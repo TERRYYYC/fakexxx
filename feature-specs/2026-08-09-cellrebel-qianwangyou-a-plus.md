@@ -21,7 +21,7 @@ source_threads:
 
 **Goal:** operator 导入地址与可信测试配额后，一键启动可恢复的无人值守批处理；系统只把能够独立复核、且前后环境连续性成立的 CellRebel 完成计入可信配额。
 
-**Acceptance Criteria:** AC-01..AC-12，见「验收标准与追踪」；每项都有对应不变量、测试和证据。
+**Acceptance Criteria:** AC-01..AC-14，见「验收标准与追踪」；每项都有对应不变量、测试和证据。
 
 **Architecture cell:** `fakexxx::android-dual-app-contract`（本仓的新 ownership cell，Phase 1 写入 `docs/architecture/ownership/README.md`）
 
@@ -49,6 +49,93 @@ source_threads:
 - B 是共享同一内核的受控高级配置演进线，不是另起炉灶。
 - C 只有在多消费者或平台需求出现后才进入候选；它复用同一执行原语和证据模型，不推倒 A+/B。
 - 单纯心跳只能证明进程仍活着，不能证明环境从未发生相关变化，禁止把心跳当连续性证据。
+
+### 0.1 修订记录
+
+| 版本 | 基线 | 内容 |
+|---|---|---|
+| v1 | `00a5e58` | 初始冻结 |
+| v1.1 | 本 PR-0.1 | contract v1 冻结**前**的实现者前置修订，见下 |
+| v1.2 | 本 PR-0.1 | 非作者 review（REQUEST_CHANGES）后的 7 项修订，见 §0.1.2 |
+| v1.3 | 本 PR-0.1 | delta re-review 后的 5 项修订，见 §0.1.3 |
+| v1.4 | 本 PR-0.1 | final narrow delta 的 3 项修订，见 §0.1.4 |
+
+v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
+
+| 项 | 变更 | 章节 |
+|---|---|---|
+| 意图绑定 | 新增 `EnvironmentObservationV1.acceptedIntentHash`、canonical digest 算法、坐标容差；可信谓词新增意图绑定段 | §6.3、§6.3.1、§6.4、INV-23、AC-13 |
+| DTO 补全 | 补齐 `ApplyRequestV1`/`PreflightRequestV1`/`PreflightReportV1`/`ObserveRequestV1`/`ReleaseRequestV1`/`ReleaseReceiptV1`，`EnvironmentIntentV1` 纳入文件所有权 | §6.3.2、§12 |
+| 枚举 wire | 枚举改为稳定 `Int` wire code + 显式 `fromWire()`，未知值 fail-closed | §6.2、§6.7 |
+| 包可见性 | Auto Manifest 新增千网游两个 applicationId 的 `<queries>`，并纳入 owner matrix | §6.1、§12.1、Task 2 |
+| minSdk | contract library 冻结 `minSdk = 24`；Auto 26 / qwy 24 不变 | §6.1 |
+| 配对次序 | 首次配对改为 bind-first，身份来自 `Binder.getCallingUid()` | §4.1、§6.5 |
+| 签名分层 | API 28+ 与 24–27 两条路径显式分层，降级路径 fail-closed 并 UI 明示 | §6.5.1 |
+| signer 边界 | 诚实披露当前 debug keystore 复用的真实后果，不夸大也不粉饰 | §6.5.2、§21 DP-1 |
+| 跨进程 revision | 单写者 + 跨进程原子持久化（**该行的承载物禁令已被 v1.3 第 1 项取代**，现行规则见 §6.6 L1–L6） | §6.6、INV-25、AC-05 |
+| 数据迁移 | Auto v4→v5 显式 migration + schema export + 禁止 destructive fallback | Task 4、INV-24、AC-14 |
+| provenance | 用 tree digest 比对替换恒真的 `--is-inside-work-tree` 断言 | Task 1 |
+| PR 路由 | 明确 Task 6 两半各随 owner 的 PR 走 | §15 |
+| 价值取舍 | 抽出 DP-1（signer 迁移）、DP-2（Auto applicationId）交 operator | §21 |
+
+v1.1 **未**改动的：A+/B/C 关系与触发门、A+ 首版范围与非目标、owner matrix 的人员划分、merge 权限、既有 INV-01..22 的语义。
+
+#### 0.1.1 平台事实 provenance
+
+v1.1 里凡是"因为 Android 平台如此，所以规则如此"的论证，都追到了一手来源；结论与来源同时记录，便于后续复核而不必重新调查：
+
+| 事实 | 结论 | 一手来源 |
+|---|---|---|
+| 显式 bind 是否受包可见性限制 | 受限。activity 的豁免不延伸到 service | `training/package-visibility`：“The limited visibility also affects explicit interactions with other apps, such as starting another app's service.” |
+| 反向（被调用方→调用方）可见性 | bind 后自动授予 | `training/package-visibility/automatic` 第 5 条：“Any app that starts or binds to a service in your app.”；AOSP `ActiveServices.bindServiceLocked` → `grantImplicitAccess` |
+| 该反向授权的存续期 | **无文档化保证**（AOSP 中为内存态） | 官方文档未规定；因此 §4.1 要求调用内快照，不做延迟反查 |
+| `SharedPreferences` 多进程 | 不支持；`MODE_MULTI_PROCESS` API 23 起弃用 | `reference/android/content/SharedPreferences`、`Context#MODE_MULTI_PROCESS` |
+| `DataStore` 多进程 | 1.1.0+ 有 `MultiProcessDataStoreFactory`，但只承诺 eventual consistency | `reference/kotlin/androidx/datastore/core/MultiProcessDataStoreFactory` |
+| Room/SQLite 多进程存储保证 | **无一手来源可引**；`enableMultiInstanceInvalidation()` 只管失效广播 | `reference/androidx/room/RoomDatabase.Builder` |
+| 跨进程共享可变状态的平台推荐 | `ContentProvider` | `Context#MODE_MULTI_PROCESS` 弃用说明 |
+| `@Parcelize` 枚举编码 | 按 `name` String（非 ordinal）；未知常量 `valueOf` 抛 `IllegalArgumentException` | kotlin-parcelize 编译器 `IrParcelSerializers.kt` 的 `IrEnumParcelSerializer`；`kotlinlang.org/docs/enum-classes` |
+
+未能取得一手确证的，一律写成"待 Task 2 核定"或直接不写，不用二手转述充当依据。
+
+#### 0.1.2 非作者 review 修订（v1.2）
+
+v1.1 收到 `REQUEST_CHANGES`，7 项全部成立并已修订。记录在此是因为其中数项是**前一版自己引入的缺陷**，不是原 spec 的问题：
+
+| # | 问题 | 修订 | 章节 |
+|---|---|---|---|
+| 1 | v1.1 冻结"DTO 只承载 Int wire"，但 exact schema 里仍有 enum 与 `Set<enum>`，靠一句散文说明覆盖 | 全部字段改为 `...Wire`/`...Wires`；删除散文豁免；`check-contract-v1.sh` 增加"`@Parcelize` 内出现 enum 即失败"的静态检查 | §6.3、§6.3.2 |
+| 2 | 身份判定有两个漏放行口：UID 未收敛到唯一 package；`hasSigningCertificate` 语义是"曾经或当前"，轮转后仍返回 true | `getPackagesForUid` 非恰好 1 个即拒；改比对**当前** signer；多签名者 v1 全拒；补 Auto 侧对千网游的反向 signer 校验 | §6.5.1、§6.5.3 |
+| 3 | 把承载技术写成了结论（禁 Room/SQLite、推 ContentProvider） | 改为冻结 L1–L6 线性化语义；owner 内部存储选型自由；只否定"多进程各自直接写同一存储"这一架构形态 | §6.6 |
+| 4 | v4→v5 未定旧进度语义：改投影则历史无声归零，回填则违反 INV-05/06 | 冻结 `LegacyCompletionSnapshot` / `LEGACY_UNVERIFIED`：保留展示、绝不生成 `TrustedQuotaEntry`、trusted 从 0 起算 | Task 4、§7.1、§7.3 |
+| 5 | canonical digest 用换行连接自由字符串，可构造碰撞 | 改长度前缀 framing（`uint32be(len) \|\| bytes`），编码单射；碰撞对列为必测负例 | §6.3.1 |
+| 6 | 用 `<10 m` 导入硬拒绝代偿模型歧义，缩小了合法输入集 | 删除该限制；归属由 intent hash + task identity 负责，最多做非阻断 warning | §6.4、§10 |
+| 7 | AC-10 的 INV 范围过期、gate 标题重复、provenance checker 未先 fetch 上游对象、DP-1 把 not-testable 范围说得过宽 | 逐项收口 | §18、§15、Task 1、§6.5.2、§21 |
+
+原则记录：第 1、3、5、6 项都是 v1.1 自己引入的——修 spec 的过程同样会产生缺陷，所以非作者 review 不是形式，contract 冻结前必须过这一关。
+
+#### 0.1.3 delta re-review 修订（v1.3）
+
+v1.2 收到第二轮 `REQUEST_CHANGES`，5 项全部成立并已修订。主题从"规则本身对不对"转成了"规则有没有传播到位、有没有可执行的起点"：
+
+| # | 问题 | 修订 | 章节 |
+|---|---|---|---|
+| 1 | §6.6 已改成 L1–L6，但 Task 3 与 §10 仍写着上一版的"禁 DataStore/跨进程原子事务"旧结论，Kimi 会收到两套相反规则 | 下游同步为：只禁"多进程各自直写同一 store"与纯内存；owner-local 存储自由但须证 L3–L5；静态 guard 检测**非 owner 写路径**而非库名 | Task 3、§10 |
+| 2 | Auto 反向校验只有谓词没有信任根：首次连接若自动信任，§10 的"同包名替代者"负例根本不会失败（silent TOFU） | 冻结 Auto 侧 `ProviderPairingRecord` + operator 显式批准入口；未见过的 signer 停本地 `NOT_PAIRED`；**禁止在信任 discover/observation 的同一步落 trusted**；明确区分 qwy 的 caller allowlist 与 Auto 的 provider allowlist | §4.1、**§6.5.3**、§7.1、Task 4/6、§10 |
+| 3 | `versionCode` 参与身份精确匹配，会让正常升级也要求重新配对，与独立发布 + 兼容握手冲突 | 授权 principal 恒为 `(applicationId, current signerDigest)`；`versionCode` 降为审计/诊断字段 | **§6.5.4**、§4.1、§6.5、§10 |
+| 4 | `LegacyCompletionSnapshot` 未落到 exact 文件图：Task 4 仍写"三类表"，entity/DAO 无路径，§7.1 漏 `migratedAt` | 改四类表；冻结 entity 落 `Entities.kt`、独立 DAO 路径、`ProviderTrustStore` owner；补齐字段 | Task 4、§7.1 |
+| 5 | `§6.5.3` 排在 `§6.5.2` 之前，锚点倒序 | 重排为 6.5.1 → 6.5.2 → 6.5.3 → 6.5.4 | §6.5 |
+
+第 1 项值得单独记：局部改对了不等于改完了。改一条被下游引用的规则时，必须回头扫所有引用点——否则文档内部自相矛盾，比不改更危险，因为执行者会各自挑一套。
+
+#### 0.1.4 final narrow delta 修订（v1.4）
+
+| # | 问题 | 修订 | 章节 |
+|---|---|---|---|
+| 1 | provider allowlist 只有 approve 没有 revoke：schema 无状态字段，`ProviderTrustStore` 只暴露查/批准两个方法，导致 §6.5 顶层的 revoke 规则**在这套 schema/API 上无法实现** | 增加 `revokedAt` 与 active 语义（撤销是状态迁移不是删除）；`ProviderTrustStore` 定为 `findActive`/`approve`/`revoke` 三个窄方法；Auto UI 增撤销动作；补撤销即时生效、进行中 run 转 release/recovery、撤销不回溯已计配额、撤销后重新出现须重走批准；Task 9 撤销两侧各测 | §6.5、**§6.5.3**、§7.1、§10（6 行）、Task 4/6/9 |
+| 2 | Task 4 写"四类表（另有一张）"，而五张表都进 v5 schema，自相矛盾 | 改为五类表；迁移 fixture 增加"`ProviderPairingRecord` 已创建且初始为空"断言——升级不得凭空产生被信任的 provider | Task 4 |
+| 3 | "禁止 TOFU"措辞过宽：operator 对首次见到、未独立比对的 signer 显式批准，密码学上仍是 TOFU；且 `lastSeenVersionCode` 没有更新入口 | 统一为"禁止 silent/automatic TOFU"并写明安全上限（不证明 publisher identity）；版本字段改 immutable `approvedVersionCode`，后续版本只进 append-only 审计，不为审计字段扩大信任 store 可写面 | §4.1、§6.5.3、§6.5.4、§7.1、§10 |
+
+第 1 项与上一轮的 TOFU 缺口是**同一种病**：在顶层写下一条规则，然后冻结了一套做不到它的 schema/API。规则与承载它的接口必须一起冻结，否则规则只是文档里的一句话。
 
 ## 1. 事实基线与来源
 
@@ -167,10 +254,22 @@ Gate 输出只能是 `stay-a-plus`、`promote-specific-controls-to-b` 或 `rejec
 
 ### 4.1 首次配对
 
-1. operator 在千网游的“自动测试协作”页看到 Auto 包名、签名摘要和契约版本。
-2. operator 明确允许该调用方；千网游持久化 `(packageName, signerSha256, approvedAt)`。
-3. Auto 调用 `discover`，显示千网游版本、支持模式、profile/schedule、连续性覆盖等级。
-4. 未配对、签名变化、协议不兼容或千网游不可用时，Auto 停在预检页并给出可操作错误；不开始 CellRebel。
+次序为 **bind-first**：先由 Binder 证实调用方身份，再让 operator 授权。
+
+配对是**双向**的，两侧各有一份独立名单，都需要 operator 的显式批准（§6.5.3）：
+
+1. Auto 以显式 `ComponentName` bind 千网游的 `EnvironmentControlService` 并调用 `discover()`。
+2. 千网游按 `Binder.getCallingUid()` 解析调用方 applicationId 与**当前** signer SHA-256（并顺带记录 versionCode 供审计），**在这次调用内把它们快照进 `PendingPairingCandidate`**，向 Auto 返回 typed `NOT_PAIRED`。
+3. **qwy 侧批准**：operator 在千网游的“自动测试协作”页看到**这条已由 Binder 证实的**候选记录；点允许后千网游持久化 `PairingRecord`（caller allowlist）。
+4. **Auto 侧批准**：Auto 重试 `discover()` 前先解析所绑定 service 所属包的 applicationId 与当前 signer。若这对身份**未出现在本地 `ProviderPairingRecord` 中**，Auto 停在本地 `NOT_PAIRED` 预检态，展示 applicationId、当前 signer 摘要与来源，**等 operator 显式批准**后才写入（provider allowlist）。批准前拿到的 capability 只能展示，不进入任何可信判定。
+5. 两侧都批准后，Auto 取得千网游版本、支持模式、profile/schedule、连续性覆盖等级，进入可用状态。
+6. 任一侧未配对、签名变化、协议不兼容或千网游不可用时，Auto 停在预检页并给出可操作错误；不开始 CellRebel。
+
+**为什么 Auto 侧也必须有一次显式批准**：若 Auto 首次连接就把当时看到的 signer **自动**落为可信（silent TOFU），那么“真千网游未安装、同包名替代实现应答 bind”这一负例根本不会失败——替代者在第一次连接时就成了被信任的环境权威，此后每次比对都“一致”，而它可以返回伪造的 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` 与稳定 revision 让 §6.4 全部谓词成立。反向校验只有配上显式信任根才真正成立。该批准把信任建立变成可见、可审计、需人确认的动作，但**不等于证明了 publisher identity**，安全上限见 §6.5.3。
+
+**为什么是 bind-first 而不是先在 UI 里挑 App**：调用方身份必须来自 `Binder.getCallingUid()`（INV-02），UI 侧自行扫描包列表既是较弱的真相源，又要求千网游反向声明 `<queries>` 才能在 Android 11+ 看到 Auto。bind-first 让身份来自唯一可信来源，同时使反向 `<queries>` 不再是核心流程的结构性依赖。若将来产品需要“在任何 bind 发生之前就列出候选 Auto 安装”，那条路径才需要千网游侧 `<queries>`，届时单独评审。
+
+**为什么必须在调用内快照，而不是只存 UID 稍后再查**：Android 的双向可见性是**不对称**的。A→B 的显式 bind 需要 A 声明 `<queries>`（官方明确“The limited visibility also affects explicit interactions with other apps, such as starting another app's service”，activity 的豁免不延伸到 service）；B→A 则在 bind 发生时自动授予（“Any app that starts or binds to a service in your app”）。但**官方文档从未规定这个反向授权的存续期**——在 AOSP 里它是 PackageManager 的内存态，随包移除清理。因此千网游只能在“调用正在进行、授权确定有效”的窗口内完成解析并落快照；把 UID 存下来等 operator 稍后批准时再反查，可能拿到 `NameNotFoundException`，也可能撞上 UID 在卸载重装后被复用。快照的是身份三元组，不是 UID。
 
 ### 4.2 创建计划
 
@@ -226,6 +325,28 @@ operator 在运行页直接看到：当前地址、可信完成数、未验证�
 - v2 若不向后兼容，使用新 package/interface，并由 `discover` 的兼容矩阵显式协商。
 - service 可跨 App 导出，但没有网络监听面；每次调用从 `Binder.getCallingUid()` 解析真实调用方，不信任请求自报身份。
 
+**ComponentName 与 applicationId（冻结）**：`name.caiyao.fakegps.integration.v1.EnvironmentControlService` 是 **class name**；`ComponentName` 的 package 半边是运行时 applicationId，而千网游 debug 构建带 `applicationIdSuffix ".bench"`。因此 Auto 必须把目标显式建模为二选一，不能硬编码单一包名：
+
+| 目标 | applicationId | class name |
+|---|---|---|
+| production | `name.caiyao.fakegps` | `name.caiyao.fakegps.integration.v1.EnvironmentControlService` |
+| bench | `name.caiyao.fakegps.bench` | 同上（class name 不随 suffix 变化） |
+
+两个 applicationId 各自独立配对（§6.5），Auto 一次只绑定一个目标并把该选择写进 `PlanSnapshot`。
+
+**minSdk（冻结）**：contract library `minSdk = 24`；Auto 保持 `minSdk = 26`；千网游保持 `minSdk = 24`。共享库取两者下界是硬约束——若 contract 取 26，`minSdk 24` 的千网游无法依赖它，AGP 直接构建失败。
+
+**package visibility（冻结）**：Auto `targetSdk 35`，在 Android 11+ 下要显式 bind 千网游必须先在 Manifest 声明可见性。当前 `Faketest@48d8ec9` 的 `<queries>` 只有 `com.cellrebel.mobile` 与 `com.hopefactory2021.fakegpslocation`，**不含千网游任一 applicationId**，因此 Auto 的 `AndroidManifest.xml` 必须新增：
+
+```xml
+<queries>
+    <package android:name="name.caiyao.fakegps" />
+    <package android:name="name.caiyao.fakegps.bench" />
+</queries>
+```
+
+该文件此前不在任何 task 的 Files 清单内，现已纳入 §12 目录与 §12.1 owner matrix（Opus5）。千网游侧同一集成路径此前已被该机制影响过一次（其 Manifest 注释记录 ContentProvider 传输被 Android 11+ 包可见性完全阻断），因此这条不是理论风险。
+
 ```aidl
 // contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl
 package io.github.terryyyc.fakexxx.contract.v1;
@@ -249,21 +370,33 @@ interface IEnvironmentControlV1 {
 }
 ```
 
-### 6.2 不允许 ordinal 比较的枚举
+### 6.2 枚举：稳定 wire code，不跨进程传枚举身份
+
+枚举**不得**以 Kotlin enum 形态直接跨 Binder 传输。v1 的每个枚举常量绑定一个永久稳定的 `Int` wire code；DTO 字段承载 `Int`，两侧各自用显式 `fromWire()` 解码。
 
 ```kotlin
-enum class VerificationLevelV1 {
-    SYSTEM_MOCK_INDEPENDENTLY_VERIFIED,
-    HOOK_UNVERIFIED,
-    NONE,
+enum class VerificationLevelV1(val wire: Int) {
+    SYSTEM_MOCK_INDEPENDENTLY_VERIFIED(1),
+    HOOK_UNVERIFIED(2),
+    NONE(3),
+    ;
+    companion object {
+        /** 未知 code = 对端更新且不兼容 → fail-closed，绝不猜成可信。 */
+        fun fromWire(code: Int): VerificationLevelV1? = entries.firstOrNull { it.wire == code }
+    }
 }
 
-enum class ContinuityCoverageV1 { FULL, PARTIAL, NONE }
-enum class DeliveryModeV1 { SYSTEM_MOCK, HOOK }
-enum class ScheduleDecisionV1 { ALLOWED_NOW, WAIT_UNTIL, DENIED }
+enum class ContinuityCoverageV1(val wire: Int) { FULL(1), PARTIAL(2), NONE(3) }
+enum class DeliveryModeV1(val wire: Int) { SYSTEM_MOCK(1), HOOK(2) }
+enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DENIED(3) }
 ```
 
-可信策略必须显式匹配 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`；禁止使用枚举顺序、`>=` 或“非 NONE 即可信”。
+规则：
+
+- 可信策略必须显式匹配 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`；禁止枚举顺序、`ordinal`、`>=` 或“非 NONE 即可信”。
+- **禁止把枚举本体交给 `@Parcelize` 自动编解码。** kotlin-parcelize 的 `IrEnumParcelSerializer` 写入 `Parcel.writeString(value.name)`、读出 `EnumClass.valueOf(readString())`。后果：重排常量顺序是 wire-safe 的（ordinal 不上线），但**改名是破坏性变更，新增常量会让旧读者抛 `IllegalArgumentException`**——异常从生成的 `createFromParcel` 抛出，表现为 unparcel 崩溃，而不是 INV-03 要求的 typed fail-closed。两个 App 独立发布、版本必然 skew（§10 version 行），所以自动编解码在本方案里不可用。承载 `Int` + 显式 `fromWire()` 把 skew 变成可判定的业务错误。
+- `fromWire()` 返回 `null` 时一律 fail-closed：可信路径直接判不可信，握手路径返回 `INCOMPATIBLE_PROTOCOL`。
+- v1 已分配的 wire code 永久不可回收、不可改语义；新增常量只能追加新 code，且必须先通过 §6.7 兼容矩阵。
 
 ### 6.3 核心 DTO
 
@@ -272,9 +405,11 @@ enum class ScheduleDecisionV1 { ALLOWED_NOW, WAIT_UNTIL, DENIED }
 data class CapabilitySnapshotV1(
     val protocolVersion: Int = 1,
     val serviceVersion: String,
-    val supportedModes: Set<DeliveryModeV1>,
-    val supportedVerificationLevels: Set<VerificationLevelV1>,
-    val continuityCoverage: ContinuityCoverageV1,
+    /** DeliveryModeV1 wire code 集合；升序去重，保证 wire 表示确定。 */
+    val supportedModeWires: List<Int>,
+    /** VerificationLevelV1 wire code 集合；升序去重。 */
+    val supportedVerificationLevelWires: List<Int>,
+    val continuityCoverageWire: Int,
     val environmentRevision: Long,
     val profileRefs: List<String>,
     val scheduleRefs: List<String>,
@@ -288,7 +423,7 @@ data class EnvironmentIntentV1(
     val scheduleRef: String,
     val latitude: Double,
     val longitude: Double,
-    val requiredVerification: VerificationLevelV1,
+    val requiredVerificationWire: Int,
     val notBeforeEpochMs: Long,
     val deadlineEpochMs: Long,
 ) : Parcelable
@@ -301,28 +436,126 @@ data class ApplyReceiptV1(
     val acceptedIntentHash: String,
     val appliedAtEpochMs: Long,
     val environmentRevision: Long,
-    val verificationLevel: VerificationLevelV1,
+    val verificationLevelWire: Int,
 ) : Parcelable
 
 @Parcelize
 data class EnvironmentObservationV1(
     val leaseId: String,
+    /** 本次观察所属 lease 当前生效意图的 canonical digest；见 §6.3.1。绑定观察与意图，防止把完成记到错误地址。 */
+    val acceptedIntentHash: String,
     val observedAtEpochMs: Long,
     val environmentRevision: Long,
     val environmentFingerprint: String,
-    val continuityCoverage: ContinuityCoverageV1,
+    val continuityCoverageWire: Int,
     val continuitySinceEpochMs: Long?,
-    val deliveryMode: DeliveryModeV1?,
-    val verificationLevel: VerificationLevelV1,
+    val deliveryModeWire: Int?,
+    val verificationLevelWire: Int,
     val effectiveLatitude: Double?,
     val effectiveLongitude: Double?,
     val isMock: Boolean?,
-    val scheduleDecision: ScheduleDecisionV1,
+    val scheduleDecisionWire: Int,
     val evidenceRefs: List<String>,
 ) : Parcelable
 ```
 
-所有 request 另含 `idempotencyKey` 或稳定 operation id；所有失败使用 typed error：`NOT_PAIRED`、`CALLER_NOT_ALLOWED`、`INCOMPATIBLE_PROTOCOL`、`CAPABILITY_UNAVAILABLE`、`SCHEDULE_DENIED`、`CONTINUITY_NOT_FULL`、`LEASE_CONFLICT`、`STALE_LEASE`、`ENVIRONMENT_DRIFT`、`RELEASE_INCOMPLETE`、`INTERNAL_FAILURE`。
+**exact schema 无省略**：本节与 §6.3.2 列出的字段就是全部字段，逐字段与实现一一对应。v1 的任何 Parcelable 中**不出现 Kotlin enum 类型**（含 `Set<enum>`/`List<enum>`）；枚举一律以 `...Wire: Int` 或 `...Wires: List<Int>` 承载，集合型升序去重。散文说明不得覆盖或补充 exact schema——若某字段没写在这两节里，它就不在 v1 里。`check-contract-v1.sh` 必须包含一条静态检查：contract 模块的 `@Parcelize` 类中出现任何 enum 类型字段即失败。
+
+#### 6.3.1 canonical intent digest（冻结算法）
+
+`acceptedIntentHash` 是 `EnvironmentIntentV1` 的 canonical digest，两侧必须独立算出同一值：
+
+```text
+canonical = 按下列顺序，对每个字段依次追加：
+              uint32be(byteLength(fieldBytes)) || fieldBytes
+            无分隔符、无尾随字节。
+
+  runId                     : UTF-8 bytes，原样
+  attemptId                 : UTF-8 bytes，原样
+  profileRef                : UTF-8 bytes，原样
+  scheduleRef               : UTF-8 bytes，原样
+  latitude                  : ASCII 定点十进制，恰好 7 位小数，半值向偶数舍入，
+                              负号保留，无 '+'，无指数，无千分位
+  longitude                 : 同上
+  requiredVerificationWire  : ASCII 十进制
+  notBeforeEpochMs          : ASCII 十进制
+  deadlineEpochMs           : ASCII 十进制
+
+acceptedIntentHash = lowercase hex of SHA-256(canonical)
+```
+
+**为什么是长度前缀而不是分隔符连接**：四个 ref 字段是自由字符串，用任何固定分隔符连接都可构造碰撞——例如以换行连接时，`runId="a\nb", attemptId="c"` 与 `runId="a", attemptId="b\nc"` 产生**完全相同**的 canonical 字节，于是两个不同意图共享同一 `acceptedIntentHash`，INV-23 的绑定被绕过。长度前缀让编码单射，碰撞不再依赖"字段里恰好没有分隔符"这种运行期巧合。禁止改回分隔符方案，也禁止用"契约上不允许出现换行"来代偿——那是把不变量的正确性押在输入校验上。
+
+禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。
+
+必测（both sides，逐条独立断言）：
+
+- 上述**分隔符碰撞对**必须产生**不同** digest；
+- 负坐标、`0.0`/`-0.0`（必须归一为同一表示）、需要半值向偶数舍入的边界值；
+- 四个 ref 含换行、制表符、emoji、以及多字节字符时两侧 digest 一致；
+- 空 ref 在业务上非法，导入/预检阶段即拒绝（这是产品校验，不是 digest 的正确性来源）。
+
+#### 6.3.2 其余 DTO exact schema
+
+```kotlin
+@Parcelize
+data class PreflightRequestV1(
+    val intent: EnvironmentIntentV1,
+    val idempotencyKey: String,
+    val callerProtocolVersion: Int,
+) : Parcelable
+
+@Parcelize
+data class PreflightReportV1(
+    val acceptedIntentHash: String,
+    val scheduleDecisionWire: Int,
+    /** scheduleDecision == WAIT_UNTIL 时必须非空，其余情况必须为 null。 */
+    val waitUntilEpochMs: Long?,
+    val achievableVerificationLevelWire: Int,
+    val continuityCoverageWire: Int,
+    val environmentRevision: Long,
+    /** ContractErrorCodeV1.wire 列表；空表示预检通过。 */
+    val blockingReasonWires: List<Int>,
+) : Parcelable
+
+@Parcelize
+data class ApplyRequestV1(
+    val intent: EnvironmentIntentV1,
+    val idempotencyKey: String,
+    val callerProtocolVersion: Int,
+) : Parcelable
+
+@Parcelize
+data class ObserveRequestV1(
+    val leaseId: String,
+    val operationId: String,
+    /** Auto 本地算得的 intent digest；与服务端当前 lease 意图不符时返回 ENVIRONMENT_DRIFT。 */
+    val expectedIntentHash: String,
+) : Parcelable
+
+@Parcelize
+data class ReleaseRequestV1(
+    val leaseId: String,
+    val operationId: String,
+    val idempotencyKey: String,
+) : Parcelable
+
+@Parcelize
+data class ReleaseReceiptV1(
+    val operationId: String,
+    val idempotencyKey: String,
+    val leaseId: String,
+    val releasedAtEpochMs: Long,
+    val environmentRevision: Long,
+    /** false = 环境未能证明清理完成 → Auto 必须走 INV-21 暂停与人工恢复。 */
+    val releaseComplete: Boolean,
+    val residualReasonWires: List<Int>,
+) : Parcelable
+```
+
+`EnvironmentIntentV1` 与上述全部类型都必须有对应 `.aidl` parcelable 声明与 `.kt` 实现，并纳入 §12 文件所有权。**实现者不得自行发明字段**：任何需要新增字段的发现都回本 spec 修订，不在 consumer branch 私改。
+
+所有 request 另含 `idempotencyKey` 或稳定 operation id；所有失败使用 typed error：`NOT_PAIRED`、`CALLER_NOT_ALLOWED`、`INCOMPATIBLE_PROTOCOL`、`CAPABILITY_UNAVAILABLE`、`SCHEDULE_DENIED`、`CONTINUITY_NOT_FULL`、`LEASE_CONFLICT`、`STALE_LEASE`、`ENVIRONMENT_DRIFT`、`RELEASE_INCOMPLETE`、`INTERNAL_FAILURE`。每个 code 绑定永久稳定的 `ContractErrorCodeV1.wire: Int`，规则同 §6.2。
 
 预期业务失败通过 `ServiceSpecificException` 返回稳定的 `ContractErrorCodeV1.wireCode`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
 
@@ -349,18 +582,150 @@ pre.fingerprint == post.fingerprint
 pre/post.verificationLevel == SYSTEM_MOCK_INDEPENDENTLY_VERIFIED
 pre/post.leaseId == apply.leaseId
 CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
+
+# 意图绑定（INV-23）：以上全部成立仍不足以证明"跑的是这个地址"
+pre.acceptedIntentHash  == apply.acceptedIntentHash
+post.acceptedIntentHash == apply.acceptedIntentHash
+apply.acceptedIntentHash == localDigest(attempt.intent)      # Auto 独立重算，不信任对端回传
+pre.effectiveLatitude != null && pre.effectiveLongitude != null
+post.effectiveLatitude != null && post.effectiveLongitude != null
+haversine(pre.effective,  intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
+haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 ```
 
 任一不成立：不得写可信配额。
 
+**为什么意图绑定是独立的一条**：`coverage/revision/fingerprint/lease/verificationLevel` 全部只证明"环境在测试全程没有相关变化"，不证明"环境处在**这个 attempt 要求的**位置"。若 apply 静默部分生效、被上一地址的残留状态覆盖、或 lease 复用时意图已切换，上面前七条可以整体成立，而可信配额被记到**错误地址**。本产品的全部价值就是"每地址的可信次数"，因此错记地址是最贵的失败模式，必须由独立不变量排除，而不是依赖其他条件的副作用。
+
+`TRUSTED_LOCATION_TOLERANCE_METERS = 1.0`，冻结为 contract 常量，两侧共用。取值理由：远大于 §6.3.1 的 7 位小数量化误差（约 1.1 cm）与 double 往返误差，因此不会造成假阴性。
+
+**容差不承担归属判定。** 归属由 `acceptedIntentHash`（其中已含 `attemptId`/`runId`）与 task identity 负责；容差只回答"环境是否真的落在这个意图要求的坐标上"。因此**不对计划内地址的最小间距做任何硬性限制**——同一栋楼两点、密集门店都是合法输入，A+ 不因模型便利去缩小可用输入集。若产品希望提示用户，只能是导入时的**非阻断 warning**，且不得据此拒绝计划。
+
 ### 6.5 配对与调用授权
 
-- 千网游 UI 明确展示候选 Auto 的包名、版本和 signer SHA-256；operator 点允许后才创建 `PairingRecord`。
-- 每次 Binder 调用按 UID 反查 package 与 signing certificate，和 PairingRecord 精确匹配。
+调用方身份**只以 `Binder.getCallingUid()` 为真相源**，永不取自请求参数。
+
+- 首次配对走 §4.1 的 bind-first 次序：Auto 先 bind 并调用，千网游按 UID 解析出调用方后落 `PendingPairingCandidate`，返回 typed `NOT_PAIRED`；配对 UI 展示的是这条已由 Binder 证实的记录，而不是 UI 侧自行扫描包列表的结果。
+- `PendingPairingCandidate` 与 `PairingRecord` 都必须**在 Binder 调用进行中完成身份解析并持久化快照**。反向包可见性授权的存续期不是文档化契约，UID 也会在卸载重装后被复用，因此**禁止只存 UID 事后反查**；匹配是每次调用现场解析出的身份与已存快照比对，两侧都不依赖延迟查询。
+- 快照中参与**授权匹配**的只有 `(applicationId, current signerDigest)`；`versionCode` 一并记录但**只用于审计与兼容诊断**，不进入身份比对（§6.5.4）。
+- 每次 Binder 调用按 UID 反查 package 与 signing certificate，和 `PairingRecord` 精确匹配。
+- `PairingRecord` 的主键是 `(applicationId, signerDigest)` 二元组。**production `name.caiyao.fakegps` 与 bench `name.caiyao.fakegps.bench` 是两个独立 applicationId，互不授权**：给 production 配的对不能让 bench 调用通过，反之亦然。
 - 包名相同但 signer 改变视为新调用方，必须重新配对。
 - 调用方不可通过参数伪造 package、signer 或 verificationLevel。
-- revoke 立即使新调用失败；active lease 进入 release/recovery，不静默继续。
+- revoke 立即使新调用失败；active lease 进入 release/recovery，不静默继续。**两侧各有一份可撤销名单**：千网游撤销 `PairingRecord`（caller allowlist），Auto 撤销 `ProviderPairingRecord`（provider allowlist，见 §6.5.3）；任一侧撤销都必须让运行停下来。
 - 配对记录和用户可见运行日志默认持久化，只有 operator 主动删除。
+
+#### 6.5.1 签名校验的 API 分层（minSdk 24 冻结）
+
+**第一步是把 UID 解析成唯一 package。** `Binder.getCallingUid()` 证明的是 UID，不是唯一包名——shared UID 下一个 UID 可对应多个包。因此：`getPackagesForUid(uid)` 结果**不是恰好 1 个就直接拒绝**（typed `CALLER_NOT_ALLOWED`）。v1 不支持 shared UID 调用方，这是窄接口的代价，不是缺陷。
+
+**第二步是比对当前 signer，不是"曾经用过的" signer。**
+
+| 运行 API | 路径 | 语义 |
+|---|---|---|
+| ≥ 28 | `GET_SIGNING_CERTIFICATES` + `SigningInfo.getApkContentsSigners()` | 取**当前**签名者集合并与配对快照比对 |
+| 24–27 | legacy `GET_SIGNATURES` | **fail-closed 降级路径**：只接受单一签名者；无法解析或任何歧义一律拒绝配对并提示升级设备 |
+
+**为什么不能直接用 `hasSigningCertificate(uid, digest, …)` 作为配对校验**：该 API 的语义是"该 uid **曾经或当前**使用过这张证书"，它是为**兼容证书轮转**设计的。拿配对时存下的旧 digest 去查，证书轮转之后**仍然返回 true**——于是 §6.5 的"signer 改变必须重新配对"被静默绕过。它可以用于"这是不是同一条轮转链"的辅助判断，但**不能**作为身份等同的判据。
+
+**多签名者：v1 一律 fail-closed 拒绝**（`SigningInfo.hasMultipleSigners()` 为真即拒）。理由是窄接口优先：单一 digest 无法无歧义表示一个签名者集合。若将来产品必须支持，只能冻结"排序后 signer-set 的 canonical digest"并走 §6.7 兼容矩阵，不得用"取第一个"或"任一匹配"含混带过。
+
+24–27 路径必须在配对 UI 上明示"本设备使用降级签名校验"，不得静默等同于 28+ 的保证。两条路径都必须有测试；shared UID 拒绝、多签名者拒绝、**证书轮转后必须要求重新配对**三条都是必测负例。
+
+#### 6.5.2 signer 强度的真实边界（诚实披露）
+
+当前 `FakeGps-test@285e4ca` 的 release 复用本机 `~/.android/debug.keystore`（alias `androiddebugkey`，口令 `android`）。必须准确陈述其后果，既不夸大也不粉饰：
+
+- 该 keystore 由 SDK 在**本机首次构建时随机生成**，密钥材料并非全球共享，因此 signer 校验仍然排除了在其他机器上构建的第三方 App——`(applicationId, signerDigest)` 二元组不是只剩 applicationId 在把关。
+- 但它同时意味着：**debug 与 release 构建的 signer 完全相同**，该 keystore 也不受口令保护（口令公开），一旦文件泄漏即可冒充该身份。
+- 受影响的**只是**"当前 production key 原位轮转"这一种真机验收场景——它在不动 production key 的前提下造不出阳性用例。**签名不匹配拒绝、轮转后要求重新配对、多签名者拒绝这些语义仍然完全可测**：用受控测试 key 另签一个 fixture APK，或在单元/instrumentation 层注入伪造的 `SigningInfo`。§13 Task 9 只把"production key 原位轮转"标为 not-testable，不得据此把整类签名验收标成 not-testable。
+- 结论：当前配置下不得宣称强 release identity。是否迁移到受控 release key 是 operator 的价值取舍，见 §21 DP-1；**本 doc PR 不擅自旋转 signer**。
+
+#### 6.5.3 Auto 侧的 provider 信任根（与 caller allowlist 是两件事）
+
+配对是双向的，而且两侧的名单**不是同一份**：
+
+| 方向 | 名单 | 持有方 | 回答的问题 |
+|---|---|---|---|
+| qwy → Auto | `PairingRecord`（caller allowlist） | 千网游 | 谁可以调用我 |
+| Auto → qwy | `ProviderPairingRecord`（provider allowlist） | Auto | 我可以把谁的 observation 当环境权威 |
+
+Auto 在**信任千网游返回的 observation 之前**，必须解析所绑定 service 所属包的 applicationId 与**当前** signer，与本地 `ProviderPairingRecord` 精确比对；不一致或无法解析即 fail-closed，不进入 CellRebel。
+
+**信任根必须显式：禁止 silent/automatic TOFU。** 只写"与本地记录一致"是不够的——若首次连接时自动把当时看到的 signer 落为可信，那么"真千网游未安装、同包名替代实现应答 bind"这一负例根本不会失败：替代者会在第一次连接时就成为被信任的权威，之后每次比对都"一致"。
+
+**安全上限要说准**：operator 对一个首次见到、未经独立比对的 signer 做显式批准，在密码学意义上**仍然是一次 trust-on-first-use**。本方案禁止并能防住的是**自动/静默**的 TOFU——把信任建立变成一个可见、可审计、需人确认的动作；它**不证明** publisher identity。真正的 publisher 级保证需要带外分发的 signer 指纹或受控 release key（§21 DP-1），不在 A+ 范围内。不得把本机制描述为"已解决身份伪造"。
+
+```kotlin
+ProviderPairingRecord(
+    applicationId: String,          // production 或 .bench，二者独立
+    currentSignerDigest: String,    // 批准当时解析到的当前 signer
+    approvedAt: Long,
+    approvedVersionCode: Long?,     // 批准当时的版本，immutable，仅审计
+    approvedBuildFingerprint: String?,   // 审计用
+    revokedAt: Long?,               // null = active；非 null = 已撤销
+)
+```
+
+- **key 与 active 语义**：主键 `(applicationId, currentSignerDigest)`。授权查询只匹配 `revokedAt == null` 的记录；**撤销是状态迁移，不是删除**，记录保留以维持审计链。同一 `(applicationId, signer)` 被撤销后若再次批准，写入新的 `approvedAt` 并清空 `revokedAt`——这是一次新的 operator 信任决定，必须重新走批准 UI，不能自动复活。
+- 首次遇到**未见过的 (applicationId, currentSignerDigest)**，Auto 停在本地 `NOT_PAIRED` 预检态，向 operator 展示 applicationId、当前 signer 摘要与来源，**由 operator 显式批准**后才写入。
+- **禁止在同一步里既信任 `discover()`/`observe()` 的返回、又把该 signer 落为 trusted**：批准是 operator 的信任决定，不是连接的副作用。批准前拿到的 capability 只能用于展示，不得进入任何可信判定。
+- signer 变化即视为新 provider，重新走批准。`approvedVersionCode` **不可变**：provider 后续升级不改这条记录，新版本号只进 append-only 审计事件——审计字段不值得为它把 store 的可写面扩大（见 §6.5.4）。
+- 采用"本地显式批准"而非预置 signer allowlist，是因为当前千网游 release 由本机 keystore 签名（§6.5.2），预置名单在不同机器上无法成立。
+
+**撤销生命周期（与 §6.5 顶层 revoke 对齐）**：
+
+`ProviderTrustStore` 是唯一入口，只暴露三个窄方法，**禁止在其上层使用 DAO 的通用 `delete`/`upsert`**（否则 INV-22 的旁路面被扩大到信任决定上）：
+
+| 方法 | 语义 |
+|---|---|
+| `findActive(applicationId, signerDigest)` | 只返回 `revokedAt == null` 的记录 |
+| `approve(candidate)` | operator 显式批准；写入或复活一条记录 |
+| `revoke(applicationId, signerDigest, at)` | 置 `revokedAt`；不删除记录 |
+
+- Auto UI 必须提供**撤销动作**（`ProviderApprovalScreen` 内，展示已批准 provider 列表与撤销入口）。
+- 撤销**立即生效**：新的 run/预检 fail-closed 停在 `NOT_PAIRED`；**进行中的 run 不静默继续**——当前 attempt 进入 release/recovery 路径，release 无法证明完成时按 INV-21 暂停并提示人工恢复。
+- 撤销后已写入的可信配额**不回溯撤销**（它们在当时有完整证据链），但撤销事件必须进审计，使历史可解释。
+
+两侧的撤销是**两件独立的事**：千网游撤销 `PairingRecord` 使 Auto 无法调用；Auto 撤销 `ProviderPairingRecord` 使自己不再采信该 provider。任一侧撤销都必须让运行停下来，Task 9 的撤销验收**必须两侧各测一遍**。
+
+#### 6.5.4 versionCode 不是身份的一部分
+
+`versionCode` 在两侧都**只是审计与兼容诊断字段**，不参与授权 principal 的精确匹配。授权 principal 恒为 `(applicationId, current signerDigest)`。
+
+理由：双 App 是独立发布的（INV-19），版本 skew 由 §6.7 的 protocol handshake 判定。若把 versionCode 并入身份匹配，任何一侧的正常升级都会要求 operator 重新配对——这与"独立发布 + 能力兼容握手"直接冲突，且会训练 operator 对配对提示脱敏。
+
+同 signer、新 versionCode → **保持配对**，由握手决定兼容或 `INCOMPATIBLE_PROTOCOL` 停机。
+
+配对记录里的版本字段一律**不可变**（`ProviderPairingRecord.approvedVersionCode` 记的是批准当时的版本）。provider/caller 后续升级**不回写**配对记录，新版本号只进 append-only 审计事件。理由：为一个纯审计字段在信任 store 上开一个可写入口，是用扩大可写面去换一条日志——审计需求由审计流满足，信任 store 的写面必须保持最窄（§6.5.3 三方法）。
+
+### 6.6 跨进程 revision 所有权（blocker）
+
+千网游至少存在三类进程上下文：主进程（UI/config/`MockProviderService`）、`:hook_verify`（`HookVerificationService`）、以及 Xposed 注入到被测 App 内的 hook 代码。`environmentRevision` 与 `continuityCoverage` 是跨这些上下文的共享可变状态，因此：
+
+**本节冻结的是语义，不是承载技术。** 下列六条必须成立，选型由 PR-3 自行决定并用测试证明：
+
+| # | 语义 | 说明 |
+|---|---|---|
+| L1 | **唯一 owner** | `EnvironmentRevisionState` 只有一个 owner 组件可读写。其他进程不直接触碰底层存储 |
+| L2 | **全部经同步 IPC** | 所有 bump 与 observe 都是到 owner 的同步跨进程调用；没有旁路写入路径 |
+| L3 | **序列化持久 read-modify-write** | owner 内部自增是序列化的，读-改-写不可分离，重启后单调性不依赖内存状态 |
+| L4 | **ACK 后于 durable commit** | bump 的成功返回只能发生在持久化提交**之后**；提交前崩溃表现为"未 bump"，不得表现为"已 bump 但未落盘" |
+| L5 | **observe 看得见已 ACK 的 bump** | 任何 observe 必须反映此前所有已 ACK 的 bump，不允许读到更旧的值 |
+| L6 | **generation 断裂即降级** | owner 每次启动分配并持久化新 generation id；与前代观察窗连续性不可证时，bump revision 且 coverage 降为 `PARTIAL/NONE` |
+
+丢一次或迟到一次 bump 的表现恰好是“coverage 仍为 FULL 且 revision 未变”，即 INV-08/09 要防的那个假可信——所以 L1–L6 不接受“大概不会丢”，必须有并发与崩溃注入测试。
+
+**选型说明（避免把结论写成技术指令）**：
+
+- owner **进程内部**用什么存不受限制。当 L1/L2 成立时，其他进程根本不写这份存储，所以它不是多进程写场景——owner 内部使用单进程 `DataStore`、Room 或 SQLite 都是合法选择。
+- IPC 通道 Binder 与非导出 `ContentProvider` 均可。**注意 `ContentProvider` 自身会被并发回调，并不自动提供事务**，选它同样要自己保证 L3。
+- 明确被否定的只有**"多个进程各自直接写同一份存储"**这一类：`SharedPreferences` 官方声明不支持多进程（`MODE_MULTI_PROCESS` 自 API 23 弃用）；`MultiProcessDataStore` 虽支持多进程，但 API reference 只承诺 cross-process **eventual consistency**，不满足 L5。这条否定针对的是**架构形态**，不是对这些库本身的禁用。
+- **有损事件源必须自我申报**：`PrefsDirectoryObserver` 一类 `FileObserver` 是可丢事件、可被回收的观察器，属于 §6.4 "观察器丢事件"类。其重订阅、失效或任何不可证明的间隙都必须 bump + 降级，不允许"没收到事件"被当作"没有变化"。
+
+### 6.7 兼容矩阵与握手
+
+`compatibility.yaml` 冻结 `protocolVersion` 与各枚举 wire code 集合。握手在 `discover()` 完成：任一侧发现对端 `protocolVersion` 不在支持集合、或收到未知 wire code，一律返回/映射 `INCOMPATIBLE_PROTOCOL` 并停在预检页，不进入 CellRebel。矩阵测试必须覆盖 新Auto+旧qwy、旧Auto+新qwy、以及未知 wire code 三类 skew。
 
 ## 7. 状态对象普查
 
@@ -375,6 +740,8 @@ CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 | `CellRebelExecution` | CellRebelAttemptFlow | executionId、attemptId、判定、证据 | 一个 attempt 可有多个外部 execution |
 | `TrustedQuotaEntry` | TrustedQuotaLedger | attemptId、taskId、evidenceDigest | UNIQUE(attemptId)，只插不改 |
 | `UnverifiedAttemptRecord` | AttemptRepository | attemptId、reason、evidenceDigest | 与可信账本不同表/类型 |
+| `LegacyCompletionSnapshot` | v4→v5 迁移（只写一次） | taskId、legacyCompletedSuccesses、legacyStatus、migratedFromSchemaVersion、migratedAt | 只读展示；**绝不生成 `TrustedQuotaEntry`**，不进 completed 投影 |
+| `ProviderPairingRecord` | ProviderTrustStore | applicationId、currentSignerDigest、approvedAt、revokedAt | Auto 侧 provider allowlist，与 qwy 的 caller allowlist 是两份名单；`approvedVersionCode` immutable 且仅审计，不参与匹配；撤销是状态迁移不是删除；**禁止 silent/automatic TOFU 写入**，只经 `ProviderTrustStore` 三个窄方法 |
 | `RecoveryCheckpoint` | RecoveryCoordinator | attemptId、lastDurableStage、receipt refs | 终态后删除或纯投影 |
 | `AutoAuditEvent` | AuditRepository | seq、correlation ids、event、payload digest | append-only；不是状态 owner |
 
@@ -392,7 +759,7 @@ CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 
 ### 7.3 纯派生状态
 
-- `LocationTask.completed` = `count(TrustedQuotaEntry where taskId=...) >= requiredSuccesses`。
+- `LocationTask.completed` = `count(TrustedQuotaEntry where taskId=...) >= requiredSuccesses`。**`LegacyCompletionSnapshot` 不参与此投影**——迁移前的历史计数展示为 legacy-unverified，不构成 A+ 完成。
 - `PlanRun.completed` = 全部 location task 完成且没有 active/recovery-required attempt。
 - `trusted/unverified` 由证据策略函数计算；数据库不允许第三种写路径手填。
 - UI 文案、进度百分比、下一地址都从上述权威对象投影。
@@ -464,6 +831,9 @@ CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 | INV-20 | Auto 不写千网游存储，不以 UI 自动化调用千网游 | forbidden-dependency/static tests |
 | INV-21 | release 无法证明完成时暂停并暴露人工恢复，不静默继续 | release failure recovery test |
 | INV-22 | 终态 attempt/run 不可被 generic restore/list/delete 旁路复活 | DAO/repository bypass tests |
+| INV-23 | 可信配额要求 pre/post observation 的 `acceptedIntentHash` 等于 apply receipt 且等于 Auto 本地重算值，且 `effectiveLat/Lng` 非空并在 `TRUSTED_LOCATION_TOLERANCE_METERS` 内匹配目标坐标 | intent-binding matrix：错误地址、意图漂移、apply 部分生效、lease 复用后意图切换、坐标为 null 五类负例 |
+| INV-24 | 用户可见持久数据的 schema 变更必须有显式 migration + 真实旧版本 fixture 测试；禁止 destructive fallback | Auto v4→v5 真实 fixture migration test；`fallbackToDestructiveMigration` 静态禁用扫描 |
+| INV-25 | `environmentRevision`/coverage 跨进程单写者、持久、原子、单调；有损观察器与进程代际不明必须 bump + 降级 | 多进程并发 bump 测试；owner 进程重启代际测试；observer 丢事件注入测试 |
 
 ## 10. 崩溃、并发、恢复与旁路误用矩阵
 
@@ -495,6 +865,33 @@ CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 | bypass | 删除 attempt 后让 location 看似未完成再重跑 | ledger FK/不可删策略保留可信事实 | 10,22 |
 | release | foreign/stale leaseId | 不清理环境，typed error | 14 |
 | version | 新 Auto + 旧 qwy / 旧 Auto + 新 qwy | 兼容则运行，不兼容则预检停止 | 3,19 |
+| version | 对端返回未知枚举 wire code | `fromWire` 返回 null → fail-closed，不得崩在 Binder transaction 内 | 3,4 |
+| pairing | operator 隔较长时间/重启后才批准 pending candidate | 用调用内落下的身份快照批准；不得因反向可见性授权已失效而失败或降级 | 2 |
+| pairing | Auto 卸载重装后 UID 被另一 App 复用 | 按 applicationId+signer 快照比对判为新调用方，不得凭 UID 直通 | 2 |
+| intent | apply 部分生效，有效坐标停在上一地址 | 意图绑定失败 → 未验证，不计数 | 23 |
+| intent | lease 复用但意图已切换，observation 仍返回旧 intent hash | `ENVIRONMENT_DRIFT`，不计数 | 23 |
+| intent | observation 的 `effectiveLat/Lng` 为 null | 不计数（不得因"其他条件都过"放行） | 23 |
+| intent | 计划内两地址距离极近（同楼/密集门店） | 正常受理并各自独立归属；不得拒绝导入 | 23 |
+| pairing | shared UID 调用方（`getPackagesForUid` 返回 ≠ 1 个包） | typed `CALLER_NOT_ALLOWED`，v1 不支持 | 2 |
+| pairing | 配对后证书轮转，旧 digest 仍在轮转链中 | 必须要求重新配对；不得因 `hasSigningCertificate` 命中"曾经使用"而放行 | 2 |
+| pairing | 真千网游未安装，同包名替代实现应答 bind | Auto 反向校验当前 signer 失败 → fail-closed，不进入 CellRebel | 2 |
+| migration | v4 fixture 的 `completedSuccesses` 非零 | 转为 `LEGACY_UNVERIFIED` 快照保留展示；`TrustedQuotaEntry` 仍为空，trusted 从 0 起算 | 24,5,6 |
+| migration | 恢复流程读到 legacy 计数 | 不得当作已完成而跳过地址 | 24,15 |
+| migration | 已存在 v4 用户库升级到 v5 | 显式 `MIGRATION_4_5` 成功，历史计划与结果全部存活 | 24 |
+| migration | migration 执行到一半进程被杀 | 重启后事务回滚或重放，绝不落半迁移库、不 destructive 重建 | 24,15 |
+| migration | 安装了更高 schema 版本后降级回旧包 | 明确失败并提示，不静默清库 | 24 |
+| multiproc | 主进程与 `:hook_verify` 同时触发 revision bump | 两次 bump 都不丢失，单调不回退 | 25 |
+| multiproc | revision owner 进程重启，代际连续性不可证 | bump + coverage 降级 | 25,8 |
+| multiproc | `FileObserver` 被回收后重订阅，期间有变化 | bump + 降级；不得把"没收到事件"当成"没有变化" | 25,9 |
+| bypass | 存在绕过 owner 的 revision 写路径（任一非 owner 进程直写 store） | 静态 guard 测试失败；检测写路径而非库名 | 25 |
+| bypass | revision 只存在内存中，进程重启后回退 | 违反 L3，测试失败 | 25 |
+| pairing | Auto 首次连接遇到未见过的 provider signer | 停在本地 `NOT_PAIRED` 等 operator 显式批准；**不得自动落为 trusted** | 2 |
+| pairing | Auto 撤销 provider 后发起新 run | 预检 fail-closed 停在 `NOT_PAIRED`，不进入 CellRebel | 2 |
+| pairing | Auto 在 run 进行中撤销 provider | 当前 attempt 进入 release/recovery；不静默继续；release 不可证时按 INV-21 暂停 | 2,21 |
+| pairing | 千网游撤销 caller 后 Auto 继续调用 | 立即 typed 失败，active lease 进入 release/recovery | 2,14 |
+| pairing | 撤销后同一 (applicationId, signer) 再次出现 | 必须重新走 operator 批准；不得因历史记录存在而自动复活 | 2 |
+| pairing | 撤销前已写入的可信配额 | 不回溯撤销；撤销事件进审计，历史可解释 | 2,10,18 |
+| pairing | 同 signer + 新 versionCode（任一侧正常升级） | 保持配对，由 protocol handshake 决定兼容；**不得要求重新配对** | 2,3,19 |
 
 ## 11. 日志与证据契约
 
@@ -546,6 +943,7 @@ fakexxx/
 │       ├── aidl/io/github/terryyyc/fakexxx/contract/v1/
 │       │   ├── IEnvironmentControlV1.aidl
 │       │   ├── CapabilitySnapshotV1.aidl
+│       │   ├── EnvironmentIntentV1.aidl
 │       │   ├── PreflightRequestV1.aidl
 │       │   ├── PreflightReportV1.aidl
 │       │   ├── ApplyRequestV1.aidl
@@ -556,6 +954,8 @@ fakexxx/
 │       │   └── ReleaseReceiptV1.aidl
 │       └── java/io/github/terryyyc/fakexxx/contract/v1/
 │           ├── CapabilitySnapshotV1.kt
+│           ├── EnvironmentIntentV1.kt
+│           ├── CanonicalIntentDigestV1.kt
 │           ├── PreflightRequestV1.kt
 │           ├── PreflightReportV1.kt
 │           ├── ApplyRequestV1.kt
@@ -576,6 +976,7 @@ fakexxx/
 │   ├── fake-qwy/src/...
 │   └── scenarios/src/test/...
 ├── scripts/
+│   ├── check-provenance.sh
 │   ├── check-contract-v1.sh
 │   ├── check-forbidden-boundaries.sh
 │   └── verify-a-plus.sh
@@ -586,7 +987,7 @@ fakexxx/
 
 | Owner | 独占写入范围 | 可读依赖 | 禁止并行触碰 |
 |---|---|---|---|
-| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`、root CI/scripts、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**` |
+| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、root CI/scripts、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**` |
 | Kimi | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行 | frozen contract | contract、Auto、acceptance |
 | Sol | `acceptance/**`、`docs/acceptance/**`、验收 issue 与证据 | contract 与两 App | Opus5/Kimi 产品实现 |
 | GLM | review verdict、对抗执行报告；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch |
@@ -605,23 +1006,27 @@ fakexxx/
 - Create: `docs/architecture/ownership/README.md`
 - Create: `.github/workflows/android-a-plus.yml`
 - Create: `scripts/verify-a-plus.sh`
+- Create: `scripts/check-provenance.sh`
 - Import: `apps/cellrebel-auto/**`
 - Import: `apps/qianwangyou/**`
 
-**RED:** 在空目标路径运行 provenance checker，必须因两个 app 未导入和 SHA 未登记失败。
+**RED:** 在空目标路径运行 `scripts/check-provenance.sh`，必须因两个 app 未导入和 SHA 未登记失败。
 
 **GREEN:** 只从远端精确 SHA subtree 导入；记录源 URL、branch、SHA、导入 commit。不得读取本机脏 worktree 作为拷贝源。
 
 **Verify:**
 
 ```bash
-test -f apps/cellrebel-auto/gradlew
-test -f apps/qianwangyou/gradlew
-git -C apps/cellrebel-auto rev-parse --is-inside-work-tree
-git -C apps/qianwangyou rev-parse --is-inside-work-tree
+./scripts/check-provenance.sh
 ```
 
-subtree 目录本身处在 `fakexxx` 工作树，后两条预期均输出 `true`；provenance 文档必须精确包含两个上游 SHA。
+checker 必须做**有证明力**的核对，逐项 exit-code 化：
+
+1. `docs/provenance/upstream-imports.md` 精确记录两个上游 SHA（`48d8ec93…` / `285e4cae…`）与源 URL、branch、导入 commit；
+2. 本地 `apps/cellrebel-auto` 的 **root tree digest** 等于 `Faketest@48d8ec9` 的 tree digest；`apps/qianwangyou` 对 `FakeGps-test@285e4ca` 同理。checker 必须**先显式 `git fetch <upstream-url> <sha>` 把该对象取到本地**再 `git rev-parse <sha>^{tree}`——CI 的浅 clone 不含上游对象，跳过 fetch 会让比对因"对象不存在"而误判或静默跳过；取不到对象必须 fail，不得降级为 skip；
+3. 关键入口文件存在（两个 `gradlew`、两个 `app/build.gradle*`、两个 `AndroidManifest.xml`）。
+
+**不得**使用 `git -C <dir> rev-parse --is-inside-work-tree` 作为验证：subtree 目录本身就在 `fakexxx` 工作树内，该命令对仓内任何 `mkdir` 出来的空目录同样返回 `true`，既证明不了导入发生，也证明不了 SHA 正确——它是恒真断言，没有证明力。
 
 ### Task 2 — 冻结 contract v1 与兼容矩阵
 
@@ -632,21 +1037,23 @@ subtree 目录本身处在 `fakexxx` 工作树，后两条预期均输出 `true`
 **Files:**
 
 - Create: `contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl`
-- Create: 同目录 `CapabilitySnapshotV1.aidl`、`PreflightRequestV1.aidl`、`PreflightReportV1.aidl`、`ApplyRequestV1.aidl`、`ApplyReceiptV1.aidl`、`ObserveRequestV1.aidl`、`EnvironmentObservationV1.aidl`、`ReleaseRequestV1.aidl`、`ReleaseReceiptV1.aidl`
+- Create: 同目录 `CapabilitySnapshotV1.aidl`、`EnvironmentIntentV1.aidl`、`PreflightRequestV1.aidl`、`PreflightReportV1.aidl`、`ApplyRequestV1.aidl`、`ApplyReceiptV1.aidl`、`ObserveRequestV1.aidl`、`EnvironmentObservationV1.aidl`、`ReleaseRequestV1.aidl`、`ReleaseReceiptV1.aidl`
 - Create: `contracts/environment-control-v1/src/main/java/io/github/terryyyc/fakexxx/contract/v1/CapabilitySnapshotV1.kt`
 - Create: 同目录 `PreflightRequestV1.kt`、`PreflightReportV1.kt`、`ApplyRequestV1.kt`、`ApplyReceiptV1.kt`、`ObserveRequestV1.kt`、`EnvironmentObservationV1.kt`、`ReleaseRequestV1.kt`、`ReleaseReceiptV1.kt`、`ContractEnumsV1.kt`、`ContractErrorCodeV1.kt`
 - Create: `contracts/environment-control-v1/build.gradle.kts`
 - Create: `contracts/environment-control-v1/consumer-rules.pro`
 - Create: `contracts/environment-control-v1/compatibility.yaml`
 - Create: `contracts/environment-control-v1/src/test/.../ContractRoundTripTest.kt`
+- Create: 同目录 `EnvironmentIntentV1.kt`、`CanonicalIntentDigestV1.kt`
 - Modify: `apps/cellrebel-auto/settings.gradle.kts`（只接入 contract library）
 - Modify: `apps/qianwangyou/settings.gradle`（只接入 contract library）
 - Modify: 两 App 的 app build 文件（只增加 contract dependency）
+- Modify: `apps/cellrebel-auto/app/src/main/AndroidManifest.xml`（新增千网游两个 applicationId 的 `<queries>`）
 - Create: `scripts/check-contract-v1.sh`
 
-**RED:** missing `verificationLevel`、枚举 ordinal 信任、v1 字段语义漂移、旧/新版本不兼容矩阵均先写失败测试。
+**RED:** missing `verificationLevel`、枚举 ordinal 信任、未知 wire code、canonical digest 跨实现不一致、intent 绑定缺失、v1 字段语义漂移、旧/新版本不兼容矩阵均先写失败测试。
 
-**GREEN:** 实现本文 §6 的 exact schema；v1 不引入泛化 command 或 Map payload。
+**GREEN:** 实现本文 §6 的 exact schema（含 §6.3.2 全部 DTO 与 §6.3.1 digest 算法）；v1 不引入泛化 command 或 Map payload。contract library `minSdk = 24`；两侧构建栈已核实一致（AGP 9.1.0 / Kotlin 2.2.10 / Gradle 9.3.1 / compileSdk 35 / Java 17），无需版本对齐工作。
 
 **Verify:** `./scripts/check-contract-v1.sh`，预期全部 contract/compatibility tests PASS。
 
@@ -674,9 +1081,22 @@ subtree 目录本身处在 `fakexxx` 工作树，后两条预期均输出 `true`
 - Test: `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/**`
 - Test: `apps/qianwangyou/app/src/androidTest/java/name/caiyao/fakegps/integration/v1/**`
 
-**RED order:** unauthorized caller → idempotency → lease conflict → revision event sources → coverage downgrade → release ownership → process death.
+**RED order:** unauthorized caller → **legacy(24–27) 签名降级路径拒绝多签名者** → idempotency → lease conflict → revision event sources → **跨进程并发 bump** → coverage downgrade → release ownership → process death → **owner 进程代际不连续**。
 
 **GREEN:** 适配现有 profile/System Mock/Hook API，不复制其逻辑；无法完整观察时返回 `PARTIAL/NONE`，不伪造 FULL。
+
+**跨进程硬约束（INV-25）**：按 §6.6 的 L1–L6 实现单写者 revision owner。`:hook_verify` 与主进程只能经同步 IPC（Binder 或非导出 `ContentProvider`）向 owner 请求 bump。
+
+被禁止的是**架构形态**，不是库：
+
+- 禁止「多个进程各自直接写同一份 store」——`SharedPreferences` 官方不支持多进程；`MultiProcessDataStore` 只承诺 eventual consistency，不满足 L5。
+- 禁止纯内存计数器——违反 L3 的持久化与重启单调性。
+- **owner 进程内部用什么存不受限制**：单进程 `DataStore`、Room、SQLite 都是合法选择，只要能证明 L3（序列化持久 read-modify-write）、L4（ACK 后于 durable commit）、L5（observe 看得见已 ACK 的 bump）。
+- 静态 guard 检测的是**非 owner 写路径**，不是库名——按库名一刀切会既误杀合法实现又漏掉真正的旁路。
+
+若本 task 新增任何持久 store，同样适用 INV-24：给出升级路径与进程死亡后的迁移证据。
+
+**配对硬约束**：`PairingRecord` 主键 `(applicationId, current signerDigest)`，`versionCode` 仅审计不参与匹配（§6.5.4）；production 与 `.bench` 互不授权；首次配对走 §4.1 bind-first，候选记录来自 `Binder.getCallingUid()` 解析，不来自 UI 侧包扫描。
 
 **Verify:**
 
@@ -703,12 +1123,38 @@ cd apps/qianwangyou
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/db/TrustedQuotaDao.kt`
 - Create: `.../AttemptExecutionDao.kt`
 - Create: `.../AuditEventDao.kt`
+- Create: `.../LegacyCompletionDao.kt`
+- Create: `.../ProviderPairingDao.kt`
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/environment/ProviderTrustStore.kt`
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/recovery/RecoveryCoordinator.kt`
 - Test: 对应 `app/src/test/**`
 
-**RED order:** state census schema → UNIQUE ledger → pre-existing execution → crash windows → concurrent insert → closed-state bypass。
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/db/Migrations.kt`（`MIGRATION_4_5`）
+- Modify: `apps/cellrebel-auto/app/build.gradle.kts`（`ksp { arg("room.schemaLocation", "$projectDir/schemas") }`）
+- Create: `apps/cellrebel-auto/app/schemas/**`（导出的 Room schema JSON，纳入版本控制）
+- Test: `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/db/Migration4to5Test.kt`
+
+**Entity / DAO 路径冻结**：`LegacyCompletionSnapshot` 与 `ProviderPairingRecord` 两个 entity 都声明在既有的 `model/plan/Entities.kt` 中（沿用该文件既有的 entity 聚合惯例）；各自使用独立 DAO（`db/LegacyCompletionDao.kt`、`db/ProviderPairingDao.kt`），不复用 `PlanDao`——`LegacyCompletionSnapshot` 只在迁移时写一次且只读，`ProviderPairingRecord` 承载信任决定，两者都不应混进计划 CRUD 的通用 DAO（否则 INV-22 的旁路面被扩大）。`ProviderTrustStore.kt` 是 §6.5.3 的 lifecycle owner，DAO 之上只暴露 `findActive` / `approve` / `revoke` 三个窄入口，不暴露通用 `upsert`/`delete`——信任决定与撤销都必须经这三个方法，否则 INV-22 的旁路面被扩大到信任面上。
+
+**RED order:** state census schema → **v4 真实 fixture 升级失败** → UNIQUE ledger → pre-existing execution → crash windows → concurrent insert → closed-state bypass。
 
 **GREEN:** 可信完成只通过 `TrustPolicy` + 单一 ledger transaction；删除旧的直接 `completedSuccesses++` 写路径，完成数改为投影。
+
+**迁移硬约束（INV-24）**：现网 `AppDatabase` 是 `version = 4` 且 `exportSchema = false`，已有用户数据。本 task 新增 `TrustedQuotaEntry`/`CellRebelExecution`/`AutoAuditEvent`/`LegacyCompletionSnapshot`/`ProviderPairingRecord` **五类表**（五张都进 v5 Room schema）→ 必须 `version = 5` 且提供显式 `MIGRATION_4_5`，同时把 `exportSchema` 改为 `true` 并把 schema JSON 纳入版本控制（千网游侧已有同款 `room.schemaLocation` 配置可参照）。**禁止 `fallbackToDestructiveMigration` 及任何变体**——缺失迁移会让老用户在升级后开库即 `IllegalStateException`，而 destructive fallback 会直接清空 operator 已导入的计划与历史结果，两者都违反“用户状态默认持久化”。迁移测试必须用**手工构建的真实 v4 fixture 库**（既有 `MigrationTest.kt` 的 v2 手法可直接复用），断言历史计划、任务与结果全部存活。
+
+**旧进度语义（必须冻结，两个方向都是错的）**：upstream `48d8ec9` 的 v4 把历史成功次数放在 `LocationTask.completedSuccesses: Int`（另有 `status: String`）。v5 把完成数改为 `count(TrustedQuotaEntry)` 投影后，两条自然做法都不可接受：
+
+- 直接改投影而不管旧值 → 新 ledger 为空，**operator 的历史进度无声归零**；
+- 把旧 `completedSuccesses` 回填成 `TrustedQuotaEntry` → 这些旧数据**没有 A+ 的证据链**（无 observation、无 intent hash、无连续性证明），直接违反 INV-05/06。
+
+冻结做法：迁移时把 v4 的 `completedSuccesses`/`status` 搬进独立的 **`LegacyCompletionSnapshot`**（`taskId`、`legacyCompletedSuccesses`、`legacyStatus`、`migratedFromSchemaVersion`、`migratedAt`），语义为 `LEGACY_UNVERIFIED`：
+
+- 历史数据与 UI 展示**保留**，operator 看得到"迁移前已完成 N 次（未按 A+ 证据标准验证）"；
+- **绝不生成 `TrustedQuotaEntry`**，不进入可信配额、不进入导出的 trusted 结果；
+- A+ 的 trusted quota 对每个 task **从 0 开始**计；
+- 该快照只读、只在迁移时写入一次，不参与任何后续判定。
+
+必测：一个 `completedSuccesses` 非零且存在 active/completed plan 的 v4 fixture，升级后断言——旧进度可见且标为 legacy-unverified、`TrustedQuotaEntry` 表为空、`LocationTask.completed` 投影为 false（除非新 ledger 真的达标）、恢复流程不把 legacy 计数当作已完成而跳过地址、**`ProviderPairingRecord` 表已创建且初始为空**（升级不得凭空产生一条被信任的 provider——那等于用迁移绕过 §6.5.3 的 operator 批准）。
 
 **Verify:**
 
@@ -758,10 +1204,11 @@ cd apps/cellrebel-auto
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/ControlScreen.kt`
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/HistoryScreen.kt`
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/PairingStatusCard.kt`
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/ProviderApprovalScreen.kt`（§6.5.3 的 operator 批准**与撤销**入口：展示待批准候选的 applicationId / 当前 signer 摘要 / 来源，以及已批准 provider 列表与撤销动作；批准前不得进入可信判定）
 - Create: `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/ui/AutomationPairingScreen.kt`
 - Modify: qwy navigation/settings files only in Kimi branch
 
-**RED:** Compose state tests先覆盖未配对、不兼容、可信、未验证、recovery-required、release-incomplete 六种现场状态。
+**RED:** Compose state tests 先覆盖未配对、**provider 待 operator 批准**、不兼容、可信、未验证、recovery-required、release-incomplete 七种现场状态。
 
 **GREEN:** 默认页保持一键模板；高级配置不出现；错误给具体恢复动作。
 
@@ -809,7 +1256,8 @@ cd apps/cellrebel-auto
 
 真机动作必须另获设备 lease；使用公开测试坐标，禁止未经授权 uninstall/clear-data/生产 profile 写入。验收至少覆盖：
 
-- 首次配对、撤销、签名变化；
+- 首次配对（两侧各一次显式批准）、签名变化；
+- **撤销两侧各测一遍**：千网游撤销 caller allowlist、Auto 撤销 provider allowlist；各覆盖"撤销后发起新 run"与"run 进行中撤销"两种时机；
 - exact-build 双 App 版本 skew；
 - 10 个地址 × 每地址指定可信次数；
 - CellRebel pre-existing、新运行、重跑、崩溃恢复；
@@ -851,6 +1299,8 @@ PR-2 contract v1（冻结 exact HEAD）
           ↓
 PR-6 integration + exact-build device evidence（只做必要胶合，不吞并三路职责）
 ```
+
+Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI 进 PR-4（Opus5），千网游侧 `integration/ui/AutomationPairingScreen.kt` 进 PR-3（Kimi）。owner matrix 本身不变——`apps/qianwangyou/**/integration/**` 含 UI 全部归 Kimi。
 
 每个 PR 的 gate：
 
@@ -899,12 +1349,14 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-02 | Auto 不复制/旁路千网游能力 | INV-01,20；boundary guard |
 | AC-03 | 私有鉴权版本化 v1 discover/preflight/apply/observe/release 可用 | INV-02,03,04；contract tests |
 | AC-04 | 只有独立验证 System Mock 进入可信配额 | INV-05,06；TrustPolicy matrix |
-| AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09；continuity matrix |
+| AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09,25；continuity matrix + 多进程 bump matrix |
+| AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
+| AC-14 | 已有用户数据跨版本升级零丢失，无 destructive fallback | INV-24；v4 真实 fixture migration test |
 | AC-06 | crash/retry 下外部执行可重跑、可信配额最多一次 | INV-10,11,12,13,15；crash matrix |
 | AC-07 | `PRE_EXISTING_RUN` 语义保留且旧结果不计新完成 | INV-11,12；fixtures/device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
-| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过 | INV-01..22；§10 report |
+| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过 | INV-01..25；§10 report |
 | AC-11 | 双 App 独立构建发布，version skew 明确运行或停止 | INV-03,19；CI + skew device matrix |
 | AC-12 | A+/B/C 触发门有持久 issue 与里程碑 verdict，不发生重写 | I7 + milestone evidence |
 
@@ -912,8 +1364,8 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 
 A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `ready for operator merge decision`：
 
-- AC-01..12 都有非作者可复核证据；
-- INV-01..22 全部被自动测试或明确的真机证据覆盖；
+- AC-01..14 都有非作者可复核证据；
+- INV-01..25 全部被自动测试或明确的真机证据覆盖；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
@@ -922,4 +1374,32 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 ## 20. 当前开放项
 
-没有需要在 Phase 0 反问 operator 的技术 A/B 题。A+ 产品基线、B/C 关系、可信边界和 merge 权限已经冻结。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+没有需要 operator 拍板的技术 A/B 题——技术项已在 PR-0.1 中给出 exact schema、digest 算法、容差与 API 24–27 语义。A+ 产品基线、B/C 关系、可信边界和 merge 权限保持冻结。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+
+仅有两件**价值取舍**需要 operator 决定，见 §21；两者都不阻塞 contract v1 冻结，但都必须在真机验收（Task 9）之前有结论。
+
+## 21. operator Decision Packets
+
+以下两项是价值取舍，不是技术 A/B；猫猫不自行决定，也不在 doc/代码 PR 中擅自执行。
+
+### DP-1 · 千网游 release signer 迁移策略
+
+**背景**：`FakeGps-test@285e4ca` 的 release 复用本机 `~/.android/debug.keystore`。该 keystore 由 SDK 在本机随机生成（密钥材料非全球共享），但口令公开且不受保护，且 debug/release signer 完全相同。上游代码注释记录了这么做的真实理由：一把稳定 key 让 debug 与 release 可以 `adb install -r` 相互替换，避免 uninstall 清空 `/data/data`——**这个选择过去已经挽救过一次 operator 全部 profile 的丢失**。
+
+| 选项 | 得到 | 付出 |
+|---|---|---|
+| A 保持现状 | 现有 profile 数据连续性不受影响；无迁移成本 | 无强 release identity；仅"production key 原位轮转"这一条真机场景标为 not-testable（签名拒绝/重配对语义仍可用受控测试 key 与注入 fixture 覆盖） |
+| B 迁移到受控 release key | 强 release identity；signer 轮转可验收；debug/release 可区分 | 一次性 uninstall 或数据迁移；操作不当会重演 profile 丢失 |
+
+**需要 operator 回答**：是否接受“A+ 首版不具备强 release identity”，还是承担一次受控迁移。选 B 时必须先有 profile 导出/恢复方案，不能裸迁。
+
+### DP-2 · Auto 最终 applicationId
+
+**背景**：Auto 当前 `applicationId = com.example.cellrebelauto`，是脚手架默认命名空间。配对记录以 `(applicationId, signerDigest)` 为主键。
+
+| 选项 | 得到 | 付出 |
+|---|---|---|
+| A 冻结沿用 | 无 identity 断裂；PairingRecord 全部有效 | 长期携带 `com.example.` 占位命名空间 |
+| B 改名 | 干净的产品 identity | 形成新 App identity 与数据边界；**作废全部既有 PairingRecord**，需重新配对 |
+
+**需要 operator 回答**：二选一并冻结。**默认不等于必须改名**——但也不能不做决定就进真机验收，因为改名越晚代价越大。改名若发生，必须在 PR-1 完成，不得晚于 contract 冻结。
