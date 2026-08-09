@@ -87,6 +87,7 @@ source_threads:
 | v1.11 | PR-0.2 第七轮 | acceptance 对 `605b4dd9` 的 `REQUEST_CHANGES`，见 §0.1.11 |
 | v1.12 | PR-0.2 第八轮 | acceptance 对 `1e88cc66` 的 `REQUEST_CHANGES`，见 §0.1.12 |
 | **v1.13** | PR-0.2 第九轮 | **operator DP-1/2/3 决策落地**（`797178eb`）+ 非作者复审的三次事实更正（`1701de28` / 本轮），新增 `INV-29`，解除 contract 冻结，见 §0.1.13 |
+| **v1.14** | PR-0.2 第十轮 | **owner transfer 传播**（#4 Kimi → DeepSeek Flash）+ **为 `INV-29` 冻结 evidence carrier**（`appid-cutover` 5 行），见 §0.1.14 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -307,6 +308,19 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 3. **穷举清单要标注它穷举的是哪一维**——§21 那份穷举的是"DP-3 语义锚点"，不是"本次 delta 的全部引用点"；把维度写出来，漏掉的那一类才会显形。
 
 **最后**：三条全部由非作者查出，作者自查两轮均未发现。这不是运气，是**分工的价值**——作者验证的是"我写的是否自洽"，非作者验证的是"它是否与外部世界一致"。后者不能靠前者更努力来替代。
+
+#### 0.1.14 owner transfer 传播与 INV-29 evidence carrier（v1.14）
+
+两项由非作者（Sol）发现的 propagation blocker：
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **owner 真相未传播。** operator 已把 #4 从 Kimi 转给 DeepSeek Flash（主 Thread `0001786311069292-001378-b555f28c`：「完成调度设计后，把 kimi 的任务给 deepseek-flash 吧」），但**现行规范**仍在 §10.1 的 33 行 owner 台账、§12.1、Task 3/6/7/8、§15 PR 图、§16 issue 图、§17 角色、§19 completion gate 里写 Kimi | 现行区 52 处全部改为 DeepSeek Flash；**§0.1.x 历史修订记录中的 5 处保留**——它们描述的是当时的真实状态，改掉就是伪造历史 |
+| 2 | **`INV-29` 有规则、没有证据载体。** 该不变量列出了旧安装探测、迁移桥 round-trip、回滚、CSV 负例与静态扫描，但 §10 / §10.1 里**一行都没有**；AC-10 与 §19 仍写 `INV-01..28` | 新增 `appid-cutover` 类 5 行（`M-AC-01..05`），按 Sol 的「跨 owner 必须拆行」原则分派：探测 / 迁移桥 / CSV 负例 = Opus5 `owner-red`；回滚演练 = Sol `device`；仓库-日志扫描 = Sol `static-guard`。§10 由 90 行/17 类增至 **95 行/18 类**；`owner-red` 64→**67**（Opus5 31→34 / DeepSeek Flash 33）· `device` 2→**3** · `static-guard` 2→**3** · `sol-blackbox` 22 不变。AC-10 与 §19 同步为 `INV-01..29` |
+
+第 2 项值得单独记，因为它是**假闭合的标准配方**：`INV-29` 已经写进不变量表、§21 清单第 11 项还准备把 GitHub #6 的覆盖措辞改成 `INV-01..29`——若不先补台账行，就会得到「issue 宣称覆盖 29 条、ledger 只能证明 28 条」的状态。**宣称覆盖与能够证明覆盖是两件事**；机械同步文案会把前者伪装成后者。
+
+一个作者侧自查漏网：本轮我最初把 `M-AC-05` 的 owner 写成 Opus5，但它的入口是 `scripts/check-forbidden-boundaries.sh`——按 §12.1 那是 **Sol 的独占文件**。在一次专门修正 owner 传播的 delta 里写错 owner，说明"正在处理某类问题"并不使人对该类问题免疫。已在推送前自查修正。
 
 ## 1. 事实基线与来源
 
@@ -1073,7 +1087,7 @@ ProviderPairingRecord(
 |---|---|---|---|
 | `PairingRecord` | CallerAuthorizer | package、signer、approved/revoked | 请求体不能覆盖 |
 | `EnvironmentRevisionState` | ContinuityTracker | monotonic revision、coverage、generation | 心跳不能写 FULL |
-| `EnvironmentLease` | EnvironmentLeaseStore | leaseId、callerApplicationId、callerSignerDigest、`acceptedIntentHash`、`state`（§8.4 七态）、`applyIdempotencyKey`、`startingEnvironmentRevision`、`deadlineElapsedRealtimeMs`、**`applyOwnerGeneration`**（apply 时的 owner generation，用于判定单调值可比性；`startingEnvironmentRevision` 不能替代——revision 是持久单调计数，generation 是每次 owner 进程启动变化的另一根轴）、`releaseIdempotencyKey?`、`residualReasonWires`、`revokeSource?`、`recoveryEvidenceRef?` | 一个设备上的冲突 lease fail-closed；字段在此冻结，**不留给 Kimi 与 fake-qwy 各自发明** |
+| `EnvironmentLease` | EnvironmentLeaseStore | leaseId、callerApplicationId、callerSignerDigest、`acceptedIntentHash`、`state`（§8.4 七态）、`applyIdempotencyKey`、`startingEnvironmentRevision`、`deadlineElapsedRealtimeMs`、**`applyOwnerGeneration`**（apply 时的 owner generation，用于判定单调值可比性；`startingEnvironmentRevision` 不能替代——revision 是持久单调计数，generation 是每次 owner 进程启动变化的另一根轴）、`releaseIdempotencyKey?`、`residualReasonWires`、`revokeSource?`、`recoveryEvidenceRef?` | 一个设备上的冲突 lease fail-closed；字段在此冻结，**不留给 DeepSeek Flash 与 fake-qwy 各自发明** |
 | `OperationReceipt` | IdempotencyStore | caller、operation、`idempotencyKey`、**`requestDigest`**（§6.3.4 冻结的 domain-separated 长度前缀 preimage）、resultDigest、`createdAtElapsedRealtimeMs` | 同键**同** `requestDigest` → 幂等重放原 receipt；同键**异** `requestDigest` → `IDEMPOTENCY_CONFLICT`。**resultDigest 证明不了这件事**——它是应答的摘要，两个不同请求完全可能产生相同应答 |
 | `PendingPairingCandidate` | CallerAuthorizer | callerApplicationId、currentSignerDigest、observedVersionCode、`firstSeenAtElapsedRealtimeMs`、`state`（§8.5 `PENDING_CALLER_APPROVAL`） | 必须在 Binder 调用进行中落快照（§6.5）；批准后转 `PairingRecord`，拒绝或过期即丢弃，**不得自动升格** |
 | `EffectiveEnvironmentObservation` | EnvironmentObserver | observed state、fingerprint、evidence refs | UI 状态不可替代 |
@@ -1153,7 +1167,7 @@ ProviderPairingRecord(
 
 ### 8.4 EnvironmentLease 状态机
 
-`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，Kimi 的 provider 与 Sol 的 fake provider 会各写一套，且 acceptance 会在两套语义之间假绿。
+`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，DeepSeek Flash 的 provider 与 Sol 的 fake provider 会各写一套，且 acceptance 会在两套语义之间假绿。
 
 | 当前状态 | 事件 | 下一状态 | 原子写入 | 阻挡新 apply |
 |---|---|---|---|---|
@@ -1442,6 +1456,11 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-MG-03` | migration | 已存在 v4 用户库升级到 v5 | 显式 `MIGRATION_4_5` 成功，历史计划与结果全部存活 | 24 |
 | `M-MG-04` | migration | migration 执行到一半进程被杀 | 重启后事务回滚或重放，绝不落半迁移库、不 destructive 重建 | 24,15 |
 | `M-MG-05` | migration | 安装了更高 schema 版本后降级回旧包 | 明确失败并提示，不静默清库 | 24 |
+| `M-AC-01` | appid-cutover | cutover 前探测旧 `applicationId` 安装是否存在持久用户状态 | 探测结果是 cutover 的前置判据：无状态 → 允许直接切；有状态 → 必须走 `M-AC-02`。**探测失败或结果不确定一律按"有状态"处理** | 29 |
+| `M-AC-02` | appid-cutover | 旧安装存在 plan/task/attempt/result/session 数据，执行版本化迁移桥 | 新 `applicationId` 下逐表数量与摘要与旧库一致；缺任一表或摘要不符即失败，不得部分迁移后继续 | 29,24 |
+| `M-AC-03` | appid-cutover | 迁移桥失败或中断后回滚 | 旧 App 与其数据保持可用且未被移除；回滚后可重试，不产生半迁移状态 | 29,24 |
+| `M-AC-04` | appid-cutover | 试图用现有结果 CSV 冒充完整迁移 | 拒绝：`AttemptCsvMapper` 只导出审计结果、`importCsv` 只收 worklist，历史结果与账本无回灌路径 | 29 |
+| `M-AC-05` | appid-cutover | 迁移产物或 operator 数据被写入仓库 / 日志 | 静态扫描失败；迁移 bundle 只存在于设备与 operator 控制的位置 | 29,18 |
 | `M-MP-01` | multiproc | 主进程与 `:hook_verify` 同时触发 revision bump | 两次 bump 都不丢失，单调不回退 | 25 |
 | `M-MP-02` | multiproc | revision owner 进程重启，代际连续性不可证 | bump + coverage 降级 | 25,8 |
 | `M-MP-03` | multiproc | `FileObserver` 被回收后重订阅，期间有变化 | bump + 降级；不得把"没收到事件"当成"没有变化" | 25,9 |
@@ -1503,7 +1522,7 @@ Task 7 此前同时承诺三件事：Sol 覆盖 §10 全部行、测试只消费
 | `static-guard` | Sol | `acceptance/scripts/` 下的静态扫描，无运行时 |
 | `device` | Sol（授权 device lease 内） | exact-build 真机证据 |
 
-owner 是该行的**主责方**——即"若该行失败，谁必须改代码"。对端的消费行为由另一条独立行覆盖（例：`M-CC-03` 由 Kimi 证明 provider 拒绝冲突 lease，`M-RL-01` 由 Sol 证明 Auto 正确处置返回的 typed error），因此每行只有一个 owner 与一个入口，不存在共管。
+owner 是该行的**主责方**——即"若该行失败，谁必须改代码"。对端的消费行为由另一条独立行覆盖（例：`M-CC-03` 由 DeepSeek Flash 证明 provider 拒绝冲突 lease，`M-RL-01` 由 Sol 证明 Auto 正确处置返回的 typed error），因此每行只有一个 owner 与一个入口，不存在共管。
 
 | ID | 类别 | evidence class | owner | 精确入口 |
 |---|---|---|---|---|
@@ -1515,11 +1534,11 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-CR-06` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_06` |
 | `M-CR-07` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_07` |
 | `M-CR-08` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_08` |
-| `M-CR-09` | crash | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/CrashMatrixTest.kt::M_CR_09` |
+| `M-CR-09` | crash | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/CrashMatrixTest.kt::M_CR_09` |
 | `M-CC-01` | concurrency | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConcurrencyMatrixTest.kt::M_CC_01` |
 | `M-CC-02` | concurrency | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConcurrencyMatrixTest.kt::M_CC_02` |
-| `M-CC-03` | concurrency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/ConcurrencyMatrixTest.kt::M_CC_03` |
-| `M-CC-04` | concurrency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/ConcurrencyMatrixTest.kt::M_CC_04` |
+| `M-CC-03` | concurrency | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/ConcurrencyMatrixTest.kt::M_CC_03` |
+| `M-CC-04` | concurrency | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/ConcurrencyMatrixTest.kt::M_CC_04` |
 | `M-RC-01` | recovery | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/RecoveryMatrixTest.kt::M_RC_01` |
 | `M-CO-01` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_01` |
 | `M-CO-02` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_02` |
@@ -1528,11 +1547,11 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-CO-05` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_05` |
 | `M-CO-06` | completion | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md#M-CO-06` |
 | `M-RC-02` | recovery | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_02` |
-| `M-RC-03` | recovery | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RecoveryMatrixTest.kt::M_RC_03` |
+| `M-RC-03` | recovery | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RecoveryMatrixTest.kt::M_RC_03` |
 | `M-RC-04` | recovery | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_04` |
 | `M-BP-01` | bypass | `static-guard` | Sol | `acceptance/scripts/check-forbidden-boundaries.sh::M-BP-01` |
 | `M-BP-02` | bypass | `static-guard` | Sol | `acceptance/scripts/check-forbidden-boundaries.sh::M-BP-02` |
-| `M-BP-03` | bypass | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_03` |
+| `M-BP-03` | bypass | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_03` |
 | `M-BP-04` | bypass | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/BypassMatrixTest.kt::M_BP_04` |
 | `M-BP-05` | bypass | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/BypassMatrixTest.kt::M_BP_05` |
 | `M-BP-06` | bypass | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_06` |
@@ -1540,25 +1559,30 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-RL-01` | release | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/ReleaseMatrixTest.kt::M_RL_01` |
 | `M-VS-01` | version | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md#M-VS-01` |
 | `M-VS-02` | version | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/VersionMatrixTest.kt::M_VS_02` |
-| `M-PA-01` | pairing | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_01` |
-| `M-PA-02` | pairing | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_02` |
+| `M-PA-01` | pairing | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_01` |
+| `M-PA-02` | pairing | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_02` |
 | `M-IN-01` | intent | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IntentMatrixTest.kt::M_IN_01` |
 | `M-IN-02` | intent | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IntentMatrixTest.kt::M_IN_02` |
 | `M-IN-03` | intent | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IntentMatrixTest.kt::M_IN_03` |
 | `M-IN-04` | intent | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/IntentMatrixTest.kt::M_IN_04` |
-| `M-PA-03` | pairing | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_03` |
-| `M-PA-04` | pairing | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_04` |
+| `M-PA-03` | pairing | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_03` |
+| `M-PA-04` | pairing | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_04` |
 | `M-PA-05` | pairing | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/PairingMatrixTest.kt::M_PA_05` |
 | `M-MG-01` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_01` |
 | `M-MG-02` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_02` |
 | `M-MG-03` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_03` |
 | `M-MG-04` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_04` |
 | `M-MG-05` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_05` |
-| `M-MP-01` | multiproc | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_01` |
-| `M-MP-02` | multiproc | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_02` |
-| `M-MP-03` | multiproc | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_03` |
-| `M-BP-08` | bypass | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_08` |
-| `M-BP-09` | bypass | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_09` |
+| `M-AC-01` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_01` |
+| `M-AC-02` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_02` |
+| `M-AC-03` | appid-cutover | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md::M_AC_03`（真机回滚演练，需设备 lease 与 exact APK SHA） |
+| `M-AC-04` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_04` |
+| `M-AC-05` | appid-cutover | `static-guard` | Sol | `scripts/check-forbidden-boundaries.sh::no-operator-data-in-repo-or-log` |
+| `M-MP-01` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_01` |
+| `M-MP-02` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_02` |
+| `M-MP-03` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_03` |
+| `M-BP-08` | bypass | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_08` |
+| `M-BP-09` | bypass | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_09` |
 | `M-PA-06` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_06` |
 | `M-PA-07` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_07` |
 | `M-PA-08` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_08` |
@@ -1572,27 +1596,27 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-TU-05` | tuple | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_05` |
 | `M-TU-06` | tuple | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_06` |
 | `M-TU-07` | tuple | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_07` |
-| `M-LS-01` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_01` |
-| `M-LS-02` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_02` |
-| `M-LS-03` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_03` |
-| `M-LS-04` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_04` |
-| `M-LS-05` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_05` |
-| `M-LS-06` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_06` |
-| `M-LS-07` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_07` |
+| `M-LS-01` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_01` |
+| `M-LS-02` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_02` |
+| `M-LS-03` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_03` |
+| `M-LS-04` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_04` |
+| `M-LS-05` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_05` |
+| `M-LS-06` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_06` |
+| `M-LS-07` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_07` |
 | `M-LS-08` | lease | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/LeaseMatrixTest.kt::M_LS_08` |
-| `M-LS-09` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_09` |
-| `M-LS-10` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_10` |
-| `M-LS-11` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_11` |
-| `M-LS-12` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_12` |
-| `M-LS-13` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_13` |
-| `M-LS-14` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_14` |
-| `M-LS-15` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_15` |
-| `M-LS-16` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_16` |
-| `M-LS-17` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_17` |
+| `M-LS-09` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_09` |
+| `M-LS-10` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_10` |
+| `M-LS-11` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_11` |
+| `M-LS-12` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_12` |
+| `M-LS-13` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_13` |
+| `M-LS-14` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_14` |
+| `M-LS-15` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_15` |
+| `M-LS-16` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_16` |
+| `M-LS-17` | lease | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_17` |
 | `M-ID-01` | idempotency | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IdempotencyMatrixTest.kt::M_ID_01` |
-| `M-ID-02` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_02` |
-| `M-ID-03` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
-| `M-RQ-01` | request | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RequestMatrixTest.kt::M_RQ_01` |
+| `M-ID-02` | idempotency | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_02` |
+| `M-ID-03` | idempotency | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
+| `M-RQ-01` | request | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RequestMatrixTest.kt::M_RQ_01` |
 | `M-RS-01` | response | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/ResponseMatrixTest.kt::M_RS_01` |
 | `M-CF-01` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_01` |
 | `M-CF-02` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_02` |
@@ -1764,11 +1788,11 @@ fakexxx/
 | Owner | 独占写入范围 | 可读依赖 | 禁止并行触碰 |
 |---|---|---|---|
 | Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**` |
-| Kimi | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行 | frozen contract | contract、Auto、acceptance |
-| Sol | `acceptance/**`、`docs/acceptance/**`、验收 issue 与证据 | contract 与两 App | Opus5/Kimi 产品实现 |
+| DeepSeek Flash | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行 | frozen contract | contract、Auto、acceptance |
+| Sol | `acceptance/**`、`docs/acceptance/**`、验收 issue 与证据 | contract 与两 App | Opus5/DeepSeek Flash 产品实现 |
 | GLM | review verdict、对抗执行报告；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch |
 
-并行成立条件：Contract PR exact HEAD 冻结后，Opus5 的 Auto consumer、Kimi 的 qwy provider、Sol 的 fake provider/scenario acceptance 三个目录无重叠，可并行。任何 contract delta 先停三路、回主 Thread 重新冻结，不允许三方各自兼容。
+并行成立条件：Contract PR exact HEAD 冻结后，Opus5 的 Auto consumer、DeepSeek Flash 的 qwy provider、Sol 的 fake provider/scenario acceptance 三个目录无重叠，可并行。任何 contract delta 先停三路、回主 Thread 重新冻结，不允许三方各自兼容。
 
 ## 13. 分步 TDD 实施计划
 
@@ -1847,7 +1871,7 @@ checker 必须做**有证明力**的核对，逐项 exit-code 化：
 
 ### Task 3 — 千网游 provider、配对与连续性
 
-**Owner:** Kimi
+**Owner:** DeepSeek Flash
 
 **Reviewer:** GLM
 
@@ -1980,7 +2004,7 @@ cd apps/cellrebel-auto
 
 ### Task 6 — Auto/千网游用户界面与现场可感知性
 
-**Owner:** Opus5（Auto）/ Kimi（千网游，各自在独占目录）
+**Owner:** Opus5（Auto）/ DeepSeek Flash（千网游，各自在独占目录）
 
 **Reviewer:** GLM；Sol 走用户旅程验收
 
@@ -1992,7 +2016,7 @@ cd apps/cellrebel-auto
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/PairingStatusCard.kt`
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/ProviderApprovalScreen.kt`（§6.5.3 的 operator 批准**与撤销**入口：展示待批准候选的 applicationId / 当前 signer 摘要 / 来源，以及已批准 provider 列表与撤销动作；批准前不得进入可信判定）
 - Create: `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/ui/AutomationPairingScreen.kt`
-- Modify: qwy navigation/settings files only in Kimi branch
+- Modify: qwy navigation/settings files only in DeepSeek Flash branch
 
 **RED:** Compose state tests 先覆盖未配对、**provider 待 operator 批准**、不兼容、可信、未验证、recovery-required、release-incomplete 七种现场状态。
 
@@ -2013,18 +2037,18 @@ cd apps/cellrebel-auto
 - Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
 
-**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **90 行 / 17 类**。
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **95 行 / 18 类**（新增 `appid-cutover` 5 行，承载 `INV-29`）。
 
 | class | 行数 | Sol 的职责 |
 |---|---|---|
 | `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
-| `static-guard` | 2 | 编写并执行静态扫描 |
-| `device` | 2 | 在授权 device lease 内执行并留存证据 |
-| `owner-red` | 64 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
+| `static-guard` | 3 | 编写并执行静态扫描 |
+| `device` | 3 | 在授权 device lease 内执行并留存证据 |
+| `owner-red` | 67 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 33 行）。
+**RED:** 上述 28 行各自至少一个失败场景先红；`owner-red` 的 67 行由各自 owner 在自己的 lane 内先红（Opus5 34 行 / DeepSeek Flash 33 行）。
 
-**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / Kimi 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
+**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / DeepSeek Flash 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
 
 **Verify:** `./scripts/verify-a-plus.sh` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
@@ -2032,7 +2056,7 @@ cd apps/cellrebel-auto
 
 **Owner:** GLM（非产品代码作者）
 
-1. 先审 Kimi qwy provider：授权、revision 覆盖声明、idempotency、foreign lease、进程死亡。
+1. 先审 DeepSeek Flash qwy provider：授权、revision 覆盖声明、idempotency、foreign lease、进程死亡。
 2. 再审 Sol acceptance：是否存在 fake 只验证实现细节、未覆盖真实状态边、误把心跳当连续性。
 3. 对 Opus5 Auto 做可信账本与 `PRE_EXISTING_RUN` 对抗审查。
 4. 每个 finding 给 `block/approve`、精确文件/行、复现命令和 exact HEAD。
@@ -2085,14 +2109,14 @@ PR-0 文档（本文，先独立落 main）
 PR-1 远端基线导入 + provenance + ownership + CI
   ↓
 PR-2 contract v1（冻结 exact HEAD）
-  ├── PR-3 Kimi：千网游 provider/continuity/security
+  ├── PR-3 DeepSeek Flash：千网游 provider/continuity/security
   ├── PR-4 Opus5：Auto data/trust/recovery/core/UI
   └── PR-5 Sol：fake provider + acceptance/adversarial matrix
           ↓
 PR-6 integration + exact-build device evidence（只做必要胶合，不吞并三路职责）
 ```
 
-Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI 进 PR-4（Opus5），千网游侧 `integration/ui/AutomationPairingScreen.kt` 进 PR-3（Kimi）。owner matrix 本身不变——`apps/qianwangyou/**/integration/**` 含 UI 全部归 Kimi。
+Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI 进 PR-4（Opus5），千网游侧 `integration/ui/AutomationPairingScreen.kt` 进 PR-3（DeepSeek Flash）。owner matrix 本身不变——`apps/qianwangyou/**/integration/**` 含 UI 全部归 DeepSeek Flash。
 
 每个 PR 的 gate：
 
@@ -2114,7 +2138,7 @@ Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI
 | EPIC | `[Epic] CellRebel × 千网游 A+ 可信无人值守测试` | 本文 | Sol 主控 | 所有 P0 child 达标且等待 operator merge/close 决定 |
 | I1 | `[P0] 导入双 App 精确基线并建立 provenance/CI` | EPIC | Opus5 / Sol | PR-1 exact HEAD 通过 gate |
 | I2 | `[P0] 冻结 Environment Control contract v1` | I1 | Opus5 / Sol+GLM | PR-2 exact HEAD + verdict |
-| I3 | `[P0] 千网游 provider：配对、lease、连续性与审计` | I2 | Kimi / GLM | PR-3 exact HEAD + INV tests |
+| I3 | `[P0] 千网游 provider：配对、lease、连续性与审计` | I2 | DeepSeek Flash / GLM | PR-3 exact HEAD + INV tests |
 | I4 | `[P0] Auto：可信账本、恢复状态机与 A+ 模板` | I2 | Opus5 / Sol | PR-4 exact HEAD + INV tests |
 | I5 | `[P0] A+ fake provider、崩溃/并发/旁路矩阵` | I2 | Sol / GLM | PR-5 exact HEAD + §10 全覆盖 |
 | I6 | `[P0] 双 App 集成与 exact-build 真机验收` | I3,I4,I5 | Sol / GLM | device matrix + hashes + verdict |
@@ -2128,8 +2152,8 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 
 1. **Opus5 核心实现**：I1/I2/I4，独立 worktree。
 2. **Sol 验收与检查**：I5/I6，独立 worktree；不写 Opus5 核心实现。
-3. **Kimi 千网游独立模块**：I3；只在 contract exact HEAD 冻结后开工，文件所有权不与 Opus5 重叠。
-4. **GLM 独立审查/对抗测试**：先审本文与 Sol 的验收设计，后审 Kimi/Opus5 exact HEAD；不替作者自审。
+3. **DeepSeek Flash 千网游独立模块**：I3；只在 contract exact HEAD 冻结后开工，文件所有权不与 Opus5 重叠。
+4. **GLM 独立审查/对抗测试**：先审本文与 Sol 的验收设计，后审 DeepSeek Flash/Opus5 exact HEAD；不替作者自审。
 
 主 Thread 只接收六个状态点：文档提交、issues/任务图完成、子 Thread 建立、核心实现 ready for review、验收完成、等待 merge 决策。
 
@@ -2146,7 +2170,7 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-07 | `CellRebelCompletionEvidenceV1` 五值判定正确，旧结果/弱证据/过短 RUNNING 均不计新完成 | INV-11,12,26；completion matrix + device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
-| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过，且每行有 §10.1 的 evidence class 与覆盖证明 | INV-01..28；§10 report + `verify-a-plus.sh` 行 ID 覆盖检查 |
+| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过，且每行有 §10.1 的 evidence class 与覆盖证明 | INV-01..29；§10 report + `verify-a-plus.sh` 行 ID 覆盖检查 |
 | AC-11 | 双 App 独立构建发布，version skew 明确运行或停止 | INV-03,19；CI + skew device matrix |
 | AC-12 | A+/B/C 触发门有持久 issue 与里程碑 verdict，不发生重写 | I7 + milestone evidence |
 | AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
@@ -2172,12 +2196,12 @@ AC-05 依赖千网游返回的 `coverage == FULL`。**Auto 能验收的只是"�
 A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `ready for operator merge decision`：
 
 - AC-01..14 都有非作者可复核证据；
-- INV-01..28 全部被自动测试或明确的真机证据覆盖；
+- INV-01..29 全部被自动测试或明确的真机证据覆盖；
 - §8.6.5（completion 跨 attempt 去重）与 §18.1（AC-05 的 FULL 依赖）两条**不可证明上限**已在验收报告中显式记录，未被写成全绿；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
-- Opus5、Kimi、Sol 的作者改动分别有独立 reviewer；GLM 不审自己写的测试改动；
+- Opus5、DeepSeek Flash、Sol 的作者改动分别有独立 reviewer；GLM 不审自己写的测试改动；
 - 所有 candidate PR 均停在未 merge 状态，等待 operator 对每个 PR 决定。
 
 ## 20. 当前开放项
@@ -2312,7 +2336,7 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 `apps/qianwangyou` 在冻结基线上带 23 个 lint error（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）；两个上游仓都没有任何 CI，所以 `lintDebug` 从未被当作门跑过。终态要求是 **`lintDebug` 真正 exit 0**，不是"债务没增长"。因此：
 
 - `scripts/check-inherited-lint-debt.sh` 的 ratchet **降级为中间证据**，不再是终态门；它继续防止债务增长，但 raw-green 达成后应随之退役。
-- 清债由 Opus5 **串行**进行（不与 Kimi 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败，届时按上表把 CI 那一行移到 `--stage contract`，这是合法分叉而非绕过。
+- 清债由 Opus5 **串行**进行（不与 DeepSeek Flash 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败，届时按上表把 CI 那一行移到 `--stage contract`，这是合法分叉而非绕过。
 
 **(5) 87 份单机验收工件：现在复制 + SHA-256，原件不动。**
 由 Sol 的验收线执行：复制 + 逐份 SHA-256 登记，**不动原件**，本次**不公开提交可能含 UI 内容的工件**。Opus5 不触碰这批文件。
