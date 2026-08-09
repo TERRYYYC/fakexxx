@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        Android Settings discovers candidates for "Select mock location app" through this legacy
+        declaration even though modern Android grants the real authority through the mock_location
+        app-op. Mock location is an intentional product capability here, so lint's test-only
+        assumption does not apply to the release manifest.
+    -->
+    <uses-permission
+        android:name="android.permission.ACCESS_MOCK_LOCATION"
+        tools:ignore="MockLocation" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:icon="@drawable/ic_lan"
+        android:label="@string/app_name"
+        android:persistent="true"
+        android:theme="@style/AppTheme.NoActionBar">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="FakeGPS - Device Info Spoofer" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="30" />
+        <!--
+            Opt into the modern XSharedPreferences transport. Without this flag (or
+            xposedminversion > 92) the framework never triggers hookNewXSP, so
+            MODE_WORLD_READABLE is rejected and the prefs file stays in the app's private
+            dir where hooked apps cannot read it (canRead=false). With the flag, the
+            framework redirects getPreferencesDir() to the daemon-provisioned safe-zone
+            (SELinux u:object_r:xposed_data:s0, 0755) that target app processes can read.
+            This is the transport that replaces the ContentProvider path, which Android 11+
+            package-visibility filtering blocks entirely.
+        -->
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
+
+        <activity
+            android:name=".ui.ComposeActivity"
+            android:label="@string/app_name"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Legacy activities kept for reference during migration -->
+        <activity
+            android:name=".ui.activity.SplashActivity"
+            android:label="@string/app_name"
+            android:exported="false" />
+
+        <activity
+            android:name=".ui.activity.MainActivity"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:exported="false"
+            android:theme="@style/AppTheme.NoActionBar" />
+
+        <!--
+            exported=false (review FC-6): this provider was world-readable with no permission, so
+            ANY app on the device could read the full spoof profile — including the app under test,
+            which turns the tool itself into the giveaway. Nothing outside this APK needs it: the
+            hook stopped querying it when the transport moved to XSharedPreferences, and the only
+            remaining callers (VerifyViewModel / ConfigPrefsSync / SpoofSettings) run in this
+            process, where same-uid access does not require export.
+        -->
+        <provider
+            android:name=".data.AppInfoProvider"
+            android:authorities="${applicationId}.data.AppInfoProvider"
+            android:exported="false" />
+
+        <!--
+            Stable-release verification runs here, never in the configuration process. The service
+            receives only request correlation metadata; it reads the published payload itself and
+            returns public-API observations. Non-exported prevents another app from driving it.
+        -->
+        <service
+            android:name=".verify.HookVerificationService"
+            android:exported="false"
+            android:process=":hook_verify"
+            android:stopWithTask="true" />
+
+        <service
+            android:name=".mockprovider.MockProviderService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+    </application>
+
+</manifest>

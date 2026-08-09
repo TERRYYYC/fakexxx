@@ -1,0 +1,5 @@
+﻿addname,latitude,longitude,tac,operator_name,wifi_hidden,nci,neighbor_cells_json
+基辅，家 🐾,50.4501,30.5234,12345,"Київ, Україна",false,68719476735,"[{""pci"":1}]"
+备用档案,,,--,"运营商
+第二行",1,,
+基辅，家 🐾,50.4501,30.5234,12345,"Київ, Україна",false,68719476735,"[{""pci"":1}]"
