@@ -30,7 +30,14 @@ LIST_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --stage) STAGE="${2:-}"; shift 2 ;;
+    # See check-provenance.sh: `shift 2` with one argument left fails without
+    # advancing $#, so a value-less `--stage` spins forever. Same fix here.
+    --stage)
+      if [ $# -lt 2 ]; then
+        printf 'verify-a-plus: --stage requires a value (import | contract | full)\n' >&2
+        exit 1
+      fi
+      STAGE="$2"; shift 2 ;;
     --stage=*) STAGE="${1#*=}"; shift ;;
     --list) LIST_ONLY=1; shift ;;
     -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;

@@ -39,7 +39,15 @@ cd "$REPO_ROOT" || exit 1
 STAGE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --stage) STAGE="${2:-}"; shift 2 ;;
+    # `shift 2` with only one argument left fails and does NOT advance $#,
+    # so the loop would spin forever on `--stage` given without a value.
+    # Check arity before shifting.
+    --stage)
+      if [ $# -lt 2 ]; then
+        printf 'check-provenance: --stage requires a value (import | contract | full)\n' >&2
+        exit 1
+      fi
+      STAGE="$2"; shift 2 ;;
     --stage=*) STAGE="${1#*=}"; shift ;;
     -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) printf 'check-provenance: unknown argument "%s"\n' "$1" >&2; exit 1 ;;

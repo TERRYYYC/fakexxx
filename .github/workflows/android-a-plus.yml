@@ -35,7 +35,12 @@ jobs:
           fetch-depth: 0
 
       - name: check-provenance
-        run: ./scripts/check-provenance.sh
+        # --stage is required and has no default (see the script header). At
+        # PR-1 the vendored apps must still be pristine, so this branch runs
+        # the strict stage. When a later PR legitimately changes an app, this
+        # line is what moves to --stage contract/full; the import-commit
+        # anchor in section 1 is checked at every stage regardless.
+        run: ./scripts/check-provenance.sh --stage import
 
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.

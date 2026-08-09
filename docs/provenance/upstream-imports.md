@@ -166,25 +166,30 @@ A pass means "the debt did not grow" and says so explicitly; it never claims
 `lintDebug` exits 0. Reducing the debt is expected to lower the budget in the
 same PR.
 
-**Remediation ownership (closed, per review of `c656e8e`).** The 23 errors span
-`mockprovider/**`, `probe/**`, `ui/**`, `dao/**` and resources. The owner matrix
-grants the Qianwangyou lane (Kimi, PR-3) only
+**Remediation ownership: still OPEN.** The 23 errors span `mockprovider/**`,
+`probe/**`, `ui/**`, `dao/**` and resources. The owner matrix grants the
+Qianwangyou lane (Kimi, PR-3) only
 `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**` plus the
 matching Manifest/Gradle lines, so **no lane in the current matrix may legally
-edit those files**. Rather than invent an owner, the disposition is:
+edit those files**. That is the problem, not the resolution:
 
-- **Remediation is explicitly out of A+ scope.** No lane is assigned it, because
-  assigning one would require widening that lane's exclusive write scope, and
-  the owner matrix is the thing keeping three parallel lanes from colliding.
-- **Terminal gate: the ratchet.** `scripts/check-inherited-lint-debt.sh` fails on
-  any increase or any new issue type, per app. That is the condition this debt
-  must satisfy for the life of A+ — bounded and visible, never zero.
-- **Changing that requires an owner-matrix amendment**, which is an
-  orchestrator/operator decision recorded in the spec, not something a lane may
-  take unilaterally. Spec §14 lists
-  `(cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)` with expected
-  exit 0; until an amendment happens, that expectation is **not met at the
-  inherited baseline**, and the ratchet is what stands in for it.
+- **There is currently no legal remediation owner.** Assigning one requires
+  widening a lane's exclusive write scope, and the owner matrix is what keeps
+  three parallel lanes from colliding — so it is an orchestrator/operator
+  amendment, not something a lane may take unilaterally.
+- **The ratchet is a holding measure, not the terminal gate.**
+  `scripts/check-inherited-lint-debt.sh` fails on any increase or any new issue
+  type, per app. It bounds the debt and keeps it visible. It does **not**
+  satisfy the release gate.
+- **The frozen spec §14 still requires `(cd apps/qianwangyou && ./gradlew
+  lintDebug assembleDebug)` to exit 0**, and at the inherited baseline it exits
+  1. That contradiction is unresolved and is recorded here as unresolved.
+- **Deciding otherwise is a separate operator value decision** — "does A+ ship
+  with a bounded-debt ratchet instead of raw-green lint?" — and it needs its own
+  Decision Packet. An earlier revision of this file declared the remediation
+  "out of A+ scope" with the ratchet as terminal gate. That was an overreach:
+  the operator's disposition covered the credential question in §6.2 only, and
+  one authorization was used to settle two different decisions. Retracted.
 
 ### 6.2 Credential-shaped material in the imported baseline — operator disposition
 
