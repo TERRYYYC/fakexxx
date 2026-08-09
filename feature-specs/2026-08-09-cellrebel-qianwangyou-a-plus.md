@@ -89,6 +89,7 @@ source_threads:
 | **v1.13** | PR-0.2 第九轮 | **operator DP-1/2/3 决策落地**（`797178eb`）+ 非作者复审的三次事实更正（`1701de28` / 本轮），新增 `INV-29`，解除 contract 冻结，见 §0.1.13 |
 | **v1.14** | PR-0.2 第十轮 | **owner transfer 传播**（#4 Kimi → DeepSeek Flash）+ **为 `INV-29` 冻结 evidence carrier**（`appid-cutover` 5 行），见 §0.1.14 |
 | **v1.15** | PR-0.2 第十一轮 | 为 `M-AC-01..05` 冻结**实施归属与时序**（Task 1 前置门 / Task 9 回滚旅程）、统一 device anchor、澄清计数单位，见 §0.1.15 |
+| **v1.16** | PR-0.2 第十二轮 | 修复 v1.15 引入的三个语义缺陷：provenance stage 自相矛盾、`M-AC-03` 依赖环、跨 applicationId carrier 物理不可行，见 §0.1.16 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -340,6 +341,22 @@ Sol 第二遍审计的三项。第 1 项是本轮真正重要的：
 第 1 项是**假闭合往上爬了一层**：上一轮是「不变量有规则、台账没行」，这一轮是「台账有行、计划没归属」。我补了载体却没补承接——**证据行本身不是证据，它只是一张待兑现的欠条；没有 Task 承接的台账行，和没有台账行的不变量，在验收面上是等价的。**
 
 第 3 项值得单独记，因为它**不是错误**：一个没有声明单位的数字，天然会被两个人量成两个值，然后双方都以为对方错了。收敛不是选一边，是**写数字必须带单位**。本 session 反复出现的度量事故（长度过滤、`head` 截断、样本构成、坏 awk 报出的假 `diff=35`）都属同一族：**度量的定义没说清，或工具本身没被验证过。**
+
+#### 0.1.16 v1.15 引入的三个语义缺陷（v1.16）
+
+上一版为 `INV-29` 补实施归属时，一次引入三个新缺陷，**全部由 Sol 在 final readiness audit 发现**。三条互相关联，共同决定 INV-29 能否执行：
+
+| # | 缺陷 | 修订 |
+|---|---|---|
+| 1 | **Task 1 的 Verify 必然失败。** Files 里要改 `apps/cellrebel-auto/**`（applicationId + 迁移文件），而最终 Verify 仍是 `--stage import`——该 stage 要求当前 app 树与上游逐字节相同 | 拆成两个 checkpoint：import commit 跑 `--stage import`（不可变锚点），Task 1 最终 HEAD 跑 `--stage contract`；CI workflow 同步（该文件属 PR-1 分支，本 doc 只做规定） |
+| 2 | **`M-AC-03` 造成依赖环。** 我把 Task 9 真机回滚写成 PR-1 合入前置，而 §15 PR 图是 PR-1 → … → PR-6 device evidence、§16 是 I6 依赖 I1 —— I1 要先完成才能到 I6，I6 又要先完成才能合 I1 | `M-AC-03` 改为阻断**实际设备 cutover / 旧 App 移除 / release candidate**，不阻断 PR-1 代码合入。单测门（G-AC-1/2/3）才是合入前置 |
+| 3 | **跨 applicationId 搬运通道物理不可行。** 我只在新 ID 侧写了 `AppIdMigrationBridge`。但 app-specific 存储按 applicationId 隔离，跨 App 只能走 `ContentProvider` 或显式共享通道；而已安装的旧 App 基线 `productFlavors = 0`、导出 `provider = 0`——**旧 sandbox 根本没有出口** | 冻结三段式：`legacyId` flavor（仍是旧 ID，经 SAF 导出 bundle）→ operator 保管 → `productId` flavor 导入并校验。**过渡构建必须先于改名交付**，两 flavor 同签名以便 `adb install -r` 覆盖而不清数据 |
+
+第 3 条是本 session 最实质的一次设计错误：前面几次是**记账与传播**问题（数字、路径、owner、载体缺失），这一次是**方案在物理上不成立**——我设计了一座只有一端的桥，而它看起来完全合理，因为文档里"迁移桥"三个字读起来是完整的。
+
+收敛：**凡涉及跨进程 / 跨 App / 跨设备边界的方案，先问"两端各自存在吗、谁先交付"，再写它的名字。** 一个组件的名字能掩盖它缺了另一半；只有把交付顺序摊开，缺口才会显形。
+
+第 1、2 条则是同一类：我给一个 Task 加了新职责，却没有回头检查**它自己的验证命令**和**它在 DAG 里的位置**是否还成立。加职责必须连带重算这两样。
 
 ## 1. 事实基线与来源
 
@@ -1828,10 +1845,14 @@ fakexxx/
 - Create: `scripts/check-provenance.sh`
 - Import: `apps/cellrebel-auto/**`
 - Import: `apps/qianwangyou/**`
-- Modify: `apps/cellrebel-auto/app/build.gradle.kts`（`applicationId` → `come.xx.fakeaauto`，**逐字**；`namespace` 与 Kotlin 包路径不动，见 §21 DP-2 范围冻结）
-- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/migration/AppIdCutoverProbe.kt`（旧安装持久状态探测）
-- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/migration/AppIdMigrationBridge.kt`（版本化迁移 bundle 的导出/导入）
-- Create: `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt`（`M_AC_01` / `M_AC_02` / `M_AC_04`）
+- Modify: `apps/cellrebel-auto/app/build.gradle.kts`：
+  - 新增 `productFlavors`：`legacyId`（`applicationId = "com.example.cellrebelauto"`，**过渡构建**）与 `productId`（`applicationId = "come.xx.fakeaauto"`，**逐字**，终态）
+  - `namespace` 与 Kotlin 包路径不动（§21 DP-2 范围冻结）
+- Create: `.../migration/AppIdCutoverProbe.kt`（旧安装持久状态探测）
+- Create: `.../migration/CutoverBundleCodec.kt`（版本化 bundle 的编解码 + 逐表摘要，两个 flavor 共用）
+- Create: `.../migration/CutoverExporter.kt`（**仅 `legacyId` flavor 可达**；经 SAF 写出 bundle 到 operator 选定位置）
+- Create: `.../migration/CutoverImporter.kt`（**仅 `productId` flavor 可达**；经 SAF 读入 bundle 并校验）
+- Create: `.../matrix/AppIdCutoverMatrixTest.kt`（`M_AC_01` / `M_AC_02` / `M_AC_04`）
 
 **applicationId cutover 前置门（INV-29，承接 `M-AC-01/02/04`）**
 
@@ -1843,17 +1864,46 @@ fakexxx/
 | G-AC-2 | `M-AC-02` | 若有状态：迁移 bundle round-trip 后，plan/task/attempt/result/session **逐表数量与摘要**与旧库一致；缺任一表或摘要不符即失败 |
 | G-AC-3 | `M-AC-04` | 拒绝以结果 CSV 冒充完整迁移（负例必须红） |
 
-**三门全绿之前，PR-1 不得合入**；`M-AC-03`（回滚演练）由 Task 9 在真机上执行，其失败同样阻断 PR-1 的 cutover 合入。旧 App **在 `M-AC-03` 通过前不得移除**。
+#### 跨 applicationId 的搬运通道（冻结）
+
+**为什么新 ID 侧一个 bridge 类不够**：Android 的 app-specific 存储按 applicationId 隔离，另一个 App **不能**直接读取它的内部文件；跨 App 只能走 `ContentProvider` 或显式共享通道。而 operator 手机上**已安装**的 `com.example.cellrebelauto` 基线里 `productFlavors = 0`、导出 `provider = 0` —— **旧安装根本没有任何出口**。因此改名后的新 APK 无法凭类名读到旧库；只在新 ID 侧写 importer 是**物理上不可能成立**的设计。
+
+冻结为三段式，载体与权限边界如下：
+
+| 段 | 构建物 | 动作 | 边界 |
+|---|---|---|---|
+| T-1 | `legacyId` flavor（仍是 `com.example.cellrebelauto`，可 `adb install -r` 覆盖现有安装） | operator 经 SAF 导出版本化 bundle | bundle 落在 **operator 选定位置**；不进仓库、不进日志 |
+| T-2 | — | operator 保管 bundle | 内容为其本人数据，不经任何猫之手 |
+| T-3 | `productId` flavor（`come.xx.fakeaauto`） | operator 经 SAF 导入并校验逐表数量/摘要 | 校验不过即失败，不得部分导入后继续 |
+
+**`legacyId` 过渡构建必须先于改名交付** —— 它是旧 sandbox 唯一的合法出口。两个 flavor 由同一份 PR-1 代码产出，签名一致以便 `adb install -r` 覆盖安装而不清数据。
+
+#### 阻断关系（无环）
+
+| 门 | 阻断什么 | **不**阻断什么 |
+|---|---|---|
+| G-AC-1/2/3（Task 1，单测） | PR-1 合入 | — |
+| `M-AC-03`（Task 9，真机） | **实际设备 cutover 执行 · 旧 App 移除 · release candidate** | **不阻断 PR-1 合入** |
+
+上一版把 `M-AC-03` 写成 PR-1 合入前置，与 §15 PR 图（PR-1 → … → PR-6 device evidence）和 §16 issue 图（I6 依赖 I3/I4/I5 → I2 → I1）构成**依赖环**：I1 要先完成才能到 I6，I6 又要先完成才能合 I1。现更正——**真机回滚演练阻断的是"操作"，不是"代码合入"**。代码合入只需单测门；设备上真正搬运数据、以及移除旧 App，才需要真机证据。旧 App **在 `M-AC-03` 通过前不得移除**这一条保持不变。
 
 **RED:** 在空目标路径运行 `scripts/check-provenance.sh --stage import`，必须因两个 app 未导入和 SHA 未登记失败；`AppIdCutoverMatrixTest::M_AC_01/02/04` 三条在实现前先红。
 
 **GREEN:** 只从远端精确 SHA subtree 导入；记录源 URL、branch、SHA、导入 commit。不得读取本机脏 worktree 作为拷贝源。
 
-**Verify:**
+**Verify（两个 checkpoint，不是一条命令）：**
 
 ```bash
-./scripts/check-provenance.sh --stage import
+# checkpoint 1 — 导入 commit 本身，app 树必须与上游逐字节相同
+git checkout <import-commit> && ./scripts/check-provenance.sh --stage import
+
+# checkpoint 2 — Task 1 最终 HEAD（applicationId + flavor + 迁移文件已合法分叉）
+./scripts/check-provenance.sh --stage contract
 ```
+
+**为什么最终 Verify 不能再用 `--stage import`**：本 task 现在**有意**修改 `apps/cellrebel-auto/**`（flavor + applicationId + 四个迁移文件）。`--stage import` 要求当前 HEAD 的 app 树与上游 root tree 逐字节相同，因此它在 Task 1 完成态下**必然 exit 1**。这正是 `--stage` 当初被设计成必填的原因（见下表），只是上一版忘了把这一行跟着移动。
+
+`.github/workflows/android-a-plus.yml` 的 provenance job 同步改传 `--stage contract`——**该文件属 PR-1 分支，本 docs PR 只做规定，实际改动在 PR-1 实现 Task 1 时落**。immutable import-commit anchor 在**任何 stage 都仍然被检查**，所以放宽的只是"当前树"，不是 provenance 本身。
 
 **`--stage` 是必填的，没有默认值**（PR-1 实现如此）。原因是两种默认都有害：默认严格会让 PR-2/3/4 里第一次**合法**修改 app 源码就永久性地让 CI 变红；默认宽松则会静默丢掉 PR-1 最强的那条检查（当前 HEAD 树仍与上游逐字节相同）。因此由调用方声明 stage：
 
@@ -1862,7 +1912,7 @@ fakexxx/
 | `import` | 全部检查 + **当前 HEAD 树仍与上游 root tree 逐字节相同** |
 | `contract` / `full` | 记录的 import commit 仍携带上游 root tree（**不可变锚点，任何 stage 都查**），但允许 app 树在其后合法演进 |
 
-CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；当它们**合法**开始分叉时，移动的就是那一行。
+CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；当它们**合法**开始分叉时，移动的就是那一行——**Task 1 的 applicationId cutover 就是第一次合法分叉**，届时该行改为 `--stage contract`。
 
 > 本节此前写的是不带 `--stage` 的裸命令。那条命令在 PR-1 的实现下会 `exit 1`（`--stage is required`）——**真相源记录了一条必然失败的验证命令**。此处更正；教训与 §0.1.3 第 1 项同类：改了一条被下游引用的契约，必须回头扫全部引用点。
 
@@ -2115,7 +2165,7 @@ cd apps/cellrebel-auto
 - System Mock 连续性变化；
 - Hook 结果不进入可信配额；
 - qwy/Auto 进程死亡与 release 人工恢复；
-- **`applicationId` cutover 回滚旅程（`M-AC-03`，锚点 `docs/acceptance/a-plus-device-matrix.md#M-AC-03`）**：在旧 `com.example.cellrebelauto` 与新 `come.xx.fakeaauto` 之间走一次完整 old→new→回滚，断言回滚后**旧 App 与其数据仍可用且未被移除**、可重试、不产生半迁移状态。**本行不通过即阻断 PR-1 的 cutover 合入**（与 Task 1 的 G-AC-1/2/3 同为 INV-29 的承载）；
+- **`applicationId` cutover 回滚旅程（`M-AC-03`，锚点 `docs/acceptance/a-plus-device-matrix.md#M-AC-03`）**：在旧 `com.example.cellrebelauto` 与新 `come.xx.fakeaauto` 之间走一次完整 old→new→回滚，断言回滚后**旧 App 与其数据仍可用且未被移除**、可重试、不产生半迁移状态。**本行不通过即阻断「实际设备 cutover 执行 / 旧 App 移除 / release candidate」，但不阻断 PR-1 代码合入**（Task 1 的 G-AC-1/2/3 单测门才是 PR-1 的合入前置；理由见 Task 1 的阻断关系表——反向阻断会与 §15/§16 的 DAG 构成依赖环）；同时验证 `legacyId` 过渡构建可 `adb install -r` 覆盖现有安装而不清数据；
 - 原仓 #14/#15 的相关稳定性风险，不用新接口存在本身代替验收。
 
 ## 14. 验证命令
