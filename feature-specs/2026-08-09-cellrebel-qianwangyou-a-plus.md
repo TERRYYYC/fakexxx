@@ -77,6 +77,7 @@ source_threads:
 | v1.8 | PR-0.2 第四轮 | Sol + GLM 双路绑定 `ecfb322e` 的 `REQUEST_CHANGES`，见 §0.1.8 |
 | v1.9 | PR-0.2 第五轮 | acceptance 对 `ad70a625` 的 `REQUEST_CHANGES`，见 §0.1.9 |
 | v1.10 | PR-0.2 第六轮 | acceptance 对 `520cc846` 的 `REQUEST_CHANGES`，见 §0.1.10 |
+| v1.11 | PR-0.2 第七轮 | acceptance 对 `605b4dd9` 的 `REQUEST_CHANGES`，见 §0.1.11 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -241,11 +242,23 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 |---|---|---|
 | 1 | **[P1]** §8.4 的 state-aware 分流表写对了，但**编码这条规则的矩阵行没跟着改**：`M-LS-07` 仍写"非 `RELEASED` lease"、`M-LS-12/13/14` 未限定状态，于是 `REVOKED` + restart 会同时命中 `M-LS-07/12`（→`RELEASE_INCOMPLETE`/`EXPIRED`）与 `M-LS-15`（→保持 `REVOKED`），预期终态互相冲突 | 四行谓词全部收窄到具体状态集：`M-LS-07/12/13` 限 `{ACQUIRING, ACTIVE}`，`M-LS-14` 限 `ACTIVE`，并各自写明"不适用于其他状态"及去向；`M-LS-15/16` 明确要求干净性可证与不可证**两种都测** |
 | 2 | **[P2]** §10.1 标为 `json` 的载体含注释、联合类型占位与互斥字段并存，**不是 verifier 能 `JSON.parse` 的实例**；PR body 仍是旧六字段 | 换成**两条真实可解析实例**（`passed` + `deferred`），并冻结容器形态与**逐 lane 的产出路径**（各 lane 写各自片段，不共写一个文件，避免跨 owner 写入）；同一 `rowId` 出现在多个片段即冲突失败；PR body 同步 |
-| 3 | 作者自查（Sol 未提）：§8.4"任何跨越 generation 断裂的在飞 attempt 都已不可能满足可信谓词"——前提带条件"连续性不可证"，结论却丢了条件 | 补全三步推导，并说明条件为何恒成立（observer 随 owner 进程销毁，重订阅必然制造不可证间隙）；同时写明若将来观察源移出 owner 进程，该论证必须重做 |
+| 3 | 作者自查（Sol 未提）：§8.4"任何跨越 generation 断裂的在飞 attempt 都已不可能满足可信谓词"——前提带条件"连续性不可证"，结论却丢了条件 | 补全三步推导（**该行所述"条件恒成立"的论据已被 v1.11 第 3 项推翻**——spec 不冻结 observer 与 owner 共址，现有 `PrefsDirectoryObserver` 就在被 hook 的目标进程；现行表述见 §8.4） |
 
 **第 1 项是同一种传播病的第六次**，而且这次特别值得记：§8.4 的分流表**里面就引用了 `M-LS-07` 与 `M-LS-12`**——我做了从规则指向行的单向引用，却没有反过来更新行本身。
 
 这暴露了四张映射的真实边界：**集合相等、列数、编号连续这些机械校验只能证明"存在"，证明不了"语义一致"**。规则改了而编码它的行没改，所有机械检查依然全绿。目前唯一的对策是像 DP-3 那样写穷举式同步清单，但它靠人执行，仍会漏。**若要根治，需要让每条规则与它的矩阵行之间存在可被构建校验的双向绑定**——本 spec 暂不引入该机制，此处如实记录为已知残留风险，不假装已解决。
+
+#### 0.1.11 acceptance 第七轮修订（v1.11）
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **[P1]** 上一轮收窄谓词时漏了一个组合：`ACTIVE + 设备 reboot + 干净性不可证` 同时被 `M-LS-07` 指向 `RELEASE_INCOMPLETE`、又被 `M-LS-13`（委派给 `M-LS-12`）指向 `EXPIRED` | `M-LS-13` 补上"干净性**可证**"条件，并写明不可证时**无论进程重启还是设备 reboot 一律先落 `M-LS-07`** |
+| 2 | **[P2]** 把伪 JSON 换成可解析实例时，原 sketch 里 `sha256(source report)` 的语义**被一并删掉**，而 normative 表只写"必填"，未冻结算法、原始报告定位、以及同报告内 `testId`↔`status` 的绑定 | 冻结三条：`SHA-256` 对原始报告**字节流**求摘要（小写 hex）；摘要必须能在该 lane 的报告目录下找到**字节完全一致**的文件（找不到被指向物即无证据）；记录的 `testId` 必须出现在该报告中且 outcome 与 `status` 一致（否则 manifest 可以声称 `passed` 而报告写着 failed） |
+| 3 | **[P2]** v1.10 新补的推导断言"observer 必随 owner 进程死亡"，但 §6.6 **刻意不冻结** owner/transport 技术，现有 `PrefsDirectoryObserver` 恰恰位于被 hook 的目标进程 | 撤回该论据；把 false-red 代价写全为两部分——**必然**多一次 release/reacquire 往返，**可能**丢掉一个本还可满足可信谓词的在飞 attempt；并说明明知如此仍选 `applyOwnerGeneration` 是"拿确定的可用性代价换确定的安全性" |
+
+第 3 项是**同一段第三次被收窄**：v1.8 写"零代价"→ v1.9 收窄为"不损失可信计数"→ 本轮发现连这个都依赖一个 spec 明确不冻结的前提。
+
+值得记的不是"又改了一次措辞"，而是**这三次都是同一个动作**：我先得出结论，再去找一个能支撑它的前提，而不是先确认前提再看能推出什么。前两次找到的前提碰巧成立，这次的不成立。**当一个说法需要被反复"收窄"时，问题通常不在措辞，而在它原本就是先有结论后有论据。** 最终版不再试图论证代价小，而是直接把代价列全，再说明为什么仍然接受它。
 
 ## 1. 事实基线与来源
 
@@ -1135,13 +1148,15 @@ generation 变化 ⊇ 时钟纪元变化
 
 **用 owner generation 作载体是可证充分的**——它不会漏掉任何一次单调值失效。因此 `EnvironmentLease` 冻结新字段 `applyOwnerGeneration`（apply 受理时的 `EnvironmentRevisionState` generation），并冻结判定：`applyOwnerGeneration ≠ 当前 generation` → `deadlineElapsedRealtimeMs` 不可比 → **按 `EXPIRED` 处理**。
 
-**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**接受这个 false-red，因为它不会丢失任何"本还能计数"的工作。** 完整推导（前一版只写了结论，条件被悄悄丢掉，此处补全）：
+**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**代价必须写全（本段已被收窄两次，此处给出最弱可辩护的表述）**：
 
-1. §6.6 L6 规定 generation 断裂**且连续性不可证**时必须 bump revision + 降级 coverage——注意这是**带条件**的。
-2. 该条件在 owner 进程重启时**恒成立**：连续性事件源（observer）随 owner 进程一同销毁并需重新订阅，而 §6.6 已冻结"重订阅、失效或任何不可证明的间隙都必须 bump + 降级"。**owner 进程重启必然制造一段不可证明的观察间隙**，因此 L6 必然触发。
-3. §6.4 的可信谓词要求 `pre.revision == post.revision` 且两侧 coverage 为 `FULL`；L6 触发后两者都不再成立。
+- §6.6 L6 只在 generation 断裂**且连续性不可证**时才强制 bump + 降级——它是**带条件**的。
+- 本 spec **刻意不冻结** owner/transport 技术，也不要求连续性事件源与 owner 进程共址（§6.6 只冻结 L1–L6 语义）。事实上现有 `PrefsDirectoryObserver` 就位于被 hook 的目标进程，而非 owner 进程。**因此"owner 进程重启必然打断观察窗"并不成立**，不能作为论据。
+- 于是 false-red 的真实代价有两部分：**① 必然**多一次 release + 重新 acquire 的往返；**② 可能**——当某个实现下连续性确实能跨 owner 重启被证明时，强制过期会丢掉一个**本还可能满足可信谓词**的在飞 attempt。
 
-结论才成立：**任何跨越 generation 断裂的在飞 attempt 都已不可能再满足可信谓词**。若将来 qwy 能证明观察窗跨进程重启连续（例如观察源移出 owner 进程），第 2 步失效，本论证必须重做，届时载体选择也要重新评估。代价不是零：它确实多一次 release + 重新 acquire 的往返，属于**可用性成本**；准确的说法是"不损失可信计数"，不是"不损失任何东西"。
+**明知有第 ② 项仍选 `applyOwnerGeneration`**，理由是它是可证充分的安全上界（generation 变化 ⊇ 时钟纪元变化），而引入一个只在少数实现下才更精确的 boot-epoch 载体，会多出一条必须自行证明正确的检测路径。**这是拿确定的可用性代价换确定的安全性**，不是"没有代价"。
+
+若将来把连续性事件源移出 owner 进程并能证明跨重启连续，第 ② 项会从"可能"变成"经常"，届时应重新评估是否值得引入独立的 boot-epoch 载体。代价不是零：它确实多一次 release + 重新 acquire 的往返，属于**可用性成本**；准确的说法是"不损失可信计数"，不是"不损失任何东西"。
 
 **恢复必须是 state-aware 的（消解 `M-LS-07`/`M-LS-12` 重叠，且不制造新的不可达）**：把"对每个非 `RELEASED` lease 一律套用同一套规则"是**错的**——它会把一个出口已经确定的状态改写成一个出口对当前调用方不可达的状态。
 
@@ -1352,7 +1367,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-LS-10` | lease | apply 之后系统墙钟前跳/后跳数小时 | `EXPIRED` 触发时刻不变（只由 `deadlineElapsedRealtimeMs` 决定） | 28 |
 | `M-LS-11` | lease | `deadlineEpochMs ≤ nowEpoch` 的 apply | 立即到期，不得因负数绕回变成超长 lease | 28 |
 | `M-LS-12` | lease | **状态 ∈ {`ACQUIRING`,`ACTIVE`}** + qwy 重启 + 干净性**可证** + `applyOwnerGeneration ≠ 当前 generation` | `EXPIRED`（原 caller 可 `release` 收敛）。**不适用于其他状态**——`REVOKED`/`RELEASE_INCOMPLETE` 见 `M-LS-15/16`，`RELEASING` 见 `M-LS-17` | 25,28 |
-| `M-LS-13` | lease | **状态 ∈ {`ACQUIRING`,`ACTIVE`}** + **设备 reboot** 后单调时钟纪元改变 | 必然伴随 generation 变化，故落入 `M-LS-12` 的同一判定；断言绝对 `deadlineElapsedRealtimeMs` **不得**被原值裸比较 | 25,28 |
+| `M-LS-13` | lease | **状态 ∈ {`ACQUIRING`,`ACTIVE`}** + **设备 reboot** 后单调时钟纪元改变 + 干净性**可证** | 与 `M-LS-12` 同一判定（reboot 必然改 generation）→ `EXPIRED`；断言绝对 `deadlineElapsedRealtimeMs` **不得**被原值裸比较。**干净性不可证时不适用本行**——无论进程重启还是设备 reboot，一律先落 `M-LS-07` | 25,28 |
 | `M-LS-14` | lease | **状态 = `ACTIVE`** + 普通进程重启（未 reboot、时钟仍可比）+ 干净性**可证** | 仍强制 `EXPIRED`——明示的 false-red 策略，非意外 | 25,28 |
 | `M-LS-15` | lease | **状态 = `REVOKED`** + qwy 重启 + 干净性**可证或不可证（两种都测）** | **必须保持 `REVOKED`**，qwy 内部自清理仍可达；**不得**被 `M-LS-07`/`M-LS-12` 的规则改写（那会让出口对已失权的 caller 不可达） | 2,25,28 |
 | `M-LS-16` | lease | **状态 = `RELEASE_INCOMPLETE`** + qwy 重启 + 干净性**可证或不可证（两种都测）** | 原样保留，仍要求 operator 人工恢复证据；不得被改写 | 21,25,28 |
@@ -1541,7 +1556,9 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
   | `deferred` | **必须缺省** | **必须缺省** | **必填** | 否 | **失败** |
 
   `deferred` 行**不得**填 `testId`/`reportDigest`：那一行还没有可执行断言，填了就是在假装跑过一个不存在的报告。它表示"还没人告诉我该断言什么"，不是一种通过；**只要清单中存在任一 `deferred` 记录，最终 gate 一律失败**。对应 DP 落地后，该行必须转为正常可执行断言并产出真实 `testId`/`reportDigest`。
-- **reportDigest**：指向原始报告（JUnit XML、guard 输出、device evidence 文件）的摘要，使清单不可脱离证据独立编造。
+- **`reportDigest` 的规范定义（冻结）**：`SHA-256` 对**原始报告文件的字节流**求摘要，小写 hex，无前缀。"原始报告"指该 lane 真实产出的那一个文件——`auto-unit`/`qwy-unit`/`acceptance` 为 JUnit XML，`static-guard` 为 guard 的原始输出文件，`device` 为设备证据文件。
+- **raw report 必须可定位**：每条记录的 `reportDigest` 必须能在同 lane 的 `build/reports/**`（或 `device` 的 `docs/acceptance/**`）下找到**字节完全一致**的文件，否则失败。摘要不是自证，它是指向证据的指针；找不到被指向物就等于没有证据。
+- **同报告内的绑定**：记录里的 `testId` 必须在该原始报告中出现，且其 outcome 与本记录的 `status` **一致**。缺这一条时，清单可以声称 `passed` 而报告里写着 failed——那样 manifest 又退回成自说自话，正是引入它要消除的东西。
 - 清单本身进 PR evidence，Sol 的矩阵报告消费它，而不是逐行手工声明。
 
 Task 7 的表述同步改为：Sol 负责 `sol-blackbox`/`static-guard`/`device` 三类的编写与执行，并对 `owner-red` 行做 **evidence audit**（核对报告中存在该 ID 的通过用例、绑定 exact HEAD、断言与该行预期终态一致）。Sol 不写 `owner-red` 测试，也不再声称"为每一行提供失败场景"。
