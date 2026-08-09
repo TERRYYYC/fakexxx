@@ -78,6 +78,7 @@ source_threads:
 | v1.9 | PR-0.2 第五轮 | acceptance 对 `ad70a625` 的 `REQUEST_CHANGES`，见 §0.1.9 |
 | v1.10 | PR-0.2 第六轮 | acceptance 对 `520cc846` 的 `REQUEST_CHANGES`，见 §0.1.10 |
 | v1.11 | PR-0.2 第七轮 | acceptance 对 `605b4dd9` 的 `REQUEST_CHANGES`，见 §0.1.11 |
+| v1.12 | PR-0.2 第八轮 | acceptance 对 `1e88cc66` 的 `REQUEST_CHANGES`，见 §0.1.12 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -209,7 +210,7 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 
 | # | 问题 | 修订 |
 |---|---|---|
-| 1 | **事实错误 + 载体缺失**：§8.4 写"qwy 重启后 `elapsedRealtime` 归零"——官方语义是**自设备 boot** 计时，进程重启不重置；且 `EnvironmentLease` 没有任何能判定单调值可比性的字段；`M-LS-07`（`RELEASE_INCOMPLETE`）与 `M-LS-12`（`EXPIRED`）对同一重启场景无优先级 | 更正事实；冻结载体 **`applyOwnerGeneration`** 并给出充分性证明（设备 reboot 必然重启 owner 进程 ⇒ **generation 变化 ⊇ 时钟纪元变化**，故不会漏检）；明示其过度检测为**策略**（**该行原写"零代价"，已被 v1.9 更正为"不损失可信计数，但有可用性成本"**）；冻结恢复终态优先级（**该优先级被 v1.9 第 1 项改为 state-aware，原"对每个非 `RELEASED` lease"过宽**）；新增 `M-LS-13/14` |
+| 1 | **事实错误 + 载体缺失**：§8.4 写"qwy 重启后 `elapsedRealtime` 归零"——官方语义是**自设备 boot** 计时，进程重启不重置；且 `EnvironmentLease` 没有任何能判定单调值可比性的字段；`M-LS-07`（`RELEASE_INCOMPLETE`）与 `M-LS-12`（`EXPIRED`）对同一重启场景无优先级 | 更正事实；冻结载体 **`applyOwnerGeneration`** 并给出充分性证明（设备 reboot 必然重启 owner 进程 ⇒ **generation 变化 ⊇ 时钟纪元变化**，故不会漏检）；明示其过度检测为**策略**（**该行原写"零代价"，经 v1.9 收窄后又被 v1.11 再次推翻——现行表述见 §8.4，只断言"不回滚已提交配额"**）；冻结恢复终态优先级（**该优先级被 v1.9 第 1 项改为 state-aware，原"对每个非 `RELEASED` lease"过宽**）；新增 `M-LS-13/14` |
 | 2 | §20 仍写"仅两件、均不阻塞 contract 冻结"，与同一 HEAD 的顶部告示、DP-2 时间窗、DP-3 停工门直接矛盾 | 换成**逐 DP 的阻塞范围表**（PR-1 identity / contract 与 #3–#6 / 真机验收三列），并声明该表是唯一权威 |
 | 3 | GitHub #7 仍把已撤回的 READY-only 写成"结构性关闭"——**durable body 本身就是提问的一部分**，会把无效选项直接递到 operator 面前 | 立即改为真实 A/B，`READY` 只作共用 mitigation |
 | 4 | `M-CO-03` 被标 `not-testable`，但它**可触达**，只是终态待 DP-3；而 manifest 只有 `passed/failed/skipped` | 区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**（可触达、待拍板）；manifest 增 `deferred` + `deferredOn`，**只要存在 deferred 记录最终 gate 一律失败** |
@@ -228,7 +229,7 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 | 1 | **v1.8 自己造的死锁**：恢复规则写成"对每个非 `RELEASED` lease"一律套用，于是 `REVOKED` lease 在重启且干净性可证时被改写为 `EXPIRED`——而 `EXPIRED` 的出口是"原 caller 调 `release`"，那个 caller 已被撤销无法调用；provider 内部自清理又只对 `REVOKED` 冻结。出口消失 | 恢复改为 **state-aware 分流表**：`REVOKED`/`RELEASE_INCOMPLETE` **原样保留**（出口与 caller 授权、时钟均无关）；`RELEASING` 幂等重放；**通用 `→ EXPIRED` 的作用域显式限定为 `ACQUIRING`/`ACTIVE`**——只有这两态的出口依赖 caller 在 deadline 前动作。新增 `M-LS-15/16/17` |
 | 2 | §10.1 散文承诺 `deferred`+`deferredOn`，紧挨着的 canonical JSON 仍是旧三值 status 且无该字段；`deferred` 时 `testId`/`reportDigest` 的必填性未定义 | JSON 与逐 status **必填性表**一并冻结：`deferred` 行**必须缺省** `testId`/`reportDigest`（那一行还没有可执行断言，填了就是假装跑过不存在的报告），必填 `deferredOn`，且存在任一 `deferred` 即最终 gate 失败 |
 | 3 | 传播残留：§21 仍写"两项"（实际 3）；Task 7 GREEN 仍写 53 行且把 owner-red 说成"触达不到"；Task 7 Verify 漏 `deferred`；PR body 写 lease 12 字段（实际 13） | 逐项同步；Task 7 GREEN 改为"不该由 Sol 跨 owner 去测"，不再说成无法测试 |
-| 4 | "false-red 实际不损失任何东西"与紧随其后承认多一次 release/reacquire 自相矛盾 | 收窄为**"不损失可信计数，但有可用性成本"** |
+| 4 | "false-red 实际不损失任何东西"与紧随其后承认多一次 release/reacquire 自相矛盾 | 收窄为"不损失可信计数，但有可用性成本"（**该收窄结果已被 v1.11 第 3 项再次推翻**——它依赖一个 spec 不冻结的前提；现行表述见 §8.4） |
 
 §10 由 87 增至 **90 行 / 17 类**；`owner-red` 64（Opus5 31 / Kimi 33）· `sol-blackbox` 22 · `static-guard` 2 · `device` 2。
 
@@ -259,6 +260,19 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 第 3 项是**同一段第三次被收窄**：v1.8 写"零代价"→ v1.9 收窄为"不损失可信计数"→ 本轮发现连这个都依赖一个 spec 明确不冻结的前提。
 
 值得记的不是"又改了一次措辞"，而是**这三次都是同一个动作**：我先得出结论，再去找一个能支撑它的前提，而不是先确认前提再看能推出什么。前两次找到的前提碰巧成立，这次的不成立。**当一个说法需要被反复"收窄"时，问题通常不在措辞，而在它原本就是先有结论后有论据。** 最终版不再试图论证代价小，而是直接把代价列全，再说明为什么仍然接受它。
+
+#### 0.1.12 acceptance 第八轮修订（v1.12）
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **[D1]** §8.4 段末仍留着 v1.9 的旧口径"准确的说法是不损失可信计数"——**正是 v1.11 明确撤回的那句**，与同段前文和修订记录直接冲突 | 删除该句；改为唯一仍可断言的事实：强制过期**不回滚任何已提交的 `TrustedQuotaEntry`**，并写明这与"不损失可信计数"**不是一回事**。§0.1.8/§0.1.9 两处指向该口径的 changelog 行同步标注已被 v1.11 推翻 |
+| 2 | **[D2]** PR body 仍写六轮且漏列 `605b4dd9`；GitHub #6 的 manifest 形状未携带本轮新冻结的 raw-report SHA-256 / lane 内定位 / 同报告 `testId`↔`outcome` 绑定，且链接指向 pre-merge `blob/main`，会把 verifier 引回旧载体 | 两处 durable 入口同步 |
+
+**这是同型传播病的第七次，但它是一个新的子型，值得单独命名：*部分块替换残留*。** 前六次是"改了 A 没改引用 A 的 B"；这次是**改了同一段落的后半，把前半那句已被自己推翻的话留在了原地**——而且它就落在 changelog 写着"本段已被收窄两次"的那一段里。
+
+`Edit` 的 `old_string` 边界恰好停在那句之前，替换成功、检查全绿、语义自相矛盾。**机械校验对"同一段内部的自相矛盾"完全无感**，这和 §0.1.10 记的"集合相等证明不了语义一致"是同一个盲区的另一个切面。
+
+可操作的收敛：**推翻一个说法时，替换范围必须覆盖整个论证段落，而不是被推翻的那一句**——因为支撑它的铺垫句往往紧邻其前后，且同样已经失效。
 
 ## 1. 事实基线与来源
 
@@ -1156,7 +1170,9 @@ generation 变化 ⊇ 时钟纪元变化
 
 **明知有第 ② 项仍选 `applyOwnerGeneration`**，理由是它是可证充分的安全上界（generation 变化 ⊇ 时钟纪元变化），而引入一个只在少数实现下才更精确的 boot-epoch 载体，会多出一条必须自行证明正确的检测路径。**这是拿确定的可用性代价换确定的安全性**，不是"没有代价"。
 
-若将来把连续性事件源移出 owner 进程并能证明跨重启连续，第 ② 项会从"可能"变成"经常"，届时应重新评估是否值得引入独立的 boot-epoch 载体。代价不是零：它确实多一次 release + 重新 acquire 的往返，属于**可用性成本**；准确的说法是"不损失可信计数"，不是"不损失任何东西"。
+若将来把连续性事件源移出 owner 进程并能证明跨重启连续，第 ② 项会从"可能"变成"经常"，届时应重新评估是否值得引入独立的 boot-epoch 载体。
+
+**唯一仍可断言的是**：强制过期**不回滚任何已提交的 `TrustedQuotaEntry`**——已写入的可信配额在当时具备完整证据链，过期只影响尚未完成的在飞 attempt。**这与"不损失可信计数"不是一回事**，后者是 v1.9 的口径，已被 v1.11 撤回：在飞 attempt 若本可满足可信谓词，它带来的那一次计数确实会丢。
 
 **恢复必须是 state-aware 的（消解 `M-LS-07`/`M-LS-12` 重叠，且不制造新的不可达）**：把"对每个非 `RELEASED` lease 一律套用同一套规则"是**错的**——它会把一个出口已经确定的状态改写成一个出口对当前调用方不可达的状态。
 
