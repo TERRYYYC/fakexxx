@@ -88,6 +88,7 @@ source_threads:
 | v1.12 | PR-0.2 第八轮 | acceptance 对 `1e88cc66` 的 `REQUEST_CHANGES`，见 §0.1.12 |
 | **v1.13** | PR-0.2 第九轮 | **operator DP-1/2/3 决策落地**（`797178eb`）+ 非作者复审的三次事实更正（`1701de28` / 本轮），新增 `INV-29`，解除 contract 冻结，见 §0.1.13 |
 | **v1.14** | PR-0.2 第十轮 | **owner transfer 传播**（#4 Kimi → DeepSeek Flash）+ **为 `INV-29` 冻结 evidence carrier**（`appid-cutover` 5 行），见 §0.1.14 |
+| **v1.15** | PR-0.2 第十一轮 | 为 `M-AC-01..05` 冻结**实施归属与时序**（Task 1 前置门 / Task 9 回滚旅程）、统一 device anchor、澄清计数单位，见 §0.1.15 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -315,7 +316,7 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 
 | # | 问题 | 修订 |
 |---|---|---|
-| 1 | **owner 真相未传播。** operator 已把 #4 从 Kimi 转给 DeepSeek Flash（主 Thread `0001786311069292-001378-b555f28c`：「完成调度设计后，把 kimi 的任务给 deepseek-flash 吧」），但**现行规范**仍在 §10.1 的 33 行 owner 台账、§12.1、Task 3/6/7/8、§15 PR 图、§16 issue 图、§17 角色、§19 completion gate 里写 Kimi | 现行区 52 处全部改为 DeepSeek Flash；**§0.1.x 历史修订记录中的 5 处保留**——它们描述的是当时的真实状态，改掉就是伪造历史 |
+| 1 | **owner 真相未传播。** operator 已把 #4 从 Kimi 转给 DeepSeek Flash（主 Thread `0001786311069292-001378-b555f28c`：「完成调度设计后，把 kimi 的任务给 deepseek-flash 吧」），但**现行规范**仍在 §10.1 的 33 行 owner 台账、§12.1、Task 3/6/7/8、§15 PR 图、§16 issue 图、§17 角色、§19 completion gate 里写 Kimi | 现行区 **52 行（53 处出现**——Task 6 的 PR 路由句里出现两次**）**全部改为 DeepSeek Flash；**§0.1.x 历史修订记录中的 5 处保留**——它们描述的是当时的真实状态，改掉就是伪造历史 |
 | 2 | **`INV-29` 有规则、没有证据载体。** 该不变量列出了旧安装探测、迁移桥 round-trip、回滚、CSV 负例与静态扫描，但 §10 / §10.1 里**一行都没有**；AC-10 与 §19 仍写 `INV-01..28` | 新增 `appid-cutover` 类 5 行（`M-AC-01..05`），按 Sol 的「跨 owner 必须拆行」原则分派：探测 / 迁移桥 / CSV 负例 = Opus5 `owner-red`；回滚演练 = Sol `device`；仓库-日志扫描 = Sol `static-guard`。§10 由 90 行/17 类增至 **95 行/18 类**；`owner-red` 64→**67**（Opus5 31→34 / DeepSeek Flash 33）· `device` 2→**3** · `static-guard` 2→**3** · `sol-blackbox` 22 不变。AC-10 与 §19 同步为 `INV-01..29` |
 
 第 2 项值得单独记，因为它是**假闭合的标准配方**：`INV-29` 已经写进不变量表、§21 清单第 11 项还准备把 GitHub #6 的覆盖措辞改成 `INV-01..29`——若不先补台账行，就会得到「issue 宣称覆盖 29 条、ledger 只能证明 28 条」的状态。**宣称覆盖与能够证明覆盖是两件事**；机械同步文案会把前者伪装成后者。
@@ -325,6 +326,20 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 本轮我最初把 `M-AC-05` 的 owner 写成 Opus5。自查时发现该行属于 `static-guard` 类、应归 Sol，于是**只改了 owner 列**，把入口留在 root `scripts/check-forbidden-boundaries.sh`。但按 §12.1，root `scripts/**` 恰恰是 **Opus5 的独占范围**；而 §10.1 明写 `static-guard` 位于 `acceptance/scripts/`，同类的 `M-BP-01/02` 也都锚在那里。**于是这次"修正"没有消除越界，只是把它从 owner 列挪到了 path 列**——而且我在上一版的教训记录里，还把 root `scripts/` 误称为「Sol 的独占文件」，等于把一条错误的所有权规则写进了教训本身。由非作者（Sol）发现。
 
 收敛：**owner 与 exact entry 是一对，必须同时校验。** 改动台账任一列时，另一列必须回到 §12.1 的写入边界重新核一次；只改一列的"修正"通常不是修好了，而是把矛盾搬了个家。教训记录本身也要过一次事实核对——写错的教训会被后来者当规则用。
+
+#### 0.1.15 evidence carrier 的实施归属与时序（v1.15）
+
+Sol 第二遍审计的三项。第 1 项是本轮真正重要的：
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **`INV-29` 有台账行，却没有任何 Task 承接实现与时序。** §20 冻结「改名必须在 PR-1 完成」，但 Task 1 只有 import/provenance/ownership/CI；Task 4 的 `MIGRATION_4_5` 只处理**同 applicationId 内**的 Room v4→v5（INV-24），且按 PR 图晚于 contract freeze；Task 9 无回滚旅程 | Task 1 增 cutover 三门 **G-AC-1/2/3**（承接 `M-AC-01/02/04`）与对应 Files/RED；Task 9 增 `M-AC-03` old→new→回滚旅程。**三门 + 回滚任一不过即阻断 PR-1 cutover 合入；旧 App 在 `M-AC-03` 通过前不得移除** |
+| 2 | `M-AC-03` 的 exact entry 用 `::M_AC_03`，而同类 device carrier 用 `#M-CO-06` / `#M-VS-01` | 统一为 `...md#M-AC-03`，并在 Task 9 列出锚点 |
+| 3 | owner 替换数字：我写 52，Sol 量得 53 | **两个都对，量的是不同东西**：含 `Kimi` 的**行数** 52，`Kimi` 的**出现次数** 53（Task 6 的 PR 路由句里出现两次）。改为「52 行（53 处出现）」 |
+
+第 1 项是**假闭合往上爬了一层**：上一轮是「不变量有规则、台账没行」，这一轮是「台账有行、计划没归属」。我补了载体却没补承接——**证据行本身不是证据，它只是一张待兑现的欠条；没有 Task 承接的台账行，和没有台账行的不变量，在验收面上是等价的。**
+
+第 3 项值得单独记，因为它**不是错误**：一个没有声明单位的数字，天然会被两个人量成两个值，然后双方都以为对方错了。收敛不是选一边，是**写数字必须带单位**。本 session 反复出现的度量事故（长度过滤、`head` 截断、样本构成、坏 awk 报出的假 `diff=35`）都属同一族：**度量的定义没说清，或工具本身没被验证过。**
 
 ## 1. 事实基线与来源
 
@@ -1579,7 +1594,7 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-MG-05` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_05` |
 | `M-AC-01` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_01` |
 | `M-AC-02` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_02` |
-| `M-AC-03` | appid-cutover | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md::M_AC_03`（真机回滚演练，需设备 lease 与 exact APK SHA） |
+| `M-AC-03` | appid-cutover | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md#M-AC-03`（真机回滚演练，需设备 lease 与 exact APK SHA） |
 | `M-AC-04` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_04` |
 | `M-AC-05` | appid-cutover | `static-guard` | Sol | `acceptance/scripts/check-forbidden-boundaries.sh::no-operator-data-in-repo-or-log` |
 | `M-MP-01` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_01` |
@@ -1813,8 +1828,24 @@ fakexxx/
 - Create: `scripts/check-provenance.sh`
 - Import: `apps/cellrebel-auto/**`
 - Import: `apps/qianwangyou/**`
+- Modify: `apps/cellrebel-auto/app/build.gradle.kts`（`applicationId` → `come.xx.fakeaauto`，**逐字**；`namespace` 与 Kotlin 包路径不动，见 §21 DP-2 范围冻结）
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/migration/AppIdCutoverProbe.kt`（旧安装持久状态探测）
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/migration/AppIdMigrationBridge.kt`（版本化迁移 bundle 的导出/导入）
+- Create: `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt`（`M_AC_01` / `M_AC_02` / `M_AC_04`）
 
-**RED:** 在空目标路径运行 `scripts/check-provenance.sh --stage import`，必须因两个 app 未导入和 SHA 未登记失败。
+**applicationId cutover 前置门（INV-29，承接 `M-AC-01/02/04`）**
+
+§20 冻结了「改名必须在 PR-1 完成、不得晚于 contract 冻结」，因此 cutover 的**实现与证据也必须落在本 task**，不能顺延到 Task 4——Task 4 的 `MIGRATION_4_5` 只处理**同 applicationId 内**的 Room v4→v5（INV-24），与跨 applicationId 的 sandbox 隔离是两个问题，且它按 PR 图晚于 contract freeze。
+
+| 门 | 承接 row | 通过判据 |
+|---|---|---|
+| G-AC-1 | `M-AC-01` | 探测旧 `com.example.cellrebelauto` 安装是否存在持久用户状态；**探测失败或不确定一律按"有状态"处理** |
+| G-AC-2 | `M-AC-02` | 若有状态：迁移 bundle round-trip 后，plan/task/attempt/result/session **逐表数量与摘要**与旧库一致；缺任一表或摘要不符即失败 |
+| G-AC-3 | `M-AC-04` | 拒绝以结果 CSV 冒充完整迁移（负例必须红） |
+
+**三门全绿之前，PR-1 不得合入**；`M-AC-03`（回滚演练）由 Task 9 在真机上执行，其失败同样阻断 PR-1 的 cutover 合入。旧 App **在 `M-AC-03` 通过前不得移除**。
+
+**RED:** 在空目标路径运行 `scripts/check-provenance.sh --stage import`，必须因两个 app 未导入和 SHA 未登记失败；`AppIdCutoverMatrixTest::M_AC_01/02/04` 三条在实现前先红。
 
 **GREEN:** 只从远端精确 SHA subtree 导入；记录源 URL、branch、SHA、导入 commit。不得读取本机脏 worktree 作为拷贝源。
 
@@ -2084,6 +2115,7 @@ cd apps/cellrebel-auto
 - System Mock 连续性变化；
 - Hook 结果不进入可信配额；
 - qwy/Auto 进程死亡与 release 人工恢复；
+- **`applicationId` cutover 回滚旅程（`M-AC-03`，锚点 `docs/acceptance/a-plus-device-matrix.md#M-AC-03`）**：在旧 `com.example.cellrebelauto` 与新 `come.xx.fakeaauto` 之间走一次完整 old→new→回滚，断言回滚后**旧 App 与其数据仍可用且未被移除**、可重试、不产生半迁移状态。**本行不通过即阻断 PR-1 的 cutover 合入**（与 Task 1 的 G-AC-1/2/3 同为 INV-29 的承载）；
 - 原仓 #14/#15 的相关稳定性风险，不用新接口存在本身代替验收。
 
 ## 14. 验证命令
