@@ -320,7 +320,11 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 
 第 2 项值得单独记，因为它是**假闭合的标准配方**：`INV-29` 已经写进不变量表、§21 清单第 11 项还准备把 GitHub #6 的覆盖措辞改成 `INV-01..29`——若不先补台账行，就会得到「issue 宣称覆盖 29 条、ledger 只能证明 28 条」的状态。**宣称覆盖与能够证明覆盖是两件事**；机械同步文案会把前者伪装成后者。
 
-一个作者侧自查漏网：本轮我最初把 `M-AC-05` 的 owner 写成 Opus5，但它的入口是 `scripts/check-forbidden-boundaries.sh`——按 §12.1 那是 **Sol 的独占文件**。在一次专门修正 owner 传播的 delta 里写错 owner，说明"正在处理某类问题"并不使人对该类问题免疫。已在推送前自查修正。
+一个作者侧的**半修复**，值得完整记录，因为它比单纯写错更有代表性：
+
+本轮我最初把 `M-AC-05` 的 owner 写成 Opus5。自查时发现该行属于 `static-guard` 类、应归 Sol，于是**只改了 owner 列**，把入口留在 root `scripts/check-forbidden-boundaries.sh`。但按 §12.1，root `scripts/**` 恰恰是 **Opus5 的独占范围**；而 §10.1 明写 `static-guard` 位于 `acceptance/scripts/`，同类的 `M-BP-01/02` 也都锚在那里。**于是这次"修正"没有消除越界，只是把它从 owner 列挪到了 path 列**——而且我在上一版的教训记录里，还把 root `scripts/` 误称为「Sol 的独占文件」，等于把一条错误的所有权规则写进了教训本身。由非作者（Sol）发现。
+
+收敛：**owner 与 exact entry 是一对，必须同时校验。** 改动台账任一列时，另一列必须回到 §12.1 的写入边界重新核一次；只改一列的"修正"通常不是修好了，而是把矛盾搬了个家。教训记录本身也要过一次事实核对——写错的教训会被后来者当规则用。
 
 ## 1. 事实基线与来源
 
@@ -1577,7 +1581,7 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-AC-02` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_02` |
 | `M-AC-03` | appid-cutover | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md::M_AC_03`（真机回滚演练，需设备 lease 与 exact APK SHA） |
 | `M-AC-04` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_04` |
-| `M-AC-05` | appid-cutover | `static-guard` | Sol | `scripts/check-forbidden-boundaries.sh::no-operator-data-in-repo-or-log` |
+| `M-AC-05` | appid-cutover | `static-guard` | Sol | `acceptance/scripts/check-forbidden-boundaries.sh::no-operator-data-in-repo-or-log` |
 | `M-MP-01` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_01` |
 | `M-MP-02` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_02` |
 | `M-MP-03` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_03` |
@@ -2034,8 +2038,8 @@ cd apps/cellrebel-auto
 
 - Create: `acceptance/fake-qwy/src/main/.../FakeEnvironmentControlService.kt`
 - Create: `acceptance/scenarios/src/test/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 22 行**，文件名与方法名按台账「精确入口」列）
-- Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
-- Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
+- Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 3 行）
+- Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 3 行）
 
 **Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **95 行 / 18 类**（新增 `appid-cutover` 5 行，承载 `INV-29`）。
 
@@ -2048,7 +2052,7 @@ cd apps/cellrebel-auto
 
 **RED:** 上述 28 行各自至少一个失败场景先红；`owner-red` 的 67 行由各自 owner 在自己的 lane 内先红（Opus5 34 行 / DeepSeek Flash 33 行）。
 
-**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / DeepSeek Flash 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
+**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **67 行 `owner-red`** 已归各自 code owner（Opus5 34 / DeepSeek Flash 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
 
 **Verify:** `./scripts/verify-a-plus.sh` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
