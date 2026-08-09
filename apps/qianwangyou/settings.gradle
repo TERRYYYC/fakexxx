@@ -20,3 +20,10 @@ dependencyResolutionManagement {
 
 rootProject.name = "FakeGPS"
 include ':app'
+
+// Shared Environment Control contract v1. Lives outside this Gradle root
+// because CellRebel Auto consumes the same module from its own independent root.
+include ':environment-control-v1'
+project(':environment-control-v1').projectDir =
+        file('../../contracts/environment-control-v1')
+
