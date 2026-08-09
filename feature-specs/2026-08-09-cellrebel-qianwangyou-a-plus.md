@@ -56,6 +56,7 @@ source_threads:
 |---|---|---|
 | v1 | `00a5e58` | 初始冻结 |
 | v1.1 | 本 PR-0.1 | contract v1 冻结**前**的实现者前置修订，见下 |
+| v1.2 | 本 PR-0.1 | 非作者 review（REQUEST_CHANGES）后的 7 项修订，见 §0.1.2 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -93,6 +94,22 @@ v1.1 里凡是"因为 Android 平台如此，所以规则如此"的论证，都�
 | `@Parcelize` 枚举编码 | 按 `name` String（非 ordinal）；未知常量 `valueOf` 抛 `IllegalArgumentException` | kotlin-parcelize 编译器 `IrParcelSerializers.kt` 的 `IrEnumParcelSerializer`；`kotlinlang.org/docs/enum-classes` |
 
 未能取得一手确证的，一律写成"待 Task 2 核定"或直接不写，不用二手转述充当依据。
+
+#### 0.1.2 非作者 review 修订（v1.2）
+
+v1.1 收到 `REQUEST_CHANGES`，7 项全部成立并已修订。记录在此是因为其中数项是**前一版自己引入的缺陷**，不是原 spec 的问题：
+
+| # | 问题 | 修订 | 章节 |
+|---|---|---|---|
+| 1 | v1.1 冻结"DTO 只承载 Int wire"，但 exact schema 里仍有 enum 与 `Set<enum>`，靠一句散文说明覆盖 | 全部字段改为 `...Wire`/`...Wires`；删除散文豁免；`check-contract-v1.sh` 增加"`@Parcelize` 内出现 enum 即失败"的静态检查 | §6.3、§6.3.2 |
+| 2 | 身份判定有两个漏放行口：UID 未收敛到唯一 package；`hasSigningCertificate` 语义是"曾经或当前"，轮转后仍返回 true | `getPackagesForUid` 非恰好 1 个即拒；改比对**当前** signer；多签名者 v1 全拒；补 Auto 侧对千网游的反向 signer 校验 | §6.5.1、§6.5.3 |
+| 3 | 把承载技术写成了结论（禁 Room/SQLite、推 ContentProvider） | 改为冻结 L1–L6 线性化语义；owner 内部存储选型自由；只否定"多进程各自直接写同一存储"这一架构形态 | §6.6 |
+| 4 | v4→v5 未定旧进度语义：改投影则历史无声归零，回填则违反 INV-05/06 | 冻结 `LegacyCompletionSnapshot` / `LEGACY_UNVERIFIED`：保留展示、绝不生成 `TrustedQuotaEntry`、trusted 从 0 起算 | Task 4、§7.1、§7.3 |
+| 5 | canonical digest 用换行连接自由字符串，可构造碰撞 | 改长度前缀 framing（`uint32be(len) \|\| bytes`），编码单射；碰撞对列为必测负例 | §6.3.1 |
+| 6 | 用 `<10 m` 导入硬拒绝代偿模型歧义，缩小了合法输入集 | 删除该限制；归属由 intent hash + task identity 负责，最多做非阻断 warning | §6.4、§10 |
+| 7 | AC-10 的 INV 范围过期、gate 标题重复、provenance checker 未先 fetch 上游对象、DP-1 把 not-testable 范围说得过宽 | 逐项收口 | §18、§15、Task 1、§6.5.2、§21 |
+
+原则记录：第 1、3、5、6 项都是 v1.1 自己引入的——修 spec 的过程同样会产生缺陷，所以非作者 review 不是形式，contract 冻结前必须过这一关。
 
 ## 1. 事实基线与来源
 
@@ -357,9 +374,11 @@ enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DE
 data class CapabilitySnapshotV1(
     val protocolVersion: Int = 1,
     val serviceVersion: String,
-    val supportedModes: Set<DeliveryModeV1>,
-    val supportedVerificationLevels: Set<VerificationLevelV1>,
-    val continuityCoverage: ContinuityCoverageV1,
+    /** DeliveryModeV1 wire code 集合；升序去重，保证 wire 表示确定。 */
+    val supportedModeWires: List<Int>,
+    /** VerificationLevelV1 wire code 集合；升序去重。 */
+    val supportedVerificationLevelWires: List<Int>,
+    val continuityCoverageWire: Int,
     val environmentRevision: Long,
     val profileRefs: List<String>,
     val scheduleRefs: List<String>,
@@ -373,7 +392,7 @@ data class EnvironmentIntentV1(
     val scheduleRef: String,
     val latitude: Double,
     val longitude: Double,
-    val requiredVerification: VerificationLevelV1,
+    val requiredVerificationWire: Int,
     val notBeforeEpochMs: Long,
     val deadlineEpochMs: Long,
 ) : Parcelable
@@ -386,7 +405,7 @@ data class ApplyReceiptV1(
     val acceptedIntentHash: String,
     val appliedAtEpochMs: Long,
     val environmentRevision: Long,
-    val verificationLevel: VerificationLevelV1,
+    val verificationLevelWire: Int,
 ) : Parcelable
 
 @Parcelize
@@ -409,30 +428,41 @@ data class EnvironmentObservationV1(
 ) : Parcelable
 ```
 
-其余枚举字段同样以 `...Wire: Int` 承载（此处为可读性只在 `EnvironmentObservationV1` 展开；`CapabilitySnapshotV1`、`ApplyReceiptV1` 及下列全部 DTO 适用同一规则）。
+**exact schema 无省略**：本节与 §6.3.2 列出的字段就是全部字段，逐字段与实现一一对应。v1 的任何 Parcelable 中**不出现 Kotlin enum 类型**（含 `Set<enum>`/`List<enum>`）；枚举一律以 `...Wire: Int` 或 `...Wires: List<Int>` 承载，集合型升序去重。散文说明不得覆盖或补充 exact schema——若某字段没写在这两节里，它就不在 v1 里。`check-contract-v1.sh` 必须包含一条静态检查：contract 模块的 `@Parcelize` 类中出现任何 enum 类型字段即失败。
 
 #### 6.3.1 canonical intent digest（冻结算法）
 
 `acceptedIntentHash` 是 `EnvironmentIntentV1` 的 canonical digest，两侧必须独立算出同一值：
 
 ```text
-canonical = UTF-8 of the following fields joined by '\n', in this exact order,
-            each rendered by the rule below, with NO trailing newline:
+canonical = 按下列顺序，对每个字段依次追加：
+              uint32be(byteLength(fieldBytes)) || fieldBytes
+            无分隔符、无尾随字节。
 
-  runId                 : 原样字符串
-  attemptId             : 原样字符串
-  profileRef            : 原样字符串
-  scheduleRef           : 原样字符串
-  latitude              : 定点十进制，恰好 7 位小数，半值向偶数舍入，负号保留
-  longitude             : 同上
-  requiredVerification  : wire code 的十进制文本
-  notBeforeEpochMs      : 十进制文本
-  deadlineEpochMs       : 十进制文本
+  runId                     : UTF-8 bytes，原样
+  attemptId                 : UTF-8 bytes，原样
+  profileRef                : UTF-8 bytes，原样
+  scheduleRef               : UTF-8 bytes，原样
+  latitude                  : ASCII 定点十进制，恰好 7 位小数，半值向偶数舍入，
+                              负号保留，无 '+'，无指数，无千分位
+  longitude                 : 同上
+  requiredVerificationWire  : ASCII 十进制
+  notBeforeEpochMs          : ASCII 十进制
+  deadlineEpochMs           : ASCII 十进制
 
 acceptedIntentHash = lowercase hex of SHA-256(canonical)
 ```
 
-禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。round-trip 测试必须覆盖负坐标、零、以及需要舍入的边界值。
+**为什么是长度前缀而不是分隔符连接**：四个 ref 字段是自由字符串，用任何固定分隔符连接都可构造碰撞——例如以换行连接时，`runId="a\nb", attemptId="c"` 与 `runId="a", attemptId="b\nc"` 产生**完全相同**的 canonical 字节，于是两个不同意图共享同一 `acceptedIntentHash`，INV-23 的绑定被绕过。长度前缀让编码单射，碰撞不再依赖"字段里恰好没有分隔符"这种运行期巧合。禁止改回分隔符方案，也禁止用"契约上不允许出现换行"来代偿——那是把不变量的正确性押在输入校验上。
+
+禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。
+
+必测（both sides，逐条独立断言）：
+
+- 上述**分隔符碰撞对**必须产生**不同** digest；
+- 负坐标、`0.0`/`-0.0`（必须归一为同一表示）、需要半值向偶数舍入的边界值；
+- 四个 ref 含换行、制表符、emoji、以及多字节字符时两侧 digest 一致；
+- 空 ref 在业务上非法，导入/预检阶段即拒绝（这是产品校验，不是 digest 的正确性来源）。
 
 #### 6.3.2 其余 DTO exact schema
 
@@ -536,7 +566,9 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 
 **为什么意图绑定是独立的一条**：`coverage/revision/fingerprint/lease/verificationLevel` 全部只证明"环境在测试全程没有相关变化"，不证明"环境处在**这个 attempt 要求的**位置"。若 apply 静默部分生效、被上一地址的残留状态覆盖、或 lease 复用时意图已切换，上面前七条可以整体成立，而可信配额被记到**错误地址**。本产品的全部价值就是"每地址的可信次数"，因此错记地址是最贵的失败模式，必须由独立不变量排除，而不是依赖其他条件的副作用。
 
-`TRUSTED_LOCATION_TOLERANCE_METERS = 1.0`，冻结为 contract 常量，两侧共用。取值理由：远大于 §6.3.1 的 7 位小数量化误差（约 1.1 cm）与 double 往返误差，因此不会造成假阴性；又远小于任何现实地址间距，因此不会让相邻地址互相别名。计划导入时若存在两个地址距离 `< 10 m`，必须在校验阶段报错并指出行号——容差本身不承担区分同一栋楼内两点的责任。
+`TRUSTED_LOCATION_TOLERANCE_METERS = 1.0`，冻结为 contract 常量，两侧共用。取值理由：远大于 §6.3.1 的 7 位小数量化误差（约 1.1 cm）与 double 往返误差，因此不会造成假阴性。
+
+**容差不承担归属判定。** 归属由 `acceptedIntentHash`（其中已含 `attemptId`/`runId`）与 task identity 负责；容差只回答"环境是否真的落在这个意图要求的坐标上"。因此**不对计划内地址的最小间距做任何硬性限制**——同一栋楼两点、密集门店都是合法输入，A+ 不因模型便利去缩小可用输入集。若产品希望提示用户，只能是导入时的**非阻断 warning**，且不得据此拒绝计划。
 
 ### 6.5 配对与调用授权
 
@@ -553,42 +585,58 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 
 #### 6.5.1 签名校验的 API 分层（minSdk 24 冻结）
 
-千网游 `minSdk = 24`，而带证书轮转语义的签名 API 只在 API 28+ 可用，因此校验路径必须显式分层，不能写成一条：
+**第一步是把 UID 解析成唯一 package。** `Binder.getCallingUid()` 证明的是 UID，不是唯一包名——shared UID 下一个 UID 可对应多个包。因此：`getPackagesForUid(uid)` 结果**不是恰好 1 个就直接拒绝**（typed `CALLER_NOT_ALLOWED`）。v1 不支持 shared UID 调用方，这是窄接口的代价，不是缺陷。
+
+**第二步是比对当前 signer，不是"曾经用过的" signer。**
 
 | 运行 API | 路径 | 语义 |
 |---|---|---|
-| ≥ 28 | `PackageManager.hasSigningCertificate(uid, cert, CERT_INPUT_SHA256)` / `GET_SIGNING_CERTIFICATES` + `SigningInfo` | 权威路径，正确处理证书轮转与多签名者 |
-| 24–27 | legacy `GET_SIGNATURES` | **fail-closed 降级路径**：只接受单一签名者；出现多签名者、无法解析或任何歧义一律拒绝配对并提示升级设备 |
+| ≥ 28 | `GET_SIGNING_CERTIFICATES` + `SigningInfo.getApkContentsSigners()` | 取**当前**签名者集合并与配对快照比对 |
+| 24–27 | legacy `GET_SIGNATURES` | **fail-closed 降级路径**：只接受单一签名者；无法解析或任何歧义一律拒绝配对并提示升级设备 |
 
-24–27 路径必须在配对 UI 上明示"本设备使用降级签名校验"，不得静默等同于 28+ 的保证。两条路径都必须有测试；降级路径的多签名者拒绝是必测负例。
+**为什么不能直接用 `hasSigningCertificate(uid, digest, …)` 作为配对校验**：该 API 的语义是"该 uid **曾经或当前**使用过这张证书"，它是为**兼容证书轮转**设计的。拿配对时存下的旧 digest 去查，证书轮转之后**仍然返回 true**——于是 §6.5 的"signer 改变必须重新配对"被静默绕过。它可以用于"这是不是同一条轮转链"的辅助判断，但**不能**作为身份等同的判据。
+
+**多签名者：v1 一律 fail-closed 拒绝**（`SigningInfo.hasMultipleSigners()` 为真即拒）。理由是窄接口优先：单一 digest 无法无歧义表示一个签名者集合。若将来产品必须支持，只能冻结"排序后 signer-set 的 canonical digest"并走 §6.7 兼容矩阵，不得用"取第一个"或"任一匹配"含混带过。
+
+24–27 路径必须在配对 UI 上明示"本设备使用降级签名校验"，不得静默等同于 28+ 的保证。两条路径都必须有测试；shared UID 拒绝、多签名者拒绝、**证书轮转后必须要求重新配对**三条都是必测负例。
+
+#### 6.5.3 Auto 侧的反向校验（同样必需）
+
+配对是双向信任问题。Auto 在**信任千网游返回的 observation 之前**，必须校验所绑定 service 所属包的 applicationId 与**当前** signer，与自己持久化的配对记录一致；不一致或无法解析即 fail-closed，不进入 CellRebel。
+
+否则存在真实攻击面：真千网游未安装时，同包名的替代实现可以成为假权威，返回伪造的 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` 与稳定 revision，使 §6.4 的全部谓词成立——可信配额就建立在一个假的环境权威上。INV-02 此前只写了千网游对 Auto 的校验，这一侧同样必须有。
 
 #### 6.5.2 signer 强度的真实边界（诚实披露）
 
 当前 `FakeGps-test@285e4ca` 的 release 复用本机 `~/.android/debug.keystore`（alias `androiddebugkey`，口令 `android`）。必须准确陈述其后果，既不夸大也不粉饰：
 
 - 该 keystore 由 SDK 在**本机首次构建时随机生成**，密钥材料并非全球共享，因此 signer 校验仍然排除了在其他机器上构建的第三方 App——`(applicationId, signerDigest)` 二元组不是只剩 applicationId 在把关。
-- 但它同时意味着：**debug 与 release 构建的 signer 完全相同**，所以 §13 Task 9 的"签名变化 → 必须重新配对"验收在当前构建配置下**造不出阳性用例**；该 keystore 也不受口令保护（口令公开），一旦文件泄漏即可冒充该身份。
+- 但它同时意味着：**debug 与 release 构建的 signer 完全相同**，该 keystore 也不受口令保护（口令公开），一旦文件泄漏即可冒充该身份。
+- 受影响的**只是**"当前 production key 原位轮转"这一种真机验收场景——它在不动 production key 的前提下造不出阳性用例。**签名不匹配拒绝、轮转后要求重新配对、多签名者拒绝这些语义仍然完全可测**：用受控测试 key 另签一个 fixture APK，或在单元/instrumentation 层注入伪造的 `SigningInfo`。§13 Task 9 只把"production key 原位轮转"标为 not-testable，不得据此把整类签名验收标成 not-testable。
 - 结论：当前配置下不得宣称强 release identity。是否迁移到受控 release key 是 operator 的价值取舍，见 §21 DP-1；**本 doc PR 不擅自旋转 signer**。
 
 ### 6.6 跨进程 revision 所有权（blocker）
 
 千网游至少存在三类进程上下文：主进程（UI/config/`MockProviderService`）、`:hook_verify`（`HookVerificationService`）、以及 Xposed 注入到被测 App 内的 hook 代码。`environmentRevision` 与 `continuityCoverage` 是跨这些上下文的共享可变状态，因此：
 
-- **单写者**：`EnvironmentRevisionState` 只有一个 owner 组件可写。其他进程一律通过 Binder/ContentProvider 请求 bump，**禁止任何进程直接写计数器**。
-- **承载物禁止清单**，每条都写明确切理由，不用"不安全"含混带过：
+**本节冻结的是语义，不是承载技术。** 下列六条必须成立，选型由 PR-3 自行决定并用测试证明：
 
-  | 承载物 | 判定 | 一手依据 |
-  |---|---|---|
-  | 进程内单例 `Long` | 禁止 | 不跨进程，无需论证 |
-  | `SharedPreferences` | 禁止 | 官方：“This class does not support use across multiple processes.” `MODE_MULTI_PROCESS` 自 API 23 弃用，弃用说明明确“does not work reliably … Applications should not attempt to use it” |
-  | `DataStore`（默认 `SingleProcessDataStore`） | 禁止 | 同一文件混用单/多进程实现会破坏全部功能；同进程重复实例读写直接抛 `IllegalStateException` |
-  | `DataStore`（`MultiProcessDataStoreFactory`，1.1.0+） | **禁止用于 revision** | 它确实支持多进程——但 API reference 只承诺 “cross-process **eventual consistency**”。最终一致对配置读取够用，对“丢一次或迟到一次 bump 就等于假可信”的单调计数器不够 |
-  | Room / SQLite | 不得默认假定 | **没有任何一手来源**声明 SQLite/Room 在存储层是多进程安全的。`enableMultiInstanceInvalidation()` 只广播表失效，**不提供存储并发保证**，开启它不解决本问题 |
-  | `ContentProvider` | 平台层推荐路径 | `MODE_MULTI_PROCESS` 的官方弃用说明直接指向“an explicit cross-process data management approach such as `ContentProvider`”；千网游已有 `AppInfoProvider` 可参照其进程模型 |
+| # | 语义 | 说明 |
+|---|---|---|
+| L1 | **唯一 owner** | `EnvironmentRevisionState` 只有一个 owner 组件可读写。其他进程不直接触碰底层存储 |
+| L2 | **全部经同步 IPC** | 所有 bump 与 observe 都是到 owner 的同步跨进程调用；没有旁路写入路径 |
+| L3 | **序列化持久 read-modify-write** | owner 内部自增是序列化的，读-改-写不可分离，重启后单调性不依赖内存状态 |
+| L4 | **ACK 后于 durable commit** | bump 的成功返回只能发生在持久化提交**之后**；提交前崩溃表现为"未 bump"，不得表现为"已 bump 但未落盘" |
+| L5 | **observe 看得见已 ACK 的 bump** | 任何 observe 必须反映此前所有已 ACK 的 bump，不允许读到更旧的值 |
+| L6 | **generation 断裂即降级** | owner 每次启动分配并持久化新 generation id；与前代观察窗连续性不可证时，bump revision 且 coverage 降为 `PARTIAL/NONE` |
 
-  丢一次 bump 的表现恰好是“coverage 仍为 FULL 且 revision 未变”，即 INV-08/09 要防的那个假可信——所以这里不接受“大概不会丢”。
-- 自增必须落在单条持久化事务内完成（读-改-写不可分离），重启后单调性不依赖内存状态。实现选型必须在 PR-3 给出**该选型为何提供强一致自增**的论证与并发测试，不能只声明“用了多进程方案”。
-- **进程代际**：owner 进程每次启动分配新的 generation id 并持久化。若无法证明与前代之间的观察窗连续，必须 bump revision 且把 coverage 降为 `PARTIAL/NONE`。
+丢一次或迟到一次 bump 的表现恰好是“coverage 仍为 FULL 且 revision 未变”，即 INV-08/09 要防的那个假可信——所以 L1–L6 不接受“大概不会丢”，必须有并发与崩溃注入测试。
+
+**选型说明（避免把结论写成技术指令）**：
+
+- owner **进程内部**用什么存不受限制。当 L1/L2 成立时，其他进程根本不写这份存储，所以它不是多进程写场景——owner 内部使用单进程 `DataStore`、Room 或 SQLite 都是合法选择。
+- IPC 通道 Binder 与非导出 `ContentProvider` 均可。**注意 `ContentProvider` 自身会被并发回调，并不自动提供事务**，选它同样要自己保证 L3。
+- 明确被否定的只有**"多个进程各自直接写同一份存储"**这一类：`SharedPreferences` 官方声明不支持多进程（`MODE_MULTI_PROCESS` 自 API 23 弃用）；`MultiProcessDataStore` 虽支持多进程，但 API reference 只承诺 cross-process **eventual consistency**，不满足 L5。这条否定针对的是**架构形态**，不是对这些库本身的禁用。
 - **有损事件源必须自我申报**：`PrefsDirectoryObserver` 一类 `FileObserver` 是可丢事件、可被回收的观察器，属于 §6.4 "观察器丢事件"类。其重订阅、失效或任何不可证明的间隙都必须 bump + 降级，不允许"没收到事件"被当作"没有变化"。
 
 ### 6.7 兼容矩阵与握手
@@ -608,6 +656,7 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 | `CellRebelExecution` | CellRebelAttemptFlow | executionId、attemptId、判定、证据 | 一个 attempt 可有多个外部 execution |
 | `TrustedQuotaEntry` | TrustedQuotaLedger | attemptId、taskId、evidenceDigest | UNIQUE(attemptId)，只插不改 |
 | `UnverifiedAttemptRecord` | AttemptRepository | attemptId、reason、evidenceDigest | 与可信账本不同表/类型 |
+| `LegacyCompletionSnapshot` | v4→v5 迁移（只写一次） | taskId、legacyCompletedSuccesses、legacyStatus、migratedFromSchemaVersion | 只读展示；**绝不生成 `TrustedQuotaEntry`**，不进 completed 投影 |
 | `RecoveryCheckpoint` | RecoveryCoordinator | attemptId、lastDurableStage、receipt refs | 终态后删除或纯投影 |
 | `AutoAuditEvent` | AuditRepository | seq、correlation ids、event、payload digest | append-only；不是状态 owner |
 
@@ -625,7 +674,7 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 
 ### 7.3 纯派生状态
 
-- `LocationTask.completed` = `count(TrustedQuotaEntry where taskId=...) >= requiredSuccesses`。
+- `LocationTask.completed` = `count(TrustedQuotaEntry where taskId=...) >= requiredSuccesses`。**`LegacyCompletionSnapshot` 不参与此投影**——迁移前的历史计数展示为 legacy-unverified，不构成 A+ 完成。
 - `PlanRun.completed` = 全部 location task 完成且没有 active/recovery-required attempt。
 - `trusted/unverified` 由证据策略函数计算；数据库不允许第三种写路径手填。
 - UI 文案、进度百分比、下一地址都从上述权威对象投影。
@@ -737,7 +786,12 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 | intent | apply 部分生效，有效坐标停在上一地址 | 意图绑定失败 → 未验证，不计数 | 23 |
 | intent | lease 复用但意图已切换，observation 仍返回旧 intent hash | `ENVIRONMENT_DRIFT`，不计数 | 23 |
 | intent | observation 的 `effectiveLat/Lng` 为 null | 不计数（不得因"其他条件都过"放行） | 23 |
-| intent | 计划内两地址距离 < 10 m | 导入阶段报错并指出行号 | 23 |
+| intent | 计划内两地址距离极近（同楼/密集门店） | 正常受理并各自独立归属；不得拒绝导入 | 23 |
+| pairing | shared UID 调用方（`getPackagesForUid` 返回 ≠ 1 个包） | typed `CALLER_NOT_ALLOWED`，v1 不支持 | 2 |
+| pairing | 配对后证书轮转，旧 digest 仍在轮转链中 | 必须要求重新配对；不得因 `hasSigningCertificate` 命中"曾经使用"而放行 | 2 |
+| pairing | 真千网游未安装，同包名替代实现应答 bind | Auto 反向校验当前 signer 失败 → fail-closed，不进入 CellRebel | 2 |
+| migration | v4 fixture 的 `completedSuccesses` 非零 | 转为 `LEGACY_UNVERIFIED` 快照保留展示；`TrustedQuotaEntry` 仍为空，trusted 从 0 起算 | 24,5,6 |
+| migration | 恢复流程读到 legacy 计数 | 不得当作已完成而跳过地址 | 24,15 |
 | migration | 已存在 v4 用户库升级到 v5 | 显式 `MIGRATION_4_5` 成功，历史计划与结果全部存活 | 24 |
 | migration | migration 执行到一半进程被杀 | 重启后事务回滚或重放，绝不落半迁移库、不 destructive 重建 | 24,15 |
 | migration | 安装了更高 schema 版本后降级回旧包 | 明确失败并提示，不静默清库 | 24 |
@@ -876,7 +930,7 @@ fakexxx/
 checker 必须做**有证明力**的核对，逐项 exit-code 化：
 
 1. `docs/provenance/upstream-imports.md` 精确记录两个上游 SHA（`48d8ec93…` / `285e4cae…`）与源 URL、branch、导入 commit；
-2. 本地 `apps/cellrebel-auto` 的 **root tree digest** 等于 `Faketest@48d8ec9` 的 tree digest；`apps/qianwangyou` 对 `FakeGps-test@285e4ca` 同理（`git rev-parse <sha>^{tree}` 与本地 `git rev-parse HEAD:apps/<dir>` 比对）；
+2. 本地 `apps/cellrebel-auto` 的 **root tree digest** 等于 `Faketest@48d8ec9` 的 tree digest；`apps/qianwangyou` 对 `FakeGps-test@285e4ca` 同理。checker 必须**先显式 `git fetch <upstream-url> <sha>` 把该对象取到本地**再 `git rev-parse <sha>^{tree}`——CI 的浅 clone 不含上游对象，跳过 fetch 会让比对因"对象不存在"而误判或静默跳过；取不到对象必须 fail，不得降级为 skip；
 3. 关键入口文件存在（两个 `gradlew`、两个 `app/build.gradle*`、两个 `AndroidManifest.xml`）。
 
 **不得**使用 `git -C <dir> rev-parse --is-inside-work-tree` 作为验证：subtree 目录本身就在 `fakexxx` 工作树内，该命令对仓内任何 `mkdir` 出来的空目录同样返回 `true`，既证明不了导入发生，也证明不了 SHA 正确——它是恒真断言，没有证明力。
@@ -890,7 +944,7 @@ checker 必须做**有证明力**的核对，逐项 exit-code 化：
 **Files:**
 
 - Create: `contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl`
-- Create: 同目录 `CapabilitySnapshotV1.aidl`、`PreflightRequestV1.aidl`、`PreflightReportV1.aidl`、`ApplyRequestV1.aidl`、`ApplyReceiptV1.aidl`、`ObserveRequestV1.aidl`、`EnvironmentObservationV1.aidl`、`ReleaseRequestV1.aidl`、`ReleaseReceiptV1.aidl`
+- Create: 同目录 `CapabilitySnapshotV1.aidl`、`EnvironmentIntentV1.aidl`、`PreflightRequestV1.aidl`、`PreflightReportV1.aidl`、`ApplyRequestV1.aidl`、`ApplyReceiptV1.aidl`、`ObserveRequestV1.aidl`、`EnvironmentObservationV1.aidl`、`ReleaseRequestV1.aidl`、`ReleaseReceiptV1.aidl`
 - Create: `contracts/environment-control-v1/src/main/java/io/github/terryyyc/fakexxx/contract/v1/CapabilitySnapshotV1.kt`
 - Create: 同目录 `PreflightRequestV1.kt`、`PreflightReportV1.kt`、`ApplyRequestV1.kt`、`ApplyReceiptV1.kt`、`ObserveRequestV1.kt`、`EnvironmentObservationV1.kt`、`ReleaseRequestV1.kt`、`ReleaseReceiptV1.kt`、`ContractEnumsV1.kt`、`ContractErrorCodeV1.kt`
 - Create: `contracts/environment-control-v1/build.gradle.kts`
@@ -980,6 +1034,20 @@ cd apps/qianwangyou
 **GREEN:** 可信完成只通过 `TrustPolicy` + 单一 ledger transaction；删除旧的直接 `completedSuccesses++` 写路径，完成数改为投影。
 
 **迁移硬约束（INV-24）**：现网 `AppDatabase` 是 `version = 4` 且 `exportSchema = false`，已有用户数据。本 task 新增 `TrustedQuotaEntry`/`CellRebelExecution`/`AutoAuditEvent` 三类表 → 必须 `version = 5` 且提供显式 `MIGRATION_4_5`，同时把 `exportSchema` 改为 `true` 并把 schema JSON 纳入版本控制（千网游侧已有同款 `room.schemaLocation` 配置可参照）。**禁止 `fallbackToDestructiveMigration` 及任何变体**——缺失迁移会让老用户在升级后开库即 `IllegalStateException`，而 destructive fallback 会直接清空 operator 已导入的计划与历史结果，两者都违反“用户状态默认持久化”。迁移测试必须用**手工构建的真实 v4 fixture 库**（既有 `MigrationTest.kt` 的 v2 手法可直接复用），断言历史计划、任务与结果全部存活。
+
+**旧进度语义（必须冻结，两个方向都是错的）**：upstream `48d8ec9` 的 v4 把历史成功次数放在 `LocationTask.completedSuccesses: Int`（另有 `status: String`）。v5 把完成数改为 `count(TrustedQuotaEntry)` 投影后，两条自然做法都不可接受：
+
+- 直接改投影而不管旧值 → 新 ledger 为空，**operator 的历史进度无声归零**；
+- 把旧 `completedSuccesses` 回填成 `TrustedQuotaEntry` → 这些旧数据**没有 A+ 的证据链**（无 observation、无 intent hash、无连续性证明），直接违反 INV-05/06。
+
+冻结做法：迁移时把 v4 的 `completedSuccesses`/`status` 搬进独立的 **`LegacyCompletionSnapshot`**（`taskId`、`legacyCompletedSuccesses`、`legacyStatus`、`migratedFromSchemaVersion`、`migratedAt`），语义为 `LEGACY_UNVERIFIED`：
+
+- 历史数据与 UI 展示**保留**，operator 看得到"迁移前已完成 N 次（未按 A+ 证据标准验证）"；
+- **绝不生成 `TrustedQuotaEntry`**，不进入可信配额、不进入导出的 trusted 结果；
+- A+ 的 trusted quota 对每个 task **从 0 开始**计；
+- 该快照只读、只在迁移时写入一次，不参与任何后续判定。
+
+必测：一个 `completedSuccesses` 非零且存在 active/completed plan 的 v4 fixture，升级后断言——旧进度可见且标为 legacy-unverified、`TrustedQuotaEntry` 表为空、`LocationTask.completed` 投影为 false（除非新 ledger 真的达标）、恢复流程不把 legacy 计数当作已完成而跳过地址。
 
 **Verify:**
 
@@ -1123,8 +1191,6 @@ PR-2 contract v1（冻结 exact HEAD）
 PR-6 integration + exact-build device evidence（只做必要胶合，不吞并三路职责）
 ```
 
-每个 PR 的 gate：
-
 Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI 进 PR-4（Opus5），千网游侧 `integration/ui/AutomationPairingScreen.kt` 进 PR-3（Kimi）。owner matrix 本身不变——`apps/qianwangyou/**/integration/**` 含 UI 全部归 Kimi。
 
 每个 PR 的 gate：
@@ -1181,7 +1247,7 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-07 | `PRE_EXISTING_RUN` 语义保留且旧结果不计新完成 | INV-11,12；fixtures/device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
-| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过 | INV-01..22；§10 report |
+| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过 | INV-01..25；§10 report |
 | AC-11 | 双 App 独立构建发布，version skew 明确运行或停止 | INV-03,19；CI + skew device matrix |
 | AC-12 | A+/B/C 触发门有持久 issue 与里程碑 verdict，不发生重写 | I7 + milestone evidence |
 
@@ -1213,7 +1279,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 | 选项 | 得到 | 付出 |
 |---|---|---|
-| A 保持现状 | 现有 profile 数据连续性不受影响；无迁移成本 | 无强 release identity；§13 Task 9 的“签名变化→重新配对”验收造不出阳性用例，只能标为 not-testable |
+| A 保持现状 | 现有 profile 数据连续性不受影响；无迁移成本 | 无强 release identity；仅"production key 原位轮转"这一条真机场景标为 not-testable（签名拒绝/重配对语义仍可用受控测试 key 与注入 fixture 覆盖） |
 | B 迁移到受控 release key | 强 release identity；signer 轮转可验收；debug/release 可区分 | 一次性 uninstall 或数据迁移；操作不当会重演 profile 丢失 |
 
 **需要 operator 回答**：是否接受“A+ 首版不具备强 release identity”，还是承担一次受控迁移。选 B 时必须先有 profile 导出/恢复方案，不能裸迁。
