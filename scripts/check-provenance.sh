@@ -47,6 +47,30 @@ fail() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 section() { printf '\n== %s ==\n' "$1"; }
 
 # ---------------------------------------------------------------------------
+section "0. fetch upstream objects"
+
+# This runs before every other section because both the document check and the
+# digest check resolve `<sha>^{tree}`. A fresh CI clone contains none of these
+# objects; a developer machine that fetched them earlier does, which is exactly
+# how an ordering bug here passes locally and fails only in CI.
+#
+# An unobtainable object is a hard failure, never a skip: skipping would reduce
+# the whole gate to a no-op.
+while IFS='|' read -r prefix url branch sha; do
+  [ -z "${prefix:-}" ] && continue
+  if git rev-parse --quiet --verify "${sha}^{commit}" >/dev/null 2>&1; then
+    pass "upstream object ${sha:0:9} already present"
+  elif git fetch --no-tags --quiet "$url" "$sha" 2>/dev/null &&
+       git rev-parse --quiet --verify "${sha}^{commit}" >/dev/null 2>&1; then
+    pass "fetched ${sha:0:9} from $url"
+  else
+    fail "cannot fetch $sha from $url (required to verify $prefix; not skippable)"
+  fi
+done <<EOF
+$(printf '%s\n' "$IMPORTS")
+EOF
+
+# ---------------------------------------------------------------------------
 section "1. provenance document"
 
 if [ -f "$PROVENANCE_DOC" ]; then
@@ -86,10 +110,15 @@ EOF
     fi
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
     import_tree="$(git rev-parse --quiet --verify "${import_commit}:${prefix}" 2>/dev/null)"
-    if [ -n "$upstream_tree" ] && [ "$import_tree" = "$upstream_tree" ]; then
+    if [ -z "$upstream_tree" ]; then
+      # Distinguish "the objects are not here" from "the trees disagree".
+      # Reporting a mismatch when the expected side is simply absent sends the
+      # reader hunting for a content difference that does not exist.
+      fail "upstream object $sha unavailable, cannot check import commit ${import_commit} for $prefix"
+    elif [ "$import_tree" = "$upstream_tree" ]; then
       pass "recorded import commit ${import_commit} carries the upstream tree at $prefix"
     else
-      fail "recorded import commit ${import_commit} does not carry upstream tree at $prefix (found '${import_tree:-<none>}')"
+      fail "recorded import commit ${import_commit} does not carry upstream tree at $prefix (expected '$upstream_tree', found '${import_tree:-<none>}')"
     fi
   done <<EOF
 $(printf '%s\n' "$IMPORTS")
@@ -101,16 +130,6 @@ section "2. upstream tree digest equality"
 
 while IFS='|' read -r prefix url branch sha; do
   [ -z "${prefix:-}" ] && continue
-
-  # CI checkouts are shallow and do not contain upstream objects. Fetch the
-  # exact object explicitly. An unobtainable object is a hard failure: silently
-  # skipping the comparison would turn this gate into a no-op.
-  if ! git rev-parse --quiet --verify "${sha}^{commit}" >/dev/null 2>&1; then
-    if ! git fetch --no-tags --quiet "$url" "$sha" 2>/dev/null; then
-      fail "cannot fetch $sha from $url (required to verify $prefix; not skippable)"
-      continue
-    fi
-  fi
 
   upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
   if [ -z "$upstream_tree" ]; then
