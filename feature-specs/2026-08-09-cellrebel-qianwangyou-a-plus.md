@@ -1233,6 +1233,7 @@ generation 变化 ⊇ 时钟纪元变化
 上面的认定来自**源码只读核验**。为避免"读代码得出的上界"与"设备上真实呈现"之间存在缝隙，对既有真机 dump 做了一次独立全量测量：
 
 - **样本**：`faketest-f002/feature-discussions/2026-07-30-f001-design/` 下 43 份 uiautomator dump，其中含 `package="com.cellrebel.mobile"` 的 **33 份**。
+- **样本构成（重要，决定了哪些结论成立）**：33 份**不是 33 次独立测量**，而是少数几次 session 内的连续帧——`device-smoke/`(8，含 `cellrebel-ready → running → poll-2..6 → completed` 一条完整轨迹) · `device-smoke/early/`(6) · `device-smoke/rapid-dumps/`(18，`d2…d19` 一次 burst) · `device-smoke/burst/`(1)。全部文件 mtime 相同（`2026-08-02 00:34`，checkout 产物），因此 mtime 不能用于区分 run。
 - **方法**：全量扫描 `resource-id` 与 `text` 属性，**不设长度或形态过滤**（此前一次计数正是被扩展名过滤器与 `head` 截断同时污染，教训见下）。
 
 | 测量项 | 结果 |
@@ -1241,11 +1242,26 @@ generation 变化 ⊇ 时钟纪元变化
 | 全部不同 `text` 取值 | **仅 8 条**：`Connection Test` / `Start` / `Web Browsing Score` / `Video Streaming Score` / 一句静态说明文案 / `Measuring web browsing quality…` / `Measuring video streaming quality…` / **`EXCELLENT`（66 次 = 33 份 × 2 个分数位）** |
 | 时间戳 / session id / result id / 数字分数 | **零** |
 
-**结论比源码推断更强**：不仅"没有执行身份"，而且**结果值本身是低基数定性标签，在整个证据集中从未变化**。因此 §8.6.4 描述的两条轨迹（`READY → 真 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果`）在观察面上**不是"难以区分"，而是逐字节相同**。
+**本样本能支持什么、不能支持什么**（区分开，因为两类结论对样本构成的依赖完全不同）：
 
-这直接决定了 DP-3 = A 的性质：**可信计数的归属依据是时序因果链，不是结果内容**——内容不携带任何可用于区分的信息。§8.6.5 的上限因此不是保守措辞，而是对观察面的准确描述。
+| 结论 | 是否成立 | 为什么 |
+|---|---|---|
+| 完成屏上**不存在**执行身份（run id / 结果行 id / session / 时间戳 / 单调计数器） | ✅ **成立** | 这类标识若存在，必然在**单次 run 内**就渲染在屏上。连续帧样本足以证否其存在，不需要跨 run |
+| 完成屏的 `resource-id` 集合完全静态 | ✅ **成立** | 同上，run 内即可观测 |
+| 分数为**低基数**定性标签、跨执行取值范围很小 | ❌ **本样本不能支持** | 33 份是少数几次 session 的连续帧；**同一次 run 内分数本就不该变**。`EXCELLENT × 66` 是预期内的，不构成基数证据 |
 
-> **方法论教训（留在此处，因为它已复发过两次）**：本测量的第一版用 `grep -ohE 'text="[^"]{4,40}"'` 取文本，长度下界 4 会静默滤掉短数字；另一次相关计数用 `| head` 截断后仍下了全量结论。两次都是**为输出好看而破坏度量本身**。计数类查询不得带展示性过滤器，结论的作用域不得大于查询的作用域。
+**因此准确的结论是**：§8.6.4 描述的两条轨迹（`READY → 真 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果`）之所以不可区分，**是因为完成屏不携带任何执行身份**——而不是因为"分数总是相同"。前者已被本样本证实，后者未被证实且不需要它。
+
+这直接决定了 DP-3 = A 的性质：**可信计数的归属依据是时序因果链，不是结果内容**——内容不携带任何可用于**归属**的信息（无论其取值分布如何）。§8.6.5 的上限因此不是保守措辞，而是对观察面的准确描述。
+
+> 若将来要主张"分数基数低"这类**跨执行分布**结论，必须另取**跨独立 run** 的样本；本节样本不具备该证明力。此处不借用。
+
+> **方法论教训（留在此处，因为它已在同一节里复发过三次，形态一次比一次隐蔽）**：
+> 1. 第一版用 `grep -ohE 'text="[^"]{4,40}"'` 取文本，长度下界 4 会静默滤掉短数字；
+> 2. 另一次相关计数用 `| head` 截断后仍下了全量结论；
+> 3. **第三次最隐蔽**：查询本身没问题，但把「同一次 run 内连续帧中分数不变」当成了「分数基数低」的证据——**结论的作用域大于样本的作用域**。它由非作者 review 指出，作者自查两轮都没发现。
+>
+> 统一的判据：**计数类查询不得带展示性过滤器；结论的作用域不得大于查询与样本的作用域。** 第 3 条尤其说明，"数据是真的"不等于"结论是真的"——还要问这批数据的**构成**能否支撑这个结论。
 
 #### 8.6.2 冻结取值集
 
@@ -1296,7 +1312,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 
 1. 本节文字是**产品承诺的一部分**，不得在后续版本中被悄悄软化；任何弱化都必须走一次新的 operator 决定。
 2. 上限**必须**呈现在用户可见的计数语义中（运行页 / 历史页 / 导出），这是 `AC-06` 的验收项而非文案建议。理由：本产品的全部价值就是"每地址的可信次数"，一个带着看不见前提的数字，在被读到的地方就是在撒谎。
-3. §8.6.1.1 的真机实测进一步表明，两条轨迹在观察面上**逐字节相同**——因此"可信"在本产品中的准确含义是「时序因果链成立」，而非「结果内容被独立核实」。呈现给 operator 的措辞不得暗示后者。
+3. §8.6.1.1 的真机实测进一步表明，完成屏**不携带任何执行身份**，因此两条轨迹在观察面上无从区分——"可信"在本产品中的准确含义是「时序因果链成立」，而非「结果内容被独立核实」。呈现给 operator 的措辞不得暗示后者。
 
 **§8.6.3 的收紧（含 `READY` 基线）是 mitigation，不是兑现。** `READY → 真实 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果` 在 `ScreenNode` 观察面上完全同形，因此任何基线要求都只能缩小窗口，不能证明 at-most-once。文中不得再出现"结构性关闭""字面兑现"一类表述。
 
@@ -1318,7 +1334,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-08 | 相关环境变化必改 revision；coverage 非 FULL 时不可信 | continuity tracker event matrix |
 | INV-09 | 心跳、进程存活或时间戳不能替代 INV-08 | forbidden-evidence tests/static guard |
 | INV-10 | 同一 attempt 的可信配额最多增加一次 | Room UNIQUE + concurrent insert test |
-| INV-11 | 未证明的新完成永不计数；可信配额只接受 `VERIFIED_NEW_COMPLETION`（§8.6.3 完整因果链）。**按 §21 DP-3 = A 兑现**：字面强度为「每 `attemptId` 至多一次」；「同一次物理执行至多一次」这半句**在当前观察面上不可兑现**（§8.6.1 实测：CellRebel 不暴露执行身份，且结果为低基数定性标签），其残余窗口由 §8.6.5 写明、由 INV-26 审计、并**必须**按 §21 DP-3 兑现条件第 3 条进入用户可见计数语义。`READY` 基线是 mitigation，不构成兑现 | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试；`READY` 基线测试；UI/导出上限呈现测试 |
+| INV-11 | 未证明的新完成永不计数；可信配额只接受 `VERIFIED_NEW_COMPLETION`（§8.6.3 完整因果链）。**按 §21 DP-3 = A 兑现**：字面强度为「每 `attemptId` 至多一次」；「同一次物理执行至多一次」这半句**在当前观察面上不可兑现**（§8.6.1 / §8.6.1.1 实测：CellRebel 完成屏不暴露任何执行身份），其残余窗口由 §8.6.5 写明、由 INV-26 审计、并**必须**按 §21 DP-3 兑现条件第 3 条进入用户可见计数语义。`READY` 基线是 mitigation，不构成兑现 | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试；`READY` 基线测试；UI/导出上限呈现测试 |
 | INV-12 | 外部 CellRebel execution 可重跑且全部留痕 | multi-execution recovery test |
 | INV-13 | apply/release 同键同 payload 幂等；同键异 payload 拒绝 | service concurrency tests |
 | INV-14 | release 只能清理本 caller、本 lease 获取的环境，不破坏 pre-existing state | stale/foreign lease tests |
@@ -2191,15 +2207,28 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 
 **成本框定修订（本版更正上一版）**：上一版把 B 的代价写成"作废全部既有 `PairingRecord`，需重新配对"。经只读核验，该代价**当前为零**——实现树中不存在 `PairingRecord` / `ProviderPairingRecord` 的 entity 或 store，它们仍是待实现的 spec surface（#4 / #5 未开工）。把注意力放在一个当前为零的代价上，会掩盖真正非零的那个。
 
-**真正非零的代价是既有用户可见状态被搁浅**，一手依据：
+**真正非零的代价是既有用户可见状态被搁浅。** 论证分两层，**承重的只有第一层**：
 
-| 事实 | 一手来源 |
+**第一层 · 承重链（Android 基础事实，无争议）**
+
+| 事实 | 来源 |
 |---|---|
 | `applicationId` 是设备上 App 的唯一身份，改 ID 即另一个 App | `developer.android.com/build/configure-app-module` |
-| app-specific storage 按 App 隔离；Auto 现网 `AppDatabase version=4` 含 plan / task / attempt / result / session | `developer.android.com/training/data-storage/app-specific` |
-| Auto Backup 默认包含 `getDatabasePath()` 下的数据库，但按 App 私有域恢复；D2D 迁移只在**相同 package name + signing certificate** 之间成立 | `developer.android.com/identity/data/autobackup`、AOSP CDD 9.16 |
-| 由上可推：`com.example.cellrebelauto` 的备份**不能**自动恢复给新 ID | 明示推断，非一手断言 |
+| app-specific storage 按 App 隔离，数据落在 `/data/data/<applicationId>` | `developer.android.com/training/data-storage/app-specific` |
+| Auto 现网 `AppDatabase version=4` 含 plan / task / attempt / result / session | repo exact HEAD |
 | 现有 CSV 不是完整迁移通道：`AttemptCsvMapper` 只导出审计结果，`MainViewModel.importCsv` 只导入 worklist | repo exact HEAD |
+
+改 ID → 新目录 → 新 App 全空、旧数据留在旧目录。**这一层不依赖任何关于备份行为的判断即已成立。**
+
+**第二层 · 次级恢复路径也大概率失败（论证不依赖它）**
+
+| 事实 | 来源 / 强度 |
+|---|---|
+| Auto Backup 默认包含 `getDatabasePath()` 下的数据库；D2D 迁移只在**相同 package name + signing certificate** 之间成立 | 一手：`developer.android.com/identity/data/autobackup`、AOSP CDD 9.16 |
+| Auto 的 Manifest 只有 `android:allowBackup="true"`，无 `dataExtractionRules` / `fullBackupContent` | 一手：repo exact HEAD |
+| 由上推断：旧 ID 的备份不能自动恢复给新 ID | **明示推断，非一手断言**——本节最弱的一环，因此**刻意不让它承重** |
+
+把第二层单列，是因为它是这套论证里唯一的推断环节。**即使它整条被推翻，第一层仍然独立成立**，`INV-29` 的必要性不变。
 
 准确措辞：数据**不是被删除，是被搁浅在旧 App 的 sandbox 里**。地址可由 CSV 重建；历史结果与证据链没有回灌路径。
 
