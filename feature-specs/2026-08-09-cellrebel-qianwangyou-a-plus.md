@@ -74,6 +74,7 @@ source_threads:
 | v1.5 | PR-0.2（base `main@be885ac`） | merge 后 acceptance + GLM 双路 `REQUEST_CHANGES` 的 fix-forward，见 §0.1.5 |
 | v1.6 | PR-0.2 第二轮 | acceptance 对 `5996b2e0` 的 `REQUEST_CHANGES`，见 §0.1.6 |
 | v1.7 | PR-0.2 第三轮 | behavioral-delta 对 `7e1fa20` 的 `REQUEST_CHANGES`，见 §0.1.7 |
+| v1.8 | PR-0.2 第四轮 | Sol + GLM 双路绑定 `ecfb322e` 的 `REQUEST_CHANGES`，见 §0.1.8 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -198,6 +199,24 @@ PR-0.1 合入后，acceptance（Sol）与对抗审查（GLM）在同一 exact HE
 §10 由 77 行增至 **85 行 / 17 类**；class 分布 `owner-red` 59（Opus5 31 / Kimi 28）· `sol-blackbox` 22 · `static-guard` 2 · `device` 2。
 
 第 1 项是本轮最该记的：我上一版**自己把 mitigation 说成了兑现**，于是给 operator 的二选一里有一个是假的。诚实披露上限做对了，但"给出一个看起来能消除上限的选项"比不给更危险——它会让拍板的人以为存在一条无代价的严格路线。**当观察面不支持某个保证时，正确的选项集是"接受并写明上限"与"不提供该保证"，而不是发明一个听起来很严格的中间态。**
+
+#### 0.1.8 双路 exact-HEAD 复审修订（v1.8）
+
+acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ecfb322e` 各自出具 `REQUEST_CHANGES`，且结论收敛。
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **事实错误 + 载体缺失**：§8.4 写"qwy 重启后 `elapsedRealtime` 归零"——官方语义是**自设备 boot** 计时，进程重启不重置；且 `EnvironmentLease` 没有任何能判定单调值可比性的字段；`M-LS-07`（`RELEASE_INCOMPLETE`）与 `M-LS-12`（`EXPIRED`）对同一重启场景无优先级 | 更正事实；冻结载体 **`applyOwnerGeneration`** 并给出充分性证明（设备 reboot 必然重启 owner 进程 ⇒ **generation 变化 ⊇ 时钟纪元变化**，故不会漏检）；明示其过度检测为**策略**并论证其零代价（L6 已让跨 generation 的在飞可信 attempt 判死）；冻结恢复终态优先级：干净性不可证 → `RELEASE_INCOMPLETE` 优先，否则 generation 不符 → `EXPIRED`；新增 `M-LS-13/14` |
+| 2 | §20 仍写"仅两件、均不阻塞 contract 冻结"，与同一 HEAD 的顶部告示、DP-2 时间窗、DP-3 停工门直接矛盾 | 换成**逐 DP 的阻塞范围表**（PR-1 identity / contract 与 #3–#6 / 真机验收三列），并声明该表是唯一权威 |
+| 3 | GitHub #7 仍把已撤回的 READY-only 写成"结构性关闭"——**durable body 本身就是提问的一部分**，会把无效选项直接递到 operator 面前 | 立即改为真实 A/B，`READY` 只作共用 mitigation |
+| 4 | `M-CO-03` 被标 `not-testable`，但它**可触达**，只是终态待 DP-3；而 manifest 只有 `passed/failed/skipped` | 区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**（可触达、待拍板）；manifest 增 `deferred` + `deferredOn`，**只要存在 deferred 记录最终 gate 一律失败** |
+| 5 | §8.6.1 说 `viewIdResourceName` 仅见于 `DebugExporter.kt` | 更正：另见 `NodeFinder.kt:81` 的 `findByViewId`（无调用点 dead code）；"不进决策路径"的结论不变 |
+
+§10 由 85 增至 **87 行 / 17 类**；`owner-red` 61（Opus5 31 / Kimi 30）· `sol-blackbox` 22 · `static-guard` 2 · `device` 2。
+
+第 2、3 项是同一种传播病的第四、五次复发：我改了顶部告示与 DP-3，却没回头改 §20；改了 #6，却没改 #7。**改一条被引用的结论时，"哪些地方引用了它"必须是可枚举的**——所以 §20 现在把阻塞范围做成表并声明自己是唯一权威，DP-3 的"选定后需同步锚点"列表也已包含 §20 与 #6/#7。
+
+第 1 项则是另一类：**我用一个事实错误（进程重启会重置 elapsedRealtime）推出了一个恰好安全的结论**。结论安全不代表推理可用——按错误前提写的测试会把错误的平台模型冻结进实现。这次改成先摆平台事实，再证明所选载体为何**充分**，而不是让它碰巧够用。
 
 ## 1. 事实基线与来源
 
@@ -964,7 +983,7 @@ ProviderPairingRecord(
 |---|---|---|---|
 | `PairingRecord` | CallerAuthorizer | package、signer、approved/revoked | 请求体不能覆盖 |
 | `EnvironmentRevisionState` | ContinuityTracker | monotonic revision、coverage、generation | 心跳不能写 FULL |
-| `EnvironmentLease` | EnvironmentLeaseStore | leaseId、callerApplicationId、callerSignerDigest、`acceptedIntentHash`、`state`（§8.4 七态）、`applyIdempotencyKey`、`startingEnvironmentRevision`、`deadlineElapsedRealtimeMs`、`releaseIdempotencyKey?`、`residualReasonWires`、`revokeSource?`、`recoveryEvidenceRef?` | 一个设备上的冲突 lease fail-closed；字段在此冻结，**不留给 Kimi 与 fake-qwy 各自发明** |
+| `EnvironmentLease` | EnvironmentLeaseStore | leaseId、callerApplicationId、callerSignerDigest、`acceptedIntentHash`、`state`（§8.4 七态）、`applyIdempotencyKey`、`startingEnvironmentRevision`、`deadlineElapsedRealtimeMs`、**`applyOwnerGeneration`**（apply 时的 owner generation，用于判定单调值可比性；`startingEnvironmentRevision` 不能替代——revision 是持久单调计数，generation 是每次 owner 进程启动变化的另一根轴）、`releaseIdempotencyKey?`、`residualReasonWires`、`revokeSource?`、`recoveryEvidenceRef?` | 一个设备上的冲突 lease fail-closed；字段在此冻结，**不留给 Kimi 与 fake-qwy 各自发明** |
 | `OperationReceipt` | IdempotencyStore | caller、operation、`idempotencyKey`、**`requestDigest`**（§6.3.4 冻结的 domain-separated 长度前缀 preimage）、resultDigest、`createdAtElapsedRealtimeMs` | 同键**同** `requestDigest` → 幂等重放原 receipt；同键**异** `requestDigest` → `IDEMPOTENCY_CONFLICT`。**resultDigest 证明不了这件事**——它是应答的摘要，两个不同请求完全可能产生相同应答 |
 | `PendingPairingCandidate` | CallerAuthorizer | callerApplicationId、currentSignerDigest、observedVersionCode、`firstSeenAtElapsedRealtimeMs`、`state`（§8.5 `PENDING_CALLER_APPROVAL`） | 必须在 Binder 调用进行中落快照（§6.5）；批准后转 `PairingRecord`，拒绝或过期即丢弃，**不得自动升格** |
 | `EffectiveEnvironmentObservation` | EnvironmentObserver | observed state、fingerprint、evidence refs | UI 状态不可替代 |
@@ -1077,7 +1096,24 @@ deadlineElapsedRealtimeMs = nowElapsed + max(0, deadlineEpochMs − nowEpoch)
 - `notBeforeEpochMs` 同理，在 `preflight`/`apply` 处一次性转换。
 - 必测：apply 后把系统墙钟前后各跳数小时，断言 `EXPIRED` 触发时刻不变。
 
-**跨进程崩溃恢复**：qwy 重启后，任何非 `RELEASED` 的 lease 都从持久状态重建；若无法证明环境干净，一律落到 `RELEASE_INCOMPLETE`，并按 §6.6 L6 bump revision + 降级 coverage。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。重启后 `elapsedRealtime` 归零，因此 `deadlineElapsedRealtimeMs` 必须与 owner generation 一起持久化；跨 generation 的单调值不可比，重建时若无法换算则按 `EXPIRED` 处理（宁可误挡）。
+**先更正上一版的事实错误**：上一版写"qwy 重启后 `elapsedRealtime` 归零"——**这是错的**。`SystemClock.elapsedRealtime()` 的官方语义是**自设备启动（boot）以来**的时间，**进程重启不会重置它**。基于错误前提写下的测试会把错误的平台模型冻结进去。
+
+**单调值的可比性载体（冻结）**：`deadlineElapsedRealtimeMs` 是绝对单调值，只在**同一个时钟纪元**内可比。时钟纪元只因设备 reboot 而改变，但**设备 reboot 必然导致 qwy owner 进程重启，因而必然改变 §6.6 的 owner generation**。所以：
+
+```text
+generation 变化 ⊇ 时钟纪元变化
+```
+
+**用 owner generation 作载体是可证充分的**——它不会漏掉任何一次单调值失效。因此 `EnvironmentLease` 冻结新字段 `applyOwnerGeneration`（apply 受理时的 `EnvironmentRevisionState` generation），并冻结判定：`applyOwnerGeneration ≠ 当前 generation` → `deadlineElapsedRealtimeMs` 不可比 → **按 `EXPIRED` 处理**。
+
+**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**接受这个 false-red，因为它实际不损失任何东西**——§6.6 L6 已规定 generation 断裂且连续性不可证时必须 bump revision + 降级 coverage，而 §6.4 的可信谓词要求 `pre.revision == post.revision` 且两侧 coverage 为 `FULL`。**任何跨越 generation 断裂的在飞可信 attempt 本来就已经判死**；强制 lease 过期只多一次 release + 重新 acquire 的往返，不会让任何原本能计数的工作丢失。
+
+**恢复终态优先级（消解 `M-LS-07` 与 `M-LS-12` 的重叠）**：qwy 重启后对每个非 `RELEASED` lease 按此顺序判定，**先命中先定**：
+
+1. **环境干净性不可证** → `RELEASE_INCOMPLETE`（`M-LS-07`）。这是更强的终态，要求 operator 人工恢复证据才能离开。
+2. 否则 **`applyOwnerGeneration ≠ 当前 generation`** → `EXPIRED`（`M-LS-12`）。原 caller 可自行 `release` 收敛。
+
+两者都阻挡新 `apply`（INV-28）；差别只在离开该态的路径。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。
 
 ### 8.5 配对与预检就绪态
 
@@ -1101,7 +1137,7 @@ deadlineElapsedRealtimeMs = nowElapsed + max(0, deadlineEpochMs − nowEpoch)
 
 **答案：没有。**
 
-- 观察面只有 `ScreenNode { text, contentDescription, className, clickable, enabled }`（`automation/cellrebel/ScreenSnapshot.kt:10-17`）。`viewIdResourceName` **不在其中**——它仅出现在 `util/DebugExporter.kt:119` 的人读 dump，不进任何决策路径。
+- 观察面只有 `ScreenNode { text, contentDescription, className, clickable, enabled }`（`automation/cellrebel/ScreenSnapshot.kt:10-17`）。`viewIdResourceName` **不在其中**——它只出现在两处：`util/DebugExporter.kt:119` 的人读 dump，以及 `NodeFinder.kt:81` 的 `findByViewId`（**无任何调用点的 dead code**）。两处都不进决策路径，但"仅出现在 DebugExporter"是不准确的说法，此处更正。
 - 无 run ID、结果行 ID、test ID、单调计数器、导出文件、ContentProvider、可读日志；CellRebel 的历史/结果列表从未被访问（唯一导航是菜单 → 文本 `"Connection Test"`）。
 - 完成判定是**轮询 UI 文本**（`CellRebelAttemptFlow.POLL_INTERVAL_MS = 1500L`）：无 running marker + 存在 enabled 的 `"Start"` + 两个分数可解析，且**连续两轮完全一致**。
 - `PRE_EXISTING_RUN` 是**纯因果归属**——"Start 交互前屏幕是否已 RUNNING"（`CellRebelAttemptFlow.kt:106-137`），不携带任何身份信息。
@@ -1213,7 +1249,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-RC-01` | recovery | `PRE_EXISTING_RUN` 后出现旧结果页 | 记录旧运行，不计新完成 | 11,12 |
 | `M-CO-01` | completion | re-foreground 期间 Start 短暂 disabled，旧完成页仍在屏 | 判 `WEAK_RUNNING_EVIDENCE`，不计数——**不得仅凭 disabled-Start 认定 RUNNING** | 11,26 |
 | `M-CO-02` | completion | RUNNING 由 marker 证实但时长 < `MIN_RUNNING_EVIDENCE_MS` | 判 `RUNNING_TOO_SHORT`，不计数 | 11 |
-| `M-CO-03` | completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **终态待 DP-3 决定**：选 A → B 若因果链完整则计入，并触发 INV-26 审计（已知上限）；选 B → 两者均不计入可信配额。**DP-3 未决前本行 not-testable**，不得写成"至多一条可信 ledger" | 10,11,26 |
+| `M-CO-03` | completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **终态待 DP-3 决定**：选 A → B 若因果链完整则计入，并触发 INV-26 审计（已知上限）；选 B → 两者均不计入可信配额。**DP-3 未决前本行标注 `deferred:DP-3`**（可触达、有 owner 与入口，只是预期终态待定；**不是** `not-testable`），不得写成"至多一条可信 ledger" | 10,11,26 |
 | `M-CO-04` | completion | 两次**合法**运行产生完全相同分数 | 两次都必须计入——禁止按分数判重（upstream INV-7） | 26 |
 | `M-CO-05` | completion | 分数数值缺失回退到评级词，同一结果跨轮给出不同键 | 不得据此判为两次运行 | 26 |
 | `M-CO-06` | completion | 设备上完全不出现 running marker 文本 | 全部判未验证并显式告警；**不得回退到 disabled-Start 弱信号** | 11 |
@@ -1270,10 +1306,12 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-LS-09` | lease | 被撤销的 caller 尝试 `release` 一个 `REVOKED` lease | `CALLER_NOT_ALLOWED`；**不得**为其保留任何 post-revoke 能力 | 2,28 |
 | `M-LS-10` | lease | apply 之后系统墙钟前跳/后跳数小时 | `EXPIRED` 触发时刻不变（只由 `deadlineElapsedRealtimeMs` 决定） | 28 |
 | `M-LS-11` | lease | `deadlineEpochMs ≤ nowEpoch` 的 apply | 立即到期，不得因负数绕回变成超长 lease | 28 |
-| `M-LS-12` | lease | qwy 重启后 generation 变化，旧 `deadlineElapsedRealtimeMs` 不可比 | 无法换算即按 `EXPIRED` 处理（宁可误挡） | 25,28 |
+| `M-LS-12` | lease | qwy 重启后 `applyOwnerGeneration ≠ 当前 generation`，且环境干净性**可证** | `EXPIRED`（原 caller 可 `release` 收敛）。优先级低于 `M-LS-07`，见 §8.4 | 25,28 |
+| `M-LS-13` | lease | **设备 reboot** 后单调时钟纪元改变 | 必然伴随 generation 变化，故被 `M-LS-12` 覆盖；断言绝对 `deadlineElapsedRealtimeMs` **不得**被原值裸比较 | 25,28 |
+| `M-LS-14` | lease | 普通进程重启（未 reboot，时钟仍可比） | 仍强制 `EXPIRED`——明示的 false-red 策略，非意外 | 25,28 |
 | `M-LS-05` | lease | 同 caller 同 `idempotencyKey` 重放 `apply` | 幂等返回原 receipt，不冲突 | 13,28 |
 | `M-LS-06` | lease | 同 caller 不同 key/不同 intentHash 再 `apply` | `LEASE_CONFLICT` | 16,28 |
-| `M-LS-07` | lease | qwy 重启后非 `RELEASED` lease | 从持久态重建；不可证明干净则 `RELEASE_INCOMPLETE` + bump/降级 | 25,28 |
+| `M-LS-07` | lease | qwy 重启后非 `RELEASED` lease，且环境干净性**不可证** | 从持久态重建 → `RELEASE_INCOMPLETE` + bump/降级。**优先于 `M-LS-12`**（§8.4 优先级 1） | 25,28 |
 | `M-ID-01` | idempotency | 同 `idempotencyKey` 异 payload | `IDEMPOTENCY_CONFLICT`（不得复用 `LEASE_CONFLICT`） | 13 |
 | `M-ID-02` | idempotency | 同一请求换 `operationId` 重试 | **不得**冲突——`operationId` 不在 §6.3.4 preimage 内 | 13 |
 | `M-ID-03` | idempotency | 构造使 `apply` 与 `release` 字段字节序列相同的输入 | domain separation 使两者 digest 不同 | 13 |
@@ -1381,6 +1419,8 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-LS-10` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_10` |
 | `M-LS-11` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_11` |
 | `M-LS-12` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_12` |
+| `M-LS-13` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_13` |
+| `M-LS-14` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_14` |
 | `M-ID-01` | idempotency | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IdempotencyMatrixTest.kt::M_ID_01` |
 | `M-ID-02` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_02` |
 | `M-ID-03` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
@@ -1394,7 +1434,14 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 
 1. **集合相等**：从 §10 表首列提取 ID 集合，从上表提取 ID 集合，两者**必须完全相等**；任一侧多出或缺失即 exit≠0。这让两张表不可能悄悄漂移。
 2. **绑定已执行结果**：从各 lane 的**测试报告**（JUnit XML / device evidence 文件）中提取实际**执行且通过**的用例标识，与 ID 集合比对。**不接受对源码 grep token**——ID 出现在注释里、出现在被 `@Ignore` 的用例上、或出现在一个不含对应断言的方法名里，都会让纯文本扫描变绿而实际零执行。
-3. **not-testable 必须显式**：若某行**四类**都无法触达，必须在 §10 该行显式标注 `not-testable` 并链接其上限说明（如 §18.1、§8.6.5、DP-3 未决）；**静默留空视为失败**，否则矩阵报告读起来像全绿。
+3. **未覆盖必须显式，且区分两种原因**——把它们混成一类会让"等人拍板"看起来像"永远做不了"：
+
+   | 标注 | 含义 | 处置 |
+   |---|---|---|
+   | `not-testable` | **四类都无法触达**，是观察面/平台的永久上限 | §10 该行标注并链接上限说明（§18.1、§8.6.5）；不计入覆盖，但不阻塞最终 gate |
+   | `deferred:<DP-x>` | **可触达，但预期终态待 operator 决定** | §10 该行标注并链接对应 DP；**verifier 必须让最终 gate 失败**直到该 DP 有结论；结论落地后该行必须变为具体断言并正常执行 |
+
+   `deferred` 行仍保留其 evidence class、owner 与精确入口（它是可写的，只是还不知道该断言什么），**静默留空一律视为失败**。
 
 **evidence manifest（冻结载体）**：上面第 2 条不能停在"从 JUnit XML 提取"——`static-guard` 不产 JUnit，`device` 的 markdown 存在也不证明执行过，且 `M-CR-01` 与方法名里的 `M_CR_01` 需要规范化。因此每条 lane 在跑完后必须产出一份机器可读清单，`verify-a-plus.sh` 只消费它：
 
@@ -1405,7 +1452,7 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 
 - **规范化**：`rowId` 一律用 §10 表的连字符形式；从测试方法名回推时把 `_` 归一为 `-` 后比对。
 - **HEAD 绑定**：每条 `exactHead` 必须等于被验的 PR HEAD；不等即 exit≠0，防止用旧跑的报告充数。
-- **status**：只有 `passed` 计入覆盖；`skipped`/`failed` 与缺失同等处理。
+- **status**：枚举为 `passed | failed | skipped | deferred`。只有 `passed` 计入覆盖；`skipped`/`failed` 与缺失同等处理；**`deferred` 必须携带 `deferredOn: "<DP-x>"`，且只要清单中存在任一 `deferred` 记录，最终 gate 一律失败**——它表示"还没人告诉我该断言什么"，不是一种通过。
 - **reportDigest**：指向原始报告（JUnit XML、guard 输出、device evidence 文件）的摘要，使清单不可脱离证据独立编造。
 - 清单本身进 PR evidence，Sol 的矩阵报告消费它，而不是逐行手工声明。
 
@@ -1745,16 +1792,16 @@ cd apps/cellrebel-auto
 - Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
 
-**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **85 行 / 17 类**。
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **87 行 / 17 类**。
 
 | class | 行数 | Sol 的职责 |
 |---|---|---|
 | `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
 | `static-guard` | 2 | 编写并执行静态扫描 |
 | `device` | 2 | 在授权 device lease 内执行并留存证据 |
-| `owner-red` | 59 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
+| `owner-red` | 61 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 59 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 28 行）。
+**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 61 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 30 行）。
 
 **GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为触达不到的 53 行已不在 Sol 名下。
 
@@ -1914,9 +1961,17 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 ## 20. 当前开放项
 
-没有需要 operator 拍板的技术 A/B 题——技术项已在 PR-0.1 中给出 exact schema、digest 算法、容差与 API 24–27 语义。A+ 产品基线、B/C 关系、可信边界和 merge 权限保持冻结。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+没有需要 operator 拍板的技术 A/B 题——技术项已给出 exact schema、digest 算法、容差与 API 24–27 语义。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
 
-仅有两件**价值取舍**需要 operator 决定，见 §21；两者都不阻塞 contract v1 冻结，但都必须在真机验收（Task 9）之前有结论。
+**三件价值取舍待 operator 决定（§21）。它们的阻塞范围各不相同，下表是唯一权威，任何入口读到的答案必须与此一致：**
+
+| DP | 主题 | 阻塞 PR-1 identity 冻结 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
+|---|---|---|---|---|
+| DP-1 | 千网游 release signer 迁移 | 否 | 否 | **是**（决定 Task 9 的签名轮转项能否产生阳性用例） |
+| DP-2 | Auto 最终 `applicationId` | **是**——改名必须在 PR-1 完成，**不得晚于 contract 冻结**（`PairingRecord`/`ProviderPairingRecord` 主键含 applicationId） | 间接：未决则 contract 不应冻结 | 是 |
+| **DP-3** | CellRebel 可信完成的安全边界 | 否 | **是——直接停工门。#3/#4/#5/#6 全部停止** | 是 |
+
+**因此本文当前不是可开工的冻结基线**（与顶部告示一致）。此前"两件、均不阻塞 contract 冻结"的表述已被本表取代——那句话与同一 HEAD 的顶部告示和 DP-3 直接矛盾，会让实现者从 §20 合法推出相反结论。
 
 ## 21. operator Decision Packets
 
@@ -1973,4 +2028,6 @@ READY → 持续 marker / 重渲 → 旧结果 X
 
 **在 operator 明确处置前**：INV-11 保持冻结基线的严格表述，§8.6.5 的上限描述不生效为产品承诺，`M-CO-03` 终态标记为 DP-3 未决，AC-06 不得标记通过，**contract 消费方（#3/#4/#5/#6）全部保持停止**。猫不得以任何 review 通过为由推进。
 
-**选定后需同步的锚点**：§8.6.3（基线与判定规则）、§8.6.5（上限措辞）、INV-11、`M-CO-03` 终态、AC-06、GitHub #7 durable body。
+**选定后需同步的锚点（穷举，缺一即视为未完成）**：§8.6.3（基线与判定规则）· §8.6.5（上限措辞）· INV-11 · `M-CO-03` 终态与 `deferred:DP-3` 标注 · §10.1 manifest 中该行的 `deferred` 记录 · AC-06 · **§20 阻塞范围表** · 文档顶部未冻结告示 · **GitHub #6 覆盖措辞** · **GitHub #7 durable body** · PR #12 body。
+
+前两轮的漏改都出在"改了结论却没枚举引用点"，因此本清单是穷举式的：**任一条未同步，DP-3 就不算落地**。
