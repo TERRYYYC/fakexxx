@@ -9,7 +9,7 @@ topics:
   - crash-recovery
 doc_kind: feature_spec
 created: 2026-08-09
-status: implementation-baseline
+status: pending-operator-decision
 source_threads:
   - thread_msi197bgeystto7f
   - thread_mslrf4eshkwf1nvu
@@ -37,6 +37,18 @@ source_threads:
 
 ---
 
+> ## ⚠️ 当前未冻结 — contract 消费方全部停止
+>
+> 本文**不是**可以直接开工的冻结基线。`DP-3`（CellRebel 可信完成的安全边界，§21）**待 operator 拍板**，在此之前：
+>
+> - `INV-11` 保持冻结基线的严格表述，**不得**按 §8.6.5 的上限描述弱化；
+> - `M-CO-03` 终态未定，`AC-06` 不得标记通过；
+> - **contract v1 不得冻结，#3 / #4 / #5 / #6 全部停止**；任何 review 通过都不构成推进许可。
+>
+> 另有两项 operator 价值取舍未决：`DP-1`（千网游 release signer）、`DP-2`（Auto applicationId，有硬时间窗）。
+>
+> 两条**不可证明上限**已写入正文，验收时不得呈现为全绿：§8.6.5（跨 attempt 完成去重）、§18.1（AC-05 依赖 qwy 的 `FULL` 声明）。
+
 ## 0. 文档地位与冻结结论
 
 本文是 `TERRYYYC/fakexxx` 的实施与演进单一真相源。GitHub Epic、子 issue、开发 Thread 和 PR 必须链接本文；出现冲突时先修本文或明确记录 operator 的新决策，不能让 issue 正文悄悄改架构。
@@ -61,6 +73,7 @@ source_threads:
 | v1.4 | 本 PR-0.1 | final narrow delta 的 3 项修订，见 §0.1.4 |
 | v1.5 | PR-0.2（base `main@be885ac`） | merge 后 acceptance + GLM 双路 `REQUEST_CHANGES` 的 fix-forward，见 §0.1.5 |
 | v1.6 | PR-0.2 第二轮 | acceptance 对 `5996b2e0` 的 `REQUEST_CHANGES`，见 §0.1.6 |
+| v1.7 | PR-0.2 第三轮 | behavioral-delta 对 `7e1fa20` 的 `REQUEST_CHANGES`，见 §0.1.7 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -160,15 +173,31 @@ PR-0.1 合入后，acceptance（Sol）与对抗审查（GLM）在同一 exact HE
 
 | # | 问题 | 修订 |
 |---|---|---|
-| 1 | **INV-11/AC-06 的降级是产品安全边界变更，不是猫可自决的文档修订** | 降级**撤回待决**：INV-11 恢复冻结基线的严格表述，AC-06 标为 DP-3 未决前不得通过；新增 **§21 DP-3** 给 operator 二选一，并提出可实现的选项 B（基线必须为 `READY`，结构性关闭双计路径），不是只给"降级或不降级" |
+| 1 | **INV-11/AC-06 的降级是产品安全边界变更，不是猫可自决的文档修订** | 降级**撤回待决**：INV-11 恢复冻结基线的严格表述，AC-06 标为 DP-3 未决前不得通过；新增 **§21 DP-3** 给 operator 二选一（**该行所述的选项 B「`READY` 基线结构性关闭」已被 v1.7 第 1 项推翻并取代**——它只是 mitigation，现行 B 见 §21） |
 | 2 | 表 4 并不 exhaustive：`completion` 6 行完全不在 §10.1；类别级散文选不出逐行 owner；序号由行序推导不稳定；grep token 可假绿 | §10 表新增**显式 ID 列**（77 行，一经分配永不重排复用）；§10.1 改为**逐行台账**（ID/class/owner/精确入口）；新增 `static-guard` 第四类；覆盖校验改为三项：集合相等 + **绑定已执行测试报告** + not-testable 必须显式 |
 | 3 | 连续性只查 pre 侧；`cellRebelStartedAt/CompletedAt` 未冻结为 exact 字段、时钟语义未定；`evidenceRefs` 非空被说成"证据可独立解析" | pre/post 两侧都查且要求 `continuitySince` 相等并早于 pre 观察；**§6.4.2 冻结 `SystemClock.elapsedRealtime()` 为唯一可比时钟**（墙钟仅审计），契约增两个 elapsed 字段，`CellRebelExecution` 冻结三个时间字段并禁止复用上游 `startedAt`；`evidenceRefs` 收窄为结构性条件 |
-| 4 | `STALE_LEASE` 与 `EXPIRED → RELEASING` 互相矛盾；`OperationReceipt` 无 request digest；`EnvironmentLease` 字段未冻结；`PendingPairingCandidate` 不在状态普查 | release 对 `ACTIVE/EXPIRED/REVOKED/RELEASE_INCOMPLETE` 四态必须受理（否则恢复迁移不可达）；`OperationReceipt` 增 **`requestDigest`**；lease 冻结 12 个权威字段；`PendingPairingCandidate` 进 §7.2 与 §8.3 |
+| 4 | `STALE_LEASE` 与 `EXPIRED → RELEASING` 互相矛盾；`OperationReceipt` 无 request digest；`EnvironmentLease` 字段未冻结；`PendingPairingCandidate` 不在状态普查 | release 受理态（**该行的四态含 `REVOKED`，已被 v1.7 第 4 项取代为三态**——失权 caller 根本无法调用，改由 qwy 内部自清理）；`OperationReceipt` 增 **`requestDigest`**；lease 冻结 12 个权威字段；`PendingPairingCandidate` 进 §7.2 与 §8.3 |
 | 5 | 未知枚举 wire 与未知 error wire 混同；`WAIT_UNTIL` 缺字段是**应答**非法却映射成 `REQUEST_INVALID`；INV 顺序 `01..11,26,12..25` 违反刚立的追加规则 | 两类未知分开；应答级矛盾冻结为消费方 fail-closed，不占用请求错误码；INV-26 移到表尾 |
 
 第 4 项里 `OperationReceipt` 缺 `requestDigest` 是这轮最典型的一例：我在 §6.3.3 新增了 `IDEMPOTENCY_CONFLICT`（"同键异 payload"），却没检查承载它的状态对象里**根本没有 payload digest**——result digest 证明不了两个不同请求，因为不同请求完全可能产生相同应答。**这与 v1.4 的 revoke 缺口、v1.3 的 TOFU 缺口是同一种病的第三次复发。**
 
 因此本轮把它变成机械可查：§8.3 完备性表要求每个被 INV 依赖的对象都指向已定义的状态机与**已冻结的权威字段**，§10.1 要求每行都指向 class/owner/精确入口且由构建校验集合相等。**规则、承载它的字段、证明它的入口，三者必须同时存在**——少任何一个，规则都只是文档里的一句话。
+
+#### 0.1.7 behavioral-delta 第三轮修订（v1.7）
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **DP-3 的选项 B 是伪严格**：`READY` 基线只排除"基线时旧分数已在屏"这一条路径，无法区分 `READY → 真 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果`——两者在 `ScreenNode` 观察面上完全同形 | B 降为 **mitigation（两选项共用）**；新 B = **UI-only 完成不进可信配额**，要求 CellRebel UI 之外的独立完成证据，代价是今天可信配额恒为 0。同步 §8.6.5、INV-11、`M-CO-03`（终态标为 DP-3 未决 + not-testable）、AC-06 |
+| 2 | `requestDigest` 有字段无 canonical preimage，真实 qwy 与 fake-qwy 会各自实现 | **§6.3.4** 冻结 domain-separated + 长度前缀 preimage，逐 operation 定字段顺序，并明确排除 `idempotencyKey`/`operationId`/`callerProtocolVersion`/caller 及各自理由；新增 `M-ID-02`（换 `operationId` 重试不得冲突）、`M-ID-03`（domain separation） |
+| 3 | `M-RQ-01` 仍把 malformed response 与非法 request 合并并归 Kimi | 拆为 `M-RQ-01`（request 校验，Kimi）与 **`M-RS-01`**（新 `response` 类，consumer fail-closed，Sol blackbox） |
+| 4 | qwy 撤销 caller 后，caller 已失权却仍被要求去 `release` 那个 `REVOKED` lease——路径不可达 | 两侧撤销分开定义：**qwy 撤销 → provider 内部自清理**（不为失权 caller 留任何 post-revoke 能力）；**Auto 撤销 provider → Auto 仍被授权，正常 release**。§6.3.3 的受理三态去掉 `REVOKED`；§8.4 拆边；新增 `M-LS-08/09` |
+| 5 | lease deadline 混用墙钟与单调钟且无桥接 | §8.4 冻结 **apply 时一次性转换并快照** `deadlineElapsedRealtimeMs = nowElapsed + max(0, deadlineEpochMs − nowEpoch)`，此后只有单调值参与判定；跨 generation 不可比时按 `EXPIRED` 处理；新增 `M-LS-10/11/12` |
+| 6 | executed-report 载体未冻结（`static-guard` 不产 JUnit、device markdown 存在不等于执行、`M-CR-01` ↔ `M_CR_01` 未规范化） | §10.1 冻结机器可读 **evidence manifest** `{rowId, exactHead, lane, testId, status, reportDigest}` + 规范化与 HEAD 绑定规则；"三类"改"四类" |
+| 7 | PR body 与 frontmatter 仍呈现为已冻结基线 | frontmatter 改 `pending-operator-decision`；文档顶部加**未冻结告示**，列出 DP-3 未决、consumer 全停、两条不可证明上限 |
+
+§10 由 77 行增至 **85 行 / 17 类**；class 分布 `owner-red` 59（Opus5 31 / Kimi 28）· `sol-blackbox` 22 · `static-guard` 2 · `device` 2。
+
+第 1 项是本轮最该记的：我上一版**自己把 mitigation 说成了兑现**，于是给 operator 的二选一里有一个是假的。诚实披露上限做对了，但"给出一个看起来能消除上限的选项"比不给更危险——它会让拍板的人以为存在一条无代价的严格路线。**当观察面不支持某个保证时，正确的选项集是"接受并写明上限"与"不提供该保证"，而不是发明一个听起来很严格的中间态。**
 
 ## 1. 事实基线与来源
 
@@ -620,11 +649,52 @@ data class ReleaseReceiptV1(
 
 12 与 13 由本次全量映射审计发现：INV-13 与 §10 早已要求"同键异 payload → typed conflict"，但清单里只有语义不同的 `LEASE_CONFLICT`；结构性非法请求此前只能落到 `INTERNAL_FAILURE`，既不可诊断，也会把调用方错误伪装成服务端故障。**两者都必须在 v1 冻结时就位**——事后追加 code 意味着旧读者按 §6.2 规则把它们 fail-closed 成 `INTERNAL_FAILURE`，语义永久丢失。
 
-**`STALE_LEASE` 不得挡住恢复路径。** §8.4 要求 `EXPIRED`/`REVOKED` 经 `RELEASING` 收敛，若 `release` 对这两态返回 `STALE_LEASE`，该迁移就永远走不到，lease 会永久卡在阻挡态——这正是把 typed error 与状态机分开写会产生的死锁。因此冻结：**由 lease 所属 caller 发起的 `release`，在 `ACTIVE`/`EXPIRED`/`REVOKED`/`RELEASE_INCOMPLETE` 四态下都必须被受理**并驱动状态机；只有"非本 caller"或"已 `RELEASED`"才返回 `STALE_LEASE`。`apply`/`observe` 则对全部非 `ACTIVE` 态返回 `STALE_LEASE`。
+**`STALE_LEASE` 不得挡住恢复路径。** §8.4 要求 `EXPIRED` 经 `RELEASING` 收敛，若 `release` 对它返回 `STALE_LEASE`，该迁移就永远走不到，lease 会永久卡在阻挡态。因此冻结：**由 lease 所属 caller 发起的 `release`，在 `ACTIVE`/`EXPIRED`/`RELEASE_INCOMPLETE` 三态下都必须被受理**并驱动状态机；只有"非本 caller"或"已 `RELEASED`"才返回 `STALE_LEASE`。`apply`/`observe` 则对全部非 `ACTIVE` 态返回 `STALE_LEASE`。
+
+**`REVOKED` 不在上述三态里，因为它根本不可达。** 撤销的第一效果就是让该 caller 的每次 Binder 调用都失败（§6.5 要求逐次匹配 active `PairingRecord`），所以"让原 caller 去 release 一个 `REVOKED` lease"是自相矛盾的——它连调用都进不来。**两侧撤销必须分开定义**：
+
+| 撤销方 | caller 还能调用 qwy 吗 | lease 清理由谁驱动 |
+|---|---|---|
+| **qwy 撤销 caller**（`PairingRecord`） | 否 | **qwy 内部自清理**：由 provider 直接把 lease 从 `REVOKED` 推过 `RELEASING → RELEASED`。qwy 拥有环境，不需要 caller 参与握手 |
+| **Auto 撤销 provider**（`ProviderPairingRecord`） | 是（Auto 仍被 qwy 授权） | Auto 正常调用 `release`，走上面三态路径 |
+
+**不为被撤销的 caller 保留任何 post-revoke 能力。** 给一个已失权的调用方开一条"仅用于清理"的口子，等于在鉴权面上开洞去解决一个 provider 自己就能解决的问题——qwy 本来就是环境的唯一权威。Auto 侧在 run 进行中遇到 `CALLER_NOT_ALLOWED`/`NOT_PAIRED`，一律暂停计划并暴露人工恢复，**不得假定环境已干净**，也不负责清理。
 
 `IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 不可互相替代：前者是"你用同一把钥匙提交了不同的内容"（调用方错误，重试无用，必须换 key 或修正 payload），后者是"环境已被别的意图占用"（时序冲突，释放后可重试）。把两者合并会让 Auto 的恢复策略无法区分"该放弃"与"该等待"。
 
 预期业务失败通过 `ServiceSpecificException` 返回稳定的 `ContractErrorCodeV1.wireCode`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
+
+#### 6.3.4 `requestDigest` canonical preimage（冻结算法）
+
+`OperationReceipt.requestDigest` 只写字段名是不够的——**没有冻结 preimage，真实 qwy 与 fake-qwy 会各自实现不同的"同一请求"判据，`IDEMPOTENCY_CONFLICT` 就不可互操作**。沿用 §6.3.1 的长度前缀 framing，并按 operation 做 domain separation：
+
+```text
+canonicalRequest = uint32be(len(domain)) || domain
+                 || uint32be(len(f_1)) || f_1
+                 || ... （按下表冻结顺序，无分隔符、无尾随字节）
+
+requestDigest = lowercase hex of SHA-256(canonicalRequest)
+
+domain（ASCII，逐 operation 唯一）:
+  apply   → "fakexxx.contract.v1.apply"
+  release → "fakexxx.contract.v1.release"
+```
+
+| operation | 冻结字段顺序 |
+|---|---|
+| `apply` | `acceptedIntentHash`（即 §6.3.1 对 `EnvironmentIntentV1` 算出的 digest，ASCII hex） |
+| `release` | `leaseId`（UTF-8 原样） |
+
+**明确排除，且每条都有理由**：
+
+| 字段 | 排除理由 |
+|---|---|
+| `idempotencyKey` | 它是**查找键**不是内容。同键同内容=重放、同键异内容=冲突，键本身进 digest 只会恒等抵消 |
+| `operationId` | **逐次调用变化**。若进 digest，每一次合法重试都会被判成 `IDEMPOTENCY_CONFLICT`，恢复路径直接瘫痪 |
+| `callerProtocolVersion` | 协议兼容由 §6.7 握手判定；进 digest 会让"重试期间调用方升级"变成伪冲突。v1 已冻结，v2 走新 interface |
+| caller 身份 | receipt 查找本就按 `(caller, operation, idempotencyKey)` 三元组作用域，重复计入无意义 |
+
+**必测**：① 同键同内容重放返回原 receipt；② 同键异内容返回 `IDEMPOTENCY_CONFLICT`；③ **domain separation**——构造使 `apply` 与 `release` 的字段字节序列相同的输入，断言两者 digest 不同；④ 长度前缀单射性（同 §6.3.1 的分隔符碰撞对）；⑤ 同一请求换 `operationId` 重试**不得**冲突。
 
 ### 6.4 连续性信号契约
 
@@ -895,7 +965,7 @@ ProviderPairingRecord(
 | `PairingRecord` | CallerAuthorizer | package、signer、approved/revoked | 请求体不能覆盖 |
 | `EnvironmentRevisionState` | ContinuityTracker | monotonic revision、coverage、generation | 心跳不能写 FULL |
 | `EnvironmentLease` | EnvironmentLeaseStore | leaseId、callerApplicationId、callerSignerDigest、`acceptedIntentHash`、`state`（§8.4 七态）、`applyIdempotencyKey`、`startingEnvironmentRevision`、`deadlineElapsedRealtimeMs`、`releaseIdempotencyKey?`、`residualReasonWires`、`revokeSource?`、`recoveryEvidenceRef?` | 一个设备上的冲突 lease fail-closed；字段在此冻结，**不留给 Kimi 与 fake-qwy 各自发明** |
-| `OperationReceipt` | IdempotencyStore | caller、operation、`idempotencyKey`、**`requestDigest`**（原始请求 payload 的 canonical digest）、resultDigest、`createdAtElapsedRealtimeMs` | 同键**同** `requestDigest` → 幂等重放原 receipt；同键**异** `requestDigest` → `IDEMPOTENCY_CONFLICT`。**resultDigest 证明不了这件事**——它是应答的摘要，两个不同请求完全可能产生相同应答 |
+| `OperationReceipt` | IdempotencyStore | caller、operation、`idempotencyKey`、**`requestDigest`**（§6.3.4 冻结的 domain-separated 长度前缀 preimage）、resultDigest、`createdAtElapsedRealtimeMs` | 同键**同** `requestDigest` → 幂等重放原 receipt；同键**异** `requestDigest` → `IDEMPOTENCY_CONFLICT`。**resultDigest 证明不了这件事**——它是应答的摘要，两个不同请求完全可能产生相同应答 |
 | `PendingPairingCandidate` | CallerAuthorizer | callerApplicationId、currentSignerDigest、observedVersionCode、`firstSeenAtElapsedRealtimeMs`、`state`（§8.5 `PENDING_CALLER_APPROVAL`） | 必须在 Binder 调用进行中落快照（§6.5）；批准后转 `PairingRecord`，拒绝或过期即丢弃，**不得自动升格** |
 | `EffectiveEnvironmentObservation` | EnvironmentObserver | observed state、fingerprint、evidence refs | UI 状态不可替代 |
 | `ScheduleEvaluation` | QWY Schedule owner | scheduleRef、decision、boundary | Auto 不复制 |
@@ -983,11 +1053,12 @@ ProviderPairingRecord(
 | `ACQUIRING` | 应用失败 | `RELEASE_INCOMPLETE` | 记录 typed reason | **是** |
 | `ACQUIRING` | 崩溃恢复 | `ACQUIRING` | 同键重放，不换 key | **是** |
 | `ACTIVE` | `RELEASE` 请求 | `RELEASING` | 保存 release key | **是** |
-| `ACTIVE` | 到达 `deadlineEpochMs` | `EXPIRED` | 记录过期 | **是** |
-| `ACTIVE` | 配对被 revoke | `REVOKED` | 记录撤销来源 | **是** |
+| `ACTIVE` | 到达 `deadlineElapsedRealtimeMs`（见下方时钟桥接） | `EXPIRED` | 记录过期 | **是** |
+| `ACTIVE` | **qwy 撤销 caller** | `REVOKED` | 记录撤销来源 | **是** |
 | `RELEASING` | 清理已证明完成 | `RELEASED` | 保存 release receipt | 否 |
 | `RELEASING` | 清理不可证明 | `RELEASE_INCOMPLETE` | `releaseComplete=false` + residual | **是** |
-| `EXPIRED` / `REVOKED` | 走 release/recovery | `RELEASING` | 同上 | **是** |
+| `EXPIRED` | 原 caller 调用 `release` | `RELEASING` | 同上 | **是** |
+| `REVOKED` | **qwy 内部自清理**（原 caller 已失权，不可能调用） | `RELEASING` | 记录 provider-driven cleanup | **是** |
 | `RELEASE_INCOMPLETE` | operator 完成人工恢复 | `RELEASED` | 记录人工恢复证据 | **是**（直到迁出） |
 | `RELEASED` | 任意重复事件 | `RELEASED` | no-op + audit | 否 |
 
@@ -995,7 +1066,18 @@ ProviderPairingRecord(
 
 **为什么 `EXPIRED` 必须继续阻挡**：过期只说明时间到了，**不说明环境已被清理**。若把 `EXPIRED` 当作自动释放，lease TTL 就成了 INV-21（release 不可证明即暂停）的一条旁路——超时即可让下一个 apply 在一个状态未知的环境上开跑。同理 `RELEASE_INCOMPLETE` 与 `REVOKED` 都必须阻挡到被显式收敛为止。**这里宁可误挡（false-red，代价是停机等人）也不能漏挡（false-green，代价是可信配额建立在脏环境上）。**
 
-**跨进程崩溃恢复**：qwy 重启后，任何非 `RELEASED` 的 lease 都从持久状态重建；若无法证明环境干净，一律落到 `RELEASE_INCOMPLETE`，并按 §6.6 L6 bump revision + 降级 coverage。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。
+**deadline 的时钟桥接（冻结）**：`EnvironmentIntentV1.deadlineEpochMs` 是调用方用**墙钟**表达的计划级意图（人可读、跨设备可讲）；而过期判定必须用 §6.4.2 的单调钟，否则一次系统校时就能让 lease 提前过期或永不过期。因此在 **`apply` 受理的那一刻转换一次并快照**，此后**只有单调值参与判定**：
+
+```text
+deadlineElapsedRealtimeMs = nowElapsed + max(0, deadlineEpochMs − nowEpoch)
+```
+
+- `deadlineEpochMs ≤ nowEpoch` → `max(0, …)` 使其立即到期，而不是变成负数绕回。
+- 快照之后**墙钟怎么跳都不影响** lease 生命周期；`deadlineEpochMs` 仅留作审计与 UI 展示。
+- `notBeforeEpochMs` 同理，在 `preflight`/`apply` 处一次性转换。
+- 必测：apply 后把系统墙钟前后各跳数小时，断言 `EXPIRED` 触发时刻不变。
+
+**跨进程崩溃恢复**：qwy 重启后，任何非 `RELEASED` 的 lease 都从持久状态重建；若无法证明环境干净，一律落到 `RELEASE_INCOMPLETE`，并按 §6.6 L6 bump revision + 降级 coverage。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。重启后 `elapsedRealtime` 归零，因此 `deadlineElapsedRealtimeMs` 必须与 owner generation 一起持久化；跨 generation 的单调值不可比，重建时若无法换算则按 `EXPIRED` 处理（宁可误挡）。
 
 ### 8.5 配对与预检就绪态
 
@@ -1070,7 +1152,9 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 
 **不接受把它写成绝对保证**——那是拿一句文档承诺去掩盖一个观察面缺口，正是本 spec §0.1.4 记录过的病。
 
-但**"因此就降级"同样不是猫可以自决的**。mission 冻结基线写的是「外部执行可能重跑；可信配额最多增加一次；未证明完成永不计数」。在"接受一个已知的跨 attempt 双计窗口以换取可用性"与"结构性关闭该窗口并承担可用性代价"之间做选择，是**产品安全边界的价值取舍**，任何猫的 review 都不能替 operator 批准。**该选择见 §21 DP-3；在 operator 明确处置前，本节的降级不生效，contract 消费方保持停止。**
+但**"因此就降级"同样不是猫可以自决的**。mission 冻结基线写的是「外部执行可能重跑；可信配额最多增加一次；未证明完成永不计数」。在"接受 UI 证据并写明上限"与"UI-only 完成一律不进可信配额"之间做选择，是**产品安全边界的价值取舍**，任何猫的 review 都不能替 operator 批准。**该选择见 §21 DP-3；在 operator 明确处置前，本节的上限描述不生效为产品承诺，contract 消费方保持停止。**
+
+**§8.6.3 的收紧（含 `READY` 基线）是 mitigation，不是兑现。** `READY → 真实 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果` 在 `ScreenNode` 观察面上完全同形，因此任何基线要求都只能缩小窗口，不能证明 at-most-once。文中不得再出现"结构性关闭""字面兑现"一类表述。
 
 若将来 CellRebel 暴露稳定执行身份（结果行 ID、导出文件、可读 run id），本节可升级为强保证并重写 INV-11；在那之前不假装拥有它。
 
@@ -1090,7 +1174,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-08 | 相关环境变化必改 revision；coverage 非 FULL 时不可信 | continuity tracker event matrix |
 | INV-09 | 心跳、进程存活或时间戳不能替代 INV-08 | forbidden-evidence tests/static guard |
 | INV-10 | 同一 attempt 的可信配额最多增加一次 | Room UNIQUE + concurrent insert test |
-| INV-11 | **保持冻结基线的严格表述：未证明的新完成永不计数，同一次物理执行至多贡献一次可信配额。** 可信配额只接受 `VERIFIED_NEW_COMPLETION`（§8.6.3 完整因果链）。§8.6.1 已证明当前观察面**无法**按字面兑现"同一物理执行"这一半——兑现方式由 **§21 DP-3** 交 operator 选择（A 有界保证 / B 基线必须 `READY` 结构性关闭）。**operator 处置前本行不得被弱化，contract 消费方保持停止** | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试；DP-3 选定后补对应基线测试 |
+| INV-11 | **保持冻结基线的严格表述：未证明的新完成永不计数，同一次物理执行至多贡献一次可信配额。** 可信配额只接受 `VERIFIED_NEW_COMPLETION`（§8.6.3 完整因果链）。§8.6.1 已证明当前观察面**无法**按字面兑现"同一物理执行"这一半——兑现方式由 **§21 DP-3** 交 operator 选择（A 接受 UI 证据并写明上限 / B UI-only 完成不进可信配额）。`READY` 基线是两个选项共用的 mitigation，**不构成兑现**。**operator 处置前本行不得被弱化，contract 消费方保持停止** | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试；DP-3 选定后补对应基线测试 |
 | INV-12 | 外部 CellRebel execution 可重跑且全部留痕 | multi-execution recovery test |
 | INV-13 | apply/release 同键同 payload 幂等；同键异 payload 拒绝 | service concurrency tests |
 | INV-14 | release 只能清理本 caller、本 lease 获取的环境，不破坏 pre-existing state | stale/foreign lease tests |
@@ -1129,7 +1213,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-RC-01` | recovery | `PRE_EXISTING_RUN` 后出现旧结果页 | 记录旧运行，不计新完成 | 11,12 |
 | `M-CO-01` | completion | re-foreground 期间 Start 短暂 disabled，旧完成页仍在屏 | 判 `WEAK_RUNNING_EVIDENCE`，不计数——**不得仅凭 disabled-Start 认定 RUNNING** | 11,26 |
 | `M-CO-02` | completion | RUNNING 由 marker 证实但时长 < `MIN_RUNNING_EVIDENCE_MS` | 判 `RUNNING_TOO_SHORT`，不计数 | 11 |
-| `M-CO-03` | completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **至多一条可信 ledger**；若因果链在 B 内不完整则 B 不计；若两次都满足完整链，按 §8.6.5 记为已知上限并触发 INV-26 审计 | 10,11,26 |
+| `M-CO-03` | completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **终态待 DP-3 决定**：选 A → B 若因果链完整则计入，并触发 INV-26 审计（已知上限）；选 B → 两者均不计入可信配额。**DP-3 未决前本行 not-testable**，不得写成"至多一条可信 ledger" | 10,11,26 |
 | `M-CO-04` | completion | 两次**合法**运行产生完全相同分数 | 两次都必须计入——禁止按分数判重（upstream INV-7） | 26 |
 | `M-CO-05` | completion | 分数数值缺失回退到评级词，同一结果跨轮给出不同键 | 不得据此判为两次运行 | 26 |
 | `M-CO-06` | completion | 设备上完全不出现 running marker 文本 | 全部判未验证并显式告警；**不得回退到 disabled-Start 弱信号** | 11 |
@@ -1181,12 +1265,20 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-LS-01` | lease | 存在 `ACTIVE` lease 时另一 caller `apply` | `LEASE_CONFLICT` | 14,16,28 |
 | `M-LS-02` | lease | 存在 `RELEASE_INCOMPLETE` lease 时新 `apply` | `LEASE_CONFLICT`；不得因"已 release 过"放行 | 21,28 |
 | `M-LS-03` | lease | lease 到 `deadline` 后新 `apply` | `EXPIRED` 仍阻挡；TTL 不是 INV-21 的旁路 | 21,28 |
-| `M-LS-04` | lease | 配对 revoke 后 lease 处于 `REVOKED` | 阻挡新 apply，走 release/recovery | 2,28 |
+| `M-LS-04` | lease | **qwy 撤销 caller** 后 lease 进入 `REVOKED` | 阻挡新 apply；**由 qwy 内部自清理**推过 `RELEASING → RELEASED`；原 caller 全部调用被拒 | 2,28 |
+| `M-LS-08` | lease | **Auto 撤销 provider** 后 in-flight lease | Auto 仍被授权，正常 `release` 收敛；不得走 qwy 自清理路径 | 2,28 |
+| `M-LS-09` | lease | 被撤销的 caller 尝试 `release` 一个 `REVOKED` lease | `CALLER_NOT_ALLOWED`；**不得**为其保留任何 post-revoke 能力 | 2,28 |
+| `M-LS-10` | lease | apply 之后系统墙钟前跳/后跳数小时 | `EXPIRED` 触发时刻不变（只由 `deadlineElapsedRealtimeMs` 决定） | 28 |
+| `M-LS-11` | lease | `deadlineEpochMs ≤ nowEpoch` 的 apply | 立即到期，不得因负数绕回变成超长 lease | 28 |
+| `M-LS-12` | lease | qwy 重启后 generation 变化，旧 `deadlineElapsedRealtimeMs` 不可比 | 无法换算即按 `EXPIRED` 处理（宁可误挡） | 25,28 |
 | `M-LS-05` | lease | 同 caller 同 `idempotencyKey` 重放 `apply` | 幂等返回原 receipt，不冲突 | 13,28 |
 | `M-LS-06` | lease | 同 caller 不同 key/不同 intentHash 再 `apply` | `LEASE_CONFLICT` | 16,28 |
 | `M-LS-07` | lease | qwy 重启后非 `RELEASED` lease | 从持久态重建；不可证明干净则 `RELEASE_INCOMPLETE` + bump/降级 | 25,28 |
 | `M-ID-01` | idempotency | 同 `idempotencyKey` 异 payload | `IDEMPOTENCY_CONFLICT`（不得复用 `LEASE_CONFLICT`） | 13 |
-| `M-RQ-01` | request | 必填 ref 为空 / 坐标越界 / `deadline ≤ notBefore` / `WAIT_UNTIL` 缺 `waitUntilEpochMs` | `REQUEST_INVALID`，不得落到 `INTERNAL_FAILURE` | 4 |
+| `M-ID-02` | idempotency | 同一请求换 `operationId` 重试 | **不得**冲突——`operationId` 不在 §6.3.4 preimage 内 | 13 |
+| `M-ID-03` | idempotency | 构造使 `apply` 与 `release` 字段字节序列相同的输入 | domain separation 使两者 digest 不同 | 13 |
+| `M-RQ-01` | request | **请求**结构性非法：必填 ref 为空 / 坐标越界 / `deadline ≤ notBefore` | qwy 返回 `REQUEST_INVALID`，不得落到 `INTERNAL_FAILURE` | 4 |
+| `M-RS-01` | response | **应答**结构性非法：`PreflightReportV1` 的 `scheduleDecision == WAIT_UNTIL` 却缺 `waitUntilEpochMs` | Auto consumer **fail-closed**：不进入可信判定、不启动 CellRebel、写未验证并记 typed reason。**不得**映射为 `REQUEST_INVALID`——那会把 provider 缺陷伪装成调用方错误 | 3,4,27 |
 | `M-CF-01` | config | 运行中改 `TRUSTED_LOCATION_TOLERANCE_METERS` 或 `requiredVerification` | 在飞 attempt continue 使用 `PlanSnapshot` 冻结值；新值只对新 plan version/地址边界生效 | 17 |
 | `M-CF-02` | config | 运行中改容差后 in-flight attempt 恰好越过新阈值 | 仍按冻结快照判定，结果不因中途改配置而翻转 | 17 |
 | `M-PA-12` | pairing | 同 signer + 新 versionCode（任一侧正常升级） | 保持配对，由 protocol handshake 决定兼容；**不得要求重新配对** | 2,3,19 |
@@ -1284,8 +1376,16 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-LS-05` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_05` |
 | `M-LS-06` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_06` |
 | `M-LS-07` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_07` |
+| `M-LS-08` | lease | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/LeaseMatrixTest.kt::M_LS_08` |
+| `M-LS-09` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_09` |
+| `M-LS-10` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_10` |
+| `M-LS-11` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_11` |
+| `M-LS-12` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_12` |
 | `M-ID-01` | idempotency | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IdempotencyMatrixTest.kt::M_ID_01` |
+| `M-ID-02` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_02` |
+| `M-ID-03` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
 | `M-RQ-01` | request | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RequestMatrixTest.kt::M_RQ_01` |
+| `M-RS-01` | response | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/ResponseMatrixTest.kt::M_RS_01` |
 | `M-CF-01` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_01` |
 | `M-CF-02` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_02` |
 | `M-PA-12` | pairing | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/PairingMatrixTest.kt::M_PA_12` |
@@ -1294,7 +1394,20 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 
 1. **集合相等**：从 §10 表首列提取 ID 集合，从上表提取 ID 集合，两者**必须完全相等**；任一侧多出或缺失即 exit≠0。这让两张表不可能悄悄漂移。
 2. **绑定已执行结果**：从各 lane 的**测试报告**（JUnit XML / device evidence 文件）中提取实际**执行且通过**的用例标识，与 ID 集合比对。**不接受对源码 grep token**——ID 出现在注释里、出现在被 `@Ignore` 的用例上、或出现在一个不含对应断言的方法名里，都会让纯文本扫描变绿而实际零执行。
-3. **not-testable 必须显式**：若某行三类都无法触达，必须在 §10 该行显式标注 `not-testable` 并链接其上限说明（如 §18.1、§8.6.5）；**静默留空视为失败**，否则矩阵报告读起来像全绿。
+3. **not-testable 必须显式**：若某行**四类**都无法触达，必须在 §10 该行显式标注 `not-testable` 并链接其上限说明（如 §18.1、§8.6.5、DP-3 未决）；**静默留空视为失败**，否则矩阵报告读起来像全绿。
+
+**evidence manifest（冻结载体）**：上面第 2 条不能停在"从 JUnit XML 提取"——`static-guard` 不产 JUnit，`device` 的 markdown 存在也不证明执行过，且 `M-CR-01` 与方法名里的 `M_CR_01` 需要规范化。因此每条 lane 在跑完后必须产出一份机器可读清单，`verify-a-plus.sh` 只消费它：
+
+```json
+{ "rowId": "M-CR-01", "exactHead": "<40-hex>", "lane": "auto-unit|qwy-unit|acceptance|static-guard|device",
+  "testId": "<完全限定用例或检查项标识>", "status": "passed|failed|skipped", "reportDigest": "<sha256 of source report>" }
+```
+
+- **规范化**：`rowId` 一律用 §10 表的连字符形式；从测试方法名回推时把 `_` 归一为 `-` 后比对。
+- **HEAD 绑定**：每条 `exactHead` 必须等于被验的 PR HEAD；不等即 exit≠0，防止用旧跑的报告充数。
+- **status**：只有 `passed` 计入覆盖；`skipped`/`failed` 与缺失同等处理。
+- **reportDigest**：指向原始报告（JUnit XML、guard 输出、device evidence 文件）的摘要，使清单不可脱离证据独立编造。
+- 清单本身进 PR evidence，Sol 的矩阵报告消费它，而不是逐行手工声明。
 
 Task 7 的表述同步改为：Sol 负责 `sol-blackbox`/`static-guard`/`device` 三类的编写与执行，并对 `owner-red` 行做 **evidence audit**（核对报告中存在该 ID 的通过用例、绑定 exact HEAD、断言与该行预期终态一致）。Sol 不写 `owner-red` 测试，也不再声称"为每一行提供失败场景"。
 
@@ -1628,20 +1741,20 @@ cd apps/cellrebel-auto
 **Files:**
 
 - Create: `acceptance/fake-qwy/src/main/.../FakeEnvironmentControlService.kt`
-- Create: `acceptance/scenarios/src/test/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 20 行**，文件名与方法名按台账「精确入口」列）
+- Create: `acceptance/scenarios/src/test/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 22 行**，文件名与方法名按台账「精确入口」列）
 - Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
 
-**Scope（按 §10.1 台账，不再是"全部 77 行"）：**
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **85 行 / 17 类**。
 
 | class | 行数 | Sol 的职责 |
 |---|---|---|
-| `sol-blackbox` | 20 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
+| `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
 | `static-guard` | 2 | 编写并执行静态扫描 |
 | `device` | 2 | 在授权 device lease 内执行并留存证据 |
-| `owner-red` | 53 | **不编写**；做 evidence audit——核对测试报告中存在该 ID 的**通过**用例、绑定 exact HEAD、断言与该行预期终态一致 |
+| `owner-red` | 59 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**RED:** 上述 24 行各自至少一个失败场景先红；`owner-red` 的 53 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 22 行）。
+**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 59 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 28 行）。
 
 **GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为触达不到的 53 行已不在 Sol 名下。
 
@@ -1761,7 +1874,7 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-03 | 私有鉴权版本化 v1 discover/preflight/apply/observe/release 可用 | INV-02,03,04；contract tests |
 | AC-04 | 只有独立验证 System Mock 进入可信配额 | INV-05,06；TrustPolicy matrix |
 | AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09,25,27；continuity matrix + 多进程 bump matrix + §18.1 上限 |
-| AC-06 | crash/retry 下外部执行可重跑、可信配额最多增加一次。**跨 attempt 的兑现强度取决于 §21 DP-3 的 operator 处置**：选 A 则本条按"每 attemptId 最多一次 + §8.6.5 上限 + INV-26 审计"验收；选 B 则按字面全量验收。**DP-3 未决前本条不得标记通过** | INV-10,11,12,13,15,26；crash matrix + DP-3 选定后的基线测试 |
+| AC-06 | crash/retry 下外部执行可重跑、可信配额最多增加一次。**跨 attempt 的兑现强度取决于 §21 DP-3 的 operator 处置**：选 A 则本条按"每 attemptId 最多一次 + §8.6.5 上限 + INV-26 审计"验收；选 B 则 UI-only 完成不进可信配额，本条对 CellRebel 完成恒为空集通过。**DP-3 未决前本条不得标记通过** | INV-10,11,12,13,15,26；crash matrix + DP-3 选定后的基线测试 |
 | AC-07 | `CellRebelCompletionEvidenceV1` 五值判定正确，旧结果/弱证据/过短 RUNNING 均不计新完成 | INV-11,12,26；completion matrix + device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
@@ -1833,18 +1946,31 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 ### DP-3 · CellRebel 可信完成的安全边界（阻塞 contract 消费方）
 
-**背景（事实，非设计偏好）**：§8.6.1 的只读核验证明 CellRebel 不暴露任何物理执行身份。因此"同一次物理执行绝不被两个 attempt 各计一次"**没有任何可观察量可以支撑**。mission 冻结基线写的是「可信配额最多增加一次；未证明完成永不计数」——这条在当前观察面上无法按字面兑现，必须由 operator 在两种兑现方式之间选一个。
+**背景（事实，非设计偏好）**：§8.6.1 的只读核验证明 CellRebel 不暴露任何物理执行身份。Auto 对"完成"的全部认知来自 `ScreenNode` 的五个字段（`text`/`contentDescription`/`className`/`clickable`/`enabled`）与它们的时序。因此**"同一次物理执行至多贡献一次可信配额"这半句，在当前观察面上没有任何可观察量可以证明**。
 
-双计的**唯一**发生路径已定位：上一次运行的结果页在 attempt 基线时仍显示在屏（`AutomationEngine` 每次都经 RECENTS 切回 CellRebel，结果页**结构性必然重显**），此时若 RUNNING 被误判，完成循环会读到屏上的旧分数。
+**先纠正上一版的错误**：上一版把"基线只接受 `READY`"称为结构性关闭双计路径，**这是错的**。它只排除了"基线时旧分数已显示在屏"这一条具体路径；而
 
-| | 选项 A：接受有界保证 | 选项 B：结构性关闭窗口 |
+```text
+READY → 真实 marker → 新结果 X
+READY → 持续 marker / 重渲 → 旧结果 X
+```
+
+这两条轨迹在现有观察面上**完全同形**——Auto 无法区分屏上的分数是刚算出来的还是被恢复渲染的。所以 `READY` 基线是**降低风险的 mitigation，不是兑现**。把它当作严格选项交给 operator，等于给出一个伪严格选择。
+
+因此 `READY` 基线**同时适用于下面两个选项**，不再作为选项本身。
+
+| | 选项 A：接受 UI 证据，写明上限 | 选项 B：UI-only 完成不进可信配额 |
 |---|---|---|
-| 基线要求 | 接受 `READY` **或** `COMPLETED` | **只接受 `READY`**——屏上不得有可解析分数 |
-| 实现 | RUNNING 必须 marker 证实 + 持续 ≥ `MIN_RUNNING_EVIDENCE_MS`（§8.6.3） | 在 A 之上，每次 attempt 前必须先导航离开结果页再回到测试页（既有 `menu → "Connection Test"` 路径可达）；到不了 `READY` 即 fail-closed 不计数 |
-| 得到 | 可用性高；CellRebel 停在结果页也能继续跑 | 旧分数**根本不在屏上**，双计路径被结构性消除，而非靠时长启发式压窄 |
-| 付出 | 保留一个已知残余窗口：CellRebel 若持续 ≥10s 渲染 marker 文本却未真正开跑，仍可能双计。只能靠 INV-26 事后审计发现 | 每 attempt 多一次导航往返（秒级）；若某设备无法回到 `READY`，该地址**完全无法获得可信计数**（停机而非误计） |
-| 与冻结基线的关系 | 弱化「最多增加一次」为「每 attemptId 最多一次」 | 保持字面语义，代价转移到可用性 |
+| 可信配额来源 | §8.6.3 完整因果链（marker 证实 + 持续达标 + `READY` 基线 mitigation） | **要求 CellRebel UI 之外的独立完成证据**；在这样的证据源出现之前，所有 CellRebel 完成一律记为 `UNVERIFIED` |
+| 字面语义 | 弱化为"每 attemptId 至多一次" + 写明跨 attempt 上限 | **完整保持**：未独立证明的完成永不计入可信 |
+| 得到 | 产品可用：能跑批、能出可信计数；上限被诚实记录并由 INV-26 审计 | 可信配额的含义与其名字一致，不存在假绿 |
+| 付出 | 保留一个**不可消除**的残余窗口：CellRebel 在 marker 显示期间重渲旧结果仍会被计入 | **今天不存在这样的证据源**，因此可信配额实际恒为 0；产品退化为"记录运行数 + 全部未验证"，`requiredSuccesses` 这一概念需要重新定义 |
+| 对现有资产的影响 | Task 4/5/7/9 与 AC-01/04/06/07 按现状推进 | 需重新定义 A+ 的完成定义、UI 文案与导出语义；B/C 演进门也要重写 |
 
-**需要 operator 回答**：A 还是 B。**这不是技术 A/B**——两条路都能实现，差别是"宁可偶尔多计一次也要跑完"与"宁可跑不完也不多计一次"，属于产品对可信度与吞吐的排序。
+**需要 operator 回答**：A 还是 B。
 
-**在 operator 明确处置前**：§8.6.5 的降级不生效，INV-11 保持冻结基线的严格表述，**contract 消费方（#3/#4/#5/#6）保持停止**。猫不得以 review 通过为由推进。若选 B，§8.6.3 第 1 条改为"基线必须为 `READY`"，并新增导航前置步骤与对应 §10 行；若选 A，§8.6.5 的上限与 INV-26 审计按现文生效。
+这不是技术 A/B——两条都能实现。差别是：**A 承认"可信"这个词在本产品里带一个写明的上限；B 坚持这个词的字面含义，代价是它今天拿不到。** 若选 B 又希望产品仍可用，真正的出路是引入独立完成证据源（CellRebel 侧导出、结果行标识、或网络侧独立测量），那属于新的能力需求，不在 A+ 范围内。
+
+**在 operator 明确处置前**：INV-11 保持冻结基线的严格表述，§8.6.5 的上限描述不生效为产品承诺，`M-CO-03` 终态标记为 DP-3 未决，AC-06 不得标记通过，**contract 消费方（#3/#4/#5/#6）全部保持停止**。猫不得以任何 review 通过为由推进。
+
+**选定后需同步的锚点**：§8.6.3（基线与判定规则）、§8.6.5（上限措辞）、INV-11、`M-CO-03` 终态、AC-06、GitHub #7 durable body。
