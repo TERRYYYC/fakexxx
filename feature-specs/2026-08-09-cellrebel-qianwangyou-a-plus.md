@@ -9,7 +9,7 @@ topics:
   - crash-recovery
 doc_kind: feature_spec
 created: 2026-08-09
-status: pending-operator-decision
+status: implementation-baseline
 source_threads:
   - thread_msi197bgeystto7f
   - thread_mslrf4eshkwf1nvu
@@ -37,17 +37,24 @@ source_threads:
 
 ---
 
-> ## ⚠️ 当前未冻结 — contract 消费方全部停止
+> ## ✅ operator 已拍板 — 本文为冻结实施基线
 >
-> 本文**不是**可以直接开工的冻结基线。`DP-3`（CellRebel 可信完成的安全边界，§21）**待 operator 拍板**，在此之前：
+> 三项 operator 价值取舍已于 `2026-08-09T21:19:59Z` 决定（主 Thread 消息
+> `0001786310399153-001347-114fff25`，逐字记录见 §21）：
 >
-> - `INV-11` 保持冻结基线的严格表述，**不得**按 §8.6.5 的上限描述弱化；
-> - `M-CO-03` 终态未定，`AC-06` 不得标记通过；
-> - **contract v1 不得冻结，#3 / #4 / #5 / #6 全部停止**；任何 review 通过都不构成推进许可。
+> - **DP-1 = B**：迁移到受控 release key。**受控迁移**——profile export/restore、
+>   release-key custody 与回滚方案必须先于 signer cutover 完成。
+> - **DP-2 = B**：Auto 立即改名，最终 `applicationId` 逐字为 **`come.xx.fakeaauto`**。
+>   实现者**不得**推断纠错为 `com...`。改名受 `INV-29` 的数据连续性硬门约束。
+> - **DP-3 = A**：接受 UI 完成证据并写明上限。上限必须进入**用户可见的计数语义**
+>   （运行页 / 历史页 / 导出），不得只留在本文里。
 >
-> 另有两项 operator 价值取舍未决：`DP-1`（千网游 release signer）、`DP-2`（Auto applicationId，有硬时间窗）。
+> 因此 `INV-11` 按 A 的兑现口径生效，`M-CO-03` 终态确定，`AC-06` 可按 A 验收，
+> **contract v1 可以冻结，#3 / #4 / #5 / #6 解除停止**。
 >
-> 两条**不可证明上限**已写入正文，验收时不得呈现为全绿：§8.6.5（跨 attempt 完成去重）、§18.1（AC-05 依赖 qwy 的 `FULL` 声明）。
+> 仍然成立的**不可证明上限**，验收时不得呈现为全绿：§8.6.5（跨 attempt 完成去重）、
+> §18.1（AC-05 依赖 qwy 的 `FULL` 声明）。DP-3 选 A 意味着这些上限被**接受并记录**，
+> 不意味着它们消失。
 
 ## 0. 文档地位与冻结结论
 
@@ -1221,6 +1228,25 @@ generation 变化 ⊇ 时钟纪元变化
 
 **因此：系统只有因果链，没有执行身份。** 这不是实现疏漏，是外部 App 的可观察面决定的上界——CellRebel 与 Auto 之间不存在完成契约（§5：唯一完成判定方是 Auto 自己）。
 
+##### 8.6.1.1 真机 dump 实测（把上述结论从源码推断升级为观测证据）
+
+上面的认定来自**源码只读核验**。为避免"读代码得出的上界"与"设备上真实呈现"之间存在缝隙，对既有真机 dump 做了一次独立全量测量：
+
+- **样本**：`faketest-f002/feature-discussions/2026-07-30-f001-design/` 下 43 份 uiautomator dump，其中含 `package="com.cellrebel.mobile"` 的 **33 份**。
+- **方法**：全量扫描 `resource-id` 与 `text` 属性，**不设长度或形态过滤**（此前一次计数正是被扩展名过滤器与 `head` 截断同时污染，教训见下）。
+
+| 测量项 | 结果 |
+|---|---|
+| `resource-id` 分布 | 每个 id 在 33 份中各出现 **33 次**，全部为静态布局 id（`web_browsing_score` / `video_streaming_score` / `start_button` / `toolbar` …），**无任何随执行变化的标识** |
+| 全部不同 `text` 取值 | **仅 8 条**：`Connection Test` / `Start` / `Web Browsing Score` / `Video Streaming Score` / 一句静态说明文案 / `Measuring web browsing quality…` / `Measuring video streaming quality…` / **`EXCELLENT`（66 次 = 33 份 × 2 个分数位）** |
+| 时间戳 / session id / result id / 数字分数 | **零** |
+
+**结论比源码推断更强**：不仅"没有执行身份"，而且**结果值本身是低基数定性标签，在整个证据集中从未变化**。因此 §8.6.4 描述的两条轨迹（`READY → 真 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果`）在观察面上**不是"难以区分"，而是逐字节相同**。
+
+这直接决定了 DP-3 = A 的性质：**可信计数的归属依据是时序因果链，不是结果内容**——内容不携带任何可用于区分的信息。§8.6.5 的上限因此不是保守措辞，而是对观察面的准确描述。
+
+> **方法论教训（留在此处，因为它已复发过两次）**：本测量的第一版用 `grep -ohE 'text="[^"]{4,40}"'` 取文本，长度下界 4 会静默滤掉短数字；另一次相关计数用 `| head` 截断后仍下了全量结论。两次都是**为输出好看而破坏度量本身**。计数类查询不得带展示性过滤器，结论的作用域不得大于查询的作用域。
+
 #### 8.6.2 冻结取值集
 
 ```kotlin
@@ -1264,7 +1290,13 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 
 **不接受把它写成绝对保证**——那是拿一句文档承诺去掩盖一个观察面缺口，正是本 spec §0.1.4 记录过的病。
 
-但**"因此就降级"同样不是猫可以自决的**。mission 冻结基线写的是「外部执行可能重跑；可信配额最多增加一次；未证明完成永不计数」。在"接受 UI 证据并写明上限"与"UI-only 完成一律不进可信配额"之间做选择，是**产品安全边界的价值取舍**，任何猫的 review 都不能替 operator 批准。**该选择见 §21 DP-3；在 operator 明确处置前，本节的上限描述不生效为产品承诺，contract 消费方保持停止。**
+但**"因此就降级"同样不是猫可以自决的**。mission 冻结基线写的是「外部执行可能重跑；可信配额最多增加一次；未证明完成永不计数」。在"接受 UI 证据并写明上限"与"UI-only 完成一律不进可信配额"之间做选择，是**产品安全边界的价值取舍**，任何猫的 review 都不能替 operator 批准。
+
+**operator 已选 A（§21.0，`2026-08-09T21:19:59Z`）：接受 UI 证据并写明上限。** 因此本节的上限自即刻起**生效为已接受的产品语义**——不是被消除，而是被显式承担。随之而来的三条约束：
+
+1. 本节文字是**产品承诺的一部分**，不得在后续版本中被悄悄软化；任何弱化都必须走一次新的 operator 决定。
+2. 上限**必须**呈现在用户可见的计数语义中（运行页 / 历史页 / 导出），这是 `AC-06` 的验收项而非文案建议。理由：本产品的全部价值就是"每地址的可信次数"，一个带着看不见前提的数字，在被读到的地方就是在撒谎。
+3. §8.6.1.1 的真机实测进一步表明，两条轨迹在观察面上**逐字节相同**——因此"可信"在本产品中的准确含义是「时序因果链成立」，而非「结果内容被独立核实」。呈现给 operator 的措辞不得暗示后者。
 
 **§8.6.3 的收紧（含 `READY` 基线）是 mitigation，不是兑现。** `READY → 真实 marker → 新结果` 与 `READY → 持续 marker/重渲 → 旧结果` 在 `ScreenNode` 观察面上完全同形，因此任何基线要求都只能缩小窗口，不能证明 at-most-once。文中不得再出现"结构性关闭""字面兑现"一类表述。
 
@@ -1286,7 +1318,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-08 | 相关环境变化必改 revision；coverage 非 FULL 时不可信 | continuity tracker event matrix |
 | INV-09 | 心跳、进程存活或时间戳不能替代 INV-08 | forbidden-evidence tests/static guard |
 | INV-10 | 同一 attempt 的可信配额最多增加一次 | Room UNIQUE + concurrent insert test |
-| INV-11 | **保持冻结基线的严格表述：未证明的新完成永不计数，同一次物理执行至多贡献一次可信配额。** 可信配额只接受 `VERIFIED_NEW_COMPLETION`（§8.6.3 完整因果链）。§8.6.1 已证明当前观察面**无法**按字面兑现"同一物理执行"这一半——兑现方式由 **§21 DP-3** 交 operator 选择（A 接受 UI 证据并写明上限 / B UI-only 完成不进可信配额）。`READY` 基线是两个选项共用的 mitigation，**不构成兑现**。**operator 处置前本行不得被弱化，contract 消费方保持停止** | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试；DP-3 选定后补对应基线测试 |
+| INV-11 | 未证明的新完成永不计数；可信配额只接受 `VERIFIED_NEW_COMPLETION`（§8.6.3 完整因果链）。**按 §21 DP-3 = A 兑现**：字面强度为「每 `attemptId` 至多一次」；「同一次物理执行至多一次」这半句**在当前观察面上不可兑现**（§8.6.1 实测：CellRebel 不暴露执行身份，且结果为低基数定性标签），其残余窗口由 §8.6.5 写明、由 INV-26 审计、并**必须**按 §21 DP-3 兑现条件第 3 条进入用户可见计数语义。`READY` 基线是 mitigation，不构成兑现 | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试；`READY` 基线测试；UI/导出上限呈现测试 |
 | INV-12 | 外部 CellRebel execution 可重跑且全部留痕 | multi-execution recovery test |
 | INV-13 | apply/release 同键同 payload 幂等；同键异 payload 拒绝 | service concurrency tests |
 | INV-14 | release 只能清理本 caller、本 lease 获取的环境，不破坏 pre-existing state | stale/foreign lease tests |
@@ -1304,6 +1336,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-26 | 禁止任何基于分数值的跨 attempt 去重（upstream INV-7：两次有效运行可产生相同结果）；改为对每次可信计数持久化完整 completion evidence，并向 operator 暴露可疑相邻计数的**去重审计报告**（低 RUNNING 时长、异常紧邻时间戳等），报告不自动否决计数 | evidence 持久化 schema 测试；审计报告触发条件测试；"分数相同的两次合法运行都被计入"正例 |
 | INV-27 | observation 的 mode/isMock/schedule/证据/时序必须与 `verificationLevel` 交叉一致；矛盾 tuple 一律 fail-closed；两次观察必须夹住执行窗且连续性窗口早于 pre 观察 | §6.4.1 矛盾 tuple 矩阵（8 行独立负例） |
 | INV-28 | 设备上任一非 `RELEASED` lease 阻挡新 `apply`（唯一例外：同 caller 同 `idempotencyKey` 幂等重放）；`EXPIRED`/`REVOKED`/`RELEASE_INCOMPLETE` 不自动释放 | §8.4 状态机逐边测试；stale/expired/revoked 阻挡测试；跨进程崩溃重建测试 |
+| INV-29 | **`applicationId` cutover 不得孤儿化用户可见状态。** 改 `applicationId` 即产生设备上另一个 App，其 sandbox 与备份域均不共享（§21 DP-2 一手依据）。因此 cutover 前必须二选一并留证：**(a)** 经可验证检查确认旧安装**不存在**持久用户状态 → 可直接 cutover；**(b)** 存在状态 → 必须先完成**版本化迁移桥**（覆盖 plan / task / attempt / result / session 及必要配置），通过数量与摘要校验，并具备可回滚验收，之后才移除旧 App。**禁止**用现有结果 CSV 冒充完整迁移（`AttemptCsvMapper` 只导出审计结果，`importCsv` 只导入 worklist）；**禁止**依赖跨 package 自动备份；**禁止**把 operator 数据复制进本仓库或任何日志 | 旧安装状态探测测试；迁移桥 round-trip 测试（数量 + 逐表摘要）；回滚演练；"CSV 不构成迁移"负例；仓库/日志内不含 operator 数据的静态扫描 |
 
 ## 10. 崩溃、并发、恢复与旁路误用矩阵
 
@@ -1325,7 +1358,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-RC-01` | recovery | `PRE_EXISTING_RUN` 后出现旧结果页 | 记录旧运行，不计新完成 | 11,12 |
 | `M-CO-01` | completion | re-foreground 期间 Start 短暂 disabled，旧完成页仍在屏 | 判 `WEAK_RUNNING_EVIDENCE`，不计数——**不得仅凭 disabled-Start 认定 RUNNING** | 11,26 |
 | `M-CO-02` | completion | RUNNING 由 marker 证实但时长 < `MIN_RUNNING_EVIDENCE_MS` | 判 `RUNNING_TOO_SHORT`，不计数 | 11 |
-| `M-CO-03` | completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **终态待 DP-3 决定**：选 A → B 若因果链完整则计入，并触发 INV-26 审计（已知上限）；选 B → 两者均不计入可信配额。**DP-3 未决前本行标注 `deferred:DP-3`**（可触达、有 owner 与入口，只是预期终态待定；**不是** `not-testable`），不得写成"至多一条可信 ledger" | 10,11,26 |
+| `M-CO-03` | completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **终态已定（DP-3 = A）**：attempt B 若因果链完整则**计入**，并触发 INV-26 去重审计。这是 A 的已知上限之一，按 §8.6.5 写明、按 §21 DP-3 兑现条件第 3 条向 operator 呈现；**不得**写成"至多一条可信 ledger"。`deferred:DP-3` 标注**已解除** | 10,11,26 |
 | `M-CO-04` | completion | 两次**合法**运行产生完全相同分数 | 两次都必须计入——禁止按分数判重（upstream INV-7） | 26 |
 | `M-CO-05` | completion | 分数数值缺失回退到评级词，同一结果跨轮给出不同键 | 不得据此判为两次运行 | 26 |
 | `M-CO-06` | completion | 设备上完全不出现 running marker 文本 | 全部判未验证并显式告警；**不得回退到 disabled-Start 弱信号** | 11 |
@@ -1541,13 +1574,16 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
     "rowId": "M-CO-03",
     "exactHead": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
     "lane": "auto-unit",
-    "status": "deferred",
-    "deferredOn": "DP-3"
+    "status": "passed",
+    "testId": "com.example.cellrebelauto.matrix.CompletionMatrixTest#M_CO_03",
+    "reportDigest": "b1946ac92492d2347c6235b4d2611184b1946ac92492d2347c6235b4d2611184"
   }
 ]
 ```
 
-上面是**两条真实可解析的实例**（一条 `passed`、一条 `deferred`），不是带注释的示意——载体必须能被 verifier 直接 `JSON.parse`，因此**不含注释、不含联合类型占位、不含互斥字段并存**。字段的取值域与逐 status 必填性由下方表格规定，**表是规范，实例只是样例**。
+**`deferred` 状态本身仍在 schema 内**，供将来出现新的待决 DP 时使用；但自 DP-3 由 operator 决定（§21.0）起，**当前没有任何行处于 `deferred`**——`M-CO-03` 的 `deferredOn: "DP-3"` 已解除，上面的实例相应改为 `passed` 形态。"只要存在 deferred 记录最终 gate 一律失败"这条规则不变。
+
+上面是**两条真实可解析的实例**，不是带注释的示意——载体必须能被 verifier 直接 `JSON.parse`，因此**不含注释、不含联合类型占位、不含互斥字段并存**。字段的取值域与逐 status 必填性由下方表格规定，**表是规范，实例只是样例**。
 
 - **容器与产出位置（冻结）**：清单是一个 JSON **数组**。**每条 lane 各自产出自己的片段，不共写一个文件**（否则会跨 owner 写入，违反 owner matrix）：
 
@@ -1697,15 +1733,26 @@ fakexxx/
 - Import: `apps/cellrebel-auto/**`
 - Import: `apps/qianwangyou/**`
 
-**RED:** 在空目标路径运行 `scripts/check-provenance.sh`，必须因两个 app 未导入和 SHA 未登记失败。
+**RED:** 在空目标路径运行 `scripts/check-provenance.sh --stage import`，必须因两个 app 未导入和 SHA 未登记失败。
 
 **GREEN:** 只从远端精确 SHA subtree 导入；记录源 URL、branch、SHA、导入 commit。不得读取本机脏 worktree 作为拷贝源。
 
 **Verify:**
 
 ```bash
-./scripts/check-provenance.sh
+./scripts/check-provenance.sh --stage import
 ```
+
+**`--stage` 是必填的，没有默认值**（PR-1 实现如此）。原因是两种默认都有害：默认严格会让 PR-2/3/4 里第一次**合法**修改 app 源码就永久性地让 CI 变红；默认宽松则会静默丢掉 PR-1 最强的那条检查（当前 HEAD 树仍与上游逐字节相同）。因此由调用方声明 stage：
+
+| stage | 检查内容 |
+|---|---|
+| `import` | 全部检查 + **当前 HEAD 树仍与上游 root tree 逐字节相同** |
+| `contract` / `full` | 记录的 import commit 仍携带上游 root tree（**不可变锚点，任何 stage 都查**），但允许 app 树在其后合法演进 |
+
+CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；当它们**合法**开始分叉时，移动的就是那一行。
+
+> 本节此前写的是不带 `--stage` 的裸命令。那条命令在 PR-1 的实现下会 `exit 1`（`--stage is required`）——**真相源记录了一条必然失败的验证命令**。此处更正；教训与 §0.1.3 第 1 项同类：改了一条被下游引用的契约，必须回头扫全部引用点。
 
 checker 必须做**有证明力**的核对，逐项 exit-code 化：
 
@@ -2042,7 +2089,7 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-03 | 私有鉴权版本化 v1 discover/preflight/apply/observe/release 可用 | INV-02,03,04；contract tests |
 | AC-04 | 只有独立验证 System Mock 进入可信配额 | INV-05,06；TrustPolicy matrix |
 | AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09,25,27；continuity matrix + 多进程 bump matrix + §18.1 上限 |
-| AC-06 | crash/retry 下外部执行可重跑、可信配额最多增加一次。**跨 attempt 的兑现强度取决于 §21 DP-3 的 operator 处置**：选 A 则本条按"每 attemptId 最多一次 + §8.6.5 上限 + INV-26 审计"验收；选 B 则 UI-only 完成不进可信配额，本条对 CellRebel 完成恒为空集通过。**DP-3 未决前本条不得标记通过** | INV-10,11,12,13,15,26；crash matrix + DP-3 选定后的基线测试 |
+| AC-06 | crash/retry 下外部执行可重跑、可信配额最多增加一次。**按 §21 DP-3 = A 验收**：每 `attemptId` 最多一次 + §8.6.5 上限 + INV-26 审计。**外加一条不可省略的验收项**：§8.6.5 的上限已进入用户可见计数语义（运行页 / 历史页 / 导出三处），只写在文档里不算通过——这是 A 与"假装 A"的分界线 | INV-10,11,12,13,15,26；crash matrix + `READY` 基线测试 + 上限呈现的 UI/导出测试 |
 | AC-07 | `CellRebelCompletionEvidenceV1` 五值判定正确，旧结果/弱证据/过短 RUNNING 均不计新完成 | INV-11,12,26；completion matrix + device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
@@ -2084,19 +2131,36 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 没有需要 operator 拍板的技术 A/B 题——技术项已给出 exact schema、digest 算法、容差与 API 24–27 语义。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
 
-**三件价值取舍待 operator 决定（§21）。它们的阻塞范围各不相同，下表是唯一权威，任何入口读到的答案必须与此一致：**
+**三件价值取舍已由 operator 决定（§21 记录逐字原文）。下表是唯一权威，任何入口读到的答案必须与此一致：**
 
-| DP | 主题 | 阻塞 PR-1 identity 冻结 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
-|---|---|---|---|---|
-| DP-1 | 千网游 release signer 迁移 | 否 | 否 | **是**（决定 Task 9 的签名轮转项能否产生阳性用例） |
-| DP-2 | Auto 最终 `applicationId` | **是**——改名必须在 PR-1 完成，**不得晚于 contract 冻结**（`PairingRecord`/`ProviderPairingRecord` 主键含 applicationId） | 间接：未决则 contract 不应冻结 | 是 |
-| **DP-3** | CellRebel 可信完成的安全边界 | 否 | **是——直接停工门。#3/#4/#5/#6 全部停止** | 是 |
+| DP | 主题 | 决定 | 阻塞 PR-1 identity 冻结 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
+|---|---|---|---|---|---|
+| DP-1 | 千网游 release signer 迁移 | **B 受控迁移** | 否 | 否 | 否——但 signer cutover 本身**必须**在 DP-1 前置门（export/restore + custody + rollback）完成后才执行 |
+| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **是**——改名必须在 PR-1 完成，**不得晚于 contract 冻结**（`PairingRecord`/`ProviderPairingRecord` 主键含 applicationId） | 已解除 | 否——但 cutover 受 `INV-29` 数据连续性硬门约束 |
+| DP-3 | CellRebel 可信完成的安全边界 | **A 接受 UI 证据 + 写明上限** | 否 | **已解除。#3/#4/#5/#6 恢复** | 否 |
 
-**因此本文当前不是可开工的冻结基线**（与顶部告示一致）。此前"两件、均不阻塞 contract 冻结"的表述已被本表取代——那句话与同一 HEAD 的顶部告示和 DP-3 直接矛盾，会让实现者从 §20 合法推出相反结论。
+**因此本文现在是可开工的冻结实施基线**（与顶部告示一致）。
+
+仍然开放、但**不属于 operator 价值取舍**的技术项：无。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置仍是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
 
 ## 21. operator Decision Packets
 
 以下**三项**是价值取舍，不是技术 A/B；猫猫不自行决定，也不在 doc/代码 PR 中擅自执行。各自的阻塞范围见 §20 的表（那张表是唯一权威）。
+
+### 21.0 operator 决定（逐字记录，唯一权威来源）
+
+来源：主 Thread `thread_mslrf4eshkwf1nvu` 消息 `0001786310399153-001347-114fff25`，`2026-08-09T21:19:59Z`。原文逐字：
+
+```text
+我选了：B 受控迁移 release key（DP-1 · 千网游 release signer）
+B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 applicationId）
+我选了：A 接受 UI 证据并写明上限（建议）（DP-3 · CellRebel 可信完成边界）
+我选了：Raw-green；Opus5 串行清债（建议）（23 条 inherited lint）
+我选了：现在复制 + SHA-256，原件不动（建议）（87 份单机验收工件）
+我选了：先落 DP + --stage import 到 #12，再窄审/合入（PR 顺序）
+```
+
+**逐字执行规则**：`come.xx.fakeaauto` 是 operator 在自由文本框中键入的字面值。它在语法上合法（三段、均以字母开头、纯字母数字，见 §21.1），因此不构成"可复现的 Android/签名硬冲突"。实现者**不得**将其推断纠错为 `com.…` 或 `…fakeauto`。若 operator 后续更正该值，走一次显式修订，不得由实现者代为判断。
 
 ### DP-1 · 千网游 release signer 迁移策略
 
@@ -2107,18 +2171,88 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | A 保持现状 | 现有 profile 数据连续性不受影响；无迁移成本 | 无强 release identity；仅"production key 原位轮转"这一条真机场景标为 not-testable（签名拒绝/重配对语义仍可用受控测试 key 与注入 fixture 覆盖） |
 | B 迁移到受控 release key | 强 release identity；signer 轮转可验收；debug/release 可区分 | 一次性 uninstall 或数据迁移；操作不当会重演 profile 丢失 |
 
-**需要 operator 回答**：是否接受“A+ 首版不具备强 release identity”，还是承担一次受控迁移。选 B 时必须先有 profile 导出/恢复方案，不能裸迁。
+**operator 决定：B — 受控迁移到受控 release key。**
+
+**"受控"是硬门，不是修饰词。** 下列三项必须**全部**先于任何 signer cutover 完成，否则不得执行迁移：
+
+| 前置门 | 内容 | 完成判据 |
+|---|---|---|
+| G1 · profile export/restore | 千网游 profile 的导出与回灌路径，覆盖 operator 现有全部 profile | 在一台设备上完成 export → 卸载 → 重装 → restore，逐条比对数量与内容摘要 |
+| G2 · release-key custody | 新 release key 的生成、保管与访问边界 | key 与口令**只**存在于 operator 控制的密钥保管处；**不得**写入本仓库、CI secret 以外的任何位置、任何日志或任何猫的上下文 |
+| G3 · rollback | 迁移失败时回到旧 signer 的可执行路径 | 旧 keystore 与旧 APK 已归档且可复原；回滚步骤经过一次演练 |
+
+上游注释记录：现在这把稳定 key **已经挽救过一次 operator 全部 profile 的丢失**。G1 存在的唯一目的就是不让这件事以另一种形式重演。
+
+**Task 9 影响**：迁移完成后，"production key 原位轮转"从 not-testable 转为可验收，§6.5.2 中据此标注的范围随之收窄；在迁移完成前，该标注继续有效。
 
 ### DP-2 · Auto 最终 applicationId
 
 **背景**：Auto 当前 `applicationId = com.example.cellrebelauto`，是脚手架默认命名空间。配对记录以 `(applicationId, signerDigest)` 为主键。
 
+**成本框定修订（本版更正上一版）**：上一版把 B 的代价写成"作废全部既有 `PairingRecord`，需重新配对"。经只读核验，该代价**当前为零**——实现树中不存在 `PairingRecord` / `ProviderPairingRecord` 的 entity 或 store，它们仍是待实现的 spec surface（#4 / #5 未开工）。把注意力放在一个当前为零的代价上，会掩盖真正非零的那个。
+
+**真正非零的代价是既有用户可见状态被搁浅**，一手依据：
+
+| 事实 | 一手来源 |
+|---|---|
+| `applicationId` 是设备上 App 的唯一身份，改 ID 即另一个 App | `developer.android.com/build/configure-app-module` |
+| app-specific storage 按 App 隔离；Auto 现网 `AppDatabase version=4` 含 plan / task / attempt / result / session | `developer.android.com/training/data-storage/app-specific` |
+| Auto Backup 默认包含 `getDatabasePath()` 下的数据库，但按 App 私有域恢复；D2D 迁移只在**相同 package name + signing certificate** 之间成立 | `developer.android.com/identity/data/autobackup`、AOSP CDD 9.16 |
+| 由上可推：`com.example.cellrebelauto` 的备份**不能**自动恢复给新 ID | 明示推断，非一手断言 |
+| 现有 CSV 不是完整迁移通道：`AttemptCsvMapper` 只导出审计结果，`MainViewModel.importCsv` 只导入 worklist | repo exact HEAD |
+
+准确措辞：数据**不是被删除，是被搁浅在旧 App 的 sandbox 里**。地址可由 CSV 重建；历史结果与证据链没有回灌路径。
+
 | 选项 | 得到 | 付出 |
 |---|---|---|
-| A 冻结沿用 | 无 identity 断裂；PairingRecord 全部有效 | 长期携带 `com.example.` 占位命名空间 |
-| B 改名 | 干净的产品 identity | 形成新 App identity 与数据边界；**作废全部既有 PairingRecord**，需重新配对 |
+| A 冻结沿用 | 无 identity 断裂；现有 v4 用户状态原地存活 | 长期携带 `com.example.` 占位命名空间 |
+| B 改名 | 干净的产品 identity；且现在改是最便宜的时刻（pairing 尚未落地） | 形成新 App identity 与数据边界；**既有 v4 用户状态会被留在旧 sandbox**，除非先完成迁移桥 |
 
-**需要 operator 回答**：二选一并冻结。**默认不等于必须改名**——但也不能不做决定就进真机验收，因为改名越晚代价越大。改名若发生，必须在 PR-1 完成，不得晚于 contract 冻结。
+**operator 决定：B — 现在改名，最终值逐字为 `come.xx.fakeaauto`。**
+
+该决定**不撤销**上述数据风险，而是给它配一道硬门：见 `INV-29`。直接改 ID 而不迁移，等价于把 operator 的历史留在不可访问的旧 sandbox，与 §7.1 的"用户状态默认持久化"和 INV-24 的立场直接冲突，**不予放行**。
+
+**范围边界（冻结，防止过度改名）**：本决定改的是 **`applicationId`，且仅此一项**。
+
+| 项 | 变更 | 理由 |
+|---|---|---|
+| `applicationId` | `com.example.cellrebelauto` → `come.xx.fakeaauto` | operator 决定；它是设备上的 App 身份，也是配对主键的组成部分 |
+| Gradle `namespace` / Kotlin 包路径 / 测试 id（`com.example.cellrebelauto.**`） | **不变** | 它们是**编译期命名空间**，不参与设备身份，也不进 `PairingRecord`。改动它们会波及全部源文件与 §10.1 manifest 里每一条 `testId`，属于与本决定无关的大范围重构 |
+
+实现者**不得**因为"看起来该一起改"而顺手重命名 namespace 或包路径。若将来确需统一，那是一次独立的重构决定。
+
+时间窗不变：改名必须在 PR-1 完成，不得晚于 contract 冻结（`PairingRecord` / `ProviderPairingRecord` 主键含 applicationId）。PR-1 因此产生新 HEAD，需独立复审。
+
+#### 21.1 `come.xx.fakeaauto` 的合法性核验（为什么不触发退回通道）
+
+该值形态非常规，因此在落盘前独立核验过，避免"看着像笔误"被当成技术理由绕过 operator 的决定：
+
+| 检查 | 结果 |
+|---|---|
+| 段数 ≥ 2 | 3 段：`come` / `xx` / `fakeaauto` ✅ |
+| 每段以字母开头 | ✅ |
+| 仅 `[A-Za-z0-9_]` | ✅ |
+| 任一段是 Java 关键字 | 否 ✅ |
+
+结论：**语法完全合法**，不构成"可复现的 Android/签名硬冲突"，因此不满足退回主 Thread 的条件。实现者按 §21.0 逐字执行。
+
+若 operator 本意是 `com.…` 或 `…fakeauto`，那是一次**值的更正**，须由 operator 显式提出并走一次修订；实现者不得代为判断，也不得因为"看起来更像"就改。本节存在的目的就是把这条边界写死：**形态可疑不等于技术冲突。**
+
+#### 21.2 其余三项 operator 决定的落实口径
+
+§21.0 第 4–6 条不是 DP，但同样是 operator 拍板，且各自改变了某个门的终态定义：
+
+**(4) inherited lint = raw-green 终态门，Opus5 串行清债。**
+`apps/qianwangyou` 在冻结基线上带 23 个 lint error（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）；两个上游仓都没有任何 CI，所以 `lintDebug` 从未被当作门跑过。终态要求是 **`lintDebug` 真正 exit 0**，不是"债务没增长"。因此：
+
+- `scripts/check-inherited-lint-debt.sh` 的 ratchet **降级为中间证据**，不再是终态门；它继续防止债务增长，但 raw-green 达成后应随之退役。
+- 清债由 Opus5 **串行**进行（不与 Kimi 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败，届时按上表把 CI 那一行移到 `--stage contract`，这是合法分叉而非绕过。
+
+**(5) 87 份单机验收工件：现在复制 + SHA-256，原件不动。**
+由 Sol 的验收线执行：复制 + 逐份 SHA-256 登记，**不动原件**，本次**不公开提交可能含 UI 内容的工件**。Opus5 不触碰这批文件。
+
+**(6) PR 顺序：先落 DP + `--stage import` 到 #12，再窄审 / 合入。**
+即本次 delta。#12 是 #10 identity / contract 与后续 #11 / #4 / #5 / #6 的决策真相源，因此决策必须先在此落盘并形成新 exact HEAD；**旧 `05debb8b` 的双路 APPROVE 随 HEAD 改变自动失效**，需要重新窄审。
 
 ### DP-3 · CellRebel 可信完成的安全边界（阻塞 contract 消费方）
 
@@ -2143,12 +2277,40 @@ READY → 持续 marker / 重渲 → 旧结果 X
 | 付出 | 保留一个**不可消除**的残余窗口：CellRebel 在 marker 显示期间重渲旧结果仍会被计入 | **今天不存在这样的证据源**，因此可信配额实际恒为 0；产品退化为"记录运行数 + 全部未验证"，`requiredSuccesses` 这一概念需要重新定义 |
 | 对现有资产的影响 | Task 4/5/7/9 与 AC-01/04/06/07 按现状推进 | 需重新定义 A+ 的完成定义、UI 文案与导出语义；B/C 演进门也要重写 |
 
-**需要 operator 回答**：A 还是 B。
+**operator 决定：A — 接受 UI 完成证据，并写明上限。**
+
+**A 的兑现条件（缺一即不算落实 A）**：
+
+1. §8.6.3 的完整因果链成立才计入可信配额；`READY` 基线作为 mitigation 保留。
+2. INV-11 按"每 `attemptId` 至多一次"兑现，跨 attempt 上限**写明**并由 INV-26 审计。
+3. **上限必须进入用户可见的计数语义**——运行页、历史页、导出三处都要让读到"可信次数"的人看得到它的含义边界，**不得只写在本文或 README 里**。一个带着看不见前提的数字，在被读到的地方就是在撒谎。
+
+第 3 条是 A 与"假装 A"的分界线，因此它是 `AC-06` 的验收项，不是文案建议。
 
 这不是技术 A/B——两条都能实现。差别是：**A 承认"可信"这个词在本产品里带一个写明的上限；B 坚持这个词的字面含义，代价是它今天拿不到。** 若选 B 又希望产品仍可用，真正的出路是引入独立完成证据源（CellRebel 侧导出、结果行标识、或网络侧独立测量），那属于新的能力需求，不在 A+ 范围内。
 
-**在 operator 明确处置前**：INV-11 保持冻结基线的严格表述，§8.6.5 的上限描述不生效为产品承诺，`M-CO-03` 终态标记为 DP-3 未决，AC-06 不得标记通过，**contract 消费方（#3/#4/#5/#6）全部保持停止**。猫不得以任何 review 通过为由推进。
+**处置已落定（A）**：INV-11 按 A 的兑现口径生效，§8.6.5 的上限成为**已接受并须公开呈现**的产品语义（不是被消除），`M-CO-03` 终态确定，AC-06 可按 A 验收，**contract 消费方（#3/#4/#5/#6）解除停止**。
 
-**选定后需同步的锚点（穷举，缺一即视为未完成）**：§8.6.3（基线与判定规则）· §8.6.5（上限措辞）· INV-11 · `M-CO-03` 终态与 `deferred:DP-3` 标注 · §10.1 manifest 中该行的 `deferred` 记录 · AC-06 · **§20 阻塞范围表** · 文档顶部未冻结告示 · **GitHub #6 覆盖措辞** · **GitHub #7 durable body** · PR #12 body。
+选 A 不等于风险消失。§8.6.1 的实测（见下）表明：可信计数的归属依据是**时序因果链**，不是结果内容——因为内容不携带任何区分信息。这正是第 3 条兑现条件（上限进入用户可见语义）不可省略的原因。
+
+**选定后需同步的锚点（穷举，缺一即视为未完成）** — 本次 delta 的落实状态：
+
+| # | 锚点 | 状态 |
+|---|---|---|
+| 1 | §8.6.1 事实认定（补实测 provenance） | ✅ 本 delta |
+| 2 | §8.6.3 基线与判定规则 | ✅ 已核对：五条规则在 A 下**原样成立**，本 delta 无需改动（`READY` 基线本就是两选项共用的 mitigation） |
+| 3 | §8.6.5 上限措辞 | ✅ 本 delta |
+| 4 | INV-11 | ✅ 本 delta |
+| 5 | `M-CO-03` 终态与 `deferred:DP-3` 标注 | ✅ 本 delta |
+| 6 | §10.1 manifest 中该行的 `deferred` 记录 | ✅ 本 delta |
+| 7 | AC-06 | ✅ 本 delta |
+| 8 | §20 阻塞范围表 | ✅ 本 delta |
+| 9 | 文档顶部告示 + frontmatter `status` | ✅ 本 delta |
+| 10 | §21 三份 packet 的决定记录 | ✅ 本 delta |
+| 11 | GitHub #6 覆盖措辞 | ⬜ 随本 PR 的 issue 同步动作 |
+| 12 | GitHub #7 durable body | ⬜ 随本 PR 的 issue 同步动作 |
+| 13 | PR #12 body | ⬜ 随本 PR 推送后更新 |
+
+第 11–13 项在仓外，落实动作与证据记录在 PR #12 的回报里；**在它们完成前，DP-3 不算全部落地**。
 
 前两轮的漏改都出在"改了结论却没枚举引用点"，因此本清单是穷举式的：**任一条未同步，DP-3 就不算落地**。
