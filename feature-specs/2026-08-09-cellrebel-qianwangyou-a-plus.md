@@ -76,6 +76,7 @@ source_threads:
 | v1.7 | PR-0.2 第三轮 | behavioral-delta 对 `7e1fa20` 的 `REQUEST_CHANGES`，见 §0.1.7 |
 | v1.8 | PR-0.2 第四轮 | Sol + GLM 双路绑定 `ecfb322e` 的 `REQUEST_CHANGES`，见 §0.1.8 |
 | v1.9 | PR-0.2 第五轮 | acceptance 对 `ad70a625` 的 `REQUEST_CHANGES`，见 §0.1.9 |
+| v1.10 | PR-0.2 第六轮 | acceptance 对 `520cc846` 的 `REQUEST_CHANGES`，见 §0.1.10 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -233,6 +234,18 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 第 1 项是 lease 机器里**同一种"出口不可达"的第三次**：`STALE_LEASE` 挡住 `EXPIRED→RELEASING`（v1.6 修）、撤销后要求失权 caller 去 release（v1.7 修）、恢复把 `REVOKED` 改写成出口不可达的 `EXPIRED`（本轮修）。三次的共同形状是：**我在定义"某状态如何离开"时只看该状态本身，没有检查有没有别的规则会把它改写成另一个状态**。
 
 因此本轮不只修实例，还把判据写进 §8.4：**恢复不得改变任何状态的出口可达性**——任何会重写 lease 状态的规则，都必须先确认目标状态的出口对当前授权主体仍然可达。这条比"再修一个 case"更值得留在文档里。
+
+#### 0.1.10 acceptance 第六轮修订（v1.10）
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **[P1]** §8.4 的 state-aware 分流表写对了，但**编码这条规则的矩阵行没跟着改**：`M-LS-07` 仍写"非 `RELEASED` lease"、`M-LS-12/13/14` 未限定状态，于是 `REVOKED` + restart 会同时命中 `M-LS-07/12`（→`RELEASE_INCOMPLETE`/`EXPIRED`）与 `M-LS-15`（→保持 `REVOKED`），预期终态互相冲突 | 四行谓词全部收窄到具体状态集：`M-LS-07/12/13` 限 `{ACQUIRING, ACTIVE}`，`M-LS-14` 限 `ACTIVE`，并各自写明"不适用于其他状态"及去向；`M-LS-15/16` 明确要求干净性可证与不可证**两种都测** |
+| 2 | **[P2]** §10.1 标为 `json` 的载体含注释、联合类型占位与互斥字段并存，**不是 verifier 能 `JSON.parse` 的实例**；PR body 仍是旧六字段 | 换成**两条真实可解析实例**（`passed` + `deferred`），并冻结容器形态与**逐 lane 的产出路径**（各 lane 写各自片段，不共写一个文件，避免跨 owner 写入）；同一 `rowId` 出现在多个片段即冲突失败；PR body 同步 |
+| 3 | 作者自查（Sol 未提）：§8.4"任何跨越 generation 断裂的在飞 attempt 都已不可能满足可信谓词"——前提带条件"连续性不可证"，结论却丢了条件 | 补全三步推导，并说明条件为何恒成立（observer 随 owner 进程销毁，重订阅必然制造不可证间隙）；同时写明若将来观察源移出 owner 进程，该论证必须重做 |
+
+**第 1 项是同一种传播病的第六次**，而且这次特别值得记：§8.4 的分流表**里面就引用了 `M-LS-07` 与 `M-LS-12`**——我做了从规则指向行的单向引用，却没有反过来更新行本身。
+
+这暴露了四张映射的真实边界：**集合相等、列数、编号连续这些机械校验只能证明"存在"，证明不了"语义一致"**。规则改了而编码它的行没改，所有机械检查依然全绿。目前唯一的对策是像 DP-3 那样写穷举式同步清单，但它靠人执行，仍会漏。**若要根治，需要让每条规则与它的矩阵行之间存在可被构建校验的双向绑定**——本 spec 暂不引入该机制，此处如实记录为已知残留风险，不假装已解决。
 
 ## 1. 事实基线与来源
 
@@ -1122,7 +1135,13 @@ generation 变化 ⊇ 时钟纪元变化
 
 **用 owner generation 作载体是可证充分的**——它不会漏掉任何一次单调值失效。因此 `EnvironmentLease` 冻结新字段 `applyOwnerGeneration`（apply 受理时的 `EnvironmentRevisionState` generation），并冻结判定：`applyOwnerGeneration ≠ 当前 generation` → `deadlineElapsedRealtimeMs` 不可比 → **按 `EXPIRED` 处理**。
 
-**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**接受这个 false-red，因为它不会丢失任何"本还能计数"的工作**——§6.6 L6 已规定 generation 断裂且连续性不可证时必须 bump revision + 降级 coverage，而 §6.4 的可信谓词要求 `pre.revision == post.revision` 且两侧 coverage 为 `FULL`。**任何跨越 generation 断裂的在飞 attempt 都已不可能再满足可信谓词**。代价不是零：它确实多一次 release + 重新 acquire 的往返，属于**可用性成本**；准确的说法是"不损失可信计数"，不是"不损失任何东西"。
+**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**接受这个 false-red，因为它不会丢失任何"本还能计数"的工作。** 完整推导（前一版只写了结论，条件被悄悄丢掉，此处补全）：
+
+1. §6.6 L6 规定 generation 断裂**且连续性不可证**时必须 bump revision + 降级 coverage——注意这是**带条件**的。
+2. 该条件在 owner 进程重启时**恒成立**：连续性事件源（observer）随 owner 进程一同销毁并需重新订阅，而 §6.6 已冻结"重订阅、失效或任何不可证明的间隙都必须 bump + 降级"。**owner 进程重启必然制造一段不可证明的观察间隙**，因此 L6 必然触发。
+3. §6.4 的可信谓词要求 `pre.revision == post.revision` 且两侧 coverage 为 `FULL`；L6 触发后两者都不再成立。
+
+结论才成立：**任何跨越 generation 断裂的在飞 attempt 都已不可能再满足可信谓词**。若将来 qwy 能证明观察窗跨进程重启连续（例如观察源移出 owner 进程），第 2 步失效，本论证必须重做，届时载体选择也要重新评估。代价不是零：它确实多一次 release + 重新 acquire 的往返，属于**可用性成本**；准确的说法是"不损失可信计数"，不是"不损失任何东西"。
 
 **恢复必须是 state-aware 的（消解 `M-LS-07`/`M-LS-12` 重叠，且不制造新的不可达）**：把"对每个非 `RELEASED` lease 一律套用同一套规则"是**错的**——它会把一个出口已经确定的状态改写成一个出口对当前调用方不可达的状态。
 
@@ -1332,15 +1351,15 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-LS-09` | lease | 被撤销的 caller 尝试 `release` 一个 `REVOKED` lease | `CALLER_NOT_ALLOWED`；**不得**为其保留任何 post-revoke 能力 | 2,28 |
 | `M-LS-10` | lease | apply 之后系统墙钟前跳/后跳数小时 | `EXPIRED` 触发时刻不变（只由 `deadlineElapsedRealtimeMs` 决定） | 28 |
 | `M-LS-11` | lease | `deadlineEpochMs ≤ nowEpoch` 的 apply | 立即到期，不得因负数绕回变成超长 lease | 28 |
-| `M-LS-12` | lease | qwy 重启后 `applyOwnerGeneration ≠ 当前 generation`，且环境干净性**可证** | `EXPIRED`（原 caller 可 `release` 收敛）。优先级低于 `M-LS-07`，见 §8.4 | 25,28 |
-| `M-LS-13` | lease | **设备 reboot** 后单调时钟纪元改变 | 必然伴随 generation 变化，故被 `M-LS-12` 覆盖；断言绝对 `deadlineElapsedRealtimeMs` **不得**被原值裸比较 | 25,28 |
-| `M-LS-14` | lease | 普通进程重启（未 reboot，时钟仍可比）下的 `ACTIVE` lease | 仍强制 `EXPIRED`——明示的 false-red 策略，非意外 | 25,28 |
-| `M-LS-15` | lease | **`REVOKED` lease + qwy 重启 + 干净性可证** | **必须保持 `REVOKED`**，qwy 内部自清理仍可达；**不得**被通用 generation 规则改写成 `EXPIRED`（那会让出口对已失权的 caller 不可达） | 2,25,28 |
-| `M-LS-16` | lease | `RELEASE_INCOMPLETE` lease + qwy 重启 | 原样保留，仍要求 operator 人工恢复证据；不得被改写 | 21,25,28 |
+| `M-LS-12` | lease | **状态 ∈ {`ACQUIRING`,`ACTIVE`}** + qwy 重启 + 干净性**可证** + `applyOwnerGeneration ≠ 当前 generation` | `EXPIRED`（原 caller 可 `release` 收敛）。**不适用于其他状态**——`REVOKED`/`RELEASE_INCOMPLETE` 见 `M-LS-15/16`，`RELEASING` 见 `M-LS-17` | 25,28 |
+| `M-LS-13` | lease | **状态 ∈ {`ACQUIRING`,`ACTIVE`}** + **设备 reboot** 后单调时钟纪元改变 | 必然伴随 generation 变化，故落入 `M-LS-12` 的同一判定；断言绝对 `deadlineElapsedRealtimeMs` **不得**被原值裸比较 | 25,28 |
+| `M-LS-14` | lease | **状态 = `ACTIVE`** + 普通进程重启（未 reboot、时钟仍可比）+ 干净性**可证** | 仍强制 `EXPIRED`——明示的 false-red 策略，非意外 | 25,28 |
+| `M-LS-15` | lease | **状态 = `REVOKED`** + qwy 重启 + 干净性**可证或不可证（两种都测）** | **必须保持 `REVOKED`**，qwy 内部自清理仍可达；**不得**被 `M-LS-07`/`M-LS-12` 的规则改写（那会让出口对已失权的 caller 不可达） | 2,25,28 |
+| `M-LS-16` | lease | **状态 = `RELEASE_INCOMPLETE`** + qwy 重启 + 干净性**可证或不可证（两种都测）** | 原样保留，仍要求 operator 人工恢复证据；不得被改写 | 21,25,28 |
 | `M-LS-17` | lease | `RELEASING` lease + qwy 重启 | 幂等重放 release；无法证明清理完成 → `RELEASE_INCOMPLETE` | 13,21,28 |
 | `M-LS-05` | lease | 同 caller 同 `idempotencyKey` 重放 `apply` | 幂等返回原 receipt，不冲突 | 13,28 |
 | `M-LS-06` | lease | 同 caller 不同 key/不同 intentHash 再 `apply` | `LEASE_CONFLICT` | 16,28 |
-| `M-LS-07` | lease | qwy 重启后非 `RELEASED` lease，且环境干净性**不可证** | 从持久态重建 → `RELEASE_INCOMPLETE` + bump/降级。**优先于 `M-LS-12`**（§8.4 优先级 1） | 25,28 |
+| `M-LS-07` | lease | **状态 ∈ {`ACQUIRING`,`ACTIVE`}** + qwy 重启 + 环境干净性**不可证** | 从持久态重建 → `RELEASE_INCOMPLETE` + bump/降级。**不适用于其他状态**：`REVOKED`/`RELEASE_INCOMPLETE` 无论干净性可否证都原样保留（`M-LS-15/16`），`RELEASING` 走 `M-LS-17` | 25,28 |
 | `M-ID-01` | idempotency | 同 `idempotencyKey` 异 payload | `IDEMPOTENCY_CONFLICT`（不得复用 `LEASE_CONFLICT`） | 13 |
 | `M-ID-02` | idempotency | 同一请求换 `operationId` 重试 | **不得**冲突——`operationId` 不在 §6.3.4 preimage 内 | 13 |
 | `M-ID-03` | idempotency | 构造使 `apply` 与 `release` 字段字节序列相同的输入 | domain separation 使两者 digest 不同 | 13 |
@@ -1478,15 +1497,38 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 **evidence manifest（冻结载体）**：上面第 2 条不能停在"从 JUnit XML 提取"——`static-guard` 不产 JUnit，`device` 的 markdown 存在也不证明执行过，且 `M-CR-01` 与方法名里的 `M_CR_01` 需要规范化。因此每条 lane 在跑完后必须产出一份机器可读清单，`verify-a-plus.sh` 只消费它：
 
 ```json
-{ "rowId":       "M-CR-01",
-  "exactHead":   "<40-hex>",
-  "lane":        "auto-unit|qwy-unit|acceptance|static-guard|device",
-  "status":      "passed|failed|skipped|deferred",
-  "testId":      "<完全限定用例或检查项标识>",   // status != deferred 时必填
-  "reportDigest":"<sha256 of source report>",  // status != deferred 时必填
-  "deferredOn":  "DP-3" }                      // status == deferred 时必填，其余 status 下必须缺省
+[
+  {
+    "rowId": "M-CR-01",
+    "exactHead": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "lane": "auto-unit",
+    "status": "passed",
+    "testId": "com.example.cellrebelauto.matrix.CrashMatrixTest#M_CR_01",
+    "reportDigest": "3f786850e387550fdab836ed7e6dc881de23001b3f786850e387550fdab836ed"
+  },
+  {
+    "rowId": "M-CO-03",
+    "exactHead": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+    "lane": "auto-unit",
+    "status": "deferred",
+    "deferredOn": "DP-3"
+  }
+]
 ```
 
+上面是**两条真实可解析的实例**（一条 `passed`、一条 `deferred`），不是带注释的示意——载体必须能被 verifier 直接 `JSON.parse`，因此**不含注释、不含联合类型占位、不含互斥字段并存**。字段的取值域与逐 status 必填性由下方表格规定，**表是规范，实例只是样例**。
+
+- **容器与产出位置（冻结）**：清单是一个 JSON **数组**。**每条 lane 各自产出自己的片段，不共写一个文件**（否则会跨 owner 写入，违反 owner matrix）：
+
+  | lane | 产出路径 |
+  |---|---|
+  | `auto-unit` | `apps/cellrebel-auto/app/build/matrix-evidence.json` |
+  | `qwy-unit` | `apps/qianwangyou/app/build/matrix-evidence.json` |
+  | `acceptance` | `acceptance/build/matrix-evidence.json` |
+  | `static-guard` | `acceptance/build/matrix-evidence-guard.json` |
+  | `device` | `docs/acceptance/matrix-evidence-device.json` |
+
+  `scripts/verify-a-plus.sh` 合并全部片段后再做三项校验；同一 `rowId` 在多个片段中出现即为冲突，直接失败（一行只有一个 owner，不该有两个 lane 声称覆盖它）。
 - **规范化**：`rowId` 一律用 §10 表的连字符形式；从测试方法名回推时把 `_` 归一为 `-` 后比对。
 - **HEAD 绑定**：每条 `exactHead` 必须等于被验的 PR HEAD；不等即 exit≠0，防止用旧跑的报告充数。
 - **status 与字段必填性（逐 status 冻结）**：
