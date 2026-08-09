@@ -77,6 +77,23 @@ v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做�
 
 v1.1 **未**改动的：A+/B/C 关系与触发门、A+ 首版范围与非目标、owner matrix 的人员划分、merge 权限、既有 INV-01..22 的语义。
 
+#### 0.1.1 平台事实 provenance
+
+v1.1 里凡是"因为 Android 平台如此，所以规则如此"的论证，都追到了一手来源；结论与来源同时记录，便于后续复核而不必重新调查：
+
+| 事实 | 结论 | 一手来源 |
+|---|---|---|
+| 显式 bind 是否受包可见性限制 | 受限。activity 的豁免不延伸到 service | `training/package-visibility`：“The limited visibility also affects explicit interactions with other apps, such as starting another app's service.” |
+| 反向（被调用方→调用方）可见性 | bind 后自动授予 | `training/package-visibility/automatic` 第 5 条：“Any app that starts or binds to a service in your app.”；AOSP `ActiveServices.bindServiceLocked` → `grantImplicitAccess` |
+| 该反向授权的存续期 | **无文档化保证**（AOSP 中为内存态） | 官方文档未规定；因此 §4.1 要求调用内快照，不做延迟反查 |
+| `SharedPreferences` 多进程 | 不支持；`MODE_MULTI_PROCESS` API 23 起弃用 | `reference/android/content/SharedPreferences`、`Context#MODE_MULTI_PROCESS` |
+| `DataStore` 多进程 | 1.1.0+ 有 `MultiProcessDataStoreFactory`，但只承诺 eventual consistency | `reference/kotlin/androidx/datastore/core/MultiProcessDataStoreFactory` |
+| Room/SQLite 多进程存储保证 | **无一手来源可引**；`enableMultiInstanceInvalidation()` 只管失效广播 | `reference/androidx/room/RoomDatabase.Builder` |
+| 跨进程共享可变状态的平台推荐 | `ContentProvider` | `Context#MODE_MULTI_PROCESS` 弃用说明 |
+| `@Parcelize` 枚举编码 | 按 `name` String（非 ordinal）；未知常量 `valueOf` 抛 `IllegalArgumentException` | kotlin-parcelize 编译器 `IrParcelSerializers.kt` 的 `IrEnumParcelSerializer`；`kotlinlang.org/docs/enum-classes` |
+
+未能取得一手确证的，一律写成"待 Task 2 核定"或直接不写，不用二手转述充当依据。
+
 ## 1. 事实基线与来源
 
 ### 1.1 新仓库
@@ -197,12 +214,14 @@ Gate 输出只能是 `stay-a-plus`、`promote-specific-controls-to-b` 或 `rejec
 次序为 **bind-first**：先由 Binder 证实调用方身份，再让 operator 授权。
 
 1. Auto 以显式 `ComponentName` bind 千网游的 `EnvironmentControlService` 并调用 `discover()`。
-2. 千网游按 `Binder.getCallingUid()` 解析调用方 applicationId、versionCode 与 signer SHA-256，落一条 `PendingPairingCandidate`，并向 Auto 返回 typed `NOT_PAIRED`。
+2. 千网游按 `Binder.getCallingUid()` 解析调用方 applicationId、versionCode 与 signer SHA-256，**在这次调用内把三者快照进 `PendingPairingCandidate`**，并向 Auto 返回 typed `NOT_PAIRED`。
 3. operator 在千网游的“自动测试协作”页看到**这条已由 Binder 证实的**候选记录；点允许后千网游持久化 `PairingRecord(applicationId, signerSha256, versionCode, approvedAt)`。
 4. Auto 重试 `discover()`，取得千网游版本、支持模式、profile/schedule、连续性覆盖等级。
 5. 未配对、签名变化、协议不兼容或千网游不可用时，Auto 停在预检页并给出可操作错误；不开始 CellRebel。
 
 **为什么是 bind-first 而不是先在 UI 里挑 App**：调用方身份必须来自 `Binder.getCallingUid()`（INV-02），UI 侧自行扫描包列表既是较弱的真相源，又要求千网游反向声明 `<queries>` 才能在 Android 11+ 看到 Auto。bind-first 让身份来自唯一可信来源，同时使反向 `<queries>` 不再是核心流程的结构性依赖。若将来产品需要“在任何 bind 发生之前就列出候选 Auto 安装”，那条路径才需要千网游侧 `<queries>`，届时单独评审。
+
+**为什么必须在调用内快照，而不是只存 UID 稍后再查**：Android 的双向可见性是**不对称**的。A→B 的显式 bind 需要 A 声明 `<queries>`（官方明确“The limited visibility also affects explicit interactions with other apps, such as starting another app's service”，activity 的豁免不延伸到 service）；B→A 则在 bind 发生时自动授予（“Any app that starts or binds to a service in your app”）。但**官方文档从未规定这个反向授权的存续期**——在 AOSP 里它是 PackageManager 的内存态，随包移除清理。因此千网游只能在“调用正在进行、授权确定有效”的窗口内完成解析并落快照；把 UID 存下来等 operator 稍后批准时再反查，可能拿到 `NameNotFoundException`，也可能撞上 UID 在卸载重装后被复用。快照的是身份三元组，不是 UID。
 
 ### 4.2 创建计划
 
@@ -327,7 +346,7 @@ enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DE
 规则：
 
 - 可信策略必须显式匹配 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`；禁止枚举顺序、`ordinal`、`>=` 或“非 NONE 即可信”。
-- **禁止把枚举本体交给 `@Parcelize` 自动编解码。** 自动编码把枚举身份绑定到常量集合本身，对端出现未知常量时会在 Binder transaction 内部抛出，得到的是 transport 崩溃而不是 INV-03 要求的 typed fail-closed。承载 `Int` + 显式 `fromWire()` 把 skew 变成可判定的业务错误。
+- **禁止把枚举本体交给 `@Parcelize` 自动编解码。** kotlin-parcelize 的 `IrEnumParcelSerializer` 写入 `Parcel.writeString(value.name)`、读出 `EnumClass.valueOf(readString())`。后果：重排常量顺序是 wire-safe 的（ordinal 不上线），但**改名是破坏性变更，新增常量会让旧读者抛 `IllegalArgumentException`**——异常从生成的 `createFromParcel` 抛出，表现为 unparcel 崩溃，而不是 INV-03 要求的 typed fail-closed。两个 App 独立发布、版本必然 skew（§10 version 行），所以自动编解码在本方案里不可用。承载 `Int` + 显式 `fromWire()` 把 skew 变成可判定的业务错误。
 - `fromWire()` 返回 `null` 时一律 fail-closed：可信路径直接判不可信，握手路径返回 `INCOMPATIBLE_PROTOCOL`。
 - v1 已分配的 wire code 永久不可回收、不可改语义；新增常量只能追加新 code，且必须先通过 §6.7 兼容矩阵。
 
@@ -524,6 +543,7 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 调用方身份**只以 `Binder.getCallingUid()` 为真相源**，永不取自请求参数。
 
 - 首次配对走 §4.1 的 bind-first 次序：Auto 先 bind 并调用，千网游按 UID 解析出调用方后落 `PendingPairingCandidate`，返回 typed `NOT_PAIRED`；配对 UI 展示的是这条已由 Binder 证实的记录，而不是 UI 侧自行扫描包列表的结果。
+- `PendingPairingCandidate` 与 `PairingRecord` 都必须**在 Binder 调用进行中完成身份解析并持久化快照**（applicationId + versionCode + signerDigest）。反向包可见性授权的存续期不是文档化契约，UID 也会在卸载重装后被复用，因此**禁止只存 UID 事后反查**；`PairingRecord` 的匹配是每次调用现场解析出的身份与已存快照比对，两侧都不依赖延迟查询。
 - 每次 Binder 调用按 UID 反查 package 与 signing certificate，和 `PairingRecord` 精确匹配。
 - `PairingRecord` 的主键是 `(applicationId, signerDigest)` 二元组。**production `name.caiyao.fakegps` 与 bench `name.caiyao.fakegps.bench` 是两个独立 applicationId，互不授权**：给 production 配的对不能让 bench 调用通过，反之亦然。
 - 包名相同但 signer 改变视为新调用方，必须重新配对。
@@ -555,8 +575,19 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 千网游至少存在三类进程上下文：主进程（UI/config/`MockProviderService`）、`:hook_verify`（`HookVerificationService`）、以及 Xposed 注入到被测 App 内的 hook 代码。`environmentRevision` 与 `continuityCoverage` 是跨这些上下文的共享可变状态，因此：
 
 - **单写者**：`EnvironmentRevisionState` 只有一个 owner 组件可写。其他进程一律通过 Binder/ContentProvider 请求 bump，**禁止任何进程直接写计数器**。
-- **禁止进程内 `Long` 或非多进程安全的持久化承载 revision**：单例内存计数器、`DataStore`、`SharedPreferences`（含 `MODE_MULTI_PROCESS`）都不满足跨进程原子性，会造成 bump 丢失——而丢失一次 bump 的表现恰好是"coverage 仍为 FULL 且 revision 未变"，即 INV-08/09 要防的那个假可信。
-- 自增必须落在单条持久化事务内完成（读-改-写不可分离），重启后单调性不依赖内存状态。
+- **承载物禁止清单**，每条都写明确切理由，不用"不安全"含混带过：
+
+  | 承载物 | 判定 | 一手依据 |
+  |---|---|---|
+  | 进程内单例 `Long` | 禁止 | 不跨进程，无需论证 |
+  | `SharedPreferences` | 禁止 | 官方：“This class does not support use across multiple processes.” `MODE_MULTI_PROCESS` 自 API 23 弃用，弃用说明明确“does not work reliably … Applications should not attempt to use it” |
+  | `DataStore`（默认 `SingleProcessDataStore`） | 禁止 | 同一文件混用单/多进程实现会破坏全部功能；同进程重复实例读写直接抛 `IllegalStateException` |
+  | `DataStore`（`MultiProcessDataStoreFactory`，1.1.0+） | **禁止用于 revision** | 它确实支持多进程——但 API reference 只承诺 “cross-process **eventual consistency**”。最终一致对配置读取够用，对“丢一次或迟到一次 bump 就等于假可信”的单调计数器不够 |
+  | Room / SQLite | 不得默认假定 | **没有任何一手来源**声明 SQLite/Room 在存储层是多进程安全的。`enableMultiInstanceInvalidation()` 只广播表失效，**不提供存储并发保证**，开启它不解决本问题 |
+  | `ContentProvider` | 平台层推荐路径 | `MODE_MULTI_PROCESS` 的官方弃用说明直接指向“an explicit cross-process data management approach such as `ContentProvider`”；千网游已有 `AppInfoProvider` 可参照其进程模型 |
+
+  丢一次 bump 的表现恰好是“coverage 仍为 FULL 且 revision 未变”，即 INV-08/09 要防的那个假可信——所以这里不接受“大概不会丢”。
+- 自增必须落在单条持久化事务内完成（读-改-写不可分离），重启后单调性不依赖内存状态。实现选型必须在 PR-3 给出**该选型为何提供强一致自增**的论证与并发测试，不能只声明“用了多进程方案”。
 - **进程代际**：owner 进程每次启动分配新的 generation id 并持久化。若无法证明与前代之间的观察窗连续，必须 bump revision 且把 coverage 降为 `PARTIAL/NONE`。
 - **有损事件源必须自我申报**：`PrefsDirectoryObserver` 一类 `FileObserver` 是可丢事件、可被回收的观察器，属于 §6.4 "观察器丢事件"类。其重订阅、失效或任何不可证明的间隙都必须 bump + 降级，不允许"没收到事件"被当作"没有变化"。
 
@@ -701,6 +732,8 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 | release | foreign/stale leaseId | 不清理环境，typed error | 14 |
 | version | 新 Auto + 旧 qwy / 旧 Auto + 新 qwy | 兼容则运行，不兼容则预检停止 | 3,19 |
 | version | 对端返回未知枚举 wire code | `fromWire` 返回 null → fail-closed，不得崩在 Binder transaction 内 | 3,4 |
+| pairing | operator 隔较长时间/重启后才批准 pending candidate | 用调用内落下的身份快照批准；不得因反向可见性授权已失效而失败或降级 | 2 |
+| pairing | Auto 卸载重装后 UID 被另一 App 复用 | 按 applicationId+signer 快照比对判为新调用方，不得凭 UID 直通 | 2 |
 | intent | apply 部分生效，有效坐标停在上一地址 | 意图绑定失败 → 未验证，不计数 | 23 |
 | intent | lease 复用但意图已切换，observation 仍返回旧 intent hash | `ENVIRONMENT_DRIFT`，不计数 | 23 |
 | intent | observation 的 `effectiveLat/Lng` 为 null | 不计数（不得因"其他条件都过"放行） | 23 |
