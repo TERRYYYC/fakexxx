@@ -21,7 +21,7 @@ source_threads:
 
 **Goal:** operator 导入地址与可信测试配额后，一键启动可恢复的无人值守批处理；系统只把能够独立复核、且前后环境连续性成立的 CellRebel 完成计入可信配额。
 
-**Acceptance Criteria:** AC-01..AC-12，见「验收标准与追踪」；每项都有对应不变量、测试和证据。
+**Acceptance Criteria:** AC-01..AC-14，见「验收标准与追踪」；每项都有对应不变量、测试和证据。
 
 **Architecture cell:** `fakexxx::android-dual-app-contract`（本仓的新 ownership cell，Phase 1 写入 `docs/architecture/ownership/README.md`）
 
@@ -49,6 +49,33 @@ source_threads:
 - B 是共享同一内核的受控高级配置演进线，不是另起炉灶。
 - C 只有在多消费者或平台需求出现后才进入候选；它复用同一执行原语和证据模型，不推倒 A+/B。
 - 单纯心跳只能证明进程仍活着，不能证明环境从未发生相关变化，禁止把心跳当连续性证据。
+
+### 0.1 修订记录
+
+| 版本 | 基线 | 内容 |
+|---|---|---|
+| v1 | `00a5e58` | 初始冻结 |
+| v1.1 | 本 PR-0.1 | contract v1 冻结**前**的实现者前置修订，见下 |
+
+v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
+
+| 项 | 变更 | 章节 |
+|---|---|---|
+| 意图绑定 | 新增 `EnvironmentObservationV1.acceptedIntentHash`、canonical digest 算法、坐标容差；可信谓词新增意图绑定段 | §6.3、§6.3.1、§6.4、INV-23、AC-13 |
+| DTO 补全 | 补齐 `ApplyRequestV1`/`PreflightRequestV1`/`PreflightReportV1`/`ObserveRequestV1`/`ReleaseRequestV1`/`ReleaseReceiptV1`，`EnvironmentIntentV1` 纳入文件所有权 | §6.3.2、§12 |
+| 枚举 wire | 枚举改为稳定 `Int` wire code + 显式 `fromWire()`，未知值 fail-closed | §6.2、§6.7 |
+| 包可见性 | Auto Manifest 新增千网游两个 applicationId 的 `<queries>`，并纳入 owner matrix | §6.1、§12.1、Task 2 |
+| minSdk | contract library 冻结 `minSdk = 24`；Auto 26 / qwy 24 不变 | §6.1 |
+| 配对次序 | 首次配对改为 bind-first，身份来自 `Binder.getCallingUid()` | §4.1、§6.5 |
+| 签名分层 | API 28+ 与 24–27 两条路径显式分层，降级路径 fail-closed 并 UI 明示 | §6.5.1 |
+| signer 边界 | 诚实披露当前 debug keystore 复用的真实后果，不夸大也不粉饰 | §6.5.2、§21 DP-1 |
+| 跨进程 revision | 单写者 + 跨进程原子持久化；禁止 DataStore/SharedPreferences/内存计数器 | §6.6、INV-25、AC-05 |
+| 数据迁移 | Auto v4→v5 显式 migration + schema export + 禁止 destructive fallback | Task 4、INV-24、AC-14 |
+| provenance | 用 tree digest 比对替换恒真的 `--is-inside-work-tree` 断言 | Task 1 |
+| PR 路由 | 明确 Task 6 两半各随 owner 的 PR 走 | §15 |
+| 价值取舍 | 抽出 DP-1（signer 迁移）、DP-2（Auto applicationId）交 operator | §21 |
+
+v1.1 **未**改动的：A+/B/C 关系与触发门、A+ 首版范围与非目标、owner matrix 的人员划分、merge 权限、既有 INV-01..22 的语义。
 
 ## 1. 事实基线与来源
 
@@ -167,10 +194,15 @@ Gate 输出只能是 `stay-a-plus`、`promote-specific-controls-to-b` 或 `rejec
 
 ### 4.1 首次配对
 
-1. operator 在千网游的“自动测试协作”页看到 Auto 包名、签名摘要和契约版本。
-2. operator 明确允许该调用方；千网游持久化 `(packageName, signerSha256, approvedAt)`。
-3. Auto 调用 `discover`，显示千网游版本、支持模式、profile/schedule、连续性覆盖等级。
-4. 未配对、签名变化、协议不兼容或千网游不可用时，Auto 停在预检页并给出可操作错误；不开始 CellRebel。
+次序为 **bind-first**：先由 Binder 证实调用方身份，再让 operator 授权。
+
+1. Auto 以显式 `ComponentName` bind 千网游的 `EnvironmentControlService` 并调用 `discover()`。
+2. 千网游按 `Binder.getCallingUid()` 解析调用方 applicationId、versionCode 与 signer SHA-256，落一条 `PendingPairingCandidate`，并向 Auto 返回 typed `NOT_PAIRED`。
+3. operator 在千网游的“自动测试协作”页看到**这条已由 Binder 证实的**候选记录；点允许后千网游持久化 `PairingRecord(applicationId, signerSha256, versionCode, approvedAt)`。
+4. Auto 重试 `discover()`，取得千网游版本、支持模式、profile/schedule、连续性覆盖等级。
+5. 未配对、签名变化、协议不兼容或千网游不可用时，Auto 停在预检页并给出可操作错误；不开始 CellRebel。
+
+**为什么是 bind-first 而不是先在 UI 里挑 App**：调用方身份必须来自 `Binder.getCallingUid()`（INV-02），UI 侧自行扫描包列表既是较弱的真相源，又要求千网游反向声明 `<queries>` 才能在 Android 11+ 看到 Auto。bind-first 让身份来自唯一可信来源，同时使反向 `<queries>` 不再是核心流程的结构性依赖。若将来产品需要“在任何 bind 发生之前就列出候选 Auto 安装”，那条路径才需要千网游侧 `<queries>`，届时单独评审。
 
 ### 4.2 创建计划
 
@@ -226,6 +258,28 @@ operator 在运行页直接看到：当前地址、可信完成数、未验证�
 - v2 若不向后兼容，使用新 package/interface，并由 `discover` 的兼容矩阵显式协商。
 - service 可跨 App 导出，但没有网络监听面；每次调用从 `Binder.getCallingUid()` 解析真实调用方，不信任请求自报身份。
 
+**ComponentName 与 applicationId（冻结）**：`name.caiyao.fakegps.integration.v1.EnvironmentControlService` 是 **class name**；`ComponentName` 的 package 半边是运行时 applicationId，而千网游 debug 构建带 `applicationIdSuffix ".bench"`。因此 Auto 必须把目标显式建模为二选一，不能硬编码单一包名：
+
+| 目标 | applicationId | class name |
+|---|---|---|
+| production | `name.caiyao.fakegps` | `name.caiyao.fakegps.integration.v1.EnvironmentControlService` |
+| bench | `name.caiyao.fakegps.bench` | 同上（class name 不随 suffix 变化） |
+
+两个 applicationId 各自独立配对（§6.5），Auto 一次只绑定一个目标并把该选择写进 `PlanSnapshot`。
+
+**minSdk（冻结）**：contract library `minSdk = 24`；Auto 保持 `minSdk = 26`；千网游保持 `minSdk = 24`。共享库取两者下界是硬约束——若 contract 取 26，`minSdk 24` 的千网游无法依赖它，AGP 直接构建失败。
+
+**package visibility（冻结）**：Auto `targetSdk 35`，在 Android 11+ 下要显式 bind 千网游必须先在 Manifest 声明可见性。当前 `Faketest@48d8ec9` 的 `<queries>` 只有 `com.cellrebel.mobile` 与 `com.hopefactory2021.fakegpslocation`，**不含千网游任一 applicationId**，因此 Auto 的 `AndroidManifest.xml` 必须新增：
+
+```xml
+<queries>
+    <package android:name="name.caiyao.fakegps" />
+    <package android:name="name.caiyao.fakegps.bench" />
+</queries>
+```
+
+该文件此前不在任何 task 的 Files 清单内，现已纳入 §12 目录与 §12.1 owner matrix（Opus5）。千网游侧同一集成路径此前已被该机制影响过一次（其 Manifest 注释记录 ContentProvider 传输被 Android 11+ 包可见性完全阻断），因此这条不是理论风险。
+
 ```aidl
 // contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl
 package io.github.terryyyc.fakexxx.contract.v1;
@@ -249,21 +303,33 @@ interface IEnvironmentControlV1 {
 }
 ```
 
-### 6.2 不允许 ordinal 比较的枚举
+### 6.2 枚举：稳定 wire code，不跨进程传枚举身份
+
+枚举**不得**以 Kotlin enum 形态直接跨 Binder 传输。v1 的每个枚举常量绑定一个永久稳定的 `Int` wire code；DTO 字段承载 `Int`，两侧各自用显式 `fromWire()` 解码。
 
 ```kotlin
-enum class VerificationLevelV1 {
-    SYSTEM_MOCK_INDEPENDENTLY_VERIFIED,
-    HOOK_UNVERIFIED,
-    NONE,
+enum class VerificationLevelV1(val wire: Int) {
+    SYSTEM_MOCK_INDEPENDENTLY_VERIFIED(1),
+    HOOK_UNVERIFIED(2),
+    NONE(3),
+    ;
+    companion object {
+        /** 未知 code = 对端更新且不兼容 → fail-closed，绝不猜成可信。 */
+        fun fromWire(code: Int): VerificationLevelV1? = entries.firstOrNull { it.wire == code }
+    }
 }
 
-enum class ContinuityCoverageV1 { FULL, PARTIAL, NONE }
-enum class DeliveryModeV1 { SYSTEM_MOCK, HOOK }
-enum class ScheduleDecisionV1 { ALLOWED_NOW, WAIT_UNTIL, DENIED }
+enum class ContinuityCoverageV1(val wire: Int) { FULL(1), PARTIAL(2), NONE(3) }
+enum class DeliveryModeV1(val wire: Int) { SYSTEM_MOCK(1), HOOK(2) }
+enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DENIED(3) }
 ```
 
-可信策略必须显式匹配 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`；禁止使用枚举顺序、`>=` 或“非 NONE 即可信”。
+规则：
+
+- 可信策略必须显式匹配 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`；禁止枚举顺序、`ordinal`、`>=` 或“非 NONE 即可信”。
+- **禁止把枚举本体交给 `@Parcelize` 自动编解码。** 自动编码把枚举身份绑定到常量集合本身，对端出现未知常量时会在 Binder transaction 内部抛出，得到的是 transport 崩溃而不是 INV-03 要求的 typed fail-closed。承载 `Int` + 显式 `fromWire()` 把 skew 变成可判定的业务错误。
+- `fromWire()` 返回 `null` 时一律 fail-closed：可信路径直接判不可信，握手路径返回 `INCOMPATIBLE_PROTOCOL`。
+- v1 已分配的 wire code 永久不可回收、不可改语义；新增常量只能追加新 code，且必须先通过 §6.7 兼容矩阵。
 
 ### 6.3 核心 DTO
 
@@ -307,22 +373,109 @@ data class ApplyReceiptV1(
 @Parcelize
 data class EnvironmentObservationV1(
     val leaseId: String,
+    /** 本次观察所属 lease 当前生效意图的 canonical digest；见 §6.3.1。绑定观察与意图，防止把完成记到错误地址。 */
+    val acceptedIntentHash: String,
     val observedAtEpochMs: Long,
     val environmentRevision: Long,
     val environmentFingerprint: String,
-    val continuityCoverage: ContinuityCoverageV1,
+    val continuityCoverageWire: Int,
     val continuitySinceEpochMs: Long?,
-    val deliveryMode: DeliveryModeV1?,
-    val verificationLevel: VerificationLevelV1,
+    val deliveryModeWire: Int?,
+    val verificationLevelWire: Int,
     val effectiveLatitude: Double?,
     val effectiveLongitude: Double?,
     val isMock: Boolean?,
-    val scheduleDecision: ScheduleDecisionV1,
+    val scheduleDecisionWire: Int,
     val evidenceRefs: List<String>,
 ) : Parcelable
 ```
 
-所有 request 另含 `idempotencyKey` 或稳定 operation id；所有失败使用 typed error：`NOT_PAIRED`、`CALLER_NOT_ALLOWED`、`INCOMPATIBLE_PROTOCOL`、`CAPABILITY_UNAVAILABLE`、`SCHEDULE_DENIED`、`CONTINUITY_NOT_FULL`、`LEASE_CONFLICT`、`STALE_LEASE`、`ENVIRONMENT_DRIFT`、`RELEASE_INCOMPLETE`、`INTERNAL_FAILURE`。
+其余枚举字段同样以 `...Wire: Int` 承载（此处为可读性只在 `EnvironmentObservationV1` 展开；`CapabilitySnapshotV1`、`ApplyReceiptV1` 及下列全部 DTO 适用同一规则）。
+
+#### 6.3.1 canonical intent digest（冻结算法）
+
+`acceptedIntentHash` 是 `EnvironmentIntentV1` 的 canonical digest，两侧必须独立算出同一值：
+
+```text
+canonical = UTF-8 of the following fields joined by '\n', in this exact order,
+            each rendered by the rule below, with NO trailing newline:
+
+  runId                 : 原样字符串
+  attemptId             : 原样字符串
+  profileRef            : 原样字符串
+  scheduleRef           : 原样字符串
+  latitude              : 定点十进制，恰好 7 位小数，半值向偶数舍入，负号保留
+  longitude             : 同上
+  requiredVerification  : wire code 的十进制文本
+  notBeforeEpochMs      : 十进制文本
+  deadlineEpochMs       : 十进制文本
+
+acceptedIntentHash = lowercase hex of SHA-256(canonical)
+```
+
+禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。round-trip 测试必须覆盖负坐标、零、以及需要舍入的边界值。
+
+#### 6.3.2 其余 DTO exact schema
+
+```kotlin
+@Parcelize
+data class PreflightRequestV1(
+    val intent: EnvironmentIntentV1,
+    val idempotencyKey: String,
+    val callerProtocolVersion: Int,
+) : Parcelable
+
+@Parcelize
+data class PreflightReportV1(
+    val acceptedIntentHash: String,
+    val scheduleDecisionWire: Int,
+    /** scheduleDecision == WAIT_UNTIL 时必须非空，其余情况必须为 null。 */
+    val waitUntilEpochMs: Long?,
+    val achievableVerificationLevelWire: Int,
+    val continuityCoverageWire: Int,
+    val environmentRevision: Long,
+    /** ContractErrorCodeV1.wire 列表；空表示预检通过。 */
+    val blockingReasonWires: List<Int>,
+) : Parcelable
+
+@Parcelize
+data class ApplyRequestV1(
+    val intent: EnvironmentIntentV1,
+    val idempotencyKey: String,
+    val callerProtocolVersion: Int,
+) : Parcelable
+
+@Parcelize
+data class ObserveRequestV1(
+    val leaseId: String,
+    val operationId: String,
+    /** Auto 本地算得的 intent digest；与服务端当前 lease 意图不符时返回 ENVIRONMENT_DRIFT。 */
+    val expectedIntentHash: String,
+) : Parcelable
+
+@Parcelize
+data class ReleaseRequestV1(
+    val leaseId: String,
+    val operationId: String,
+    val idempotencyKey: String,
+) : Parcelable
+
+@Parcelize
+data class ReleaseReceiptV1(
+    val operationId: String,
+    val idempotencyKey: String,
+    val leaseId: String,
+    val releasedAtEpochMs: Long,
+    val environmentRevision: Long,
+    /** false = 环境未能证明清理完成 → Auto 必须走 INV-21 暂停与人工恢复。 */
+    val releaseComplete: Boolean,
+    val residualReasonWires: List<Int>,
+) : Parcelable
+```
+
+`EnvironmentIntentV1` 与上述全部类型都必须有对应 `.aidl` parcelable 声明与 `.kt` 实现，并纳入 §12 文件所有权。**实现者不得自行发明字段**：任何需要新增字段的发现都回本 spec 修订，不在 consumer branch 私改。
+
+所有 request 另含 `idempotencyKey` 或稳定 operation id；所有失败使用 typed error：`NOT_PAIRED`、`CALLER_NOT_ALLOWED`、`INCOMPATIBLE_PROTOCOL`、`CAPABILITY_UNAVAILABLE`、`SCHEDULE_DENIED`、`CONTINUITY_NOT_FULL`、`LEASE_CONFLICT`、`STALE_LEASE`、`ENVIRONMENT_DRIFT`、`RELEASE_INCOMPLETE`、`INTERNAL_FAILURE`。每个 code 绑定永久稳定的 `ContractErrorCodeV1.wire: Int`，规则同 §6.2。
 
 预期业务失败通过 `ServiceSpecificException` 返回稳定的 `ContractErrorCodeV1.wireCode`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
 
@@ -349,18 +502,67 @@ pre.fingerprint == post.fingerprint
 pre/post.verificationLevel == SYSTEM_MOCK_INDEPENDENTLY_VERIFIED
 pre/post.leaseId == apply.leaseId
 CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
+
+# 意图绑定（INV-23）：以上全部成立仍不足以证明"跑的是这个地址"
+pre.acceptedIntentHash  == apply.acceptedIntentHash
+post.acceptedIntentHash == apply.acceptedIntentHash
+apply.acceptedIntentHash == localDigest(attempt.intent)      # Auto 独立重算，不信任对端回传
+pre.effectiveLatitude != null && pre.effectiveLongitude != null
+post.effectiveLatitude != null && post.effectiveLongitude != null
+haversine(pre.effective,  intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
+haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 ```
 
 任一不成立：不得写可信配额。
 
+**为什么意图绑定是独立的一条**：`coverage/revision/fingerprint/lease/verificationLevel` 全部只证明"环境在测试全程没有相关变化"，不证明"环境处在**这个 attempt 要求的**位置"。若 apply 静默部分生效、被上一地址的残留状态覆盖、或 lease 复用时意图已切换，上面前七条可以整体成立，而可信配额被记到**错误地址**。本产品的全部价值就是"每地址的可信次数"，因此错记地址是最贵的失败模式，必须由独立不变量排除，而不是依赖其他条件的副作用。
+
+`TRUSTED_LOCATION_TOLERANCE_METERS = 1.0`，冻结为 contract 常量，两侧共用。取值理由：远大于 §6.3.1 的 7 位小数量化误差（约 1.1 cm）与 double 往返误差，因此不会造成假阴性；又远小于任何现实地址间距，因此不会让相邻地址互相别名。计划导入时若存在两个地址距离 `< 10 m`，必须在校验阶段报错并指出行号——容差本身不承担区分同一栋楼内两点的责任。
+
 ### 6.5 配对与调用授权
 
-- 千网游 UI 明确展示候选 Auto 的包名、版本和 signer SHA-256；operator 点允许后才创建 `PairingRecord`。
-- 每次 Binder 调用按 UID 反查 package 与 signing certificate，和 PairingRecord 精确匹配。
+调用方身份**只以 `Binder.getCallingUid()` 为真相源**，永不取自请求参数。
+
+- 首次配对走 §4.1 的 bind-first 次序：Auto 先 bind 并调用，千网游按 UID 解析出调用方后落 `PendingPairingCandidate`，返回 typed `NOT_PAIRED`；配对 UI 展示的是这条已由 Binder 证实的记录，而不是 UI 侧自行扫描包列表的结果。
+- 每次 Binder 调用按 UID 反查 package 与 signing certificate，和 `PairingRecord` 精确匹配。
+- `PairingRecord` 的主键是 `(applicationId, signerDigest)` 二元组。**production `name.caiyao.fakegps` 与 bench `name.caiyao.fakegps.bench` 是两个独立 applicationId，互不授权**：给 production 配的对不能让 bench 调用通过，反之亦然。
 - 包名相同但 signer 改变视为新调用方，必须重新配对。
 - 调用方不可通过参数伪造 package、signer 或 verificationLevel。
 - revoke 立即使新调用失败；active lease 进入 release/recovery，不静默继续。
 - 配对记录和用户可见运行日志默认持久化，只有 operator 主动删除。
+
+#### 6.5.1 签名校验的 API 分层（minSdk 24 冻结）
+
+千网游 `minSdk = 24`，而带证书轮转语义的签名 API 只在 API 28+ 可用，因此校验路径必须显式分层，不能写成一条：
+
+| 运行 API | 路径 | 语义 |
+|---|---|---|
+| ≥ 28 | `PackageManager.hasSigningCertificate(uid, cert, CERT_INPUT_SHA256)` / `GET_SIGNING_CERTIFICATES` + `SigningInfo` | 权威路径，正确处理证书轮转与多签名者 |
+| 24–27 | legacy `GET_SIGNATURES` | **fail-closed 降级路径**：只接受单一签名者；出现多签名者、无法解析或任何歧义一律拒绝配对并提示升级设备 |
+
+24–27 路径必须在配对 UI 上明示"本设备使用降级签名校验"，不得静默等同于 28+ 的保证。两条路径都必须有测试；降级路径的多签名者拒绝是必测负例。
+
+#### 6.5.2 signer 强度的真实边界（诚实披露）
+
+当前 `FakeGps-test@285e4ca` 的 release 复用本机 `~/.android/debug.keystore`（alias `androiddebugkey`，口令 `android`）。必须准确陈述其后果，既不夸大也不粉饰：
+
+- 该 keystore 由 SDK 在**本机首次构建时随机生成**，密钥材料并非全球共享，因此 signer 校验仍然排除了在其他机器上构建的第三方 App——`(applicationId, signerDigest)` 二元组不是只剩 applicationId 在把关。
+- 但它同时意味着：**debug 与 release 构建的 signer 完全相同**，所以 §13 Task 9 的"签名变化 → 必须重新配对"验收在当前构建配置下**造不出阳性用例**；该 keystore 也不受口令保护（口令公开），一旦文件泄漏即可冒充该身份。
+- 结论：当前配置下不得宣称强 release identity。是否迁移到受控 release key 是 operator 的价值取舍，见 §21 DP-1；**本 doc PR 不擅自旋转 signer**。
+
+### 6.6 跨进程 revision 所有权（blocker）
+
+千网游至少存在三类进程上下文：主进程（UI/config/`MockProviderService`）、`:hook_verify`（`HookVerificationService`）、以及 Xposed 注入到被测 App 内的 hook 代码。`environmentRevision` 与 `continuityCoverage` 是跨这些上下文的共享可变状态，因此：
+
+- **单写者**：`EnvironmentRevisionState` 只有一个 owner 组件可写。其他进程一律通过 Binder/ContentProvider 请求 bump，**禁止任何进程直接写计数器**。
+- **禁止进程内 `Long` 或非多进程安全的持久化承载 revision**：单例内存计数器、`DataStore`、`SharedPreferences`（含 `MODE_MULTI_PROCESS`）都不满足跨进程原子性，会造成 bump 丢失——而丢失一次 bump 的表现恰好是"coverage 仍为 FULL 且 revision 未变"，即 INV-08/09 要防的那个假可信。
+- 自增必须落在单条持久化事务内完成（读-改-写不可分离），重启后单调性不依赖内存状态。
+- **进程代际**：owner 进程每次启动分配新的 generation id 并持久化。若无法证明与前代之间的观察窗连续，必须 bump revision 且把 coverage 降为 `PARTIAL/NONE`。
+- **有损事件源必须自我申报**：`PrefsDirectoryObserver` 一类 `FileObserver` 是可丢事件、可被回收的观察器，属于 §6.4 "观察器丢事件"类。其重订阅、失效或任何不可证明的间隙都必须 bump + 降级，不允许"没收到事件"被当作"没有变化"。
+
+### 6.7 兼容矩阵与握手
+
+`compatibility.yaml` 冻结 `protocolVersion` 与各枚举 wire code 集合。握手在 `discover()` 完成：任一侧发现对端 `protocolVersion` 不在支持集合、或收到未知 wire code，一律返回/映射 `INCOMPATIBLE_PROTOCOL` 并停在预检页，不进入 CellRebel。矩阵测试必须覆盖 新Auto+旧qwy、旧Auto+新qwy、以及未知 wire code 三类 skew。
 
 ## 7. 状态对象普查
 
@@ -464,6 +666,9 @@ CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 | INV-20 | Auto 不写千网游存储，不以 UI 自动化调用千网游 | forbidden-dependency/static tests |
 | INV-21 | release 无法证明完成时暂停并暴露人工恢复，不静默继续 | release failure recovery test |
 | INV-22 | 终态 attempt/run 不可被 generic restore/list/delete 旁路复活 | DAO/repository bypass tests |
+| INV-23 | 可信配额要求 pre/post observation 的 `acceptedIntentHash` 等于 apply receipt 且等于 Auto 本地重算值，且 `effectiveLat/Lng` 非空并在 `TRUSTED_LOCATION_TOLERANCE_METERS` 内匹配目标坐标 | intent-binding matrix：错误地址、意图漂移、apply 部分生效、lease 复用后意图切换、坐标为 null 五类负例 |
+| INV-24 | 用户可见持久数据的 schema 变更必须有显式 migration + 真实旧版本 fixture 测试；禁止 destructive fallback | Auto v4→v5 真实 fixture migration test；`fallbackToDestructiveMigration` 静态禁用扫描 |
+| INV-25 | `environmentRevision`/coverage 跨进程单写者、持久、原子、单调；有损观察器与进程代际不明必须 bump + 降级 | 多进程并发 bump 测试；owner 进程重启代际测试；observer 丢事件注入测试 |
 
 ## 10. 崩溃、并发、恢复与旁路误用矩阵
 
@@ -495,6 +700,18 @@ CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 | bypass | 删除 attempt 后让 location 看似未完成再重跑 | ledger FK/不可删策略保留可信事实 | 10,22 |
 | release | foreign/stale leaseId | 不清理环境，typed error | 14 |
 | version | 新 Auto + 旧 qwy / 旧 Auto + 新 qwy | 兼容则运行，不兼容则预检停止 | 3,19 |
+| version | 对端返回未知枚举 wire code | `fromWire` 返回 null → fail-closed，不得崩在 Binder transaction 内 | 3,4 |
+| intent | apply 部分生效，有效坐标停在上一地址 | 意图绑定失败 → 未验证，不计数 | 23 |
+| intent | lease 复用但意图已切换，observation 仍返回旧 intent hash | `ENVIRONMENT_DRIFT`，不计数 | 23 |
+| intent | observation 的 `effectiveLat/Lng` 为 null | 不计数（不得因"其他条件都过"放行） | 23 |
+| intent | 计划内两地址距离 < 10 m | 导入阶段报错并指出行号 | 23 |
+| migration | 已存在 v4 用户库升级到 v5 | 显式 `MIGRATION_4_5` 成功，历史计划与结果全部存活 | 24 |
+| migration | migration 执行到一半进程被杀 | 重启后事务回滚或重放，绝不落半迁移库、不 destructive 重建 | 24,15 |
+| migration | 安装了更高 schema 版本后降级回旧包 | 明确失败并提示，不静默清库 | 24 |
+| multiproc | 主进程与 `:hook_verify` 同时触发 revision bump | 两次 bump 都不丢失，单调不回退 | 25 |
+| multiproc | revision owner 进程重启，代际连续性不可证 | bump + coverage 降级 | 25,8 |
+| multiproc | `FileObserver` 被回收后重订阅，期间有变化 | bump + 降级；不得把"没收到事件"当成"没有变化" | 25,9 |
+| bypass | 用 `DataStore`/`SharedPreferences`/内存单例承载 revision | 静态 guard 测试失败 | 25 |
 
 ## 11. 日志与证据契约
 
@@ -546,6 +763,7 @@ fakexxx/
 │       ├── aidl/io/github/terryyyc/fakexxx/contract/v1/
 │       │   ├── IEnvironmentControlV1.aidl
 │       │   ├── CapabilitySnapshotV1.aidl
+│       │   ├── EnvironmentIntentV1.aidl
 │       │   ├── PreflightRequestV1.aidl
 │       │   ├── PreflightReportV1.aidl
 │       │   ├── ApplyRequestV1.aidl
@@ -556,6 +774,8 @@ fakexxx/
 │       │   └── ReleaseReceiptV1.aidl
 │       └── java/io/github/terryyyc/fakexxx/contract/v1/
 │           ├── CapabilitySnapshotV1.kt
+│           ├── EnvironmentIntentV1.kt
+│           ├── CanonicalIntentDigestV1.kt
 │           ├── PreflightRequestV1.kt
 │           ├── PreflightReportV1.kt
 │           ├── ApplyRequestV1.kt
@@ -576,6 +796,7 @@ fakexxx/
 │   ├── fake-qwy/src/...
 │   └── scenarios/src/test/...
 ├── scripts/
+│   ├── check-provenance.sh
 │   ├── check-contract-v1.sh
 │   ├── check-forbidden-boundaries.sh
 │   └── verify-a-plus.sh
@@ -586,7 +807,7 @@ fakexxx/
 
 | Owner | 独占写入范围 | 可读依赖 | 禁止并行触碰 |
 |---|---|---|---|
-| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`、root CI/scripts、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**` |
+| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、root CI/scripts、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**` |
 | Kimi | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行 | frozen contract | contract、Auto、acceptance |
 | Sol | `acceptance/**`、`docs/acceptance/**`、验收 issue 与证据 | contract 与两 App | Opus5/Kimi 产品实现 |
 | GLM | review verdict、对抗执行报告；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch |
@@ -605,23 +826,27 @@ fakexxx/
 - Create: `docs/architecture/ownership/README.md`
 - Create: `.github/workflows/android-a-plus.yml`
 - Create: `scripts/verify-a-plus.sh`
+- Create: `scripts/check-provenance.sh`
 - Import: `apps/cellrebel-auto/**`
 - Import: `apps/qianwangyou/**`
 
-**RED:** 在空目标路径运行 provenance checker，必须因两个 app 未导入和 SHA 未登记失败。
+**RED:** 在空目标路径运行 `scripts/check-provenance.sh`，必须因两个 app 未导入和 SHA 未登记失败。
 
 **GREEN:** 只从远端精确 SHA subtree 导入；记录源 URL、branch、SHA、导入 commit。不得读取本机脏 worktree 作为拷贝源。
 
 **Verify:**
 
 ```bash
-test -f apps/cellrebel-auto/gradlew
-test -f apps/qianwangyou/gradlew
-git -C apps/cellrebel-auto rev-parse --is-inside-work-tree
-git -C apps/qianwangyou rev-parse --is-inside-work-tree
+./scripts/check-provenance.sh
 ```
 
-subtree 目录本身处在 `fakexxx` 工作树，后两条预期均输出 `true`；provenance 文档必须精确包含两个上游 SHA。
+checker 必须做**有证明力**的核对，逐项 exit-code 化：
+
+1. `docs/provenance/upstream-imports.md` 精确记录两个上游 SHA（`48d8ec93…` / `285e4cae…`）与源 URL、branch、导入 commit；
+2. 本地 `apps/cellrebel-auto` 的 **root tree digest** 等于 `Faketest@48d8ec9` 的 tree digest；`apps/qianwangyou` 对 `FakeGps-test@285e4ca` 同理（`git rev-parse <sha>^{tree}` 与本地 `git rev-parse HEAD:apps/<dir>` 比对）；
+3. 关键入口文件存在（两个 `gradlew`、两个 `app/build.gradle*`、两个 `AndroidManifest.xml`）。
+
+**不得**使用 `git -C <dir> rev-parse --is-inside-work-tree` 作为验证：subtree 目录本身就在 `fakexxx` 工作树内，该命令对仓内任何 `mkdir` 出来的空目录同样返回 `true`，既证明不了导入发生，也证明不了 SHA 正确——它是恒真断言，没有证明力。
 
 ### Task 2 — 冻结 contract v1 与兼容矩阵
 
@@ -639,14 +864,16 @@ subtree 目录本身处在 `fakexxx` 工作树，后两条预期均输出 `true`
 - Create: `contracts/environment-control-v1/consumer-rules.pro`
 - Create: `contracts/environment-control-v1/compatibility.yaml`
 - Create: `contracts/environment-control-v1/src/test/.../ContractRoundTripTest.kt`
+- Create: 同目录 `EnvironmentIntentV1.kt`、`CanonicalIntentDigestV1.kt`
 - Modify: `apps/cellrebel-auto/settings.gradle.kts`（只接入 contract library）
 - Modify: `apps/qianwangyou/settings.gradle`（只接入 contract library）
 - Modify: 两 App 的 app build 文件（只增加 contract dependency）
+- Modify: `apps/cellrebel-auto/app/src/main/AndroidManifest.xml`（新增千网游两个 applicationId 的 `<queries>`）
 - Create: `scripts/check-contract-v1.sh`
 
-**RED:** missing `verificationLevel`、枚举 ordinal 信任、v1 字段语义漂移、旧/新版本不兼容矩阵均先写失败测试。
+**RED:** missing `verificationLevel`、枚举 ordinal 信任、未知 wire code、canonical digest 跨实现不一致、intent 绑定缺失、v1 字段语义漂移、旧/新版本不兼容矩阵均先写失败测试。
 
-**GREEN:** 实现本文 §6 的 exact schema；v1 不引入泛化 command 或 Map payload。
+**GREEN:** 实现本文 §6 的 exact schema（含 §6.3.2 全部 DTO 与 §6.3.1 digest 算法）；v1 不引入泛化 command 或 Map payload。contract library `minSdk = 24`；两侧构建栈已核实一致（AGP 9.1.0 / Kotlin 2.2.10 / Gradle 9.3.1 / compileSdk 35 / Java 17），无需版本对齐工作。
 
 **Verify:** `./scripts/check-contract-v1.sh`，预期全部 contract/compatibility tests PASS。
 
@@ -674,9 +901,13 @@ subtree 目录本身处在 `fakexxx` 工作树，后两条预期均输出 `true`
 - Test: `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/**`
 - Test: `apps/qianwangyou/app/src/androidTest/java/name/caiyao/fakegps/integration/v1/**`
 
-**RED order:** unauthorized caller → idempotency → lease conflict → revision event sources → coverage downgrade → release ownership → process death.
+**RED order:** unauthorized caller → **legacy(24–27) 签名降级路径拒绝多签名者** → idempotency → lease conflict → revision event sources → **跨进程并发 bump** → coverage downgrade → release ownership → process death → **owner 进程代际不连续**。
 
 **GREEN:** 适配现有 profile/System Mock/Hook API，不复制其逻辑；无法完整观察时返回 `PARTIAL/NONE`，不伪造 FULL。
+
+**跨进程硬约束（INV-25）**：按 §6.6 实现单写者 revision owner。`:hook_verify` 与主进程只能经 Binder/ContentProvider 请求 bump；`EnvironmentRevisionState` 必须落在跨进程原子的持久化事务里，**禁止 `DataStore`、`SharedPreferences`（含 `MODE_MULTI_PROCESS`）或进程内单例计数器**。若本 task 新增任何持久 store，同样适用 INV-24：给出升级路径与进程死亡后的迁移证据。
+
+**配对硬约束**：`PairingRecord` 主键 `(applicationId, signerDigest)`，production 与 `.bench` 互不授权；首次配对走 §4.1 bind-first，候选记录来自 `Binder.getCallingUid()` 解析，不来自 UI 侧包扫描。
 
 **Verify:**
 
@@ -706,9 +937,16 @@ cd apps/qianwangyou
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/recovery/RecoveryCoordinator.kt`
 - Test: 对应 `app/src/test/**`
 
-**RED order:** state census schema → UNIQUE ledger → pre-existing execution → crash windows → concurrent insert → closed-state bypass。
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/db/Migrations.kt`（`MIGRATION_4_5`）
+- Modify: `apps/cellrebel-auto/app/build.gradle.kts`（`ksp { arg("room.schemaLocation", "$projectDir/schemas") }`）
+- Create: `apps/cellrebel-auto/app/schemas/**`（导出的 Room schema JSON，纳入版本控制）
+- Test: `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/db/Migration4to5Test.kt`
+
+**RED order:** state census schema → **v4 真实 fixture 升级失败** → UNIQUE ledger → pre-existing execution → crash windows → concurrent insert → closed-state bypass。
 
 **GREEN:** 可信完成只通过 `TrustPolicy` + 单一 ledger transaction；删除旧的直接 `completedSuccesses++` 写路径，完成数改为投影。
+
+**迁移硬约束（INV-24）**：现网 `AppDatabase` 是 `version = 4` 且 `exportSchema = false`，已有用户数据。本 task 新增 `TrustedQuotaEntry`/`CellRebelExecution`/`AutoAuditEvent` 三类表 → 必须 `version = 5` 且提供显式 `MIGRATION_4_5`，同时把 `exportSchema` 改为 `true` 并把 schema JSON 纳入版本控制（千网游侧已有同款 `room.schemaLocation` 配置可参照）。**禁止 `fallbackToDestructiveMigration` 及任何变体**——缺失迁移会让老用户在升级后开库即 `IllegalStateException`，而 destructive fallback 会直接清空 operator 已导入的计划与历史结果，两者都违反“用户状态默认持久化”。迁移测试必须用**手工构建的真实 v4 fixture 库**（既有 `MigrationTest.kt` 的 v2 手法可直接复用），断言历史计划、任务与结果全部存活。
 
 **Verify:**
 
@@ -854,6 +1092,10 @@ PR-6 integration + exact-build device evidence（只做必要胶合，不吞并�
 
 每个 PR 的 gate：
 
+Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI 进 PR-4（Opus5），千网游侧 `integration/ui/AutomationPairingScreen.kt` 进 PR-3（Kimi）。owner matrix 本身不变——`apps/qianwangyou/**/integration/**` 含 UI 全部归 Kimi。
+
+每个 PR 的 gate：
+
 1. 独立 worktree/branch；作者与 reviewer 不同。
 2. 只改 owner matrix 允许的文件；共享 contract delta 回 contract PR，不在 consumer branch 偷改。
 3. 回本实施主 Thread 提交 exact HEAD、changed files、测试命令/结果、review verdict、已知风险。
@@ -899,7 +1141,9 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-02 | Auto 不复制/旁路千网游能力 | INV-01,20；boundary guard |
 | AC-03 | 私有鉴权版本化 v1 discover/preflight/apply/observe/release 可用 | INV-02,03,04；contract tests |
 | AC-04 | 只有独立验证 System Mock 进入可信配额 | INV-05,06；TrustPolicy matrix |
-| AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09；continuity matrix |
+| AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09,25；continuity matrix + 多进程 bump matrix |
+| AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
+| AC-14 | 已有用户数据跨版本升级零丢失，无 destructive fallback | INV-24；v4 真实 fixture migration test |
 | AC-06 | crash/retry 下外部执行可重跑、可信配额最多一次 | INV-10,11,12,13,15；crash matrix |
 | AC-07 | `PRE_EXISTING_RUN` 语义保留且旧结果不计新完成 | INV-11,12；fixtures/device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
@@ -912,8 +1156,8 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 
 A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `ready for operator merge decision`：
 
-- AC-01..12 都有非作者可复核证据；
-- INV-01..22 全部被自动测试或明确的真机证据覆盖；
+- AC-01..14 都有非作者可复核证据；
+- INV-01..25 全部被自动测试或明确的真机证据覆盖；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
@@ -922,4 +1166,32 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 ## 20. 当前开放项
 
-没有需要在 Phase 0 反问 operator 的技术 A/B 题。A+ 产品基线、B/C 关系、可信边界和 merge 权限已经冻结。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+没有需要 operator 拍板的技术 A/B 题——技术项已在 PR-0.1 中给出 exact schema、digest 算法、容差与 API 24–27 语义。A+ 产品基线、B/C 关系、可信边界和 merge 权限保持冻结。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+
+仅有两件**价值取舍**需要 operator 决定，见 §21；两者都不阻塞 contract v1 冻结，但都必须在真机验收（Task 9）之前有结论。
+
+## 21. operator Decision Packets
+
+以下两项是价值取舍，不是技术 A/B；猫猫不自行决定，也不在 doc/代码 PR 中擅自执行。
+
+### DP-1 · 千网游 release signer 迁移策略
+
+**背景**：`FakeGps-test@285e4ca` 的 release 复用本机 `~/.android/debug.keystore`。该 keystore 由 SDK 在本机随机生成（密钥材料非全球共享），但口令公开且不受保护，且 debug/release signer 完全相同。上游代码注释记录了这么做的真实理由：一把稳定 key 让 debug 与 release 可以 `adb install -r` 相互替换，避免 uninstall 清空 `/data/data`——**这个选择过去已经挽救过一次 operator 全部 profile 的丢失**。
+
+| 选项 | 得到 | 付出 |
+|---|---|---|
+| A 保持现状 | 现有 profile 数据连续性不受影响；无迁移成本 | 无强 release identity；§13 Task 9 的“签名变化→重新配对”验收造不出阳性用例，只能标为 not-testable |
+| B 迁移到受控 release key | 强 release identity；signer 轮转可验收；debug/release 可区分 | 一次性 uninstall 或数据迁移；操作不当会重演 profile 丢失 |
+
+**需要 operator 回答**：是否接受“A+ 首版不具备强 release identity”，还是承担一次受控迁移。选 B 时必须先有 profile 导出/恢复方案，不能裸迁。
+
+### DP-2 · Auto 最终 applicationId
+
+**背景**：Auto 当前 `applicationId = com.example.cellrebelauto`，是脚手架默认命名空间。配对记录以 `(applicationId, signerDigest)` 为主键。
+
+| 选项 | 得到 | 付出 |
+|---|---|---|
+| A 冻结沿用 | 无 identity 断裂；PairingRecord 全部有效 | 长期携带 `com.example.` 占位命名空间 |
+| B 改名 | 干净的产品 identity | 形成新 App identity 与数据边界；**作废全部既有 PairingRecord**，需重新配对 |
+
+**需要 operator 回答**：二选一并冻结。**默认不等于必须改名**——但也不能不做决定就进真机验收，因为改名越晚代价越大。改名若发生，必须在 PR-1 完成，不得晚于 contract 冻结。
