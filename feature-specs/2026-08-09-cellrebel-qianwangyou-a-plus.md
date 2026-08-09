@@ -75,6 +75,7 @@ source_threads:
 | v1.6 | PR-0.2 第二轮 | acceptance 对 `5996b2e0` 的 `REQUEST_CHANGES`，见 §0.1.6 |
 | v1.7 | PR-0.2 第三轮 | behavioral-delta 对 `7e1fa20` 的 `REQUEST_CHANGES`，见 §0.1.7 |
 | v1.8 | PR-0.2 第四轮 | Sol + GLM 双路绑定 `ecfb322e` 的 `REQUEST_CHANGES`，见 §0.1.8 |
+| v1.9 | PR-0.2 第五轮 | acceptance 对 `ad70a625` 的 `REQUEST_CHANGES`，见 §0.1.9 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -206,7 +207,7 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 
 | # | 问题 | 修订 |
 |---|---|---|
-| 1 | **事实错误 + 载体缺失**：§8.4 写"qwy 重启后 `elapsedRealtime` 归零"——官方语义是**自设备 boot** 计时，进程重启不重置；且 `EnvironmentLease` 没有任何能判定单调值可比性的字段；`M-LS-07`（`RELEASE_INCOMPLETE`）与 `M-LS-12`（`EXPIRED`）对同一重启场景无优先级 | 更正事实；冻结载体 **`applyOwnerGeneration`** 并给出充分性证明（设备 reboot 必然重启 owner 进程 ⇒ **generation 变化 ⊇ 时钟纪元变化**，故不会漏检）；明示其过度检测为**策略**并论证其零代价（L6 已让跨 generation 的在飞可信 attempt 判死）；冻结恢复终态优先级：干净性不可证 → `RELEASE_INCOMPLETE` 优先，否则 generation 不符 → `EXPIRED`；新增 `M-LS-13/14` |
+| 1 | **事实错误 + 载体缺失**：§8.4 写"qwy 重启后 `elapsedRealtime` 归零"——官方语义是**自设备 boot** 计时，进程重启不重置；且 `EnvironmentLease` 没有任何能判定单调值可比性的字段；`M-LS-07`（`RELEASE_INCOMPLETE`）与 `M-LS-12`（`EXPIRED`）对同一重启场景无优先级 | 更正事实；冻结载体 **`applyOwnerGeneration`** 并给出充分性证明（设备 reboot 必然重启 owner 进程 ⇒ **generation 变化 ⊇ 时钟纪元变化**，故不会漏检）；明示其过度检测为**策略**（**该行原写"零代价"，已被 v1.9 更正为"不损失可信计数，但有可用性成本"**）；冻结恢复终态优先级（**该优先级被 v1.9 第 1 项改为 state-aware，原"对每个非 `RELEASED` lease"过宽**）；新增 `M-LS-13/14` |
 | 2 | §20 仍写"仅两件、均不阻塞 contract 冻结"，与同一 HEAD 的顶部告示、DP-2 时间窗、DP-3 停工门直接矛盾 | 换成**逐 DP 的阻塞范围表**（PR-1 identity / contract 与 #3–#6 / 真机验收三列），并声明该表是唯一权威 |
 | 3 | GitHub #7 仍把已撤回的 READY-only 写成"结构性关闭"——**durable body 本身就是提问的一部分**，会把无效选项直接递到 operator 面前 | 立即改为真实 A/B，`READY` 只作共用 mitigation |
 | 4 | `M-CO-03` 被标 `not-testable`，但它**可触达**，只是终态待 DP-3；而 manifest 只有 `passed/failed/skipped` | 区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**（可触达、待拍板）；manifest 增 `deferred` + `deferredOn`，**只要存在 deferred 记录最终 gate 一律失败** |
@@ -217,6 +218,21 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 第 2、3 项是同一种传播病的第四、五次复发：我改了顶部告示与 DP-3，却没回头改 §20；改了 #6，却没改 #7。**改一条被引用的结论时，"哪些地方引用了它"必须是可枚举的**——所以 §20 现在把阻塞范围做成表并声明自己是唯一权威，DP-3 的"选定后需同步锚点"列表也已包含 §20 与 #6/#7。
 
 第 1 项则是另一类：**我用一个事实错误（进程重启会重置 elapsedRealtime）推出了一个恰好安全的结论**。结论安全不代表推理可用——按错误前提写的测试会把错误的平台模型冻结进实现。这次改成先摆平台事实，再证明所选载体为何**充分**，而不是让它碰巧够用。
+
+#### 0.1.9 acceptance 第五轮修订（v1.9）
+
+| # | 问题 | 修订 |
+|---|---|---|
+| 1 | **v1.8 自己造的死锁**：恢复规则写成"对每个非 `RELEASED` lease"一律套用，于是 `REVOKED` lease 在重启且干净性可证时被改写为 `EXPIRED`——而 `EXPIRED` 的出口是"原 caller 调 `release`"，那个 caller 已被撤销无法调用；provider 内部自清理又只对 `REVOKED` 冻结。出口消失 | 恢复改为 **state-aware 分流表**：`REVOKED`/`RELEASE_INCOMPLETE` **原样保留**（出口与 caller 授权、时钟均无关）；`RELEASING` 幂等重放；**通用 `→ EXPIRED` 的作用域显式限定为 `ACQUIRING`/`ACTIVE`**——只有这两态的出口依赖 caller 在 deadline 前动作。新增 `M-LS-15/16/17` |
+| 2 | §10.1 散文承诺 `deferred`+`deferredOn`，紧挨着的 canonical JSON 仍是旧三值 status 且无该字段；`deferred` 时 `testId`/`reportDigest` 的必填性未定义 | JSON 与逐 status **必填性表**一并冻结：`deferred` 行**必须缺省** `testId`/`reportDigest`（那一行还没有可执行断言，填了就是假装跑过不存在的报告），必填 `deferredOn`，且存在任一 `deferred` 即最终 gate 失败 |
+| 3 | 传播残留：§21 仍写"两项"（实际 3）；Task 7 GREEN 仍写 53 行且把 owner-red 说成"触达不到"；Task 7 Verify 漏 `deferred`；PR body 写 lease 12 字段（实际 13） | 逐项同步；Task 7 GREEN 改为"不该由 Sol 跨 owner 去测"，不再说成无法测试 |
+| 4 | "false-red 实际不损失任何东西"与紧随其后承认多一次 release/reacquire 自相矛盾 | 收窄为**"不损失可信计数，但有可用性成本"** |
+
+§10 由 87 增至 **90 行 / 17 类**；`owner-red` 64（Opus5 31 / Kimi 33）· `sol-blackbox` 22 · `static-guard` 2 · `device` 2。
+
+第 1 项是 lease 机器里**同一种"出口不可达"的第三次**：`STALE_LEASE` 挡住 `EXPIRED→RELEASING`（v1.6 修）、撤销后要求失权 caller 去 release（v1.7 修）、恢复把 `REVOKED` 改写成出口不可达的 `EXPIRED`（本轮修）。三次的共同形状是：**我在定义"某状态如何离开"时只看该状态本身，没有检查有没有别的规则会把它改写成另一个状态**。
+
+因此本轮不只修实例，还把判据写进 §8.4：**恢复不得改变任何状态的出口可达性**——任何会重写 lease 状态的规则，都必须先确认目标状态的出口对当前授权主体仍然可达。这条比"再修一个 case"更值得留在文档里。
 
 ## 1. 事实基线与来源
 
@@ -1106,14 +1122,24 @@ generation 变化 ⊇ 时钟纪元变化
 
 **用 owner generation 作载体是可证充分的**——它不会漏掉任何一次单调值失效。因此 `EnvironmentLease` 冻结新字段 `applyOwnerGeneration`（apply 受理时的 `EnvironmentRevisionState` generation），并冻结判定：`applyOwnerGeneration ≠ 当前 generation` → `deadlineElapsedRealtimeMs` 不可比 → **按 `EXPIRED` 处理**。
 
-**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**接受这个 false-red，因为它实际不损失任何东西**——§6.6 L6 已规定 generation 断裂且连续性不可证时必须 bump revision + 降级 coverage，而 §6.4 的可信谓词要求 `pre.revision == post.revision` 且两侧 coverage 为 `FULL`。**任何跨越 generation 断裂的在飞可信 attempt 本来就已经判死**；强制 lease 过期只多一次 release + 重新 acquire 的往返，不会让任何原本能计数的工作丢失。
+**它同时会过度检测，这是明示策略而非意外**：普通的 qwy 进程重启（未 reboot、时钟仍可比）也会改 generation，于是也强制 lease 过期。**接受这个 false-red，因为它不会丢失任何"本还能计数"的工作**——§6.6 L6 已规定 generation 断裂且连续性不可证时必须 bump revision + 降级 coverage，而 §6.4 的可信谓词要求 `pre.revision == post.revision` 且两侧 coverage 为 `FULL`。**任何跨越 generation 断裂的在飞 attempt 都已不可能再满足可信谓词**。代价不是零：它确实多一次 release + 重新 acquire 的往返，属于**可用性成本**；准确的说法是"不损失可信计数"，不是"不损失任何东西"。
 
-**恢复终态优先级（消解 `M-LS-07` 与 `M-LS-12` 的重叠）**：qwy 重启后对每个非 `RELEASED` lease 按此顺序判定，**先命中先定**：
+**恢复必须是 state-aware 的（消解 `M-LS-07`/`M-LS-12` 重叠，且不制造新的不可达）**：把"对每个非 `RELEASED` lease 一律套用同一套规则"是**错的**——它会把一个出口已经确定的状态改写成一个出口对当前调用方不可达的状态。
 
-1. **环境干净性不可证** → `RELEASE_INCOMPLETE`（`M-LS-07`）。这是更强的终态，要求 operator 人工恢复证据才能离开。
-2. 否则 **`applyOwnerGeneration ≠ 当前 generation`** → `EXPIRED`（`M-LS-12`）。原 caller 可自行 `release` 收敛。
+先按状态分流，**同一 lease 只命中一条**：
 
-两者都阻挡新 `apply`（INV-28）；差别只在离开该态的路径。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。
+| 持久状态 | 重启后处置 | 理由 |
+|---|---|---|
+| `REVOKED` | **原样保留 `REVOKED`** | 它的出口是 §6.3.3 冻结的 **qwy 内部自清理**（`REVOKED → RELEASING`），与 caller 授权和时钟都无关。改写成 `EXPIRED` 会让出口消失：原 caller 已失权无法 `release`，而内部自清理只对 `REVOKED` 冻结 |
+| `RELEASE_INCOMPLETE` | **原样保留** | 出口是 operator 人工恢复证据，同样与时钟无关；改写只会丢失"需要人介入"这一信息 |
+| `RELEASING` | 重新驱动 release；无法证明清理完成 → `RELEASE_INCOMPLETE` | 幂等重放，语义不变 |
+| `ACQUIRING` / `ACTIVE` | ① 干净性不可证 → `RELEASE_INCOMPLETE`（`M-LS-07`）；② 否则 `applyOwnerGeneration ≠ 当前 generation` → `EXPIRED`（`M-LS-12`） | **只有这两态的出口依赖"caller 在 deadline 前动作"**，因此也只有它们受单调值可比性影响 |
+| `EXPIRED` | 原样保留 | 已过期，无需再过期一次 |
+| `RELEASED` | 终态，不参与恢复 | — |
+
+**通用 `→ EXPIRED` 规则的作用域被显式限定为 `ACQUIRING`/`ACTIVE`**，不得推广到"每个非 `RELEASED` lease"。
+
+所有非 `RELEASED` 态都阻挡新 `apply`（INV-28）；差别只在离开该态的路径，而**恢复不得改变这条路径的可达性**。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。
 
 ### 8.5 配对与预检就绪态
 
@@ -1308,7 +1334,10 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-LS-11` | lease | `deadlineEpochMs ≤ nowEpoch` 的 apply | 立即到期，不得因负数绕回变成超长 lease | 28 |
 | `M-LS-12` | lease | qwy 重启后 `applyOwnerGeneration ≠ 当前 generation`，且环境干净性**可证** | `EXPIRED`（原 caller 可 `release` 收敛）。优先级低于 `M-LS-07`，见 §8.4 | 25,28 |
 | `M-LS-13` | lease | **设备 reboot** 后单调时钟纪元改变 | 必然伴随 generation 变化，故被 `M-LS-12` 覆盖；断言绝对 `deadlineElapsedRealtimeMs` **不得**被原值裸比较 | 25,28 |
-| `M-LS-14` | lease | 普通进程重启（未 reboot，时钟仍可比） | 仍强制 `EXPIRED`——明示的 false-red 策略，非意外 | 25,28 |
+| `M-LS-14` | lease | 普通进程重启（未 reboot，时钟仍可比）下的 `ACTIVE` lease | 仍强制 `EXPIRED`——明示的 false-red 策略，非意外 | 25,28 |
+| `M-LS-15` | lease | **`REVOKED` lease + qwy 重启 + 干净性可证** | **必须保持 `REVOKED`**，qwy 内部自清理仍可达；**不得**被通用 generation 规则改写成 `EXPIRED`（那会让出口对已失权的 caller 不可达） | 2,25,28 |
+| `M-LS-16` | lease | `RELEASE_INCOMPLETE` lease + qwy 重启 | 原样保留，仍要求 operator 人工恢复证据；不得被改写 | 21,25,28 |
+| `M-LS-17` | lease | `RELEASING` lease + qwy 重启 | 幂等重放 release；无法证明清理完成 → `RELEASE_INCOMPLETE` | 13,21,28 |
 | `M-LS-05` | lease | 同 caller 同 `idempotencyKey` 重放 `apply` | 幂等返回原 receipt，不冲突 | 13,28 |
 | `M-LS-06` | lease | 同 caller 不同 key/不同 intentHash 再 `apply` | `LEASE_CONFLICT` | 16,28 |
 | `M-LS-07` | lease | qwy 重启后非 `RELEASED` lease，且环境干净性**不可证** | 从持久态重建 → `RELEASE_INCOMPLETE` + bump/降级。**优先于 `M-LS-12`**（§8.4 优先级 1） | 25,28 |
@@ -1421,6 +1450,9 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-LS-12` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_12` |
 | `M-LS-13` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_13` |
 | `M-LS-14` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_14` |
+| `M-LS-15` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_15` |
+| `M-LS-16` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_16` |
+| `M-LS-17` | lease | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_17` |
 | `M-ID-01` | idempotency | `sol-blackbox` | Sol | `acceptance/scenarios/src/test/kotlin/matrix/IdempotencyMatrixTest.kt::M_ID_01` |
 | `M-ID-02` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_02` |
 | `M-ID-03` | idempotency | `owner-red` | Kimi | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
@@ -1446,13 +1478,27 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 **evidence manifest（冻结载体）**：上面第 2 条不能停在"从 JUnit XML 提取"——`static-guard` 不产 JUnit，`device` 的 markdown 存在也不证明执行过，且 `M-CR-01` 与方法名里的 `M_CR_01` 需要规范化。因此每条 lane 在跑完后必须产出一份机器可读清单，`verify-a-plus.sh` 只消费它：
 
 ```json
-{ "rowId": "M-CR-01", "exactHead": "<40-hex>", "lane": "auto-unit|qwy-unit|acceptance|static-guard|device",
-  "testId": "<完全限定用例或检查项标识>", "status": "passed|failed|skipped", "reportDigest": "<sha256 of source report>" }
+{ "rowId":       "M-CR-01",
+  "exactHead":   "<40-hex>",
+  "lane":        "auto-unit|qwy-unit|acceptance|static-guard|device",
+  "status":      "passed|failed|skipped|deferred",
+  "testId":      "<完全限定用例或检查项标识>",   // status != deferred 时必填
+  "reportDigest":"<sha256 of source report>",  // status != deferred 时必填
+  "deferredOn":  "DP-3" }                      // status == deferred 时必填，其余 status 下必须缺省
 ```
 
 - **规范化**：`rowId` 一律用 §10 表的连字符形式；从测试方法名回推时把 `_` 归一为 `-` 后比对。
 - **HEAD 绑定**：每条 `exactHead` 必须等于被验的 PR HEAD；不等即 exit≠0，防止用旧跑的报告充数。
-- **status**：枚举为 `passed | failed | skipped | deferred`。只有 `passed` 计入覆盖；`skipped`/`failed` 与缺失同等处理；**`deferred` 必须携带 `deferredOn: "<DP-x>"`，且只要清单中存在任一 `deferred` 记录，最终 gate 一律失败**——它表示"还没人告诉我该断言什么"，不是一种通过。
+- **status 与字段必填性（逐 status 冻结）**：
+
+  | status | `testId` | `reportDigest` | `deferredOn` | 计入覆盖 | 对最终 gate |
+  |---|---|---|---|---|---|
+  | `passed` | 必填 | 必填 | 必须缺省 | 是 | 通过 |
+  | `failed` | 必填 | 必填 | 必须缺省 | 否 | 失败 |
+  | `skipped` | 必填 | 必填 | 必须缺省 | 否 | 失败 |
+  | `deferred` | **必须缺省** | **必须缺省** | **必填** | 否 | **失败** |
+
+  `deferred` 行**不得**填 `testId`/`reportDigest`：那一行还没有可执行断言，填了就是在假装跑过一个不存在的报告。它表示"还没人告诉我该断言什么"，不是一种通过；**只要清单中存在任一 `deferred` 记录，最终 gate 一律失败**。对应 DP 落地后，该行必须转为正常可执行断言并产出真实 `testId`/`reportDigest`。
 - **reportDigest**：指向原始报告（JUnit XML、guard 输出、device evidence 文件）的摘要，使清单不可脱离证据独立编造。
 - 清单本身进 PR evidence，Sol 的矩阵报告消费它，而不是逐行手工声明。
 
@@ -1792,20 +1838,20 @@ cd apps/cellrebel-auto
 - Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
 
-**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **87 行 / 17 类**。
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **90 行 / 17 类**。
 
 | class | 行数 | Sol 的职责 |
 |---|---|---|
 | `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
 | `static-guard` | 2 | 编写并执行静态扫描 |
 | `device` | 2 | 在授权 device lease 内执行并留存证据 |
-| `owner-red` | 61 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
+| `owner-red` | 64 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 61 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 30 行）。
+**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Kimi 33 行）。
 
-**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为触达不到的 53 行已不在 Sol 名下。
+**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / Kimi 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
 
-**Verify:** `./scripts/verify-a-plus.sh` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验（集合相等 / 绑定已执行报告 / not-testable 显式）。
+**Verify:** `./scripts/verify-a-plus.sh` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
 ### Task 8 — GLM 独立审查与 exact-HEAD 对抗验证
 
@@ -1975,7 +2021,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 ## 21. operator Decision Packets
 
-以下两项是价值取舍，不是技术 A/B；猫猫不自行决定，也不在 doc/代码 PR 中擅自执行。
+以下**三项**是价值取舍，不是技术 A/B；猫猫不自行决定，也不在 doc/代码 PR 中擅自执行。各自的阻塞范围见 §20 的表（那张表是唯一权威）。
 
 ### DP-1 · 千网游 release signer 迁移策略
 
