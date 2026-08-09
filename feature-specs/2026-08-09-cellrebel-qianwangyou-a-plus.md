@@ -59,6 +59,7 @@ source_threads:
 | v1.2 | 本 PR-0.1 | 非作者 review（REQUEST_CHANGES）后的 7 项修订，见 §0.1.2 |
 | v1.3 | 本 PR-0.1 | delta re-review 后的 5 项修订，见 §0.1.3 |
 | v1.4 | 本 PR-0.1 | final narrow delta 的 3 项修订，见 §0.1.4 |
+| v1.5 | PR-0.2（base `main@be885ac`） | merge 后 acceptance + GLM 双路 `REQUEST_CHANGES` 的 fix-forward，见 §0.1.5 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -136,6 +137,23 @@ v1.2 收到第二轮 `REQUEST_CHANGES`，5 项全部成立并已修订。主题�
 | 3 | "禁止 TOFU"措辞过宽：operator 对首次见到、未独立比对的 signer 显式批准，密码学上仍是 TOFU；且 `lastSeenVersionCode` 没有更新入口 | 统一为"禁止 silent/automatic TOFU"并写明安全上限（不证明 publisher identity）；版本字段改 immutable `approvedVersionCode`，后续版本只进 append-only 审计，不为审计字段扩大信任 store 可写面 | §4.1、§6.5.3、§6.5.4、§7.1、§10 |
 
 第 1 项与上一轮的 TOFU 缺口是**同一种病**：在顶层写下一条规则，然后冻结了一套做不到它的 schema/API。规则与承载它的接口必须一起冻结，否则规则只是文档里的一句话。
+
+#### 0.1.5 post-merge fix-forward（v1.5）
+
+PR-0.1 合入后，acceptance（Sol）与对抗审查（GLM）在同一 exact HEAD 上各自给出 `REQUEST_CHANGES`。八项 blocker 的**共同 failure mode 被明确命名**：*规范承诺没有完整落到 wire code、状态机边和可触达的 evidence owner*。这已是第 5 轮同型缺口，因此本轮不逐条打补丁，改为产出四张**全量映射**，让"承诺存在但无承载"在结构上可被发现。
+
+| 表 | 内容 | 章节 | 审计出的新缺口 |
+|---|---|---|---|
+| 表 1 | 每条 typed failure → `ContractErrorCodeV1` wire code | §6.3.3 | `IDEMPOTENCY_CONFLICT`、`REQUEST_INVALID` 缺失 |
+| 表 2 | observation 每个字段 → 信任谓词角色 | §6.4.1 | `deliveryMode`/`isMock`/`scheduleDecision` 未交叉校验（外部指出）；**`observedAt` 未验证夹住执行窗、`continuitySince` 未验证早于 pre 观察（本表审计新发现）** |
+| 表 3 | 每个 stateful object → 状态机/崩溃/冲突 | §8.3 | `EnvironmentLease` 无状态机（§8.4）、配对/预检态未普查（§8.5） |
+| 表 4 | §10 每行 → evidence class / owner / 入口 | §10.1 | Task 7 三项承诺不可同时成立 |
+
+其余修订：AC 表恢复顺序并冻结"新增一律追加表尾"；AC-05 的不可证明上限落表（§18.1）；Task 2 的 `EnvironmentIntentV1.kt` 路径此前被我追加在 `src/test` 行之后导致"同目录"指向测试目录，已修正；`check-forbidden-boundaries.sh` 移入 `acceptance/scripts/`，消除 root scripts 的 owner 冲突。
+
+**最重要的一条是降级而不是新增**：§8.6 先做事实认定——CellRebel 在现有可观察面上**不暴露任何物理执行身份**，Auto 与它之间不存在完成契约，`PRE_EXISTING_RUN` 只是因果归属。因此 INV-11 的绝对表述不可能成立，已降级为有界保证 + INV-26 审计，并在 §8.6.5 写明"能证明什么、不能证明什么"。同时按事实收紧了判定：RUNNING 必须由 marker 文本证实且持续达标，堵住"re-foreground 动画期间 disabled-Start 被当作 RUNNING、读到上一次结果页分数"这条真实双计路径。
+
+方法论记录：**先查可观察面，再定不变量。** 前四轮的缺口都是"先写下承诺，再去找承载"，而承载往往不存在。第 5 轮改成先做事实认定，结论就从"补一条 INV"变成了"必须降级一条 INV"——后者才是诚实的。
 
 ## 1. 事实基线与来源
 
@@ -555,7 +573,31 @@ data class ReleaseReceiptV1(
 
 `EnvironmentIntentV1` 与上述全部类型都必须有对应 `.aidl` parcelable 声明与 `.kt` 实现，并纳入 §12 文件所有权。**实现者不得自行发明字段**：任何需要新增字段的发现都回本 spec 修订，不在 consumer branch 私改。
 
-所有 request 另含 `idempotencyKey` 或稳定 operation id；所有失败使用 typed error：`NOT_PAIRED`、`CALLER_NOT_ALLOWED`、`INCOMPATIBLE_PROTOCOL`、`CAPABILITY_UNAVAILABLE`、`SCHEDULE_DENIED`、`CONTINUITY_NOT_FULL`、`LEASE_CONFLICT`、`STALE_LEASE`、`ENVIRONMENT_DRIFT`、`RELEASE_INCOMPLETE`、`INTERNAL_FAILURE`。每个 code 绑定永久稳定的 `ContractErrorCodeV1.wire: Int`，规则同 §6.2。
+所有 request 另含 `idempotencyKey` 或稳定 operation id。
+
+#### 6.3.3 `ContractErrorCodeV1` 全量映射（表 1）
+
+每个 code 绑定永久稳定的 `wire: Int`，规则同 §6.2。**本表是 v1 typed failure 的完备集**：spec 中任何一条 INV 或 §10 矩阵行所要求的 typed failure，都必须能在这里找到唯一对应的 code；找不到即是 spec 缺陷，回本表补，不得由实现者复用近义 code 或私自发明。
+
+| wire | code | 触发条件 | 承载的 INV / §10 |
+|---|---|---|---|
+| 1 | `NOT_PAIRED` | 调用方不在 caller allowlist（或 Auto 侧 provider 未批准，本地态） | INV-02；pairing 行 |
+| 2 | `CALLER_NOT_ALLOWED` | 身份解析失败或被拒：`getPackagesForUid` ≠ 1 个包、多签名者、signer 与快照不符、已 revoke | INV-02；bypass/pairing 行 |
+| 3 | `INCOMPATIBLE_PROTOCOL` | `protocolVersion` 不在支持集合，或收到未知枚举 wire code | INV-03,04,19；version 行 |
+| 4 | `CAPABILITY_UNAVAILABLE` | 请求的模式/profile/schedule 当前不可用 | INV-01,03 |
+| 5 | `SCHEDULE_DENIED` | `scheduleDecision == DENIED` | INV-17；recovery 行 |
+| 6 | `CONTINUITY_NOT_FULL` | coverage 为 `PARTIAL/NONE` | INV-08,09；crash/bypass 行 |
+| 7 | `LEASE_CONFLICT` | 与另一 caller 或另一 intent 的 active/未收敛 lease 冲突 | INV-14,16；concurrency 行 |
+| 8 | `STALE_LEASE` | leaseId 已过期、已释放或不属于本 caller | INV-14；release 行 |
+| 9 | `ENVIRONMENT_DRIFT` | `expectedIntentHash` 与当前 lease 生效意图不符，或有效环境已漂移 | INV-08,23；intent 行 |
+| 10 | `RELEASE_INCOMPLETE` | release 无法证明清理完成 | INV-21；release/recovery 行 |
+| 11 | `INTERNAL_FAILURE` | 服务端内部错误；**以及未知 wire code 的唯一 fallback** | INV-03 |
+| **12** | **`IDEMPOTENCY_CONFLICT`** | **同 `idempotencyKey` 但 payload digest 不同** | **INV-13；`apply 同键异 payload` 行** |
+| **13** | **`REQUEST_INVALID`** | **请求结构性非法：必填 ref 为空、坐标越界、`deadline ≤ notBefore`、`WAIT_UNTIL` 缺 `waitUntilEpochMs`** | **INV-04；contract round-trip 负例** |
+
+12 与 13 由本次全量映射审计发现：INV-13 与 §10 早已要求"同键异 payload → typed conflict"，但清单里只有语义不同的 `LEASE_CONFLICT`；结构性非法请求此前只能落到 `INTERNAL_FAILURE`，既不可诊断，也会把调用方错误伪装成服务端故障。**两者都必须在 v1 冻结时就位**——事后追加 code 意味着旧读者按 §6.2 规则把它们 fail-closed 成 `INTERNAL_FAILURE`，语义永久丢失。
+
+`IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 不可互相替代：前者是"你用同一把钥匙提交了不同的内容"（调用方错误，重试无用，必须换 key 或修正 payload），后者是"环境已被别的意图占用"（时序冲突，释放后可重试）。把两者合并会让 Auto 的恢复策略无法区分"该放弃"与"该等待"。
 
 预期业务失败通过 `ServiceSpecificException` 返回稳定的 `ContractErrorCodeV1.wireCode`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
 
@@ -583,6 +625,18 @@ pre/post.verificationLevel == SYSTEM_MOCK_INDEPENDENTLY_VERIFIED
 pre/post.leaseId == apply.leaseId
 CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION
 
+# tuple 交叉一致（INV-27）：verificationLevel 单独可信不成立
+pre/post.deliveryMode     == SYSTEM_MOCK        # 非空且必须是 SYSTEM_MOCK
+pre/post.isMock           == true               # 非空且为 true
+pre/post.scheduleDecision == ALLOWED_NOW
+pre/post.evidenceRefs     非空
+
+# 观察窗必须真正包住执行窗（INV-27）
+pre.observedAtEpochMs  <  cellRebelStartedAtEpochMs
+post.observedAtEpochMs >  cellRebelCompletedAtEpochMs
+pre.continuitySinceEpochMs != null
+pre.continuitySinceEpochMs <= pre.observedAtEpochMs
+
 # 意图绑定（INV-23）：以上全部成立仍不足以证明"跑的是这个地址"
 pre.acceptedIntentHash  == apply.acceptedIntentHash
 post.acceptedIntentHash == apply.acceptedIntentHash
@@ -594,6 +648,41 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 ```
 
 任一不成立：不得写可信配额。
+
+#### 6.4.1 observation 字段 → 信任谓词角色（表 2）
+
+`EnvironmentObservationV1` 的**每一个**字段都必须在下表里有明确角色。"字段存在但没人校验"是可信语义的隐性漏洞：fake provider 只要不被校验就可以自由填写。
+
+| 字段 | 角色 | 可信要求 |
+|---|---|---|
+| `leaseId` | 谓词 | `== apply.leaseId` |
+| `acceptedIntentHash` | 谓词 | `== apply.acceptedIntentHash == localDigest(intent)` |
+| `observedAtEpochMs` | **谓词** | pre 早于 CellRebel 启动，post 晚于 CellRebel 完成 |
+| `environmentRevision` | 谓词 | `pre == post` |
+| `environmentFingerprint` | 谓词 | `pre == post` |
+| `continuityCoverageWire` | 谓词 | `== FULL` |
+| `continuitySinceEpochMs` | **谓词** | 非空且 `<= pre.observedAtEpochMs` |
+| `deliveryModeWire` | **谓词** | 非空且 `== SYSTEM_MOCK` |
+| `verificationLevelWire` | 谓词 | `== SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` |
+| `effectiveLatitude/Longitude` | 谓词 | 非空且在容差内匹配 intent |
+| `isMock` | **谓词** | 非空且 `== true` |
+| `scheduleDecisionWire` | **谓词** | `== ALLOWED_NOW` |
+| `evidenceRefs` | **谓词 + 审计** | 非空；内容进证据链 |
+
+粗体五项是本次全量映射新增的校验。前三项（`deliveryMode`/`isMock`/`scheduleDecision`）来自 acceptance review：**只看 `verificationLevel` 会放过自相矛盾的 tuple**——`HOOK + VERIFIED`、`DENIED + VERIFIED`、`isMock=false + VERIFIED` 都能满足旧谓词，直接撞穿 INV-06（Hook 不得进可信账）与 INV-17。后两项（`observedAt` 序、`continuitySince`）是做本表时发现的同类漏洞：旧谓词从不检查两次观察是否真的**夹住**了执行窗，也不检查连续性窗口是否**早于** pre 观察就已建立；两者都可以让一份"前后都 FULL"的证据实际上没有覆盖测试发生的那段时间。
+
+**矛盾 tuple 必须 fail-closed 且必测**。以下每一行都是独立负例，断言不写可信配额：
+
+| 矛盾 tuple | 为何危险 |
+|---|---|
+| `HOOK` + `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` | Hook 结果冒充独立验证，绕过 INV-06 |
+| `isMock=false` + `VERIFIED` | 环境根本没在 mock，却声称已验证 |
+| `isMock=null` + `VERIFIED` | 用"未知"冒充"已验证" |
+| `DENIED`/`WAIT_UNTIL` + `VERIFIED` | schedule 明确不允许运行，却计入可信 |
+| `coverage=FULL` + `continuitySince=null` | 声称完整覆盖却给不出覆盖起点 |
+| `continuitySince > pre.observedAt` | 连续性窗口晚于观察，未覆盖测试 |
+| `post.observedAt < CellRebel 完成时刻` | "后置观察"发生在完成之前，不构成后置证据 |
+| `evidenceRefs` 为空 + `VERIFIED` | 无可复核证据的"已验证" |
 
 **为什么意图绑定是独立的一条**：`coverage/revision/fingerprint/lease/verificationLevel` 全部只证明"环境在测试全程没有相关变化"，不证明"环境处在**这个 attempt 要求的**位置"。若 apply 静默部分生效、被上一地址的残留状态覆盖、或 lease 复用时意图已切换，上面前七条可以整体成立，而可信配额被记到**错误地址**。本产品的全部价值就是"每地址的可信次数"，因此错记地址是最贵的失败模式，必须由独立不变量排除，而不是依赖其他条件的副作用。
 
@@ -737,7 +826,7 @@ ProviderPairingRecord(
 | `PlanRun` | AutomationEngine | runId、planVersion、状态、开始/结束时间 | “完成百分比”派生，不单存 |
 | `LocationTask` | PlanRepository | 顺序、目标配额 | completed 由可信账本计数派生 |
 | `Attempt` | AttemptRepository | attemptId、taskId、状态、当前 operation | 不直接存 success boolean |
-| `CellRebelExecution` | CellRebelAttemptFlow | executionId、attemptId、判定、证据 | 一个 attempt 可有多个外部 execution |
+| `CellRebelExecution` | CellRebelAttemptFlow | executionId、attemptId、`CellRebelCompletionEvidenceV1` 判定值（§8.6.2 五值之一）、完整证据（基线态/marker 文本/RUNNING 时长/各轮时间戳/分数） | 一个 attempt 可有多个外部 execution；`executionId` 是 **Auto 本地生成**的，**不是** CellRebel 的物理执行身份（§8.6.1） |
 | `TrustedQuotaEntry` | TrustedQuotaLedger | attemptId、taskId、evidenceDigest | UNIQUE(attemptId)，只插不改 |
 | `UnverifiedAttemptRecord` | AttemptRepository | attemptId、reason、evidenceDigest | 与可信账本不同表/类型 |
 | `LegacyCompletionSnapshot` | v4→v5 迁移（只写一次） | taskId、legacyCompletedSuccesses、legacyStatus、migratedFromSchemaVersion、migratedAt | 只读展示；**绝不生成 `TrustedQuotaEntry`**，不进 completed 投影 |
@@ -805,6 +894,129 @@ ProviderPairingRecord(
 | 非终态 | 永久不兼容/安全失败 | `STOPPED` | 明确原因和人工动作 |
 | `COMPLETED/STOPPED` | 任意继续事件 | 原状态 | 终态不可复活；新建 run |
 
+### 8.3 stateful object 完备性映射（表 3）
+
+§7 普查了"有哪些状态对象"，本表回答"每个对象的状态迁移在哪里被冻结"。**空缺即缺陷**：任何被 INV 或 §10 依赖其状态语义的对象，都必须在此表指向一个已定义的状态机，否则各实现者会各自发明。
+
+| 对象 | owner | 状态机 | 崩溃恢复 | 冲突语义 |
+|---|---|---|---|---|
+| `PlanRun` | AutomationEngine | §8.2 | §8.2 `RECOVERING` | 单设备一个 active run（INV-16） |
+| `Attempt` | AttemptRepository | §8.1 | §8.1 `RECOVERY_REQUIRED` | 同 task 串行 |
+| `EnvironmentLease` | EnvironmentLeaseStore | **§8.4（本次新增）** | §8.4 | §8.4 冲突谓词 |
+| `PairingRecord` / `ProviderPairingRecord` | CallerAuthorizer / ProviderTrustStore | **§8.5（本次新增）** | 持久，无中间态 | 同 key 唯一 |
+| `EnvironmentRevisionState` | ContinuityTracker | §6.6 L1–L6 | §6.6 generation | 单写者，无冲突 |
+| `CellRebelExecution` | CellRebelAttemptFlow | §8.6（completion evidence） | 随 Attempt | 见 §8.6 去重 |
+| `OperationReceipt` | IdempotencyStore | 无中间态：同键同 payload 幂等重放，异 payload → `IDEMPOTENCY_CONFLICT` | 键持久，重放安全 | INV-13 |
+| `TrustedQuotaEntry` | TrustedQuotaLedger | 只插不改，无迁移 | ledger 为真相（§10） | `UNIQUE(attemptId)` + §8.6 |
+| `UnverifiedAttemptRecord` | AttemptRepository | 只插不改 | 同上 | 与可信账本不同表 |
+| `LegacyCompletionSnapshot` | v4→v5 迁移 | 只写一次，此后只读 | 迁移事务内 | 不参与判定 |
+| `RecoveryCheckpoint` | RecoveryCoordinator | 终态后删除或纯投影 | 本身即恢复输入 | 单 attempt 唯一 |
+| `EffectiveEnvironmentObservation` | EnvironmentObserver | 不可变快照 | 无 | 无 |
+| `ScheduleEvaluation` | QWY Schedule owner | qwy 内部，Auto 只消费 decision | qwy 内部 | 无 |
+| `AutoAuditEvent` / `QwyAuditEvent` | AuditRepository / IntegrationAuditStore | append-only，非状态 owner | 无 | 无 |
+
+### 8.4 EnvironmentLease 状态机
+
+`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，Kimi 的 provider 与 Sol 的 fake provider 会各写一套，且 acceptance 会在两套语义之间假绿。
+
+| 当前状态 | 事件 | 下一状态 | 原子写入 | 阻挡新 apply |
+|---|---|---|---|---|
+| （无） | `ACQUIRE` 通过预检 | `ACQUIRING` | 先写 lease + idempotencyKey | — |
+| `ACQUIRING` | 环境已应用 | `ACTIVE` | 保存 intentHash、起始 revision | **是** |
+| `ACQUIRING` | 应用失败 | `RELEASE_INCOMPLETE` | 记录 typed reason | **是** |
+| `ACQUIRING` | 崩溃恢复 | `ACQUIRING` | 同键重放，不换 key | **是** |
+| `ACTIVE` | `RELEASE` 请求 | `RELEASING` | 保存 release key | **是** |
+| `ACTIVE` | 到达 `deadlineEpochMs` | `EXPIRED` | 记录过期 | **是** |
+| `ACTIVE` | 配对被 revoke | `REVOKED` | 记录撤销来源 | **是** |
+| `RELEASING` | 清理已证明完成 | `RELEASED` | 保存 release receipt | 否 |
+| `RELEASING` | 清理不可证明 | `RELEASE_INCOMPLETE` | `releaseComplete=false` + residual | **是** |
+| `EXPIRED` / `REVOKED` | 走 release/recovery | `RELEASING` | 同上 | **是** |
+| `RELEASE_INCOMPLETE` | operator 完成人工恢复 | `RELEASED` | 记录人工恢复证据 | **是**（直到迁出） |
+| `RELEASED` | 任意重复事件 | `RELEASED` | no-op + audit | 否 |
+
+**冲突谓词**：新的 `apply` 在设备上存在任一非 `RELEASED` lease 时返回 `LEASE_CONFLICT`，**唯一例外**是同一 caller 以**同一 `idempotencyKey`** 重放——那是幂等重放，返回原 receipt；同一 caller 用不同 key 或不同 intentHash 再次 apply 同样冲突。
+
+**为什么 `EXPIRED` 必须继续阻挡**：过期只说明时间到了，**不说明环境已被清理**。若把 `EXPIRED` 当作自动释放，lease TTL 就成了 INV-21（release 不可证明即暂停）的一条旁路——超时即可让下一个 apply 在一个状态未知的环境上开跑。同理 `RELEASE_INCOMPLETE` 与 `REVOKED` 都必须阻挡到被显式收敛为止。**这里宁可误挡（false-red，代价是停机等人）也不能漏挡（false-green，代价是可信配额建立在脏环境上）。**
+
+**跨进程崩溃恢复**：qwy 重启后，任何非 `RELEASED` 的 lease 都从持久状态重建；若无法证明环境干净，一律落到 `RELEASE_INCOMPLETE`，并按 §6.6 L6 bump revision + 降级 coverage。**禁止**用"重启后没看到 lease 就当没有"来隐式释放。
+
+### 8.5 配对与预检就绪态
+
+§7 的状态普查此前不含配对/预检态，而 §4.1 的双向批准流程与 §6.5.3 的撤销生命周期都依赖它们。
+
+| 状态 | 含义 | 可否进入 CellRebel |
+|---|---|---|
+| `UNPAIRED_CALLER` | 千网游侧无 active `PairingRecord` | 否（`NOT_PAIRED`） |
+| `PENDING_CALLER_APPROVAL` | 候选已落 `PendingPairingCandidate`，等 operator | 否 |
+| `UNAPPROVED_PROVIDER` | Auto 侧无 active `ProviderPairingRecord` | 否（本地 `NOT_PAIRED`，禁止 silent TOFU） |
+| `PENDING_PROVIDER_APPROVAL` | 已展示给 operator，等显式批准 | 否；capability 仅可展示 |
+| `INCOMPATIBLE` | 握手判定协议/能力不兼容 | 否（`INCOMPATIBLE_PROTOCOL`） |
+| `READY` | 两侧均 active 且握手通过 | 是 |
+| `REVOKED_EITHER_SIDE` | 任一侧撤销 | 否；in-flight run 转 release/recovery |
+
+### 8.6 CellRebel completion evidence（冻结取值集 + 诚实上限）
+
+`VERIFIED_NEW_COMPLETION` 此前是 §6.4 可信谓词的 load-bearing 项，却全文无定义。补定义之前必须先回答一个事实问题：**CellRebel 是否向外暴露稳定的物理执行身份？**
+
+#### 8.6.1 事实认定（只读核验 `TERRYYYC/Faketest@48d8ec9`）
+
+**答案：没有。**
+
+- 观察面只有 `ScreenNode { text, contentDescription, className, clickable, enabled }`（`automation/cellrebel/ScreenSnapshot.kt:10-17`）。`viewIdResourceName` **不在其中**——它仅出现在 `util/DebugExporter.kt:119` 的人读 dump，不进任何决策路径。
+- 无 run ID、结果行 ID、test ID、单调计数器、导出文件、ContentProvider、可读日志；CellRebel 的历史/结果列表从未被访问（唯一导航是菜单 → 文本 `"Connection Test"`）。
+- 完成判定是**轮询 UI 文本**（`CellRebelAttemptFlow.POLL_INTERVAL_MS = 1500L`）：无 running marker + 存在 enabled 的 `"Start"` + 两个分数可解析，且**连续两轮完全一致**。
+- `PRE_EXISTING_RUN` 是**纯因果归属**——"Start 交互前屏幕是否已 RUNNING"（`CellRebelAttemptFlow.kt:106-137`），不携带任何身份信息。
+- Auto 侧无任何源自 CellRebel 的去重键；全部 ordinal 都由**我们自己的行数**推导。`PlanRepository.finalizeAttemptSuccess` 的 `incrementSuccessIfCurrent` CAS 只保证**同一 attempt 重放**幂等，**不阻止两个不同 attempt 各自认领同一次物理执行**（二者 `expectedCompletedSuccesses` 分别为 N 与 N+1，都会 CAS 成功）。
+
+**因此：系统只有因果链，没有执行身份。** 这不是实现疏漏，是外部 App 的可观察面决定的上界——CellRebel 与 Auto 之间不存在完成契约（§5：唯一完成判定方是 Auto 自己）。
+
+#### 8.6.2 冻结取值集
+
+```kotlin
+enum class CellRebelCompletionEvidenceV1(val wire: Int) {
+    /** 完整因果链：基线非 RUNNING → 本次 Start 交互 → marker 证实的 RUNNING 持续达标 → 稳定 COMPLETED */
+    VERIFIED_NEW_COMPLETION(1),
+    /** Start 交互前屏幕已 RUNNING —— 属于上一次运行 */
+    PRE_EXISTING_RUN(2),
+    /** RUNNING 仅由「Start 按钮 disabled」推得，无 marker 文本佐证 */
+    WEAK_RUNNING_EVIDENCE(3),
+    /** RUNNING 时长低于冻结下限，与布局动画不可区分 */
+    RUNNING_TOO_SHORT(4),
+    /** 超时、中断、分数不可解析等 */
+    NO_COMPLETION_EVIDENCE(5),
+}
+```
+
+**只有 `VERIFIED_NEW_COMPLETION` 可进入可信配额**；其余全部写 `UnverifiedAttemptRecord`，且必须记录 typed reason。
+
+#### 8.6.3 判定规则（全部条件缺一不可）
+
+1. **基线**：Start 交互前在同一 `run()` 调用内观察到 `READY` 或 `COMPLETED`（非 RUNNING）。观察到 RUNNING → `PRE_EXISTING_RUN`。
+2. **RUNNING 必须由 marker 文本证实**。当前检测式为 `hasMarker || (start != null && !start.enabled)`；**后半条单独成立时不得判为可信**。理由见 §8.6.4。仅 disabled-Start → `WEAK_RUNNING_EVIDENCE`。
+3. **RUNNING 必须持续 ≥ `MIN_RUNNING_EVIDENCE_MS`**（冻结为 10_000 ms）。真实连接测试量级为数十秒，而 re-foreground 布局动画量级为数百毫秒。低于下限 → `RUNNING_TOO_SHORT`。
+4. **RUNNING → 非 RUNNING → 稳定 COMPLETED** 的迁移必须发生在**同一 `run()` 调用内**。跨调用拼接的证据不成立。
+5. 分数需连续两轮完全一致（沿用既有稳定性判据）。
+
+#### 8.6.4 为什么第 2、3 条是必需的（具体攻击面）
+
+`AutomationEngine.kt:313` 在每次 `runTest` 前调用 `returnToSelf()`，随后 `CellRebelHandler.launchAndWaitForForeground()` 经 `GLOBAL_ACTION_RECENTS` 切回 CellRebel——**上一次运行的完成结果页是结构性地必然重显**，不是偶发。
+
+若此时 Start 按钮因布局/动画短暂 `enabled=false`，旧判据的后半条即成立 → 判为 RUNNING → 进入完成循环 → 读到**上一次运行仍在屏幕上的分数** → 连续两轮当然一致 → 返回 `Success`。**一次物理执行被第二个 attemptId 再计一次可信配额**，且 `UNIQUE(attemptId)` 完全挡不住（两个 attemptId 本就不同）。
+
+**分数不能用来去重**：upstream 明文规定"两次有效运行可以产生完全相同的结果"（INV-7）。用分数相同判重会系统性丢弃合法成功；且 `findNearbyScoreOrLabel` 在数值缺失时回退到 5 档评级词，同一次结果在不同轮次可能给出不同键，反而制造假分裂。**因此禁止任何基于分数值的跨 attempt 去重。**
+
+#### 8.6.5 诚实上限（本方案能证明什么、不能证明什么）
+
+**能证明**：每个 attemptId 至多一次可信配额（INV-10）；可信配额只在完整因果链于单次 `run()` 内被观察到时写入；每次接受都留下可复核证据（基线态、marker 文本、RUNNING 时长、各轮时间戳、分数）。
+
+**不能证明**：同一次物理 CellRebel 执行绝不会被两个 attempt 各计一次。**没有任何可观察量支持这个保证**。第 2、3 条把攻击窗从"数百毫秒的动画"收缩到"CellRebel 必须持续 ≥10s 渲染 marker 文本却未真正开跑"，但不能消除它。
+
+因此 **INV-11 降级为有界保证**，并配一条 operator 可见的审计（INV-26）。**不接受把它写成绝对保证**——那是拿一句文档承诺去掩盖一个观察面缺口，正是本 spec §0.1.4 记录过的病。
+
+若将来 CellRebel 暴露稳定执行身份（结果行 ID、导出文件、可读 run id），本节可升级为强保证并重写 INV-11；在那之前不假装拥有它。
+
+**实现注记（Task 5 必查）**：`CellRebelStateDetector` 用 `text.equals("Start")` 精确匹配，而 `CellRebelHandler.findStartNode` 经 `NodeFinder.findByText` 用 contains 匹配。标签若为 `"Start Test"`，handler 找得到而 detector 判 `UNKNOWN`——两者必须统一，否则新设备上会静默失去全部可信计数。
+
 ## 9. 安全与一致性不变量
 
 | INV | 不变量 | 可测证据 |
@@ -819,7 +1031,8 @@ ProviderPairingRecord(
 | INV-08 | 相关环境变化必改 revision；coverage 非 FULL 时不可信 | continuity tracker event matrix |
 | INV-09 | 心跳、进程存活或时间戳不能替代 INV-08 | forbidden-evidence tests/static guard |
 | INV-10 | 同一 attempt 的可信配额最多增加一次 | Room UNIQUE + concurrent insert test |
-| INV-11 | 未证明 CellRebel 新完成永不计数 | PRE_EXISTING_RUN/timeout/crash tests |
+| INV-11 | 可信配额只接受 `VERIFIED_NEW_COMPLETION`——即基线非 RUNNING → 本次 Start → **marker 证实**且持续 ≥ `MIN_RUNNING_EVIDENCE_MS` 的 RUNNING → 同一 `run()` 内稳定 COMPLETED 的完整因果链；任一环缺失即写未验证。**这是有界保证，不是"同一物理执行绝不双计"**，上限见 §8.6.5 | `PRE_EXISTING_RUN`/`WEAK_RUNNING_EVIDENCE`/`RUNNING_TOO_SHORT`/timeout/crash 逐值测试 |
+| INV-26 | 禁止任何基于分数值的跨 attempt 去重（upstream INV-7：两次有效运行可产生相同结果）；改为对每次可信计数持久化完整 completion evidence，并向 operator 暴露可疑相邻计数的**去重审计报告**（低 RUNNING 时长、异常紧邻时间戳等），报告不自动否决计数 | evidence 持久化 schema 测试；审计报告触发条件测试；"分数相同的两次合法运行都被计入"正例 |
 | INV-12 | 外部 CellRebel execution 可重跑且全部留痕 | multi-execution recovery test |
 | INV-13 | apply/release 同键同 payload 幂等；同键异 payload 拒绝 | service concurrency tests |
 | INV-14 | release 只能清理本 caller、本 lease 获取的环境，不破坏 pre-existing state | stale/foreign lease tests |
@@ -834,6 +1047,8 @@ ProviderPairingRecord(
 | INV-23 | 可信配额要求 pre/post observation 的 `acceptedIntentHash` 等于 apply receipt 且等于 Auto 本地重算值，且 `effectiveLat/Lng` 非空并在 `TRUSTED_LOCATION_TOLERANCE_METERS` 内匹配目标坐标 | intent-binding matrix：错误地址、意图漂移、apply 部分生效、lease 复用后意图切换、坐标为 null 五类负例 |
 | INV-24 | 用户可见持久数据的 schema 变更必须有显式 migration + 真实旧版本 fixture 测试；禁止 destructive fallback | Auto v4→v5 真实 fixture migration test；`fallbackToDestructiveMigration` 静态禁用扫描 |
 | INV-25 | `environmentRevision`/coverage 跨进程单写者、持久、原子、单调；有损观察器与进程代际不明必须 bump + 降级 | 多进程并发 bump 测试；owner 进程重启代际测试；observer 丢事件注入测试 |
+| INV-27 | observation 的 mode/isMock/schedule/证据/时序必须与 `verificationLevel` 交叉一致；矛盾 tuple 一律 fail-closed；两次观察必须夹住执行窗且连续性窗口早于 pre 观察 | §6.4.1 矛盾 tuple 矩阵（8 行独立负例） |
+| INV-28 | 设备上任一非 `RELEASED` lease 阻挡新 `apply`（唯一例外：同 caller 同 `idempotencyKey` 幂等重放）；`EXPIRED`/`REVOKED`/`RELEASE_INCOMPLETE` 不自动释放 | §8.4 状态机逐边测试；stale/expired/revoked 阻挡测试；跨进程崩溃重建测试 |
 
 ## 10. 崩溃、并发、恢复与旁路误用矩阵
 
@@ -853,6 +1068,12 @@ ProviderPairingRecord(
 | concurrency | 两 caller 请求冲突环境 lease | 第二方 typed `LEASE_CONFLICT` | 14,16 |
 | concurrency | apply 同键异 payload | typed conflict，不执行第二次 | 13 |
 | recovery | `PRE_EXISTING_RUN` 后出现旧结果页 | 记录旧运行，不计新完成 | 11,12 |
+| completion | re-foreground 期间 Start 短暂 disabled，旧完成页仍在屏 | 判 `WEAK_RUNNING_EVIDENCE`，不计数——**不得仅凭 disabled-Start 认定 RUNNING** | 11,26 |
+| completion | RUNNING 由 marker 证实但时长 < `MIN_RUNNING_EVIDENCE_MS` | 判 `RUNNING_TOO_SHORT`，不计数 | 11 |
+| completion | 同一物理完成被 attempt A（post-observe 失败）与 attempt B 各观测一次 | **至多一条可信 ledger**；若因果链在 B 内不完整则 B 不计；若两次都满足完整链，按 §8.6.5 记为已知上限并触发 INV-26 审计 | 10,11,26 |
+| completion | 两次**合法**运行产生完全相同分数 | 两次都必须计入——禁止按分数判重（upstream INV-7） | 26 |
+| completion | 分数数值缺失回退到评级词，同一结果跨轮给出不同键 | 不得据此判为两次运行 | 26 |
+| completion | 设备上完全不出现 running marker 文本 | 全部判未验证并显式告警；**不得回退到 disabled-Start 弱信号** | 11 |
 | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |
 | recovery | qwy release 只能部分清理 | plan 暂停，显示人工恢复 | 14,21 |
@@ -891,7 +1112,47 @@ ProviderPairingRecord(
 | pairing | 千网游撤销 caller 后 Auto 继续调用 | 立即 typed 失败，active lease 进入 release/recovery | 2,14 |
 | pairing | 撤销后同一 (applicationId, signer) 再次出现 | 必须重新走 operator 批准；不得因历史记录存在而自动复活 | 2 |
 | pairing | 撤销前已写入的可信配额 | 不回溯撤销；撤销事件进审计，历史可解释 | 2,10,18 |
+| tuple | `HOOK` + `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` | fail-closed，不计数 | 6,27 |
+| tuple | `isMock=false`（或 null）+ `VERIFIED` | fail-closed，不计数 | 27 |
+| tuple | `DENIED`/`WAIT_UNTIL` + `VERIFIED` | fail-closed，不计数 | 17,27 |
+| tuple | `coverage=FULL` + `continuitySince=null` | fail-closed，不计数 | 8,9,27 |
+| tuple | `continuitySince > pre.observedAt` | 连续性窗未覆盖观察，不计数 | 8,27 |
+| tuple | `post.observedAt` 早于 CellRebel 完成时刻 | 后置观察不成立，不计数 | 7,27 |
+| tuple | `evidenceRefs` 为空 + `VERIFIED` | 无可复核证据，不计数 | 18,27 |
+| lease | 存在 `ACTIVE` lease 时另一 caller `apply` | `LEASE_CONFLICT` | 14,16,28 |
+| lease | 存在 `RELEASE_INCOMPLETE` lease 时新 `apply` | `LEASE_CONFLICT`；不得因"已 release 过"放行 | 21,28 |
+| lease | lease 到 `deadline` 后新 `apply` | `EXPIRED` 仍阻挡；TTL 不是 INV-21 的旁路 | 21,28 |
+| lease | 配对 revoke 后 lease 处于 `REVOKED` | 阻挡新 apply，走 release/recovery | 2,28 |
+| lease | 同 caller 同 `idempotencyKey` 重放 `apply` | 幂等返回原 receipt，不冲突 | 13,28 |
+| lease | 同 caller 不同 key/不同 intentHash 再 `apply` | `LEASE_CONFLICT` | 16,28 |
+| lease | qwy 重启后非 `RELEASED` lease | 从持久态重建；不可证明干净则 `RELEASE_INCOMPLETE` + bump/降级 | 25,28 |
+| idempotency | 同 `idempotencyKey` 异 payload | `IDEMPOTENCY_CONFLICT`（不得复用 `LEASE_CONFLICT`） | 13 |
+| request | 必填 ref 为空 / 坐标越界 / `deadline ≤ notBefore` / `WAIT_UNTIL` 缺 `waitUntilEpochMs` | `REQUEST_INVALID`，不得落到 `INTERNAL_FAILURE` | 4 |
+| config | 运行中改 `TRUSTED_LOCATION_TOLERANCE_METERS` 或 `requiredVerification` | 在飞 attempt continue 使用 `PlanSnapshot` 冻结值；新值只对新 plan version/地址边界生效 | 17 |
+| config | 运行中改容差后 in-flight attempt 恰好越过新阈值 | 仍按冻结快照判定，结果不因中途改配置而翻转 | 17 |
 | pairing | 同 signer + 新 versionCode（任一侧正常升级） | 保持配对，由 protocol handshake 决定兼容；**不得要求重新配对** | 2,3,19 |
+
+### 10.1 矩阵行 → evidence class / owner / 入口（表 4）
+
+Task 7 此前同时承诺三件事：Sol 覆盖 §10 全部行、测试只消费 public v1 contract、Sol 不写 Auto core。**这三件在当前结构下不可能同时成立**——ledger 事务、migration、崩溃窗口、状态机边都是内部窗口，公开契约触达不到；Sol 若要测只能写进 `apps/cellrebel-auto/**`，违反 owner matrix。
+
+**决议：不为测试在生产代码里开 driver seam。** 生产面为测试而扩大，正是本 spec 反复拒绝的模式（同 `lastSeenVersionCode` 的处理）。改为按证据类型分工，并让分工**可被构建证明**。
+
+**行 ID**：每行 ID 为 `M-<类别>-<该类别内序号>`，由 §10 表的类别列与行序确定性推导，无需人工维护。类别即表首列（`crash`/`concurrency`/`recovery`/`bypass`/`release`/`version`/`intent`/`pairing`/`migration`/`multiproc`/`tuple`/`lease`/`idempotency`/`request`/`config`）。
+
+| evidence class | 谁写 | 触达方式 | 适用类别 |
+|---|---|---|---|
+| `owner-red` | 代码 owner（Auto→Opus5，qwy→Kimi）在自己的 unit test 内 | 进程内 fake + 在 durable write 与外部调用之间注入故障 | `crash`、`migration`、`multiproc`、`config`，以及 `bypass` 中针对内部 DAO/静态 guard 的行 |
+| `sol-blackbox` | Sol | 只经 public v1 contract + `acceptance/fake-qwy` 驱动 | `tuple`、`lease`、`idempotency`、`request`、`version`、`release`、`intent`、`pairing`、`recovery`、`concurrency` 中经契约可达的行 |
+| `device` | Sol（授权 device lease 内执行） | exact-build 真机 | `recovery` 中依赖真实 CellRebel 行为的行、AC-05 逐构建证据、§18.1 上限 |
+
+**Sol 不写 owner-red 测试，但也不盲信它。** `owner-red` 行的 Sol 职责是 **evidence audit**：核对该行存在一个具名测试、绑定 exact HEAD、断言的确是该行的预期终态。为了让这条不是口头承诺：
+
+- 每个覆盖矩阵行的测试，其**测试方法名必须包含对应行 ID**（例：`fun crash_M_CRASH_03_ledgerCommitThenProcessDeath()`）；
+- `scripts/verify-a-plus.sh` 从 §10 表推导全部行 ID，再从两 App 与 acceptance 的测试源码中提取已出现的行 ID，**任何行 ID 没有覆盖测试即 exit≠0**；
+- 覆盖检查的结果进 PR evidence，Sol 的矩阵报告消费该输出，而不是逐行手工声明。
+
+这样 `owner-red` 从"相信作者写了"变成"构建证明存在"，同时 Sol 不跨 owner 写核心、生产代码不为测试让步。若某行三类都无法触达，**必须在 §10 表内显式标注为 not-testable 并说明上限**（如 §18.1），不得静默留空——静默留空会让矩阵报告读起来像全绿。
 
 ## 11. 日志与证据契约
 
@@ -971,15 +1232,16 @@ fakexxx/
 │   │   └── app/src/{main,test,androidTest}/...
 │   └── qianwangyou/                    # subtree from FakeGps-test@285e4ca
 │       └── app/src/{main,test,androidTest}/...
-├── acceptance/
+├── acceptance/                         # Sol 独占
 │   ├── fixtures/
 │   ├── fake-qwy/src/...
-│   └── scenarios/src/test/...
-├── scripts/
+│   ├── scenarios/src/test/...
+│   └── scripts/
+│       └── check-forbidden-boundaries.sh
+├── scripts/                            # Opus5 独占
 │   ├── check-provenance.sh
 │   ├── check-contract-v1.sh
-│   ├── check-forbidden-boundaries.sh
-│   └── verify-a-plus.sh
+│   └── verify-a-plus.sh                # 聚合器：调用上面两条 + acceptance/scripts/**
 └── .github/workflows/android-a-plus.yml
 ```
 
@@ -987,7 +1249,7 @@ fakexxx/
 
 | Owner | 独占写入范围 | 可读依赖 | 禁止并行触碰 |
 |---|---|---|---|
-| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、root CI/scripts、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**` |
+| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**` |
 | Kimi | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行 | frozen contract | contract、Auto、acceptance |
 | Sol | `acceptance/**`、`docs/acceptance/**`、验收 issue 与证据 | contract 与两 App | Opus5/Kimi 产品实现 |
 | GLM | review verdict、对抗执行报告；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch |
@@ -1039,12 +1301,11 @@ checker 必须做**有证明力**的核对，逐项 exit-code 化：
 - Create: `contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl`
 - Create: 同目录 `CapabilitySnapshotV1.aidl`、`EnvironmentIntentV1.aidl`、`PreflightRequestV1.aidl`、`PreflightReportV1.aidl`、`ApplyRequestV1.aidl`、`ApplyReceiptV1.aidl`、`ObserveRequestV1.aidl`、`EnvironmentObservationV1.aidl`、`ReleaseRequestV1.aidl`、`ReleaseReceiptV1.aidl`
 - Create: `contracts/environment-control-v1/src/main/java/io/github/terryyyc/fakexxx/contract/v1/CapabilitySnapshotV1.kt`
-- Create: 同目录 `PreflightRequestV1.kt`、`PreflightReportV1.kt`、`ApplyRequestV1.kt`、`ApplyReceiptV1.kt`、`ObserveRequestV1.kt`、`EnvironmentObservationV1.kt`、`ReleaseRequestV1.kt`、`ReleaseReceiptV1.kt`、`ContractEnumsV1.kt`、`ContractErrorCodeV1.kt`
+- Create: 同目录（即 `src/main/java/io/github/terryyyc/fakexxx/contract/v1/`）`EnvironmentIntentV1.kt`、`CanonicalIntentDigestV1.kt`、`PreflightRequestV1.kt`、`PreflightReportV1.kt`、`ApplyRequestV1.kt`、`ApplyReceiptV1.kt`、`ObserveRequestV1.kt`、`EnvironmentObservationV1.kt`、`ReleaseRequestV1.kt`、`ReleaseReceiptV1.kt`、`ContractEnumsV1.kt`、`ContractErrorCodeV1.kt`
 - Create: `contracts/environment-control-v1/build.gradle.kts`
 - Create: `contracts/environment-control-v1/consumer-rules.pro`
 - Create: `contracts/environment-control-v1/compatibility.yaml`
-- Create: `contracts/environment-control-v1/src/test/.../ContractRoundTripTest.kt`
-- Create: 同目录 `EnvironmentIntentV1.kt`、`CanonicalIntentDigestV1.kt`
+- Create: `contracts/environment-control-v1/src/test/java/io/github/terryyyc/fakexxx/contract/v1/ContractRoundTripTest.kt`
 - Modify: `apps/cellrebel-auto/settings.gradle.kts`（只接入 contract library）
 - Modify: `apps/qianwangyou/settings.gradle`（只接入 contract library）
 - Modify: 两 App 的 app build 文件（只增加 contract dependency）
@@ -1228,7 +1489,7 @@ cd apps/cellrebel-auto
 - Create: `.../ContinuityAndTrustMatrixTest.kt`
 - Create: `.../BypassMisuseMatrixTest.kt`
 - Create: `docs/acceptance/a-plus-device-matrix.md`
-- Create: `scripts/check-forbidden-boundaries.sh`
+- Create: `acceptance/scripts/check-forbidden-boundaries.sh`
 
 **RED:** §10 每行至少一个失败场景；故障注入点可停在每个 durable write 与外部调用之间。
 
@@ -1279,7 +1540,7 @@ cd apps/cellrebel-auto
 (cd apps/qianwangyou && ./gradlew testDebugUnitTest)
 (cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)
 
-./scripts/check-forbidden-boundaries.sh
+./acceptance/scripts/check-forbidden-boundaries.sh
 ./scripts/verify-a-plus.sh
 ```
 
@@ -1349,23 +1610,39 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-02 | Auto 不复制/旁路千网游能力 | INV-01,20；boundary guard |
 | AC-03 | 私有鉴权版本化 v1 discover/preflight/apply/observe/release 可用 | INV-02,03,04；contract tests |
 | AC-04 | 只有独立验证 System Mock 进入可信配额 | INV-05,06；TrustPolicy matrix |
-| AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09,25；continuity matrix + 多进程 bump matrix |
-| AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
-| AC-14 | 已有用户数据跨版本升级零丢失，无 destructive fallback | INV-24；v4 真实 fixture migration test |
-| AC-06 | crash/retry 下外部执行可重跑、可信配额最多一次 | INV-10,11,12,13,15；crash matrix |
-| AC-07 | `PRE_EXISTING_RUN` 语义保留且旧结果不计新完成 | INV-11,12；fixtures/device evidence |
+| AC-05 | 每个 CellRebel execution 前后 observe，连续性不成立即不计 | INV-07,08,09,25,27；continuity matrix + 多进程 bump matrix + §18.1 上限 |
+| AC-06 | crash/retry 下外部执行可重跑；**同一 attemptId 可信配额最多一次**（跨 attempt 的物理去重上限见 §8.6.5） | INV-10,11,12,13,15,26；crash matrix |
+| AC-07 | `CellRebelCompletionEvidenceV1` 五值判定正确，旧结果/弱证据/过短 RUNNING 均不计新完成 | INV-11,12,26；completion matrix + device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
-| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过 | INV-01..25；§10 report |
+| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过，且每行有 §10.1 的 evidence class 与覆盖证明 | INV-01..28；§10 report + `verify-a-plus.sh` 行 ID 覆盖检查 |
 | AC-11 | 双 App 独立构建发布，version skew 明确运行或停止 | INV-03,19；CI + skew device matrix |
 | AC-12 | A+/B/C 触发门有持久 issue 与里程碑 verdict，不发生重写 | I7 + milestone evidence |
+| AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
+| AC-14 | 已有用户数据跨版本升级零丢失，无 destructive fallback | INV-24；v4 真实 fixture migration test |
+
+AC 编号必须**顺序排列**，便于逐号完整性核对；新增 AC 一律追加到表尾，不得插入既有编号之间。
+
+### 18.1 AC-05 的显式不可证明上限（诚实披露）
+
+AC-05 依赖千网游返回的 `coverage == FULL`。**Auto 能验收的只是"正确消费 FULL"，无法独立证明"qwy 报 FULL 时覆盖确实完整"**——后者取决于上游连续性实现的正确性，而架构上千网游是唯一权威（§5），Auto 没有第二个信息源可以反驳它。
+
+这不是理论顾虑：上游 `TERRYYYC/FakeGps-test` 的 **#14、#15 至今仍是 OPEN P0**，症状分别是「System Mock 蓝点在 mock/真实位置间闪烁」与「Hook 保存后 1–2 秒回跳真实位置」。**这正是 INV-08 要 catch 的"测试窗口内的相关环境变化"**：若这类 flicker 未被 qwy 的连续性事件源完整捕获，Auto 会收到一个假 FULL，进而产生假绿的可信计数。
+
+因此冻结：
+
+- AC-05 的验收结论必须**逐候选构建**给出"在本设备、本 exact-build 上未观察到 #14/#15 类漏报"的独立证据；**新接口存在不能代替该证据**（§19 原则落到本条）。
+- 验收报告必须显式记录该上限：本方案能证明的是"Auto 在 FULL 之外一律不计"，不能证明"FULL 永远为真"。
+- 上限未消除前，AC-05 不得标记为无条件通过；应标为「conditional-pass + 逐构建证据」。
+- #14/#15 关闭与否由上游判定，本 feature 不代为关闭（§2.3 非目标）。
 
 ## 19. 完成定义
 
 A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `ready for operator merge decision`：
 
 - AC-01..14 都有非作者可复核证据；
-- INV-01..25 全部被自动测试或明确的真机证据覆盖；
+- INV-01..28 全部被自动测试或明确的真机证据覆盖；
+- §8.6.5（completion 跨 attempt 去重）与 §18.1（AC-05 的 FULL 依赖）两条**不可证明上限**已在验收报告中显式记录，未被写成全绿；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
