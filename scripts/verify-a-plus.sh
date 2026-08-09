@@ -58,15 +58,24 @@ esac
 # frozen error inventory grows — the debt stays visible instead of being
 # silenced with a lint baseline or a continue-on-error step. Its disposition is
 # tracked in docs/provenance/upstream-imports.md.
+# Stage 3 ("full") is the A+ acceptance gate. It must contain the gates that
+# prove scenarios actually ran, not only the ones that prove code compiles.
+# Without them, a tree with zero acceptance scenarios and an empty evidence
+# ledger would satisfy `--stage full` — a green light for something nobody
+# tested. These entries are declared before their scripts exist precisely so
+# that `--stage full` FAILS today with "REQUIRED but missing" instead of
+# quietly passing.
 GATES="
-1|provenance|PR-1|scripts/check-provenance.sh|./scripts/check-provenance.sh
+1|provenance|PR-1|scripts/check-provenance.sh|./scripts/check-provenance.sh --stage \$STAGE
 1|auto-unit-tests|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew testDebugUnitTest
 1|auto-assemble|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew assembleDebug
 1|qwy-unit-tests|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew testDebugUnitTest
 1|qwy-assemble|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew assembleDebug
 1|inherited-lint-debt|PR-1|scripts/check-inherited-lint-debt.sh|./scripts/check-inherited-lint-debt.sh
 2|contract-v1|PR-2|scripts/check-contract-v1.sh|./scripts/check-contract-v1.sh
-3|forbidden-boundaries|PR-5|scripts/check-forbidden-boundaries.sh|./scripts/check-forbidden-boundaries.sh
+3|acceptance-scenarios|PR-5|acceptance/scenarios|cd acceptance && ./gradlew test
+3|matrix-coverage|PR-5|scripts/check-matrix-coverage.sh|./scripts/check-matrix-coverage.sh
+3|forbidden-boundaries|PR-5|acceptance/scripts/check-forbidden-boundaries.sh|./acceptance/scripts/check-forbidden-boundaries.sh
 "
 
 if [ "$LIST_ONLY" -eq 1 ]; then

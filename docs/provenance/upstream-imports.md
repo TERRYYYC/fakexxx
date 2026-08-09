@@ -166,9 +166,63 @@ A pass means "the debt did not grow" and says so explicitly; it never claims
 `lintDebug` exits 0. Reducing the debt is expected to lower the budget in the
 same PR.
 
-Open disposition for the main implementation Thread: whether PR-3 fixes the 23
-errors, or the operator accepts them as a released-baseline condition. Until
-that is decided, the ratchet keeps them visible and bounded.
+**Remediation ownership (closed, per review of `c656e8e`).** The 23 errors span
+`mockprovider/**`, `probe/**`, `ui/**`, `dao/**` and resources. The owner matrix
+grants the Qianwangyou lane (Kimi, PR-3) only
+`apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**` plus the
+matching Manifest/Gradle lines, so **no lane in the current matrix may legally
+edit those files**. Rather than invent an owner, the disposition is:
+
+- **Remediation is explicitly out of A+ scope.** No lane is assigned it, because
+  assigning one would require widening that lane's exclusive write scope, and
+  the owner matrix is the thing keeping three parallel lanes from colliding.
+- **Terminal gate: the ratchet.** `scripts/check-inherited-lint-debt.sh` fails on
+  any increase or any new issue type, per app. That is the condition this debt
+  must satisfy for the life of A+ — bounded and visible, never zero.
+- **Changing that requires an owner-matrix amendment**, which is an
+  orchestrator/operator decision recorded in the spec, not something a lane may
+  take unilaterally. Spec §14 lists
+  `(cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)` with expected
+  exit 0; until an amendment happens, that expectation is **not met at the
+  inherited baseline**, and the ratchet is what stands in for it.
+
+### 6.2 Credential-shaped material in the imported baseline — operator disposition
+
+`apps/qianwangyou/app/MobileFromUtil.txt:23` contains a hard-coded 32-character
+value passed as an `apikey` HTTP request header.
+
+Exposure facts, verified before disposition (the value itself is deliberately
+not reproduced here):
+
+| Fact | Finding |
+|---|---|
+| Present in upstream `TERRYYYC/FakeGps-test@285e4ca` | Yes — blob `72930df`, 4588 bytes |
+| Upstream repository visibility | **PUBLIC** |
+| `TERRYYYC/fakexxx` visibility | **PUBLIC** |
+| Reachable from any build | **No** — a `.txt` file with no reference from any `.kt`/`.java`/`.gradle*`/`.xml` in either app |
+| Other occurrences in the repo | None; this is the only file and the only occurrence |
+
+**This import did not create the exposure.** The value was already committed in a
+public upstream repository before `fakexxx` existed. Consequently, deleting it
+here would not be remediation: anything that has been in a public repository has
+to be treated as disclosed, and the only real remedy is rotation at the service
+provider.
+
+**Operator disposition (2026-08-09): option A — no action required; the value is
+not a live secret.** Recorded here as the "non-secret evidence" the review asked
+for. Two things this record does *not* claim: it is an operator assertion, not an
+independent verification against the provider, and it does not certify the value
+was never live — only that its current disposition needs no action.
+
+The file therefore stays **byte-identical** to upstream. Redacting it would break
+the provenance invariant in §3 (the vendored tree must equal the upstream root
+tree) and would require an enumerated exception in
+`scripts/check-provenance.sh`, at no security benefit, since the upstream copy
+remains public regardless.
+
+If that disposition ever changes, the correct sequence is: rotate at the
+provider first, then decide separately whether the repository copy is worth an
+explicit provenance exception.
 
 ## 7. Change log
 

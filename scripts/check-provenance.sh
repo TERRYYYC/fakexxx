@@ -20,6 +20,42 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
+# --stage is REQUIRED and has no default, on purpose.
+#
+# Two different facts are checked here and they have different lifetimes:
+#
+#   * The import commit carries the upstream root tree. This is IMMUTABLE — it
+#     is a statement about a commit that already exists, so it stays true no
+#     matter how the apps evolve. Always checked.
+#
+#   * The CURRENT HEAD tree still equals the upstream root tree. This is only
+#     true while nobody has legitimately changed the vendored apps. PR-2/3/4
+#     must change them, so asserting it forever would make the first legal app
+#     change fail CI permanently and pressure people into weakening the gate.
+#
+# Defaulting either way is a trap: default-strict breaks later stages, and
+# default-lenient silently drops PR-1's strongest check. So the caller must say
+# which stage it is, and a missing/unknown stage is a usage failure.
+STAGE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --stage) STAGE="${2:-}"; shift 2 ;;
+    --stage=*) STAGE="${1#*=}"; shift ;;
+    -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) printf 'check-provenance: unknown argument "%s"\n' "$1" >&2; exit 1 ;;
+  esac
+done
+
+case "$STAGE" in
+  import|contract|full) ;;
+  "") printf 'check-provenance: --stage is required (import | contract | full)\n' >&2; exit 1 ;;
+  *)  printf 'check-provenance: unknown stage "%s" (expected: import | contract | full)\n' "$STAGE" >&2; exit 1 ;;
+esac
+
+# Pristine-HEAD equality is asserted only while the vendored apps are supposed
+# to be untouched, i.e. at the import stage (PR-1).
+if [ "$STAGE" = "import" ]; then PRISTINE_HEAD_EXPECTED=1; else PRISTINE_HEAD_EXPECTED=0; fi
+
 PROVENANCE_DOC="docs/provenance/upstream-imports.md"
 
 # prefix|upstream url|branch|exact sha
@@ -126,7 +162,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-section "2. upstream tree digest equality"
+section "2. current HEAD state (stage=$STAGE)"
 
 while IFS='|' read -r prefix url branch sha; do
   [ -z "${prefix:-}" ] && continue
@@ -139,21 +175,31 @@ while IFS='|' read -r prefix url branch sha; do
 
   local_tree="$(git rev-parse --quiet --verify "HEAD:${prefix}" 2>/dev/null)"
   if [ -z "$local_tree" ]; then
+    # Absent at any stage is always wrong: the vendored app must exist.
     fail "$prefix is not present in HEAD (expected upstream tree $upstream_tree)"
     continue
   fi
 
-  if [ "$local_tree" = "$upstream_tree" ]; then
-    pass "$prefix tree $local_tree == ${url##*/}@${sha:0:9} root tree"
+  if [ "$PRISTINE_HEAD_EXPECTED" -eq 1 ]; then
+    if [ "$local_tree" = "$upstream_tree" ]; then
+      pass "$prefix tree $local_tree == ${url##*/}@${sha:0:9} root tree (pristine, required at stage import)"
+    else
+      fail "$prefix tree $local_tree != ${url##*/}@${sha:0:9} root tree $upstream_tree"
+    fi
+  elif [ "$local_tree" = "$upstream_tree" ]; then
+    pass "$prefix is still pristine at ${sha:0:9} (not required at stage $STAGE)"
   else
-    fail "$prefix tree $local_tree != ${url##*/}@${sha:0:9} root tree $upstream_tree"
+    # Divergence is EXPECTED here. The immutable proof is section 1: the
+    # recorded import commit still carries the upstream tree, so the baseline
+    # remains provable no matter what later PRs change on top of it.
+    pass "$prefix has diverged from upstream (allowed at stage $STAGE; baseline proven at the import commit in section 1)"
   fi
 
   # The digest above describes committed content. Assert the working tree has
   # not drifted from it, otherwise the gate could pass while the checkout on
   # disk differs from what was verified.
   if ! git diff --quiet HEAD -- "$prefix" 2>/dev/null; then
-    fail "$prefix has uncommitted modifications; verified digest does not describe the working tree"
+    fail "$prefix has uncommitted modifications; the verified digest does not describe the working tree"
   elif [ -n "$(git ls-files --others --exclude-standard -- "$prefix" 2>/dev/null)" ]; then
     fail "$prefix has untracked files; verified digest does not describe the working tree"
   else

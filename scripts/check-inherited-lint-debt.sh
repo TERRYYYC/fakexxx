@@ -59,10 +59,31 @@ command -v python3 >/dev/null 2>&1 || {
 }
 
 FAILURES=0
+CHECKED=0
+
+# An unknown --only-app used to select nothing, leave FAILURES at 0, and exit
+# PASS. A gate that reports success after checking nothing is worse than no
+# gate: it produces a green line in CI for work that never happened. Validate
+# the target up front, and assert below that at least one app was examined.
+if [ -n "$ONLY_APP" ]; then
+  known=0
+  while IFS='|' read -r a _b; do
+    [ -z "${a:-}" ] && continue
+    [ "$a" = "$ONLY_APP" ] && known=1
+  done <<EOF
+$(printf '%s\n' "$BUDGETS")
+EOF
+  if [ "$known" -eq 0 ]; then
+    printf 'check-inherited-lint-debt: unknown app "%s"; known apps are:\n' "$ONLY_APP" >&2
+    printf '%s\n' "$BUDGETS" | awk -F'|' 'NF{printf "  %s\n", $1}' >&2
+    exit 1
+  fi
+fi
 
 while IFS='|' read -r app budget; do
   [ -z "${app:-}" ] && continue
   [ -n "$ONLY_APP" ] && [ "$ONLY_APP" != "$app" ] && continue
+  CHECKED=$((CHECKED + 1))
 
   dir="apps/$app"
   report="$dir/app/build/reports/lint-results-debug.xml"
@@ -128,8 +149,15 @@ $(printf '%s\n' "$BUDGETS")
 EOF
 
 printf '\n'
+# Zero apps examined is never a pass. Reaching here with CHECKED=0 means the
+# selection logic excluded everything, and reporting PASS would assert something
+# the run never looked at.
+if [ "$CHECKED" -eq 0 ]; then
+  printf 'check-inherited-lint-debt: FAIL (no app was examined; refusing to report PASS for zero checks)\n'
+  exit 1
+fi
 if [ "$FAILURES" -eq 0 ]; then
-  printf 'check-inherited-lint-debt: PASS (no app increased its lint error debt)\n'
+  printf 'check-inherited-lint-debt: PASS (%d app(s) checked; no app increased its lint error debt)\n' "$CHECKED"
   printf 'NOTE: passing means the debt did not grow. It does NOT mean lintDebug exits 0.\n'
   exit 0
 fi
