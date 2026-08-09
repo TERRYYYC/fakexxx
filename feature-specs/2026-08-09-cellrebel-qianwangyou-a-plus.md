@@ -45,8 +45,7 @@ source_threads:
 > - **DP-1 = B**：迁移到受控 release key。**受控迁移**——profile export/restore、
 >   release-key custody 与回滚方案必须先于 signer cutover 完成。
 > - **DP-2 = B**：Auto 立即改名，最终 `applicationId` 逐字为 **`come.xx.fakeaauto`**。
->   实现者**不得**推断纠错为 `com...`。**该值已冻结可直接用于 contract**；但
->   **改名动作本身**受 `INV-29` deferred gate 阻断，载体见 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)。
+>   实现者**不得**推断纠错为 `com...`。改名受 `INV-29` 的数据连续性硬门约束。
 > - **DP-3 = A**：接受 UI 完成证据并写明上限。上限必须进入**用户可见的计数语义**
 >   （运行页 / 历史页 / 导出），不得只留在本文里。
 >
@@ -91,7 +90,7 @@ source_threads:
 | **v1.14** | PR-0.2 第十轮 | **owner transfer 传播**（#4 Kimi → DeepSeek Flash）+ **为 `INV-29` 冻结 evidence carrier**（`appid-cutover` 5 行），见 §0.1.14 |
 | **v1.15** | PR-0.2 第十一轮 | 为 `M-AC-01..05` 冻结**实施归属与时序**（Task 1 前置门 / Task 9 回滚旅程）、统一 device anchor、澄清计数单位，见 §0.1.15 |
 | **v1.16** | PR-0.2 第十二轮 | 修复 v1.15 引入的三个语义缺陷：provenance stage 自相矛盾、`M-AC-03` 依赖环、跨 applicationId carrier 物理不可行，见 §0.1.16 |
-| **v1.17** | PR-0.2 第十三轮 | **scope split**：cutover 实施设计（flavor / SAF / bundle / variant CI / `M-AC-01..05`）拆出到 Issue #13；`INV-29` 在本文降为 deferred gate，见 §0.1.17 |
+| **v1.17-cutover** | 本 PR（Issue #13） | 承接从 PR #12 拆出的 `applicationId` cutover 实施设计；**known-not-ready**，Sol advisory 的 AR-1..5 未闭合，见 §0.1.17-cutover |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -360,31 +359,21 @@ Sol 第二遍审计的三项。第 1 项是本轮真正重要的：
 
 第 1、2 条则是同一类：我给一个 Task 加了新职责，却没有回头检查**它自己的验证命令**和**它在 DAG 里的位置**是否还成立。加职责必须连带重算这两样。
 
-#### 0.1.17 scope split：cutover 实施设计移出本文（v1.17）
+#### 0.1.17-cutover 本 PR 的范围与已知未就绪（v1.17-cutover）
 
-Sol 的 final readiness audit 对 `78587ac7` 判 `not_ready`（4 P1 + 1 P2），全部指向 DP-2 = B 的 cutover 载体。作者在动手补之前先做了一次归属测量：
+本 PR 承接 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)，内容是从 [PR #12](https://github.com/TERRYYYC/fakexxx/pull/12) 拆出的 `applicationId` cutover 实施设计。拆分的测量依据见 PR #12 的 §0.1.17：四条 P1 全部落在双审后嫁接的 46 行 cutover 设计里，而 PR #12 原有内容自 `05debb8b` 起零 finding。
 
-```
-05debb8b..78587ac 累计            +429 / −91（7 个 HEAD）
-cutover 相关行 @78587ac           46
-cutover 相关行 @05debb8b（双审版）  0
-```
+**本 PR 明确 known-not-ready。** Sol 在 `78587ac7` 的 advisory readiness 判 `not_ready`（4 P1 + 1 P2），以下五条**尚未闭合**，不得据本文开工：
 
-**四条 P1 全部落在这 46 行内**；而本文原有的四张全量映射自 `05debb8b` 起零 finding。也就是说，一份已被双路 APPROVE 的稳定决策记录，和一套 operator 拍板后才嫁接进来的新功能设计，共享了同一个 review identity——后者每补一轮就多一片新表面，新表面又招来下一条 finding，于是 2 小时内 7 次 HEAD 漂移，每次 push 作废刚拿到的 verdict。
+| # | Sev | 未闭合内容 |
+|---|---|---|
+| AR-1 | P1 | update eligibility 绑错对象：决定能否保留旧 sandbox 的是 **`legacyId` APK 与设备上既有 `com.example.cellrebelauto` 的 signer lineage 匹配**，不是"两个新 flavor 同签名"。baseline 只有 `versionCode = 1`、无 Auto signing config。须先读取并留证 installed package 的 signer/version，失败 fail-closed，**禁止用 uninstall 绕过** |
+| AR-2 | P1 | SAF carrier 不可从文件图执行：缺 `src/legacyId/**` / `src/productId/**` source set、缺 UI/ViewModel/ActivityResult 入口，且没有负例证明另一 flavor 不含该能力（`main/` 会进入所有 variant） |
+| AR-3 | P1 | 迁移状态全集与 canonical bundle 未闭合：`PlanConfigStore` 的 5 个 DataStore key 会被静默丢弃；bundle schema/version、row ordering、digest preimage、全量校验后一次性 transaction、crash/retry 语义均未冻结。另：`productId` 是新 package，**AccessibilityService 必须由用户显式重开**、Android 13+ 通知权限对新安装默认关闭——cutover 旅程未承接这些重新授权证据 |
+| AR-4 | P1 | variant CI / artifact carrier 未同步：§14 与 Task 4/5 仍调用无 flavor 的 `testDebugUnitTest` / `lintDebug assembleDebug`；PR #10 的 workflow 硬编码 `app/build/outputs/apk/debug/app-debug.apk`，加 flavor 后会找不到 APK，也未分别记录两份 exact APK 的 SHA/signer/version |
+| AR-5 | P2 | 传播残留：`M-AC-03` 的阻断措辞需明确为"阻断 operator/live-data cutover，**不**阻断授权 acceptance-device rehearsal" |
 
-**这不是执行力问题，是坐标系问题：我们在一个 review 循环里现场设计一个新功能。** 编排方（Sol）据此裁定拆分。
-
-| 留在本文 | 移出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) |
-|---|---|
-| 四张全量映射 · DP-1/2/3 决定记录（§21.0 逐字原文） · `come.xx.fakeaauto` 的冻结值与 §21.1 合法性核验 · DP-2 的成本论证与范围边界 · `INV-29` 作为 **deferred gate** | flavor（`legacyId`/`productId`） · 三段式 SAF 搬运通道 · canonical bundle schema/ordering/digest/原子性 · Task 1 的 `G-AC-1/2/3` · Task 9 的 `M-AC-03` 真机旅程 · §10 台账 `appid-cutover` 5 行 · variant CI/APK evidence · AR-1..5 |
-
-随之回退的连带项，逐条列出以免又漏引用点：Task 1 不再修改 `apps/cellrebel-auto/**`，因此 Verify 回到**单** checkpoint `--stage import`（两 checkpoint 的拆分本就是为 cutover 分叉而设）；§10 由 95 行/18 类回到 **90 行/17 类**，`owner-red` 67→**64**（Opus5 34→**31** / DeepSeek Flash 33 不变）；AC-10 与 §19 由 `INV-01..29` 回到 `INV-01..28` **加一条显式 deferred 声明**——不是把 INV-29 删掉，而是如实说"本文不声称已覆盖它"。
-
-**为什么 `INV-29` 留下而它的载体移走**：它是**对 operator 决定的安全约束**（改 ID 不得孤儿化用户状态），不是实施方案。删掉它，本文就变成"批准了改名、没有任何护栏"；整条搬走，`§20`/`§21` 又会引用一个不存在的门。按编排方给的判据——**归属两边的，本文留稳定 gate + issue 链接，完整规范只在新 PR**。
-
-同一判据也解释了为什么 `come.xx.fakeaauto` 这个值留下而改名动作移走：**contract 需要的是那个字符串**（`PairingRecord` 主键含 applicationId），不是 cutover 的完成。值已冻结可用；动作被 gate 挡着。
-
-> 教训与 §0.1.14 第 2 项同族但更上一层：那次是"不变量有规则、台账没行"，这次是**整个子系统的成熟度与它寄居的 PR 不匹配**。可操作判据：**当一个 PR 的 finding 连续多轮集中在同一块新增区域，而其余部分零 finding 时，那不是需要再补一轮，是需要拆。** 补的次数不会让新设计变成熟，只会让稳定部分陪着一起等。
+**边界（与 Issue #13 一致）**：本 PR 未闭合前阻断任何 `applicationId` mutation · operator/live-data cutover · 旧 App 移除 · release candidate；**不**阻断 PR #10 的 exact-baseline import，也**不**阻断 contract v1 使用已拍板的 `come.xx.fakeaauto` 值——该值已在 PR #12 冻结，contract 需要的是字符串本身，不是 cutover 的完成。
 
 ## 1. 事实基线与来源
 
@@ -1467,7 +1456,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-26 | 禁止任何基于分数值的跨 attempt 去重（upstream INV-7：两次有效运行可产生相同结果）；改为对每次可信计数持久化完整 completion evidence，并向 operator 暴露可疑相邻计数的**去重审计报告**（低 RUNNING 时长、异常紧邻时间戳等），报告不自动否决计数 | evidence 持久化 schema 测试；审计报告触发条件测试；"分数相同的两次合法运行都被计入"正例 |
 | INV-27 | observation 的 mode/isMock/schedule/证据/时序必须与 `verificationLevel` 交叉一致；矛盾 tuple 一律 fail-closed；两次观察必须夹住执行窗且连续性窗口早于 pre 观察 | §6.4.1 矛盾 tuple 矩阵（8 行独立负例） |
 | INV-28 | 设备上任一非 `RELEASED` lease 阻挡新 `apply`（唯一例外：同 caller 同 `idempotencyKey` 幂等重放）；`EXPIRED`/`REVOKED`/`RELEASE_INCOMPLETE` 不自动释放 | §8.4 状态机逐边测试；stale/expired/revoked 阻挡测试；跨进程崩溃重建测试 |
-| INV-29 | **`applicationId` cutover 不得孤儿化用户可见状态。** 改 `applicationId` 即产生设备上另一个 App，其 sandbox 与备份域均不共享（§21 DP-2 一手依据）。因此 cutover 前必须二选一并留证：**(a)** 经可验证检查确认旧安装**不存在**持久用户状态 → 可直接 cutover；**(b)** 存在状态 → 必须先完成**版本化迁移桥**（覆盖 plan / task / attempt / result / session 及必要配置），通过数量与摘要校验，并具备可回滚验收，之后才移除旧 App。**禁止**用现有结果 CSV 冒充完整迁移（`AttemptCsvMapper` 只导出审计结果，`importCsv` 只导入 worklist）；**禁止**依赖跨 package 自动备份；**禁止**把 operator 数据复制进本仓库或任何日志 | **deferred gate — 证据载体见 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)，本文不声称已覆盖。** 该 issue 未闭合前，**任何 `applicationId` mutation / operator cutover / 旧 App 移除 / release candidate 一律阻断**；本 spec 的 §10 台账因此**不含** `appid-cutover` 行 |
+| INV-29 | **`applicationId` cutover 不得孤儿化用户可见状态。** 改 `applicationId` 即产生设备上另一个 App，其 sandbox 与备份域均不共享（§21 DP-2 一手依据）。因此 cutover 前必须二选一并留证：**(a)** 经可验证检查确认旧安装**不存在**持久用户状态 → 可直接 cutover；**(b)** 存在状态 → 必须先完成**版本化迁移桥**（覆盖 plan / task / attempt / result / session 及必要配置），通过数量与摘要校验，并具备可回滚验收，之后才移除旧 App。**禁止**用现有结果 CSV 冒充完整迁移（`AttemptCsvMapper` 只导出审计结果，`importCsv` 只导入 worklist）；**禁止**依赖跨 package 自动备份；**禁止**把 operator 数据复制进本仓库或任何日志 | 旧安装状态探测测试；迁移桥 round-trip 测试（数量 + 逐表摘要）；回滚演练；"CSV 不构成迁移"负例；仓库/日志内不含 operator 数据的静态扫描 |
 
 ## 10. 崩溃、并发、恢复与旁路误用矩阵
 
@@ -1520,6 +1509,11 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-MG-03` | migration | 已存在 v4 用户库升级到 v5 | 显式 `MIGRATION_4_5` 成功，历史计划与结果全部存活 | 24 |
 | `M-MG-04` | migration | migration 执行到一半进程被杀 | 重启后事务回滚或重放，绝不落半迁移库、不 destructive 重建 | 24,15 |
 | `M-MG-05` | migration | 安装了更高 schema 版本后降级回旧包 | 明确失败并提示，不静默清库 | 24 |
+| `M-AC-01` | appid-cutover | cutover 前探测旧 `applicationId` 安装是否存在持久用户状态 | 探测结果是 cutover 的前置判据：无状态 → 允许直接切；有状态 → 必须走 `M-AC-02`。**探测失败或结果不确定一律按"有状态"处理** | 29 |
+| `M-AC-02` | appid-cutover | 旧安装存在 plan/task/attempt/result/session 数据，执行版本化迁移桥 | 新 `applicationId` 下逐表数量与摘要与旧库一致；缺任一表或摘要不符即失败，不得部分迁移后继续 | 29,24 |
+| `M-AC-03` | appid-cutover | 迁移桥失败或中断后回滚 | 旧 App 与其数据保持可用且未被移除；回滚后可重试，不产生半迁移状态 | 29,24 |
+| `M-AC-04` | appid-cutover | 试图用现有结果 CSV 冒充完整迁移 | 拒绝：`AttemptCsvMapper` 只导出审计结果、`importCsv` 只收 worklist，历史结果与账本无回灌路径 | 29 |
+| `M-AC-05` | appid-cutover | 迁移产物或 operator 数据被写入仓库 / 日志 | 静态扫描失败；迁移 bundle 只存在于设备与 operator 控制的位置 | 29,18 |
 | `M-MP-01` | multiproc | 主进程与 `:hook_verify` 同时触发 revision bump | 两次 bump 都不丢失，单调不回退 | 25 |
 | `M-MP-02` | multiproc | revision owner 进程重启，代际连续性不可证 | bump + coverage 降级 | 25,8 |
 | `M-MP-03` | multiproc | `FileObserver` 被回收后重订阅，期间有变化 | bump + 降级；不得把"没收到事件"当成"没有变化" | 25,9 |
@@ -1632,6 +1626,11 @@ owner 是该行的**主责方**——即"若该行失败，谁必须改代码"�
 | `M-MG-03` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_03` |
 | `M-MG-04` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_04` |
 | `M-MG-05` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_05` |
+| `M-AC-01` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_01` |
+| `M-AC-02` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_02` |
+| `M-AC-03` | appid-cutover | `device` | Sol | `docs/acceptance/a-plus-device-matrix.md#M-AC-03`（真机回滚演练，需设备 lease 与 exact APK SHA） |
+| `M-AC-04` | appid-cutover | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AppIdCutoverMatrixTest.kt::M_AC_04` |
+| `M-AC-05` | appid-cutover | `static-guard` | Sol | `acceptance/scripts/check-forbidden-boundaries.sh::no-operator-data-in-repo-or-log` |
 | `M-MP-01` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_01` |
 | `M-MP-02` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_02` |
 | `M-MP-03` | multiproc | `owner-red` | DeepSeek Flash | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_03` |
@@ -1863,22 +1862,65 @@ fakexxx/
 - Create: `scripts/check-provenance.sh`
 - Import: `apps/cellrebel-auto/**`
 - Import: `apps/qianwangyou/**`
+- Modify: `apps/cellrebel-auto/app/build.gradle.kts`：
+  - 新增 `productFlavors`：`legacyId`（`applicationId = "com.example.cellrebelauto"`，**过渡构建**）与 `productId`（`applicationId = "come.xx.fakeaauto"`，**逐字**，终态）
+  - `namespace` 与 Kotlin 包路径不动（§21 DP-2 范围冻结）
+- Create: `.../migration/AppIdCutoverProbe.kt`（旧安装持久状态探测）
+- Create: `.../migration/CutoverBundleCodec.kt`（版本化 bundle 的编解码 + 逐表摘要，两个 flavor 共用）
+- Create: `.../migration/CutoverExporter.kt`（**仅 `legacyId` flavor 可达**；经 SAF 写出 bundle 到 operator 选定位置）
+- Create: `.../migration/CutoverImporter.kt`（**仅 `productId` flavor 可达**；经 SAF 读入 bundle 并校验）
+- Create: `.../matrix/AppIdCutoverMatrixTest.kt`（`M_AC_01` / `M_AC_02` / `M_AC_04`）
 
-> **`applicationId` cutover 不在本 task。** DP-2 = B 的改名及其数据连续性载体（flavor / SAF 搬运通道 / canonical bundle / variant CI / `M-AC-01..05`）已拆出到 **[Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)**，完整规范只在该 issue 的 spec PR 里。本 task 因此**不修改 `apps/cellrebel-auto/**`**，两个 app 树在 PR-1 全程保持 pristine。`INV-29` 的 deferred gate 见 §9。
+**applicationId cutover 前置门（INV-29，承接 `M-AC-01/02/04`）**
 
-**RED:** 在空目标路径运行 `scripts/check-provenance.sh --stage import`，必须因两个 app 未导入和 SHA 未登记失败。
+§20 冻结了「改名必须在 PR-1 完成、不得晚于 contract 冻结」，因此 cutover 的**实现与证据也必须落在本 task**，不能顺延到 Task 4——Task 4 的 `MIGRATION_4_5` 只处理**同 applicationId 内**的 Room v4→v5（INV-24），与跨 applicationId 的 sandbox 隔离是两个问题，且它按 PR 图晚于 contract freeze。
+
+| 门 | 承接 row | 通过判据 |
+|---|---|---|
+| G-AC-1 | `M-AC-01` | 探测旧 `com.example.cellrebelauto` 安装是否存在持久用户状态；**探测失败或不确定一律按"有状态"处理** |
+| G-AC-2 | `M-AC-02` | 若有状态：迁移 bundle round-trip 后，plan/task/attempt/result/session **逐表数量与摘要**与旧库一致；缺任一表或摘要不符即失败 |
+| G-AC-3 | `M-AC-04` | 拒绝以结果 CSV 冒充完整迁移（负例必须红） |
+
+#### 跨 applicationId 的搬运通道（冻结）
+
+**为什么新 ID 侧一个 bridge 类不够**：Android 的 app-specific 存储按 applicationId 隔离，另一个 App **不能**直接读取它的内部文件；跨 App 只能走 `ContentProvider` 或显式共享通道。而 operator 手机上**已安装**的 `com.example.cellrebelauto` 基线里 `productFlavors = 0`、导出 `provider = 0` —— **旧安装根本没有任何出口**。因此改名后的新 APK 无法凭类名读到旧库；只在新 ID 侧写 importer 是**物理上不可能成立**的设计。
+
+冻结为三段式，载体与权限边界如下：
+
+| 段 | 构建物 | 动作 | 边界 |
+|---|---|---|---|
+| T-1 | `legacyId` flavor（仍是 `com.example.cellrebelauto`，可 `adb install -r` 覆盖现有安装） | operator 经 SAF 导出版本化 bundle | bundle 落在 **operator 选定位置**；不进仓库、不进日志 |
+| T-2 | — | operator 保管 bundle | 内容为其本人数据，不经任何猫之手 |
+| T-3 | `productId` flavor（`come.xx.fakeaauto`） | operator 经 SAF 导入并校验逐表数量/摘要 | 校验不过即失败，不得部分导入后继续 |
+
+**`legacyId` 过渡构建必须先于改名交付** —— 它是旧 sandbox 唯一的合法出口。两个 flavor 由同一份 PR-1 代码产出，签名一致以便 `adb install -r` 覆盖安装而不清数据。
+
+#### 阻断关系（无环）
+
+| 门 | 阻断什么 | **不**阻断什么 |
+|---|---|---|
+| G-AC-1/2/3（Task 1，单测） | PR-1 合入 | — |
+| `M-AC-03`（Task 9，真机） | **实际设备 cutover 执行 · 旧 App 移除 · release candidate** | **不阻断 PR-1 合入** |
+
+上一版把 `M-AC-03` 写成 PR-1 合入前置，与 §15 PR 图（PR-1 → … → PR-6 device evidence）和 §16 issue 图（I6 依赖 I3/I4/I5 → I2 → I1）构成**依赖环**：I1 要先完成才能到 I6，I6 又要先完成才能合 I1。现更正——**真机回滚演练阻断的是"操作"，不是"代码合入"**。代码合入只需单测门；设备上真正搬运数据、以及移除旧 App，才需要真机证据。旧 App **在 `M-AC-03` 通过前不得移除**这一条保持不变。
+
+**RED:** 在空目标路径运行 `scripts/check-provenance.sh --stage import`，必须因两个 app 未导入和 SHA 未登记失败；`AppIdCutoverMatrixTest::M_AC_01/02/04` 三条在实现前先红。
 
 **GREEN:** 只从远端精确 SHA subtree 导入；记录源 URL、branch、SHA、导入 commit。不得读取本机脏 worktree 作为拷贝源。
 
-**Verify:**
+**Verify（两个 checkpoint，不是一条命令）：**
 
 ```bash
-./scripts/check-provenance.sh --stage import
+# checkpoint 1 — 导入 commit 本身，app 树必须与上游逐字节相同
+git checkout <import-commit> && ./scripts/check-provenance.sh --stage import
+
+# checkpoint 2 — Task 1 最终 HEAD（applicationId + flavor + 迁移文件已合法分叉）
+./scripts/check-provenance.sh --stage contract
 ```
 
-本 task 不修改任何 app 树（cutover 已拆到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)），因此 Task 1 最终 HEAD 仍满足 `--stage import` 最强的那条断言：**当前 HEAD 的 app 树与上游 root tree 逐字节相同**。`.github/workflows/android-a-plus.yml` 的 provenance job 相应传 `--stage import`。
+**为什么最终 Verify 不能再用 `--stage import`**：本 task 现在**有意**修改 `apps/cellrebel-auto/**`（flavor + applicationId + 四个迁移文件）。`--stage import` 要求当前 HEAD 的 app 树与上游 root tree 逐字节相同，因此它在 Task 1 完成态下**必然 exit 1**。这正是 `--stage` 当初被设计成必填的原因（见下表），只是上一版忘了把这一行跟着移动。
 
-**第一次合法分叉发生在 Issue #13 落地时**——届时（且仅届时）把 CI 那一行移到 `--stage contract`。immutable import-commit anchor 在**任何 stage 都仍然被检查**，所以那次放宽的只是"当前树"，不是 provenance 本身。
+`.github/workflows/android-a-plus.yml` 的 provenance job 同步改传 `--stage contract`——**该文件属 PR-1 分支，本 docs PR 只做规定，实际改动在 PR-1 实现 Task 1 时落**。immutable import-commit anchor 在**任何 stage 都仍然被检查**，所以放宽的只是"当前树"，不是 provenance 本身。
 
 **`--stage` 是必填的，没有默认值**（PR-1 实现如此）。原因是两种默认都有害：默认严格会让 PR-2/3/4 里第一次**合法**修改 app 源码就永久性地让 CI 变红；默认宽松则会静默丢掉 PR-1 最强的那条检查（当前 HEAD 树仍与上游逐字节相同）。因此由调用方声明 stage：
 
@@ -1887,7 +1929,7 @@ fakexxx/
 | `import` | 全部检查 + **当前 HEAD 树仍与上游 root tree 逐字节相同** |
 | `contract` / `full` | 记录的 import commit 仍携带上游 root tree（**不可变锚点，任何 stage 都查**），但允许 app 树在其后合法演进 |
 
-CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；当它们**合法**开始分叉时，移动的就是那一行——**第一次合法分叉是 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 的 applicationId cutover**，届时该行改为 `--stage contract`。
+CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；当它们**合法**开始分叉时，移动的就是那一行——**Task 1 的 applicationId cutover 就是第一次合法分叉**，届时该行改为 `--stage contract`。
 
 > 本节此前写的是不带 `--stage` 的裸命令。那条命令在 PR-1 的实现下会 `exit 1`（`--stage is required`）——**真相源记录了一条必然失败的验证命令**。此处更正；教训与 §0.1.3 第 1 项同类：改了一条被下游引用的契约，必须回头扫全部引用点。
 
@@ -2097,7 +2139,7 @@ cd apps/cellrebel-auto
 - Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 3 行）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 3 行）
 
-**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **90 行 / 17 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **95 行 / 18 类**（新增 `appid-cutover` 5 行，承载 `INV-29`）。
 
 | class | 行数 | Sol 的职责 |
 |---|---|---|
@@ -2106,9 +2148,9 @@ cd apps/cellrebel-auto
 | `device` | 3 | 在授权 device lease 内执行并留存证据 |
 | `owner-red` | 67 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**RED:** 上述 28 行各自至少一个失败场景先红；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / DeepSeek Flash 33 行）。
+**RED:** 上述 28 行各自至少一个失败场景先红；`owner-red` 的 67 行由各自 owner 在自己的 lane 内先红（Opus5 34 行 / DeepSeek Flash 33 行）。
 
-**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / DeepSeek Flash 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
+**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；Sol 的测试只消费公开 v1 contract——**这一约束现在与覆盖范围自洽**，因为那 **67 行 `owner-red`** 已归各自 code owner（Opus5 34 / DeepSeek Flash 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 Sol 跨 owner 去测**；Sol 对它们的职责是 evidence audit。
 
 **Verify:** `./scripts/verify-a-plus.sh` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
@@ -2140,7 +2182,7 @@ cd apps/cellrebel-auto
 - System Mock 连续性变化；
 - Hook 结果不进入可信配额；
 - qwy/Auto 进程死亡与 release 人工恢复；
-- **`applicationId` cutover 的真机旅程不在本 task**：已随 `M-AC-03` 一并拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)。在该 issue 闭合前，本 spec 的 Task 9 **不包含**任何 cutover 设备动作；
+- **`applicationId` cutover 回滚旅程（`M-AC-03`，锚点 `docs/acceptance/a-plus-device-matrix.md#M-AC-03`）**：在旧 `com.example.cellrebelauto` 与新 `come.xx.fakeaauto` 之间走一次完整 old→new→回滚，断言回滚后**旧 App 与其数据仍可用且未被移除**、可重试、不产生半迁移状态。**本行不通过即阻断「实际设备 cutover 执行 / 旧 App 移除 / release candidate」，但不阻断 PR-1 代码合入**（Task 1 的 G-AC-1/2/3 单测门才是 PR-1 的合入前置；理由见 Task 1 的阻断关系表——反向阻断会与 §15/§16 的 DAG 构成依赖环）；同时验证 `legacyId` 过渡构建可 `adb install -r` 覆盖现有安装而不清数据；
 - 原仓 #14/#15 的相关稳定性风险，不用新接口存在本身代替验收。
 
 ## 14. 验证命令
@@ -2231,7 +2273,7 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-07 | `CellRebelCompletionEvidenceV1` 五值判定正确，旧结果/弱证据/过短 RUNNING 均不计新完成 | INV-11,12,26；completion matrix + device evidence |
 | AC-08 | 配对、签名 allowlist、lease ownership 与 release fail-closed | INV-02,14,21；security/release tests |
 | AC-09 | 运行现场与历史日志可追溯，秘密不落日志 | INV-18；schema/redaction tests + UI |
-| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过，且每行有 §10.1 的 evidence class 与覆盖证明 | INV-01..28（**INV-29 为 deferred gate，覆盖载体在 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)，本文不声称已覆盖**）；§10 report + `verify-a-plus.sh` 行 ID 覆盖检查 |
+| AC-10 | 崩溃/并发/恢复/旁路矩阵逐项通过，且每行有 §10.1 的 evidence class 与覆盖证明 | INV-01..29；§10 report + `verify-a-plus.sh` 行 ID 覆盖检查 |
 | AC-11 | 双 App 独立构建发布，version skew 明确运行或停止 | INV-03,19；CI + skew device matrix |
 | AC-12 | A+/B/C 触发门有持久 issue 与里程碑 verdict，不发生重写 | I7 + milestone evidence |
 | AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
@@ -2257,7 +2299,7 @@ AC-05 依赖千网游返回的 `coverage == FULL`。**Auto 能验收的只是"�
 A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `ready for operator merge decision`：
 
 - AC-01..14 都有非作者可复核证据；
-- INV-01..28 全部被自动测试或明确的真机证据覆盖；**INV-29 是 deferred gate**——其证据载体在 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)，未闭合前不得声称覆盖，也不得执行任何 `applicationId` mutation；
+- INV-01..29 全部被自动测试或明确的真机证据覆盖；
 - §8.6.5（completion 跨 attempt 去重）与 §18.1（AC-05 的 FULL 依赖）两条**不可证明上限**已在验收报告中显式记录，未被写成全绿；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
@@ -2274,7 +2316,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | DP | 主题 | 决定 | 阻塞 PR-1 identity 冻结 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
 |---|---|---|---|---|---|
 | DP-1 | 千网游 release signer 迁移 | **B 受控迁移** | 否 | 否 | 否——但 signer cutover 本身**必须**在 DP-1 前置门（export/restore + custody + rollback）完成后才执行 |
-| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **是**——改名必须在 PR-1 完成，**不得晚于 contract 冻结**（`PairingRecord`/`ProviderPairingRecord` 主键含 applicationId）。**但改名本身受 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 阻断**：`INV-29` 未闭合前不得执行任何 `applicationId` mutation | 已解除——contract 使用已拍板的新值即可，不依赖 cutover 完成 | 否——但 cutover 受 `INV-29` deferred gate 约束 |
+| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **是**——改名必须在 PR-1 完成，**不得晚于 contract 冻结**（`PairingRecord`/`ProviderPairingRecord` 主键含 applicationId） | 已解除 | 否——但 cutover 受 `INV-29` 数据连续性硬门约束 |
 | DP-3 | CellRebel 可信完成的安全边界 | **A 接受 UI 证据 + 写明上限** | 否 | **已解除。#3/#4/#5/#6 恢复** | 否 |
 
 **因此本文现在是可开工的冻结实施基线**（与顶部告示一致）。
@@ -2397,7 +2439,7 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 `apps/qianwangyou` 在冻结基线上带 23 个 lint error（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）；两个上游仓都没有任何 CI，所以 `lintDebug` 从未被当作门跑过。终态要求是 **`lintDebug` 真正 exit 0**，不是"债务没增长"。因此：
 
 - `scripts/check-inherited-lint-debt.sh` 的 ratchet **降级为中间证据**，不再是终态门；它继续防止债务增长，但 raw-green 达成后应随之退役。
-- 清债由 Opus5 **串行**进行（不与 DeepSeek Flash 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败。**第一次合法分叉由 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 的 cutover 触发**，届时才按上表把 CI 那一行移到 `--stage contract`；清债若先于它发生，同样按该表移动并在 PR 里说明——两者都是合法分叉，不是绕过。
+- 清债由 Opus5 **串行**进行（不与 DeepSeek Flash 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败，届时按上表把 CI 那一行移到 `--stage contract`，这是合法分叉而非绕过。
 
 **(5) 87 份单机验收工件：现在复制 + SHA-256，原件不动。**
 由 Sol 的验收线执行：复制 + 逐份 SHA-256 登记，**不动原件**，本次**不公开提交可能含 UI 内容的工件**。Opus5 不触碰这批文件。
