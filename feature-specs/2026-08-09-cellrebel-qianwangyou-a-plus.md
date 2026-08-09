@@ -58,6 +58,7 @@ source_threads:
 | v1.1 | 本 PR-0.1 | contract v1 冻结**前**的实现者前置修订，见下 |
 | v1.2 | 本 PR-0.1 | 非作者 review（REQUEST_CHANGES）后的 7 项修订，见 §0.1.2 |
 | v1.3 | 本 PR-0.1 | delta re-review 后的 5 项修订，见 §0.1.3 |
+| v1.4 | 本 PR-0.1 | final narrow delta 的 3 项修订，见 §0.1.4 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -125,6 +126,16 @@ v1.2 收到第二轮 `REQUEST_CHANGES`，5 项全部成立并已修订。主题�
 | 5 | `§6.5.3` 排在 `§6.5.2` 之前，锚点倒序 | 重排为 6.5.1 → 6.5.2 → 6.5.3 → 6.5.4 | §6.5 |
 
 第 1 项值得单独记：局部改对了不等于改完了。改一条被下游引用的规则时，必须回头扫所有引用点——否则文档内部自相矛盾，比不改更危险，因为执行者会各自挑一套。
+
+#### 0.1.4 final narrow delta 修订（v1.4）
+
+| # | 问题 | 修订 | 章节 |
+|---|---|---|---|
+| 1 | provider allowlist 只有 approve 没有 revoke：schema 无状态字段，`ProviderTrustStore` 只暴露查/批准两个方法，导致 §6.5 顶层的 revoke 规则**在这套 schema/API 上无法实现** | 增加 `revokedAt` 与 active 语义（撤销是状态迁移不是删除）；`ProviderTrustStore` 定为 `findActive`/`approve`/`revoke` 三个窄方法；Auto UI 增撤销动作；补撤销即时生效、进行中 run 转 release/recovery、撤销不回溯已计配额、撤销后重新出现须重走批准；Task 9 撤销两侧各测 | §6.5、**§6.5.3**、§7.1、§10（6 行）、Task 4/6/9 |
+| 2 | Task 4 写"四类表（另有一张）"，而五张表都进 v5 schema，自相矛盾 | 改为五类表；迁移 fixture 增加"`ProviderPairingRecord` 已创建且初始为空"断言——升级不得凭空产生被信任的 provider | Task 4 |
+| 3 | "禁止 TOFU"措辞过宽：operator 对首次见到、未独立比对的 signer 显式批准，密码学上仍是 TOFU；且 `lastSeenVersionCode` 没有更新入口 | 统一为"禁止 silent/automatic TOFU"并写明安全上限（不证明 publisher identity）；版本字段改 immutable `approvedVersionCode`，后续版本只进 append-only 审计，不为审计字段扩大信任 store 可写面 | §4.1、§6.5.3、§6.5.4、§7.1、§10 |
+
+第 1 项与上一轮的 TOFU 缺口是**同一种病**：在顶层写下一条规则，然后冻结了一套做不到它的 schema/API。规则与承载它的接口必须一起冻结，否则规则只是文档里的一句话。
 
 ## 1. 事实基线与来源
 
@@ -254,7 +265,7 @@ Gate 输出只能是 `stay-a-plus`、`promote-specific-controls-to-b` 或 `rejec
 5. 两侧都批准后，Auto 取得千网游版本、支持模式、profile/schedule、连续性覆盖等级，进入可用状态。
 6. 任一侧未配对、签名变化、协议不兼容或千网游不可用时，Auto 停在预检页并给出可操作错误；不开始 CellRebel。
 
-**为什么 Auto 侧也必须有一次显式批准**：若 Auto 首次连接就把当时看到的 signer 自动落为可信（TOFU），那么“真千网游未安装、同包名替代实现应答 bind”这一负例根本不会失败——替代者在第一次连接时就成了被信任的环境权威，此后每次比对都“一致”，而它可以返回伪造的 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` 与稳定 revision 让 §6.4 全部谓词成立。反向校验只有配上显式信任根才真正成立。
+**为什么 Auto 侧也必须有一次显式批准**：若 Auto 首次连接就把当时看到的 signer **自动**落为可信（silent TOFU），那么“真千网游未安装、同包名替代实现应答 bind”这一负例根本不会失败——替代者在第一次连接时就成了被信任的环境权威，此后每次比对都“一致”，而它可以返回伪造的 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` 与稳定 revision 让 §6.4 全部谓词成立。反向校验只有配上显式信任根才真正成立。该批准把信任建立变成可见、可审计、需人确认的动作，但**不等于证明了 publisher identity**，安全上限见 §6.5.3。
 
 **为什么是 bind-first 而不是先在 UI 里挑 App**：调用方身份必须来自 `Binder.getCallingUid()`（INV-02），UI 侧自行扫描包列表既是较弱的真相源，又要求千网游反向声明 `<queries>` 才能在 Android 11+ 看到 Auto。bind-first 让身份来自唯一可信来源，同时使反向 `<queries>` 不再是核心流程的结构性依赖。若将来产品需要“在任何 bind 发生之前就列出候选 Auto 安装”，那条路径才需要千网游侧 `<queries>`，届时单独评审。
 
@@ -601,7 +612,7 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 - `PairingRecord` 的主键是 `(applicationId, signerDigest)` 二元组。**production `name.caiyao.fakegps` 与 bench `name.caiyao.fakegps.bench` 是两个独立 applicationId，互不授权**：给 production 配的对不能让 bench 调用通过，反之亦然。
 - 包名相同但 signer 改变视为新调用方，必须重新配对。
 - 调用方不可通过参数伪造 package、signer 或 verificationLevel。
-- revoke 立即使新调用失败；active lease 进入 release/recovery，不静默继续。
+- revoke 立即使新调用失败；active lease 进入 release/recovery，不静默继续。**两侧各有一份可撤销名单**：千网游撤销 `PairingRecord`（caller allowlist），Auto 撤销 `ProviderPairingRecord`（provider allowlist，见 §6.5.3）；任一侧撤销都必须让运行停下来。
 - 配对记录和用户可见运行日志默认持久化，只有 operator 主动删除。
 
 #### 6.5.1 签名校验的 API 分层（minSdk 24 冻结）
@@ -641,22 +652,42 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 
 Auto 在**信任千网游返回的 observation 之前**，必须解析所绑定 service 所属包的 applicationId 与**当前** signer，与本地 `ProviderPairingRecord` 精确比对；不一致或无法解析即 fail-closed，不进入 CellRebel。
 
-**信任根必须显式，禁止 TOFU。** 只写"与本地记录一致"是不够的——若首次连接时自动把当时看到的 signer 落为可信，那么"真千网游未安装、同包名替代实现应答 bind"这一负例根本不会失败：替代者会在第一次连接时就成为被信任的权威，之后每次比对都"一致"。因此冻结：
+**信任根必须显式：禁止 silent/automatic TOFU。** 只写"与本地记录一致"是不够的——若首次连接时自动把当时看到的 signer 落为可信，那么"真千网游未安装、同包名替代实现应答 bind"这一负例根本不会失败：替代者会在第一次连接时就成为被信任的权威，之后每次比对都"一致"。
+
+**安全上限要说准**：operator 对一个首次见到、未经独立比对的 signer 做显式批准，在密码学意义上**仍然是一次 trust-on-first-use**。本方案禁止并能防住的是**自动/静默**的 TOFU——把信任建立变成一个可见、可审计、需人确认的动作；它**不证明** publisher identity。真正的 publisher 级保证需要带外分发的 signer 指纹或受控 release key（§21 DP-1），不在 A+ 范围内。不得把本机制描述为"已解决身份伪造"。
 
 ```kotlin
 ProviderPairingRecord(
     applicationId: String,          // production 或 .bench，二者独立
     currentSignerDigest: String,    // 批准当时解析到的当前 signer
     approvedAt: Long,
+    approvedVersionCode: Long?,     // 批准当时的版本，immutable，仅审计
     approvedBuildFingerprint: String?,   // 审计用
-    lastSeenVersionCode: Long?,          // 审计/兼容诊断，不参与身份匹配
+    revokedAt: Long?,               // null = active；非 null = 已撤销
 )
 ```
 
-- 首次遇到**未见过的 (applicationId, currentSignerDigest)**，Auto 必须停在本地 `NOT_PAIRED` 预检态，向 operator 展示 applicationId、当前 signer 摘要与来源，**由 operator 显式批准**后才写入 `ProviderPairingRecord`。
+- **key 与 active 语义**：主键 `(applicationId, currentSignerDigest)`。授权查询只匹配 `revokedAt == null` 的记录；**撤销是状态迁移，不是删除**，记录保留以维持审计链。同一 `(applicationId, signer)` 被撤销后若再次批准，写入新的 `approvedAt` 并清空 `revokedAt`——这是一次新的 operator 信任决定，必须重新走批准 UI，不能自动复活。
+- 首次遇到**未见过的 (applicationId, currentSignerDigest)**，Auto 停在本地 `NOT_PAIRED` 预检态，向 operator 展示 applicationId、当前 signer 摘要与来源，**由 operator 显式批准**后才写入。
 - **禁止在同一步里既信任 `discover()`/`observe()` 的返回、又把该 signer 落为 trusted**：批准是 operator 的信任决定，不是连接的副作用。批准前拿到的 capability 只能用于展示，不得进入任何可信判定。
-- signer 变化即视为新 provider，重新走批准；`lastSeenVersionCode` 只更新审计字段，不触发重新批准（见 §6.5.4）。
+- signer 变化即视为新 provider，重新走批准。`approvedVersionCode` **不可变**：provider 后续升级不改这条记录，新版本号只进 append-only 审计事件——审计字段不值得为它把 store 的可写面扩大（见 §6.5.4）。
 - 采用"本地显式批准"而非预置 signer allowlist，是因为当前千网游 release 由本机 keystore 签名（§6.5.2），预置名单在不同机器上无法成立。
+
+**撤销生命周期（与 §6.5 顶层 revoke 对齐）**：
+
+`ProviderTrustStore` 是唯一入口，只暴露三个窄方法，**禁止在其上层使用 DAO 的通用 `delete`/`upsert`**（否则 INV-22 的旁路面被扩大到信任决定上）：
+
+| 方法 | 语义 |
+|---|---|
+| `findActive(applicationId, signerDigest)` | 只返回 `revokedAt == null` 的记录 |
+| `approve(candidate)` | operator 显式批准；写入或复活一条记录 |
+| `revoke(applicationId, signerDigest, at)` | 置 `revokedAt`；不删除记录 |
+
+- Auto UI 必须提供**撤销动作**（`ProviderApprovalScreen` 内，展示已批准 provider 列表与撤销入口）。
+- 撤销**立即生效**：新的 run/预检 fail-closed 停在 `NOT_PAIRED`；**进行中的 run 不静默继续**——当前 attempt 进入 release/recovery 路径，release 无法证明完成时按 INV-21 暂停并提示人工恢复。
+- 撤销后已写入的可信配额**不回溯撤销**（它们在当时有完整证据链），但撤销事件必须进审计，使历史可解释。
+
+两侧的撤销是**两件独立的事**：千网游撤销 `PairingRecord` 使 Auto 无法调用；Auto 撤销 `ProviderPairingRecord` 使自己不再采信该 provider。任一侧撤销都必须让运行停下来，Task 9 的撤销验收**必须两侧各测一遍**。
 
 #### 6.5.4 versionCode 不是身份的一部分
 
@@ -665,6 +696,8 @@ ProviderPairingRecord(
 理由：双 App 是独立发布的（INV-19），版本 skew 由 §6.7 的 protocol handshake 判定。若把 versionCode 并入身份匹配，任何一侧的正常升级都会要求 operator 重新配对——这与"独立发布 + 能力兼容握手"直接冲突，且会训练 operator 对配对提示脱敏。
 
 同 signer、新 versionCode → **保持配对**，由握手决定兼容或 `INCOMPATIBLE_PROTOCOL` 停机。
+
+配对记录里的版本字段一律**不可变**（`ProviderPairingRecord.approvedVersionCode` 记的是批准当时的版本）。provider/caller 后续升级**不回写**配对记录，新版本号只进 append-only 审计事件。理由：为一个纯审计字段在信任 store 上开一个可写入口，是用扩大可写面去换一条日志——审计需求由审计流满足，信任 store 的写面必须保持最窄（§6.5.3 三方法）。
 
 ### 6.6 跨进程 revision 所有权（blocker）
 
@@ -708,7 +741,7 @@ ProviderPairingRecord(
 | `TrustedQuotaEntry` | TrustedQuotaLedger | attemptId、taskId、evidenceDigest | UNIQUE(attemptId)，只插不改 |
 | `UnverifiedAttemptRecord` | AttemptRepository | attemptId、reason、evidenceDigest | 与可信账本不同表/类型 |
 | `LegacyCompletionSnapshot` | v4→v5 迁移（只写一次） | taskId、legacyCompletedSuccesses、legacyStatus、migratedFromSchemaVersion、migratedAt | 只读展示；**绝不生成 `TrustedQuotaEntry`**，不进 completed 投影 |
-| `ProviderPairingRecord` | ProviderTrustStore | applicationId、currentSignerDigest、approvedAt | Auto 侧 provider allowlist，与 qwy 的 caller allowlist 是两份名单；`lastSeenVersionCode` 仅审计，不参与匹配；**禁止 TOFU 自动写入** |
+| `ProviderPairingRecord` | ProviderTrustStore | applicationId、currentSignerDigest、approvedAt、revokedAt | Auto 侧 provider allowlist，与 qwy 的 caller allowlist 是两份名单；`approvedVersionCode` immutable 且仅审计，不参与匹配；撤销是状态迁移不是删除；**禁止 silent/automatic TOFU 写入**，只经 `ProviderTrustStore` 三个窄方法 |
 | `RecoveryCheckpoint` | RecoveryCoordinator | attemptId、lastDurableStage、receipt refs | 终态后删除或纯投影 |
 | `AutoAuditEvent` | AuditRepository | seq、correlation ids、event、payload digest | append-only；不是状态 owner |
 
@@ -852,7 +885,12 @@ ProviderPairingRecord(
 | multiproc | `FileObserver` 被回收后重订阅，期间有变化 | bump + 降级；不得把"没收到事件"当成"没有变化" | 25,9 |
 | bypass | 存在绕过 owner 的 revision 写路径（任一非 owner 进程直写 store） | 静态 guard 测试失败；检测写路径而非库名 | 25 |
 | bypass | revision 只存在内存中，进程重启后回退 | 违反 L3，测试失败 | 25 |
-| pairing | Auto 首次连接遇到未见过的 provider signer | 停在本地 `NOT_PAIRED` 等 operator 显式批准；**不得 TOFU 自动落为 trusted** | 2 |
+| pairing | Auto 首次连接遇到未见过的 provider signer | 停在本地 `NOT_PAIRED` 等 operator 显式批准；**不得自动落为 trusted** | 2 |
+| pairing | Auto 撤销 provider 后发起新 run | 预检 fail-closed 停在 `NOT_PAIRED`，不进入 CellRebel | 2 |
+| pairing | Auto 在 run 进行中撤销 provider | 当前 attempt 进入 release/recovery；不静默继续；release 不可证时按 INV-21 暂停 | 2,21 |
+| pairing | 千网游撤销 caller 后 Auto 继续调用 | 立即 typed 失败，active lease 进入 release/recovery | 2,14 |
+| pairing | 撤销后同一 (applicationId, signer) 再次出现 | 必须重新走 operator 批准；不得因历史记录存在而自动复活 | 2 |
+| pairing | 撤销前已写入的可信配额 | 不回溯撤销；撤销事件进审计，历史可解释 | 2,10,18 |
 | pairing | 同 signer + 新 versionCode（任一侧正常升级） | 保持配对，由 protocol handshake 决定兼容；**不得要求重新配对** | 2,3,19 |
 
 ## 11. 日志与证据契约
@@ -1096,13 +1134,13 @@ cd apps/qianwangyou
 - Create: `apps/cellrebel-auto/app/schemas/**`（导出的 Room schema JSON，纳入版本控制）
 - Test: `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/db/Migration4to5Test.kt`
 
-**Entity / DAO 路径冻结**：`LegacyCompletionSnapshot` 与 `ProviderPairingRecord` 两个 entity 都声明在既有的 `model/plan/Entities.kt` 中（沿用该文件既有的 entity 聚合惯例）；各自使用独立 DAO（`db/LegacyCompletionDao.kt`、`db/ProviderPairingDao.kt`），不复用 `PlanDao`——`LegacyCompletionSnapshot` 只在迁移时写一次且只读，`ProviderPairingRecord` 承载信任决定，两者都不应混进计划 CRUD 的通用 DAO（否则 INV-22 的旁路面被扩大）。`ProviderTrustStore.kt` 是 §6.5.3 的 lifecycle owner，DAO 之上只暴露"查已批准 / 提交 operator 批准"两个入口，不暴露通用 upsert。
+**Entity / DAO 路径冻结**：`LegacyCompletionSnapshot` 与 `ProviderPairingRecord` 两个 entity 都声明在既有的 `model/plan/Entities.kt` 中（沿用该文件既有的 entity 聚合惯例）；各自使用独立 DAO（`db/LegacyCompletionDao.kt`、`db/ProviderPairingDao.kt`），不复用 `PlanDao`——`LegacyCompletionSnapshot` 只在迁移时写一次且只读，`ProviderPairingRecord` 承载信任决定，两者都不应混进计划 CRUD 的通用 DAO（否则 INV-22 的旁路面被扩大）。`ProviderTrustStore.kt` 是 §6.5.3 的 lifecycle owner，DAO 之上只暴露 `findActive` / `approve` / `revoke` 三个窄入口，不暴露通用 `upsert`/`delete`——信任决定与撤销都必须经这三个方法，否则 INV-22 的旁路面被扩大到信任面上。
 
 **RED order:** state census schema → **v4 真实 fixture 升级失败** → UNIQUE ledger → pre-existing execution → crash windows → concurrent insert → closed-state bypass。
 
 **GREEN:** 可信完成只通过 `TrustPolicy` + 单一 ledger transaction；删除旧的直接 `completedSuccesses++` 写路径，完成数改为投影。
 
-**迁移硬约束（INV-24）**：现网 `AppDatabase` 是 `version = 4` 且 `exportSchema = false`，已有用户数据。本 task 新增 `TrustedQuotaEntry`/`CellRebelExecution`/`AutoAuditEvent`/`LegacyCompletionSnapshot` **四类表**（另有 `ProviderPairingRecord`，见下）→ 必须 `version = 5` 且提供显式 `MIGRATION_4_5`，同时把 `exportSchema` 改为 `true` 并把 schema JSON 纳入版本控制（千网游侧已有同款 `room.schemaLocation` 配置可参照）。**禁止 `fallbackToDestructiveMigration` 及任何变体**——缺失迁移会让老用户在升级后开库即 `IllegalStateException`，而 destructive fallback 会直接清空 operator 已导入的计划与历史结果，两者都违反“用户状态默认持久化”。迁移测试必须用**手工构建的真实 v4 fixture 库**（既有 `MigrationTest.kt` 的 v2 手法可直接复用），断言历史计划、任务与结果全部存活。
+**迁移硬约束（INV-24）**：现网 `AppDatabase` 是 `version = 4` 且 `exportSchema = false`，已有用户数据。本 task 新增 `TrustedQuotaEntry`/`CellRebelExecution`/`AutoAuditEvent`/`LegacyCompletionSnapshot`/`ProviderPairingRecord` **五类表**（五张都进 v5 Room schema）→ 必须 `version = 5` 且提供显式 `MIGRATION_4_5`，同时把 `exportSchema` 改为 `true` 并把 schema JSON 纳入版本控制（千网游侧已有同款 `room.schemaLocation` 配置可参照）。**禁止 `fallbackToDestructiveMigration` 及任何变体**——缺失迁移会让老用户在升级后开库即 `IllegalStateException`，而 destructive fallback 会直接清空 operator 已导入的计划与历史结果，两者都违反“用户状态默认持久化”。迁移测试必须用**手工构建的真实 v4 fixture 库**（既有 `MigrationTest.kt` 的 v2 手法可直接复用），断言历史计划、任务与结果全部存活。
 
 **旧进度语义（必须冻结，两个方向都是错的）**：upstream `48d8ec9` 的 v4 把历史成功次数放在 `LocationTask.completedSuccesses: Int`（另有 `status: String`）。v5 把完成数改为 `count(TrustedQuotaEntry)` 投影后，两条自然做法都不可接受：
 
@@ -1116,7 +1154,7 @@ cd apps/qianwangyou
 - A+ 的 trusted quota 对每个 task **从 0 开始**计；
 - 该快照只读、只在迁移时写入一次，不参与任何后续判定。
 
-必测：一个 `completedSuccesses` 非零且存在 active/completed plan 的 v4 fixture，升级后断言——旧进度可见且标为 legacy-unverified、`TrustedQuotaEntry` 表为空、`LocationTask.completed` 投影为 false（除非新 ledger 真的达标）、恢复流程不把 legacy 计数当作已完成而跳过地址。
+必测：一个 `completedSuccesses` 非零且存在 active/completed plan 的 v4 fixture，升级后断言——旧进度可见且标为 legacy-unverified、`TrustedQuotaEntry` 表为空、`LocationTask.completed` 投影为 false（除非新 ledger 真的达标）、恢复流程不把 legacy 计数当作已完成而跳过地址、**`ProviderPairingRecord` 表已创建且初始为空**（升级不得凭空产生一条被信任的 provider——那等于用迁移绕过 §6.5.3 的 operator 批准）。
 
 **Verify:**
 
@@ -1166,7 +1204,7 @@ cd apps/cellrebel-auto
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/ControlScreen.kt`
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/HistoryScreen.kt`
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/PairingStatusCard.kt`
-- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/ProviderApprovalScreen.kt`（§6.5.3 的 operator 显式批准入口：展示 applicationId、当前 signer 摘要、来源；批准前不得进入可信判定）
+- Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/ui/ProviderApprovalScreen.kt`（§6.5.3 的 operator 批准**与撤销**入口：展示待批准候选的 applicationId / 当前 signer 摘要 / 来源，以及已批准 provider 列表与撤销动作；批准前不得进入可信判定）
 - Create: `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/ui/AutomationPairingScreen.kt`
 - Modify: qwy navigation/settings files only in Kimi branch
 
@@ -1218,7 +1256,8 @@ cd apps/cellrebel-auto
 
 真机动作必须另获设备 lease；使用公开测试坐标，禁止未经授权 uninstall/clear-data/生产 profile 写入。验收至少覆盖：
 
-- 首次配对、撤销、签名变化；
+- 首次配对（两侧各一次显式批准）、签名变化；
+- **撤销两侧各测一遍**：千网游撤销 caller allowlist、Auto 撤销 provider allowlist；各覆盖"撤销后发起新 run"与"run 进行中撤销"两种时机；
 - exact-build 双 App 版本 skew；
 - 10 个地址 × 每地址指定可信次数；
 - CellRebel pre-existing、新运行、重跑、崩溃恢复；
