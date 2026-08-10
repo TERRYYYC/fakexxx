@@ -63,23 +63,30 @@ SHA. Those trailers are a second, independent record of the same fact.
    `IMPORTS` and the `each_import` iterator are `readonly`, so a machine query
    cannot report a value the gate does not itself consume;
 1. this document records the URL, branch, exact SHA and the fakexxx import commit;
-2. **the anchor** — the root tree recorded **on that prefix's own row** equals the
-   tree of the upstream object actually fetched from the upstream URL. Parsed
-   field by field: a document-wide grep only proves the hash appears somewhere,
-   and swapping the two rows' root trees left both hashes present and both
-   prefixes passing. Checked at **every** stage, depends on no local history, so
-   it survives a squash or rebase merge intact;
+2. **one strict row per prefix** — the imports table must contain exactly one row
+   whose first cell is *exactly* that prefix (not a prefix-suffix, not duplicated)
+   with exactly six cells, and the URL, branch, upstream SHA and root tree are all
+   compared **from that same row**. A document-wide `grep` per token only proved a
+   string existed somewhere: swapping just the two rows' SHA cells, or renaming a
+   row to `apps/qianwangyou-shadow`, left every string present and both prefixes
+   passing, so the document could map prefix to SHA wrongly and still be certified;
+2b. **the anchor** — the root tree on that row equals the tree of the upstream
+   object actually fetched from the upstream URL. Checked at **every** stage and
+   depends on no local history;
 3. *additionally, and only while it is still reachable*, the recorded import
    commit carries that upstream tree at the prefix. This is DAG evidence: a
    squash/rebase merge legitimately discards it, so it is a bonus, never the
    anchor;
+3b. **ancestry** — some commit reachable from HEAD carries the upstream root tree
+   at that prefix. This is the question that actually matters and no merge method
+   can erase it: after a squash merge the base commit still holds the pristine
+   tree, and a later contract-wiring delta lands on top. An earlier version used
+   one named commit (the recorded import commit) as the only ancestry carrier,
+   which made every legitimate post-squash divergence fail;
 4. at `--stage import` only, the committed tree of the prefix still equals the
-   upstream root tree (pristine). At `contract`/`full` divergence is expected —
-   but **only provable while the import commit is still an ancestor of HEAD**.
-   Diverged *and* unreachable is a hard failure: nothing left in the repository
-   shows the current tree descends from the recorded baseline, and passing anyway
-   is how a single-commit clone with arbitrary tampering once exited 0. Pristine
-   trees still pass without any history. When divergence is reachable-proven,
+   upstream root tree (pristine). At `contract`/`full` divergence is expected and
+   allowed **whenever ancestry above is proven**; with no ancestor carrying the
+   baseline tree it is a hard failure. When divergence is ancestry-proven,
    **this gate does not bound which paths diverged** — that is an ownership
    question for the boundary gate, not a provenance question;
 5. the working tree has not drifted from the verified commit;
@@ -267,8 +274,19 @@ explicit provenance exception.
 ## 5. Regression gate
 
 `scripts/selftest-provenance.sh` runs the production checker against throwaway
-clones: 3 positives and 8 negatives, including swapped root-tree rows, a prefix
-smuggled into the branch field, a malformed three-field record, and history-lost
-divergence. It runs in CI next to the checker itself. Every negative was a state
-this repository actually shipped; the table used to live in a document, where it
-gated nothing.
+clones and asserts its exit code — **4 positives and 9 negatives**, counted by the
+harness rather than written by hand. No case inspects source text: grepping the
+checker for a literal proves the line exists, not that it does anything, and an
+earlier version counted two such greps as negatives while advertising 8 when only
+6 behaviours ran.
+
+Positives include a squash-merged history with pristine trees **and** a
+squash-merged history carrying a real contract-wiring delta — the combination a
+previous version failed, which would have forbidden the operator from using the
+squash button. Negatives include a forged single commit with no pristine ancestor,
+a row renamed to a prefix-suffix, a duplicated row, cross-row swaps of the SHA and
+root-tree cells, an executed iterator-redefinition fork, a dropped record, a prefix
+smuggled into the branch field, and a malformed three-field record.
+
+It runs in CI next to the checker. Each case was verified bound to the production
+predicate by mutation: reverting the fix must make that case fail.

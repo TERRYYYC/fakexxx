@@ -200,6 +200,41 @@ done < <(each_import)
 
 # ---------------------------------------------------------------------------
 DAG_PROVEN=""
+ANCESTRY_PROVEN=""
+
+# Strict single-row parser for the provenance table.
+#
+# doc_row <prefix> prints the row's 6 data cells, tab separated, and fails if the
+# document does not contain exactly one row whose FIRST cell, after stripping
+# backticks and whitespace, is exactly that prefix.
+#
+# The previous selector used index($2, pfx): a substring test. Renaming the table
+# row to `apps/qianwangyou-shadow` still matched, so the checker certified a
+# document that no longer described the prefix it claimed to. Prefix-suffix,
+# duplicate rows, and short/long rows are all rejected here rather than each
+# caller re-deriving them.
+doc_row() {
+  awk -F'|' -v pfx="$1" '
+    # Anchor to the imports table only. The document also has an "upstream commit
+    # detail" table whose first cell is the same prefix but which has four cells,
+    # so an unanchored scan matched both and every row looked malformed.
+    /Exact upstream SHA/ { intable = 1; next }
+    intable && !/^[[:space:]]*\|/ { intable = 0 }
+    intable && /^[[:space:]]*\|[[:space:]]*-/ { next }
+    intable && /^[[:space:]]*\|/ {
+      first = $2; gsub(/[`[:space:]]/, "", first)
+      if (first != pfx) next
+      if (NF - 2 != 6) { printf("ERR field-count %d\n", NF - 2); found = 2; exit }
+      hits++
+      row = ""
+      for (i = 2; i <= 7; i++) { c = $i; gsub(/[`[:space:]]/, "", c); row = row (i > 2 ? "\t" : "") c }
+    }
+    END {
+      if (found == 2) exit 1
+      if (hits != 1) { printf("ERR row-count %d\n", hits); exit 1 }
+      print row
+    }' "$PROVENANCE_DOC"
+}
 
 section "1. provenance document"
 
@@ -212,15 +247,26 @@ else
 fi
 
 if [ "$DOC_PRESENT" -eq 1 ]; then
+  # Every load-bearing field is read from THAT prefix's single row and compared
+  # exactly. Whole-file `grep -qF` per token only proved the string existed
+  # somewhere: swapping just the two rows' upstream-SHA cells left both strings
+  # present and both prefixes passed, so the document could map prefix -> SHA
+  # wrongly and still be certified.
   while IFS='|' read -r prefix url branch sha; do
     [ -z "${prefix:-}" ] && continue
-    for token in "$url" "$branch" "$sha" "$prefix"; do
-      if grep -qF -- "$token" "$PROVENANCE_DOC"; then
-        pass "$PROVENANCE_DOC records '$token'"
-      else
-        fail "$PROVENANCE_DOC does not record '$token'"
-      fi
-    done
+    row="$(doc_row "$prefix")" || { fail "$PROVENANCE_DOC has no single well-formed row for $prefix ($row)"; continue; }
+    r_prefix="$(printf '%s' "$row" | cut -f1)"
+    r_url="$(printf '%s' "$row" | cut -f2)"
+    r_branch="$(printf '%s' "$row" | cut -f3)"
+    r_sha="$(printf '%s' "$row" | cut -f4)"
+    [ "$r_prefix" = "$prefix" ] && pass "row first cell is exactly '$prefix'" \
+      || fail "row first cell '$r_prefix' != '$prefix'"
+    [ "$r_url" = "$url" ] && pass "row for $prefix records url $url" \
+      || fail "row for $prefix records url '$r_url', expected '$url'"
+    [ "$r_branch" = "$branch" ] && pass "row for $prefix records branch $branch" \
+      || fail "row for $prefix records branch '$r_branch', expected '$branch'"
+    [ "$r_sha" = "$sha" ] && pass "row for $prefix records upstream sha ${sha:0:9}" \
+      || fail "row for $prefix records upstream sha '$r_sha', expected '$sha'"
   done < <(each_import)
 
   # ---- load-bearing, merge-method-independent anchor ----
@@ -240,10 +286,8 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
     # grep only proves the hash appears somewhere: swapping the two rows' root
     # trees left both hashes present and both prefixes passed. Membership in the
     # file is not an assignment to a prefix.
-    recorded_tree="$(awk -F'|' -v pfx="$prefix" '
-        $0 ~ /^\|/ && index($2, pfx) {
-          gsub(/[` \t]/, "", $6); print $6; exit
-        }' "$PROVENANCE_DOC")"
+    row="$(doc_row "$prefix")" || row=""
+    recorded_tree="$(printf '%s' "$row" | cut -f5)"
     if [ -z "$upstream_tree" ]; then
       fail "upstream object $sha unavailable; cannot verify the root tree recorded for $prefix"
     elif [ -z "$recorded_tree" ]; then
@@ -277,10 +321,9 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
     if ! git merge-base --is-ancestor "$import_commit" HEAD 2>/dev/null; then
       # Object existence is not reachability: `git cat-file -e` succeeds for an
       # object that is present but no longer an ancestor of HEAD.
-      pass "import commit $import_commit for $prefix is not an ancestor of HEAD (squash/rebase merge); DAG evidence unavailable"
+      pass "import commit $import_commit for $prefix is not an ancestor of HEAD (squash/rebase merge); this specific commit is no longer the ancestry carrier"
       continue
     fi
-    DAG_PROVEN="${DAG_PROVEN}|${prefix}|"
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
     import_tree="$(git rev-parse --quiet --verify "${import_commit}:${prefix}" 2>/dev/null)"
     if [ -z "$upstream_tree" ]; then
@@ -295,6 +338,42 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
     fi
   done < <(each_import)
 fi
+
+# ---------------------------------------------------------------------------
+section "1b. baseline ancestry"
+
+# Does ANY reachable ancestor carry the upstream tree at this prefix?
+#
+# The previous version used one specific commit — the recorded import commit —
+# as the only ancestry carrier, so a squash or rebase merge of PR #10 made every
+# later legitimate divergence fail. That is a legal path: after a squash, the
+# base commit still holds the pristine prefix tree, and the next commit applies a
+# real contract-wiring delta on top. Ancestry objectively exists; only that one
+# named commit is gone.
+#
+# So ask the question that actually matters, in a way no merge method can erase:
+# is there a commit reachable from HEAD whose <prefix> tree equals the fetched
+# upstream root tree? The prefix tree only changes at commits that touch the
+# prefix, so those commits plus HEAD are the complete candidate set.
+while IFS='|' read -r prefix url branch sha; do
+  [ -z "${prefix:-}" ] && continue
+  upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
+  if [ -z "$upstream_tree" ]; then
+    fail "upstream object $sha unavailable; cannot establish ancestry for $prefix"
+    continue
+  fi
+  anc=""
+  for c in HEAD $(git rev-list HEAD -- "$prefix" 2>/dev/null); do
+    t="$(git rev-parse --quiet --verify "${c}:${prefix}" 2>/dev/null)" || t=""
+    if [ "$t" = "$upstream_tree" ]; then anc="$(git rev-parse --short "$c")"; break; fi
+  done
+  if [ -n "$anc" ]; then
+    pass "$prefix: reachable ancestor $anc carries the upstream tree $upstream_tree (ancestry proven; merge-method independent)"
+    ANCESTRY_PROVEN="${ANCESTRY_PROVEN}|${prefix}|"
+  else
+    fail "$prefix: no reachable commit carries upstream tree $upstream_tree — the vendored tree cannot be shown to descend from the recorded baseline"
+  fi
+done < <(each_import)
 
 # ---------------------------------------------------------------------------
 section "2. current HEAD state (stage=$STAGE)"
@@ -335,11 +414,11 @@ while IFS='|' read -r prefix url branch sha; do
     # "baseline identity proven". Until an authorised-delta-chain carrier exists
     # (a task-specific, machine-verifiable record of which divergence was
     # approved), the honest answer is that it cannot be verified.
-    case "$DAG_PROVEN" in
+    case "$ANCESTRY_PROVEN" in
       *"|${prefix}|"*)
-        pass "$prefix has diverged from upstream (allowed at stage $STAGE; descent from the baseline carried by the reachable import commit — this gate does not bound WHICH paths diverged)" ;;
+        pass "$prefix has diverged from upstream (allowed at stage $STAGE; ancestry proven in section 1b — this gate does not bound WHICH paths diverged, that is the scope gate's job)" ;;
       *)
-        fail "$prefix has diverged from upstream AND the import commit is unreachable: descent from the recorded baseline cannot be verified at stage $STAGE. Pristine trees still pass without the DAG; a diverged tree needs either the import commit reachable or an authorised-delta-chain carrier, which does not exist yet." ;;
+        fail "$prefix has diverged from upstream and no reachable commit carries the recorded baseline tree: descent cannot be established at stage $STAGE" ;;
     esac
   fi
 
