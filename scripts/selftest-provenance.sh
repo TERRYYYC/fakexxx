@@ -47,16 +47,19 @@ mk_squashed() {
 # of them says nothing about the other.
 mk_fulldag() {
   local d sha; d="$(mktemp -d)"; sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-  # Do NOT depend on the source repo's HEAD being a branch. `git clone` resolves
-  # the remote's symbolic HEAD to decide what to check out, so a detached source
-  # HEAD yields a clone with an EMPTY working tree. That is environment-shaped:
-  # it built fine on a developer machine sitting on a branch and failed on CI with
-  # "no such file: docs/provenance/upstream-imports.md", which the old silent
-  # setup() reported only as "FIXTURE SETUP FAILED". Clone the objects, then check
-  # out the exact commit by SHA, which has no symbolic dependency at all.
-  # Identity is persisted for the same reason mk_squashed persists it: the tampers
-  # commit again inside the fixture, a clone inherits no user.email/user.name, and
-  # macOS derives one from user@host while a CI runner refuses.
+  # Both hardenings below REMOVE AN AMBIENT DEPENDENCY; neither one asserts a
+  # mechanism. Checking the exact commit out by SHA removes the dependency on the
+  # source repo's symbolic HEAD. Persisting user.email/user.name removes the
+  # dependency on an ambient git identity, which a clone does not inherit and the
+  # tampers do need, because they commit again inside the fixture — mk_squashed
+  # has persisted it from the start for exactly that reason.
+  #
+  # Attribution is deliberately NOT made here. This comment once stated a
+  # detached-HEAD/empty-tree mechanism as established fact while the same commit's
+  # body correctly said the root cause was not established, and that mechanism was
+  # later disproven. The failure was attributed by a separate one-shot probe, not
+  # by prose; spec §0.1.36 carries the experiment and its evidence. A comment is
+  # not a place to promote a hypothesis to a fact.
   git clone -q --no-checkout "$REPO_ROOT" "$d" >/dev/null 2>&1
   ( cd "$d" && git config user.email s@s && git config user.name s \
       && git checkout -q -B fixture "$sha" ) >/dev/null 2>&1
