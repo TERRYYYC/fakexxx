@@ -37,6 +37,7 @@ cd "$REPO_ROOT" || exit 1
 # default-lenient silently drops PR-1's strongest check. So the caller must say
 # which stage it is, and a missing/unknown stage is a usage failure.
 STAGE=""
+PRINT_IMPORT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     # `shift 2` with only one argument left fails and does NOT advance $#,
@@ -49,6 +50,15 @@ while [ $# -gt 0 ]; do
       fi
       STAGE="$2"; shift 2 ;;
     --stage=*) STAGE="${1#*=}"; shift ;;
+    # Machine query for downstream gates (see the handler below). Same arity
+    # guard as --stage: `shift 2` with one argument left would spin forever.
+    --print-import)
+      if [ $# -lt 2 ]; then
+        printf 'check-provenance: --print-import requires a <prefix>\n' >&2
+        exit 2
+      fi
+      PRINT_IMPORT="$2"; shift 2 ;;
+    --print-import=*) PRINT_IMPORT="${1#*=}"; shift ;;
     -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) printf 'check-provenance: unknown argument "%s"\n' "$1" >&2; exit 1 ;;
   esac
@@ -56,7 +66,7 @@ done
 
 case "$STAGE" in
   import|contract|full) ;;
-  "") printf 'check-provenance: --stage is required (import | contract | full)\n' >&2; exit 1 ;;
+  "") if [ -n "$PRINT_IMPORT" ]; then :; else printf 'check-provenance: --stage is required (import | contract | full)\n' >&2; exit 1; fi ;;
   *)  printf 'check-provenance: unknown stage "%s" (expected: import | contract | full)\n' "$STAGE" >&2; exit 1 ;;
 esac
 
@@ -73,6 +83,29 @@ IMPORTS="
 apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e
 apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944
 "
+
+# --print-import <prefix> handler
+#
+# Machine query for downstream gates. Any consumer that needs the frozen SHA
+# MUST call this instead of parsing this file's text: a text parser and the
+# runtime value can diverge (a later `printf -v IMPORTS` / `export IMPORTS=`
+# assignment, a decoy line outside the block, or two assignment blocks all make
+# a parser disagree with what the loops below actually consume). This prints
+# from the same $IMPORTS the loops read, so there is exactly one source.
+if [ -n "$PRINT_IMPORT" ]; then
+  found=""
+  while IFS='|' read -r prefix url branch sha; do
+    [ -z "${prefix:-}" ] && continue
+    [ "$prefix" = "$PRINT_IMPORT" ] || continue
+    [ -z "$found" ] || { printf 'duplicate IMPORTS entry for %s\n' "$PRINT_IMPORT" >&2; exit 1; }
+    found="$sha"
+  done <<EOF
+$(printf '%s\n' "$IMPORTS")
+EOF
+  [ -n "$found" ] || { printf 'no IMPORTS entry for %s\n' "$PRINT_IMPORT" >&2; exit 1; }
+  printf '%s\n' "$found"
+  exit 0
+fi
 
 # Entry files that must exist after a successful import (spec §13 Task 1.3).
 ENTRY_FILES="
@@ -148,8 +181,14 @@ EOF
       fail "$PROVENANCE_DOC does not record an import commit for $prefix"
       continue
     fi
+    # The import commit is DAG evidence. A squash or rebase merge legitimately
+    # discards it, and a correct tree must not be reported as a provenance
+    # failure just because someone used a different merge button. So: assert
+    # the pairing only when the commit is still reachable. The load-bearing,
+    # merge-method-independent proof is section 2 (fetched upstream tree +
+    # confined divergence), which depends on no local history at all.
     if ! git cat-file -e "${import_commit}^{commit}" 2>/dev/null; then
-      fail "recorded import commit $import_commit for $prefix does not exist in this repository"
+      pass "import commit $import_commit for $prefix not reachable (squash/rebase merge); DAG evidence skipped, content proof in section 2 still applies"
       continue
     fi
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
