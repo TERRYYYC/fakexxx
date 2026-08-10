@@ -102,6 +102,7 @@ source_threads:
 | **v1.23** | PR-0.2 第十九轮 | Sol 对 `5cef50b7`/`aa6a5787` 两轮窄审：**两张 pairing 表写反**（`PairingRecord`=千网游 caller allowlist / `ProviderPairingRecord`=Auto provider allowlist）· 失败路由表补**第 0 条证据自身故障**并取消「无法定位⇒自动改 contract」· PR-5 补 Gradle/wrapper/fixture/self-test 等**可执行载体**与 exact 测试入口 · Task 3.5 的 guard 真正实现声明集合（prefix + `integration/**` 排除 + baseline 成员）· 另修 RED 三处拆分、版本表顺序、§21.2 线性误导、Task 8 audit 复核义务的虚假引用，见 §0.1.23 |
 | **v1.24** | PR-0.2 第二十轮 | Sol 复核 `59db6201` 余 3 P1：**历史区 B-1 仍留相反的活路由**（违反本文自己冻的「历史区待执行指令须内联标记」）· PR-5 的 `./gradlew test` 无法同时满足 0 矩阵行与三类 self-test，改为 **`selfTest` / `matrixTest` 双 source set + task 图**，台账 22 行入口同步 · **Task 3.5 guard 绑回指向物**（原始 lint 报告 digest + 条数 + 整行相等 + fail-closed），并撤回上一版「(a)(b) 封住扩权」的假断言，见 §0.1.24 |
 | **v1.25** | PR-0.2 第二十一轮 | Sol 判 P1-2/P1-3 **CLOSED**，余 P1-4。三条子发现全部成立：**23 是 Error instance 数、唯一文件只有 5 个**——旧判据可被 warning-only 文件重复填满而扩权；XML 带绝对路径致 digest 不可重放，改为**规范化 repo-relative + 绑生成 commit**；`set -euo pipefail` 原在六道前置门之后，**失败会被后续成功掩绿**，已提到第一条。授权集合改为**从报告派生、与 baseline 声明逐元素相等**，见 §0.1.25 |
+| **v1.26** | PR-0.2 第二十二轮 | Sol 判前两条 CLOSED，余 1 P1 + 1 P2。**P1：我引用的 `qianwangyou-upstream-sha:` 字段根本不存在**，且比较是**空值自洽**的（缺失/空声明→绿，合法值→红）；改绑 `check-provenance.sh` 的 `IMPORTS` 表（PR #10 已校验的真实 machine carrier，#10 无需改动）+ `git-subtree-split` trailer 交叉校验，并对所有比较型断言先证**非空/单值/格式合法**。**P2**：`sort -u` 先于比较导致「5 条正确 + 1 条重复」放行，改为先查 raw count 与重复。另修两处 23-path 活投影，见 §0.1.26 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -620,6 +621,56 @@ Sol 判 P1-2、P1-3 **CLOSED**，只剩 P1-4——同一个 guard，我在这里
 第 2 条值得说明为何**已经**成立：它满足方向判别法——作者往 manifest 多加一条 `passed`，`testId` 在原始报告里查不到匹配 outcome，会红。**这条是 v1.11 那轮 Sol 逼出来的**，当时的措辞就已经是派生式；本轮只是回头确认它没有退化。
 
 **这一节和 §0.1.24 是配套的**：§0.1.24 说判据冻结时要枚举适用面，而这三版说明**即使枚举了，如果判据本身的方向是错的，枚举出来的每一处都会一起错**。本轮枚举的 5 类适用点里，baseline 这一处正是被枚举到、也被"修"过、但方向仍然错着的那一处。
+
+#### 0.1.26 一条在「东西不存在」时会变绿的检查（v1.26）
+
+Sol 判 P1-4 的前两条 CLOSED（派生式授权集合、规范化 + strict flags + `mktemp -d`），余 **1 P1 + 1 P2**。
+
+**P1 打中的是我自己写的第八条判据。** 我在 guard 里写：
+
+```
+FROZEN=$(sed -n 's/^qianwangyou-upstream-sha: *//p' docs/provenance/upstream-imports.md)
+```
+
+**这个字段根本不存在。** PR #10 exact HEAD `aa6d93a3` 的那份文件只有一张 Markdown 导入表，真实 SHA 在表格单元与 `check-provenance.sh` 的常量里（我这轮真的去打开了才知道——上一轮我引用它时**没有打开过**）。
+
+而真正糟糕的不是引用错，是**这条检查在操作数缺失时会变绿**：
+
+| baseline 声明 | `FROZEN`（空） | 结果 |
+|---|---|---|
+| 缺失 / 空 | 空 | `空 == 空` → **exit 0，绿** |
+| 合法 40-hex | 空 | 不等 → **exit 1，红** |
+
+**缺声明反而通过，写对了反而失败。绑定被整个倒过来了。**
+
+| # | 缺口 | 修订 |
+|---|---|---|
+| F-1 | carrier 不存在，且空值自洽 | 改绑 **`check-provenance.sh` 的 `IMPORTS` 表第 4 字段**——它是 provenance gate 自己的真相源、PR #10 已用它反向校验文档、真实存在且 40-hex，**且 #10 无需改动**；再用 git 派生的 `git-subtree-split:` trailer 做独立第二记录。所有比较型断言先证两侧**非空、单值、格式合法** |
+| F-2 | `sort -u` 先于比较，「5 条正确 + 1 条重复」放行 | 先查 raw 行数 == 5 与无重复，再做集合相等 |
+| F-3 | 两处仍写「23 条 exact 路径」 | 改为「23 是 Error instance 数；授权集合是派生出的 5 条唯一路径」 |
+
+**一条比较型断言，有三件互相独立的事会坏：**
+
+1. **方向**——派生还是印证（§0.1.25）
+2. **指称**——carrier 到底存不存在（§0.1.23）
+3. **退化输入**——两侧为空 / 缺失时，它到底红还是绿（**本节新增**）
+
+我前两轮把 1 和 2 各写了一遍判据，**第 3 件从来没检查过**。而它最阴险：前两件出错时检查往往会红，容易被发现；**第 3 件出错时检查会绿**——它不是漏检，是**主动把"东西不存在"认证成"检查通过"**。
+
+> **判据补第十条**：**任何比较型断言，必须先证明两侧操作数存在、单值、格式合法，再做比较。** 判别法：**把任意一侧删空，这条检查必须红。** 如果删空之后它变绿，那它检查的不是事实，而是"我没找到反例"。
+
+**按第九条同轮枚举第十条的适用点**（本文所有比较型断言）：
+
+| 断言 | 删空一侧 | 处置 |
+|---|---|---|
+| `generated-at-commit` vs `IMPORTS` SHA | 原为**绿** | 本轮修：两侧证非空 + 40-hex + 单值 |
+| `report-sha256` vs 实算 digest | 一侧恒非空故原为红，但依赖巧合 | 本轮补：两侧证非空 + 64-hex + 单值 |
+| 派生集合 vs 声明集合 | 声明空 → raw count != 5 → 红 | 已成立（F-2 同轮补 raw/重复检查） |
+| Error instance 数 == 23 / 唯一数 == 5 | 空 → 0 != 23 → 红 | 已成立 |
+| `--stage contract` workflow 断言 | 调用点为 0 → `grep -c` 为 0 → 红 | 已成立 |
+| §10 ID 集合 == §10.1 ID 集合 | 任一侧空 → 集合不等 → 红 | 已成立 |
+
+**这三节连起来（§0.1.24 枚举、§0.1.25 方向、§0.1.26 退化输入）指向同一件事**：我写检查时想的是「它怎样才能抓住我预想的那个错」，而不是「它在各种输入下分别输出什么」。**前者产出的是示例，后者才是谓词。**
 
 ## 1. 事实基线与来源
 
@@ -2289,7 +2340,7 @@ cd ../..
 **Files:**
 
 - Create: **`docs/provenance/qwy-lint-baseline-report.xml`** —— 在**冻结导入基线**（`FakeGps-test@285e4ca` 的 pristine 树）上跑 `lintDebug` 得到的原始报告，**且每个 `location/@file` 必须先规范化为 repo-relative** 再逐字节提交。这是授权集合的**指向物**。
-- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述报告**机械派生**，必须记录：① `generated-at-commit:` = qwy 冻结导入 SHA（须等于 `docs/provenance/upstream-imports.md` 的 `qianwangyou-upstream-sha:` 字段）；② `report-sha256:` = **规范化后**报告的 SHA-256；③ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，每行一条 exact 路径，**共 5 条**（用哨兵不用代码围栏：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞）。**必须先于任何源码修改单独提交。**
+- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述报告**机械派生**，必须记录：① `generated-at-commit:` = qwy 冻结导入 SHA，**须等于 `scripts/check-provenance.sh` 的 `IMPORTS` 表中 `apps/qianwangyou` 行第 4 字段**（该表是 provenance gate 自己的真相源，PR #10 已用它反向校验 `upstream-imports.md`，因此是一个真实存在、非空、单值、40-hex 且已被 #10 校验的 machine carrier）；② `report-sha256:` = **规范化后**报告的 SHA-256；③ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，每行一条 exact 路径，**共 5 条**（用哨兵不用代码围栏：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞）。**必须先于任何源码修改单独提交。**
 - Modify: **仅**上述 5 条 exact 路径
 
 > **23 与 5 是两个不同的数（v1.25 更正，由 Sol 实测证伪）**：`lintDebug` 报的是 **23 个 Error instance**，但它们只落在 **5 个唯一文件**上（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3 说的是 **instance** 分布），另有 54 个 warning-only 文件与授权集合无关。上一版把「条数 == 23」当成路径集合的判据，于是**把 warning-only 文件（如 `config/ConfigPrefsSync.kt`）重复填满 23 行也能全绿**——不改报告、不改 digest 就完成扩权。现在 **23 只用于校验 Error instance 数，5 才是授权路径集合的基数**；集合由报告派生，baseline 只是声明副本，二者必须**逐元素相等**。
@@ -2308,7 +2359,8 @@ cd ../..
 
 ```bash
 (cd apps/qianwangyou && ./gradlew lintDebug)      # 预期 exit != 0
-# 且 error 数与 qwy-lint-baseline.md 记录的 23 条逐条对应（多出的即 PR-3 引入的回归，退回 Task 3）
+# 且 Error instance 数与 baseline 记录的 23 一致（多出的即 PR-3 引入的回归，退回 Task 3）
+# 注意：23 是 instance 数；baseline 的 allowed-paths 只含 5 条唯一文件路径
 ```
 
 **GREEN:** `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**。
@@ -2336,14 +2388,28 @@ ALLOWED_EXTRA='apps/qianwangyou/app/src/main/res/values-en/strings.xml'
 #     否则 digest 依赖 checkout 位置，别人无法重放出同一 digest
 ! grep -q 'file="/' "$REPORT" || { echo "REPORT NOT NORMALIZED (absolute paths)"; exit 1; }
 
-# (b) baseline 必须声明生成 commit，且等于 qwy 的冻结导入 SHA
-FROZEN=$(sed -n 's/^qianwangyou-upstream-sha: *//p' docs/provenance/upstream-imports.md)
-[ "$(sed -n 's/^generated-at-commit: *//p' "$BASELINE")" = "$FROZEN" ] \
-  || { echo "BASELINE COMMIT != frozen import SHA"; exit 1; }
+# (b) baseline 必须声明生成 commit，且等于 qwy 冻结导入 SHA
+#     carrier = provenance gate 自己的 IMPORTS 表（PR #10 已校验），不是文档里的自由文本
+FROZEN=$(awk -F'|' '$1=="apps/qianwangyou"{print $4}' scripts/check-provenance.sh)
+DECL=$(sed -n 's/^generated-at-commit: *//p' "$BASELINE")
+# 先证明两侧都是【非空、单值、40-hex】——否则"空 == 空"会自洽为绿
+for v in "$FROZEN" "$DECL"; do
+  [ "$(printf '%s' "$v" | wc -l)" -eq 0 ] || { echo "CARRIER NOT SINGLE-VALUED"; exit 1; }
+  printf '%s' "$v" | grep -qE '^[0-9a-f]{40}$' || { echo "NOT A 40-HEX SHA: '$v'"; exit 1; }
+done
+[ "$DECL" = "$FROZEN" ] || { echo "BASELINE COMMIT != frozen import SHA"; exit 1; }
+# 独立第二记录：同一 SHA 必须作为 git-subtree-split trailer 真实存在于历史中（git 派生，非文档声明）
+git log --all --format=%B | grep -qxF "git-subtree-split: $FROZEN" \
+  || { echo "FROZEN SHA HAS NO git-subtree-split TRAILER"; exit 1; }
 
-# (c) digest 绑定（对已规范化的报告）
-[ "$(sed -n 's/^report-sha256: *//p' "$BASELINE")" = "$(shasum -a 256 "$REPORT" | cut -d' ' -f1)" ] \
-  || { echo "BASELINE NOT BOUND TO REPORT"; exit 1; }
+# (c) digest 绑定（对已规范化的报告）——同样先证两侧非空、单值、64-hex
+REC=$(sed -n 's/^report-sha256: *//p' "$BASELINE")
+ACT=$(shasum -a 256 "$REPORT" | cut -d' ' -f1)
+for v in "$REC" "$ACT"; do
+  [ "$(printf '%s' "$v" | wc -l)" -eq 0 ] || { echo "DIGEST NOT SINGLE-VALUED"; exit 1; }
+  printf '%s' "$v" | grep -qE '^[0-9a-f]{64}$' || { echo "NOT A 64-HEX DIGEST: '$v'"; exit 1; }
+done
+[ "$REC" = "$ACT" ] || { echo "BASELINE NOT BOUND TO REPORT"; exit 1; }
 
 # (d) 只取 severity="Error" 的 location/@file —— warning 一律不进授权集合
 xmllint --xpath '//issue[@severity="Error"]/location/@file' "$REPORT" \
@@ -2356,7 +2422,12 @@ sort -u "$TMP/err-instances" > "$TMP/derived"          # 23 个 instance → 5 �
 
 # (e) baseline 声明的集合必须与派生集合【完全相等】（不是"包含"、不是"命中"）
 awk '/^# BEGIN allowed-paths$/{f=1;next} /^# END allowed-paths$/{f=0} f' "$BASELINE" \
-  | sed '/^$/d' | sort -u > "$TMP/declared"
+  | sed '/^$/d' > "$TMP/declared-raw"
+# 先查 raw 行数与重复 —— sort -u 会把"5 条正确 + 1 条重复"洗成 5 条而放行
+[ "$(wc -l < "$TMP/declared-raw")" -eq 5 ] \
+  || { echo "DECLARED RAW LINE COUNT != 5"; exit 1; }
+if sort "$TMP/declared-raw" | uniq -d | grep -q .; then echo "DUPLICATE LINES IN BASELINE"; exit 1; fi
+sort -u "$TMP/declared-raw" > "$TMP/declared"
 diff -q "$TMP/derived" "$TMP/declared" >/dev/null \
   || { echo "DECLARED SET != DERIVED SET (baseline 被手工增删)"; diff "$TMP/derived" "$TMP/declared"; exit 1; }
 
@@ -2956,7 +3027,7 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 
 - `scripts/check-inherited-lint-debt.sh` 的 ratchet **降级为中间证据**，不再是终态门；它继续防止债务增长，但 raw-green 达成后应随之退役。
 - **执行 lane（冻结）**：清债作为 **PR-3.5**，时序为 **PR-3 合入之后、PR-6 之前；与 PR-4 平行，二者之间没有依赖边**（上一版写「插在 PR-3 与 PR-4 之间」是线性误导，与现行 DAG 不符）。**它现在是 §13 的真实节点 [`Task 3.5`](#task-35--千网游-inherited-lint-raw-green-清债)（含 Files / RED / GREEN / Verify）与 issue `I3.5`**，不再只是本节的散文，owner **Opus5**，reviewer **Sol + GLM**。以 Task 3.5 正文为准，本节只做索引，避免两处各写一套。
-  - **exact 文件范围**：由 `docs/provenance/qwy-lint-baseline.md` **冻结成一份提交物**（23 条 error 的 exact 路径 + rule id + 行号）∪ `res/values-en/strings.xml`；不用「被 lint error 命中的文件」这种会漂移、review 时无法判定的动态描述。**不碰** `integration/**`（Fable5 独占），由 Task 3.5 的越界断言机器判定。
+  - **exact 文件范围**：**从 `docs/provenance/qwy-lint-baseline-report.xml`（规范化为 repo-relative 的原始报告）中 `severity="Error"` 派生的 5 条唯一文件路径** ∪ `res/values-en/strings.xml`；`qwy-lint-baseline.md` 只是该派生集合的**声明副本**，guard 要求二者逐元素相等。**23 是 Error instance 数，不是路径数**（v1.26 更正：上一版把两者混写成「23 条 error 的 exact 路径」，会把实现者送回旧的脆弱载体）；不用「被 lint error 命中的文件」这种会漂移、review 时无法判定的动态描述。**不碰** `integration/**`（Fable5 独占），由 Task 3.5 的越界断言机器判定。
   - **时序**：必须在 PR-3 合入后开始（避免与 Fable5 并行写 qwy），并在 PR-6 之前完成。**Task 3 的 lint 门已相应降为 ratchet**——上一版让 Task 3 先要求 raw-green、又把清债排在 PR-3 之后，两者互锁，已消环。
   - **gate 节点**：`I3.5` 的终结谓词 = `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**；该谓词同时是 §19 raw-green 终态门的唯一证据来源。**但 Verify 不止 lint**：清债会改运行时源码与资源，因此 unit + assemble 同为必过门。
   - owner matrix 相应放宽：**Opus5 在 PR-3.5 内可写上述 exact 范围**，这是 §12.1「PR-3 开始后不触碰 qwy」的**唯一具名例外**（已写入 §12.1 表内），范围外仍禁止。
