@@ -97,8 +97,9 @@ source_threads:
 | **v1.18** | PR-0.2 第十四轮 | Sol 语义窄审 SR-1..6：契约层/设备层拆分 · stage 绑定改「第一个改 app 树的 PR」· PR-5 26 行 / PR-6 90 行聚合分工 · lint 清债 lane（PR-3.5）· DP-3 解停条件收敛 · Task 7 计数；owner → Fable5，见 §0.1.18 |
 | **v1.19** | PR-0.2 第十五轮 | Sol 增量语义审 6 P1 + 1 P2：#13 release edge 与 I3.5 进 DAG · 2v2 owner/reviewer 全链传播 · Task 2 自搬 workflow 并反向自验 · verifier `--lane` 子集契约 · 条件式解停，见 §0.1.19 |
 | **v1.20** | PR-0.2 第十六轮 | 兑现 Phase O 裁定的 `sol-blackbox` 处置项时自查发现：v1.19 只改了责任层（owner/reviewer 列），**授权层未改**——`acceptance/**` 仍禁 Fable5 写入。本轮把 2v2 传播到 owner matrix / 目录树 / class 表 / Task 7·8 / §17 / §19 / §21，冻结 legacy label→执行者映射，并冻结五投影一致性检查器的判据，见 §0.1.20 |
-| **v1.22** | PR-0.2 第十八轮 | GLM 独立复核证伪 **A-6 的理由**：机械门 ①②③ 不校验「断言↔预期终态」，因此不能兜底那 33 行自审——独立性实际来自 PR-3 的跨个体 code review。另修 §8.4 冻结 `state` 的作者归因、历史区两处待执行 owner 残留、§16「Sol 主控」列义。判据补**第六投影（承重论证散文）**与**历史区不整片豁免**，见 §0.1.22 |
 | **v1.21** | PR-0.2 第十七轮 | Sol exact-HEAD 语义审 7 P1：**owner 列拆 `evidenceOwner` / `fixOwner` 并冻结失败路由表**（2v2 后 acceptance 行红了无法路由）· DP-2 载体拆四段（PR-1 是 import-only，产不出 contract/pairing）· `I6` 与 `#13` 改 Epic-close 的 sibling 输入 · lane selector 冻成 `(class, owner, 路径前缀)` 三元组、PR-5 只验 harness、26 行转 PR-6 · Task 3.5 建成真实节点并消 PR-3↔PR-3.5 环 · workflow 迁移加机器断言 · durable closure 与 review provenance 收口，见 §0.1.21 |
+| **v1.22** | PR-0.2 第十八轮 | GLM 独立复核证伪 **A-6 的理由**：机械门 ①②③ 不校验「断言↔预期终态」，因此不能兜底那 33 行自审——独立性实际来自 PR-3 的跨个体 code review。另修 §8.4 冻结 `state` 的作者归因、历史区两处待执行 owner 残留、§16「Sol 主控」列义。判据补**第六投影（承重论证散文）**与**历史区不整片豁免**，见 §0.1.22 |
+| **v1.23** | PR-0.2 第十九轮 | Sol 对 `5cef50b7`/`aa6a5787` 两轮窄审：**两张 pairing 表写反**（`PairingRecord`=千网游 caller allowlist / `ProviderPairingRecord`=Auto provider allowlist）· 失败路由表补**第 0 条证据自身故障**并取消「无法定位⇒自动改 contract」· PR-5 补 Gradle/wrapper/fixture/self-test 等**可执行载体**与 exact 测试入口 · Task 3.5 的 guard 真正实现声明集合（prefix + `integration/**` 排除 + baseline 成员）· 另修 RED 三处拆分、版本表顺序、§21.2 线性误导、Task 8 audit 复核义务的虚假引用，见 §0.1.23 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -476,7 +477,7 @@ Sol 在 `9acd436d` 上给了 7 条 P1。**其中第 2 条是我上一轮亲手�
 | # | 缺口 | 修订 |
 |---|---|---|
 | B-1 | owner 列同时承载 evidence author 与 product fix owner | 拆成 **`evidenceOwner`（进表，每行唯一）/ `fixOwner`（不进表，规则派生）**，冻结六条**失败路由表**（含两侧交互时先产定位证据、定位不能判定则 fail-closed 升级到 contract 层 → Opus5），并加两条硬约束：evidenceOwner 不得用 `not-testable`/`deferred` 绕过；路由必须留定位证据，不允许口头指认对端 |
-| B-2 | DP-2 让 PR-1 交付 contract 与两侧 pairing 主键，但 Task 1 冻结为 import-only | 按真实载体拆**四段**：字面值 → PR-0.2 · contract/compat → PR-2 · `ProviderPairingRecord` → PR-3 / `PairingRecord` → PR-4 · 设备 mutation → #13。`INV-29` 只 gate 第四段 |
+| B-2 | DP-2 让 PR-1 交付 contract 与两侧 pairing 主键，但 Task 1 冻结为 import-only | 按真实载体拆**四段**：字面值 → PR-0.2 · contract/compat → PR-2 · `ProviderPairingRecord` → PR-3 / `PairingRecord` → PR-4 · 设备 mutation → #13。`INV-29` 只 gate 第四段〔**当轮记录，且第三段写反了**：v1.23 更正为 **`PairingRecord`→PR-3（千网游 caller allowlist）/ `ProviderPairingRecord`→PR-4（Auto provider allowlist）**，以 §6.5.3 与 §21 DP-2 为准，勿照本行执行〕 |
 | B-3 | §15 `PR-6 → #13 → Epic`、§16 `I6 depends on #13`、§20「#13 不阻断 Task 9」三个方向互相否定 | 统一为：**PR-6 交付 pre-cutover 证据可独立合入**；**`I6` 与 `#13` 是 Epic close 这个 join 的两个 sibling 输入**，彼此无依赖边 |
 | B-4 | `--lane` 只写「该 lane 自有行」，而 Fable5 同时拥有 PR-3 的 33 行与 PR-5 的 26 行，selector 不确定；且 PR-5 被要求在自己 HEAD 上证明依赖 sibling 产品代码的行 | selector 冻成 **`(class, evidenceOwner, 入口路径前缀)` 三元组** + verifier 自检划分（`pr-3 ∪ pr-4` ≠ 64 即 fail-closed）；**PR-5 只自证 harness，26 行的真实产品通过与 device evidence 转 PR-6 汇合 HEAD**；Task 3/4/7/9 的 Verify 全部显式传 `--lane` |
 | B-5 | `Task 3.5` 只在 §21.2 散文里；且 Task 3 先要求 `lintDebug` 绿、清债又排在 PR-3 之后，互锁 | 建成 §13 真实节点（Files/RED/GREEN/Verify）；**Task 3 的 lint 门降为 ratchet**消环；授权路径从「被 lint error 命中的文件」改为**先冻结成 `docs/provenance/qwy-lint-baseline.md` 这份提交物**，并加越界断言；gate 补 unit + assemble |
@@ -528,6 +529,35 @@ Sol 在 `9acd436d` 上给了 7 条 P1。**其中第 2 条是我上一轮亲手�
 - §0.1.22 **我为「已知风险可接受」给出的理由本身是错的** → 不是漏、不是坏，是**我自己构造了一个不成立的兜底**
 
 最后这个最难自查：前三种都能靠枚举发现，**这一种只能靠别人来打**。我做对的一件事是把它写出来并点名请人攻击；做错的是把「听起来结实」当成了「验证过」。**主动披露不等于论证成立——披露只是把靶子摆出来，理由仍然要各自承重。**
+
+#### 0.1.23 我一直在交付「指向物的描述」，而不是指向物本身（v1.23）
+
+Sol 连审两个 HEAD，给出 4 P1 + 4 P2。把它们并排看，形状是同一个。
+
+| # | 缺口 | 修订 |
+|---|---|---|
+| D-1 | v1.21 的四段拆分把**两张 pairing 表写反**：`ProviderPairingRecord`→qwy / `PairingRecord`→Auto，与 §6.5.3、§7.1、§8.2、Task 3/4 全部相反 | 更正为 **`PairingRecord`（caller allowlist）→ PR-3 千网游 / `ProviderPairingRecord`（provider allowlist）→ PR-4 Auto**；并写明 `come.xx.fakeaauto` 是 **Auto 的** applicationId，故作为 **caller key 出现在千网游的表里**；且**真实配对记录只在新 ID bind + operator 批准后产生**，②③ 段都不产生已批准记录 |
+| D-2 | 失败路由表把「跨端无法定位」自动判为 contract 欠定义并交 Opus5 | 新增**第 0 条且先于一切**：证据载体自身故障（断言写错 / harness bug / fixture 损坏 / device 环境异常 / manifest 生成错）→ `evidenceOwner` 修证据。第 5 条改为**保持红 + Sol/GLM 联合 triage**，只有 triage 明确判定后才动 contract |
+| D-3 | PR-5 只列了源码与脚本，**没有构建入口**，而 verifier 已要求 `cd acceptance && ./gradlew test` | 补 `settings.gradle.kts` / 独立 wrapper / 两个 module 的 build 文件 / fixtures / 三个 self-test 载体，并冻结 exact 测试命令；同时写明 `device` 类 2 行的 markdown **不是可执行测试**，PR-5 只交模板 |
+| D-4 | Task 3.5 声明授权集合是「baseline ∪ `values-en/strings.xml`」，guard 却只 grep baseline | 三条一起实现声明的集合：**(a)** `src/main/**` prefix、**(b)** `integration/**` 绝对排除、**(c)** baseline 成员资格。(a)(b) 是不受 baseline 影响的外层围栏，同时封住「作者往 baseline 多写几行就给自己扩权」 |
+| D-5..8（P2） | RED 三处混成一句、版本表 `1.20→1.22→1.21`、§21.2「插在 PR-3 与 PR-4 之间」的线性误导、**Task 8 第 2 条的虚假引用** | 逐条修；最后一条选择**把义务真正写进 Task 8 第 3 条**，而不是撤回引用 |
+
+**四条 P1 是同一个形状：我交付了「指向物的描述」，而指向物不存在、或与描述不符。**
+
+- D-1：写下了四段载体的**形状**，没有回去核对两个 record 各自到底住在哪一侧。
+- D-3：列出了要写哪些**源文件**，没有给出让它们能跑起来的**构建载体**。
+- D-4：声明了授权集合，**guard 实现的是另一个更窄的集合**——窄到会拒绝那唯一一个合法新增文件。
+- D-8：写了「Task 8 第 2 条已加针对性义务」，**而第 2 条里没有这句话**。
+
+> **描述与指向物的差别，机械检查看不出来。** 「`ProviderPairingRecord` → PR-3」语法完好、术语正确、位置正确；「每个 diff path 必须在 baseline 中」是一条能跑的命令；「Task 8 第 2 条已加」是一句通顺的引用。**它们全都形式正确，只是所指为空或所指相反。** 我这轮跑的七个投影全部 CLEAN，一条都没抓到——因为投影比对的是**描述之间**是否一致，不是描述与**被描述物**是否一致。
+
+**D-8 尤其该记：它和 §0.1.22 是同一个错，而且就犯在修 §0.1.22 的那次提交里。** 上一轮我刚记下「我为已知风险构造了一个不成立的兜底」，紧接着在替换那个兜底时，又引用了一条并不存在的复核义务当作新理由。**同一个病，在写下它的病历的同一页复发。**
+
+所以判据再补一条，它和前面七条不同类——前七条是**内部一致性**，这条是**指称有效性**：
+
+> **凡引用一个具体载体（文件 / 命令 / 条款编号 / 表名 / 字段），必须能当场打开它并确认所指为真。** 描述与指向物之间没有任何投影能替你检查；**唯一的验证方式是去看那个东西本身**。写「Task 8 第 2 条已加」之前，打开 Task 8 第 2 条读一遍；写「`ProviderPairingRecord` 归 qwy」之前，打开 §6.5.3 读一遍。
+
+这也解释了为什么这几轮的缺陷计数下不去：**我在提高描述层的自洽度，而缺陷一直在描述与被描述物之间的缝里。** 投影检查器再多加几条也抓不到——它们全都活在描述层。
 
 ## 1. 事实基线与来源
 
@@ -1743,12 +1773,19 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 
 | # | 条件 | `fixOwner` |
 |---|---|---|
+| **0** | **证据载体自身故障**——断言写错、harness/fake 有 bug、fixture 过期或损坏、device 环境/lease 异常、evidence manifest 生成有误 | **`evidenceOwner`**（修证据，**不是**修产品）。**本条先于其余所有条判定** |
 | 1 | class = `owner-red` | 就是 `evidenceOwner`（定义上二者同一） |
 | 2 | 断言只涉及 Auto 侧可观察行为 | **Opus5** |
 | 3 | 断言只涉及千网游 provider 侧可观察行为 | **Fable5** |
 | 4 | 断言涉及两侧交互 | `evidenceOwner` **必须先产出定位证据**（哪一侧先违反 v1 contract），再按 2/3 路由 |
-| 5 | 第 4 条定位不能判定 | **fail-closed 升级到 contract 层 → Opus5**（`contracts/**` 归 Opus5）；因为"两侧都自认合规却仍不兼容"的唯一剩余解释是 contract 本身欠定义 |
+| 5 | 第 4 条定位不能判定 | **保持红，转 Sol + GLM 联合 triage**；**不得**自动改 contract。只有联合 triage **明确判定 contract 欠定义**后，才路由 Opus5 改 `contracts/**` |
 | 6 | class = `static-guard`（扫出越界路径） | 该路径在 §12.1 owner matrix 上的 owner |
+
+**第 0 条是必经的第一步（v1.23 冻结）**：任何 red 在进入 2–5 之前，`evidenceOwner` 必须先完成 **evidence-validity triage** 并留证——证明这条红反映的是**产品行为**，而不是证据链自身坏了。
+
+> **上一版这张表默认「红 ⇒ 产品有问题」，漏掉了整整一类原因。** 一条 acceptance 行变红，至少有三种解释：产品错、**证据错**、以及两者都对但契约欠定义。上一版只写了第一和第三种，于是把「证据错」静默归并进了产品故障，会让人去改一个本来正确的实现。
+>
+> **第 5 条上一版的推理也不成立**：它写「两侧都自认合规却仍不兼容，唯一剩余解释是 contract 欠定义」——**「自认合规」不是证据**，而且在排除第 0 条之前，「定位不出来」最常见的原因恰恰是证据链坏了。把"无法定位"自动升级成"改契约"，等于让最难判定的情形去动最难回退的东西（contract 冻结后改动会停三路、要求全部重新冻结）。**无法定位时正确的动作是保持红并升级到人，不是降级到改契约。**
 
 **两条硬约束**：
 
@@ -2220,11 +2257,25 @@ cd ../..
 ./acceptance/scripts/check-forbidden-boundaries.sh
 ./scripts/verify-a-plus.sh --lane pr-3.5         # 空矩阵集；只校验上述门
 
-# 越界断言：本 PR 改动的 qwy 文件必须全部落在冻结的授权路径集内
-git diff --name-only origin/main...HEAD | grep '^apps/qianwangyou/' \
-  | while read -r p; do grep -qF "$p" docs/provenance/qwy-lint-baseline.md \
-      || { echo "OUT OF SCOPE: $p"; exit 1; }; done
+# 越界断言：本 PR 改动的 qwy 文件必须全部落在【声明的授权集合】内
+# 授权集合 = baseline 列出的 exact 路径 ∪ {res/values-en/strings.xml}
+#            且必须 ⊆ apps/qianwangyou/app/src/main/**，且 ∩ integration/** = ∅
+ALLOWED_EXTRA='apps/qianwangyou/app/src/main/res/values-en/strings.xml'
+git diff --name-only origin/main...HEAD | grep '^apps/qianwangyou/' | while read -r p; do
+  # (a) prefix 约束
+  case "$p" in apps/qianwangyou/app/src/main/*) ;; *) echo "OUT OF PREFIX: $p"; exit 1;; esac
+  # (b) integration/** 排除（Fable5 独占，任何情况不得触碰）
+  case "$p" in */integration/*) echo "FORBIDDEN integration/**: $p"; exit 1;; esac
+  # (c) 成员资格：baseline 路径 或 唯一具名新增文件
+  [ "$p" = "$ALLOWED_EXTRA" ] && continue
+  grep -qF -- "$p" docs/provenance/qwy-lint-baseline.md \
+    || { echo "OUT OF SCOPE: $p"; exit 1; }
+done
 ```
+
+> **guard 必须实现它自己声明的集合（v1.23 更正）**：上一版只做了上面的 (c)，即「每个改动路径都要出现在 baseline 里」。这与本 task 声明的授权集合**不一致，且方向是拒绝合法改动**——`res/values-en/strings.xml` 是**新建**文件，按定义不可能出现在 baseline 中，因此上一版的 guard 会把 `MissingTranslation` 的唯一合法修法判为越界。
+>
+> 三条一起才等于声明的集合：**(a) prefix 约束**限定 `src/main/**`；**(b) `integration/**` 排除**是绝对的，即使某天 baseline 被误写进一条 integration 路径也不放行——这条同时封住「坏 baseline 扩权」：baseline 是本 PR 自己提交的文件，若只靠 (c)，作者往里多写几行就能给自己扩范围，(a)(b) 是不受 baseline 影响的外层围栏；**(c) 成员资格**才用 baseline，且只对**既有**文件生效。
 
 **终结谓词：** `(cd apps/qianwangyou && ./gradlew lintDebug)` exit 0 —— 同时是 §19 raw-green 终态门的唯一证据来源。`check-inherited-lint-debt.sh` 的 ratchet 在此之前是**中间证据**，之后退役。
 
@@ -2350,10 +2401,29 @@ cd apps/cellrebel-auto
 
 **Files:**
 
+**① 可执行载体（冻结，缺任一条 PR-5 无法启动）** —— 上一版只列了源码与脚本，**没有构建入口**，而 PR #10 的 verifier 已要求 `cd acceptance && ./gradlew test`：
+
+- Create: `acceptance/settings.gradle.kts`（声明 `:fake-qwy` 与 `:scenarios` 两个 module）
+- Create: `acceptance/build.gradle.kts` + `acceptance/gradle/libs.versions.toml`
+- Create: `acceptance/gradlew` / `acceptance/gradlew.bat` / `acceptance/gradle/wrapper/**`（**独立 wrapper**：`acceptance/**` 不在两个 App 的 Gradle build 内，不得依赖它们的 wrapper）
+- Create: `acceptance/fake-qwy/build.gradle.kts`、`acceptance/scenarios/build.gradle.kts`
+- **exact 测试入口（冻结）**：`cd acceptance && ./gradlew test` —— 与 PR #10 `verify-a-plus.sh --lane pr-5` 调用的命令**必须逐字一致**
+
+**② 被测产物**
+
 - Create: `acceptance/fake-qwy/src/main/.../FakeEnvironmentControlService.kt`
 - Create: `acceptance/scenarios/src/test/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 22 行**，文件名与方法名按台账「精确入口」列）
-- Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
+- Create: `acceptance/fixtures/**`（v4→v5 迁移 fixture、损坏/过期 fixture 负例）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
+- Create: `docs/acceptance/a-plus-device-matrix.md`（`device` 类 2 行的**证据模板与登记表**——注意它是 markdown，**不是可执行测试**，见下）
+
+**③ harness self-test（PR-5 唯一的绿灯来源，冻结）**
+
+- Create: `acceptance/scenarios/src/test/kotlin/selftest/FakeNegativeControlTest.kt` —— fake provider 在**被要求返回违规响应**时，scenario 断言必须判红（证明断言不是恒真）
+- Create: `acceptance/scenarios/src/test/kotlin/selftest/FixtureLoaderTest.kt` —— fixture 能装载；**损坏 fixture 必须 fail 而不是静默跳过**
+- Create: `acceptance/scripts/selftest/violating-sample/**` + `acceptance/scripts/selftest/run-guard-selftest.sh` —— 对**构造出来的越界样本**，`check-forbidden-boundaries.sh` 必须 exit≠0；对干净样本必须 exit 0
+
+> **`device` 类 2 行不在 PR-5 产生任何绿灯。** `docs/acceptance/a-plus-device-matrix.md` 是登记表，markdown 存在**不构成执行证据**（§10.1 已冻结 `reportDigest` 必须指向真实设备证据文件）。PR-5 只交付模板；两条 device 行的实际证据在 **PR-6 的授权 device lease 内**产生。
 
 **聚合分工（冻结）——manifest 每行 `exactHead` 必须等于被验 PR 的 HEAD，因此单个 PR 不可能聚合平行 sibling 产出的行**：
 
@@ -2398,11 +2468,19 @@ cd apps/cellrebel-auto
 **这 33 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
 
 1. **测试代码本身经过独立 review**：那 33 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **Sol + GLM**（§16）。断言写错会在代码 review 阶段被非作者看到。
-2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 Sol + GLM 复核，且 Task 8 第 2 条已加一条针对性证伪义务。
+2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 Sol + GLM 复核——具体义务写在 **Task 8 第 3 条**（逐条核 `passed` 记录存在性、`exactHead` 相符、**断言语义是否真对应台账「预期终态」列**），并明写机械门 ①②③ 不覆盖最后一项。**v1.23 更正**：上一版此处引用的是「Task 8 第 2 条」，而第 2 条只审 fake 是否迎合自家 provider，**并不包含 owner-red audit 复核**——那是一条当时并不存在的传播。现已把该义务真正写入 Task 8 并把引用指向它。
 
 **因此这 33 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 33 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
 
-**RED（分两处发生，不在同一 HEAD）：** 26 行的**测试代码**在 PR-5 上写就，各自至少一个失败场景先红——但那是**对 fake provider 的 harness self-test**，不是对真实产品的断言；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Fable5 33 行）。**26 行对真实 Auto/provider 的 RED→GREEN 发生在 PR-6 的汇合 HEAD 上**，因为在 PR-5 的 HEAD 上那些实现还不存在。
+**RED（三处，各自绑不同 HEAD——上一版把它们混成一句，与「PR-5 = 0 矩阵行」冲突）：**
+
+| 在哪 | 什么先红 | 涉及行 |
+|---|---|---|
+| **PR-5** | **只有 harness self-test 先红**：negative-control 断言、fixture loader 对损坏 fixture、guard 对构造违规样本。**不是任何一条矩阵行** | **0 矩阵行** |
+| PR-3 / PR-4 | 各自 `owner-red` 行先红 | Fable5 33 / Opus5 31 |
+| **PR-6** | 22 `sol-blackbox` + 2 `static-guard` 对**真实 Auto/provider** 的 RED→GREEN；2 `device` 行在授权 lease 内产生首份真机证据 | 26 |
+
+上一版写「26 行的测试代码在 PR-5 上写就、各自失败场景先红」有两处不成立：**①** 与本 Task 已冻结的「PR-5 = 0 矩阵行」直接冲突；**②** 26 行里有 **2 条是 `device` 类**，它们的载体是 `docs/acceptance/**` 的**证据登记，根本没有可以"先红"的测试代码**。**在 PR-5 的 HEAD 上，被断言的实现尚不存在，任何「矩阵行先红」都不是有效 RED，只是编译不过或断言恒假。**
 
 **GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / Fable5 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
 
@@ -2424,9 +2502,10 @@ cd apps/cellrebel-auto
 
 1. 先审 Fable5 qwy provider：授权、revision 覆盖声明、idempotency、foreign lease、进程死亡。
 2. 再审 **Fable5** acceptance：是否存在 fake 只验证实现细节、未覆盖真实状态边、误把心跳当连续性。**2v2 后 provider 与 acceptance 同属 Fable5，本条须额外证伪一件事**：fake provider 是否被写成"迎合自家 provider 实现"而非迎合 public v1 contract——即对 §10.1 中 `M-CC-03`/`M-RL-01` 一类跨端行，断言是否只在 Fable5 自己的实现语义下成立。
-3. 对 Opus5 Auto 做可信账本与 `PRE_EXISTING_RUN` 对抗审查。
-4. 每个 finding 给 `block/approve`、精确文件/行、复现命令和 exact HEAD。
-5. behavioral delta 后旧 verdict 失效，必须重跑受影响矩阵。
+3. **复核 Fable5 对 64 行 `owner-red` 的 evidence audit（v1.23 新增，非可选）**——其中 **33 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 33 行的断言正确性除 PR-3 的代码 review 外，只有本条覆盖。发现 audit 与台账预期终态不符时，按 §10.1 失败路由表处置，**不得**因 CI 全绿而放行。
+4. 对 Opus5 Auto 做可信账本与 `PRE_EXISTING_RUN` 对抗审查。
+5. 每个 finding 给 `block/approve`、精确文件/行、复现命令和 exact HEAD。
+6. behavioral delta 后旧 verdict 失效，必须重跑受影响矩阵。
 
 ### Task 9 — 隔离真机验收与发布候选
 
@@ -2601,7 +2680,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | DP | 主题 | 决定 | 字面值 / 载体归属 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
 |---|---|---|---|---|---|
 | DP-1 | 千网游 release signer 迁移 | **B 受控迁移** | 不涉及 | 否 | 否——但 signer cutover 本身**必须**在 DP-1 前置门（export/restore + custody + rollback）完成后才执行 |
-| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **不由 PR-1 承载**（Task 1 是 import-only、app 树 pristine，物理上产不出这些载体）。四段式见 §21 DP-2：**字面值 → 本 docs PR（PR-0.2）** · **contract/compatibility 常量 → PR-2** · **`ProviderPairingRecord` 主键 → PR-3（qwy 侧）/ `PairingRecord` 主键 → PR-4（Auto 侧）** · **设备 mutation → [#13](https://github.com/TERRYYYC/fakexxx/issues/13)**。`INV-29` 只 gate 最后一段 | 已解除——contract 使用已拍板的新值即可，不依赖 cutover 完成 | 否——但 cutover 受 `INV-29` deferred gate 约束 |
+| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **不由 PR-1 承载**（Task 1 是 import-only、app 树 pristine，物理上产不出这些载体）。四段式见 §21 DP-2：**字面值 → 本 docs PR（PR-0.2）** · **contract/compatibility 常量 → PR-2** · **`PairingRecord`（caller allowlist）→ PR-3（千网游侧）/ `ProviderPairingRecord`（provider allowlist）→ PR-4（Auto 侧）** · **设备 mutation → [#13](https://github.com/TERRYYYC/fakexxx/issues/13)**。`INV-29` 只 gate 最后一段。**字面值 `come.xx.fakeaauto` 是 Auto 的 applicationId，故作为 caller key 出现在千网游的 `PairingRecord`；真实配对记录只在新 ID bind + operator 批准后产生，②③ 都不产生已批准记录**（v1.23 更正：v1.21 曾把两张表写反，详见 §21 DP-2） | 已解除——contract 使用已拍板的新值即可，不依赖 cutover 完成 | 否——但 cutover 受 `INV-29` deferred gate 约束 |
 | DP-3 | CellRebel 可信完成的安全边界 | **A 接受 UI 证据 + 写明上限** | 否 | **条件式解除**：`#3` 需 `#2` + `#12` 均合入；`#4/#5/#6` 需其上游 issue 依赖满足。DP-3 本身的 durable closure 见 §21 清单 | 否 |
 
 **因此本文现在是可开工的冻结实施基线**（与顶部告示一致）。
@@ -2707,7 +2786,13 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 |---|---|---|---|
 | **① 字面值** | 冻结字符串 `come.xx.fakeaauto` 本身（含 §21.1 合法性核验） | **本 docs PR（PR-0.2 / #12）** | 已完成，随本 PR 合入 |
 | **② contract / compatibility** | contract v1 与 compatibility 常量按该字面值成立 | **PR-2（Task 2）** | contract 冻结时 |
-| **③ pairing 持久化** | `ProviderPairingRecord` 主键（qwy 侧）→ **PR-3（Task 3）**；`PairingRecord` 主键（Auto 侧）→ **PR-4（Task 4）** | **PR-3 / PR-4** | contract exact HEAD 冻结后并行 |
+| **③ pairing 持久化** | **`PairingRecord`（caller allowlist，千网游侧）→ PR-3（Task 3）**；**`ProviderPairingRecord`（provider allowlist，Auto 侧）→ PR-4（Task 4）** | **PR-3 / PR-4** | contract exact HEAD 冻结后并行 |
+
+> **v1.23 更正——上一版把这两张表写反了。** v1.21 引入四段拆分时写成「`ProviderPairingRecord`→qwy / `PairingRecord`→Auto」，与本文权威模型相反。§6.5.3、§7.1、§8.2 与 Task 3/4 一致地规定：**千网游维护 caller allowlist `PairingRecord`，Auto 维护 provider allowlist `ProviderPairingRecord`**，两份名单各自可撤销、互不替代。
+>
+> **字面值的落点也随之明确**：`come.xx.fakeaauto` 是 **Auto 的 applicationId**，因此它作为 **caller key 出现在千网游的 `PairingRecord` 里**（不是出现在 Auto 自己的 `ProviderPairingRecord` 里——那张表存的是 provider 即千网游的身份）。
+>
+> **真实新 ID record 的创建时点**：不由本 docs PR 或 PR-2 产生。record 只在**设备上以新 ID 完成 bind + operator 显式批准**之后才存在（§4.1 bind-first，禁止 TOFU）。因此 ②「contract/compatibility 常量」冻结的是**字符串常量与比对规则**，③ 冻结的是**两张表的 schema 与写入路径**，**都不产生任何已批准的配对记录**——那属于 ④ 之后的运行期事实。
 | **④ 设备 mutation** | 真正把设备上的 App 从旧 ID 迁到新 ID（flavor / SAF 搬运 / bundle / 旧 App 移除） | **[Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) / Draft PR #14** | live cutover · 旧 App 移除 · release candidate |
 
 **①②③ 都不是设备 mutation**，因此 `INV-29` 的 gate **只作用于 ④**。**在 #13 闭合前，`INV-29` 不得泛化阻塞 PR-1/2/3/4/5/6** —— 那些 PR 不执行设备迁移，也就没有可孤儿化的状态。PR-1 保持 import-only，因此仍满足 provenance 最强断言（`--stage import`）。
@@ -2741,7 +2826,7 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 `apps/qianwangyou` 在冻结基线上带 23 个 lint error（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）；两个上游仓都没有任何 CI，所以 `lintDebug` 从未被当作门跑过。终态要求是 **`lintDebug` 真正 exit 0**，不是"债务没增长"。因此：
 
 - `scripts/check-inherited-lint-debt.sh` 的 ratchet **降级为中间证据**，不再是终态门；它继续防止债务增长，但 raw-green 达成后应随之退役。
-- **执行 lane（冻结）**：清债作为 **PR-3.5** 插在 PR-3 与 PR-4 之间。**它现在是 §13 的真实节点 [`Task 3.5`](#task-35--千网游-inherited-lint-raw-green-清债)（含 Files / RED / GREEN / Verify）与 issue `I3.5`**，不再只是本节的散文，owner **Opus5**，reviewer **Sol + GLM**。以 Task 3.5 正文为准，本节只做索引，避免两处各写一套。
+- **执行 lane（冻结）**：清债作为 **PR-3.5**，时序为 **PR-3 合入之后、PR-6 之前；与 PR-4 平行，二者之间没有依赖边**（上一版写「插在 PR-3 与 PR-4 之间」是线性误导，与现行 DAG 不符）。**它现在是 §13 的真实节点 [`Task 3.5`](#task-35--千网游-inherited-lint-raw-green-清债)（含 Files / RED / GREEN / Verify）与 issue `I3.5`**，不再只是本节的散文，owner **Opus5**，reviewer **Sol + GLM**。以 Task 3.5 正文为准，本节只做索引，避免两处各写一套。
   - **exact 文件范围**：由 `docs/provenance/qwy-lint-baseline.md` **冻结成一份提交物**（23 条 error 的 exact 路径 + rule id + 行号）∪ `res/values-en/strings.xml`；不用「被 lint error 命中的文件」这种会漂移、review 时无法判定的动态描述。**不碰** `integration/**`（Fable5 独占），由 Task 3.5 的越界断言机器判定。
   - **时序**：必须在 PR-3 合入后开始（避免与 Fable5 并行写 qwy），并在 PR-6 之前完成。**Task 3 的 lint 门已相应降为 ratchet**——上一版让 Task 3 先要求 raw-green、又把清债排在 PR-3 之后，两者互锁，已消环。
   - **gate 节点**：`I3.5` 的终结谓词 = `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**；该谓词同时是 §19 raw-green 终态门的唯一证据来源。**但 Verify 不止 lint**：清债会改运行时源码与资源，因此 unit + assemble 同为必过门。
