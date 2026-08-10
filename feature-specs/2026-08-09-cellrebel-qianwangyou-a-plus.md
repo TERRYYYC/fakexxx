@@ -94,7 +94,7 @@ source_threads:
 | **v1.15** | PR-0.2 第十一轮 | 为 `M-AC-01..05` 冻结**实施归属与时序**（Task 1 前置门 / Task 9 回滚旅程）、统一 device anchor、澄清计数单位，见 §0.1.15 |
 | **v1.16** | PR-0.2 第十二轮 | 修复 v1.15 引入的三个语义缺陷：provenance stage 自相矛盾、`M-AC-03` 依赖环、跨 applicationId carrier 物理不可行，见 §0.1.16 |
 | **v1.17** | PR-0.2 第十三轮 | **scope split**：cutover 实施设计（flavor / SAF / bundle / variant CI / `M-AC-01..05`）拆出到 Issue #13；`INV-29` 在本文降为 deferred gate，见 §0.1.17 |
-| **v1.17** | PR-0.2 第十三轮 | Sol 语义窄审 SR-1..6：契约层/设备层拆分 · stage 绑定改「第一个改 app 树的 PR」· PR-5 26 行 / PR-6 90 行聚合分工 · lint 清债 lane（PR-3.5）· DP-3 解停条件收敛 · Task 7 计数；owner → Fable5，见 §0.1.17 |
+| **v1.18** | PR-0.2 第十四轮 | Sol 语义窄审 SR-1..6：契约层/设备层拆分 · stage 绑定改「第一个改 app 树的 PR」· PR-5 26 行 / PR-6 90 行聚合分工 · lint 清债 lane（PR-3.5）· DP-3 解停条件收敛 · Task 7 计数；owner → Fable5，见 §0.1.18 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -389,7 +389,7 @@ cutover 相关行 @05debb8b（双审版）  0
 
 > 教训与 §0.1.14 第 2 项同族但更上一层：那次是"不变量有规则、台账没行"，这次是**整个子系统的成熟度与它寄居的 PR 不匹配**。可操作判据：**当一个 PR 的 finding 连续多轮集中在同一块新增区域，而其余部分零 finding 时，那不是需要再补一轮，是需要拆。** 补的次数不会让新设计变成熟，只会让稳定部分陪着一起等。
 
-#### 0.1.17 Sol 语义窄审 SR-1..6（v1.17）
+#### 0.1.18 Sol 语义窄审 SR-1..6（v1.18）
 
 `4e810f31` 上 GLM 机械/对抗角 APPROVE，Sol 语义角 `REQUEST_CHANGES` 命中 5×P1 + 1×P2。**六条全部成立，全部是 scope split 暴露或产生的执行面缺口**：
 
@@ -2116,8 +2116,8 @@ cd apps/cellrebel-auto
 
 - Create: `acceptance/fake-qwy/src/main/.../FakeEnvironmentControlService.kt`
 - Create: `acceptance/scenarios/src/test/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 22 行**，文件名与方法名按台账「精确入口」列）
-- Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 3 行）
-- Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 3 行）
+- Create: `docs/acceptance/a-plus-device-matrix.md`（承担 `device` 类 2 行）
+- Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
 
 **聚合分工（冻结）——manifest 每行 `exactHead` 必须等于被验 PR 的 HEAD，因此单个 PR 不可能聚合平行 sibling 产出的行**：
 
