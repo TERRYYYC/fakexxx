@@ -16,9 +16,10 @@ SHA_AUTO=48d8ec93adb84cdb9c4282c376ec97476648683e
 SHA_QWY=285e4cae438ab6feea1f70f984f433c7a424b944
 TREE_AUTO=0553fcb46f02e7211f4496e4a98b846ec70ef9a2
 TREE_QWY=f4bdce23c65e6227cf43dab5fe0416120b95134e
-POS=0; NEG=0; MUT=0; FAILURES=0
+POS=0; NEG=0; MUT=0; FAILURES=0; PASSED=""
 
-ok()  { printf '  PASS  %s\n' "$1"; }
+ok()  { printf '  PASS  %s\n' "$1"; PASSED="$PASSED
+$1"; }
 bad() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 
 # A squash/rebase merge leaves exactly this: one commit, no import-commit
@@ -45,12 +46,23 @@ mk_squashed() {
 # import-commit cell through different code paths, and a counterproof on only one
 # of them says nothing about the other.
 mk_fulldag() {
-  local d; d="$(mktemp -d)"
-  git clone -q "$REPO_ROOT" "$d" >/dev/null 2>&1
+  local d sha; d="$(mktemp -d)"; sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  # Do NOT depend on the source repo's HEAD being a branch. `git clone` resolves
+  # the remote's symbolic HEAD to decide what to check out, so a detached source
+  # HEAD yields a clone with an EMPTY working tree. That is environment-shaped:
+  # it built fine on a developer machine sitting on a branch and failed on CI with
+  # "no such file: docs/provenance/upstream-imports.md", which the old silent
+  # setup() reported only as "FIXTURE SETUP FAILED". Clone the objects, then check
+  # out the exact commit by SHA, which has no symbolic dependency at all.
+  # Identity is persisted for the same reason mk_squashed persists it: the tampers
+  # commit again inside the fixture, a clone inherits no user.email/user.name, and
+  # macOS derives one from user@host while a CI runner refuses.
+  git clone -q --no-checkout "$REPO_ROOT" "$d" >/dev/null 2>&1
+  ( cd "$d" && git config user.email s@s && git config user.name s \
+      && git checkout -q -B fixture "$sha" ) >/dev/null 2>&1
   cp "$PROD" "$d/scripts/check-provenance.sh"
   cp "$REPO_ROOT/$DOC" "$d/$DOC"
-  ( cd "$d" && git add -A >/dev/null \
-      && git -c user.email=s@s -c user.name=s commit -qm "working-tree state under test" ) >/dev/null 2>&1
+  ( cd "$d" && git add -A >/dev/null && git commit -qm "working-tree state under test" ) >/dev/null 2>&1
   ( cd "$d" && git fetch --no-tags -q https://github.com/TERRYYYC/FakeGps-test.git "$SHA_QWY" ) >/dev/null 2>&1
   printf '%s\n' "$d"
 }
@@ -63,8 +75,16 @@ run() { ( cd "$2" && ./scripts/check-provenance.sh "${@:3}" ) >/dev/null 2>&1; r
 # printing "real Task-2 qwy delta (rc=0)". A green case whose fixture never
 # existed is a false verification — precisely what the case exists to prevent.
 setup() { # <label> <dir> <shell-body>
-  if ! ( cd "$2" && eval "$3" ) >/dev/null 2>&1; then
-    bad "$1 — FIXTURE SETUP FAILED; the case below would have tested nothing"; return 1
+  local out
+  # Capture instead of discarding. A previous version sent stdout and stderr to
+  # /dev/null, so a fixture that failed only on CI reported "FIXTURE SETUP FAILED"
+  # and nothing else: the one machine that could see the reason was the one nobody
+  # could read. Diagnosing it cost a full push/CI round-trip of guessing. Silent
+  # on success, verbatim on failure.
+  if ! out="$( cd "$2" && eval "$3" 2>&1 )"; then
+    bad "$1 — FIXTURE SETUP FAILED; the case below would have tested nothing"
+    printf '        setup output: %s\n' "$(printf '%s' "$out" | tr '\n' '|' | cut -c1-400)"
+    return 1
   fi; return 0
 }
 shape() { # <label> <predicate-cmd...>
@@ -284,6 +304,14 @@ fi
 printf '\n== mutation self-validation (each fix must be load-bearing) ==\n'
 mutate() { # <label> <target-case-id> <sed-script-applied-to-the-checker>
   local label="$1" target="$2" sedscript="$3"; MUT=$((MUT+1))
+  # The target must be GREEN before the mutation, or "reverting the fix makes it
+  # fail" is vacuously true. CI proved this is not hypothetical: N-12's fixture
+  # broke there, the case was already red, and M-5 still printed "load-bearing".
+  # A mutation whose target was already failing measures nothing at all.
+  if ! printf '%s' "$PASSED" | grep -q "^$target"; then
+    bad "$label - INCONCLUSIVE: $target was not green before the mutation, so reverting the fix proves nothing"
+    return
+  fi
   local m; m="$(mktemp -d)"
   # The copy must be a real git repository: the inner run's mk_squashed calls
   # `git archive HEAD` on it. A plain file copy made every fixture fail to build,
@@ -315,7 +343,11 @@ mutate() { # <label> <target-case-id> <sed-script-applied-to-the-checker>
   # the same pipefail shape this project already fixed once in the checker.
   local inner
   inner="$( cd "$m" && SELFTEST_MUTATION_PASS=1 SELFTEST_ONLY="$target" ./scripts/selftest-provenance.sh 2>&1 )"
-  if printf '%s' "$inner" | grep -q "FAIL  $target"; then
+  if printf '%s' "$inner" | grep -q "FAIL  $target.*FIXTURE"; then
+    # A broken fixture also prints "FAIL  <target> ...", and a bare grep for that
+    # accepted it as proof the fix was load-bearing. The case never ran.
+    bad "$label - INCONCLUSIVE: $target's fixture broke under mutation; the case never ran"
+  elif printf '%s' "$inner" | grep -q "FAIL  $target"; then
     ok "$label - reverting the fix makes $target fail, so the fix is load-bearing"
   else
     bad "$label - $target still passes without the fix; that case is not bound to it"
