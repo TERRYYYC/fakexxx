@@ -277,19 +277,42 @@ done
 # full-DAG --stage import AND on depth-1 history-lost --stage contract. Trimming
 # only the outer padding was the right call and still left the transport lossy:
 # `[[:space:]]` covers TAB, but an interior TAB is neither leading nor trailing.
-tab_tamper='python3 -c "
-p=\"docs/provenance/upstream-imports.md\"; s=open(p).read()
-a=\"5687e319f978dcd9b76e413c06b2b0da91627518\"
-assert s.count(a)==1
-open(p,\"w\").write(s.replace(a, a+\"\tJUNK\", 1))
+#
+# EVERY cell is tampered, not only the sixth. The criterion this pins reads "put
+# the delimiter into every field and require red", so testing one field would
+# leave the claim wider than the test -- the exact failure this suite exists to
+# stop. Cells 2..6 are caught by the interior-whitespace rule; cell 1 goes red
+# through an earlier door (the row selector stops matching the prefix, so no row
+# is found at all). Both are red, which is what the criterion actually asserts.
+#
+# The tamper edits the imports row in place BY CELL INDEX rather than replacing a
+# value document-wide: `apps/qianwangyou` and `master` also occur in other tables,
+# and a global replace would tamper rows the case does not name. chr(96)/chr(9)
+# keep backticks and TABs out of the eval'd string -- a literal backtick there is
+# command substitution, not a Markdown delimiter.
+tab_tamper_for() { # <1-based cell index> -> prints the fixture command
+  printf '%s' 'python3 -c "
+p=\"docs/provenance/upstream-imports.md\"; n='"$1"'
+L=open(p).read().split(chr(10))
+r=[i for i,l in enumerate(L) if len(l.split(\"|\"))==8 and l.split(\"|\")[1].strip().strip(chr(96))==\"apps/qianwangyou\"]
+assert len(r)==1, r
+c=L[r[0]].split(\"|\"); v=c[n].strip().strip(chr(96))
+c[n]=\" \"+chr(96)+v+chr(9)+\"JUNK\"+chr(96)+\" \"
+L[r[0]]=\"|\".join(c)
+open(p,\"w\").write(chr(10).join(L))
 " && grep -q JUNK docs/provenance/upstream-imports.md && git add -A && git commit -qm tabcell -q'
+}
 
-D="$(mk_fulldag)"
-if setup "N-12 fixture" "$D" "$tab_tamper"; then
-  neg "N-12 import-commit cell carries a literal TAB (full DAG, stage=import)" "$D" --stage import
-fi
+for spec in "1|prefix" "2|url" "3|branch" "4|sha" "5|tree" "6|import-commit"; do
+  n="${spec%%|*}"; name="${spec#*|}"
+  D="$(mk_fulldag)"
+  if setup "N-12/$name fixture" "$D" "$(tab_tamper_for "$n")"; then
+    neg "N-12/$name cell $n carries a literal TAB (full DAG, stage=import)" "$D" --stage import
+  fi
+done
+
 D="$(mk_squashed)"
-if setup "N-13 fixture" "$D" "$tab_tamper"; then
+if setup "N-13 fixture" "$D" "$(tab_tamper_for 6)"; then
   neg "N-13 import-commit cell carries a literal TAB (history-lost, stage=contract)" "$D" --stage contract
 fi
 
@@ -374,7 +397,7 @@ if [ "${SELFTEST_MUTATION_PASS:-0}" != "1" ]; then
   # transport field-count assertion each catch the TAB on their own, so reverting
   # only one leaves N-12 red — the mutation would report "bound" while proving
   # nothing about the pair it is supposed to pin.
-  mutate "M-5 lossless six-cell transport (both layers)" "N-12" '/ERR interior-whitespace/d; /ERR transport-fields/d'
+  mutate "M-5 lossless six-cell transport (both layers)" "N-12/import-commit" '/ERR interior-whitespace/d; /ERR transport-fields/d'
 fi
 
 printf '\n'
