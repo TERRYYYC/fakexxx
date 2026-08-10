@@ -101,6 +101,7 @@ source_threads:
 | **v1.22** | PR-0.2 第十八轮 | GLM 独立复核证伪 **A-6 的理由**：机械门 ①②③ 不校验「断言↔预期终态」，因此不能兜底那 33 行自审——独立性实际来自 PR-3 的跨个体 code review。另修 §8.4 冻结 `state` 的作者归因、历史区两处待执行 owner 残留、§16「Sol 主控」列义。判据补**第六投影（承重论证散文）**与**历史区不整片豁免**，见 §0.1.22 |
 | **v1.23** | PR-0.2 第十九轮 | Sol 对 `5cef50b7`/`aa6a5787` 两轮窄审：**两张 pairing 表写反**（`PairingRecord`=千网游 caller allowlist / `ProviderPairingRecord`=Auto provider allowlist）· 失败路由表补**第 0 条证据自身故障**并取消「无法定位⇒自动改 contract」· PR-5 补 Gradle/wrapper/fixture/self-test 等**可执行载体**与 exact 测试入口 · Task 3.5 的 guard 真正实现声明集合（prefix + `integration/**` 排除 + baseline 成员）· 另修 RED 三处拆分、版本表顺序、§21.2 线性误导、Task 8 audit 复核义务的虚假引用，见 §0.1.23 |
 | **v1.24** | PR-0.2 第二十轮 | Sol 复核 `59db6201` 余 3 P1：**历史区 B-1 仍留相反的活路由**（违反本文自己冻的「历史区待执行指令须内联标记」）· PR-5 的 `./gradlew test` 无法同时满足 0 矩阵行与三类 self-test，改为 **`selfTest` / `matrixTest` 双 source set + task 图**，台账 22 行入口同步 · **Task 3.5 guard 绑回指向物**（原始 lint 报告 digest + 条数 + 整行相等 + fail-closed），并撤回上一版「(a)(b) 封住扩权」的假断言，见 §0.1.24 |
+| **v1.25** | PR-0.2 第二十一轮 | Sol 判 P1-2/P1-3 **CLOSED**，余 P1-4。三条子发现全部成立：**23 是 Error instance 数、唯一文件只有 5 个**——旧判据可被 warning-only 文件重复填满而扩权；XML 带绝对路径致 digest 不可重放，改为**规范化 repo-relative + 绑生成 commit**；`set -euo pipefail` 原在六道前置门之后，**失败会被后续成功掩绿**，已提到第一条。授权集合改为**从报告派生、与 baseline 声明逐元素相等**，见 §0.1.25 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -585,6 +586,40 @@ Sol 复核 `59db6201`：**5 项闭合，余 3 P1**。三条并排看，是同一
 作为立即兑现：本轮把第八条（指称有效性）的适用面枚举了一遍——Task 8 引用、baseline 集合、PR-5 入口命令、台账 22 行入口路径、Task 3.5 的报告 digest，共 5 类，**全部处置完毕并在本轮 Verify 中机械复核**。E-3 正是这次枚举查出来的第二处。
 
 **诚实记一笔趋势**：本轮 Sol 一次闭合 5 项、余 3；上一轮 4 P1 + 4 P2；再上一轮 7 P1。**缺陷计数确实在降**，但降的原因不是我变仔细了，而是**可执行契约的表面正在被逐条钉死**——从散文到图、到权限、到定义、到指称、再到判据的适用面。剩下的洞越来越靠近"必须真的去跑一遍才知道"的那一层。
+
+#### 0.1.25 「看起来像绑定」不是绑定（v1.25）
+
+Sol 判 P1-2、P1-3 **CLOSED**，只剩 P1-4——同一个 guard，我在这里**连错三版**。
+
+| 版本 | 我写的"绑定" | 为什么假 |
+|---|---|---|
+| v1.23 | prefix + `integration/**` 排除「封住往 baseline 加行扩权」 | 这两层只约束路径的**形状**；扩权发生在**成员资格**上。加一条任意 `src/main/**` 非-integration 路径，全过 |
+| v1.24 | 「条数 == 23 + 每条要在报告里搜得到」 | **23 是 Error instance 数，不是文件数**（唯一文件只有 5 个）；`grep` 搜整个 XML 不区分 severity。**把 warning-only 文件重复填满 23 行，三道判定全过**——不改报告、不改 digest 即扩权 |
+| v1.25 | 集合**从报告派生**，baseline 声明副本必须与之**逐元素相等** | 手加一行即破坏集合相等 |
+
+另两条同轮修：**① digest 不可重放**——lint XML 的 `location/@file` 带绝对 checkout 路径，换个目录 SHA-256 就从 `731feb…` 变 `9111c3…`，所以我写的「别人在冻结 commit 重跑得到同一 digest」根本不成立；现改为**先规范化为 repo-relative 再提交与摘要**，并要求 baseline 声明生成 commit。**② `set -euo pipefail` 位置错**——它原本排在 lint / unit / assemble / provenance / boundary / verifier **六道门之后**，那六道失败仍会被后面的成功掩成绿（最小复现 `false; set -euo pipefail; true` 退出码 0）。现在它是整个 Verify 的第一条可执行命令。
+
+**三版的共同毛病，可以说得比前几节更准：**
+
+> **我一直在写「拿指向物去印证被检查方的声明」，而不是「从指向物派生出被检查的集合」。** 两者长得几乎一样——都会打开那份报告、都会做一次比对、都能跑通——但**方向相反**：前者只要能在指向物里搜到任意子串就放行，后者手改一个元素就破坏相等。**§0.1.23 说「把断言绑到指向物」，我照做了三次，三次都做成了印证。**
+
+判据补一条**方向性**，作为第八条的细化：
+
+> **绑定必须是「派生 → 比较」，不能是「声明 → 印证」。** 判别法：问「如果被检查方往自己的声明里多加一个元素，这条检查会不会红？」——**会红才是绑定；只是搜不到才红，那是印证。**
+
+**按第九条判据，同轮枚举「方向性」的全部适用点**（凡"被检查方产出一份声明、由 gate 校验"的地方）：
+
+| # | 位置 | 方向 | 处置 |
+|---|---|---|---|
+| 1 | Task 3.5 授权路径集 | ~~声明→印证~~ → **派生→比较** | 本轮修 |
+| 2 | §10.1 evidence manifest 的 `status=passed` 行 | **派生→比较**（已成立） | 无需改：`reportDigest` 必须定位到字节一致的原始报告，且 `testId` 必须在该报告中出现且 outcome 一致——伪造一行 passed 会因报告里查无此结果而红 |
+| 3 | `check-provenance.sh` 的 tree digest | **派生→比较**（已成立） | 无需改：digest 从 `git fetch` 到的上游对象现算，不读仓内声明 |
+| 4 | lane selector 三元组 | **派生→比较**（已成立） | 无需改：行集合从 §10.1 台账现算，verifier 另有 `pr-3 ∪ pr-4 == 64` 自检 |
+| 5 | Task 3.5 的 `ALLOWED_EXTRA` | 单个具名常量，非集合 | 不适用：只有一条且写死在 gate 内，被检查方改不动 |
+
+第 2 条值得说明为何**已经**成立：它满足方向判别法——作者往 manifest 多加一条 `passed`，`testId` 在原始报告里查不到匹配 outcome，会红。**这条是 v1.11 那轮 Sol 逼出来的**，当时的措辞就已经是派生式；本轮只是回头确认它没有退化。
+
+**这一节和 §0.1.24 是配套的**：§0.1.24 说判据冻结时要枚举适用面，而这三版说明**即使枚举了，如果判据本身的方向是错的，枚举出来的每一处都会一起错**。本轮枚举的 5 类适用点里，baseline 这一处正是被枚举到、也被"修"过、但方向仍然错着的那一处。
 
 ## 1. 事实基线与来源
 
@@ -2253,19 +2288,21 @@ cd ../..
 
 **Files:**
 
-- Create: **`docs/provenance/qwy-lint-baseline-report.xml`** —— 在**冻结导入基线**（`FakeGps-test@285e4ca` 的 pristine 树）上跑 `lintDebug` 得到的**原始报告文件，逐字节提交**。这是授权集合的**指向物**。
-- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述原始报告**机械派生**，必须记录：① 生成所用的冻结 commit；② 该原始报告的 **SHA-256**；③ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，**每行一条 exact 路径**，共 **23** 条（**用哨兵不用 ``` 围栏**：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞，解析器会在第一条路径前就停止）（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）。**必须先于任何源码修改单独提交。**
-- Modify: **仅** baseline fenced block 中列出的 exact 路径
+- Create: **`docs/provenance/qwy-lint-baseline-report.xml`** —— 在**冻结导入基线**（`FakeGps-test@285e4ca` 的 pristine 树）上跑 `lintDebug` 得到的原始报告，**且每个 `location/@file` 必须先规范化为 repo-relative** 再逐字节提交。这是授权集合的**指向物**。
+- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述报告**机械派生**，必须记录：① `generated-at-commit:` = qwy 冻结导入 SHA（须等于 `docs/provenance/upstream-imports.md` 的 `qianwangyou-upstream-sha:` 字段）；② `report-sha256:` = **规范化后**报告的 SHA-256；③ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，每行一条 exact 路径，**共 5 条**（用哨兵不用代码围栏：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞）。**必须先于任何源码修改单独提交。**
+- Modify: **仅**上述 5 条 exact 路径
+
+> **23 与 5 是两个不同的数（v1.25 更正，由 Sol 实测证伪）**：`lintDebug` 报的是 **23 个 Error instance**，但它们只落在 **5 个唯一文件**上（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3 说的是 **instance** 分布），另有 54 个 warning-only 文件与授权集合无关。上一版把「条数 == 23」当成路径集合的判据，于是**把 warning-only 文件（如 `config/ConfigPrefsSync.kt`）重复填满 23 行也能全绿**——不改报告、不改 digest 就完成扩权。现在 **23 只用于校验 Error instance 数，5 才是授权路径集合的基数**；集合由报告派生，baseline 只是声明副本，二者必须**逐元素相等**。
 - Create（若 `MissingTranslation` 需要）: `apps/qianwangyou/app/src/main/res/values-en/strings.xml`
 - Modify: `scripts/check-inherited-lint-debt.sh` —— raw-green 达成后退役该 ratchet
 
-**授权路径集（冻结判定式）：** baseline fenced block 中的 exact 路径 ∪ `res/values-en/strings.xml`，且整体 ⊆ `apps/qianwangyou/app/src/main/**` 且 ∩ `integration/**` = ∅（后者 Fable5 独占）。
+**授权路径集（冻结判定式）：** **从规范化报告中 `severity="Error"` 派生的 5 条唯一路径** ∪ `res/values-en/strings.xml`，且整体 ⊆ `apps/qianwangyou/app/src/main/**` 且 ∩ `integration/**` = ∅（后者 Fable5 独占）。
 
 > **为什么不写「被 lint error 命中的文件」**：那是**动态描述**，会随 lint 版本、AGP 版本、`minSdk` 变化而漂移；review 时无法判定某个改动是否越界，静态 guard 也无从检查。**先把集合冻成一份提交物，再改代码**——集合本身成为可 diff、可 review 的对象。
 >
 > **但「冻成提交物」还不够（v1.24 更正）**：上一版声称 prefix + `integration/**` 排除这两层「封住了往 baseline 加行扩权」。**这条断言是假的**——作者只要往 baseline 里加一条任意 `src/main/**` 的非-integration 路径，三层全部 PASS。两层围栏约束的是路径的**形状**，不是集合的**成员资格**，而扩权恰恰发生在成员资格上。
 >
-> **真正封住它的是把集合绑到指向物**：baseline 的 23 条必须能从 `qwy-lint-baseline-report.xml` 机械重放，而该报告的 SHA-256 记在 baseline 里、报告本身是提交物。**往 baseline 手加一行，条数不再等于 23、且该行在报告里找不到对应 issue，guard 直接判红。** 作者要扩权就得同时伪造那份原始报告——而它可以由任何人在冻结 commit 上重跑 `lintDebug` 复算。**这正是 §0.1.23 那条判据的应用：把断言绑到可打开的指向物，而不是绑到作者的声明。**
+> **真正封住它的是把集合绑到指向物**：授权集合**不由 baseline 声明，而由规范化报告中 `severity="Error"` 的 location 派生**（23 个 instance → 5 个唯一文件），baseline 里那 5 行只是声明副本，guard 要求二者**逐元素相等**。**往 baseline 手加一行，集合不再相等，直接判红。**作者要扩权就得同时伪造那份规范化报告——而它可以由任何人在冻结 commit 上重跑 `lintDebug` 并按同一规范化规则复算。**这正是 §0.1.23 判据的应用：把断言绑到可打开、可独立重放的指向物。**
 
 **RED:**
 
@@ -2279,41 +2316,52 @@ cd ../..
 **Verify（gate 不能只有 lint —— 本 task 会改运行时源码与资源）：**
 
 ```bash
-cd apps/qianwangyou
-./gradlew lintDebug                              # 终态门：exit 0（raw-green）
-./gradlew testDebugUnitTest                      # 不得因清债破坏既有行为
-./gradlew assembleDebug                          # 不得因清债破坏构建
+set -euo pipefail          # 必须是整个 Verify 的【第一条可执行命令】
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT     # collision-safe，禁止固定 /tmp 文件名
 
-cd ../..
-./scripts/check-provenance.sh --stage contract   # 清债是合法分叉；--stage import 此时已不适用
+# ---- 门 1：构建与既有行为（放在 strict flags 之后，失败即中止，不会被后续成功掩绿）----
+(cd apps/qianwangyou && ./gradlew lintDebug)          # 终态门：exit 0（raw-green）
+(cd apps/qianwangyou && ./gradlew testDebugUnitTest)  # 不得因清债破坏既有行为
+(cd apps/qianwangyou && ./gradlew assembleDebug)      # 不得因清债破坏构建
+./scripts/check-provenance.sh --stage contract        # 清债是合法分叉
 ./acceptance/scripts/check-forbidden-boundaries.sh
-./scripts/verify-a-plus.sh --lane pr-3.5         # 空矩阵集；只校验上述门
+./scripts/verify-a-plus.sh --lane pr-3.5              # 空矩阵集
 
-set -euo pipefail          # (0) fail-closed：任一环节非零即中止，不得静默继续
-
+# ---- 门 2：授权集合必须【从冻结报告派生】，不是由 baseline 自行声明 ----
 BASELINE=docs/provenance/qwy-lint-baseline.md
 REPORT=docs/provenance/qwy-lint-baseline-report.xml
 ALLOWED_EXTRA='apps/qianwangyou/app/src/main/res/values-en/strings.xml'
 
-# (1) 把集合绑回指向物：baseline 声明的 digest 必须等于报告实际 digest
-RECORDED=$(sed -n 's/^report-sha256: *//p' "$BASELINE")
-ACTUAL=$(shasum -a 256 "$REPORT" | cut -d' ' -f1)
-[ -n "$RECORDED" ] && [ "$RECORDED" = "$ACTUAL" ] \
-  || { echo "BASELINE NOT BOUND TO REPORT: $RECORDED != $ACTUAL"; exit 1; }
+# (a) 报告必须已规范化为 repo-relative：含任何绝对路径即判红
+#     否则 digest 依赖 checkout 位置，别人无法重放出同一 digest
+! grep -q 'file="/' "$REPORT" || { echo "REPORT NOT NORMALIZED (absolute paths)"; exit 1; }
 
-# (2) 结构化 exact path 集合（哨兵行之间每行一条），并冻结条数
-#     哨兵用注释行，不用 markdown 代码围栏 —— baseline 本身是 markdown，
-#     拿围栏当数据分隔符会与容器碰撞，解析会在第一条路径前就停
+# (b) baseline 必须声明生成 commit，且等于 qwy 的冻结导入 SHA
+FROZEN=$(sed -n 's/^qianwangyou-upstream-sha: *//p' docs/provenance/upstream-imports.md)
+[ "$(sed -n 's/^generated-at-commit: *//p' "$BASELINE")" = "$FROZEN" ] \
+  || { echo "BASELINE COMMIT != frozen import SHA"; exit 1; }
+
+# (c) digest 绑定（对已规范化的报告）
+[ "$(sed -n 's/^report-sha256: *//p' "$BASELINE")" = "$(shasum -a 256 "$REPORT" | cut -d' ' -f1)" ] \
+  || { echo "BASELINE NOT BOUND TO REPORT"; exit 1; }
+
+# (d) 只取 severity="Error" 的 location/@file —— warning 一律不进授权集合
+xmllint --xpath '//issue[@severity="Error"]/location/@file' "$REPORT" \
+  | tr ' ' '\n' | sed -n 's/^file="\(.*\)"$/\1/p' > "$TMP/err-instances"
+[ "$(wc -l < "$TMP/err-instances")" -eq 23 ] \
+  || { echo "ERROR INSTANCE COUNT != 23"; exit 1; }
+sort -u "$TMP/err-instances" > "$TMP/derived"          # 23 个 instance → 5 个唯一文件
+[ "$(wc -l < "$TMP/derived")" -eq 5 ] \
+  || { echo "UNIQUE ERROR FILE COUNT != 5"; exit 1; }
+
+# (e) baseline 声明的集合必须与派生集合【完全相等】（不是"包含"、不是"命中"）
 awk '/^# BEGIN allowed-paths$/{f=1;next} /^# END allowed-paths$/{f=0} f' "$BASELINE" \
-  | sed '/^$/d' > /tmp/allowed.txt
-[ "$(wc -l < /tmp/allowed.txt)" -eq 23 ] \
-  || { echo "BASELINE ENTRY COUNT != 23 (被手工增删过)"; exit 1; }
-# 每条都必须在原始报告中找得到对应 issue，否则是凭空加进去的
-while read -r a; do grep -qF -- "$a" "$REPORT" \
-  || { echo "PATH NOT IN FROZEN REPORT: $a"; exit 1; }; done < /tmp/allowed.txt
+  | sed '/^$/d' | sort -u > "$TMP/declared"
+diff -q "$TMP/derived" "$TMP/declared" >/dev/null \
+  || { echo "DECLARED SET != DERIVED SET (baseline 被手工增删)"; diff "$TMP/derived" "$TMP/declared"; exit 1; }
 
-# (3) 逐条判定本 PR 改动的 qwy 文件
-git diff --name-only origin/main...HEAD > /tmp/changed.txt      # set -e 保证 diff 失败即中止
+# ---- 门 3：本 PR 改动必须落在 派生集合 ∪ {唯一具名新增文件} 内 ----
+git diff --name-only origin/main...HEAD > "$TMP/changed"
 CHECKED=0
 while read -r p; do
   case "$p" in apps/qianwangyou/*) ;; *) continue;; esac
@@ -2321,21 +2369,22 @@ while read -r p; do
   case "$p" in apps/qianwangyou/app/src/main/*) ;; *) echo "OUT OF PREFIX: $p"; exit 1;; esac
   case "$p" in */integration/*) echo "FORBIDDEN integration/**: $p"; exit 1;; esac
   [ "$p" = "$ALLOWED_EXTRA" ] && continue
-  # exact 整行相等，不是子串命中
-  grep -qxF -- "$p" /tmp/allowed.txt || { echo "OUT OF SCOPE: $p"; exit 1; }
-done < /tmp/changed.txt
-
-# (4) 空检查也判红：本 task 按定义必须改到 qwy 源码
-[ "$CHECKED" -gt 0 ] || { echo "NO qwy PATH CHECKED — selector 失效或 diff 为空"; exit 1; }
+  grep -qxF -- "$p" "$TMP/derived" || { echo "OUT OF SCOPE: $p"; exit 1; }   # 整行相等
+done < "$TMP/changed"
+[ "$CHECKED" -gt 0 ] || { echo "NO qwy PATH CHECKED — selector 失效"; exit 1; }
 ```
+
+**规范化规则（冻结）**：`qwy-lint-baseline-report.xml` 提交前必须把每个 `location/@file` 由绝对 checkout 路径改写为 **repo-relative**（去掉仓库根前缀，不做其他修改）。**只有规范化后的报告才有可重放的 digest**——否则换一个 checkout 目录，SHA-256 就变（实测 `731feb…` → `9111c3…`），"另一 reviewer 在冻结 commit 重跑得到同一 digest"这条根本不成立。
+
+**解析器可自决**：上面用 `xmllint --xpath` 是参考实现；改用 TSV/JSON 或任何 parser 都可以，**只要满足同一谓词**——① 只取 `severity="Error"`；② Error instance 数 == 23；③ 唯一文件数 == 5；④ baseline 声明集合与派生集合**逐元素相等**。
 
 > **guard 必须实现它自己声明的集合（v1.23 更正）**：上一版只做了上面的 (c)，即「每个改动路径都要出现在 baseline 里」。这与本 task 声明的授权集合**不一致，且方向是拒绝合法改动**——`res/values-en/strings.xml` 是**新建**文件，按定义不可能出现在 baseline 中，因此上一版的 guard 会把 `MissingTranslation` 的唯一合法修法判为越界。
 >
-> **五层一起才等于声明的契约（v1.24 重写）**：**(0) `set -euo pipefail`** 让上游 `git diff` / `sed` / `shasum` 任一失败即中止，不再"失败也继续、循环体一次没跑就绿"；**(1) digest 绑定**把集合锚回 `qwy-lint-baseline-report.xml` 这个指向物；**(2) 结构化解析 + 条数 == 23 + 每条必须在原始报告里找得到**；**(3) `grep -qxF` 整行相等**判定成员资格；**(4) 检查数为 0 也判红**。
+> **六层一起才等于声明的契约（v1.25 重写）**：**(0)** `set -euo pipefail` 现在是**整个 Verify 的第一条可执行命令**——上一版把它放在 lint/unit/assemble/provenance/boundary/verifier **之后**，那些前置门失败仍会被后续成功掩绿（最小复现：`false; set -euo pipefail; true` 退出码 0）；**(1)** 报告必须已规范化为 repo-relative，含绝对路径即判红；**(2)** baseline 声明的生成 commit 必须等于 qwy 冻结导入 SHA；**(3)** 规范化报告的 digest 绑定；**(4)** 只取 `severity="Error"`，instance 数 == 23、唯一文件数 == 5，**派生集合与 baseline 声明集合逐元素相等**；**(5)** `grep -qxF` 整行相等 + 检查数为 0 判红 + `mktemp -d` 避免并行覆盖。
 >
-> **上一版声称 (a)(b) 两层「封住了往 baseline 加行扩权」——这条断言是假的，由 Sol 证伪。** (a)(b) 只约束路径的**形状**（在 `src/main/**`、不在 `integration/**`），而扩权发生在**成员资格**上：作者往 baseline 加一条任意 `src/main/**` 非-integration 路径，三层全部 PASS。**真正封住它的是 (1)(2)**——集合必须能从冻结报告机械重放，手加一行会同时撞上条数与"报告里找不到"两道判定。
+> **前两版在这里连错两次，都是同一个毛病——把「看起来像绑定」当成绑定。** 第一版声称 prefix + `integration/**` 排除「封住了往 baseline 加行扩权」：假的，那两层只约束路径**形状**，扩权发生在**成员资格**上。第二版改用「条数 == 23 + 每条要在报告里搜得到」：仍是假的，因为 **23 是 Error instance 数不是文件数**，而 `grep` 搜整个 XML 不区分 severity——**把 warning-only 文件重复填满 23 行，三道判定全过**。
 >
-> 上一版还用 `grep -qF`（子串命中）判成员资格：baseline 里只要含 `Foo.kt.generated`，就会放行 `Foo.kt`。已改 `grep -qxF` 整行相等。
+> 真正的绑定只有一种形状：**集合必须是从指向物派生出来的，而不是由被检查方声明、再拿指向物去「印证」。** 前者手加一行会破坏集合相等；后者只要能在指向物里搜到任意子串就放行。
 
 **终结谓词：** `(cd apps/qianwangyou && ./gradlew lintDebug)` exit 0 —— 同时是 §19 raw-green 终态门的唯一证据来源。`check-inherited-lint-debt.sh` 的 ratchet 在此之前是**中间证据**，之后退役。
 
