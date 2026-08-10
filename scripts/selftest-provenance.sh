@@ -139,29 +139,36 @@ done
 # the handler so the loops would see only cellrebel, and tamper qwy at the same
 # time. If the fork worked the tampering would be invisible; the run must go red.
 D="$(mk_squashed)"
+# The fork must be the ONLY thing that can redden this case, and it must be a
+# record set the rest of the gate accepts. Dropping qwy is already caught by the
+# section-0a prefix-set check, so a dropping fork never exercised readonly -f at
+# all: deleting that line left the whole suite green. This injects a complete,
+# well-formed 5-field set whose qwy SHA is forged. With readonly -f the
+# redefinition is a hard error, the loops read the true record, and the run is
+# green; without it the loops would read the forged SHA and the document row
+# would no longer match.
 ( cd "$D" && python3 - <<'PY'
 p='scripts/check-provenance.sh'; s=open(p).read()
 a="# Entry files that must exist after a successful import (spec §13 Task 1.3)."
-s=s.replace(a,"each_import() { printf '%s\\n' 'apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e'; }\n\n"+a,1)
-open(p,'w').write(s)
+fork = ("each_import() { printf '%s\\n' "
+        "'apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e|301da0f2925373dfe40cfd2a51d53ddaca4bba93' "
+        "'apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|deadbeefdeadbeefdeadbeefdeadbeefdeadbeef|5687e319f978dcd9b76e413c06b2b0da91627518'; }\n\n")
+assert a in s
+open(p,'w').write(s.replace(a, fork + a, 1))
 PY
 ) >/dev/null 2>&1
-# The fork must be the ONLY defect. Bundling a qwy tamper made the case pass even
-# when the injection silently failed, because a tamper alone already reddens
-# --stage import. Assert the injection landed, then let red come from nothing else.
-if shape "N-5 fork injection landed" grep -qc "^each_import() { printf" "$D/scripts/check-provenance.sh"; then
-  # readonly -f makes the redefinition a hard error, so the fork cannot take
-  # effect and a clean repo stays green. Asserting rc alone would therefore
-  # prove nothing. Assert the behaviour that matters instead: the loops still
-  # consumed the real record set, i.e. qwy was still checked. The previous
-  # version bundled a qwy tamper so red could come from the tamper alone,
-  # letting the case pass even when the injection silently failed.
+if shape "N-5 fork injection landed (valid 5-field, forged qwy SHA)" \
+     grep -q "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$D/scripts/check-provenance.sh"; then
   NEG=$((NEG+1))
-  out="$( cd "$D" && ./scripts/check-provenance.sh --stage import 2>&1 )"
-  if printf '%s' "$out" | grep -q 'apps/qianwangyou'; then
-    ok "N-5 iterator redefinition cannot fork query from gate (qwy still checked)"
+  n5_out="$( cd "$D" && ./scripts/check-provenance.sh --stage import 2>&1 )"; n5_rc=$?
+  # Two independent facts, both required. An exit code alone is not enough, and a
+  # bare grep for the prefix is worthless: "apps/qianwangyou" also appears in the
+  # entry-file section no matter what the import loop consumed. The string below
+  # can only be produced by the doc-binding loop that each_import drives.
+  if [ "$n5_rc" -eq 0 ] && printf '%s' "$n5_out" | grep -q "row for apps/qianwangyou records upstream sha 285e4cae4"; then
+    ok "N-5 iterator redefinition cannot fork the gate (loops still read the true qwy SHA, rc=0)"
   else
-    bad "N-5 iterator redefinition forked the gate — qwy was never checked"
+    bad "N-5 the forged record reached the production loops - rc=$n5_rc"
   fi
 fi
 
@@ -285,6 +292,11 @@ if [ "${SELFTEST_MUTATION_PASS:-0}" != "1" ]; then
   mutate "M-1 exact first-cell binding (both layers)" "N-2" 's/if (first != pfx) next/if (index(first, pfx) == 0) next/; s/\[ "\$r_prefix" = "\$prefix" \]/[ -n "\$r_prefix" ]/'
   mutate "M-2 ancestry walks ancestors"  "P-4" 's/for c in HEAD \$(git rev-list HEAD -- "\$prefix" 2>\/dev\/null); do/for c in HEAD; do/'
   mutate "M-3 outer-only cell trim"      "N-9" 's/\^\[`\[:space:\]\]+|\[`\[:space:\]\]+\$/[`[:space:]]/'
+
+  # The protection N-5 exists to guard. Without this mutation, deleting
+  # `readonly -f each_import` left the entire suite green: the case that was
+  # supposed to notice reported PASS.
+  mutate "M-4 readonly -f freezes the iterator" "N-5" '/readonly -f each_import/d'
 fi
 
 printf '\n'

@@ -162,8 +162,11 @@ else
   fail "frozen record set prefix mismatch — expected [$(printf '%s' "$EXPECTED_PREFIXES" | tr '\n' ' ')], got [$(printf '%s' "$ACTUAL_PREFIXES" | tr '\n' ' ')]"
 fi
 
-# Every record must have exactly 4 fields; a short or padded record shifts the
-# meaning of every downstream $sha / $url read.
+# Every record must have exactly 5 fields (prefix|url|branch|upstream sha|import
+# commit); a short or padded record shifts the meaning of every downstream
+# $sha / $url read. The assertion below is the binding statement of that arity —
+# this comment said 4 while the code required 5, so the prose was not a second
+# source of truth, it was a stale one.
 while IFS= read -r rec; do
   [ -n "$rec" ] || continue
   nf="$(printf '%s' "$rec" | awk -F'|' '{print NF}')"

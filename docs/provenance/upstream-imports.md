@@ -64,7 +64,8 @@ SHA. Those trailers are a second, independent record of the same fact.
 0. the frozen record set's **first fields** are exactly the expected prefix set
    (set equality, not a substring test — a prefix hidden in the branch field once
    made a one-record set report both prefixes present), every record has exactly
-   four fields, and the set is unchanged between the first and last section. Both
+   five fields (`prefix|url|branch|upstream sha|import commit`), and the set is
+   unchanged between the first and last section. Both
    `IMPORTS` and the `each_import` iterator are `readonly`, so a machine query
    cannot report a value the gate does not itself consume;
 1. this document records the URL, branch, exact SHA and the fakexxx import commit;
