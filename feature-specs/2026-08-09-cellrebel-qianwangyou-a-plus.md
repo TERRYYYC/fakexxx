@@ -103,6 +103,7 @@ source_threads:
 | **v1.24** | PR-0.2 第二十轮 | Sol 复核 `59db6201` 余 3 P1：**历史区 B-1 仍留相反的活路由**（违反本文自己冻的「历史区待执行指令须内联标记」）· PR-5 的 `./gradlew test` 无法同时满足 0 矩阵行与三类 self-test，改为 **`selfTest` / `matrixTest` 双 source set + task 图**，台账 22 行入口同步 · **Task 3.5 guard 绑回指向物**（原始 lint 报告 digest + 条数 + 整行相等 + fail-closed），并撤回上一版「(a)(b) 封住扩权」的假断言，见 §0.1.24 |
 | **v1.25** | PR-0.2 第二十一轮 | Sol 判 P1-2/P1-3 **CLOSED**，余 P1-4。三条子发现全部成立：**23 是 Error instance 数、唯一文件只有 5 个**——旧判据可被 warning-only 文件重复填满而扩权；XML 带绝对路径致 digest 不可重放，改为**规范化 repo-relative + 绑生成 commit**；`set -euo pipefail` 原在六道前置门之后，**失败会被后续成功掩绿**，已提到第一条。授权集合改为**从报告派生、与 baseline 声明逐元素相等**，见 §0.1.25 |
 | **v1.26** | PR-0.2 第二十二轮 | Sol 判前两条 CLOSED，余 1 P1 + 1 P2。**P1：我引用的 `qianwangyou-upstream-sha:` 字段根本不存在**，且比较是**空值自洽**的（缺失/空声明→绿，合法值→红）；改绑 `check-provenance.sh` 的 `IMPORTS` 表（PR #10 已校验的真实 machine carrier，#10 无需改动）+ `git-subtree-split` trailer 交叉校验，并对所有比较型断言先证**非空/单值/格式合法**。**P2**：`sort -u` 先于比较导致「5 条正确 + 1 条重复」放行，改为先查 raw count 与重复。另修两处 23-path 活投影，见 §0.1.26 |
+| **v1.27** | PR-0.2 第二十三轮 | Sol 判 P1 = **合法状态必红**：`git log --all \| grep -qxF` 在 `set -euo pipefail` 下，命中即关管道→`git log` 收 SIGPIPE→`PIPESTATUS=(141 0)`，**trailer 真实存在时整条反而非零**。同修两条 P2：`--all` 未绑当前历史、未要求 split SHA 与 `git-subtree-dir` 成对；`awk` 扫整份脚本而非 `IMPORTS` **赋值块**，块外一条同形 decoy 即可让本检查与 `check-provenance.sh` 循环读到不同 SHA。见 §0.1.27 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -621,6 +622,33 @@ Sol 判 P1-2、P1-3 **CLOSED**，只剩 P1-4——同一个 guard，我在这里
 第 2 条值得说明为何**已经**成立：它满足方向判别法——作者往 manifest 多加一条 `passed`，`testId` 在原始报告里查不到匹配 outcome，会红。**这条是 v1.11 那轮 Sol 逼出来的**，当时的措辞就已经是派生式；本轮只是回头确认它没有退化。
 
 **这一节和 §0.1.24 是配套的**：§0.1.24 说判据冻结时要枚举适用面，而这三版说明**即使枚举了，如果判据本身的方向是错的，枚举出来的每一处都会一起错**。本轮枚举的 5 类适用点里，baseline 这一处正是被枚举到、也被"修"过、但方向仍然错着的那一处。
+
+#### 0.1.27 我上一轮加固的那条检查，把合法状态判成了非法（v1.27）
+
+上一版为了摆脱"东西不存在就变绿"，给 trailer 交叉校验加了 `set -euo pipefail` 与严格断言。Sol 实测发现它翻到了反面：
+
+```
+git log --all --format=%B | grep -qxF "git-subtree-split: $FROZEN"
+→ rc=141   PIPESTATUS=(141 0)
+```
+
+`grep -q` 的语义是**命中即退出**。它一退出，管道读端关闭，上游 `git log` 写入时收到 `SIGPIPE` 而以 141 终止；`pipefail` 取管道中最后一个非零值，于是**整条命令在 trailer 真实存在时返回 141**。同一份历史里 `grep -cxF` 数出来是 `1` ——**东西就在那儿，检查却说没有。**
+
+这比上一轮那条"缺失即绿"更危险：缺失变绿至少还需要有人真的把字段删掉；而这条是**正确状态必红**，等于把 Task 3.5 的 Verify 变成一道谁也过不去的门。合规的人被挡在外面，是最容易被"那就先跳过这道检查吧"绕过去的形态。
+
+同轮另两条也成立，都是"绑定看起来在，实际没绑住"：
+
+| 条目 | 问题 | 修法 |
+|---|---|---|
+| P2 · `--all` | trailer 只要在**任意** ref 上存在就算数，哪怕那条 ref 与本次交付的历史无关；也没要求 split SHA 与 `git-subtree-dir: apps/qianwangyou` 出现在同一 commit——碰巧同值的另一次 split 也能放行 | 改绑 `HEAD`（当前历史可达）+ `--all-match` 两个 trailer **同 commit** |
+| P2 · `awk` | 扫的是**整份脚本文本**，而 `check-provenance.sh` 的循环只消费 `$IMPORTS` 变量。赋值块内删掉 qwy 行、块外（usage 文本 / heredoc / 注释）留一条同形 decoy，本检查提取到 decoy 的 40-hex，真实消费者读到空——**两个消费者各自自洽为绿** | 先用 range 模式把解析限制在 `IMPORTS="` … `"` 赋值块内 |
+
+三条都已实测闭合，正负例见 Verify 段。
+
+> **教训（这是同族的第三次，前两次是 §0.1.25 的"看起来像绑定"和 §0.1.26 的"不存在即绿"）**：
+> 前两次我记的是"断言要绑到真的指向物"。这次的形态不同——**指向物是真的，绑定也是真的，坏的是我用来读它的那个工具的退出语义**。
+>
+> 收敛判据因此要加一条：**新写的检查器必须同时跑正例与负例**。只跑负例（"缺了会不会红"）证明不了它在合法状态下会绿；而一道"永远红"的门和一道"永远绿"的门，都不是门。上一轮我为投影 6/7 的 checker 做过一次自我证伪并抓到误报，这轮却没对这条 shell 断言做同样的事——**证伪纪律不能只用在我当时正盯着的那个检查上。**
 
 #### 0.1.26 一条在「东西不存在」时会变绿的检查（v1.26）
 
@@ -2390,7 +2418,11 @@ ALLOWED_EXTRA='apps/qianwangyou/app/src/main/res/values-en/strings.xml'
 
 # (b) baseline 必须声明生成 commit，且等于 qwy 冻结导入 SHA
 #     carrier = provenance gate 自己的 IMPORTS 表（PR #10 已校验），不是文档里的自由文本
-FROZEN=$(awk -F'|' '$1=="apps/qianwangyou"{print $4}' scripts/check-provenance.sh)
+#     且只能解析 IMPORTS 的【赋值块】，不能扫描整份脚本文本——否则脚本别处一条同形
+#     decoy 行（usage 文本 / heredoc / 注释块）就能被本检查提取到，而 check-provenance.sh
+#     的循环只消费 $IMPORTS 变量本身，两个消费者会读到不同的 SHA 而各自自洽为绿
+FROZEN=$(awk '/^IMPORTS="$/{b=1;next} b&&/^"$/{b=0} b' scripts/check-provenance.sh \
+         | awk -F'|' '$1=="apps/qianwangyou"{print $4}')
 DECL=$(sed -n 's/^generated-at-commit: *//p' "$BASELINE")
 # 先证明两侧都是【非空、单值、40-hex】——否则"空 == 空"会自洽为绿
 for v in "$FROZEN" "$DECL"; do
@@ -2398,9 +2430,20 @@ for v in "$FROZEN" "$DECL"; do
   printf '%s' "$v" | grep -qE '^[0-9a-f]{40}$' || { echo "NOT A 40-HEX SHA: '$v'"; exit 1; }
 done
 [ "$DECL" = "$FROZEN" ] || { echo "BASELINE COMMIT != frozen import SHA"; exit 1; }
-# 独立第二记录：同一 SHA 必须作为 git-subtree-split trailer 真实存在于历史中（git 派生，非文档声明）
-git log --all --format=%B | grep -qxF "git-subtree-split: $FROZEN" \
-  || { echo "FROZEN SHA HAS NO git-subtree-split TRAILER"; exit 1; }
+# 独立第二记录：同一 SHA 必须作为 git-subtree-split trailer 真实存在于历史中（git 派生，非文档声明）。
+# 三条约束缺一不可：
+#   ① 绑 HEAD 而不是 --all —— --all 会让一条 unrelated stale ref 上的 trailer 也算数，
+#      而那条 ref 与本次交付的历史无关；
+#   ② --all-match 要求两个 trailer 出现在【同一个 commit】里，即该 SHA 确实是
+#      apps/qianwangyou 这棵 subtree 的 split，而不是碰巧同值的另一次 split；
+#   ③ 不用 `git log … | grep -q` —— grep 命中即提前关闭管道，git log 收 SIGPIPE，
+#      在开头的 `set -euo pipefail` 下整条管道返回 141，于是【合法状态必红】。
+#      实测：PIPESTATUS=(141 0)。改为完整消费输入并计数。
+PAIRED=$(git log HEAD --fixed-strings --all-match \
+           --grep="git-subtree-split: $FROZEN" \
+           --grep="git-subtree-dir: apps/qianwangyou" \
+           --format='%H' | wc -l | tr -d ' ')
+[ "$PAIRED" -ge 1 ] || { echo "NO PAIRED git-subtree TRAILER FOR $FROZEN"; exit 1; }
 
 # (c) digest 绑定（对已规范化的报告）——同样先证两侧非空、单值、64-hex
 REC=$(sed -n 's/^report-sha256: *//p' "$BASELINE")
