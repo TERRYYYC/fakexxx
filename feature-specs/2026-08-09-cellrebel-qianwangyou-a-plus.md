@@ -105,6 +105,7 @@ source_threads:
 | **v1.26** | PR-0.2 第二十二轮 | Sol 判前两条 CLOSED，余 1 P1 + 1 P2。**P1：我引用的 `qianwangyou-upstream-sha:` 字段根本不存在**，且比较是**空值自洽**的（缺失/空声明→绿，合法值→红）；改绑 `check-provenance.sh` 的 `IMPORTS` 表（PR #10 已校验的真实 machine carrier，#10 无需改动）+ `git-subtree-split` trailer 交叉校验，并对所有比较型断言先证**非空/单值/格式合法**。**P2**：`sort -u` 先于比较导致「5 条正确 + 1 条重复」放行，改为先查 raw count 与重复。另修两处 23-path 活投影，见 §0.1.26 |
 | **v1.27** | PR-0.2 第二十三轮 | Sol 判 P1 = **合法状态必红**：`git log --all \| grep -qxF` 在 `set -euo pipefail` 下，命中即关管道→`git log` 收 SIGPIPE→`PIPESTATUS=(141 0)`，**trailer 真实存在时整条反而非零**。同修两条 P2：`--all` 未绑当前历史、未要求 split SHA 与 `git-subtree-dir` 成对；`awk` 扫整份脚本而非 `IMPORTS` **赋值块**，块外一条同形 decoy 即可让本检查与 `check-provenance.sh` 循环读到不同 SHA。见 §0.1.27 |
 | **v1.28** | PR-0.2 第二十四轮 | Sol 判 2 P1 + 4 P2。**P1-1** PR body 仍绑旧 HEAD 与错 stats（§21 #13 每 HEAD exact equality 失配）。**P1-2** trailer 是 DAG 证据，operator 若 squash 合 #10 会合法丢掉它 → 未来 gate 必红；承重记录改为 `qwy-subtree-tree`（tree 跨 squash 存活），DAG 降为可达时才断言。**P2**：`--grep` 命中的是正文子串不是真 trailer（散文即可假绿），改 `interpret-trailers --parse`；range awk 会拼接多个 `IMPORTS` 块而 Bash 只用最后一次赋值，加**恰好一次赋值**断言；修订正文顺序回归；补齐 8 条可重放正负例，见 §0.1.28 |
+| **v1.29** | PR-0.2 第二十五轮 | Sol 判 3 P1 + 2 P2，**三条 P1 是同一个设计错误的三个面：用历史形状承载内容命题**。**P1-1** Task 3.5 先跑的 `check-provenance.sh` 仍硬要求 import commit 存在，我上一版的 tree/trailer 逻辑在那道 gate 之外——**改 PR #10 的 checker 本身**，DAG 证据降为可达时才断言（fresh squash clone 实测 rc=1 → rc=0）。**P1-2** `qwy-subtree-tree` 取错时间截面（baseline 先于源码修改提交，最终态必不相等）→ 删除该字段，不变量改为**相对 upstream 树的分叉受限**，pristine 与终态都成立。**P1-3** selftest 无合法执行边且归属写成 Fable5 独占的 `acceptance/**` → 移入 Opus5 独占的 root `scripts/`，guard 与 selftest 共用同一实现并由 Verify 真正调用。**P2-1** 文本 parser 仍可与 runtime 分叉（`printf -v` / `export`）→ PR #10 新增 `--print-import` 机器查询。**P2-2** body 三处短 SHA 标题自称当前 + 历史清单不穷举 → 改用 git 派生的 21 个 HEAD 全血统，见 §0.1.29 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -712,7 +713,7 @@ git log --all --format=%B | grep -qxF "git-subtree-split: $FROZEN"
 | | 载体 | 跨 squash | 角色 |
 |---|---|---|---|
 | 旧 | `git-subtree-split` trailer | ❌ DAG 被丢弃 | 曾是硬门 |
-| **新** | **`qwy-subtree-tree`**（`git rev-parse HEAD:apps/qianwangyou`） | ✅ **squash 保留最终 tree** | **承重** |
+| **新** | **`qwy-subtree-tree`**（`git rev-parse HEAD:apps/qianwangyou`） | ✅ **squash 保留最终 tree** | ~~承重~~ **← 已被 v1.29 推翻并删除：它取错时间截面（baseline 先于源码修改提交，最终态必不相等）。现行方案见 §0.1.29** |
 | 保留 | trailer | ❌ | **加分项**：仅当 import commit 仍可达时断言，可达即必须真成对 |
 
 选 tree 的理由是它由**内容**决定而不是由**历史形状**决定。provenance 要证的本来就是"这棵树等于上游那棵树"，那是内容命题；用 DAG 去承载内容命题，等于让结论依赖一个与它无关的变量。
@@ -725,9 +726,41 @@ git log --all --format=%B | grep -qxF "git-subtree-split: $FROZEN"
 | range awk 不同源 | 它把文件里**所有** `IMPORTS="…"` 块拼起来，Bash 却只用**最后一次赋值** | 追加第二个只含 cellrebel 的块 → 本解析仍返回合法 `285e…`（格式/单值全过），真实 consumer 的 qwy 为**空** → 分叉。加"恰好一次赋值 + canonical 块形式"两道断言，同时封住 one-line 与 single-quote 再赋值 |
 | 修订正文顺序 | headings 成了 `0.1.25 → 0.1.27 → 0.1.26` | 已归位。这是 §0.1.22 抓过的同类回归——我插新节时只看了版本表有序，没看正文 |
 
-还有一条不是缺陷而是**言行不符**：§0.1.27 里我写"正负例见 Verify 段"，但 Verify 里只有生产态正例。**手测写在提交消息里不构成可重放证据**——后来者执行的是 Verify，不是我的 commit body。现已落地为 `acceptance/scripts/selftest-task35-guard.sh` 的 7 负例 + 1 正例。
+还有一条不是缺陷而是**言行不符**：§0.1.27 里我写"正负例见 Verify 段"，但 Verify 里只有生产态正例。**手测写在提交消息里不构成可重放证据**——后来者执行的是 Verify，不是我的 commit body。现已落地为 `acceptance/scripts/selftest-task35-guard.sh` 的 7 负例 + 1 正例。**← 该路径已被 v1.29 更正为 `scripts/selftest-task35-guard.sh`：`acceptance/**` 是 Fable5 独占，本 task owner 是 Opus5，原写法是一条永远执行不到的指令。**
 
 > 教训：**"我验证过"和"它被写进了会被重跑的地方"是两件事。** 前者随作者的上下文一起消失；只有后者能挡住下一个人。这与 §0.1.14 的"证据行本身不是证据，只是一张待兑现的欠条"同族——那次欠的是台账行，这次欠的是可执行负例。
+
+#### 0.1.29 三条 P1 是同一个错误的三个面（v1.29）
+
+Sol 在 `be0902ea` 判 3 P1 + 2 P2。逐条看像五个独立缺陷，放在一起看是**同一个设计错误**：**我一直在用历史形状（commit、DAG、某一时刻的 tree）去承载一个内容命题。**
+
+provenance 要证的是"这棵树等于上游那棵树"。这是关于**内容**的断言，而我三次把它绑到了会被合法操作改变的**历史**上：
+
+| # | 我绑的东西 | 什么合法操作会毁掉它 |
+|---|---|---|
+| P1-1 | `check-provenance.sh` 硬要求 import commit 可解析 | operator 按 squash / rebase |
+| P1-2 | pristine 时刻的 `qwy-subtree-tree` | 本 task 自己修改 qwy 源码（**必然发生**） |
+| 上一版 | `git-subtree-split` trailer | 同 P1-1 |
+
+**P1-1 尤其说明我上一轮的修补是无效的**：我把 trailer 降成了加分项，可 Task 3.5 的 Verify **第一条**就跑 `check-provenance.sh --stage contract`，而那道 gate 仍硬要求 import commit 存在——我的降级逻辑在它之外，根本轮不到执行。**在一道必红的门后面写宽容逻辑，不会让门变宽。**
+
+真·丢历史的 fresh clone 实测（`git archive aa6d93a` → 新仓单 commit，两个 import commit 真正 ABSENT）：
+
+```
+旧 checker --stage contract : rc=1  (recorded import commit does not exist)
+新 checker --stage contract : rc=0  (DAG evidence skipped, content proof still applies)
+新 checker --stage import   : rc=0  (严格性未放松，app 树仍 pristine)
+```
+
+**修法统一为内容锚**：fetched upstream `${FROZEN}^{tree}` + **分叉受限**（当前树相对 upstream 的差异必须落在已声明的授权集合内）。它不依赖任何本地历史，因此跨任何 merge 方式存活；且它在 pristine 与最终态**都成立**，从根上消掉了 P1-2 的时间截面问题——因为不变量不再是"相等"，而是"差异有界"。
+
+P1-3 是另一类：`selftest` 我指到了 `acceptance/**`，而按 §12.1 那是 Fable5 独占、Sol 只有 review 权，Task 3.5 的 owner 是 Opus5，且 `I3.5` 只依赖 `I3`，不能假定 sibling PR-5 交付过任何文件。**给自己的产物挑一个别人独占的目录，等于写了一条永远执行不到的指令。** 已移入 Opus5 独占的 root `scripts/`，且 guard 与 selftest **共用同一实现**——两份实现会各自漂移，负例就不再证明生产 guard 的行为。
+
+P2-1 的 `printf -v IMPORTS` / `export IMPORTS=` 让我最终承认：**任何"解析别人的源码文本"都不可能真正同源**，因为文本与 runtime 是两条独立演化的路径。PR #10 因此新增 `--print-import` 机器查询，从循环实际消费的同一个 `$IMPORTS` 打印。
+
+> **教训**：P2-2 值得单记，因为它是本 session 第四次同型。上一轮我明确写了"只修点名那处就是补锅匠，所以做了全量扫描"——**而那次扫描本身是窄的**：正则写成 `当前 HEAD \`[0-9a-f]{40}\``，只覆盖全 SHA，三处 8 位短 SHA 全部逃逸。
+>
+> 根因是我一直在**扫"断言 + 值"的组合形态**，而我要保证的性质是"任何自称当前 HEAD 的文本都必须等于当前 HEAD"——性质只关于**断言短语**，值的形态是自由的。改法：先枚举断言短语的**全部**出现（`当前 HEAD` 共 6 处），再逐处检查其值，而不是让 pattern 同时承担"找到"和"判定"两件事。**让查询形态决定结论范围，就是这个病本身。**
 
 ## 1. 事实基线与来源
 
@@ -2397,7 +2430,9 @@ cd ../..
 **Files:**
 
 - Create: **`docs/provenance/qwy-lint-baseline-report.xml`** —— 在**冻结导入基线**（`FakeGps-test@285e4ca` 的 pristine 树）上跑 `lintDebug` 得到的原始报告，**且每个 `location/@file` 必须先规范化为 repo-relative** 再逐字节提交。这是授权集合的**指向物**。
-- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述报告**机械派生**，必须记录：① `generated-at-commit:` = qwy 冻结导入 SHA，**须等于 `scripts/check-provenance.sh` 的 `IMPORTS` 表中 `apps/qianwangyou` 行第 4 字段**（该表是 provenance gate 自己的真相源，PR #10 已用它反向校验 `upstream-imports.md`，因此是一个真实存在、非空、单值、40-hex 且已被 #10 校验的 machine carrier）；② `report-sha256:` = **规范化后**报告的 SHA-256；③ `qwy-subtree-tree:` = `git rev-parse HEAD:apps/qianwangyou`，即 vendored subtree 的 **tree hash**——**这是承重的第二记录**，因为 commit DAG 会被 squash/rebase 合法丢弃而 tree 不会（squash 保留最终 tree），所以它与 PR #10 的合入方式无关；④ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，每行一条 exact 路径，**共 5 条**（用哨兵不用代码围栏：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞）。**必须先于任何源码修改单独提交。**
+- Create: `scripts/task35-scope-guard.sh` —— **生产 guard 的唯一可调用实现**（root `scripts/**` 是 §12.1 里 Opus5 的独占范围，Task 3.5 owner 亦是 Opus5，因此这是本 task 唯一合法的落点；**不放 `acceptance/**`——那是 Fable5 独占，且 I3.5 只依赖 I3，不能假定 sibling PR-5 已交付任何文件**）
+- Create: `scripts/selftest-task35-guard.sh` —— 负例/正例控制，**调用上面同一个实现**（不得复制一份逻辑：两份实现会各自漂移，负例就不再证明生产 guard 的行为）
+- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述报告**机械派生**，必须记录：① `generated-at-commit:` = qwy 冻结导入 SHA，**须等于 `./scripts/check-provenance.sh --print-import apps/qianwangyou` 的输出**（PR #10 提供的机器查询，从 checker 循环实际消费的同一个 `$IMPORTS` 打印——**不得改为解析脚本文本**，文本 parser 与 runtime 值会分叉）；② `report-sha256:` = **规范化后**报告的 SHA-256；③ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，每行一条 exact 路径，**共 5 条**（用哨兵不用代码围栏：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞）。**必须先于任何源码修改单独提交。**
 - Modify: **仅**上述 5 条 exact 路径
 
 > **23 与 5 是两个不同的数（v1.25 更正，由 Sol 实测证伪）**：`lintDebug` 报的是 **23 个 Error instance**，但它们只落在 **5 个唯一文件**上（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3 说的是 **instance** 分布），另有 54 个 warning-only 文件与授权集合无关。上一版把「条数 == 23」当成路径集合的判据，于是**把 warning-only 文件（如 `config/ConfigPrefsSync.kt`）重复填满 23 行也能全绿**——不改报告、不改 digest 就完成扩权。现在 **23 只用于校验 Error instance 数，5 才是授权路径集合的基数**；集合由报告派生，baseline 只是声明副本，二者必须**逐元素相等**。
@@ -2450,19 +2485,12 @@ ALLOWED_EXTRA='apps/qianwangyou/app/src/main/res/values-en/strings.xml'
 
 # (b) baseline 必须声明生成 commit，且等于 qwy 冻结导入 SHA
 #     carrier = provenance gate 自己的 IMPORTS 表（PR #10 已校验），不是文档里的自由文本
-#     解析必须与 Bash 实际消费的值【同源】，两道断言缺一不可：
-#       ① 恰好一次赋值 —— range awk 会把文件里所有 IMPORTS 块拼起来，而 Bash 只用
-#          最后一次赋值。实测：追加第二个只含 cellrebel 的块后，本解析仍返回合法
-#          285e…（格式/单值全过），真实 consumer 的 qwy 却是空 → 两者分叉。
-#          该断言同时封住 one-line 与 single-quote 形式的再赋值。
-#       ② canonical 块形式 —— 否则 range 模式本身失效。
-#     只解析赋值块内部，也封住"块外一条同形 decoy 行"（usage 文本 / heredoc / 注释块）。
-ASSIGNS=$(grep -cE '^[[:space:]]*IMPORTS=' scripts/check-provenance.sh || true)
-[ "$ASSIGNS" -eq 1 ] || { echo "IMPORTS ASSIGNED $ASSIGNS TIMES (must be exactly 1)"; exit 1; }
-grep -qx 'IMPORTS="' scripts/check-provenance.sh \
-  || { echo "IMPORTS NOT IN CANONICAL BLOCK FORM"; exit 1; }
-FROZEN=$(awk '/^IMPORTS="$/{b=1;next} b&&/^"$/{b=0} b' scripts/check-provenance.sh \
-         | awk -F'|' '$1=="apps/qianwangyou"{print $4}')
+#     **必须用机器查询，不解析脚本文本。** 文本 parser 与 runtime `$IMPORTS` 会分叉：
+#     块外 decoy 行、两个赋值块、或之后一句 `printf -v IMPORTS` / `export IMPORTS=`
+#     都能让解析值与循环实际消费的值不同，且双方各自自洽为绿（实测：parser 读到
+#     合法 285e…，runtime 的 qwy 为空，而 `--stage contract` 仍 rc=0，provenance 被静默跳过）。
+#     `--print-import` 从循环读的同一个 $IMPORTS 打印，因此只有一个源。
+FROZEN=$(./scripts/check-provenance.sh --print-import apps/qianwangyou)
 DECL=$(sed -n 's/^generated-at-commit: *//p' "$BASELINE")
 # 先证明两侧都是【非空、单值、40-hex】——否则"空 == 空"会自洽为绿
 for v in "$FROZEN" "$DECL"; do
@@ -2470,36 +2498,26 @@ for v in "$FROZEN" "$DECL"; do
   printf '%s' "$v" | grep -qE '^[0-9a-f]{40}$' || { echo "NOT A 40-HEX SHA: '$v'"; exit 1; }
 done
 [ "$DECL" = "$FROZEN" ] || { echo "BASELINE COMMIT != frozen import SHA"; exit 1; }
-# 独立第二记录 —— 承重的那条必须【跨 merge 方式存活】。
-# commit DAG 会被 squash / rebase 合法丢弃；**tree 不会**（squash 保留最终 tree）。
-# 因此承重记录用 tree 等值，它由内容决定、与合入方式无关：
-DECL_TREE=$(sed -n 's/^qwy-subtree-tree: *//p' "$BASELINE")
-ACT_TREE=$(git rev-parse "HEAD:apps/qianwangyou")
-for v in "$DECL_TREE" "$ACT_TREE"; do
-  [ "$(printf '%s' "$v" | wc -l)" -eq 0 ] || { echo "TREE NOT SINGLE-VALUED"; exit 1; }
-  printf '%s' "$v" | grep -qE '^[0-9a-f]{40}$' || { echo "NOT A 40-HEX TREE: '$v'"; exit 1; }
-done
-[ "$DECL_TREE" = "$ACT_TREE" ] || { echo "BASELINE NOT BOUND TO VENDORED TREE"; exit 1; }
-
-# DAG 证据是【加分项，不是硬门】。理由与上一轮 SIGPIPE 是同一形态：
-# 把一条合法路径（operator 用 squash 合 PR #10）判成失败，就又造了一道"正确状态必红"
-# 的门。故只在 import commit 仍从 HEAD 可达时断言，可达即必须真成对。
-if git merge-base --is-ancestor "$IMPORT_COMMIT" HEAD 2>/dev/null; then
-  # 必须是【真实 Git trailer】，不是 commit 正文子串——一段普通散文提到这两个字符串
-  # 就能让 `--grep` 命中（实测 PAIRED=1，而 `interpret-trailers --parse` 为 0 行）。
-  # `--grep` 只用来缩小候选集，判定一律交给 trailer 解析。
-  # 注意此处用 shell 模式匹配而非 `… | grep -q`：后者正是上一轮 SIGPIPE 的形状。
-  PAIRED=0
-  for c in $(git log HEAD --fixed-strings --all-match \
-               --grep="git-subtree-split: $FROZEN" \
-               --grep="git-subtree-dir: apps/qianwangyou" --format='%H'); do
-    TR=$(git log -1 --format=%B "$c" | git interpret-trailers --parse)
-    case $'\n'"$TR"$'\n' in *$'\n'"git-subtree-split: $FROZEN"$'\n'*) ;; *) continue ;; esac
-    case $'\n'"$TR"$'\n' in *$'\n'"git-subtree-dir: apps/qianwangyou"$'\n'*) ;; *) continue ;; esac
-    PAIRED=$((PAIRED+1))
-  done
-  [ "$PAIRED" -ge 1 ] || { echo "IMPORT COMMIT REACHABLE BUT NO REAL PAIRED TRAILER"; exit 1; }
-fi
+# 独立第二记录 —— 承重的那条必须【跨 merge 方式存活】，且【取对时间截面】。
+#
+# 上一版记录 pristine 的 `qwy-subtree-tree` 再与最终 HEAD 比较，是错的：baseline 必须
+# 先于任何源码修改提交，而本 task 之后【必然】修改 qwy 源码，所以最终态两值必不相等
+# ——合法终态必红。事后回填声明求绿则退化为同作者对最终 tree 的自洽抄录，失去 upstream
+# 语义。两条路都不成立，故该字段已删除。
+#
+# 正确的不变量不是"树相等"，而是**分叉受限**：当前树相对 upstream 树的差异，必须
+# 落在本 task 已声明的授权集合内。它由 fetched upstream 对象锚定，不依赖任何本地
+# 历史，因此跨 squash / rebase 存活；且它在 pristine 与最终态【都成立】。
+UP_TREE=$(git rev-parse --quiet --verify "${FROZEN}^{tree}") \
+  || { echo "UPSTREAM OBJECT UNAVAILABLE (run check-provenance first)"; exit 1; }
+git diff --name-only "$UP_TREE" "HEAD:apps/qianwangyou" > "$TMP/diverged"
+while read -r rel; do
+  [ -n "$rel" ] || continue
+  p="apps/qianwangyou/$rel"
+  [ "$p" = "$ALLOWED_EXTRA" ] && continue
+  grep -qxF -- "$p" "$TMP/derived" \
+    || { echo "DIVERGES FROM UPSTREAM OUTSIDE AUTHORIZED SET: $p"; exit 1; }
+done < "$TMP/diverged"
 
 # (c) digest 绑定（对已规范化的报告）——同样先证两侧非空、单值、64-hex
 REC=$(sed -n 's/^report-sha256: *//p' "$BASELINE")
@@ -2544,9 +2562,18 @@ done < "$TMP/changed"
 [ "$CHECKED" -gt 0 ] || { echo "NO qwy PATH CHECKED — selector 失效"; exit 1; }
 ```
 
-**负例控制（冻结，与上面的生产态断言同为 Verify 的一部分）**
+**负例控制（冻结）——必须由 Verify 真正调用，不能只写在表里**
 
-上一版只跑了生产态正例，却在 §0.1.27 冻结了「新检查器必须同时跑正负例」——**宣称与兑现不符**。这里补齐：以下每条都必须**可被后来者重放**，不能只存在于作者的提交消息里。落地为 `acceptance/scripts/selftest-task35-guard.sh`（Sol 的 `static-guard` lane，与 `M-BP-01/02` 同目录），在临时目录内构造，**不污染工作树**。
+```bash
+# 生产 guard 与负例控制共用同一实现；Verify 两条都跑，缺一不算通过
+./scripts/task35-scope-guard.sh          # 生产态：必须 exit 0
+./scripts/selftest-task35-guard.sh       # N-1..N-7 + P-1：必须 exit 0
+```
+
+
+上一版只跑了生产态正例，却在 §0.1.27 冻结了「新检查器必须同时跑正负例」——**宣称与兑现不符**。这里补齐：以下每条都必须**可被后来者重放**，不能只存在于作者的提交消息里。落地为 `scripts/selftest-task35-guard.sh`，在临时目录内构造，**不污染工作树**。
+
+> 上一版把它写成 `acceptance/scripts/…`（并称「Sol 的 static-guard lane」）是**双重错误**：`acceptance/**` 按 §12.1 是 Fable5 独占、Sol 只有 review 权；而 Task 3.5 的 owner 是 Opus5，`I3.5` 只依赖 `I3`，不能假定 sibling PR-5 已交付任何文件。**给自己的产物挑一个别人独占的目录，等于写了一条永远执行不到的指令。**
 
 | # | 构造 | 期望 |
 |---|---|---|
@@ -2555,13 +2582,15 @@ done < "$TMP/changed"
 | N-3 | 赋值块内删 qwy 行、块外留同形 decoy | 红 · `NOT A 40-HEX SHA: ''` |
 | N-4 | commit 正文**散文**里提到两条 `git-subtree-*` 字符串（非真 trailer） | 红 · `NO REAL PAIRED TRAILER`（`--grep` 会命中，`interpret-trailers --parse` 为 0 行） |
 | N-5 | 真 SHA 配错 `git-subtree-dir` | 红 · 同上 |
-| N-6 | `qwy-subtree-tree` 声明值 ≠ `git rev-parse HEAD:apps/qianwangyou` | 红 · `BASELINE NOT BOUND TO VENDORED TREE` |
-| N-7 | 该字段缺失 / 空 | 红 · `NOT A 40-HEX TREE: ''` |
+| N-6 | 在授权集合外改一个 qwy 文件（相对 upstream 树产生未授权分叉） | 红 · `DIVERGES FROM UPSTREAM OUTSIDE AUTHORIZED SET` |
+| N-7 | `IMPORTS` 后追加 `printf -v IMPORTS …` / `export IMPORTS=…` 再赋值 | 红 · 机器查询与 runtime 同源，两者一起变，绝不分叉（对照：旧的文本 parser 在此仍返回合法 SHA） |
 | **P-1** | **未改动的生产态** | **绿 · exit 0** |
 
 `P-1` 不可省略：**只跑负例证明不了检查器在合法状态下会绿**，而一道永远红的门和一道永远绿的门都不是门（§0.1.27）。
 
-**关于 PR #10 的合入方式**：DAG 证据（`git-subtree-*` trailer）只在 `IMPORT_COMMIT` 仍从 HEAD 可达时断言。若 operator 以 **squash / rebase** 合入 PR #10，exact import commit 与 trailer 祖先会被合法丢弃——此时本 gate **不判红**，承重记录改由 `qwy-subtree-tree` 承担（tree 跨 squash 存活）。**merge commit 仍是首选**，因为它额外保留 DAG 证据；但它是偏好，不是硬约束——把一条合法的合入路径做成必红，就是上一轮 SIGPIPE 的同一个错误换了触发者。
+**关于 PR #10 的合入方式（冻结）**：本 gate 与 `check-provenance.sh` **都不要求任何 merge 方式**。DAG 证据（import commit、`git-subtree-*` trailer）只在仍可达时断言；squash / rebase 合法丢弃它们时如实降级并说明，**不判红**。承重证明是 **fetched upstream tree + 分叉受限**，它不依赖任何本地历史。
+
+实测（`git archive aa6d93a` → 新仓单 commit，两个 import commit 真正 ABSENT）：旧 checker `--stage contract` **rc=1**（`recorded import commit does not exist`），改后 **rc=0**，而 `--stage import` 仍严格。**把一条合法的合入路径做成必红，就是 SIGPIPE 那个错误换了触发者。**
 
 **规范化规则（冻结）**：`qwy-lint-baseline-report.xml` 提交前必须把每个 `location/@file` 由绝对 checkout 路径改写为 **repo-relative**（去掉仓库根前缀，不做其他修改）。**只有规范化后的报告才有可重放的 digest**——否则换一个 checkout 目录，SHA-256 就变（实测 `731feb…` → `9111c3…`），"另一 reviewer 在冻结 commit 重跑得到同一 digest"这条根本不成立。
 
