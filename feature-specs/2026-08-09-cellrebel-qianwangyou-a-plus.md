@@ -110,6 +110,7 @@ source_threads:
 | **v1.31** | PR-0.2 第二十七轮 | Sol 判 P1-2/P1-3 CLOSED，余 2 P1 + 2 P2（P2-1 升级 P1）。**同一个 commit 里我把 substring 当成绑定用了两次**：root-tree 锚点是全局 `grep`（互换两行仍双绿）、0a 成员检查是整段 substring（prefix 藏进 branch 字段即假绿）。改为**逐行逐字段绑定**与**第一字段集合相等 + 字段数校验**；`readonly -f each_import` 冻结函数本体；**history-lost + 分叉改为硬失败**（pristine 仍绿，不误伤 squash 合入）。负例矩阵落地为 #10 CI 里的 `selftest-provenance.sh`（3 正 + 8 负），并补齐 Task 3.5 的调用契约，见 §0.1.31 |
 | **v1.32** | PR-0.2 第二十八轮 | Sol generation-8 判 2 P1 + 2 P2。**P1-1 我第三次造出永远红**：squash 合入 + 真实 Task-2 contract delta 是合法路径（base commit 仍持 pristine tree，ancestry 客观存在），却因原 import commit 不可达被判红；判据改为**任一可达 ancestor 的 prefix tree == fetched upstream tree**。**P1-2 判据 11 只用在了一格**：row selector 仍是 `index()` 子串、URL/branch/SHA 仍全文件 grep——改名 `apps/qianwangyou-shadow`、只互换两行 SHA 单元格都能假绿；改为**锚定 imports 表的严格单行解析器**（恰好一行 / 恰好六格 / 同行绑定全部字段）。**P2-1** selftest 自称 3 正 8 负，实际只有 6 条行为负例（N-7a 是正例、N-7b 只 grep 源码）——重写为 **4 正 + 9 负全部执行生产 checker**、计数由 harness 派生。**P2-2** #10 body 的 `21 PASS` 已 stale。见 §0.1.32 |
 | **v1.33** | PR-0.2 第二十九轮 | Sol gen-10 判 1 P1 + 2 P2。**P1**：strict parser 既不 strict 也不完整——`gsub` 删的是**单元格内部**空白（SHA 中间插空格会被规范化成正确值并认证）；第 6 格 import commit 根本没走 parser，写 `0000…0000` 会被读成合法 squash 而放行。改为**只 trim 外围** + 把 canonical import commit 纳入冻结记录并与第 6 格 exact 比对；表格单元格改为裸值。**P2-1**：selftest 会在夹具没构造成功时自报全绿（P-4 丢弃 setup 退出码，实际重测了 P-3）；N-5 把 fork 与独立 tamper 混在一起。改为 setup fail-hard + 形状断言 + fork 隔离，并**把变异自检放进 harness**。**P2-2** #10 body/workflow 数字回填。见 §0.1.33 |
+| **v1.34** | PR-0.2 第三十轮 | Sol gen-11 判 **0 P1 + 2 P2**（P1 已闭合）。**P2-1**：N-5 在它负责保护的 `readonly -f each_import` 被删除后仍全绿——它不断言退出码、只搜一个 entry-file 段无条件输出的字符串，注入记录仍是旧 4 字段（构成独立失败源），更根本的是「丢掉 qwy」的 fork 本就被 0a 集合检查拦下、**从未触达 `readonly -f`**。改注入**合法 5 格但 SHA 伪造**的 fork，断言 rc 与只来自 doc-binding 循环的证据，新增 **M-4**（删 `readonly -f` 必使 N-5 失败）；并把「逐条变异」收窄为**实际的 4 条具名 mutation**。**P2-2** #10 body 两句 stale current 声明与 4→5 字段文案已收口。见 §0.1.34 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -882,6 +883,66 @@ harness 因此再加两条硬约束：
 - **变异必须覆盖同一能力的全部实现层**：M-1 只退 row selector 时 N-2 仍红，因为 `r_prefix` 精确断言还兜着——**单层变异证明不了这一对**。
 
 **这是错误爬到的第五层**：产品代码 → 检查器 → 检查器的负例 → 负例的验证方法 → **验证方法的执行环境**（是不是 git 仓、有没有对象、管道语义）。每高一层，看起来正常的欺骗性就更强一分。
+
+#### 0.1.34 那条负例根本没有在断言（v1.34）
+
+Sol gen-11：**0 P1 + 2 P2**。生产 parser 这轮没有再被判红——错的仍然是验证侧。
+
+**P2-1 —— N-5 观察的那个字符串，与它要测的能力无关。** 它注入一个 iterator fork，然后在整段输出里 `grep 'apps/qianwangyou'` 就算通过。可这个串由固定的 entry-file 段**无条件打印**：fork 成功与否，它都在。于是这条负例既不断言退出码、也不断言任何只有 fork 失败才会出现的事实——**它不是一条弱断言，它不是断言**。Sol 的反证一句话就够：在 `829d0c20` 的临时仓里**只删掉** `readonly -f each_import`，其余一律不动，整套 selftest 仍然 `rc=0` 并照常打印 `PASS  N-5 ...`。次生问题同源：注入的记录仍是旧的 **4 格**形状，而生产 schema 已是 5 格，所以即便 fork 生效，判红也可能来自 malformed-record 而不是 fork——**一条负例有两个失败源，就等于没有失败源**。
+
+已改为：注入一条**合法 5 格、唯一缺陷是 qwy SHA 被伪造**的 fork，并**同时断言 `rc=0` 与 `row for apps/qianwangyou records upstream sha 285e4cae4`**——后者只可能由 `each_import` 驱动的 doc-binding 循环产出。再补 `M-4` 变异（删 `readonly -f each_import`）把这条能力钉住。实测：
+
+| 环境 | N-5 |
+|---|---|
+| `readonly -f each_import` 在 | `PASS`（循环读到真 SHA，rc=0） |
+| **按 Sol 的反证删掉它** | **`FAIL  N-5 the forged record reached the production loops - rc=1`** |
+
+**P2-2 —— 同一份 body 在同一个 exact HEAD 上同时投影 21 与 33。** 顶部 current block 是对的，但正文 `At this HEAD: 21 PASS` 与「HEAD 仍是 …，本次未推任何 commit」两句仍在，而且我上一轮**广播说已经删了后者**。顺带按同一失效类做了审计，抓到 Sol 没点名的第三处：`- Exact HEAD:` 也是块外 HEAD 投影。处置不是把 21 改成 33，而是**删掉块外的每一处当前态投影**——留着第二个副本，就是留着下一次漂移。自称「唯一当前真相块」而块外还有三处同类投影，那行标题本身就是假的。
+
+> **判据补第十三条：断言所观察的输出，必须只能由被测能力产出。** 判别法：**把被测能力整个删掉，如果该输出仍然出现，这条断言就不是断言。** 判据 11 管的是粒度（命题说某一行某一格，就不能去搜整个文件），第十三条管的是**来源**——粒度对了，只要观察的是一个无条件产出的串，依然什么都没测到。
+
+**关于覆盖声明**：本轮同时把 Task 3.5 里「逐条把修复退回去」收窄为真实的 `M-1..M-4 / 12 条负例`。**4 条被写成了 12 条**，与 §0.1 里反复出现的「宣称覆盖 ≠ 能证明覆盖」是同一个形状，只不过这次长在描述 harness 的散文里，而散文不会被任何 gate 执行。
+
+**验证环境这一层也翻了车，值得记。** 本轮第一次跑 M-4 时它报「N-5 未绑定」。按第十二条我先怀疑变异——查下来真因不在变异，而在**被测对象在测试期间不是恒定的**：这个 worktree 当时有并发写者，`mutate()` 是运行时从工作区拷 selftest 的，于是拷进去的是**旧版 N-5**，harness 忠实地报告了"这条没绑住"——报告完全正确，只是它测的根本不是我以为的那份文件。改在 `git clone` 出来的隔离副本里跑，两个结论立刻稳定复现。
+
+**这是错误爬到的第六层**：产品代码 → 检查器 → 负例 → 负例的验证方法 → 验证方法的执行环境 → **被测对象在验证期间的同一性**。前五层问「这段逻辑对不对」，第六层问「我刚才测的，还是不是我要测的那个东西」。
+
+#### 0.1.34 守护 X 的用例，在 X 被删掉之后依然是绿的（v1.34）
+
+Sol gen-11：**0 P1 + 2 P2**。P1 已闭合——parser 六格同行消费，internal-whitespace 与零/错 import commit 全部判红。
+
+**P2-1 的反证一句话就能跑**：临时仓里**只删掉** `check-provenance.sh` 的 `readonly -f each_import`，selftest 一个字不改，完整跑仍 `rc=0`，照常打印
+
+```
+PASS  N-5 iterator redefinition cannot fork query from gate (qwy still checked)
+PASS  (4 positive, 12 negative, 3 mutation self-checks)
+```
+
+**N-5 存在的全部理由就是守护那一行，而那一行被删掉之后它依然是绿的。**
+
+三个原因叠在一起，只有第三个是设计错误：
+
+| # | 问题 | 性质 |
+|---|---|---|
+| 1 | 不断言退出码，只在**整段输出**里搜 `apps/qianwangyou` | 该串由 entry-file 段无条件输出，与 import loop 消费了什么无关 |
+| 2 | 注入记录仍是旧 **4 字段**，schema 已是 5 | 删掉 `readonly -f` 后，malformed-record 成了**独立失败源**，冒充被测行为 |
+| 3 | fork **丢掉 qwy**，而丢 prefix 本就被 0a 集合检查拦下 | **从未触达 `readonly -f`**——测的根本不是那条防护 |
+
+第 3 条是我该早看出来的：**我给这个 case 选的攻击手法，会先被另一道更早的门挡住。** 于是它测的是那道更早的门，标签写的却是这一道。
+
+修法：注入**合法 5 字段、qwy SHA 伪造**的 fork——0a 放行（两 prefix 齐全、字段数正确），只有 `readonly -f` 决定循环读到真记录还是伪造记录。断言两件事：`rc=0`，且输出含**只可能由 doc-binding 循环产生**的那行真 SHA。再加 **M-4**：删 `readonly -f` 必使 N-5 失败——实测只有 N-5 转红。
+
+**还有一句必须收回。** spec 里写过「逐条把修复退回去」，而实际只有 3 条 mutation；同段还称 N-5「断言退出码」，而它当时没有。
+
+> **宣称的覆盖面必须等于实际执行的覆盖面。** 描述测试的文字若比测试本身更强，它自己就是下一处假绿——而且更难发现，因为读者会拿它当已验证的事实。
+
+现已如实写成 **4 条具名 mutation** 并列出各自守护的用例，同时写明选取标准：**曾经产生过假绿的修复必须有变异兜底**，新增负例不自动获得变异。
+
+**另记两条流程事故，都不是 Sol 提的，是我自己撞的。**
+
+**一、验证过 ≠ 提交了。** 本轮 #10 的修复我写好、跑过、确认 M-4 通过，**然后在提交前丢失**——补丁脚本放在 `/tmp`，`/tmp` 被清理，工作树回到旧版。我是在运行**之后**补 grep 关键标记时才发现（返回 0，而那次运行明明报了 PASS）。**从此：辅助脚本落在仓内、用完即删；验证通过立即提交；提交前用一次独立 grep 确认标记真在文件里，不靠「我刚跑过」的记忆。**
+
+**二、共享 worktree 可能有第二个写者。** 本轮我在 #12 工作树里发现一处**我无法确认出自本 session** 的未提交改动，内容正确且正好切中 P2-1。同 `catId` 的平行 session 与我共用这两个 worktree，虽已声明不写入，但**声明不是机制**。已如实上报，并采用：**动手前先 `git status`，发现非本 session 的改动先核实内容再决定是否纳入本轮提交**，不默认它是自己写的、也不默认它是脏数据。
 
 ## 1. 事实基线与来源
 
@@ -2724,7 +2785,9 @@ done < "$TMP/changed"
 
 **调用契约（冻结）**：上表**每一行**都必须由 `scripts/selftest-task35-guard.sh` 真正执行——`N-1..N-8` 与 `P-1..P-3` 全部在内。**新增一行到表里而不加进调用，等于没加**：v1.30 补了 N-8/P-2/P-3 却把调用契约留在 `N-1..N-7 + P-1`，那三行当轮不构成任何回归门。
 
-**PR #10 的承重行为由 PR #10 自测，不推迟到本 task**：`scripts/selftest-provenance.sh` 已接入 #10 的 CI，**每条都执行生产 checker 并断言退出码**，不以 grep 源码字面量充数；计数由 harness 自身计数器打印，标签不会与真实执行漂移。正例含 **squash 合入 + 真实 Task-2 contract delta 必绿**（且先断言其形状：父提交 prefix tree == upstream、HEAD != upstream、恰好三个 qwy 文件）；负例含无 pristine 祖先的伪造终态、prefix-suffix 改名、重复行、SHA/root-tree 跨行互换、**单元格内部空白**、**import-commit 单元格被替换为不存在对象或另一 prefix 的 commit**、隔离的 iterator 重定义。**变异自检已进 harness**（不再只写在 commit body）：逐条把修复退回去，被它守护的用例必须失败，且**先证明变异真的落地**——否则「用例仍通过」与「变异没应用」是同一段输出，后者会冒充前者。
+**PR #10 的承重行为由 PR #10 自测，不推迟到本 task**：`scripts/selftest-provenance.sh` 已接入 #10 的 CI，**每条都执行生产 checker 并断言退出码**，不以 grep 源码字面量充数；计数由 harness 自身计数器打印，标签不会与真实执行漂移。（v1.34 更正：在此之前 **N-5 是唯一的例外**——它只在整段输出里搜 `apps/qianwangyou`，而该串由固定 entry-file 段无条件带出，因此不构成任何断言。现已改为**注入一条合法 5 格 fork 并同时断言 rc 与只可能由 doc-binding 循环产出的真值证据**。）正例含 **squash 合入 + 真实 Task-2 contract delta 必绿**（且先断言其形状：父提交 prefix tree == upstream、HEAD != upstream、恰好三个 qwy 文件）；负例含无 pristine 祖先的伪造终态、prefix-suffix 改名、重复行、SHA/root-tree 跨行互换、**单元格内部空白**、**import-commit 单元格被替换为不存在对象或另一 prefix 的 commit**、隔离的 iterator 重定义。
+
+**变异自检的真实覆盖是 4 条具名修复，不是「逐条」（v1.34 收窄）**：`M-1`→`N-2`（第一格 exact 的**两个**实现层同时退回）、`M-2`→`P-4`（ancestry 走祖先而非只看 HEAD）、`M-3`→`N-9`（只 trim 外围）、`M-4`→`N-5`（`readonly -f each_import`）。**其余负例只保证"被执行并断言退出码"，不声称 mutation-bound。** 上一版写的「逐条把修复退回去」把 4 条说成了 12 条——**声称的覆盖与能够证明的覆盖是两件事**，这正是本文 §0.1 反复记的那个形状，只不过这次长在描述 harness 的散文里。选取标准是**曾经产生过假绿的那条修复必须有变异兜底**；新增负例不自动获得变异，要么补 mutation，要么不写进覆盖声明。每条变异都**先证明真的落地**（比对变异前后 checker 的 SHA-256）——否则「用例仍通过」与「变异没应用」是同一段输出，后者会冒充前者。
 
 `P-1` 不可省略：**只跑负例证明不了检查器在合法状态下会绿**，而一道永远红的门和一道永远绿的门都不是门（§0.1.27）。
 
