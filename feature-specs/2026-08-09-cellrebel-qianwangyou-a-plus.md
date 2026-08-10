@@ -108,6 +108,7 @@ source_threads:
 | **v1.29** | PR-0.2 第二十五轮 | Sol 判 3 P1 + 2 P2，**三条 P1 是同一个设计错误的三个面：用历史形状承载内容命题**。**P1-1** Task 3.5 先跑的 `check-provenance.sh` 仍硬要求 import commit 存在，我上一版的 tree/trailer 逻辑在那道 gate 之外——**改 PR #10 的 checker 本身**，DAG 证据降为可达时才断言（fresh squash clone 实测 rc=1 → rc=0）。**P1-2** `qwy-subtree-tree` 取错时间截面（baseline 先于源码修改提交，最终态必不相等）→ 删除该字段，不变量改为**相对 upstream 树的分叉受限**，pristine 与终态都成立。**P1-3** selftest 无合法执行边且归属写成 Fable5 独占的 `acceptance/**` → 移入 Opus5 独占的 root `scripts/`，guard 与 selftest 共用同一实现并由 Verify 真正调用。**P2-1** 文本 parser 仍可与 runtime 分叉（`printf -v` / `export`）→ PR #10 新增 `--print-import` 机器查询。**P2-2** body 三处短 SHA 标题自称当前 + 历史清单不穷举 → 改用 git 派生的 21 个 HEAD 全血统，见 §0.1.29 |
 | **v1.30** | PR-0.2 第二十六轮 | Sol 判 3 P1 + 2 P2（耦合 PR #10）。**P1-1** provenance 锚点是两节互相指望——DAG 一丢，history-lost + 任意篡改仍 `PASS (all checks)`（已复现）；锚点改为 **fetched upstream root tree**（内容承载，跨任何合入方式存活），import commit 降为可达时才断言。**P1-2** 分叉检查拿 upstream 与最终 HEAD 全量比较 → 把 Task 2/3 的合法改动判越界；且在 `$TMP/derived` 生成前就用它（grep rc=2）。按三载体拆分：provenance 归 #10、前序分叉不归本 gate、本 task 只看自己 merge-base 之后的 delta。**P1-3** Verify 调用 sibling 才交付的 `acceptance/**` 脚本 = 永远执行不到的指令，已移除。**P2-1** `--print-import` 与生产循环共享变量名而非代码路径，改 `readonly` + 单一 `each_import`，并加冻结记录集自检与末尾复检。**P2-2** PR body lineage/provenance 表回填。见 §0.1.30 |
 | **v1.31** | PR-0.2 第二十七轮 | Sol 判 P1-2/P1-3 CLOSED，余 2 P1 + 2 P2（P2-1 升级 P1）。**同一个 commit 里我把 substring 当成绑定用了两次**：root-tree 锚点是全局 `grep`（互换两行仍双绿）、0a 成员检查是整段 substring（prefix 藏进 branch 字段即假绿）。改为**逐行逐字段绑定**与**第一字段集合相等 + 字段数校验**；`readonly -f each_import` 冻结函数本体；**history-lost + 分叉改为硬失败**（pristine 仍绿，不误伤 squash 合入）。负例矩阵落地为 #10 CI 里的 `selftest-provenance.sh`（3 正 + 8 负），并补齐 Task 3.5 的调用契约，见 §0.1.31 |
+| **v1.32** | PR-0.2 第二十八轮 | Sol generation-8 判 2 P1 + 2 P2。**P1-1 我第三次造出永远红**：squash 合入 + 真实 Task-2 contract delta 是合法路径（base commit 仍持 pristine tree，ancestry 客观存在），却因原 import commit 不可达被判红；判据改为**任一可达 ancestor 的 prefix tree == fetched upstream tree**。**P1-2 判据 11 只用在了一格**：row selector 仍是 `index()` 子串、URL/branch/SHA 仍全文件 grep——改名 `apps/qianwangyou-shadow`、只互换两行 SHA 单元格都能假绿；改为**锚定 imports 表的严格单行解析器**（恰好一行 / 恰好六格 / 同行绑定全部字段）。**P2-1** selftest 自称 3 正 8 负，实际只有 6 条行为负例（N-7a 是正例、N-7b 只 grep 源码）——重写为 **4 正 + 9 负全部执行生产 checker**、计数由 harness 派生。**P2-2** #10 body 的 `21 PASS` 已 stale。见 §0.1.32 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -818,9 +819,40 @@ Sol 判 P1-2、P1-3 CLOSED，余 2 P1 + 2 P2，其中 P2-1 因实测 false-green
 另两条：
 
 - **`readonly IMPORTS` 冻结不了 `each_import`。** 在 handler `exit 0` 之后重定义函数，query 仍返回冻结 SHA、生产循环却吃另一份记录。已加 `readonly -f each_import`。**冻结数据不等于冻结取数据的路径。**
-- **history-lost + 分叉曾无条件放行。** 那是 v1.30 修「永远红」时冲过了头（§0.1.30 记的正是这个摆动）。现在区分三态：*pristine + 无 DAG* → 绿（合法 squash 合入不误红）；*分叉 + DAG 可达* → 绿（DAG 承载 descent）；**分叉 + DAG 不可达 → 红**（仓库里已无任何东西能证明当前树自那个基线演进）。**这不是把摆动摆回去，是把一个二值判断拆成了它本来就该有的三态。**
+- **history-lost + 分叉曾无条件放行。** 那是 v1.30 修「永远红」时冲过了头（§0.1.30 记的正是这个摆动）。现在区分三态：*pristine* → 绿；*分叉 + ancestry 可证* → 绿；**分叉 + 无任何祖先携带 baseline tree → 红**。**← v1.32 更正**：本轮我把「ancestry 可证」错误地实现成「原 import commit 仍可达」，于是 squash 合入后落真实 Task-2 delta（一条合法路径）被判红——**这是我第三次造出永远红的门**。判据已改为**任一可达 ancestor 的 prefix tree 等于 fetched upstream tree**，跨任何合入方式存活。
 
 **P2-1 是我自己写的规矩没做到**：v1.30 往负例表加了 N-8/P-2/P-3，却把调用契约留在 `N-1..N-7 + P-1`——**加进表里而没加进调用，那三行当轮什么都没 gate 住**。这与 §0.1.28「手测写在提交消息里不构成可重放证据」同族，只是这次欠的是调用边。现已把 #10 的承重负例落成 `scripts/selftest-provenance.sh`（3 正 + 8 负）并接入 #10 的 CI——**跑生产 checker 本体，不是副本**，否则负例只证明副本的行为。
+
+#### 0.1.32 我的变异测试自己是错的（v1.32）
+
+Sol generation-8：2 P1 + 2 P2。两条 P1 都是我这几轮**已经写下判据、却只用在一处**的重演。
+
+**P1-1 —— 第三次造出永远红。** squash 合入 PR #10 之后落 PR-2 的真实 contract 接线，是一条完全合法的路径：base commit 仍持 pristine 的 vendored tree，**ancestry 客观存在**，消失的只是我指名当载体的那一个 commit。我判了红，而 spec 自己冻结着「不冻结 merge method」。判据改成真正该问的问题：**有没有任一可达 commit 的 prefix tree 等于 fetched upstream tree**。prefix tree 只在触碰它的 commit 上变化，所以那些 commit 加 HEAD 就是完备候选集。
+
+**P1-2 —— 判据 11 只用在了一格。** 我上一轮写下「断言粒度必须等于命题粒度」，然后把 root-tree 做成逐行绑定，**其余承重字段全留在全文件 `grep`**，连 row selector 本身都还是 `index($2, pfx)` 子串。Sol 两个反例：把行改名 `apps/qianwangyou-shadow` 仍打印「row for apps/qianwangyou … equal」；只互换两行的 **Exact upstream SHA 单元格**，两个 SHA 仍都"已记录"。**文档可以把 prefix→SHA 映射写错，而 checker 认证通过。**
+
+> 这是 §0.1.24 那条的第二次兑现失败：**冻结判据的同轮必须枚举它的全部适用点**。我枚举了「哪些地方在做绑定」，却没枚举「这一行里还有哪些字段是承重的」——**枚举的维度选错了，等于没枚举**。
+
+**P2-1 —— selftest 的标签在撒谎。** 它印 `PASS (3 positive, 8 negative)`，实际只有 6 条行为负例：N-7a 是正例，N-7b 只 `grep` 源码里两段字面量、`bash -c` 的结果还被丢弃。**grep 到一行代码，只证明那行存在，不证明它起作用。** 已重写为每条都执行生产 checker 并断言退出码，**计数由 harness 的计数器打印，不再手写**——手写的数字和真实执行是两个可以各自漂移的东西。
+
+**但这一轮最该记的，是我自己的变异测试是错的。**
+
+我按纪律给新负例做了变异验证：把修复退回去，看对应用例会不会失败。**两次变异都没打破测试。** 如果就此收工，我会带着"负例已验证"的错觉推出去。
+
+我去看了，两个变异都构造错了：
+
+| 变异 | 我以为移除了 | 实际 |
+|---|---|---|
+| 把 selector 退回 `index()` | 行选择的精确性 | **`r_prefix` 相等断言那层还在**，仍然判红 |
+| `rev-list \| tail -1` | ancestry 的祖先遍历 | `tail -1` 取到的是**最老**的 prefix-touching commit——恰恰就是 pristine 那个 |
+
+重做之后：同时移除两层精确性 → **N-2 失败**；ancestry 只看 HEAD → **P-4 失败**。两条都真正绑住了。
+
+> **一个因为变异构造错误而通过的变异测试，比没有变异测试更糟。** 它产出的不是"未验证"，是**假的"已验证"**——和这几轮我反复修的 false-green 是同一个东西，只不过这次长在验证工具上。
+>
+> 判据补第十二条：**变异测试必须先自证有效——变异之后目标用例必须失败。如果它仍然通过，先怀疑变异，不要相信结论。**
+
+四轮连起来看，我的错误正在沿着同一条线往上爬：产品代码 → 检查器 → 检查器的负例 → **负例的验证方法**。每往上一层，错误就更难被发现，因为上层工具的失败模式正好是"看起来一切正常"。
 
 ## 1. 事实基线与来源
 
@@ -2663,7 +2695,7 @@ done < "$TMP/changed"
 
 **调用契约（冻结）**：上表**每一行**都必须由 `scripts/selftest-task35-guard.sh` 真正执行——`N-1..N-8` 与 `P-1..P-3` 全部在内。**新增一行到表里而不加进调用，等于没加**：v1.30 补了 N-8/P-2/P-3 却把调用契约留在 `N-1..N-7 + P-1`，那三行当轮不构成任何回归门。
 
-**PR #10 的承重行为由 PR #10 自测，不推迟到本 task**：`scripts/selftest-provenance.sh`（3 正例 + 8 负例，含互换 root-tree 行、prefix 藏进 branch 字段、三字段畸形记录、history-lost 分叉）已接入 #10 的 CI，跑的是生产 checker 本体而非副本。
+**PR #10 的承重行为由 PR #10 自测，不推迟到本 task**：`scripts/selftest-provenance.sh`（**4 正例 + 9 负例**，计数由 harness 自身计数器打印、不手写）已接入 #10 的 CI，**每条都执行生产 checker 并断言退出码**，不以 grep 源码字面量充数。正例含 **squash 合入 + 真实 Task-2 contract delta 必绿**；负例含无 pristine 祖先的伪造终态、prefix-suffix 改名、重复行、SHA/root-tree 跨行互换、真实执行的 iterator 重定义 fork。**每条都经变异验证**：把修复退回去，该条必须失败。
 
 `P-1` 不可省略：**只跑负例证明不了检查器在合法状态下会绿**，而一道永远红的门和一道永远绿的门都不是门（§0.1.27）。
 
