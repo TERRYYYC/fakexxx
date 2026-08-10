@@ -56,12 +56,31 @@ SHA. Those trailers are a second, independent record of the same fact.
 
 `scripts/check-provenance.sh` asserts, per prefix:
 
+0. the frozen record set still carries every prefix the gate is responsible for,
+   and is unchanged between the first and last section (a shortened set would
+   make the gate skip an app while still exiting 0);
 1. this document records the URL, branch, exact SHA and the fakexxx import commit;
-2. the recorded import commit exists and carries the upstream root tree at that prefix;
-3. the upstream object is **fetched from the upstream URL** and the committed
-   tree object of the prefix equals the upstream commit's root tree;
-4. the working tree has not drifted from the verified commit;
-5. the entry files exist (`gradlew`, `app/build.gradle*`, `app/src/main/AndroidManifest.xml`).
+2. **the anchor** — this document's recorded upstream **root tree** equals the
+   tree of the upstream object actually fetched from the upstream URL. This is
+   checked at **every** stage and depends on no local history, so it survives a
+   squash or rebase merge intact;
+3. *additionally, and only while it is still reachable*, the recorded import
+   commit carries that upstream tree at the prefix. This is DAG evidence: a
+   squash/rebase merge legitimately discards it, so it is a bonus, never the
+   anchor;
+4. at `--stage import` only, the committed tree of the prefix still equals the
+   upstream root tree (pristine). At `contract`/`full` divergence is expected and
+   **this gate does not bound which paths diverged** — that is an ownership
+   question for the boundary gate, not a provenance question;
+5. the working tree has not drifted from the verified commit;
+6. the entry files exist (`gradlew`, `app/build.gradle*`, `app/src/main/AndroidManifest.xml`).
+
+**What step 2 replaced.** An earlier version made the reachable import commit the
+load-bearing proof, with section 2 of the script deferring to section 1 and
+section 1 deferring back to section 2. Once the DAG was gone both statements
+pointed at each other: a fresh single-commit clone passed `--stage contract` with
+arbitrary divergence in the vendored trees. Provenance is a claim about content,
+so it is now carried by content.
 
 Step 3 fetches explicitly because CI checkouts are shallow and do not contain
 upstream objects. An unobtainable object is a **hard failure**, never a skip — a

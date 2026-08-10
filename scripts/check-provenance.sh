@@ -83,6 +83,18 @@ IMPORTS="
 apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e
 apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944
 "
+readonly IMPORTS
+
+# Single, non-forkable iterator.
+#
+# The --print-import handler and every production loop below read the frozen
+# records through this one function. Sharing a variable name is not enough: a
+# reassignment placed after the handler but before the loops made the machine
+# query report one value while the gate consumed another, and both exited 0.
+# `readonly` makes any later assignment a hard error instead of a silent fork,
+# and routing every consumer through each_import means query and gate cannot
+# take different code paths.
+each_import() { printf '%s\n' "$IMPORTS"; }
 
 # --print-import <prefix> handler
 #
@@ -99,9 +111,7 @@ if [ -n "$PRINT_IMPORT" ]; then
     [ "$prefix" = "$PRINT_IMPORT" ] || continue
     [ -z "$found" ] || { printf 'duplicate IMPORTS entry for %s\n' "$PRINT_IMPORT" >&2; exit 1; }
     found="$sha"
-  done <<EOF
-$(printf '%s\n' "$IMPORTS")
-EOF
+  done < <(each_import)
   [ -n "$found" ] || { printf 'no IMPORTS entry for %s\n' "$PRINT_IMPORT" >&2; exit 1; }
   printf '%s\n' "$found"
   exit 0
@@ -124,6 +134,26 @@ fail() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 section() { printf '\n== %s ==\n' "$1"; }
 
 # ---------------------------------------------------------------------------
+section "0a. frozen record set"
+
+# The loops below are only as complete as $IMPORTS. A silently shortened record
+# set makes them skip an entire app while every executed check still passes and
+# the script exits 0 — the gate would report success for an app it never looked
+# at. So assert membership before using it.
+#
+# Read into a variable and match with a shell pattern rather than piping into
+# `grep -q`: `grep -q` exits at the first match, the writer takes SIGPIPE, and
+# under `set -o pipefail` the pipeline reports failure on success. That exact
+# shape already turned a passing state red once in this script.
+IMPORTS_RECORDS="$(each_import)"
+for required in apps/cellrebel-auto apps/qianwangyou; do
+  case "$IMPORTS_RECORDS" in
+    *"${required}|"*) pass "frozen record set still carries $required" ;;
+    *) fail "frozen record set no longer carries $required — the gate would skip it silently" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
 section "0. fetch upstream objects"
 
 # This runs before every other section because both the document check and the
@@ -143,9 +173,7 @@ while IFS='|' read -r prefix url branch sha; do
   else
     fail "cannot fetch $sha from $url (required to verify $prefix; not skippable)"
   fi
-done <<EOF
-$(printf '%s\n' "$IMPORTS")
-EOF
+done < <(each_import)
 
 # ---------------------------------------------------------------------------
 section "1. provenance document"
@@ -168,9 +196,29 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
         fail "$PROVENANCE_DOC does not record '$token'"
       fi
     done
-  done <<EOF
-$(printf '%s\n' "$IMPORTS")
-EOF
+  done < <(each_import)
+
+  # ---- load-bearing, merge-method-independent anchor ----
+  #
+  # The document claims a root tree for each upstream SHA. That claim is checked
+  # against the object actually fetched from the upstream remote, so it holds at
+  # every stage, after any merge method, in a fresh single-commit clone. Nothing
+  # here depends on local history existing.
+  #
+  # This is the assertion that used to be delegated to "the import commit", and
+  # it is why losing the DAG no longer removes the proof: provenance is a claim
+  # about content, so it is carried by content.
+  while IFS='|' read -r prefix url branch sha; do
+    [ -z "${prefix:-}" ] && continue
+    upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
+    if [ -z "$upstream_tree" ]; then
+      fail "upstream object $sha unavailable; cannot verify the root tree recorded for $prefix"
+    elif grep -qF -- "$upstream_tree" "$PROVENANCE_DOC"; then
+      pass "$PROVENANCE_DOC records the true upstream root tree $upstream_tree for $prefix (verified against ${url##*/}@${sha:0:9})"
+    else
+      fail "$PROVENANCE_DOC does not record the true upstream root tree for $prefix (expected $upstream_tree from ${url##*/}@${sha:0:9})"
+    fi
+  done < <(each_import)
 
   # Every import must name the fakexxx commit that introduced it, and that
   # commit must itself carry the upstream tree at the prefix.
@@ -181,14 +229,18 @@ EOF
       fail "$PROVENANCE_DOC does not record an import commit for $prefix"
       continue
     fi
-    # The import commit is DAG evidence. A squash or rebase merge legitimately
-    # discards it, and a correct tree must not be reported as a provenance
-    # failure just because someone used a different merge button. So: assert
-    # the pairing only when the commit is still reachable. The load-bearing,
-    # merge-method-independent proof is section 2 (fetched upstream tree +
-    # confined divergence), which depends on no local history at all.
+    # The import commit is *additional* DAG evidence, not the anchor. A squash or
+    # rebase merge legitimately discards it, so it is asserted only while it is
+    # still reachable.
+    #
+    # The previous version said the load-bearing proof was "section 2", while
+    # section 2 said the baseline was "proven at the import commit in section 1".
+    # With the DAG gone both statements pointed at each other and nothing was
+    # actually proven: a fresh single-commit clone passed --stage contract with
+    # arbitrary divergence in the vendored trees. The anchor is now the root-tree
+    # assertion directly above, which stands on its own.
     if ! git cat-file -e "${import_commit}^{commit}" 2>/dev/null; then
-      pass "import commit $import_commit for $prefix not reachable (squash/rebase merge); DAG evidence skipped, content proof in section 2 still applies"
+      pass "import commit $import_commit for $prefix not reachable (squash/rebase merge); DAG evidence unavailable — the root-tree anchor above is unaffected"
       continue
     fi
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
@@ -203,9 +255,7 @@ EOF
     else
       fail "recorded import commit ${import_commit} does not carry upstream tree at $prefix (expected '$upstream_tree', found '${import_tree:-<none>}')"
     fi
-  done <<EOF
-$(printf '%s\n' "$IMPORTS")
-EOF
+  done < <(each_import)
 fi
 
 # ---------------------------------------------------------------------------
@@ -236,10 +286,15 @@ while IFS='|' read -r prefix url branch sha; do
   elif [ "$local_tree" = "$upstream_tree" ]; then
     pass "$prefix is still pristine at ${sha:0:9} (not required at stage $STAGE)"
   else
-    # Divergence is EXPECTED here. The immutable proof is section 1: the
-    # recorded import commit still carries the upstream tree, so the baseline
-    # remains provable no matter what later PRs change on top of it.
-    pass "$prefix has diverged from upstream (allowed at stage $STAGE; baseline proven at the import commit in section 1)"
+    # Divergence is EXPECTED here and this gate does not bound it.
+    #
+    # What section 1 proved is the *identity of the baseline* (the recorded root
+    # tree really is the upstream tree at the recorded SHA). It did not prove,
+    # and this check does not prove, that the current divergence is authorised —
+    # that is an ownership question, enforced by the owner-matrix boundary gate,
+    # not by provenance. An earlier comment here claimed "confined divergence";
+    # no such confinement existed, so the claim is withdrawn rather than faked.
+    pass "$prefix has diverged from upstream (allowed at stage $STAGE; baseline identity proven by the root-tree anchor in section 1 — this gate does not bound which paths diverged)"
   fi
 
   # The digest above describes committed content. Assert the working tree has
@@ -252,9 +307,7 @@ while IFS='|' read -r prefix url branch sha; do
   else
     pass "$prefix working tree matches HEAD"
   fi
-done <<EOF
-$(printf '%s\n' "$IMPORTS")
-EOF
+done < <(each_import)
 
 # ---------------------------------------------------------------------------
 section "3. entry files"
@@ -269,6 +322,20 @@ while read -r entry; do
 done <<EOF
 $(printf '%s\n' "$ENTRY_FILES")
 EOF
+
+# ---------------------------------------------------------------------------
+section "4. frozen record set unchanged"
+
+# Section 0a self-checked the record set; every section since then re-read it
+# through each_import. Assert the set the gate finished on is the same one it
+# vetted, so "what was checked" and "what was verified as complete" cannot be
+# two different things. `readonly` already blocks reassignment today; this
+# survives a future edit that removes it.
+if [ "$(each_import)" = "$IMPORTS_RECORDS" ]; then
+  pass "record set identical to the one vetted in section 0a"
+else
+  fail "record set changed during the run — sections above did not all read the same imports"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n'
