@@ -57,12 +57,11 @@ mk_fulldag() {
   # Identity is persisted for the same reason mk_squashed persists it: the tampers
   # commit again inside the fixture, a clone inherits no user.email/user.name, and
   # macOS derives one from user@host while a CI runner refuses.
-  git clone -q --no-checkout "$REPO_ROOT" "$d" >/dev/null 2>&1
-  ( cd "$d" && git config user.email s@s && git config user.name s \
-      && git checkout -q -B fixture "$sha" ) >/dev/null 2>&1
+  git clone -q "$REPO_ROOT" "$d" >/dev/null 2>&1
   cp "$PROD" "$d/scripts/check-provenance.sh"
   cp "$REPO_ROOT/$DOC" "$d/$DOC"
-  ( cd "$d" && git add -A >/dev/null && git commit -qm "working-tree state under test" ) >/dev/null 2>&1
+  ( cd "$d" && git add -A >/dev/null \
+      && git -c user.email=s@s -c user.name=s commit -qm "working-tree state under test" ) >/dev/null 2>&1
   ( cd "$d" && git fetch --no-tags -q https://github.com/TERRYYYC/FakeGps-test.git "$SHA_QWY" ) >/dev/null 2>&1
   printf '%s\n' "$d"
 }
