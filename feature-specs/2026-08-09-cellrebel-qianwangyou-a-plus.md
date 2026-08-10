@@ -106,6 +106,7 @@ source_threads:
 | **v1.27** | PR-0.2 第二十三轮 | Sol 判 P1 = **合法状态必红**：`git log --all \| grep -qxF` 在 `set -euo pipefail` 下，命中即关管道→`git log` 收 SIGPIPE→`PIPESTATUS=(141 0)`，**trailer 真实存在时整条反而非零**。同修两条 P2：`--all` 未绑当前历史、未要求 split SHA 与 `git-subtree-dir` 成对；`awk` 扫整份脚本而非 `IMPORTS` **赋值块**，块外一条同形 decoy 即可让本检查与 `check-provenance.sh` 循环读到不同 SHA。见 §0.1.27 |
 | **v1.28** | PR-0.2 第二十四轮 | Sol 判 2 P1 + 4 P2。**P1-1** PR body 仍绑旧 HEAD 与错 stats（§21 #13 每 HEAD exact equality 失配）。**P1-2** trailer 是 DAG 证据，operator 若 squash 合 #10 会合法丢掉它 → 未来 gate 必红；承重记录改为 `qwy-subtree-tree`（tree 跨 squash 存活），DAG 降为可达时才断言。**P2**：`--grep` 命中的是正文子串不是真 trailer（散文即可假绿），改 `interpret-trailers --parse`；range awk 会拼接多个 `IMPORTS` 块而 Bash 只用最后一次赋值，加**恰好一次赋值**断言；修订正文顺序回归；补齐 8 条可重放正负例，见 §0.1.28 |
 | **v1.29** | PR-0.2 第二十五轮 | Sol 判 3 P1 + 2 P2，**三条 P1 是同一个设计错误的三个面：用历史形状承载内容命题**。**P1-1** Task 3.5 先跑的 `check-provenance.sh` 仍硬要求 import commit 存在，我上一版的 tree/trailer 逻辑在那道 gate 之外——**改 PR #10 的 checker 本身**，DAG 证据降为可达时才断言（fresh squash clone 实测 rc=1 → rc=0）。**P1-2** `qwy-subtree-tree` 取错时间截面（baseline 先于源码修改提交，最终态必不相等）→ 删除该字段，不变量改为**相对 upstream 树的分叉受限**，pristine 与终态都成立。**P1-3** selftest 无合法执行边且归属写成 Fable5 独占的 `acceptance/**` → 移入 Opus5 独占的 root `scripts/`，guard 与 selftest 共用同一实现并由 Verify 真正调用。**P2-1** 文本 parser 仍可与 runtime 分叉（`printf -v` / `export`）→ PR #10 新增 `--print-import` 机器查询。**P2-2** body 三处短 SHA 标题自称当前 + 历史清单不穷举 → 改用 git 派生的 21 个 HEAD 全血统，见 §0.1.29 |
+| **v1.30** | PR-0.2 第二十六轮 | Sol 判 3 P1 + 2 P2（耦合 PR #10）。**P1-1** provenance 锚点是两节互相指望——DAG 一丢，history-lost + 任意篡改仍 `PASS (all checks)`（已复现）；锚点改为 **fetched upstream root tree**（内容承载，跨任何合入方式存活），import commit 降为可达时才断言。**P1-2** 分叉检查拿 upstream 与最终 HEAD 全量比较 → 把 Task 2/3 的合法改动判越界；且在 `$TMP/derived` 生成前就用它（grep rc=2）。按三载体拆分：provenance 归 #10、前序分叉不归本 gate、本 task 只看自己 merge-base 之后的 delta。**P1-3** Verify 调用 sibling 才交付的 `acceptance/**` 脚本 = 永远执行不到的指令，已移除。**P2-1** `--print-import` 与生产循环共享变量名而非代码路径，改 `readonly` + 单一 `each_import`，并加冻结记录集自检与末尾复检。**P2-2** PR body lineage/provenance 表回填。见 §0.1.30 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -761,6 +762,42 @@ P2-1 的 `printf -v IMPORTS` / `export IMPORTS=` 让我最终承认：**任何"�
 > **教训**：P2-2 值得单记，因为它是本 session 第四次同型。上一轮我明确写了"只修点名那处就是补锅匠，所以做了全量扫描"——**而那次扫描本身是窄的**：正则写成 `当前 HEAD \`[0-9a-f]{40}\``，只覆盖全 SHA，三处 8 位短 SHA 全部逃逸。
 >
 > 根因是我一直在**扫"断言 + 值"的组合形态**，而我要保证的性质是"任何自称当前 HEAD 的文本都必须等于当前 HEAD"——性质只关于**断言短语**，值的形态是自由的。改法：先枚举断言短语的**全部**出现（`当前 HEAD` 共 6 处），再逐处检查其值，而不是让 pattern 同时承担"找到"和"判定"两件事。**让查询形态决定结论范围，就是这个病本身。**
+
+#### 0.1.30 修错了方向的检查，会冲到相反的错（v1.30）
+
+Sol 判 3 P1 + 2 P2，其中 P1-1、P2-1 落在耦合的 PR #10。
+
+**P1-1 是一个循环论证。** section 1 在 import commit 不可达时说「内容证明在 section 2 还成立」，section 2 在树分叉时说「基线由 section 1 的 import commit 证明」。**DAG 一丢，两边互相指望，谁都没证。** 我按 Sol 给的复现跑了一遍：fresh single-commit（两个 import commit 真 ABSENT）+ 篡改 `apps/qianwangyou/app/build.gradle` → `rc=0`、`PASS (all checks)`。
+
+修法是把锚点从**历史形状**换成**内容**：doc 记录的 upstream root tree 必须等于从上游实际 fetch 到的对象的树。它在每个 stage 都成立、不依赖任何本地历史、跨 squash/rebase 存活。import commit 降为可达时才断言的加分证据。
+
+**但真正该记的是这三轮的形状。** 同一道门，我连改三次，每次都冲到上一次的反面：
+
+| 版本 | 症状 | 我的修法 | 结果 |
+|---|---|---|---|
+| v1.28 前 | import commit 不可达 → **必红**（squash 合入后 CI 永久红） | 不可达时直接 PASS | **变成永远绿**：任意篡改都过 |
+| v1.29 | 永远绿 | 拿 upstream 树与最终 HEAD 全量比较，要求差异落在 5 文件集合内 | **又变成永远红**：Task 2/3 的合法改动必然在集合外 |
+| v1.30 | —— | 先问「这道门到底回答哪个问题」 | 三个问题拆三个载体 |
+
+> **我一直在修症状的方向，而不是先确定这道门该回答哪个问题。** 「永远红」的反面不是「永远绿」，是**问对问题**。一个差异不可能同时回答"基线从哪来""前序改了什么""本 task 改了什么"——硬要它回答三个，就只能在两种失败模式之间来回摆。
+
+Sol 给的拆法是解药，冻结如下：
+
+| 问题 | 载体 | 时间截面 | 归谁 |
+|---|---|---|---|
+| 基线从哪来 | fetched upstream **root tree** | 与历史无关，任何时刻 | PR #10 `check-provenance.sh` |
+| 前序 feature 改了什么 | —— | Task 2/3 的 PR | **不归任何 provenance/scope gate** |
+| 本 task 改了什么 | `git merge-base origin/main HEAD` 之后的 delta | 本 PR 自己 | Task 3.5 门 3 |
+
+另外三条：
+
+- **P1-2 的第二半**：分叉循环用的 `$TMP/derived` 在下面才生成，文件不存在时 `grep` 返回 2 → 5 个授权文件也全部 exit 1。**先用后建**，一条纯顺序错误，但后果和逻辑错误一样是永远红。
+- **P1-3**：Task 3.5 的 Verify 调用 `acceptance/scripts/check-forbidden-boundaries.sh`，而它由 sibling Task 7/I5（Fable5）交付，`I3.5` 只依赖 `I3` —— 按 DAG 本 task 可以先跑，届时文件不存在；而 `acceptance/**` 是 Fable5 独占，本 task owner 是 Opus5 也无权补。**一条永远执行不到的指令不是门。** 这与 §0.1.28 里我给自己的负例脚本挑了别人独占目录，是同一个错误。
+- **P2-1**：`--print-import` 与生产循环**共享变量名，不共享代码路径**。在 handler 之后、循环之前注入 `printf -v IMPORTS`，query 报原值、gate 消费新值，两者都 exit 0（已复现）。改 `readonly` + 单一 `each_import`；再加两道：section 0a 断言冻结记录集仍含每个 prefix（否则整个 app 被跳过而仍绿），section 4 断言跑完时的记录集与 0a 自检过的是同一份。
+
+> **同名不是同源。** 两处读同一个变量名，但读的时刻不同，就是两个值。要让它们不可分叉，得让它们走同一条代码路径，并把数据冻住。
+
+section 0a 的成员判定特意**读进变量再用 shell 模式匹配**，没有管道进 `grep -q`——那正是 §0.1.27 里让合法状态变红的 SIGPIPE 形状。**这次是主动避开，不是又踩一次。**
 
 ## 1. 事实基线与来源
 
@@ -2468,8 +2505,13 @@ TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT     # collision-safe，禁止固定 
 (cd apps/qianwangyou && ./gradlew testDebugUnitTest)  # 不得因清债破坏既有行为
 (cd apps/qianwangyou && ./gradlew assembleDebug)      # 不得因清债破坏构建
 ./scripts/check-provenance.sh --stage contract        # 清债是合法分叉
-./acceptance/scripts/check-forbidden-boundaries.sh
 ./scripts/verify-a-plus.sh --lane pr-3.5              # 空矩阵集
+# 注意：这里【不】调用 acceptance/scripts/check-forbidden-boundaries.sh。
+# 它由 sibling Task 7 / I5（Fable5）交付，而 I3.5 只 depends I3 —— 按 DAG 本 task
+# 可以早于 I5 执行，届时该文件根本不存在，Verify 会以 "No such file" 必红；而
+# `acceptance/**` 是 Fable5 独占，本 task 的 owner 是 Opus5，也无权补上它。
+# 一条永远执行不到的指令不是门。本 task 的越界判定由下面门 3 自带的断言承担，
+# 它只用 git 与本仓已存在的文件，不依赖任何 sibling 交付物。
 
 # ---- 门 2：授权集合必须【从冻结报告派生】，不是由 baseline 自行声明 ----
 BASELINE=docs/provenance/qwy-lint-baseline.md
@@ -2505,19 +2547,20 @@ done
 # ——合法终态必红。事后回填声明求绿则退化为同作者对最终 tree 的自洽抄录，失去 upstream
 # 语义。两条路都不成立，故该字段已删除。
 #
-# 正确的不变量不是"树相等"，而是**分叉受限**：当前树相对 upstream 树的差异，必须
-# 落在本 task 已声明的授权集合内。它由 fetched upstream 对象锚定，不依赖任何本地
-# 历史，因此跨 squash / rebase 存活；且它在 pristine 与最终态【都成立】。
-UP_TREE=$(git rev-parse --quiet --verify "${FROZEN}^{tree}") \
-  || { echo "UPSTREAM OBJECT UNAVAILABLE (run check-provenance first)"; exit 1; }
-git diff --name-only "$UP_TREE" "HEAD:apps/qianwangyou" > "$TMP/diverged"
-while read -r rel; do
-  [ -n "$rel" ] || continue
-  p="apps/qianwangyou/$rel"
-  [ "$p" = "$ALLOWED_EXTRA" ] && continue
-  grep -qxF -- "$p" "$TMP/derived" \
-    || { echo "DIVERGES FROM UPSTREAM OUTSIDE AUTHORIZED SET: $p"; exit 1; }
-done < "$TMP/diverged"
+# 上一版又错了一次，方向相反：它拿 upstream 树与最终 HEAD 做**全量**差异，再要求每条
+# 差异都落在本 task 的 5 文件集合内。但 Task 3.5 排在 Task 2/3 **之后**，前序已合法
+# 修改 qwy 的 Gradle / settings / Manifest / integration —— 实测 contract HEAD
+# `eddf9729` 相对 upstream 已有 `app/build.gradle`、`build.gradle`、`settings.gradle`
+# 等差异，它们不可能落进 5 个 `app/src/main/**` 的 lint 集合。**于是前序合法工作会被
+# 判越界，又一道永远红的门。** 而且该循环用的 `$TMP/derived` 在下面 (d) 才生成，
+# 文件不存在时 `grep` 返回 2，5 个授权文件也会全部 exit 1。
+#
+# 三件事必须绑三个不同的载体与时间截面（不能用一个差异同时回答）：
+#   ① baseline provenance  —— upstream 树，由 PR #10 的 check-provenance 承担
+#   ② 前序 feature divergence —— Task 2/3 的合法改动，**不归本 gate 管**
+#   ③ 本 task 的 scope delta —— 只看本 PR 自己改了什么，见下方门 3
+# 因此这里不再做 upstream→final 的全量比较；本 task 的授权判定完全由门 3 承担，
+# 而门 3 的基线是本 PR 自己的 merge-base，不是 upstream。
 
 # (c) digest 绑定（对已规范化的报告）——同样先证两侧非空、单值、64-hex
 REC=$(sed -n 's/^report-sha256: *//p' "$BASELINE")
@@ -2549,7 +2592,13 @@ diff -q "$TMP/derived" "$TMP/declared" >/dev/null \
   || { echo "DECLARED SET != DERIVED SET (baseline 被手工增删)"; diff "$TMP/derived" "$TMP/declared"; exit 1; }
 
 # ---- 门 3：本 PR 改动必须落在 派生集合 ∪ {唯一具名新增文件} 内 ----
-git diff --name-only origin/main...HEAD > "$TMP/changed"
+# 本 task 的 scope delta 绑自己的 pre-fix base：merge-base 之后本 PR 改了什么。
+# 用 upstream 或 main 的当前 tip 都会把前序 task 的合法改动算进来。
+BASE_REF=$(git merge-base origin/main HEAD) \
+  || { echo "CANNOT RESOLVE MERGE-BASE"; exit 1; }
+printf '%s' "$BASE_REF" | grep -qE '^[0-9a-f]{40}$' \
+  || { echo "MERGE-BASE NOT A 40-HEX SHA: '$BASE_REF'"; exit 1; }
+git diff --name-only "$BASE_REF" HEAD > "$TMP/changed"
 CHECKED=0
 while read -r p; do
   case "$p" in apps/qianwangyou/*) ;; *) continue;; esac
@@ -2577,20 +2626,23 @@ done < "$TMP/changed"
 
 | # | 构造 | 期望 |
 |---|---|---|
-| N-1 | `IMPORTS` 追加第二个赋值块（只含 cellrebel） | 红 · `IMPORTS ASSIGNED 2 TIMES` |
-| N-2 | 改成 one-line `IMPORTS="…"` 或 single-quote 再赋值 | 红 · 同上或 `NOT IN CANONICAL BLOCK FORM` |
-| N-3 | 赋值块内删 qwy 行、块外留同形 decoy | 红 · `NOT A 40-HEX SHA: ''` |
-| N-4 | commit 正文**散文**里提到两条 `git-subtree-*` 字符串（非真 trailer） | 红 · `NO REAL PAIRED TRAILER`（`--grep` 会命中，`interpret-trailers --parse` 为 0 行） |
-| N-5 | 真 SHA 配错 `git-subtree-dir` | 红 · 同上 |
-| N-6 | 在授权集合外改一个 qwy 文件（相对 upstream 树产生未授权分叉） | 红 · `DIVERGES FROM UPSTREAM OUTSIDE AUTHORIZED SET` |
-| N-7 | `IMPORTS` 后追加 `printf -v IMPORTS …` / `export IMPORTS=…` 再赋值 | 红 · 机器查询与 runtime 同源，两者一起变，绝不分叉（对照：旧的文本 parser 在此仍返回合法 SHA） |
+| N-1 | baseline 手加一行（raw 6 行） | 红 · `DECLARED RAW LINE COUNT != 5` |
+| N-2 | 正确 5 行 + 1 条重复（unique 仍 5） | 红 · `DUPLICATE LINES IN BASELINE` |
+| N-3 | 用一个 warning-only 文件替换 baseline 中的一条 | 红 · `DECLARED SET != DERIVED SET` |
+| N-4 | 报告保留绝对 checkout 路径（未规范化） | 红 · `REPORT NOT NORMALIZED` |
+| N-5 | `generated-at-commit:` 留空 / 删除该行 | 红 · `NOT A 40-HEX SHA: ''`（**删空必红**，§0.1.26 第十条） |
+| N-6 | 在授权集合外改一个 qwy 文件（本 PR 自己的 delta） | 红 · `OUT OF SCOPE: <path>` |
+| N-7 | `check-provenance.sh` 的 `IMPORTS` 在 handler 之后重新赋值 | **赋值本身硬错**（`readonly`），query 与 gate 不可分叉；配套 N-7b：直接删掉 `IMPORTS` 里的 qwy 记录 → 红 · `frozen record set no longer carries apps/qianwangyou` |
+| N-8 | 篡改 provenance doc 记录的 upstream root tree | 红 · `does not record the true upstream root tree`（PR #10 侧锚点） |
 | **P-1** | **未改动的生产态** | **绿 · exit 0** |
+| **P-2** | **history-lost（import commit 全不可达）+ pristine** | **绿 · exit 0 —— 合法合入路径不得误红** |
+| **P-3** | **Task 2/3 已合法改过 qwy Gradle/Manifest 之后再跑本 task** | **绿 —— 前序合法分叉不归本 gate 管** |
 
 `P-1` 不可省略：**只跑负例证明不了检查器在合法状态下会绿**，而一道永远红的门和一道永远绿的门都不是门（§0.1.27）。
 
-**关于 PR #10 的合入方式（冻结）**：本 gate 与 `check-provenance.sh` **都不要求任何 merge 方式**。DAG 证据（import commit、`git-subtree-*` trailer）只在仍可达时断言；squash / rebase 合法丢弃它们时如实降级并说明，**不判红**。承重证明是 **fetched upstream tree + 分叉受限**，它不依赖任何本地历史。
+**关于 PR #10 的合入方式（冻结）**：本 gate 与 `check-provenance.sh` **都不要求任何 merge 方式**。DAG 证据（import commit、`git-subtree-*` trailer）只在仍可达时断言；squash / rebase 合法丢弃它们时如实降级并说明，**不判红**。承重证明是 **fetched upstream root tree 锚点**（PR #10 section 1），它不依赖任何本地历史。**「分叉受限」已撤回**：本 gate 不再拿 upstream 与最终 HEAD 做全量比较——Task 3.5 排在 Task 2/3 之后，那样会把前序合法改动判越界（见门 2 上方注释）。本 task 的授权判定只看自己 merge-base 之后的 delta。
 
-实测（`git archive aa6d93a` → 新仓单 commit，两个 import commit 真正 ABSENT）：旧 checker `--stage contract` **rc=1**（`recorded import commit does not exist`），改后 **rc=0**，而 `--stage import` 仍严格。**把一条合法的合入路径做成必红，就是 SIGPIPE 那个错误换了触发者。**
+实测（`git archive aa6d93a` → 新仓单 commit，两个 import commit 真正 ABSENT）：旧 checker `--stage contract` **rc=1**（`recorded import commit does not exist`），改后 **rc=0**，而 `--stage import` 仍严格。**但那一版又走过了头**：history-lost 之后任意篡改 qwy tracked 文件仍 rc=0（实测 `PASS (all checks)`），因为 section 1 说「内容证明在 section 2」、section 2 说「基线由 section 1 的 import commit 证明」，DAG 一丢两边互相指望。现由 root-tree 锚点独立承担，已实测 N-8 判红。**把一条合法的合入路径做成必红，就是 SIGPIPE 那个错误换了触发者。**
 
 **规范化规则（冻结）**：`qwy-lint-baseline-report.xml` 提交前必须把每个 `location/@file` 由绝对 checkout 路径改写为 **repo-relative**（去掉仓库根前缀，不做其他修改）。**只有规范化后的报告才有可重放的 digest**——否则换一个 checkout 目录，SHA-256 就变（实测 `731feb…` → `9111c3…`），"另一 reviewer 在冻结 commit 重跑得到同一 digest"这条根本不成立。
 
