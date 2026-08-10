@@ -44,6 +44,14 @@ jobs:
         # so it is asserted only while still reachable.)
         run: ./scripts/check-provenance.sh --stage import
 
+      - name: selftest-provenance
+        # The negative matrix is a regression gate, not a table in a document.
+        # It runs the production check-provenance.sh (never a copy) against
+        # throwaway clones, so a negative can only start passing if the real
+        # predicate changed. Three of these eight were shipped defects that a
+        # reviewer had to find by hand.
+        run: ./scripts/selftest-provenance.sh
+
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.
     name: cellrebel-auto (unit + lint + assemble)

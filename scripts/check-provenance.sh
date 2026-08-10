@@ -95,6 +95,8 @@ readonly IMPORTS
 # and routing every consumer through each_import means query and gate cannot
 # take different code paths.
 each_import() { printf '%s\n' "$IMPORTS"; }
+readonly -f each_import   # 冻结函数，不只是冻结变量：readonly IMPORTS 挡不住在
+                          # handler 之后重定义 each_import 来喂给生产循环另一份记录
 
 # --print-import <prefix> handler
 #
@@ -146,12 +148,33 @@ section "0a. frozen record set"
 # under `set -o pipefail` the pipeline reports failure on success. That exact
 # shape already turned a passing state red once in this script.
 IMPORTS_RECORDS="$(each_import)"
-for required in apps/cellrebel-auto apps/qianwangyou; do
-  case "$IMPORTS_RECORDS" in
-    *"${required}|"*) pass "frozen record set still carries $required" ;;
-    *) fail "frozen record set no longer carries $required — the gate would skip it silently" ;;
-  esac
-done
+
+# Compare the set of FIRST FIELDS exactly. A substring test over the whole record
+# block is not a membership test: putting "apps/qianwangyou|" into the *branch*
+# field made a one-record set report both prefixes present while the production
+# loops skipped qwy entirely and the run still exited 0.
+EXPECTED_PREFIXES="apps/cellrebel-auto
+apps/qianwangyou"
+ACTUAL_PREFIXES="$(printf '%s\n' "$IMPORTS_RECORDS" | sed '/^$/d' | cut -d'|' -f1 | sort)"
+if [ "$ACTUAL_PREFIXES" = "$(printf '%s\n' "$EXPECTED_PREFIXES" | sort)" ]; then
+  pass "frozen record set carries exactly the expected prefixes (first-field set equality)"
+else
+  fail "frozen record set prefix mismatch — expected [$(printf '%s' "$EXPECTED_PREFIXES" | tr '\n' ' ')], got [$(printf '%s' "$ACTUAL_PREFIXES" | tr '\n' ' ')]"
+fi
+
+# Every record must have exactly 4 fields; a short or padded record shifts the
+# meaning of every downstream $sha / $url read.
+while IFS= read -r rec; do
+  [ -n "$rec" ] || continue
+  nf="$(printf '%s' "$rec" | awk -F'|' '{print NF}')"
+  if [ "$nf" -eq 4 ]; then
+    pass "record for $(printf '%s' "$rec" | cut -d'|' -f1) has 4 fields"
+  else
+    fail "malformed IMPORTS record ($nf fields, expected 4): $rec"
+  fi
+done <<REC
+$IMPORTS_RECORDS
+REC
 
 # ---------------------------------------------------------------------------
 section "0. fetch upstream objects"
@@ -176,6 +199,8 @@ while IFS='|' read -r prefix url branch sha; do
 done < <(each_import)
 
 # ---------------------------------------------------------------------------
+DAG_PROVEN=""
+
 section "1. provenance document"
 
 if [ -f "$PROVENANCE_DOC" ]; then
@@ -211,12 +236,22 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
   while IFS='|' read -r prefix url branch sha; do
     [ -z "${prefix:-}" ] && continue
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
+    # Read the root tree from THIS prefix's row, field by field. A document-wide
+    # grep only proves the hash appears somewhere: swapping the two rows' root
+    # trees left both hashes present and both prefixes passed. Membership in the
+    # file is not an assignment to a prefix.
+    recorded_tree="$(awk -F'|' -v pfx="$prefix" '
+        $0 ~ /^\|/ && index($2, pfx) {
+          gsub(/[` \t]/, "", $6); print $6; exit
+        }' "$PROVENANCE_DOC")"
     if [ -z "$upstream_tree" ]; then
       fail "upstream object $sha unavailable; cannot verify the root tree recorded for $prefix"
-    elif grep -qF -- "$upstream_tree" "$PROVENANCE_DOC"; then
-      pass "$PROVENANCE_DOC records the true upstream root tree $upstream_tree for $prefix (verified against ${url##*/}@${sha:0:9})"
+    elif [ -z "$recorded_tree" ]; then
+      fail "$PROVENANCE_DOC has no root-tree cell on the row for $prefix"
+    elif [ "$recorded_tree" = "$upstream_tree" ]; then
+      pass "$PROVENANCE_DOC row for $prefix records root tree $recorded_tree, equal to ${url##*/}@${sha:0:9}"
     else
-      fail "$PROVENANCE_DOC does not record the true upstream root tree for $prefix (expected $upstream_tree from ${url##*/}@${sha:0:9})"
+      fail "$PROVENANCE_DOC row for $prefix records root tree '$recorded_tree' but ${url##*/}@${sha:0:9} has '$upstream_tree'"
     fi
   done < <(each_import)
 
@@ -239,10 +274,13 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
     # actually proven: a fresh single-commit clone passed --stage contract with
     # arbitrary divergence in the vendored trees. The anchor is now the root-tree
     # assertion directly above, which stands on its own.
-    if ! git cat-file -e "${import_commit}^{commit}" 2>/dev/null; then
-      pass "import commit $import_commit for $prefix not reachable (squash/rebase merge); DAG evidence unavailable — the root-tree anchor above is unaffected"
+    if ! git merge-base --is-ancestor "$import_commit" HEAD 2>/dev/null; then
+      # Object existence is not reachability: `git cat-file -e` succeeds for an
+      # object that is present but no longer an ancestor of HEAD.
+      pass "import commit $import_commit for $prefix is not an ancestor of HEAD (squash/rebase merge); DAG evidence unavailable"
       continue
     fi
+    DAG_PROVEN="${DAG_PROVEN}|${prefix}|"
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
     import_tree="$(git rev-parse --quiet --verify "${import_commit}:${prefix}" 2>/dev/null)"
     if [ -z "$upstream_tree" ]; then
@@ -286,15 +324,23 @@ while IFS='|' read -r prefix url branch sha; do
   elif [ "$local_tree" = "$upstream_tree" ]; then
     pass "$prefix is still pristine at ${sha:0:9} (not required at stage $STAGE)"
   else
-    # Divergence is EXPECTED here and this gate does not bound it.
+    # Divergence at this stage is expected, but it is only *provable* while the
+    # chain back to the import is still there. Section 1 proved the identity of
+    # the baseline (the recorded root tree really is upstream's). It did NOT
+    # prove that this diverged tree descends from that baseline.
     #
-    # What section 1 proved is the *identity of the baseline* (the recorded root
-    # tree really is the upstream tree at the recorded SHA). It did not prove,
-    # and this check does not prove, that the current divergence is authorised —
-    # that is an ownership question, enforced by the owner-matrix boundary gate,
-    # not by provenance. An earlier comment here claimed "confined divergence";
-    # no such confinement existed, so the claim is withdrawn rather than faked.
-    pass "$prefix has diverged from upstream (allowed at stage $STAGE; baseline identity proven by the root-tree anchor in section 1 — this gate does not bound which paths diverged)"
+    # With the import commit still an ancestor, the DAG carries that descent.
+    # Without it, nothing here does — and blanket-passing is exactly how a
+    # single-commit clone with arbitrary tampering exited 0 while printing
+    # "baseline identity proven". Until an authorised-delta-chain carrier exists
+    # (a task-specific, machine-verifiable record of which divergence was
+    # approved), the honest answer is that it cannot be verified.
+    case "$DAG_PROVEN" in
+      *"|${prefix}|"*)
+        pass "$prefix has diverged from upstream (allowed at stage $STAGE; descent from the baseline carried by the reachable import commit — this gate does not bound WHICH paths diverged)" ;;
+      *)
+        fail "$prefix has diverged from upstream AND the import commit is unreachable: descent from the recorded baseline cannot be verified at stage $STAGE. Pristine trees still pass without the DAG; a diverged tree needs either the import commit reachable or an authorised-delta-chain carrier, which does not exist yet." ;;
+    esac
   fi
 
   # The digest above describes committed content. Assert the working tree has

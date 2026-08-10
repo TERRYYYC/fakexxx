@@ -56,20 +56,30 @@ SHA. Those trailers are a second, independent record of the same fact.
 
 `scripts/check-provenance.sh` asserts, per prefix:
 
-0. the frozen record set still carries every prefix the gate is responsible for,
-   and is unchanged between the first and last section (a shortened set would
-   make the gate skip an app while still exiting 0);
+0. the frozen record set's **first fields** are exactly the expected prefix set
+   (set equality, not a substring test — a prefix hidden in the branch field once
+   made a one-record set report both prefixes present), every record has exactly
+   four fields, and the set is unchanged between the first and last section. Both
+   `IMPORTS` and the `each_import` iterator are `readonly`, so a machine query
+   cannot report a value the gate does not itself consume;
 1. this document records the URL, branch, exact SHA and the fakexxx import commit;
-2. **the anchor** — this document's recorded upstream **root tree** equals the
-   tree of the upstream object actually fetched from the upstream URL. This is
-   checked at **every** stage and depends on no local history, so it survives a
-   squash or rebase merge intact;
+2. **the anchor** — the root tree recorded **on that prefix's own row** equals the
+   tree of the upstream object actually fetched from the upstream URL. Parsed
+   field by field: a document-wide grep only proves the hash appears somewhere,
+   and swapping the two rows' root trees left both hashes present and both
+   prefixes passing. Checked at **every** stage, depends on no local history, so
+   it survives a squash or rebase merge intact;
 3. *additionally, and only while it is still reachable*, the recorded import
    commit carries that upstream tree at the prefix. This is DAG evidence: a
    squash/rebase merge legitimately discards it, so it is a bonus, never the
    anchor;
 4. at `--stage import` only, the committed tree of the prefix still equals the
-   upstream root tree (pristine). At `contract`/`full` divergence is expected and
+   upstream root tree (pristine). At `contract`/`full` divergence is expected —
+   but **only provable while the import commit is still an ancestor of HEAD**.
+   Diverged *and* unreachable is a hard failure: nothing left in the repository
+   shows the current tree descends from the recorded baseline, and passing anyway
+   is how a single-commit clone with arbitrary tampering once exited 0. Pristine
+   trees still pass without any history. When divergence is reachable-proven,
    **this gate does not bound which paths diverged** — that is an ownership
    question for the boundary gate, not a provenance question;
 5. the working tree has not drifted from the verified commit;
@@ -253,3 +263,12 @@ explicit provenance exception.
 | Date | Change | Commit |
 |---|---|---|
 | 2026-08-09 | Initial import of both baselines at the frozen SHAs | `301da0f`, `5687e31` |
+
+## 5. Regression gate
+
+`scripts/selftest-provenance.sh` runs the production checker against throwaway
+clones: 3 positives and 8 negatives, including swapped root-tree rows, a prefix
+smuggled into the branch field, a malformed three-field record, and history-lost
+divergence. It runs in CI next to the checker itself. Every negative was a state
+this repository actually shipped; the table used to live in a document, where it
+gated nothing.
