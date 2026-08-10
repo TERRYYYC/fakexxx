@@ -97,6 +97,7 @@ source_threads:
 | **v1.18** | PR-0.2 第十四轮 | Sol 语义窄审 SR-1..6：契约层/设备层拆分 · stage 绑定改「第一个改 app 树的 PR」· PR-5 26 行 / PR-6 90 行聚合分工 · lint 清债 lane（PR-3.5）· DP-3 解停条件收敛 · Task 7 计数；owner → Fable5，见 §0.1.18 |
 | **v1.19** | PR-0.2 第十五轮 | Sol 增量语义审 6 P1 + 1 P2：#13 release edge 与 I3.5 进 DAG · 2v2 owner/reviewer 全链传播 · Task 2 自搬 workflow 并反向自验 · verifier `--lane` 子集契约 · 条件式解停，见 §0.1.19 |
 | **v1.20** | PR-0.2 第十六轮 | 兑现 Phase O 裁定的 `sol-blackbox` 处置项时自查发现：v1.19 只改了责任层（owner/reviewer 列），**授权层未改**——`acceptance/**` 仍禁 Fable5 写入。本轮把 2v2 传播到 owner matrix / 目录树 / class 表 / Task 7·8 / §17 / §19 / §21，冻结 legacy label→执行者映射，并冻结五投影一致性检查器的判据，见 §0.1.20 |
+| **v1.21** | PR-0.2 第十七轮 | Sol exact-HEAD 语义审 7 P1：**owner 列拆 `evidenceOwner` / `fixOwner` 并冻结失败路由表**（2v2 后 acceptance 行红了无法路由）· DP-2 载体拆四段（PR-1 是 import-only，产不出 contract/pairing）· `I6` 与 `#13` 改 Epic-close 的 sibling 输入 · lane selector 冻成 `(class, owner, 路径前缀)` 三元组、PR-5 只验 harness、26 行转 PR-6 · Task 3.5 建成真实节点并消 PR-3↔PR-3.5 环 · workflow 迁移加机器断言 · durable closure 与 review provenance 收口，见 §0.1.21 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -458,6 +459,38 @@ SR-1/2/3 则共享一个形状：**我给某个对象加了新职责或新约束
 这是同一族的第四次（`INV → 台账行` · `台账行 → Task 归属` · `Task 规则 → DAG 边` · **`责任归属 → 写入授权`**）。前三次我的结论都是"下次记得多推一层"，四次之后这个结论本身该被否决了：**靠"记得多推一层"来闭合，是把一致性寄托在作者当轮的注意力上，而这份文档已经证明那不可靠。**
 
 真正的判据是机械的：**owner 列、class 表"谁写"列、§12.1 owner matrix、目录树注释、`check-forbidden-boundaries.sh` 的输入，是同一事实的五个投影；任何两个不一致都应该由脚本报错，而不是由 reviewer 从 2500 行里读出来。** 本轮六条里有四条是纯机械可检的。该检查器按 Phase O 裁定走独立后续（不混入本 delta），但它的**判据在此冻结**：五个投影两两一致，不一致即 fail-closed。
+
+#### 0.1.21 一个坏掉的定义，比一个缺失的定义更难发现（v1.21）
+
+Sol 在 `9acd436d` 上给了 7 条 P1。**其中第 2 条是我上一轮亲手改过、并且自认为改完了的那一节。**
+
+上一轮我把 acceptance 的授权层从 Sol 迁到 Fable5，改了 owner matrix、目录树、class 表、五个投影全部对齐，还写下「五投影两两一致即闭合」的判据。**但我没有回头看 owner 这个词本身的定义。**
+
+§10.1 写着：
+
+> owner 是该行的主责方——即"若该行失败，谁必须改代码"。
+
+在 2v2 之前这是对的：Sol 写 acceptance、Sol 不改产品代码，这个定义从来没被激活过。**2v2 之后它坏了**——`M-RL-01` 由 Fable5 在 acceptance lane 证明 **Auto** 正确处置 typed error；它红了，要改代码的是 **Opus5**。于是 `evidenceOwner` 和 `fixOwner` 被塞进同一列，**失败无法路由**：Fable5 修不了，Opus5 不知道该自己修。
+
+| # | 缺口 | 修订 |
+|---|---|---|
+| B-1 | owner 列同时承载 evidence author 与 product fix owner | 拆成 **`evidenceOwner`（进表，每行唯一）/ `fixOwner`（不进表，规则派生）**，冻结六条**失败路由表**（含两侧交互时先产定位证据、定位不能判定则 fail-closed 升级到 contract 层 → Opus5），并加两条硬约束：evidenceOwner 不得用 `not-testable`/`deferred` 绕过；路由必须留定位证据，不允许口头指认对端 |
+| B-2 | DP-2 让 PR-1 交付 contract 与两侧 pairing 主键，但 Task 1 冻结为 import-only | 按真实载体拆**四段**：字面值 → PR-0.2 · contract/compat → PR-2 · `ProviderPairingRecord` → PR-3 / `PairingRecord` → PR-4 · 设备 mutation → #13。`INV-29` 只 gate 第四段 |
+| B-3 | §15 `PR-6 → #13 → Epic`、§16 `I6 depends on #13`、§20「#13 不阻断 Task 9」三个方向互相否定 | 统一为：**PR-6 交付 pre-cutover 证据可独立合入**；**`I6` 与 `#13` 是 Epic close 这个 join 的两个 sibling 输入**，彼此无依赖边 |
+| B-4 | `--lane` 只写「该 lane 自有行」，而 Fable5 同时拥有 PR-3 的 33 行与 PR-5 的 26 行，selector 不确定；且 PR-5 被要求在自己 HEAD 上证明依赖 sibling 产品代码的行 | selector 冻成 **`(class, evidenceOwner, 入口路径前缀)` 三元组** + verifier 自检划分（`pr-3 ∪ pr-4` ≠ 64 即 fail-closed）；**PR-5 只自证 harness，26 行的真实产品通过与 device evidence 转 PR-6 汇合 HEAD**；Task 3/4/7/9 的 Verify 全部显式传 `--lane` |
+| B-5 | `Task 3.5` 只在 §21.2 散文里；且 Task 3 先要求 `lintDebug` 绿、清债又排在 PR-3 之后，互锁 | 建成 §13 真实节点（Files/RED/GREEN/Verify）；**Task 3 的 lint 门降为 ratchet**消环；授权路径从「被 lint error 命中的文件」改为**先冻结成 `docs/provenance/qwy-lint-baseline.md` 这份提交物**，并加越界断言；gate 补 unit + assemble |
+| B-6 | Task 2 的三条 Verify 跑的是本地 checker，证明不了 CI 的 workflow 真的被改 | 加第四条机器断言：workflow 里每一个 `check-provenance.sh` 调用点都必须带 `--stage contract`。同仓已存在反例——PR #11 `eddf9729` 至今是裸调用，而 PR #10 已要求 `--stage` 必填 |
+| B-7 | §21 checklist 第 13 项长期 ⬜，同时顶部宣称 frozen baseline | 改为**绑 HEAD 的可复验断言**（HEAD 相符 + 历史快照分节存在），每产生新 exact HEAD 重新核验，而不是等一个永远不打勾的动作 |
+
+**这一轮的教训和前两轮不是同一条。**
+
+§0.1.19 是「规则没变成图上的边」，§0.1.20 是「责任改了、权限没改」——两条都是**漏掉了一个位置**。这一轮不是漏，是**一个定义在坐标系变化后失效，而它长得和之前一模一样**。
+
+> **缺失的定义会在第一次使用时炸；坏掉的定义不会——它继续返回一个值，只是那个值现在错了。** 我上一轮扫了五个投影，每一个都问「这里写的是谁」，没有一次问「owner 这个词现在还指什么」。**投影一致，不代表被投影的那个东西还成立。**
+
+这也是为什么 B-1 的修法不是把 owner 列改成 `fixOwner` 或加第 91 列，而是**把「一个词承担两个角色」这件事本身拆掉，并为拆开后的第二个角色冻结一张可判定的路由表**。一个概念在坐标系变化后要么分裂、要么退休，**不能靠读者每次自行消歧**——那等于把定义的正确性外包给读者的注意力，而这份文档已经证明那不可靠（§0.1.20）。
+
+对 §0.1.20 冻结的五投影判据，本轮补一条**前置条件**：**投影一致性检查的前提是「被投影的定义仍然成立」。** 因此 checker 除了比对五个投影，还必须在每次 owner/role 语义变更时，重新枚举所有**消费该定义的位置**（本轮是失败路由、lane selector、reviewer 链三处）。否则五个投影会整齐地一致地指向同一个错误答案。
 
 ## 1. 事实基线与来源
 
@@ -1304,7 +1337,7 @@ ProviderPairingRecord(
 
 ### 8.4 EnvironmentLease 状态机
 
-`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，Fable5 的 provider 与 Sol 的 fake provider 会各写一套，且 acceptance 会在两套语义之间假绿。
+`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，Fable5 的 provider 与 Fable5 的 fake provider（2v2 后同属一人，更容易两套语义同时漂移而互相自洽）会各写一套，且 acceptance 会在两套语义之间假绿。
 
 | 当前状态 | 事件 | 下一状态 | 原子写入 | 阻挡新 apply |
 |---|---|---|---|---|
@@ -1658,7 +1691,30 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 
 **`sol-blackbox` 是冻结的 legacy label，不是 owner 声明（冻结）**：该字符串在 §10.1 的 22 个行 ID、[Issue #6](https://github.com/TERRYYYC/fakexxx/issues/6) 与未来 `verify-a-plus.sh` 的解析里都是稳定 key，**重命名会让既有行 ID 与历史证据失配**，因此按 §10.1「行 ID 一经分配永不重排、永不复用」的同一理由保留原字符串。它现在只表示**触达方式 = 黑盒、只经 public v1 contract**，与执行者身份无关。**legacy label → 执行者的映射（唯一真相）**：`sol-blackbox` / `static-guard` / `device` 三类共 26 行的编写与执行者一律为 **Fable5**（operator 2v2；[#6](https://github.com/TERRYYYC/fakexxx/issues/6) T0：*Fable5 implements the 26 acceptance-lane rows*）。**任何位置读到 `sol-blackbox` 都不得推导出 "Sol 写这一行"**；owner 列是唯一权威，label 只描述触达方式。
 
-owner 是该行的**主责方**——即"若该行失败，谁必须改代码"。对端的消费行为由另一条独立行覆盖（例：`M-CC-03` 由 Fable5 证明 provider 拒绝冲突 lease，`M-RL-01` 由 Fable5 在 acceptance lane 证明 Auto 正确处置返回的 typed error），因此每行只有一个 owner 与一个入口，不存在共管。
+**owner 列 = `evidenceOwner`，不是 `fixOwner`（v1.21 冻结）。** 上一版把 owner 定义成"若该行失败，谁必须改代码"，在 2v2 下这个定义已经坏掉：`M-RL-01` 由 Fable5 在 acceptance lane 证明 **Auto** 正确处置 typed error——若它红了，要改代码的是 **Opus5**，不是 Fable5。**一列同时承载「谁写证据」与「谁改代码」，失败就无法路由**：evidenceOwner 修不了，fixOwner 不知道该自己修。
+
+因此拆成两个概念，只有前者进表：
+
+- **`evidenceOwner`（= §10.1 的 owner 列，每行唯一）**：谁编写、执行该行，并对该行的证据与 `exactHead` 绑定负责。
+- **`fixOwner`（不进表，由下列规则派生）**：该行红时谁必须改产品代码。
+
+**失败路由规则（冻结，逐条判定，先命中先适用）**：
+
+| # | 条件 | `fixOwner` |
+|---|---|---|
+| 1 | class = `owner-red` | 就是 `evidenceOwner`（定义上二者同一） |
+| 2 | 断言只涉及 Auto 侧可观察行为 | **Opus5** |
+| 3 | 断言只涉及千网游 provider 侧可观察行为 | **Fable5** |
+| 4 | 断言涉及两侧交互 | `evidenceOwner` **必须先产出定位证据**（哪一侧先违反 v1 contract），再按 2/3 路由 |
+| 5 | 第 4 条定位不能判定 | **fail-closed 升级到 contract 层 → Opus5**（`contracts/**` 归 Opus5）；因为"两侧都自认合规却仍不兼容"的唯一剩余解释是 contract 本身欠定义 |
+| 6 | class = `static-guard`（扫出越界路径） | 该路径在 §12.1 owner matrix 上的 owner |
+
+**两条硬约束**：
+
+- **`evidenceOwner` 不得因为"我修不了"而把该行标 `not-testable` / `deferred` / 降级**——那是把路由失败伪装成覆盖上限。该行**保持红**直到 `fixOwner` 修复；红行不满足任何 lane 的终门。
+- **路由本身要留证据**：适用第 4/5 条时，定位证据（哪一侧、哪条 contract 条款）必须进 PR evidence，否则该行视为未定位、仍然红。**不允许口头指认对端。**
+
+对端的消费行为仍由另一条独立行覆盖（例：`M-CC-03` 由 Fable5 证明 provider 拒绝冲突 lease），因此每行只有一个 `evidenceOwner` 与一个入口，不存在共管；但**共管的缺席不等于 fixOwner 自动等于 evidenceOwner**——那正是上一版的错误。
 
 | ID | 类别 | evidence class | owner | 精确入口 |
 |---|---|---|---|---|
@@ -1918,7 +1974,7 @@ fakexxx/
 
 | Owner | 独占写入范围 | 可读依赖 | 禁止并行触碰 |
 |---|---|---|---|
-| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**` |
+| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、`docs/provenance/**`、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**`。**唯一具名例外：Task 3.5 / PR-3.5**——可写 `docs/provenance/qwy-lint-baseline.md` 冻结的 exact 路径集 ∪ `res/values-en/strings.xml`，该集合 ⊆ `apps/qianwangyou/app/src/main/**` 且与 `integration/**` 不相交；**范围外仍绝对禁止**，由 Task 3.5 的越界断言机器判定 |
 | Fable5 | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行；**`acceptance/**`（含 `acceptance/scripts/check-forbidden-boundaries.sh`）、`docs/acceptance/**`、验收 issue 与证据** | frozen contract、两 App | contract、Auto |
 | Sol | **无独占写入范围（review-only）**：review verdict、语义/验收审查报告；若需补测试代码则单独 PR 并由 GLM 审 | 全仓 | 不修改正在审的作者 branch |
 | GLM | review verdict、对抗执行报告；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch |
@@ -1966,7 +2022,7 @@ fakexxx/
 | `import` | 全部检查 + **当前 HEAD 树仍与上游 root tree 逐字节相同** |
 | `contract` / `full` | 记录的 import commit 仍携带上游 root tree（**不可变锚点，任何 stage 都查**），但允许 app 树在其后合法演进 |
 
-CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；**第一个实际修改 app 树的 PR 负责原子移动它到 `--stage contract`**（按当前 DAG 即 Task 2 的 contract 接线；若更早者出现则由更早者移动）。cutover**，届时该行改为 `--stage contract`。
+CI workflow 在 app 仍应保持 pristine 期间传 `--stage import`；**第一个实际修改 app 树的 PR 负责原子移动它到 `--stage contract`**（按当前 DAG 即 Task 2 的 contract 接线；若更早者出现则由更早者移动）。
 
 > 本节此前写的是不带 `--stage` 的裸命令。那条命令在 PR-1 的实现下会 `exit 1`（`--stage is required`）——**真相源记录了一条必然失败的验证命令**。此处更正；教训与 §0.1.3 第 1 项同类：改了一条被下游引用的契约，必须回头扫全部引用点。
 
@@ -2011,9 +2067,20 @@ checker 必须做**有证明力**的核对，逐项 exit-code 化：
 ./scripts/check-contract-v1.sh                    # 全部 contract/compatibility tests PASS
 ./scripts/check-provenance.sh --stage contract    # 必须 exit 0（app 树已合法分叉）
 ./scripts/check-provenance.sh --stage import      # 预期 exit 1 —— 证明分叉真实发生、stage 移动是必需的
+
+# 第四条：断言 workflow 真的被移动了（前三条都证明不了这件事）
+# 取出 workflow 里所有调用 check-provenance.sh 的行；只要有任何一行不带 --stage contract 就失败。
+# 这一条同时覆盖「残留裸调用」与「残留 --stage import」，不需要额外分支。
+grep -c 'check-provenance\.sh' .github/workflows/android-a-plus.yml     # 必须 >= 1（调用点没被删掉）
+! grep 'check-provenance\.sh' .github/workflows/android-a-plus.yml \
+    | grep -qv -- '--stage contract'
 ```
 
 第三条是**反向证据**：若它仍然 exit 0，说明本 task 并未真正改动 app 树，那么移动 workflow 就是错的。
+
+**第四条是「迁移真的发生了」的机器断言，缺它则前三条全绿也证明不了 CI 被改。** 前三条跑的是**本地 checker**，而 CI 调用的是 **workflow YAML 里那一行**——两者完全解耦：workflow 可以继续传 `--stage import`（甚至裸调用），本地 Verify 依然全绿，而 required job 会红在 PR 上。这不是假设：PR #11 `eddf9729` 的 workflow 至今仍是裸 `./scripts/check-provenance.sh`，而 PR #10 已把 `--stage` 改为必填——**同一个仓里已经存在这条必失败路径**。
+
+若实现方偏好 exact GitHub job gate 而非文本断言，允许替换，但必须满足同一谓词：**能在本地 Verify 阶段判定 workflow 当前传的 stage**，不得只靠人读 YAML。
 
 **Checkpoint:** exact contract HEAD 回主 Thread；只有该 HEAD 获得独立 verdict 后，Task 3/4/5 才开始并行。
 
@@ -2061,8 +2128,66 @@ checker 必须做**有证明力**的核对，逐项 exit-code 化：
 ```bash
 cd apps/qianwangyou
 ./gradlew testDebugUnitTest
-./gradlew lintDebug assembleDebug
+./gradlew assembleDebug
+# lint 在本 task 只做 ratchet（不得新增 error）——raw-green 是 Task 3.5 的终门，见下
+../../scripts/check-inherited-lint-debt.sh qianwangyou
+
+cd ../..
+./scripts/verify-a-plus.sh --lane pr-3      # 33 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 90 行判红
 ```
+
+**lint 门在本 task 是 ratchet，不是 raw-green（v1.21 消环）**：上一版让 Task 3 直接要求 `lintDebug` exit 0，而基线自带 23 个 inherited error、清债又被冻结在 **PR-3 合入之后**的 Task 3.5——两者互锁，谁都过不去。本 task 只需证明**没有新增** lint error；raw-green 由 Task 3.5 达成。
+
+### Task 3.5 — 千网游 inherited lint raw-green 清债
+
+**Owner:** Opus5（§12.1「PR-3 开始后不触碰 qwy」的**唯一具名例外**）
+
+**Reviewer:** Sol（语义）+ GLM（对抗）
+
+**时序（冻结）：** 必须在 **PR-3 合入之后**开始（避免与 Fable5 并行写 `apps/qianwangyou/**`），并在 **PR-6 之前**完成。
+
+**Files:**
+
+- Create: `docs/provenance/qwy-lint-baseline.md` —— 由**冻结基线**上的 `lintDebug` 原始报告生成，逐条记录 23 个 error 的 **exact 文件路径 + rule id + 行号**（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）。**本文件必须先于任何源码修改单独提交**。
+- Modify: **仅** `qwy-lint-baseline.md` 中列出的 exact 路径
+- Create（若 `MissingTranslation` 需要）: `apps/qianwangyou/app/src/main/res/values-en/strings.xml`
+- Modify: `scripts/check-inherited-lint-debt.sh` —— raw-green 达成后退役该 ratchet
+
+**授权路径集（冻结判定式）：** `qwy-lint-baseline.md` 中列出的 exact 路径 ∪ `res/values-en/strings.xml`，且整体必须 ⊆ `apps/qianwangyou/app/src/main/**` 且 ∩ `integration/**` = ∅（后者 Fable5 独占）。
+
+> **为什么不写「被 lint error 命中的文件」**：那是**动态描述**，会随 lint 版本、AGP 版本、`minSdk` 变化而漂移；review 时无法判定某个改动是否越界，静态 guard 也无从检查。**先把集合冻成一份提交物，再改代码**——集合本身成为可 diff、可 review 的对象。
+
+**RED:**
+
+```bash
+(cd apps/qianwangyou && ./gradlew lintDebug)      # 预期 exit != 0
+# 且 error 数与 qwy-lint-baseline.md 记录的 23 条逐条对应（多出的即 PR-3 引入的回归，退回 Task 3）
+```
+
+**GREEN:** `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**。
+
+**Verify（gate 不能只有 lint —— 本 task 会改运行时源码与资源）：**
+
+```bash
+cd apps/qianwangyou
+./gradlew lintDebug                              # 终态门：exit 0（raw-green）
+./gradlew testDebugUnitTest                      # 不得因清债破坏既有行为
+./gradlew assembleDebug                          # 不得因清债破坏构建
+
+cd ../..
+./scripts/check-provenance.sh --stage contract   # 清债是合法分叉；--stage import 此时已不适用
+./acceptance/scripts/check-forbidden-boundaries.sh
+./scripts/verify-a-plus.sh --lane pr-3.5         # 空矩阵集；只校验上述门
+
+# 越界断言：本 PR 改动的 qwy 文件必须全部落在冻结的授权路径集内
+git diff --name-only origin/main...HEAD | grep '^apps/qianwangyou/' \
+  | while read -r p; do grep -qF "$p" docs/provenance/qwy-lint-baseline.md \
+      || { echo "OUT OF SCOPE: $p"; exit 1; }; done
+```
+
+**终结谓词：** `(cd apps/qianwangyou && ./gradlew lintDebug)` exit 0 —— 同时是 §19 raw-green 终态门的唯一证据来源。`check-inherited-lint-debt.sh` 的 ratchet 在此之前是**中间证据**，之后退役。
+
+**Checkpoint:** exact HEAD + 原始 lint 报告 + baseline 对照回主 Thread。
 
 ### Task 4 — Auto 数据模型、可信账本与恢复事务
 
@@ -2119,6 +2244,10 @@ cd apps/qianwangyou
 ```bash
 cd apps/cellrebel-auto
 ./gradlew testDebugUnitTest
+./gradlew lintDebug assembleDebug
+
+cd ../..
+./scripts/verify-a-plus.sh --lane pr-4      # 31 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 90 行判红
 ```
 
 ### Task 5 — Auto A+ 执行内核
@@ -2189,21 +2318,28 @@ cd apps/cellrebel-auto
 
 | PR | 必须证明 | 行数 |
 |---|---|---|
-| **PR-5**（Fable5 开发 / Sol + GLM 审查） | `sol-blackbox` 22 + `static-guard` 2 + `device` 2 | **26** |
-| **PR-3 / PR-4**（Fable5 / Opus5，平行） | 各自 `owner-red` 行，绑各自 PR HEAD | 33 / 31 |
-| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 90 行** | **90** |
+| **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **33** |
+| **PR-4**（Opus5） | 自有 `owner-red` 行，绑 PR-4 HEAD | **31** |
+| **PR-5**（Fable5 开发 / Sol + GLM 审查） | **不验任何矩阵行**；只验 acceptance **harness 自身**：fake provider 的 negative controls、fixture 装载、`static-guard` 扫描器对**构造违规样本**能判红（self-test） | **0 矩阵行** |
+| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 90 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **90** |
+
+**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——90 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
 
 **verifier 必须支持 lane 子集（否则本分工不可执行）**：`scripts/verify-a-plus.sh` 增 `--lane <pr-3|pr-3.5|pr-4|pr-5|pr-6>`。
 
-| lane | 校验集合 | 谁的 exactHead |
-|---|---|---|
-| `pr-3` / `pr-4` / `pr-5` | 仅该 lane 自有行 | 该 PR 的 HEAD |
-| `pr-3.5` | 不验矩阵行；仅 `lintDebug` exit 0 | 该 PR 的 HEAD |
-| `pr-6` | **全部 90 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | PR-6 HEAD |
+**lane selector 必须是机器可判定的行集合，不能写「该 lane 自有行」**——Fable5 同时拥有 PR-3 的 33 行与 PR-5 交付的 26 行，仅凭 owner 无法区分。冻结为 `(class, evidenceOwner, 入口路径前缀)` 三元组：
 
-**没有 `--lane` 时默认 `pr-6` 语义（全 90 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约。
+| lane | 校验集合（机器判定式） | 行数 | 谁的 exactHead |
+|---|---|---|---|
+| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 33 | PR-3 HEAD |
+| `pr-4` | `class=owner-red` ∧ `evidenceOwner=Opus5` ∧ 入口前缀 `apps/cellrebel-auto/` | 31 | PR-4 HEAD |
+| `pr-3.5` | **空集**；不验矩阵行，仅 `lintDebug` exit 0 + qwy unit + assemble | 0 | PR-3.5 HEAD |
+| `pr-5` | **空集**；仅 harness self-test（见上表 PR-5 行），**不消费 evidence manifest** | 0 | PR-5 HEAD |
+| `pr-6` | **全部 90 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 90 | PR-6 HEAD |
 
-上一版要求 PR-5 聚合全 90 行，而 64 个 `owner-red` 行分别产生在平行 sibling PR 上——它们的 `exactHead` **物理上不可能同时等于 PR-5 的 HEAD**。聚合只能发生在下游汇合点。
+三元组两两不相交且并集 = 64 个 `owner-red`；26 个非 `owner-red` 行**只出现在 `pr-6`**。**verifier 必须自检这个划分**：若 `pr-3 ∪ pr-4` ≠ 64 或与 `pr-6` 的 90 行不自洽，直接 fail-closed——lane 定义漂移必须比矩阵失败更早被发现。
+
+**没有 `--lane` 时默认 `pr-6` 语义（全 90 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 90 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
 
 **Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **90 行 / 17 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
 
@@ -2216,11 +2352,21 @@ cd apps/cellrebel-auto
 
 **已知性质（显式记录，不隐藏）**：`owner-red` 64 行中有 33 行的 code owner 本身就是 Fable5，因此该 evidence audit 包含**对自有 33 行的自审**。这一点可接受的唯一理由是它**不是**终门：终门是 `verify-a-plus.sh` 里 owner-independent 的机械覆盖校验（本 Task 的 **Verify** ①②③，在 CI 内运行、不看执行者是谁），Fable5 的 audit 只是其上的叙述层，且 audit 产物本身由 Sol + GLM 独立复核。**不得**把这条自审当作独立证据，也不得用它替代机械校验。
 
-**RED:** 上述 26 行各自至少一个失败场景先红；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Fable5 33 行）。
+**RED（分两处发生，不在同一 HEAD）：** 26 行的**测试代码**在 PR-5 上写就，各自至少一个失败场景先红——但那是**对 fake provider 的 harness self-test**，不是对真实产品的断言；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Fable5 33 行）。**26 行对真实 Auto/provider 的 RED→GREEN 发生在 PR-6 的汇合 HEAD 上**，因为在 PR-5 的 HEAD 上那些实现还不存在。
 
 **GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / Fable5 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
 
-**Verify:** `./scripts/verify-a-plus.sh` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
+**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 90 行同 HEAD，在本 PR 上必红）：**
+
+```bash
+# PR-5 自身：只自证 harness，不消费 evidence manifest、不验矩阵行
+./scripts/verify-a-plus.sh --lane pr-5
+./acceptance/scripts/check-forbidden-boundaries.sh          # 依赖边界静态阻断
+```
+
+`--lane pr-5` 的通过条件：fake provider 的 negative controls 全绿、fixture 可装载、`static-guard` 扫描器对**构造出来的违规样本**能判红（扫描器自己不会假绿）。
+
+**26 行的真实产品通过与 device evidence 在 PR-6 汇合 HEAD 上产生**，届时 `./scripts/verify-a-plus.sh --lane pr-6` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
 ### Task 8 — GLM 独立审查与 exact-HEAD 对抗验证
 
@@ -2236,7 +2382,7 @@ cd apps/cellrebel-auto
 
 **Owner:** Fable5（验收执行，operator 2v2）
 
-**Independent reviewer:** GLM
+**Independent reviewers:** Sol（语义 / 验收）+ GLM（对抗）——与 `I6` / §19 / live [#7](https://github.com/TERRYYYC/fakexxx/issues/7) 的 2v2 配置一致。上一版只写 GLM，与这三处冲突。
 
 **Merge authority:** operator only
 
@@ -2267,10 +2413,10 @@ cd apps/cellrebel-auto
 (cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)
 
 ./acceptance/scripts/check-forbidden-boundaries.sh
-./scripts/verify-a-plus.sh
+./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 90 行、每行 exactHead == PR-6 HEAD
 ```
 
-预期：全部 exit 0；测试报告归档到 PR evidence。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
+预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 90 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
 
 ## 15. PR 顺序与 merge gates
 
@@ -2284,16 +2430,20 @@ PR-2 contract v1（冻结 exact HEAD）
   │      ↓
   │   PR-3.5 Opus5：qwy inherited lint raw-green 清债（§12.1 唯一具名例外）
   ├── PR-4 Opus5：Auto data/trust/recovery/core/UI
-  └── PR-5 Fable5：fake provider + acceptance/adversarial matrix（Sol + GLM 审查）
+  └── PR-5 Fable5：fake provider + acceptance harness（只自证 harness；26 行在 PR-6 验）（Sol + GLM 审查）
           ↓
-PR-6 integration + exact-build device evidence（只做必要胶合，不吞并三路职责）
-          ↓
-#13 / PR-14 applicationId cutover（设备层）——**release edge，不在实现链上**
-          ↓
-Epic #1 close
+PR-6 integration + exact-build device evidence（pre-cutover；只做必要胶合，不吞并三路职责）
+          │
+          ├──────────────┐
+          ↓              ↓
+    I6 release      #13 / PR-14 applicationId cutover（设备层）
+    closure         post-cutover evidence · INV-29 gate 只作用于此
+          └──────┬───────┘
+                 ↓
+           Epic #1 close（join：两个 sibling 输入都闭合才能 close）
 ```
 
-**#13 的结构边（冻结）**：#13 不阻断 PR-1..PR-6 的合入，但 **`I6` 的 device acceptance 终门与 Epic #1 的 close 都必须等 #13 闭合**；`INV-29` 的 gate 只作用于这条 release edge 上的设备 mutation。
+**#13 的结构边（冻结，v1.21 消歧）**：#13 **不在实现链上**，**不阻断 PR-1..PR-6 任何一个的合入**——PR-6 交付的是 pre-cutover 集成与真机证据，在旧 `applicationId` 上成立。**`I6` 与 `#13` 是 Epic close 这个 join 的两个 sibling 输入，彼此之间没有依赖边**（上一版写「I6 终门必须等 #13」，与 §20「#13 不阻断 Task 9」直接对撞，此处按 §21 DP-2 的四段模型统一）。`INV-29` 的 gate 只作用于 #13 一侧的设备 mutation。
 
 Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI 进 PR-4（Opus5），千网游侧 `integration/ui/AutomationPairingScreen.kt` 进 PR-3（Fable5）。owner matrix 本身不变——`apps/qianwangyou/**/integration/**` 含 UI 全部归 Fable5。
 
@@ -2319,10 +2469,10 @@ Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI
 | I2 | `[P0] 冻结 Environment Control contract v1` | I1 | Opus5 / Sol+GLM | PR-2 exact HEAD + verdict |
 | I3 | `[P0] 千网游 provider：配对、lease、连续性与审计` | I2 | Fable5 / **Sol + GLM** | PR-3 exact HEAD + INV tests |
 | I4 | `[P0] Auto：可信账本、恢复状态机与 A+ 模板` | I2 | Opus5 / **Sol + GLM** | PR-4 exact HEAD + INV tests |
-| I5 | `[P0] A+ fake provider、崩溃/并发/旁路矩阵` | I2 | **Fable5** / Sol + GLM | PR-5 exact HEAD + **Fable5 自有 26 行**全绿（全 90 行聚合在 I6/PR-6，见 §10.1 聚合分工） |
+| I5 | `[P0] A+ fake provider、崩溃/并发/旁路矩阵 harness` | I2 | **Fable5** / Sol + GLM | PR-5 exact HEAD + **harness self-test 全绿**（negative controls / fixture 装载 / `static-guard` 对构造违规样本判红）。**不在 PR-5 验任何矩阵行**——26 行的真实产品通过与 device evidence 在 I6/PR-6 汇合 HEAD 上产生，见 Task 7 lane 表 |
 | I3.5 | `[P0] qwy inherited lint raw-green 清债` | I3 | Opus5 / Sol + GLM | `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0** |
-| I6 | `[P0] 双 App 集成与 exact-build 真机验收` | I3,I3.5,I4,I5,**#13** | **Fable5** / Sol + GLM | device matrix + hashes + verdict |
-| #13 | `applicationId cutover：flavor / SAF 搬运 / bundle / variant CI` | I1 | Opus5 / Sol + GLM | **release edge**：`M-AC-01..05` 全绿；未闭合则 I6 终门与 Epic close 均阻断 |
+| I6 | `[P0] 双 App 集成与 exact-build 真机验收（pre-cutover）` | I3,I3.5,I4,I5 | **Fable5** / Sol + GLM | device matrix + hashes + verdict（旧 `applicationId` 上成立；**不依赖 #13**） |
+| #13 | `applicationId cutover：flavor / SAF 搬运 / bundle / variant CI` | I1 | Opus5 / Sol + GLM | `M-AC-01..05` 全绿。**与 I6 是 Epic close 的两个 sibling 输入**，二者互不阻断；未闭合只阻断 Epic close，不阻断 I6 |
 | I7 | `[Product Gate] A+→B→C 触发证据与非重写演进` | EPIC | Sol 主控 | 每个里程碑记录 stay/promote/reject verdict |
 
 Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范围、相关 INV、验证命令与“operator only merge”。
@@ -2396,10 +2546,10 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 **三件价值取舍已由 operator 决定（§21 记录逐字原文）。下表是唯一权威，任何入口读到的答案必须与此一致：**
 
-| DP | 主题 | 决定 | 阻塞 PR-1 identity 冻结 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
+| DP | 主题 | 决定 | 字面值 / 载体归属 | 阻塞 contract v1 冻结 / #3–#6 | 阻塞真机验收（Task 9） |
 |---|---|---|---|---|---|
-| DP-1 | 千网游 release signer 迁移 | **B 受控迁移** | 否 | 否 | 否——但 signer cutover 本身**必须**在 DP-1 前置门（export/restore + custody + rollback）完成后才执行 |
-| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **是（仅契约层）**——PR-1 必须冻结该**字面值**并让契约与配对主键按它成立；**设备上的物理 mutation 不在 PR-1**，见 §21 DP-2 的两层拆分（`PairingRecord`/`ProviderPairingRecord` 主键含 applicationId）。**但改名本身受 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 阻断**：`INV-29` 未闭合前不得执行任何 `applicationId` mutation | 已解除——contract 使用已拍板的新值即可，不依赖 cutover 完成 | 否——但 cutover 受 `INV-29` deferred gate 约束 |
+| DP-1 | 千网游 release signer 迁移 | **B 受控迁移** | 不涉及 | 否 | 否——但 signer cutover 本身**必须**在 DP-1 前置门（export/restore + custody + rollback）完成后才执行 |
+| DP-2 | Auto 最终 `applicationId` | **B 改名 → `come.xx.fakeaauto`** | **不由 PR-1 承载**（Task 1 是 import-only、app 树 pristine，物理上产不出这些载体）。四段式见 §21 DP-2：**字面值 → 本 docs PR（PR-0.2）** · **contract/compatibility 常量 → PR-2** · **`ProviderPairingRecord` 主键 → PR-3（qwy 侧）/ `PairingRecord` 主键 → PR-4（Auto 侧）** · **设备 mutation → [#13](https://github.com/TERRYYYC/fakexxx/issues/13)**。`INV-29` 只 gate 最后一段 | 已解除——contract 使用已拍板的新值即可，不依赖 cutover 完成 | 否——但 cutover 受 `INV-29` deferred gate 约束 |
 | DP-3 | CellRebel 可信完成的安全边界 | **A 接受 UI 证据 + 写明上限** | 否 | **条件式解除**：`#3` 需 `#2` + `#12` 均合入；`#4/#5/#6` 需其上游 issue 依赖满足。DP-3 本身的 durable closure 见 §21 清单 | 否 |
 
 **因此本文现在是可开工的冻结实施基线**（与顶部告示一致）。
@@ -2499,14 +2649,22 @@ B 现在改名（建议）：come.xx.fakeaauto（DP-2 · Auto 最终 application
 
 **两层拆分（冻结）——上一版把这两件事混成一件，导致 Task 1「不做 mutation」与本节「改名在 PR-1 完成」直接对撞**：
 
-| 层 | 内容 | 归属 | 时间窗 |
+**上一版把「契约层」整块归给 PR-1，那是不可满足的**：Task 1 冻结为 import-only、两棵 app 树逐字节 pristine，它物理上产不出 contract 常量，更产不出两侧的 pairing 持久化。按 §13 的真实载体重新拆成**四段**（冻结，唯一模型）：
+
+| 段 | 内容 | 载体 | 时间窗 |
 |---|---|---|---|
-| **契约层** | 冻结字面值 `come.xx.fakeaauto`；契约、`PairingRecord`/`ProviderPairingRecord` 主键、compatibility 常量按它成立 | **PR-1** | 不得晚于 contract 冻结 |
-| **设备层** | 真正把设备上的 App 从旧 ID 迁到新 ID（flavor / SAF 搬运 / bundle / 旧 App 移除） | **[Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) / Draft PR #14** | 挂 live cutover · 旧 App 移除 · release candidate · I6 终门 |
+| **① 字面值** | 冻结字符串 `come.xx.fakeaauto` 本身（含 §21.1 合法性核验） | **本 docs PR（PR-0.2 / #12）** | 已完成，随本 PR 合入 |
+| **② contract / compatibility** | contract v1 与 compatibility 常量按该字面值成立 | **PR-2（Task 2）** | contract 冻结时 |
+| **③ pairing 持久化** | `ProviderPairingRecord` 主键（qwy 侧）→ **PR-3（Task 3）**；`PairingRecord` 主键（Auto 侧）→ **PR-4（Task 4）** | **PR-3 / PR-4** | contract exact HEAD 冻结后并行 |
+| **④ 设备 mutation** | 真正把设备上的 App 从旧 ID 迁到新 ID（flavor / SAF 搬运 / bundle / 旧 App 移除） | **[Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) / Draft PR #14** | live cutover · 旧 App 移除 · release candidate |
 
-**契约层不触碰任何 app 树**，因此 PR-1 仍满足 provenance 的最强断言；**设备层才是 mutation**，`INV-29` 的 gate 只作用于它。**在 #13 闭合前，`INV-29` 不得泛化阻塞 PR-1/2/3/4/5** —— 那些 PR 不执行设备迁移，也就没有可孤儿化的状态。
+**①②③ 都不是设备 mutation**，因此 `INV-29` 的 gate **只作用于 ④**。**在 #13 闭合前，`INV-29` 不得泛化阻塞 PR-1/2/3/4/5/6** —— 那些 PR 不执行设备迁移，也就没有可孤儿化的状态。PR-1 保持 import-only，因此仍满足 provenance 最强断言（`--stage import`）。
 
-DAG 位置：#13 不在 §15/§16 的实现链上，而是挂在 **I6 / Epic completion 的 release edge** 上；未闭合即阻断 release candidate，但不阻断上游 PR 合入。
+**DAG 位置（冻结，消除上一版的三处方向冲突）**：上一版同时存在「§15 把 #13 排在 PR-6 之后」「§16 让 I6 depends on #13」「§20 说 #13 不阻断 Task 9」三种方向，互相否定。统一为：
+
+- **#13 不在实现链上**，也**不阻断 PR-6 的代码合入**——PR-6 交付的是 **pre-cutover** 的集成与真机验收证据，在旧 `applicationId` 上成立，可独立合入。
+- **`I6`（release closure）与 `#13`（post-cutover evidence）是 Epic close 这个 join 的两个 sibling 输入**，彼此不构成依赖边。
+- 因此：**`I6` 不再 depends on `#13`**；二者各自闭合后 Epic #1 才能 close。`INV-29` 只 gate `#13` 这一侧。
 
 #### 21.1 `come.xx.fakeaauto` 的合法性核验（为什么不触发退回通道）
 
@@ -2531,12 +2689,12 @@ DAG 位置：#13 不在 §15/§16 的实现链上，而是挂在 **I6 / Epic com
 `apps/qianwangyou` 在冻结基线上带 23 个 lint error（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）；两个上游仓都没有任何 CI，所以 `lintDebug` 从未被当作门跑过。终态要求是 **`lintDebug` 真正 exit 0**，不是"债务没增长"。因此：
 
 - `scripts/check-inherited-lint-debt.sh` 的 ratchet **降级为中间证据**，不再是终态门；它继续防止债务增长，但 raw-green 达成后应随之退役。
-- **执行 lane（冻结）**：清债作为 **PR-3.5** 插在 PR-3 与 PR-4 之间（`Task 3.5`，issue `I3.5`），owner **Opus5**，reviewer **Sol + GLM**。
-  - **exact 文件范围**：仅 `apps/qianwangyou/app/src/main/**` 中被 23 条 lint error 命中的文件，以及必要时 `apps/qianwangyou/app/src/main/res/values-en/strings.xml`（`MissingTranslation`）。**不碰** `integration/**`（Fable5 独占）。
-  - **时序**：必须在 PR-3 合入后开始（避免与 Fable5 并行写 qwy），并在 PR-6 之前完成。
-  - **gate 节点**：`I3.5` 的终结谓词 = `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**；该谓词同时是 §19 raw-green 终态门的唯一证据来源。
-  - owner matrix 相应放宽：**Opus5 在 PR-3.5 内可写上述 exact 范围**，这是 §12.1「PR-3 开始后不触碰 qwy」的**唯一具名例外**，范围外仍禁止。
-- 清债由 Opus5 **串行**进行（不与 Fable5 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败。**第一次合法分叉由 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 的 cutover 触发**，届时才按上表把 CI 那一行移到 `--stage contract`；清债若先于它发生，同样按该表移动并在 PR 里说明——两者都是合法分叉，不是绕过。
+- **执行 lane（冻结）**：清债作为 **PR-3.5** 插在 PR-3 与 PR-4 之间。**它现在是 §13 的真实节点 [`Task 3.5`](#task-35--千网游-inherited-lint-raw-green-清债)（含 Files / RED / GREEN / Verify）与 issue `I3.5`**，不再只是本节的散文，owner **Opus5**，reviewer **Sol + GLM**。以 Task 3.5 正文为准，本节只做索引，避免两处各写一套。
+  - **exact 文件范围**：由 `docs/provenance/qwy-lint-baseline.md` **冻结成一份提交物**（23 条 error 的 exact 路径 + rule id + 行号）∪ `res/values-en/strings.xml`；不用「被 lint error 命中的文件」这种会漂移、review 时无法判定的动态描述。**不碰** `integration/**`（Fable5 独占），由 Task 3.5 的越界断言机器判定。
+  - **时序**：必须在 PR-3 合入后开始（避免与 Fable5 并行写 qwy），并在 PR-6 之前完成。**Task 3 的 lint 门已相应降为 ratchet**——上一版让 Task 3 先要求 raw-green、又把清债排在 PR-3 之后，两者互锁，已消环。
+  - **gate 节点**：`I3.5` 的终结谓词 = `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**；该谓词同时是 §19 raw-green 终态门的唯一证据来源。**但 Verify 不止 lint**：清债会改运行时源码与资源，因此 unit + assemble 同为必过门。
+  - owner matrix 相应放宽：**Opus5 在 PR-3.5 内可写上述 exact 范围**，这是 §12.1「PR-3 开始后不触碰 qwy」的**唯一具名例外**（已写入 §12.1 表内），范围外仍禁止。
+- 清债由 Opus5 **串行**进行（不与 Fable5 的 provider 实现并行写 `apps/qianwangyou/**`），每次授权的 delta 必须可追溯，且**不得破坏 upstream import provenance**——`check-provenance.sh` 在 `--stage import` 下会因此失败。**stage 移动规则以 §13 Task 1 的冻结条款为唯一真相源：由第一个实际修改 app 树的 PR 原子移动**——按当前 DAG 即 **Task 2**（contract 接线已要改两 App Gradle 与 Auto Manifest），不是 #13。清债 PR-3.5 若在 Task 2 之后落地，届时 workflow 早已是 `--stage contract`，无需再移；若它反常地更早，则由它移动并在 PR body 记录移动前后 stage。**上一版把首次分叉钉死在 #13 是错的，此处更正**——两者都是合法分叉，不是绕过。
 
 **(5) 87 份单机验收工件：现在复制 + SHA-256，原件不动。**
 由 **Fable5** 的验收线执行（2v2 后 `docs/acceptance/**` 与 device 证据归 Fable5，见 §12.1）：复制 + 逐份 SHA-256 登记，**不动原件**，本次**不公开提交可能含 UI 内容的工件**。Opus5 不触碰这批文件；Sol 只核验登记结果，不执行复制。
@@ -2599,8 +2757,10 @@ READY → 持续 marker / 重渲 → 旧结果 X
 | 10 | §21 三份 packet 的决定记录 | ✅ 本 delta |
 | 11 | GitHub #6 覆盖措辞 | ✅ Sol 已同步（含 2v2 owner/reviewer） |
 | 12 | GitHub #7 durable body | ✅ Sol 已同步（含 2v2 owner/reviewer） |
-| 13 | PR #12 body | ⬜ 随本 PR 推送后更新 |
+| 13 | PR #12 body | ✅ 已同步：顶部 banner 条件化解停、exact HEAD 绑当前值、旧 verdict 逐条标 stale、current/historical provenance 分节。**证据：** PR #12 body 顶部表的 `exact HEAD` 行 == 本 PR 当前 HEAD，且 `## ⚠️ current head vs historical snapshots` 一节列出全部历史 SHA |
 
-第 11–13 项在仓外，落实动作与证据记录在 PR #12 的回报里；**在它们完成前，DP-3 不算全部落地**。
+第 11–13 项在仓外。**三项均已同步，因此 DP-3 的 durable closure 成立。**
+
+> **第 13 项是 mutable 表面，因此它的 ✅ 绑 HEAD，不绑一次性动作**：PR body 可以在任意时刻被改回去。**每产生一个新 exact HEAD，本项必须重新核验**——核验式是上表给出的两条（HEAD 相符 + 历史快照分节存在）。上一版把它长期挂 ⬜，同时文档顶部又宣称 frozen baseline，两个口径互相否定；现在改为「⛓ 绑 HEAD 的可复验断言」，而不是「等一个永远不打勾的动作」。
 
 前两轮的漏改都出在"改了结论却没枚举引用点"，因此本清单是穷举式的：**任一条未同步，DP-3 就不算落地**。
