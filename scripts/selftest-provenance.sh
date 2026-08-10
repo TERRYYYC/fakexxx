@@ -39,6 +39,22 @@ mk_squashed() {
   printf '%s\n' "$d"
 }
 
+# A full-DAG working copy: unlike mk_squashed, the import commits stay reachable,
+# so the checker takes its real-ancestry branch instead of the history-lost one.
+# Both shapes are needed for the TAB cases below: the two stages reach the
+# import-commit cell through different code paths, and a counterproof on only one
+# of them says nothing about the other.
+mk_fulldag() {
+  local d; d="$(mktemp -d)"
+  git clone -q "$REPO_ROOT" "$d" >/dev/null 2>&1
+  cp "$PROD" "$d/scripts/check-provenance.sh"
+  cp "$REPO_ROOT/$DOC" "$d/$DOC"
+  ( cd "$d" && git add -A >/dev/null \
+      && git -c user.email=s@s -c user.name=s commit -qm "working-tree state under test" ) >/dev/null 2>&1
+  ( cd "$d" && git fetch --no-tags -q https://github.com/TERRYYYC/FakeGps-test.git "$SHA_QWY" ) >/dev/null 2>&1
+  printf '%s\n' "$d"
+}
+
 run() { ( cd "$2" && ./scripts/check-provenance.sh "${@:3}" ) >/dev/null 2>&1; return $?; }
 
 # Every fixture must be built successfully AND be shaped the way its case claims.
@@ -233,6 +249,30 @@ for spec in "N-10|0000000000000000000000000000000000000000|a nonexistent object"
   fi
 done
 
+# N-12 / N-13 a literal TAB INSIDE the import-commit cell. doc_row() serialises
+# the six cells with TABs and every caller reads them back with `cut -f1..f6`, so
+# an interior TAB manufactured a seventh transport field and `cut -f6` silently
+# discarded the tail. The document said `<canonical sha>\tJUNK` and the checker
+# printed "records the canonical import commit 5687e319f" and exited 0 — on
+# full-DAG --stage import AND on depth-1 history-lost --stage contract. Trimming
+# only the outer padding was the right call and still left the transport lossy:
+# `[[:space:]]` covers TAB, but an interior TAB is neither leading nor trailing.
+tab_tamper='python3 -c "
+p=\"docs/provenance/upstream-imports.md\"; s=open(p).read()
+a=\"5687e319f978dcd9b76e413c06b2b0da91627518\"
+assert s.count(a)==1
+open(p,\"w\").write(s.replace(a, a+\"\tJUNK\", 1))
+" && grep -q JUNK docs/provenance/upstream-imports.md && git add -A && git commit -qm tabcell -q'
+
+D="$(mk_fulldag)"
+if setup "N-12 fixture" "$D" "$tab_tamper"; then
+  neg "N-12 import-commit cell carries a literal TAB (full DAG, stage=import)" "$D" --stage import
+fi
+D="$(mk_squashed)"
+if setup "N-13 fixture" "$D" "$tab_tamper"; then
+  neg "N-13 import-commit cell carries a literal TAB (history-lost, stage=contract)" "$D" --stage contract
+fi
+
 # ---------------------------------------------------------------------------
 # Mutation self-validation.
 #
@@ -297,6 +337,12 @@ if [ "${SELFTEST_MUTATION_PASS:-0}" != "1" ]; then
   # `readonly -f each_import` left the entire suite green: the case that was
   # supposed to notice reported PASS.
   mutate "M-4 readonly -f freezes the iterator" "N-5" '/readonly -f each_import/d'
+
+  # Two layers again, exactly like M-1. The interior-whitespace rule and the
+  # transport field-count assertion each catch the TAB on their own, so reverting
+  # only one leaves N-12 red — the mutation would report "bound" while proving
+  # nothing about the pair it is supposed to pin.
+  mutate "M-5 lossless six-cell transport (both layers)" "N-12" '/ERR interior-whitespace/d; /ERR transport-fields/d'
 fi
 
 printf '\n'

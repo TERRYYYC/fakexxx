@@ -233,11 +233,30 @@ doc_row() {
       # Trim only the OUTER Markdown padding and backticks. Deleting all internal
       # whitespace normalises a broken cell into a valid-looking value: an upstream
       # SHA written with a space inside it was silently repaired and certified.
-      for (i = 2; i <= 7; i++) { c = $i; gsub(/^[`[:space:]]+|[`[:space:]]+$/, "", c); row = row (i > 2 ? "\t" : "") c }
+      for (i = 2; i <= 7; i++) {
+        c = $i; gsub(/^[`[:space:]]+|[`[:space:]]+$/, "", c)
+        # No cell of this table may carry INTERIOR whitespace: prefix, URL, branch
+        # and the three hex ids are all whitespace-free by construction. This is
+        # not cosmetic. The row is serialised below with TABs and every caller
+        # reads it back with `cut -f1..f6`, so an interior TAB in any cell
+        # manufactures a seventh transport field and `cut` silently drops the
+        # tail: writing `<canonical sha>\tJUNK` into the import-commit cell was
+        # read back as the canonical SHA and certified, on full-DAG --stage import
+        # and on depth-1 history-lost --stage contract alike. Trimming only the
+        # outer padding is right; it is not sufficient to make the transport
+        # lossless, and this is what makes it lossless.
+        if (c ~ /[[:space:]]/) { printf("ERR interior-whitespace cell %d\n", i - 1); found = 3; exit }
+        row = row (i > 2 ? "\t" : "") c
+      }
     }
     END {
-      if (found == 2) exit 1
+      if (found) exit 1
       if (hits != 1) { printf("ERR row-count %d\n", hits); exit 1 }
+      # State the transport invariant independently of the rule that maintains it.
+      # Whatever the trimming above does or stops doing, the string handed to
+      # `cut` must carry exactly six fields, or every caller is reading shifted
+      # cells while believing it read the row.
+      n = split(row, parts, "\t"); if (n != 6) { printf("ERR transport-fields %d\n", n); exit 1 }
       print row
     }' "$PROVENANCE_DOC"
 }
