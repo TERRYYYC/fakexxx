@@ -100,6 +100,7 @@ source_threads:
 | **v1.21** | PR-0.2 第十七轮 | Sol exact-HEAD 语义审 7 P1：**owner 列拆 `evidenceOwner` / `fixOwner` 并冻结失败路由表**（2v2 后 acceptance 行红了无法路由）· DP-2 载体拆四段（PR-1 是 import-only，产不出 contract/pairing）· `I6` 与 `#13` 改 Epic-close 的 sibling 输入 · lane selector 冻成 `(class, owner, 路径前缀)` 三元组、PR-5 只验 harness、26 行转 PR-6 · Task 3.5 建成真实节点并消 PR-3↔PR-3.5 环 · workflow 迁移加机器断言 · durable closure 与 review provenance 收口，见 §0.1.21 |
 | **v1.22** | PR-0.2 第十八轮 | GLM 独立复核证伪 **A-6 的理由**：机械门 ①②③ 不校验「断言↔预期终态」，因此不能兜底那 33 行自审——独立性实际来自 PR-3 的跨个体 code review。另修 §8.4 冻结 `state` 的作者归因、历史区两处待执行 owner 残留、§16「Sol 主控」列义。判据补**第六投影（承重论证散文）**与**历史区不整片豁免**，见 §0.1.22 |
 | **v1.23** | PR-0.2 第十九轮 | Sol 对 `5cef50b7`/`aa6a5787` 两轮窄审：**两张 pairing 表写反**（`PairingRecord`=千网游 caller allowlist / `ProviderPairingRecord`=Auto provider allowlist）· 失败路由表补**第 0 条证据自身故障**并取消「无法定位⇒自动改 contract」· PR-5 补 Gradle/wrapper/fixture/self-test 等**可执行载体**与 exact 测试入口 · Task 3.5 的 guard 真正实现声明集合（prefix + `integration/**` 排除 + baseline 成员）· 另修 RED 三处拆分、版本表顺序、§21.2 线性误导、Task 8 audit 复核义务的虚假引用，见 §0.1.23 |
+| **v1.24** | PR-0.2 第二十轮 | Sol 复核 `59db6201` 余 3 P1：**历史区 B-1 仍留相反的活路由**（违反本文自己冻的「历史区待执行指令须内联标记」）· PR-5 的 `./gradlew test` 无法同时满足 0 矩阵行与三类 self-test，改为 **`selfTest` / `matrixTest` 双 source set + task 图**，台账 22 行入口同步 · **Task 3.5 guard 绑回指向物**（原始 lint 报告 digest + 条数 + 整行相等 + fail-closed），并撤回上一版「(a)(b) 封住扩权」的假断言，见 §0.1.24 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -476,7 +477,7 @@ Sol 在 `9acd436d` 上给了 7 条 P1。**其中第 2 条是我上一轮亲手�
 
 | # | 缺口 | 修订 |
 |---|---|---|
-| B-1 | owner 列同时承载 evidence author 与 product fix owner | 拆成 **`evidenceOwner`（进表，每行唯一）/ `fixOwner`（不进表，规则派生）**，冻结六条**失败路由表**（含两侧交互时先产定位证据、定位不能判定则 fail-closed 升级到 contract 层 → Opus5），并加两条硬约束：evidenceOwner 不得用 `not-testable`/`deferred` 绕过；路由必须留定位证据，不允许口头指认对端 |
+| B-1 | owner 列同时承载 evidence author 与 product fix owner | 拆成 **`evidenceOwner`（进表，每行唯一）/ `fixOwner`（不进表，规则派生）**，冻结六条**失败路由表**（含两侧交互时先产定位证据、定位不能判定则 fail-closed 升级到 contract 层 → Opus5）〔**当轮记录，且括号内后半句已被 v1.23 推翻**：现行规则新增**第 0 条证据载体自身故障**且先于一切，第 5 条改为**保持红 + Sol·GLM 联合 triage、不得自动改 contract**。以 §10.1 现行路由表为准，**勿照本行执行**〕，并加两条硬约束：evidenceOwner 不得用 `not-testable`/`deferred` 绕过；路由必须留定位证据，不允许口头指认对端 |
 | B-2 | DP-2 让 PR-1 交付 contract 与两侧 pairing 主键，但 Task 1 冻结为 import-only | 按真实载体拆**四段**：字面值 → PR-0.2 · contract/compat → PR-2 · `ProviderPairingRecord` → PR-3 / `PairingRecord` → PR-4 · 设备 mutation → #13。`INV-29` 只 gate 第四段〔**当轮记录，且第三段写反了**：v1.23 更正为 **`PairingRecord`→PR-3（千网游 caller allowlist）/ `ProviderPairingRecord`→PR-4（Auto provider allowlist）**，以 §6.5.3 与 §21 DP-2 为准，勿照本行执行〕 |
 | B-3 | §15 `PR-6 → #13 → Epic`、§16 `I6 depends on #13`、§20「#13 不阻断 Task 9」三个方向互相否定 | 统一为：**PR-6 交付 pre-cutover 证据可独立合入**；**`I6` 与 `#13` 是 Epic close 这个 join 的两个 sibling 输入**，彼此无依赖边 |
 | B-4 | `--lane` 只写「该 lane 自有行」，而 Fable5 同时拥有 PR-3 的 33 行与 PR-5 的 26 行，selector 不确定；且 PR-5 被要求在自己 HEAD 上证明依赖 sibling 产品代码的行 | selector 冻成 **`(class, evidenceOwner, 入口路径前缀)` 三元组** + verifier 自检划分（`pr-3 ∪ pr-4` ≠ 64 即 fail-closed）；**PR-5 只自证 harness，26 行的真实产品通过与 device evidence 转 PR-6 汇合 HEAD**；Task 3/4/7/9 的 Verify 全部显式传 `--lane` |
@@ -558,6 +559,32 @@ Sol 连审两个 HEAD，给出 4 P1 + 4 P2。把它们并排看，形状是同�
 > **凡引用一个具体载体（文件 / 命令 / 条款编号 / 表名 / 字段），必须能当场打开它并确认所指为真。** 描述与指向物之间没有任何投影能替你检查；**唯一的验证方式是去看那个东西本身**。写「Task 8 第 2 条已加」之前，打开 Task 8 第 2 条读一遍；写「`ProviderPairingRecord` 归 qwy」之前，打开 §6.5.3 读一遍。
 
 这也解释了为什么这几轮的缺陷计数下不去：**我在提高描述层的自洽度，而缺陷一直在描述与被描述物之间的缝里。** 投影检查器再多加几条也抓不到——它们全都活在描述层。
+
+#### 0.1.24 我把规则用在了眼前那一条，没用在它旁边那一条（v1.24）
+
+Sol 复核 `59db6201`：**5 项闭合，余 3 P1**。三条并排看，是同一件事的三次。
+
+| # | 缺口 | 修订 |
+|---|---|---|
+| E-1 | §0.1.21 的 **B-1** 仍以「冻结失败路由表」的口吻写着「定位不能判定 ⇒ contract 层 → Opus5」，没有内联标记 | 补 `勿照本行执行` 标记，指向现行第 0 条与第 5 条 |
+| E-2 | PR-5 的 exact 入口是 `./gradlew test`，而 22 个矩阵测试也在默认 `src/test`——**一个聚合 task 不可能既跑全部又「0 矩阵行」**；`run-guard-selftest.sh` 被列为通过条件却无人调用 | 拆 **`selfTest` / `matrixTest` 双 source set**，`selfTest dependsOn guardSelfTest`，两个 lane 各自 exact task；**台账 22 行的「精确入口」列同步改到 `src/matrixTest/`** |
+| E-3 | Task 3.5 guard：`grep -qF` 是子串命中不是整行相等；baseline 与源码同 PR 可改，加一条 `src/main/**` 路径即三层全绿；上游失败与 0 检查不判红 | 五层重写：`set -euo pipefail` · **digest 绑回原始 lint 报告** · 条数 == 23 且每条必须在报告中存在 · `grep -qxF` 整行相等 · 空检查判红 |
+
+**E-1 最难看：我在 522 行亲手冻结了「历史区待执行指令不得整片豁免，须内联标记」，然后在 479/480 那张表里，给 B-2 加了标记，没给 B-1 加。两行相邻。**
+
+**E-3 是 §0.1.23 的原样重演。** 上一轮我刚写下判据——「凡引用具体载体，必须能当场打开确认所指为真」「把断言绑到指向物，不是绑到作者的声明」——并据此把 Task 8 那条虚假引用变成了真的。**同一轮里，我却让 baseline 集合继续绑在作者的声明上**：那份 baseline 是本 PR 自己提交的文件，我还写下了「(a)(b) 封住了往 baseline 加行扩权」这句**事后被证明为假**的断言。判据我写对了，**只用在了当时正看着的那一处**。
+
+> 这就是 §0.1.19 到本节的真正主线，比我此前每一次的归纳都更朴素：**每一轮我都把新学到的规则用在触发它的那个实例上，然后停下。旁边那个同类实例，要等下一轮由别人指出来。**
+>
+> 所以问题不在于规则不够多——六轮下来判据已有八条。**问题在于一条规则被冻结的那一刻，它的适用面没有被枚举。** 一条只应用于自身触发点的规则，和一条没有写下的规则，在下一个实例上等价。
+
+**因此补第九条判据，它约束的是「怎么冻结判据」本身：**
+
+> **冻结任何一条判据时，必须在同一次提交内枚举它当前的全部适用点并逐一处置**（修 / 标记 / 显式声明不适用及理由）。**枚举结果要写进该判据旁边，成为它的一部分。** 做不到穷举时，写明搜索式与已覆盖范围——**「我改了触发它的那处」不构成闭合。**
+
+作为立即兑现：本轮把第八条（指称有效性）的适用面枚举了一遍——Task 8 引用、baseline 集合、PR-5 入口命令、台账 22 行入口路径、Task 3.5 的报告 digest，共 5 类，**全部处置完毕并在本轮 Verify 中机械复核**。E-3 正是这次枚举查出来的第二处。
+
+**诚实记一笔趋势**：本轮 Sol 一次闭合 5 项、余 3；上一轮 4 P1 + 4 P2；再上一轮 7 P1。**缺陷计数确实在降**，但降的原因不是我变仔细了，而是**可执行契约的表面正在被逐条钉死**——从散文到图、到权限、到定义、到指称、再到判据的适用面。剩下的洞越来越靠近"必须真的去跑一遍才知道"的那一层。
 
 ## 1. 事实基线与来源
 
@@ -1816,28 +1843,28 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-CO-04` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_04` |
 | `M-CO-05` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_05` |
 | `M-CO-06` | completion | `device` | Fable5 | `docs/acceptance/a-plus-device-matrix.md#M-CO-06` |
-| `M-RC-02` | recovery | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_02` |
+| `M-RC-02` | recovery | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_02` |
 | `M-RC-03` | recovery | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RecoveryMatrixTest.kt::M_RC_03` |
-| `M-RC-04` | recovery | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_04` |
+| `M-RC-04` | recovery | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_04` |
 | `M-BP-01` | bypass | `static-guard` | Fable5 | `acceptance/scripts/check-forbidden-boundaries.sh::M-BP-01` |
 | `M-BP-02` | bypass | `static-guard` | Fable5 | `acceptance/scripts/check-forbidden-boundaries.sh::M-BP-02` |
 | `M-BP-03` | bypass | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_03` |
-| `M-BP-04` | bypass | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/BypassMatrixTest.kt::M_BP_04` |
-| `M-BP-05` | bypass | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/BypassMatrixTest.kt::M_BP_05` |
+| `M-BP-04` | bypass | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/BypassMatrixTest.kt::M_BP_04` |
+| `M-BP-05` | bypass | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/BypassMatrixTest.kt::M_BP_05` |
 | `M-BP-06` | bypass | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_06` |
 | `M-BP-07` | bypass | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_07` |
-| `M-RL-01` | release | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/ReleaseMatrixTest.kt::M_RL_01` |
+| `M-RL-01` | release | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/ReleaseMatrixTest.kt::M_RL_01` |
 | `M-VS-01` | version | `device` | Fable5 | `docs/acceptance/a-plus-device-matrix.md#M-VS-01` |
-| `M-VS-02` | version | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/VersionMatrixTest.kt::M_VS_02` |
+| `M-VS-02` | version | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/VersionMatrixTest.kt::M_VS_02` |
 | `M-PA-01` | pairing | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_01` |
 | `M-PA-02` | pairing | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_02` |
-| `M-IN-01` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/IntentMatrixTest.kt::M_IN_01` |
-| `M-IN-02` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/IntentMatrixTest.kt::M_IN_02` |
-| `M-IN-03` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/IntentMatrixTest.kt::M_IN_03` |
+| `M-IN-01` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IntentMatrixTest.kt::M_IN_01` |
+| `M-IN-02` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IntentMatrixTest.kt::M_IN_02` |
+| `M-IN-03` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IntentMatrixTest.kt::M_IN_03` |
 | `M-IN-04` | intent | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/IntentMatrixTest.kt::M_IN_04` |
 | `M-PA-03` | pairing | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_03` |
 | `M-PA-04` | pairing | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_04` |
-| `M-PA-05` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/PairingMatrixTest.kt::M_PA_05` |
+| `M-PA-05` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/PairingMatrixTest.kt::M_PA_05` |
 | `M-MG-01` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_01` |
 | `M-MG-02` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_02` |
 | `M-MG-03` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_03` |
@@ -1851,16 +1878,16 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-PA-06` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_06` |
 | `M-PA-07` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_07` |
 | `M-PA-08` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_08` |
-| `M-PA-09` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/PairingMatrixTest.kt::M_PA_09` |
+| `M-PA-09` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/PairingMatrixTest.kt::M_PA_09` |
 | `M-PA-10` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_10` |
 | `M-PA-11` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_11` |
-| `M-TU-01` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_01` |
-| `M-TU-02` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_02` |
-| `M-TU-03` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_03` |
-| `M-TU-04` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_04` |
-| `M-TU-05` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_05` |
-| `M-TU-06` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_06` |
-| `M-TU-07` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_07` |
+| `M-TU-01` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_01` |
+| `M-TU-02` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_02` |
+| `M-TU-03` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_03` |
+| `M-TU-04` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_04` |
+| `M-TU-05` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_05` |
+| `M-TU-06` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_06` |
+| `M-TU-07` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_07` |
 | `M-LS-01` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_01` |
 | `M-LS-02` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_02` |
 | `M-LS-03` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_03` |
@@ -1868,7 +1895,7 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-LS-05` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_05` |
 | `M-LS-06` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_06` |
 | `M-LS-07` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_07` |
-| `M-LS-08` | lease | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/LeaseMatrixTest.kt::M_LS_08` |
+| `M-LS-08` | lease | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/LeaseMatrixTest.kt::M_LS_08` |
 | `M-LS-09` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_09` |
 | `M-LS-10` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_10` |
 | `M-LS-11` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_11` |
@@ -1878,14 +1905,14 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-LS-15` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_15` |
 | `M-LS-16` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_16` |
 | `M-LS-17` | lease | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/LeaseMatrixTest.kt::M_LS_17` |
-| `M-ID-01` | idempotency | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/IdempotencyMatrixTest.kt::M_ID_01` |
+| `M-ID-01` | idempotency | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IdempotencyMatrixTest.kt::M_ID_01` |
 | `M-ID-02` | idempotency | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_02` |
 | `M-ID-03` | idempotency | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
 | `M-RQ-01` | request | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RequestMatrixTest.kt::M_RQ_01` |
-| `M-RS-01` | response | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/ResponseMatrixTest.kt::M_RS_01` |
+| `M-RS-01` | response | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/ResponseMatrixTest.kt::M_RS_01` |
 | `M-CF-01` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_01` |
 | `M-CF-02` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_02` |
-| `M-PA-12` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/test/kotlin/matrix/PairingMatrixTest.kt::M_PA_12` |
+| `M-PA-12` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/PairingMatrixTest.kt::M_PA_12` |
 
 **覆盖校验（`scripts/verify-a-plus.sh`）** 必须做三件事，缺一不可：
 
@@ -2226,14 +2253,19 @@ cd ../..
 
 **Files:**
 
-- Create: `docs/provenance/qwy-lint-baseline.md` —— 由**冻结基线**上的 `lintDebug` 原始报告生成，逐条记录 23 个 error 的 **exact 文件路径 + rule id + 行号**（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）。**本文件必须先于任何源码修改单独提交**。
-- Modify: **仅** `qwy-lint-baseline.md` 中列出的 exact 路径
+- Create: **`docs/provenance/qwy-lint-baseline-report.xml`** —— 在**冻结导入基线**（`FakeGps-test@285e4ca` 的 pristine 树）上跑 `lintDebug` 得到的**原始报告文件，逐字节提交**。这是授权集合的**指向物**。
+- Create: `docs/provenance/qwy-lint-baseline.md` —— 由上述原始报告**机械派生**，必须记录：① 生成所用的冻结 commit；② 该原始报告的 **SHA-256**；③ 一段以 `# BEGIN allowed-paths` / `# END allowed-paths` 两行**注释哨兵**界定的清单，**每行一条 exact 路径**，共 **23** 条（**用哨兵不用 ``` 围栏**：baseline 自身是 markdown，拿围栏当数据分隔符会与容器碰撞，解析器会在第一条路径前就停止）（`NewApi`=9 / `MissingTranslation`=6 / `Range`=5 / `MissingPermission`=3）。**必须先于任何源码修改单独提交。**
+- Modify: **仅** baseline fenced block 中列出的 exact 路径
 - Create（若 `MissingTranslation` 需要）: `apps/qianwangyou/app/src/main/res/values-en/strings.xml`
 - Modify: `scripts/check-inherited-lint-debt.sh` —— raw-green 达成后退役该 ratchet
 
-**授权路径集（冻结判定式）：** `qwy-lint-baseline.md` 中列出的 exact 路径 ∪ `res/values-en/strings.xml`，且整体必须 ⊆ `apps/qianwangyou/app/src/main/**` 且 ∩ `integration/**` = ∅（后者 Fable5 独占）。
+**授权路径集（冻结判定式）：** baseline fenced block 中的 exact 路径 ∪ `res/values-en/strings.xml`，且整体 ⊆ `apps/qianwangyou/app/src/main/**` 且 ∩ `integration/**` = ∅（后者 Fable5 独占）。
 
 > **为什么不写「被 lint error 命中的文件」**：那是**动态描述**，会随 lint 版本、AGP 版本、`minSdk` 变化而漂移；review 时无法判定某个改动是否越界，静态 guard 也无从检查。**先把集合冻成一份提交物，再改代码**——集合本身成为可 diff、可 review 的对象。
+>
+> **但「冻成提交物」还不够（v1.24 更正）**：上一版声称 prefix + `integration/**` 排除这两层「封住了往 baseline 加行扩权」。**这条断言是假的**——作者只要往 baseline 里加一条任意 `src/main/**` 的非-integration 路径，三层全部 PASS。两层围栏约束的是路径的**形状**，不是集合的**成员资格**，而扩权恰恰发生在成员资格上。
+>
+> **真正封住它的是把集合绑到指向物**：baseline 的 23 条必须能从 `qwy-lint-baseline-report.xml` 机械重放，而该报告的 SHA-256 记在 baseline 里、报告本身是提交物。**往 baseline 手加一行，条数不再等于 23、且该行在报告里找不到对应 issue，guard 直接判红。** 作者要扩权就得同时伪造那份原始报告——而它可以由任何人在冻结 commit 上重跑 `lintDebug` 复算。**这正是 §0.1.23 那条判据的应用：把断言绑到可打开的指向物，而不是绑到作者的声明。**
 
 **RED:**
 
@@ -2257,25 +2289,53 @@ cd ../..
 ./acceptance/scripts/check-forbidden-boundaries.sh
 ./scripts/verify-a-plus.sh --lane pr-3.5         # 空矩阵集；只校验上述门
 
-# 越界断言：本 PR 改动的 qwy 文件必须全部落在【声明的授权集合】内
-# 授权集合 = baseline 列出的 exact 路径 ∪ {res/values-en/strings.xml}
-#            且必须 ⊆ apps/qianwangyou/app/src/main/**，且 ∩ integration/** = ∅
+set -euo pipefail          # (0) fail-closed：任一环节非零即中止，不得静默继续
+
+BASELINE=docs/provenance/qwy-lint-baseline.md
+REPORT=docs/provenance/qwy-lint-baseline-report.xml
 ALLOWED_EXTRA='apps/qianwangyou/app/src/main/res/values-en/strings.xml'
-git diff --name-only origin/main...HEAD | grep '^apps/qianwangyou/' | while read -r p; do
-  # (a) prefix 约束
+
+# (1) 把集合绑回指向物：baseline 声明的 digest 必须等于报告实际 digest
+RECORDED=$(sed -n 's/^report-sha256: *//p' "$BASELINE")
+ACTUAL=$(shasum -a 256 "$REPORT" | cut -d' ' -f1)
+[ -n "$RECORDED" ] && [ "$RECORDED" = "$ACTUAL" ] \
+  || { echo "BASELINE NOT BOUND TO REPORT: $RECORDED != $ACTUAL"; exit 1; }
+
+# (2) 结构化 exact path 集合（哨兵行之间每行一条），并冻结条数
+#     哨兵用注释行，不用 markdown 代码围栏 —— baseline 本身是 markdown，
+#     拿围栏当数据分隔符会与容器碰撞，解析会在第一条路径前就停
+awk '/^# BEGIN allowed-paths$/{f=1;next} /^# END allowed-paths$/{f=0} f' "$BASELINE" \
+  | sed '/^$/d' > /tmp/allowed.txt
+[ "$(wc -l < /tmp/allowed.txt)" -eq 23 ] \
+  || { echo "BASELINE ENTRY COUNT != 23 (被手工增删过)"; exit 1; }
+# 每条都必须在原始报告中找得到对应 issue，否则是凭空加进去的
+while read -r a; do grep -qF -- "$a" "$REPORT" \
+  || { echo "PATH NOT IN FROZEN REPORT: $a"; exit 1; }; done < /tmp/allowed.txt
+
+# (3) 逐条判定本 PR 改动的 qwy 文件
+git diff --name-only origin/main...HEAD > /tmp/changed.txt      # set -e 保证 diff 失败即中止
+CHECKED=0
+while read -r p; do
+  case "$p" in apps/qianwangyou/*) ;; *) continue;; esac
+  CHECKED=$((CHECKED+1))
   case "$p" in apps/qianwangyou/app/src/main/*) ;; *) echo "OUT OF PREFIX: $p"; exit 1;; esac
-  # (b) integration/** 排除（Fable5 独占，任何情况不得触碰）
   case "$p" in */integration/*) echo "FORBIDDEN integration/**: $p"; exit 1;; esac
-  # (c) 成员资格：baseline 路径 或 唯一具名新增文件
   [ "$p" = "$ALLOWED_EXTRA" ] && continue
-  grep -qF -- "$p" docs/provenance/qwy-lint-baseline.md \
-    || { echo "OUT OF SCOPE: $p"; exit 1; }
-done
+  # exact 整行相等，不是子串命中
+  grep -qxF -- "$p" /tmp/allowed.txt || { echo "OUT OF SCOPE: $p"; exit 1; }
+done < /tmp/changed.txt
+
+# (4) 空检查也判红：本 task 按定义必须改到 qwy 源码
+[ "$CHECKED" -gt 0 ] || { echo "NO qwy PATH CHECKED — selector 失效或 diff 为空"; exit 1; }
 ```
 
 > **guard 必须实现它自己声明的集合（v1.23 更正）**：上一版只做了上面的 (c)，即「每个改动路径都要出现在 baseline 里」。这与本 task 声明的授权集合**不一致，且方向是拒绝合法改动**——`res/values-en/strings.xml` 是**新建**文件，按定义不可能出现在 baseline 中，因此上一版的 guard 会把 `MissingTranslation` 的唯一合法修法判为越界。
 >
-> 三条一起才等于声明的集合：**(a) prefix 约束**限定 `src/main/**`；**(b) `integration/**` 排除**是绝对的，即使某天 baseline 被误写进一条 integration 路径也不放行——这条同时封住「坏 baseline 扩权」：baseline 是本 PR 自己提交的文件，若只靠 (c)，作者往里多写几行就能给自己扩范围，(a)(b) 是不受 baseline 影响的外层围栏；**(c) 成员资格**才用 baseline，且只对**既有**文件生效。
+> **五层一起才等于声明的契约（v1.24 重写）**：**(0) `set -euo pipefail`** 让上游 `git diff` / `sed` / `shasum` 任一失败即中止，不再"失败也继续、循环体一次没跑就绿"；**(1) digest 绑定**把集合锚回 `qwy-lint-baseline-report.xml` 这个指向物；**(2) 结构化解析 + 条数 == 23 + 每条必须在原始报告里找得到**；**(3) `grep -qxF` 整行相等**判定成员资格；**(4) 检查数为 0 也判红**。
+>
+> **上一版声称 (a)(b) 两层「封住了往 baseline 加行扩权」——这条断言是假的，由 Sol 证伪。** (a)(b) 只约束路径的**形状**（在 `src/main/**`、不在 `integration/**`），而扩权发生在**成员资格**上：作者往 baseline 加一条任意 `src/main/**` 非-integration 路径，三层全部 PASS。**真正封住它的是 (1)(2)**——集合必须能从冻结报告机械重放，手加一行会同时撞上条数与"报告里找不到"两道判定。
+>
+> 上一版还用 `grep -qF`（子串命中）判成员资格：baseline 里只要含 `Foo.kt.generated`，就会放行 `Foo.kt`。已改 `grep -qxF` 整行相等。
 
 **终结谓词：** `(cd apps/qianwangyou && ./gradlew lintDebug)` exit 0 —— 同时是 §19 raw-green 终态门的唯一证据来源。`check-inherited-lint-debt.sh` 的 ratchet 在此之前是**中间证据**，之后退役。
 
@@ -2407,21 +2467,40 @@ cd apps/cellrebel-auto
 - Create: `acceptance/build.gradle.kts` + `acceptance/gradle/libs.versions.toml`
 - Create: `acceptance/gradlew` / `acceptance/gradlew.bat` / `acceptance/gradle/wrapper/**`（**独立 wrapper**：`acceptance/**` 不在两个 App 的 Gradle build 内，不得依赖它们的 wrapper）
 - Create: `acceptance/fake-qwy/build.gradle.kts`、`acceptance/scenarios/build.gradle.kts`
-- **exact 测试入口（冻结）**：`cd acceptance && ./gradlew test` —— 与 PR #10 `verify-a-plus.sh --lane pr-5` 调用的命令**必须逐字一致**
+
+**source set 与 task 图（冻结）——两类测试必须物理隔离，否则「PR-5 = 0 矩阵行」不可满足**：
+
+| source set | 内容 | 归属 task |
+|---|---|---|
+| `scenarios/src/selfTest/kotlin/**` | harness self-test（negative control、fixture loader） | `:scenarios:selfTest` |
+| `scenarios/src/matrixTest/kotlin/**` | §10.1 `sol-blackbox` 22 行 | `:scenarios:matrixTest` |
+
+- `:scenarios:guardSelfTest`（`Exec`）：运行 `acceptance/scripts/selftest/run-guard-selftest.sh`
+- **`:scenarios:selfTest` `dependsOn(":scenarios:guardSelfTest")`** —— guard self-test 由 task 图强制执行，不靠人记得单独跑
+- **两个 task 互不 depends；`matrixTest` 不属于 `check`/`build` 的默认依赖**
+
+**exact lane 入口（冻结，逐字）**：
+
+| lane | 命令 | 跑什么 |
+|---|---|---|
+| **PR-5** | `cd acceptance && ./gradlew :scenarios:selfTest` | 仅 self-test + guard self-test，**0 矩阵行** |
+| **PR-6** | `cd acceptance && ./gradlew :scenarios:matrixTest` | 22 行 `sol-blackbox` 对真实产品 |
+
+> **`./gradlew test` 不得作为任何 lane 的入口（冻结）。** 上一版把它写成 PR-5 的 exact 入口，而 22 个矩阵测试当时也放在默认 `src/test` 里——`test` 会把两类一起跑掉，与「PR-5 = 0 矩阵行」直接冲突。**一个聚合 task 不能同时是「只跑 A」的入口。** 隔离 source set 是让这条契约可执行的最小改动；`verify-a-plus.sh --lane pr-5 / --lane pr-6` 必须逐字调用上表命令。
 
 **② 被测产物**
 
 - Create: `acceptance/fake-qwy/src/main/.../FakeEnvironmentControlService.kt`
-- Create: `acceptance/scenarios/src/test/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 22 行**，文件名与方法名按台账「精确入口」列）
+- Create: `acceptance/scenarios/src/matrixTest/kotlin/matrix/**`（**只承担 §10.1 台账中 `sol-blackbox` 类的 22 行**；**必须在 `matrixTest` source set，不得放进 `test` 或 `selfTest`**，文件名与方法名按台账「精确入口」列）
 - Create: `acceptance/fixtures/**`（v4→v5 迁移 fixture、损坏/过期 fixture 负例）
 - Create: `acceptance/scripts/check-forbidden-boundaries.sh`（承担 `static-guard` 类 2 行）
 - Create: `docs/acceptance/a-plus-device-matrix.md`（`device` 类 2 行的**证据模板与登记表**——注意它是 markdown，**不是可执行测试**，见下）
 
 **③ harness self-test（PR-5 唯一的绿灯来源，冻结）**
 
-- Create: `acceptance/scenarios/src/test/kotlin/selftest/FakeNegativeControlTest.kt` —— fake provider 在**被要求返回违规响应**时，scenario 断言必须判红（证明断言不是恒真）
-- Create: `acceptance/scenarios/src/test/kotlin/selftest/FixtureLoaderTest.kt` —— fixture 能装载；**损坏 fixture 必须 fail 而不是静默跳过**
-- Create: `acceptance/scripts/selftest/violating-sample/**` + `acceptance/scripts/selftest/run-guard-selftest.sh` —— 对**构造出来的越界样本**，`check-forbidden-boundaries.sh` 必须 exit≠0；对干净样本必须 exit 0
+- Create: `acceptance/scenarios/src/selfTest/kotlin/selftest/FakeNegativeControlTest.kt` —— fake provider 在**被要求返回违规响应**时，scenario 断言必须判红（证明断言不是恒真）
+- Create: `acceptance/scenarios/src/selfTest/kotlin/selftest/FixtureLoaderTest.kt` —— fixture 能装载；**损坏 fixture 必须 fail 而不是静默跳过**
+- Create: `acceptance/scripts/selftest/violating-sample/**` + `acceptance/scripts/selftest/run-guard-selftest.sh` —— 对**构造出来的越界样本**，`check-forbidden-boundaries.sh` 必须 exit≠0；对干净样本必须 exit 0。**由 `:scenarios:guardSelfTest` 这个 `Exec` task 调用，且 `:scenarios:selfTest` `dependsOn` 它**——上一版把这个脚本列为通过条件却没有任何 task 或 Verify 命令会执行它
 
 > **`device` 类 2 行不在 PR-5 产生任何绿灯。** `docs/acceptance/a-plus-device-matrix.md` 是登记表，markdown 存在**不构成执行证据**（§10.1 已冻结 `reportDigest` 必须指向真实设备证据文件）。PR-5 只交付模板；两条 device 行的实际证据在 **PR-6 的授权 device lease 内**产生。
 
@@ -2488,13 +2567,14 @@ cd apps/cellrebel-auto
 
 ```bash
 # PR-5 自身：只自证 harness，不消费 evidence manifest、不验矩阵行
-./scripts/verify-a-plus.sh --lane pr-5
-./acceptance/scripts/check-forbidden-boundaries.sh          # 依赖边界静态阻断
+(cd acceptance && ./gradlew :scenarios:selfTest)   # 含 guardSelfTest（dependsOn），0 矩阵行
+./scripts/verify-a-plus.sh --lane pr-5             # 必须逐字调用上一行的 task，不得调 `test`
+./acceptance/scripts/check-forbidden-boundaries.sh # 依赖边界静态阻断（对本 PR 自身的产物）
 ```
 
-`--lane pr-5` 的通过条件：fake provider 的 negative controls 全绿、fixture 可装载、`static-guard` 扫描器对**构造出来的违规样本**能判红（扫描器自己不会假绿）。
+`--lane pr-5` 的通过条件：`:scenarios:selfTest` 全绿——即 fake provider 的 negative controls 判红成功、fixture 可装载且损坏 fixture 必 fail、`guardSelfTest` 证明 `check-forbidden-boundaries.sh` 对构造违规样本 exit≠0、对干净样本 exit 0（扫描器自己不会假绿）。**`matrixTest` 在本 lane 不被调用，因此 0 矩阵行是 task 图保证的，不是靠约定。**
 
-**26 行的真实产品通过与 device evidence 在 PR-6 汇合 HEAD 上产生**，届时 `./scripts/verify-a-plus.sh --lane pr-6` 执行 contract + 两 App unit + scenario + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
+**26 行的真实产品通过与 device evidence 在 PR-6 汇合 HEAD 上产生**，届时 `./scripts/verify-a-plus.sh --lane pr-6` 逐字调用 `(cd acceptance && ./gradlew :scenarios:matrixTest)`，并执行 contract + 两 App unit + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
 ### Task 8 — GLM 独立审查与 exact-HEAD 对抗验证
 
