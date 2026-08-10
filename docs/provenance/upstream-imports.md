@@ -21,10 +21,15 @@ Spec: [`feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md`](../../feature
 
 ## 1. Imports
 
+<!-- Every cell in this table is parsed as a bare value: outer backticks and
+     padding are trimmed, nothing else. Do not add label text inside a cell —
+     the column header carries the meaning, and an in-cell label would have to
+     be stripped by rules that also silently repair malformed values. -->
+
 | Prefix | Upstream URL | Branch | Exact upstream SHA | Upstream root tree | fakexxx import commit |
 |---|---|---|---|---|---|
-| `apps/cellrebel-auto` | `https://github.com/TERRYYYC/Faketest.git` | `main` | `48d8ec93adb84cdb9c4282c376ec97476648683e` | `0553fcb46f02e7211f4496e4a98b846ec70ef9a2` | import commit `301da0f2925373dfe40cfd2a51d53ddaca4bba93` |
-| `apps/qianwangyou` | `https://github.com/TERRYYYC/FakeGps-test.git` | `master` | `285e4cae438ab6feea1f70f984f433c7a424b944` | `f4bdce23c65e6227cf43dab5fe0416120b95134e` | import commit `5687e319f978dcd9b76e413c06b2b0da91627518` |
+| `apps/cellrebel-auto` | `https://github.com/TERRYYYC/Faketest.git` | `main` | `48d8ec93adb84cdb9c4282c376ec97476648683e` | `0553fcb46f02e7211f4496e4a98b846ec70ef9a2` | `301da0f2925373dfe40cfd2a51d53ddaca4bba93` |
+| `apps/qianwangyou` | `https://github.com/TERRYYYC/FakeGps-test.git` | `master` | `285e4cae438ab6feea1f70f984f433c7a424b944` | `f4bdce23c65e6227cf43dab5fe0416120b95134e` | `5687e319f978dcd9b76e413c06b2b0da91627518` |
 
 Upstream commit detail at import time:
 
@@ -274,8 +279,8 @@ explicit provenance exception.
 ## 5. Regression gate
 
 `scripts/selftest-provenance.sh` runs the production checker against throwaway
-clones and asserts its exit code — **4 positives and 9 negatives**, counted by the
-harness rather than written by hand. No case inspects source text: grepping the
+clones and asserts its exit code. Counts come from the harness's own counters rather
+than a hand-written label, so they cannot drift from what actually ran. No case inspects source text: grepping the
 checker for a literal proves the line exists, not that it does anything, and an
 earlier version counted two such greps as negatives while advertising 8 when only
 6 behaviours ran.
@@ -288,5 +293,8 @@ a row renamed to a prefix-suffix, a duplicated row, cross-row swaps of the SHA a
 root-tree cells, an executed iterator-redefinition fork, a dropped record, a prefix
 smuggled into the branch field, and a malformed three-field record.
 
-It runs in CI next to the checker. Each case was verified bound to the production
-predicate by mutation: reverting the fix must make that case fail.
+It runs in CI next to the checker, and mutation-checks itself: a section at the
+end reverts each load-bearing fix and asserts the case guarding it fails. That
+section first proves the mutation actually landed, because "the case still
+passes" and "the mutation never applied" otherwise produce identical output and
+the second masquerades as the first.

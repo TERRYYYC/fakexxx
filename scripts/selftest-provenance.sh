@@ -16,7 +16,7 @@ SHA_AUTO=48d8ec93adb84cdb9c4282c376ec97476648683e
 SHA_QWY=285e4cae438ab6feea1f70f984f433c7a424b944
 TREE_AUTO=0553fcb46f02e7211f4496e4a98b846ec70ef9a2
 TREE_QWY=f4bdce23c65e6227cf43dab5fe0416120b95134e
-POS=0; NEG=0; FAILURES=0
+POS=0; NEG=0; MUT=0; FAILURES=0
 
 ok()  { printf '  PASS  %s\n' "$1"; }
 bad() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
@@ -28,19 +28,46 @@ mk_squashed() {
   ( cd "$d" && git init -q . && git config user.email s@s && git config user.name s )
   ( cd "$REPO_ROOT" && git archive HEAD ) | tar -x -C "$d"
   cp "$PROD" "$d/scripts/check-provenance.sh"
+  cp "$REPO_ROOT/$DOC" "$d/$DOC"          # working-tree doc, not the committed one
   ( cd "$d" && git add -A >/dev/null && git commit -qm "squash merge of PR #10" )
+  # Fetch the upstream object into the fixture itself. Shape assertions resolve
+  # ${SHA}^{tree} before the checker runs, so they must not depend on whichever
+  # repository happens to be $REPO_ROOT — inside a mutation copy that repo does
+  # not have the object, and the assertion then failed for a reason unrelated to
+  # the mutation, producing an unreliable "not bound" verdict.
+  ( cd "$d" && git fetch --no-tags -q https://github.com/TERRYYYC/FakeGps-test.git "$SHA_QWY" ) >/dev/null 2>&1
   printf '%s\n' "$d"
 }
 
 run() { ( cd "$2" && ./scripts/check-provenance.sh "${@:3}" ) >/dev/null 2>&1; return $?; }
 
+# Every fixture must be built successfully AND be shaped the way its case claims.
+# A previous version discarded the setup subshell's exit code: breaking P-4's
+# first append left the case silently re-testing pristine P-3 while still
+# printing "real Task-2 qwy delta (rc=0)". A green case whose fixture never
+# existed is a false verification — precisely what the case exists to prevent.
+setup() { # <label> <dir> <shell-body>
+  if ! ( cd "$2" && eval "$3" ) >/dev/null 2>&1; then
+    bad "$1 — FIXTURE SETUP FAILED; the case below would have tested nothing"; return 1
+  fi; return 0
+}
+shape() { # <label> <predicate-cmd...>
+  if ! "${@:2}" >/dev/null 2>&1; then bad "$1 — FIXTURE SHAPE ASSERTION FAILED"; return 1; fi; return 0
+}
+tree_at() { git -C "$1" rev-parse --quiet --verify "${2}:apps/qianwangyou" 2>/dev/null; }
+
+# When SELFTEST_ONLY is set, run only the case whose label starts with it. The
+# mutation section uses this so each mutation costs one case instead of a full
+# re-run: three nested full runs took minutes and would have timed out in CI.
+skip_case() { [ -n "${SELFTEST_ONLY:-}" ] && case "$1" in "$SELFTEST_ONLY"*) return 1;; *) return 0;; esac; return 1; }
+
 pos() { # <label> <dir> <args...>
-  local l="$1"; shift; POS=$((POS+1))
+  local l="$1"; shift; skip_case "$l" && return 0; POS=$((POS+1))
   local rc; run x "$@"; rc=$?
   [ "$rc" -eq 0 ] && ok "$l (rc=0)" || bad "$l — expected rc=0, got $rc"
 }
 neg() { # <label> <dir> <args...>
-  local l="$1"; shift; NEG=$((NEG+1))
+  local l="$1"; shift; skip_case "$l" && return 0; NEG=$((NEG+1))
   local rc; run x "$@"; rc=$?
   [ "$rc" -ne 0 ] && ok "$l (rc=$rc)" || bad "$l — expected non-zero, got 0"
 }
@@ -56,12 +83,19 @@ pos "P-3 squash-merged history, pristine trees"       "$D" --stage contract
 # base commit carries the pristine tree — so this must be green. Making it red
 # would forbid the operator from using the squash button.
 D="$(mk_squashed)"
-( cd "$D" \
-  && printf '\n// contract wiring (PR-2 Task 2)\n' >> apps/qianwangyou/app/build.gradle \
-  && printf '\n// contract wiring (PR-2 Task 2)\n' >> apps/qianwangyou/build.gradle \
-  && printf '\n// contract wiring (PR-2 Task 2)\n' >> apps/qianwangyou/settings.gradle \
-  && git add -A && git commit -qm "PR-2 contract wiring" -q ) >/dev/null 2>&1
-pos "P-4 squash-merged history + real Task-2 qwy delta" "$D" --stage contract
+if setup "P-4 fixture" "$D" '
+    for f in app/build.gradle build.gradle settings.gradle; do
+      test -f "apps/qianwangyou/$f" || exit 1
+      printf "\n// contract wiring (PR-2 Task 2)\n" >> "apps/qianwangyou/$f"
+    done
+    git add -A && git commit -qm "PR-2 contract wiring" -q'; then
+  UP="$(git -C "$D" rev-parse "${SHA_QWY}^{tree}" 2>/dev/null)"
+  if shape "P-4 parent prefix tree == upstream" test "$(tree_at "$D" HEAD^)" = "$UP" \
+  && shape "P-4 HEAD prefix tree != upstream"   test "$(tree_at "$D" HEAD)" != "$UP" \
+  && shape "P-4 exactly 3 qwy files in delta"   test "$(git -C "$D" diff --name-only HEAD^ HEAD -- apps/qianwangyou | wc -l | tr -d ' ')" = "3"; then
+    pos "P-4 squash-merged history + Task-2-shaped qwy delta (3 build files)" "$D" --stage contract
+  fi
+fi
 
 printf '\n== negatives (bad states that must go red) ==\n'
 
@@ -111,46 +145,152 @@ a="# Entry files that must exist after a successful import (spec §13 Task 1.3).
 s=s.replace(a,"each_import() { printf '%s\\n' 'apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e'; }\n\n"+a,1)
 open(p,'w').write(s)
 PY
-printf '\n// tampered\n' >> apps/qianwangyou/app/build.gradle
-git add -A && git commit -qm fork -q ) >/dev/null 2>&1
-neg "N-5 handler-after iterator redefinition + qwy tamper" "$D" --stage import
+) >/dev/null 2>&1
+# The fork must be the ONLY defect. Bundling a qwy tamper made the case pass even
+# when the injection silently failed, because a tamper alone already reddens
+# --stage import. Assert the injection landed, then let red come from nothing else.
+if shape "N-5 fork injection landed" grep -qc "^each_import() { printf" "$D/scripts/check-provenance.sh"; then
+  # readonly -f makes the redefinition a hard error, so the fork cannot take
+  # effect and a clean repo stays green. Asserting rc alone would therefore
+  # prove nothing. Assert the behaviour that matters instead: the loops still
+  # consumed the real record set, i.e. qwy was still checked. The previous
+  # version bundled a qwy tamper so red could come from the tamper alone,
+  # letting the case pass even when the injection silently failed.
+  NEG=$((NEG+1))
+  out="$( cd "$D" && ./scripts/check-provenance.sh --stage import 2>&1 )"
+  if printf '%s' "$out" | grep -q 'apps/qianwangyou'; then
+    ok "N-5 iterator redefinition cannot fork query from gate (qwy still checked)"
+  else
+    bad "N-5 iterator redefinition forked the gate — qwy was never checked"
+  fi
+fi
 
 # A prefix dropped from the frozen record set: the gate would skip an app.
 D="$(mk_squashed)"
 ( cd "$D" && python3 - <<'PY'
 p='scripts/check-provenance.sh'; s=open(p).read()
-open(p,'w').write(s.replace("apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944\n","",1))
+open(p,'w').write(s.replace("apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944|5687e319f978dcd9b76e413c06b2b0da91627518\n","",1))
 PY
 ) >/dev/null 2>&1
-neg "N-6 qwy record removed from the frozen set" "$D" --stage import
+if shape "N-6 mutation landed (qwy record gone)" sh -c '! grep -q "^apps/qianwangyou|" "'"$D"'/scripts/check-provenance.sh"'; then
+  neg "N-6 qwy record removed from the frozen set" "$D" --stage import
+fi
 
 # A prefix smuggled into the branch field: a substring membership test reported
 # both prefixes present from a one-record set.
 D="$(mk_squashed)"
 ( cd "$D" && python3 - <<'PY'
 p='scripts/check-provenance.sh'; s=open(p).read()
-s=s.replace("apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|",
-            "apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|apps/qianwangyou|",1)
-s=s.replace("apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944\n","",1)
+s=s.replace("|main|48d8ec93","|apps/qianwangyou|48d8ec93",1)
+s=s.replace("apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944|5687e319f978dcd9b76e413c06b2b0da91627518\n","",1)
 open(p,'w').write(s)
 PY
 ) >/dev/null 2>&1
-neg "N-7 prefix smuggled into the branch field" "$D" --stage import
+if shape "N-7 mutation landed (prefix in branch field)" grep -q "|apps/qianwangyou|48d8ec93" "$D/scripts/check-provenance.sh"; then
+  neg "N-7 prefix smuggled into the branch field" "$D" --stage import
+fi
 
 # A malformed record silently shifts every later field read.
 D="$(mk_squashed)"
 ( cd "$D" && python3 - <<'PY'
 p='scripts/check-provenance.sh'; s=open(p).read()
-open(p,'w').write(s.replace("apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944",
+open(p,'w').write(s.replace("apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944|5687e319f978dcd9b76e413c06b2b0da91627518",
                             "apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|285e4cae438ab6feea1f70f984f433c7a424b944",1))
 PY
 ) >/dev/null 2>&1
-neg "N-8 malformed IMPORTS record (3 fields)" "$D" --stage import
+if shape "N-8 mutation landed (short record)" grep -q "FakeGps-test.git|285e4cae" "$D/scripts/check-provenance.sh"; then
+  neg "N-8 malformed IMPORTS record (short)" "$D" --stage import
+fi
+
+# N-9 an upstream SHA cell with whitespace inside it. Trimming a cell's internal
+# whitespace silently repairs a broken value into a valid-looking one, so a SHA
+# nobody could copy out of the document was normalised and then certified.
+D="$(mk_squashed)"
+if setup "N-9 fixture" "$D" 'python3 -c "
+p=\"docs/provenance/upstream-imports.md\"; s=open(p).read()
+assert \"285e4cae438ab6feea1f70f984f433c7a424b944\" in s
+open(p,\"w\").write(s.replace(\"285e4cae438ab6feea1f70f984f433c7a424b944\",\"285e4cae438ab6feea1f70f984f433c7a 424b944\",1))
+" && git add -A && git commit -qm ws -q'; then
+  neg "N-9 upstream SHA cell contains internal whitespace" "$D" --stage import
+fi
+
+# N-10 / N-11 the import-commit cell must be bound to the frozen canonical value.
+# A whole-file lookup let the document name any hex string: writing 0000...0000
+# printed "is not an ancestor", which the code then read as a legitimate squash.
+for spec in "N-10|0000000000000000000000000000000000000000|a nonexistent object" \
+            "N-11|301da0f2925373dfe40cfd2a51d53ddaca4bba93|the other prefix's commit"; do
+  id="${spec%%|*}"; rest="${spec#*|}"; val="${rest%%|*}"; desc="${rest#*|}"
+  D="$(mk_squashed)"
+  if setup "$id fixture" "$D" "grep -q 5687e319f978dcd9b76e413c06b2b0da91627518 $DOC && sed -i.bak s/5687e319f978dcd9b76e413c06b2b0da91627518/$val/ $DOC && rm -f $DOC.bak && git add -A && git commit -qm importcell -q"; then
+    neg "$id import-commit cell replaced with $desc" "$D" --stage import
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Mutation self-validation.
+#
+# A passing case proves nothing until the fix it guards is shown to be load
+# bearing. Twice already a mutation of mine left its target passing and I nearly
+# read that as confirmation; both times the mutation was what was wrong. So the
+# check lives here, in the harness, instead of in a commit message: revert a
+# fix, and the case guarding it MUST fail.
+printf '\n== mutation self-validation (each fix must be load-bearing) ==\n'
+mutate() { # <label> <target-case-id> <sed-script-applied-to-the-checker>
+  local label="$1" target="$2" sedscript="$3"; MUT=$((MUT+1))
+  local m; m="$(mktemp -d)"
+  # The copy must be a real git repository: the inner run's mk_squashed calls
+  # `git archive HEAD` on it. A plain file copy made every fixture fail to build,
+  # which the harness then reported as "not bound" — a mutation result produced
+  # by a broken mutation harness, which is the very thing this section exists to
+  # rule out.
+  ( cd "$REPO_ROOT" && git archive HEAD ) | tar -x -C "$m" 2>/dev/null
+  cp "$REPO_ROOT/scripts/check-provenance.sh" "$REPO_ROOT/scripts/selftest-provenance.sh" "$m/scripts/"
+  cp "$REPO_ROOT/$DOC" "$m/$DOC"
+  ( cd "$m" && git init -q . && git config user.email m@m && git config user.name m \
+      && git add -A && git commit -qm "mutation baseline" ) >/dev/null 2>&1
+  local before after
+  before="$(shasum -a 256 "$m/scripts/check-provenance.sh" | cut -d" " -f1)"
+  sed -i.bak "$sedscript" "$m/scripts/check-provenance.sh" 2>/dev/null
+  rm -f "$m/scripts/check-provenance.sh.bak"
+  after="$(shasum -a 256 "$m/scripts/check-provenance.sh" | cut -d" " -f1)"
+  # Prove the mutation landed before interpreting the result. Without this,
+  # "the case still passes" and "the mutation never applied" are the same
+  # output, and the second one masquerades as the first.
+  if [ "$before" = "$after" ]; then
+    bad "$label - MUTATION DID NOT APPLY (checker unchanged); result says nothing"
+    rm -rf "$m"; return
+  fi
+  # Capture first, match second. Piping the inner run into `grep -q` looked
+  # right and was wrong: the inner run exits non-zero *by design* when the
+  # mutation bites, and under `set -o pipefail` that makes the whole pipeline
+  # non-zero even when grep matched. The mutation was landing, the case was
+  # failing exactly as intended, and the harness read that as "not bound" —
+  # the same pipefail shape this project already fixed once in the checker.
+  local inner
+  inner="$( cd "$m" && SELFTEST_MUTATION_PASS=1 SELFTEST_ONLY="$target" ./scripts/selftest-provenance.sh 2>&1 )"
+  if printf '%s' "$inner" | grep -q "FAIL  $target"; then
+    ok "$label - reverting the fix makes $target fail, so the fix is load-bearing"
+  else
+    bad "$label - $target still passes without the fix; that case is not bound to it"
+  fi
+  rm -rf "$m"
+}
+export SELFTEST_NO_MUTATE=1
+if [ "${SELFTEST_MUTATION_PASS:-0}" != "1" ]; then
+  SELFTEST_MUTATION_PASS=1
+  export SELFTEST_MUTATION_PASS
+  # Exact first-cell binding is implemented in two places — the row selector and
+  # the explicit r_prefix equality. Reverting only the selector leaves the second
+  # layer catching N-2, so a one-layer mutation proves nothing about the pair.
+  mutate "M-1 exact first-cell binding (both layers)" "N-2" 's/if (first != pfx) next/if (index(first, pfx) == 0) next/; s/\[ "\$r_prefix" = "\$prefix" \]/[ -n "\$r_prefix" ]/'
+  mutate "M-2 ancestry walks ancestors"  "P-4" 's/for c in HEAD \$(git rev-list HEAD -- "\$prefix" 2>\/dev\/null); do/for c in HEAD; do/'
+  mutate "M-3 outer-only cell trim"      "N-9" 's/\^\[`\[:space:\]\]+|\[`\[:space:\]\]+\$/[`[:space:]]/'
+fi
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
-  printf 'selftest-provenance: PASS (%d positive, %d negative — all executed against the production checker)\n' "$POS" "$NEG"
+  printf 'selftest-provenance: PASS (%d positive, %d negative, %d mutation self-check(s) — every case executed against the production checker)\n' "$POS" "$NEG" "$MUT"
   exit 0
 fi
-printf 'selftest-provenance: FAIL (%d of %d case(s) failed)\n' "$FAILURES" "$((POS + NEG))"
+printf 'selftest-provenance: FAIL (%d failure(s) across %d executed case(s) plus fixture/mutation assertions)\n' "$FAILURES" "$((POS + NEG))"
 exit 1

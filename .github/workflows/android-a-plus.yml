@@ -48,8 +48,9 @@ jobs:
         # The negative matrix is a regression gate, not a table in a document.
         # It runs the production check-provenance.sh (never a copy) against
         # throwaway clones, so a negative can only start passing if the real
-        # predicate changed. Three of these eight were shipped defects that a
-        # reviewer had to find by hand.
+        # predicate changed. Several of these were shipped defects a reviewer had
+        # to find by hand. It also mutation-checks itself: reverting a fix must
+        # make the case guarding it fail, otherwise that case proves nothing.
         run: ./scripts/selftest-provenance.sh
 
   cellrebel-auto:

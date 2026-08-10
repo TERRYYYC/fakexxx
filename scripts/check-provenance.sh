@@ -76,12 +76,12 @@ if [ "$STAGE" = "import" ]; then PRISTINE_HEAD_EXPECTED=1; else PRISTINE_HEAD_EX
 
 PROVENANCE_DOC="docs/provenance/upstream-imports.md"
 
-# prefix|upstream url|branch|exact sha
+# prefix|upstream url|branch|exact sha|canonical import commit
 # These are the frozen facts from spec §1.2. The checker asserts the provenance
 # document records the same values, so doc and gate cannot drift apart silently.
 IMPORTS="
-apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e
-apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944
+apps/cellrebel-auto|https://github.com/TERRYYYC/Faketest.git|main|48d8ec93adb84cdb9c4282c376ec97476648683e|301da0f2925373dfe40cfd2a51d53ddaca4bba93
+apps/qianwangyou|https://github.com/TERRYYYC/FakeGps-test.git|master|285e4cae438ab6feea1f70f984f433c7a424b944|5687e319f978dcd9b76e413c06b2b0da91627518
 "
 readonly IMPORTS
 
@@ -108,7 +108,7 @@ readonly -f each_import   # 冻结函数，不只是冻结变量：readonly IMPO
 # from the same $IMPORTS the loops read, so there is exactly one source.
 if [ -n "$PRINT_IMPORT" ]; then
   found=""
-  while IFS='|' read -r prefix url branch sha; do
+  while IFS='|' read -r prefix url branch sha import_commit; do
     [ -z "${prefix:-}" ] && continue
     [ "$prefix" = "$PRINT_IMPORT" ] || continue
     [ -z "$found" ] || { printf 'duplicate IMPORTS entry for %s\n' "$PRINT_IMPORT" >&2; exit 1; }
@@ -167,10 +167,10 @@ fi
 while IFS= read -r rec; do
   [ -n "$rec" ] || continue
   nf="$(printf '%s' "$rec" | awk -F'|' '{print NF}')"
-  if [ "$nf" -eq 4 ]; then
-    pass "record for $(printf '%s' "$rec" | cut -d'|' -f1) has 4 fields"
+  if [ "$nf" -eq 5 ]; then
+    pass "record for $(printf '%s' "$rec" | cut -d'|' -f1) has 5 fields"
   else
-    fail "malformed IMPORTS record ($nf fields, expected 4): $rec"
+    fail "malformed IMPORTS record ($nf fields, expected 5): $rec"
   fi
 done <<REC
 $IMPORTS_RECORDS
@@ -186,7 +186,7 @@ section "0. fetch upstream objects"
 #
 # An unobtainable object is a hard failure, never a skip: skipping would reduce
 # the whole gate to a no-op.
-while IFS='|' read -r prefix url branch sha; do
+while IFS='|' read -r prefix url branch sha import_commit; do
   [ -z "${prefix:-}" ] && continue
   if git rev-parse --quiet --verify "${sha}^{commit}" >/dev/null 2>&1; then
     pass "upstream object ${sha:0:9} already present"
@@ -222,12 +222,15 @@ doc_row() {
     intable && !/^[[:space:]]*\|/ { intable = 0 }
     intable && /^[[:space:]]*\|[[:space:]]*-/ { next }
     intable && /^[[:space:]]*\|/ {
-      first = $2; gsub(/[`[:space:]]/, "", first)
+      first = $2; gsub(/^[`[:space:]]+|[`[:space:]]+$/, "", first)
       if (first != pfx) next
       if (NF - 2 != 6) { printf("ERR field-count %d\n", NF - 2); found = 2; exit }
       hits++
       row = ""
-      for (i = 2; i <= 7; i++) { c = $i; gsub(/[`[:space:]]/, "", c); row = row (i > 2 ? "\t" : "") c }
+      # Trim only the OUTER Markdown padding and backticks. Deleting all internal
+      # whitespace normalises a broken cell into a valid-looking value: an upstream
+      # SHA written with a space inside it was silently repaired and certified.
+      for (i = 2; i <= 7; i++) { c = $i; gsub(/^[`[:space:]]+|[`[:space:]]+$/, "", c); row = row (i > 2 ? "\t" : "") c }
     }
     END {
       if (found == 2) exit 1
@@ -252,7 +255,7 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
   # somewhere: swapping just the two rows' upstream-SHA cells left both strings
   # present and both prefixes passed, so the document could map prefix -> SHA
   # wrongly and still be certified.
-  while IFS='|' read -r prefix url branch sha; do
+  while IFS='|' read -r prefix url branch sha import_commit; do
     [ -z "${prefix:-}" ] && continue
     row="$(doc_row "$prefix")" || { fail "$PROVENANCE_DOC has no single well-formed row for $prefix ($row)"; continue; }
     r_prefix="$(printf '%s' "$row" | cut -f1)"
@@ -279,7 +282,7 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
   # This is the assertion that used to be delegated to "the import commit", and
   # it is why losing the DAG no longer removes the proof: provenance is a claim
   # about content, so it is carried by content.
-  while IFS='|' read -r prefix url branch sha; do
+  while IFS='|' read -r prefix url branch sha import_commit; do
     [ -z "${prefix:-}" ] && continue
     upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
     # Read the root tree from THIS prefix's row, field by field. A document-wide
@@ -301,13 +304,25 @@ if [ "$DOC_PRESENT" -eq 1 ]; then
 
   # Every import must name the fakexxx commit that introduced it, and that
   # commit must itself carry the upstream tree at the prefix.
-  while IFS='|' read -r prefix url branch sha; do
+  while IFS='|' read -r prefix url branch sha import_commit; do
     [ -z "${prefix:-}" ] && continue
-    import_commit="$(sed -n "s@^.*${prefix}.*import commit[^0-9a-f]*\([0-9a-f]\{7,40\}\).*@\1@p" "$PROVENANCE_DOC" | head -1)"
-    if [ -z "$import_commit" ]; then
-      fail "$PROVENANCE_DOC does not record an import commit for $prefix"
+    # Cell 6 comes from the SAME strict parser as every other load-bearing field
+    # and is exact-compared against the frozen canonical import commit. It used to
+    # be fetched by a whole-file sed, so the document could name any hex string —
+    # writing 0000…0000 produced "is not an ancestor", which the code then read as
+    # a legitimate squash and passed. A document naming a nonexistent object is
+    # not evidence of a squash merge; it is a wrong document.
+    row="$(doc_row "$prefix")" || row=""
+    doc_import="$(printf '%s' "$row" | cut -f6)"
+    if [ -z "$doc_import" ]; then
+      fail "$PROVENANCE_DOC has no import-commit cell on the row for $prefix"
       continue
     fi
+    if [ "$doc_import" != "$import_commit" ]; then
+      fail "row for $prefix records import commit '$doc_import' but the frozen record says '$import_commit'"
+      continue
+    fi
+    pass "row for $prefix records the canonical import commit ${import_commit:0:9}"
     # The import commit is *additional* DAG evidence, not the anchor. A squash or
     # rebase merge legitimately discards it, so it is asserted only while it is
     # still reachable.
@@ -355,7 +370,7 @@ section "1b. baseline ancestry"
 # is there a commit reachable from HEAD whose <prefix> tree equals the fetched
 # upstream root tree? The prefix tree only changes at commits that touch the
 # prefix, so those commits plus HEAD are the complete candidate set.
-while IFS='|' read -r prefix url branch sha; do
+while IFS='|' read -r prefix url branch sha import_commit; do
   [ -z "${prefix:-}" ] && continue
   upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
   if [ -z "$upstream_tree" ]; then
@@ -378,7 +393,7 @@ done < <(each_import)
 # ---------------------------------------------------------------------------
 section "2. current HEAD state (stage=$STAGE)"
 
-while IFS='|' read -r prefix url branch sha; do
+while IFS='|' read -r prefix url branch sha import_commit; do
   [ -z "${prefix:-}" ] && continue
 
   upstream_tree="$(git rev-parse --quiet --verify "${sha}^{tree}" 2>/dev/null)"
