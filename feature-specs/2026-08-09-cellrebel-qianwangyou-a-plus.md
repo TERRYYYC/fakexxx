@@ -97,6 +97,7 @@ source_threads:
 | **v1.18** | PR-0.2 第十四轮 | Sol 语义窄审 SR-1..6：契约层/设备层拆分 · stage 绑定改「第一个改 app 树的 PR」· PR-5 26 行 / PR-6 90 行聚合分工 · lint 清债 lane（PR-3.5）· DP-3 解停条件收敛 · Task 7 计数；owner → Fable5，见 §0.1.18 |
 | **v1.19** | PR-0.2 第十五轮 | Sol 增量语义审 6 P1 + 1 P2：#13 release edge 与 I3.5 进 DAG · 2v2 owner/reviewer 全链传播 · Task 2 自搬 workflow 并反向自验 · verifier `--lane` 子集契约 · 条件式解停，见 §0.1.19 |
 | **v1.20** | PR-0.2 第十六轮 | 兑现 Phase O 裁定的 `sol-blackbox` 处置项时自查发现：v1.19 只改了责任层（owner/reviewer 列），**授权层未改**——`acceptance/**` 仍禁 Fable5 写入。本轮把 2v2 传播到 owner matrix / 目录树 / class 表 / Task 7·8 / §17 / §19 / §21，冻结 legacy label→执行者映射，并冻结五投影一致性检查器的判据，见 §0.1.20 |
+| **v1.22** | PR-0.2 第十八轮 | GLM 独立复核证伪 **A-6 的理由**：机械门 ①②③ 不校验「断言↔预期终态」，因此不能兜底那 33 行自审——独立性实际来自 PR-3 的跨个体 code review。另修 §8.4 冻结 `state` 的作者归因、历史区两处待执行 owner 残留、§16「Sol 主控」列义。判据补**第六投影（承重论证散文）**与**历史区不整片豁免**，见 §0.1.22 |
 | **v1.21** | PR-0.2 第十七轮 | Sol exact-HEAD 语义审 7 P1：**owner 列拆 `evidenceOwner` / `fixOwner` 并冻结失败路由表**（2v2 后 acceptance 行红了无法路由）· DP-2 载体拆四段（PR-1 是 import-only，产不出 contract/pairing）· `I6` 与 `#13` 改 Epic-close 的 sibling 输入 · lane selector 冻成 `(class, owner, 路径前缀)` 三元组、PR-5 只验 harness、26 行转 PR-6 · Task 3.5 建成真实节点并消 PR-3↔PR-3.5 环 · workflow 迁移加机器断言 · durable closure 与 review provenance 收口，见 §0.1.21 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
@@ -326,7 +327,7 @@ acceptance（Sol）与对抗审查（GLM）首次**绑定同一 exact HEAD** `ec
 | # | 问题 | 修订 |
 |---|---|---|
 | 1 | **owner 真相未传播。** operator 已把 #4 从 Kimi 转给 DeepSeek Flash（主 Thread `0001786311069292-001378-b555f28c`：「完成调度设计后，把 kimi 的任务给 deepseek-flash 吧」），但**现行规范**仍在 §10.1 的 33 行 owner 台账、§12.1、Task 3/6/7/8、§15 PR 图、§16 issue 图、§17 角色、§19 completion gate 里写 Kimi | 现行区 **52 行（53 处出现**——Task 6 的 PR 路由句里出现两次**）**全部改为 DeepSeek Flash；**§0.1.x 历史修订记录中的 5 处保留**——它们描述的是当时的真实状态，改掉就是伪造历史 |
-| 2 | **`INV-29` 有规则、没有证据载体。** 该不变量列出了旧安装探测、迁移桥 round-trip、回滚、CSV 负例与静态扫描，但 §10 / §10.1 里**一行都没有**；AC-10 与 §19 仍写 `INV-01..28` | 新增 `appid-cutover` 类 5 行（`M-AC-01..05`），按 Sol 的「跨 owner 必须拆行」原则分派：探测 / 迁移桥 / CSV 负例 = Opus5 `owner-red`；回滚演练 = Sol `device`；仓库-日志扫描 = Sol `static-guard`。§10 由 90 行/17 类增至 **95 行/18 类**；`owner-red` 64→**67**（Opus5 31→34 / DeepSeek Flash 33）· `device` 2→**3** · `static-guard` 2→**3** · `sol-blackbox` 22 不变。AC-10 与 §19 同步为 `INV-01..29` |
+| 2 | **`INV-29` 有规则、没有证据载体。** 该不变量列出了旧安装探测、迁移桥 round-trip、回滚、CSV 负例与静态扫描，但 §10 / §10.1 里**一行都没有**；AC-10 与 §19 仍写 `INV-01..28` | 新增 `appid-cutover` 类 5 行（`M-AC-01..05`），按 Sol 的「跨 owner 必须拆行」原则分派：探测 / 迁移桥 / CSV 负例 = Opus5 `owner-red`；回滚演练 = Sol `device`；仓库-日志扫描 = Sol `static-guard`**〔当轮记录；v1.20 起 `device`/`static-guard` 两类一律归 **Fable5**，#13 实施者按现行 §10.1 class 规则派工，勿照本行〕**。§10 由 90 行/17 类增至 **95 行/18 类**；`owner-red` 64→**67**（Opus5 31→34 / DeepSeek Flash 33）· `device` 2→**3** · `static-guard` 2→**3** · `sol-blackbox` 22 不变。AC-10 与 §19 同步为 `INV-01..29` |
 
 第 2 项值得单独记，因为它是**假闭合的标准配方**：`INV-29` 已经写进不变量表、§21 清单第 11 项还准备把 GitHub #6 的覆盖措辞改成 `INV-01..29`——若不先补台账行，就会得到「issue 宣称覆盖 29 条、ledger 只能证明 28 条」的状态。**宣称覆盖与能够证明覆盖是两件事**；机械同步文案会把前者伪装成后者。
 
@@ -400,7 +401,7 @@ cutover 相关行 @05debb8b（双审版）  0
 |---|---|---|
 | SR-1 | 把「契约用冻结值」与「设备物理 mutation」混成一件事 → Task 1 不 mutation 与 §20「改名在 PR-1 完成」直接对撞；#13 未进 DAG；`INV-29` 泛化阻塞先行 PR | 拆两层：**契约层**（字面值 + 配对主键，PR-1，不碰 app 树）/ **设备层**（flavor/SAF/bundle/旧 App 移除，#13，挂 I6 release edge）。`INV-29` 只作用于设备层 |
 | SR-2 | 把「第一次合法分叉」钉死在 #13，但 **Task 2 已要改两 App Gradle 与 Auto Manifest**，PR #11 分支实际早已偏离 | 规则改为「**第一个实际修改 app 树的 PR 原子移动 workflow 那一行**」，按当前 DAG 即 Task 2；更早者出现则由更早者移动，并在其 PR body 记录移动前后 stage |
-| SR-3 | 要求 PR-5 聚合全 90 行，但 64 个 `owner-red` 行产生在平行 sibling PR，其 `exactHead` 不可能同时等于 PR-5 HEAD | 冻结聚合分工：**PR-5 证 26 行**（Sol 自有）/ PR-3、PR-4 各证自有 / **PR-6 在 integration exact HEAD 重跑聚合 90 行** |
+| SR-3 | 要求 PR-5 聚合全 90 行，但 64 个 `owner-red` 行产生在平行 sibling PR，其 `exactHead` 不可能同时等于 PR-5 HEAD | 冻结聚合分工：**PR-5 证 26 行**（Sol 自有）/ PR-3、PR-4 各证自有 / **PR-6 在 integration exact HEAD 重跑聚合 90 行**〔当轮记录；**v1.20 起 26 行归 Fable5，v1.21 起 PR-5 不再证矩阵行**——PR-5 只自证 harness，26 行转 PR-6，见 Task 7 lane 表〕 |
 | SR-4 | raw-green 清债是 operator 已定项，却没有合法 lane——owner matrix 禁止 Opus5 在 PR-3 后碰 qwy，§13/§15/§16 无 lint 节点 | 冻结 **PR-3.5 / Task 3.5 / I3.5**：exact 文件范围、时序（PR-3 后、PR-6 前）、gate（`lintDebug` exit 0），并写明这是 §12.1 的**唯一具名例外** |
 | SR-5 | 顶部写 implementation baseline / `#3–#6` 解停，而 §21 清单自己标着 11–13 未完成、DP-3 不算落地 | 解停收敛为**条件式**：`#3` 需 `#2` + `#12` 均合入；DP-3 需与 #6/#7/PR body 原子同步后才算落地 |
 | SR-6 | Task 7 保留拆分前计数（device=3/static=3/owner-red=67/Sol=28） | 改为 2/2/64/26；台账实算 `22+2+2+64=90` 复核一致 |
@@ -491,6 +492,42 @@ Sol 在 `9acd436d` 上给了 7 条 P1。**其中第 2 条是我上一轮亲手�
 这也是为什么 B-1 的修法不是把 owner 列改成 `fixOwner` 或加第 91 列，而是**把「一个词承担两个角色」这件事本身拆掉，并为拆开后的第二个角色冻结一张可判定的路由表**。一个概念在坐标系变化后要么分裂、要么退休，**不能靠读者每次自行消歧**——那等于把定义的正确性外包给读者的注意力，而这份文档已经证明那不可靠（§0.1.20）。
 
 对 §0.1.20 冻结的五投影判据，本轮补一条**前置条件**：**投影一致性检查的前提是「被投影的定义仍然成立」。** 因此 checker 除了比对五个投影，还必须在每次 owner/role 语义变更时，重新枚举所有**消费该定义的位置**（本轮是失败路由、lane selector、reviewer 链三处）。否则五个投影会整齐地一致地指向同一个错误答案。
+
+#### 0.1.22 我给的理由是错的那个：GLM 证伪 A-6（v1.22）
+
+上一轮我在 §0.1.20 的 A-6 里主动披露了一件事：`owner-red` 64 行中有 33 行的 code owner 就是 Fable5，因此 evidence audit 含自审。我写了披露，也写了「为什么可接受」：
+
+> 可接受的唯一理由是它**不是**终门——终门是 `verify-a-plus.sh` 里 owner-independent 的机械覆盖校验。
+
+我还特意在传球时请 reviewer **直接攻击这个判断**。GLM 攻下来了，而且攻在我完全没设防的地方：
+
+> 机械门 ①②③ 校验的是「ID 集合相等」「覆盖绑 `status=passed` + `exactHead`」「未覆盖行分类」。**这三条都不校验「断言语义是否真对应预期终态」。** 而那恰恰是 evidence audit 在做的事——**机械门覆盖不到自审所校验的东西。**
+
+**披露是对的，理由是错的。** 而且错得比没写理由更危险：「有个 owner-independent 的自动门兜底」听起来结实，后人据此**放松 PR-3 的代码 review 强度**，就会拆掉这 33 行**唯一**的独立检查。
+
+| # | 缺口 | 修订 |
+|---|---|---|
+| C-1 | A-6 的理由不成立（机械门不覆盖被自审的东西） | 换成真实理由：**独立性完全来自 PR 阶段的跨个体 review**——33 行测试代码随 PR-3 由 Sol + GLM 审，audit 产物再由二者复核。并加硬约束：**不得因 CI 全绿而放松 PR-3 代码 review** |
+| C-2 | §8.4 冻结 `state` 的论证把风险归因于「两个不同作者」，2v2 后前提消失 | 归因改为**与作者数无关**：风险来自「同一份契约有两条独立实现路径」。作者身份只改变发现难度，且方向相反——**同一人写两条路径时更容易一起漂移并互相自洽**，故 2v2 下这条冻结更吃重 |
+| C-3 | 历史区两处记录「待执行行的 owner」，实施者照读会派错工 | 不改写历史，加内联标记：§0.1.14 的 `device`/`static-guard` = Sol、§0.1.18 的「PR-5 证 26 行（Sol 自有）」各补一句现行归属 |
+| C-4 | §16 Owner 列的「Sol 主控」可被读成写入所有权 | 标注 **coordination / review only，无写入 lane** |
+
+**这一轮暴露的是我那个判据本身的两个洞。**
+
+**第一个洞：我数漏了一个投影。** §0.1.20 冻结的五投影是 owner 列 / class 表「谁写」/ owner matrix / 目录树 / guard 输入——**全是结构化字段**。但 §8.4 那句话不是字段，是**承重的论证散文**：它是「为什么必须冻结 `state`」的理由本身。
+
+> §0.1.19 我记的是「散文里的规则不是约束，图上的边才是」。**这条有一个例外，而我把例外当成了通则：当散文本身是某条冻结的理由时，它的归因腐烂，论证就跟着腐烂。** 承重的论证是第六个投影。
+
+**第二个洞：我把历史区整片豁免了。** 自查器刻意跳过 §0.1.x，理由是「改历史即伪造」。这个理由对**已完成事项**成立，但历史条目里还记着**尚未执行的行的 owner**（`M-AC-04/05` 的 class 归属、PR-5 的 26 行）——那些是**现在仍会被照着执行的指令**，因而同样是同一事实的投影。**判据补一条：历史区中凡记录待执行工作归属的条目，不得豁免；处置是加内联标记，不是改写。**
+
+连起来看，这三轮是同一个东西越剥越深：
+
+- §0.1.19 规则没变成边 → **漏了一个位置**
+- §0.1.20 责任改了权限没改 → **漏了一层**
+- §0.1.21 owner 的定义在坐标系变化后失效 → **一个定义坏了**
+- §0.1.22 **我为「已知风险可接受」给出的理由本身是错的** → 不是漏、不是坏，是**我自己构造了一个不成立的兜底**
+
+最后这个最难自查：前三种都能靠枚举发现，**这一种只能靠别人来打**。我做对的一件事是把它写出来并点名请人攻击；做错的是把「听起来结实」当成了「验证过」。**主动披露不等于论证成立——披露只是把靶子摆出来，理由仍然要各自承重。**
 
 ## 1. 事实基线与来源
 
@@ -1337,7 +1374,11 @@ ProviderPairingRecord(
 
 ### 8.4 EnvironmentLease 状态机
 
-`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，Fable5 的 provider 与 Fable5 的 fake provider（2v2 后同属一人，更容易两套语义同时漂移而互相自洽）会各写一套，且 acceptance 会在两套语义之间假绿。
+`state` 此前只作为字段名出现，而 INV-14（release 只能清理本 caller 本 lease）与 INV-16（冲突 lease fail-closed）都以"什么算 active lease"为前提。不冻结它，**真 provider 与 `acceptance/fake-qwy` 这两条实现路径会各写一套 `state` 语义**，acceptance 就会在两套之间假绿。
+
+> **归因更正（v1.22，由 GLM 指出）**：上一版把这条风险写成「**Fable5 的 provider 与 Sol 的 fake provider** 会各写一套」——即把风险归因于**两个不同作者**。2v2 后两者同属 Fable5，若照原句读，前提消失、结论似乎也就不必要了。**但结论仍然成立，因为它从来不依赖作者多样性**：风险的来源是**同一份契约存在两条独立实现路径**，无论由几个人写。冻结 `state` 消除的正是这个发散，与谁写无关。
+>
+> 作者身份只改变**发现难度**，不改变**必要性**——而且方向与直觉相反：**同一个人写两条路径时，两套语义更容易朝同一个方向一起漂移并互相自洽**，从而在 acceptance 里表现为「都过了」。因此 2v2 之下这条冻结不是变得可有可无，而是**更吃重**。
 
 | 当前状态 | 事件 | 下一状态 | 原子写入 | 阻挡新 apply |
 |---|---|---|---|---|
@@ -2350,7 +2391,16 @@ cd apps/cellrebel-auto
 | `device` | 2 | 在授权 device lease 内执行并留存证据 |
 | `owner-red` | 64 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**已知性质（显式记录，不隐藏）**：`owner-red` 64 行中有 33 行的 code owner 本身就是 Fable5，因此该 evidence audit 包含**对自有 33 行的自审**。这一点可接受的唯一理由是它**不是**终门：终门是 `verify-a-plus.sh` 里 owner-independent 的机械覆盖校验（本 Task 的 **Verify** ①②③，在 CI 内运行、不看执行者是谁），Fable5 的 audit 只是其上的叙述层，且 audit 产物本身由 Sol + GLM 独立复核。**不得**把这条自审当作独立证据，也不得用它替代机械校验。
+**已知性质（显式记录，不隐藏）**：`owner-red` 64 行中有 33 行的 code owner 本身就是 Fable5，因此该 evidence audit 包含**对自有 33 行的自审**。
+
+> **v1.22 更正——上一版给的理由是错的，由 GLM 证伪。** 上一版写「可接受的唯一理由是它不是终门，终门是 `verify-a-plus.sh` 的 owner-independent 机械校验」。**这条论证不成立**：本 Task 的 Verify ①②③ 校验的是「ID 集合相等」「覆盖绑 `status=passed` 且 `exactHead` 相符」「未覆盖行分类 `not-testable` / `deferred`」——**没有任何一条校验「断言语义是否真对应该行的预期终态」**。而「断言与预期终态一致」恰恰是 evidence audit 在做的事。**机械门覆盖不到自审所校验的东西，因此它不能充当自审的兜底。**
+
+**这 33 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
+
+1. **测试代码本身经过独立 review**：那 33 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **Sol + GLM**（§16）。断言写错会在代码 review 阶段被非作者看到。
+2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 Sol + GLM 复核，且 Task 8 第 2 条已加一条针对性证伪义务。
+
+**因此这 33 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 33 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
 
 **RED（分两处发生，不在同一 HEAD）：** 26 行的**测试代码**在 PR-5 上写就，各自至少一个失败场景先红——但那是**对 fake provider 的 harness self-test**，不是对真实产品的断言；`owner-red` 的 64 行由各自 owner 在自己的 lane 内先红（Opus5 31 行 / Fable5 33 行）。**26 行对真实 Auto/provider 的 RED→GREEN 发生在 PR-6 的汇合 HEAD 上**，因为在 PR-5 的 HEAD 上那些实现还不存在。
 
@@ -2464,7 +2514,7 @@ Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI
 
 | Key | 标题 | Depends on | Owner/Reviewer | 终结谓词 |
 |---|---|---|---|---|
-| EPIC | `[Epic] CellRebel × 千网游 A+ 可信无人值守测试` | 本文 | Sol 主控 | 所有 P0 child 达标且等待 operator merge/close 决定 |
+| EPIC | `[Epic] CellRebel × 千网游 A+ 可信无人值守测试` | 本文 | Sol 主控（**coordination / review only，无写入 lane**） | 所有 P0 child 达标且等待 operator merge/close 决定 |
 | I1 | `[P0] 导入双 App 精确基线并建立 provenance/CI` | EPIC | Opus5 / Sol | PR-1 exact HEAD 通过 gate |
 | I2 | `[P0] 冻结 Environment Control contract v1` | I1 | Opus5 / Sol+GLM | PR-2 exact HEAD + verdict |
 | I3 | `[P0] 千网游 provider：配对、lease、连续性与审计` | I2 | Fable5 / **Sol + GLM** | PR-3 exact HEAD + INV tests |
@@ -2473,7 +2523,9 @@ Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI
 | I3.5 | `[P0] qwy inherited lint raw-green 清债` | I3 | Opus5 / Sol + GLM | `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0** |
 | I6 | `[P0] 双 App 集成与 exact-build 真机验收（pre-cutover）` | I3,I3.5,I4,I5 | **Fable5** / Sol + GLM | device matrix + hashes + verdict（旧 `applicationId` 上成立；**不依赖 #13**） |
 | #13 | `applicationId cutover：flavor / SAF 搬运 / bundle / variant CI` | I1 | Opus5 / Sol + GLM | `M-AC-01..05` 全绿。**与 I6 是 Epic close 的两个 sibling 输入**，二者互不阻断；未闭合只阻断 Epic close，不阻断 I6 |
-| I7 | `[Product Gate] A+→B→C 触发证据与非重写演进` | EPIC | Sol 主控 | 每个里程碑记录 stay/promote/reject verdict |
+| I7 | `[Product Gate] A+→B→C 触发证据与非重写演进` | EPIC | Sol 主控（**coordination / review only，无写入 lane**） | 每个里程碑记录 stay/promote/reject verdict |
+
+> **Owner 列里的「Sol 主控」不是写入所有权**：本列同时承载 owner 与 reviewer，而 §12.1 已冻结 Sol **无独占写入范围（review-only）**。「主控」指 coordination 与 verdict 汇总，不含任何代码/文档产出义务。此处显式标注以免读者从列名推断 Sol 拥有 Epic 的实现责任。
 
 Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范围、相关 INV、验证命令与“operator only merge”。
 
