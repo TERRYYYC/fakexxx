@@ -109,6 +109,7 @@ source_threads:
 | **v1.30** | PR-0.2 第二十六轮 | Sol 判 3 P1 + 2 P2（耦合 PR #10）。**P1-1** provenance 锚点是两节互相指望——DAG 一丢，history-lost + 任意篡改仍 `PASS (all checks)`（已复现）；锚点改为 **fetched upstream root tree**（内容承载，跨任何合入方式存活），import commit 降为可达时才断言。**P1-2** 分叉检查拿 upstream 与最终 HEAD 全量比较 → 把 Task 2/3 的合法改动判越界；且在 `$TMP/derived` 生成前就用它（grep rc=2）。按三载体拆分：provenance 归 #10、前序分叉不归本 gate、本 task 只看自己 merge-base 之后的 delta。**P1-3** Verify 调用 sibling 才交付的 `acceptance/**` 脚本 = 永远执行不到的指令，已移除。**P2-1** `--print-import` 与生产循环共享变量名而非代码路径，改 `readonly` + 单一 `each_import`，并加冻结记录集自检与末尾复检。**P2-2** PR body lineage/provenance 表回填。见 §0.1.30 |
 | **v1.31** | PR-0.2 第二十七轮 | Sol 判 P1-2/P1-3 CLOSED，余 2 P1 + 2 P2（P2-1 升级 P1）。**同一个 commit 里我把 substring 当成绑定用了两次**：root-tree 锚点是全局 `grep`（互换两行仍双绿）、0a 成员检查是整段 substring（prefix 藏进 branch 字段即假绿）。改为**逐行逐字段绑定**与**第一字段集合相等 + 字段数校验**；`readonly -f each_import` 冻结函数本体；**history-lost + 分叉改为硬失败**（pristine 仍绿，不误伤 squash 合入）。负例矩阵落地为 #10 CI 里的 `selftest-provenance.sh`（3 正 + 8 负），并补齐 Task 3.5 的调用契约，见 §0.1.31 |
 | **v1.32** | PR-0.2 第二十八轮 | Sol generation-8 判 2 P1 + 2 P2。**P1-1 我第三次造出永远红**：squash 合入 + 真实 Task-2 contract delta 是合法路径（base commit 仍持 pristine tree，ancestry 客观存在），却因原 import commit 不可达被判红；判据改为**任一可达 ancestor 的 prefix tree == fetched upstream tree**。**P1-2 判据 11 只用在了一格**：row selector 仍是 `index()` 子串、URL/branch/SHA 仍全文件 grep——改名 `apps/qianwangyou-shadow`、只互换两行 SHA 单元格都能假绿；改为**锚定 imports 表的严格单行解析器**（恰好一行 / 恰好六格 / 同行绑定全部字段）。**P2-1** selftest 自称 3 正 8 负，实际只有 6 条行为负例（N-7a 是正例、N-7b 只 grep 源码）——重写为 **4 正 + 9 负全部执行生产 checker**、计数由 harness 派生。**P2-2** #10 body 的 `21 PASS` 已 stale。见 §0.1.32 |
+| **v1.33** | PR-0.2 第二十九轮 | Sol gen-10 判 1 P1 + 2 P2。**P1**：strict parser 既不 strict 也不完整——`gsub` 删的是**单元格内部**空白（SHA 中间插空格会被规范化成正确值并认证）；第 6 格 import commit 根本没走 parser，写 `0000…0000` 会被读成合法 squash 而放行。改为**只 trim 外围** + 把 canonical import commit 纳入冻结记录并与第 6 格 exact 比对；表格单元格改为裸值。**P2-1**：selftest 会在夹具没构造成功时自报全绿（P-4 丢弃 setup 退出码，实际重测了 P-3）；N-5 把 fork 与独立 tamper 混在一起。改为 setup fail-hard + 形状断言 + fork 隔离，并**把变异自检放进 harness**。**P2-2** #10 body/workflow 数字回填。见 §0.1.33 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -853,6 +854,34 @@ Sol generation-8：2 P1 + 2 P2。两条 P1 都是我这几轮**已经写下判�
 > 判据补第十二条：**变异测试必须先自证有效——变异之后目标用例必须失败。如果它仍然通过，先怀疑变异，不要相信结论。**
 
 四轮连起来看，我的错误正在沿着同一条线往上爬：产品代码 → 检查器 → 检查器的负例 → **负例的验证方法**。每往上一层，错误就更难被发现，因为上层工具的失败模式正好是"看起来一切正常"。
+
+#### 0.1.33 让变异自检跑起来花了四轮，每一轮错的都是 harness（v1.33）
+
+Sol gen-10：1 P1 + 2 P2。
+
+**P1 —— strict parser 既不 strict 也不完整。** `gsub` 删掉的是**单元格内部**的全部空白，而不是外围的 Markdown padding：把 qwy 的 upstream SHA 写成中间带一个空格，checker 会把它规范化成正确值并认证。而第 6 格 import commit 根本没走 parser——仍由全文件 `sed` 另取，且任何 `merge-base --is-ancestor` 非零（含「对象不存在」）都被读成合法 squash。写 `0000…0000` 会打印 is-not-an-ancestor 然后 rc=0。**文档指名一个不存在的对象，那是文档错了，不是有人 squash 了。**
+
+**P2-1 —— selftest 会在夹具根本没构造成功时自报全绿。** P-4 丢弃了 setup 的退出码、也不断言 delta 存在，于是弄坏第一条 append 之后，它**静默地重测了一遍 pristine P-3**，却照常打印 real-Task-2-delta rc=0。N-5 则把 iterator fork 和一个独立就能判红的 qwy tamper 捆在一起，注入失败时仍然绿。
+
+**但这一节真正该记的，是把「变异自检进 harness」做出来花了四轮，而四轮错的都不是被测代码，是 harness 自己。**
+
+| 轮次 | 现象 | 真因 |
+|---|---|---|
+| 1 | 三条变异全报「未绑定」 | `mutate()` 造的临时目录**不是 git 仓**，内层每个夹具都构建失败 |
+| 2 | 仍全报「未绑定」 | P-4 的形状断言从「哪个仓恰好是 root」取 upstream tree，变异副本里没有该对象 |
+| 3 | 单次运行超时 | 每条变异都跑整轮内层（含多次 upstream fetch）；改为只跑目标 case |
+| 4 | 变异确实落地、内层确实失败，仍报「未绑定」 | **内层被管道进 `grep -q`，而内层按设计以非零退出；`set -o pipefail` 把「grep 命中」整体判成失败** |
+
+第 4 条最刺眼：**那正是本仓 §0.1.27 已经修过、我还专门写过警告的 pipefail 形状**，我又在验证工具里造了一遍。
+
+> 我上一轮冻的第十二条是「变异后目标用例仍通过时，先怀疑变异」。这四轮里我**每一轮都照做了**——正因为照做，才没有把四次假阴性当成结论收工。**判据在这里第一次真正救了我，而不是事后解释我。**
+
+harness 因此再加两条硬约束：
+
+- **先证明变异落地**：比对变异前后 checker 的 SHA-256，未变则报 MUTATION-DID-NOT-APPLY 而不是「未绑定」。**「用例仍通过」和「变异没应用」是同一段输出，后者会冒充前者。**
+- **变异必须覆盖同一能力的全部实现层**：M-1 只退 row selector 时 N-2 仍红，因为 `r_prefix` 精确断言还兜着——**单层变异证明不了这一对**。
+
+**这是错误爬到的第五层**：产品代码 → 检查器 → 检查器的负例 → 负例的验证方法 → **验证方法的执行环境**（是不是 git 仓、有没有对象、管道语义）。每高一层，看起来正常的欺骗性就更强一分。
 
 ## 1. 事实基线与来源
 
@@ -2695,7 +2724,7 @@ done < "$TMP/changed"
 
 **调用契约（冻结）**：上表**每一行**都必须由 `scripts/selftest-task35-guard.sh` 真正执行——`N-1..N-8` 与 `P-1..P-3` 全部在内。**新增一行到表里而不加进调用，等于没加**：v1.30 补了 N-8/P-2/P-3 却把调用契约留在 `N-1..N-7 + P-1`，那三行当轮不构成任何回归门。
 
-**PR #10 的承重行为由 PR #10 自测，不推迟到本 task**：`scripts/selftest-provenance.sh`（**4 正例 + 9 负例**，计数由 harness 自身计数器打印、不手写）已接入 #10 的 CI，**每条都执行生产 checker 并断言退出码**，不以 grep 源码字面量充数。正例含 **squash 合入 + 真实 Task-2 contract delta 必绿**；负例含无 pristine 祖先的伪造终态、prefix-suffix 改名、重复行、SHA/root-tree 跨行互换、真实执行的 iterator 重定义 fork。**每条都经变异验证**：把修复退回去，该条必须失败。
+**PR #10 的承重行为由 PR #10 自测，不推迟到本 task**：`scripts/selftest-provenance.sh` 已接入 #10 的 CI，**每条都执行生产 checker 并断言退出码**，不以 grep 源码字面量充数；计数由 harness 自身计数器打印，标签不会与真实执行漂移。正例含 **squash 合入 + 真实 Task-2 contract delta 必绿**（且先断言其形状：父提交 prefix tree == upstream、HEAD != upstream、恰好三个 qwy 文件）；负例含无 pristine 祖先的伪造终态、prefix-suffix 改名、重复行、SHA/root-tree 跨行互换、**单元格内部空白**、**import-commit 单元格被替换为不存在对象或另一 prefix 的 commit**、隔离的 iterator 重定义。**变异自检已进 harness**（不再只写在 commit body）：逐条把修复退回去，被它守护的用例必须失败，且**先证明变异真的落地**——否则「用例仍通过」与「变异没应用」是同一段输出，后者会冒充前者。
 
 `P-1` 不可省略：**只跑负例证明不了检查器在合法状态下会绿**，而一道永远红的门和一道永远绿的门都不是门（§0.1.27）。
 
