@@ -41,8 +41,21 @@ class ContractWireCompatibilityTest {
     }
 
     @Test
-    fun `ContractErrorCodeV1 wire codes are frozen and complete`() {
-        val expected = mapOf(
+    fun `ContractErrorCodeV1 wire values are frozen, and no code is added silently`() {
+        // This test used to be called "frozen and complete" and asserted that the
+        // list below WAS the §6.3.2 error set. It could not have known that: a
+        // unit test cannot read the canonical document. While the module was
+        // frozen against a superseded §6, this test was green -- so a test whose
+        // name said "complete" was actively certifying the superseded set. That
+        // is worse than having no test, because it reads as proof.
+        //
+        // What a hardcoded list here CAN prove is narrower and still worth having:
+        // that no wire value silently changed, and that nobody added or removed a
+        // constant without touching this list. Completeness against canonical
+        // §6.3.3 is proven by check-contract-v1.sh section 5, which compares
+        // (name, code) SETS across spec, Kotlin and compatibility.yaml in both
+        // directions -- the only place that can see all three carriers.
+        val frozen = mapOf(
             ContractErrorCodeV1.NOT_PAIRED to 1,
             ContractErrorCodeV1.CALLER_NOT_ALLOWED to 2,
             ContractErrorCodeV1.INCOMPATIBLE_PROTOCOL to 3,
@@ -54,12 +67,18 @@ class ContractWireCompatibilityTest {
             ContractErrorCodeV1.ENVIRONMENT_DRIFT to 9,
             ContractErrorCodeV1.RELEASE_INCOMPLETE to 10,
             ContractErrorCodeV1.INTERNAL_FAILURE to 11,
+            ContractErrorCodeV1.IDEMPOTENCY_CONFLICT to 12,
+            ContractErrorCodeV1.REQUEST_INVALID to 13,
+            ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH to 14,
+            ContractErrorCodeV1.SCHEDULE_VERSION_STALE to 15,
+            ContractErrorCodeV1.SCHEDULE_EXHAUSTED to 16,
         )
-        expected.forEach { (code, wire) -> assertEquals("$code", wire, code.wire) }
+        frozen.forEach { (code, wire) -> assertEquals("$code", wire, code.wire) }
         assertEquals(
-            "the §6.3.2 error list is closed in v1",
-            expected.size,
-            ContractErrorCodeV1.entries.size,
+            "a constant was added or removed without updating this tripwire; " +
+                "canonical completeness is check-contract-v1.sh section 5, not this test",
+            frozen.keys,
+            ContractErrorCodeV1.entries.toSet(),
         )
     }
 
