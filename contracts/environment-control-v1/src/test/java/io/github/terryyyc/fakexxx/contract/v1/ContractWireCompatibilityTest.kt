@@ -82,6 +82,25 @@ class ContractWireCompatibilityTest {
         )
     }
 
+    /**
+     * An unknown advance outcome must never be optimistically read as ADVANCED.
+     *
+     * Reading it that way would let Auto believe the schedule moved when it has
+     * no idea what happened, and then attribute results to the wrong item -- the
+     * wrong-environment attribution §6.7.5 exists to prevent, arriving through
+     * the outcome field instead of through the observation.
+     */
+    @Test
+    fun `unknown advance outcome fails closed rather than reading as advanced`() {
+        assertTrue(AdvanceOutcomeV1.advancedOrFailClosed(AdvanceOutcomeV1.ADVANCED.wire))
+        assertFalse(AdvanceOutcomeV1.advancedOrFailClosed(AdvanceOutcomeV1.EXHAUSTED.wire))
+        val unknown = AdvanceOutcomeV1.entries.maxOf { it.wire } + 1
+        assertFalse("unknown outcome must not be treated as advanced",
+            AdvanceOutcomeV1.advancedOrFailClosed(unknown))
+        assertFalse(AdvanceOutcomeV1.advancedOrFailClosed(0))
+        assertFalse(AdvanceOutcomeV1.advancedOrFailClosed(-1))
+    }
+
     /** A reused wire code would make two distinct meanings indistinguishable. */
     @Test
     fun `wire codes are unique within each enum`() {
@@ -93,6 +112,7 @@ class ContractWireCompatibilityTest {
         assertUnique<DeliveryModeV1>("DeliveryModeV1", DeliveryModeV1.entries.map { it.wire })
         assertUnique<ScheduleDecisionV1>("ScheduleDecisionV1", ScheduleDecisionV1.entries.map { it.wire })
         assertUnique<ContractErrorCodeV1>("ContractErrorCodeV1", ContractErrorCodeV1.entries.map { it.wire })
+        assertUnique<AdvanceOutcomeV1>("AdvanceOutcomeV1", AdvanceOutcomeV1.entries.map { it.wire })
     }
 
     // -------------------------------------------------------------- fail-closed
@@ -129,6 +149,9 @@ class ContractWireCompatibilityTest {
         probes(ContractErrorCodeV1.entries.maxOf { it.wire }).forEach {
             assertNull("ContractErrorCodeV1.fromWire($it)", ContractErrorCodeV1.fromWire(it))
         }
+        probes(AdvanceOutcomeV1.entries.maxOf { it.wire }).forEach {
+            assertNull("AdvanceOutcomeV1.fromWire($it)", AdvanceOutcomeV1.fromWire(it))
+        }
     }
 
     @Test
@@ -138,6 +161,7 @@ class ContractWireCompatibilityTest {
         DeliveryModeV1.entries.forEach { assertEquals(it, DeliveryModeV1.fromWire(it.wire)) }
         ScheduleDecisionV1.entries.forEach { assertEquals(it, ScheduleDecisionV1.fromWire(it.wire)) }
         ContractErrorCodeV1.entries.forEach { assertEquals(it, ContractErrorCodeV1.fromWire(it.wire)) }
+        AdvanceOutcomeV1.entries.forEach { assertEquals(it, AdvanceOutcomeV1.fromWire(it.wire)) }
     }
 
     /**

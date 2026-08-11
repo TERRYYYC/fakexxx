@@ -95,32 +95,53 @@ enum class ScheduleDecisionV1(val wire: Int) {
 /**
  * Frozen contract constants.
  */
+/**
+ * Frozen domain of [AdvanceReceiptV1.outcomeWire] (§6.7.4).
+ *
+ * Modelled as an enum with an Int wire exactly like the other contract enums, so
+ * it inherits the carrier bindings that already exist: compatibility.yaml <->
+ * Kotlin agreement is checked by check-contract-v1.sh section 2, and the derived
+ * unknown-probe tests cover it automatically. The first version of this domain
+ * was a pair of `const val`s, which no carrier and no gate could see -- changing
+ * one side left every gate green.
+ *
+ * §6.7.4 previously described exhaustion twice and mutually exclusively: once as
+ * a typed SCHEDULE_EXHAUSTED failure, once as "terminal, not a failure" with a
+ * null-target receipt. One call cannot be both. The two conflated situations are
+ * now split:
+ *
+ *  - completing the LAST item SUCCEEDS -> [EXHAUSTED] with advancedToItemId=null.
+ *    Throwing there would make a caller treat a successful completion as an
+ *    error and, worse, retry it.
+ *  - asking to advance when the schedule is ALREADY exhausted is a real caller
+ *    error and remains ContractErrorCodeV1.SCHEDULE_EXHAUSTED(16).
+ *
+ * The error code means "there was nothing to advance"; this outcome means "the
+ * advance happened and landed at the end".
+ */
+enum class AdvanceOutcomeV1(val wire: Int) {
+    ADVANCED(1),
+    EXHAUSTED(2),
+    ;
+
+    companion object {
+        /** Strict decode; null for an unknown code so the caller can fail closed. */
+        fun fromWire(code: Int): AdvanceOutcomeV1? = entries.firstOrNull { it.wire == code }
+
+        /**
+         * Fail-closed decode. An unknown outcome from a newer peer must NEVER be
+         * optimistically read as [ADVANCED]: that would let Auto believe the
+         * schedule moved when it has no idea what happened, and then attribute
+         * results to the wrong item. Unknown is treated as "not advanced".
+         */
+        fun advancedOrFailClosed(code: Int): Boolean = fromWire(code) == ADVANCED
+    }
+}
+
 object ContractV1 {
     /** Protocol version carried by every request and snapshot. */
     const val PROTOCOL_VERSION: Int = 1
 
-    /**
-     * Frozen domain of [AdvanceReceiptV1.outcomeWire] (§6.7.4).
-     *
-     * §6.7.4 previously described exhaustion twice and inconsistently: once as
-     * ContractErrorCodeV1.SCHEDULE_EXHAUSTED (a typed failure) and once as "a
-     * terminal state, not a failure" carrying a receipt with a null target. Those
-     * two cannot both be the answer to one call, and an implementer had to guess.
-     *
-     * Resolved by separating the two situations that were being conflated:
-     *
-     *  - completing the LAST item SUCCEEDS. The current item really was completed,
-     *    so throwing would make a caller treat a successful completion as an
-     *    error and, worse, retry it. It returns [ADVANCE_OUTCOME_EXHAUSTED] with
-     *    advancedToItemId = null.
-     *  - asking to advance again once the schedule is ALREADY exhausted is a
-     *    genuine caller error and stays ContractErrorCodeV1.SCHEDULE_EXHAUSTED(16).
-     *
-     * So the error code is not redundant: it means "there was nothing to advance",
-     * while this outcome means "the advance happened and landed at the end".
-     */
-    const val ADVANCE_OUTCOME_ADVANCED: Int = 1
-    const val ADVANCE_OUTCOME_EXHAUSTED: Int = 2
 
     /**
      * Maximum distance between an observation's effective coordinates and the

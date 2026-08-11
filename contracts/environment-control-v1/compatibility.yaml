@@ -48,6 +48,9 @@ enums:
     ALLOWED_NOW: 1
     WAIT_UNTIL: 2
     DENIED: 3
+  AdvanceOutcomeV1:
+    ADVANCED: 1
+    EXHAUSTED: 2
   ContractErrorCodeV1:
     NOT_PAIRED: 1
     CALLER_NOT_ALLOWED: 2

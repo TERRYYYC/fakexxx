@@ -1237,6 +1237,7 @@ enum class VerificationLevelV1(val wire: Int) {
 
 enum class ContinuityCoverageV1(val wire: Int) { FULL(1), PARTIAL(2), NONE(3) }
 enum class DeliveryModeV1(val wire: Int) { SYSTEM_MOCK(1), HOOK(2) }
+enum class AdvanceOutcomeV1(val wire: Int) { ADVANCED(1), EXHAUSTED(2) }
 enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DENIED(3) }
 ```
 
@@ -1826,7 +1827,7 @@ data class CompleteAndAdvanceRequestV1(
 
 @Parcelize
 data class AdvanceReceiptV1(
-    /** `ContractV1.ADVANCE_OUTCOME_*`，取值域见 §6.7.4。 */
+    /** `AdvanceOutcomeV1.wire`，取值域见 §6.7.4；未知值必须 fail-closed。 */
     val outcomeWire: Int,
     val advancedFromItemId: String,
     /** 耗尽时为 null——终态，非失败。 */
@@ -1853,7 +1854,7 @@ data class AdvanceReceiptV1(
 > - **完成最后一项是成功的。** 当前项确实被完成了；抛异常会让调用方把一次成功完成当成错误，并且很可能去重试它。返回 receipt，`outcomeWire = ADVANCE_OUTCOME_EXHAUSTED`、`advancedToItemId = null`。
 > - **在已经耗尽之后再请求推进**才是调用方错误，仍为 `SCHEDULE_EXHAUSTED`（16）。
 >
-> 所以两者不冗余：**错误码说「没有东西可推进」，outcome 说「推进发生了，并且落在了末尾」**。`AdvanceReceiptV1.outcomeWire` 取值域就此冻结为 `ADVANCE_OUTCOME_ADVANCED = 1` / `ADVANCE_OUTCOME_EXHAUSTED = 2`。
+> 所以两者不冗余：**错误码说「没有东西可推进」，outcome 说「推进发生了，并且落在了末尾」**。`AdvanceReceiptV1.outcomeWire` 取值域就此冻结为 **`AdvanceOutcomeV1`**：`ADVANCED = 1` / `EXHAUSTED = 2`。**它是枚举而不是两个 `const`**——第一版写成 const，于是没有任何 carrier 和任何门禁看得见它：改一侧、全绿。改成与其它契约枚举同形后，它自动继承 `compatibility.yaml ↔ Kotlin` 绑定与 derived unknown-probe 覆盖。未知 outcome **必须 fail-closed**（`advancedOrFailClosed`）：把未知乐观读成「已推进」会让 Auto 在完全不知道发生了什么的情况下相信计划已前移，并把结果归因到错误的项——§6.7.5 要防的错环境归因，从 outcome 字段而不是 observation 进来。
 
 任一条不满足 → **不推进、不改指针**，返回 typed failure。「跳项」不需要单独 wire：跳项要么撞 14，要么撞 15。
 

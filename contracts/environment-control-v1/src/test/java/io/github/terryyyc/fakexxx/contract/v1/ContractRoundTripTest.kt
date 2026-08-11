@@ -326,7 +326,7 @@ class ContractRoundTripTest {
     @Test
     fun `AdvanceReceiptV1 keeps a null target for the exhausted case`() {
         val advanced = AdvanceReceiptV1(
-            outcomeWire = ContractV1.ADVANCE_OUTCOME_ADVANCED,
+            outcomeWire = AdvanceOutcomeV1.ADVANCED.wire,
             advancedFromItemId = "item-7",
             advancedToItemId = "item-8",
             scheduleVersionAfter = 4L,
@@ -337,7 +337,7 @@ class ContractRoundTripTest {
         assertEquals(advanced, roundTrip(advanced))
 
         val exhausted = advanced.copy(
-            outcomeWire = ContractV1.ADVANCE_OUTCOME_EXHAUSTED,
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
             advancedToItemId = null,
         )
         val restored = roundTrip(exhausted)
