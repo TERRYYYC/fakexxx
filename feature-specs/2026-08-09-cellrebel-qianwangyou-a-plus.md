@@ -1756,6 +1756,26 @@ ProviderPairingRecord(
 
 **幂等语义**：同 `idempotencyKey` + 同 `requestDigest` → 返回**同一份 receipt**，**不产生第二次推进**；同键异 digest → `IDEMPOTENCY_CONFLICT`（wire 12）。
 
+**`requestDigest` 的 preimage 必须绑住两条前置**，否则 §6.7.4 整节失效：
+
+```
+canonical = 逐字段 uint32be(byteLength(bytes)) || bytes，无分隔符、无尾字节
+  leaseId                  UTF-8 verbatim
+  expectedScheduleVersion  ASCII decimal
+  expectedCurrentItemId    UTF-8 verbatim
+  completionProof.scheduleItemId        UTF-8 verbatim
+  completionProof.trustedSuccessCount   ASCII decimal
+  completionProof.quotaRequired         ASCII decimal
+  completionProof.ledgerRef             UTF-8 verbatim
+requestDigest = lowercase hex of SHA-256(canonical)
+```
+
+**为什么这是承重的而不是登记**：幂等重放靠「同键 + 同 digest」判定「这是同一个请求」。若 `expectedCurrentItemId` 不在 preimage 里，那么**指向不同当前项的两个请求会得到同一个 digest**——重放检查会把它们认成同一个，于是返回旧 receipt 或直接放行，**这正是 wrong-item 与 double advance**。`expectedScheduleVersion` 同理对应 skip。换句话说：**digest 漏掉哪条前置，§6.7.4 就少哪一条防护**，而表面上三个 wire code 一个不少。
+
+`idempotencyKey` 与 `callerProtocolVersion` **不进** preimage：前者是查找键（进 preimage 会自我指涉），后者按 §6.3.4 已冻结的理由排除（重试期间调用方升级不得变成伪冲突）。
+
+**长度前缀不是风格选择**：`expectedCurrentItemId`、`ledgerRef`、`scheduleItemId` 都是自由字符串。用任何固定分隔符拼接，都能让一个字段吞掉分隔符并移动边界——`itemId="a|b", ledgerRef="c"` 与 `itemId="a", ledgerRef="b|c"` 会产生**逐字节相同**的 canonical，于是两个不同的推进请求共用一个 digest。这与 §6.3.1 已经踩过的 `\n` 碰撞是同一个 bug，只是换了字段。**判据第十四条在这里再次适用。**
+
 #### 6.7.4 前置条件即三类防护（compare-and-advance）
 
 推进是**比较并推进**，不是无条件自增。三条前置各自对应一类事故：
