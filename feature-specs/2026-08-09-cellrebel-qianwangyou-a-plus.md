@@ -114,6 +114,7 @@ source_threads:
 | **v1.35** | PR-0.2 第三十轮·补充 | Sol 补充 verdict 把 gen-11 由 `0 P1 + 2 P2` 更正为 **1 P1 + 2 P2**。**新 P1：校验发生在值上，损坏发生在传输上。** `doc_row()` 把六格用 TAB 串行化、消费方一律 `cut -f1..f6`；第六格内部写 `<canonical sha><TAB>JUNK` 会生成**第七个传输字段**，`cut -f6` 静默截尾，于是文档指着一个带垃圾尾巴的值，checker 照样打印 `records the canonical import commit 5687e319f` 并 rc=0——**full-DAG `--stage import` 与 depth-1 history-lost `--stage contract` 两条路径均已复现**。v1.33「只 trim 外围」是对的，但只管到了值：`[[:space:]]` 覆盖 TAB，而内部 TAB 既不在首也不在尾。改为**拒绝任意单元格的内部空白** + **独立断言拼装后恰好六个传输字段**（两层）；补 `N-12`（full-DAG import）/ `N-13`（history-lost contract）两条负例与 `M-5`（同时退两层）。实测修前两条均 rc=0、修后均 rc=1。**判据补第十四条**（拼装再解析时，分隔符必须被证明不可能出现在字段内部）。见 §0.1.35 |
 | **v1.36** | PR-0.2 第三十一轮 | Sol gen-13 判 **0 P1 + 2 P2**，代码侧 blocker 清零。**归因实验**：上一轮我把 `setup()` 诊断与 `mk_fulldag` 两处候选修复放进同一 commit，CI 转绿却说不出是谁修好的；改用一次性 ref + `workflow_dispatch` 只退回硬化（probe `8cde419b` / run `31376782849`，**PR 分支零改动**），CI 精确报 **`Author identity unknown`**——夹具真因确认为 `git clone` 不继承 committer 身份（macOS 从 user@host 推导、runner 拒绝，而 `mk_squashed` 一直持久化身份）。同一日志的 **`INCONCLUSIVE: N-12 was not green before the mutation`** 则给 pre-green guard 自身的承重证据。**P2-1**：两份 PR body 仍把当前 HEAD 投影成我自己撤回的 known-red `40029ae8`——v1.34 的「唯一当前真相块」解决了「有几份」，没解决「是否新鲜」。**P2-2**：`§0.1.35` 声称「塞进每一个字段」而只测第六格，已**六格逐格参数化**（cell 2..6 由内部空白规则判红、cell 1 由 row selector 判红）。**判据补第十五条**（不知根因时只交付诊断，不在同一提交里附带候选修复）。**同轮另闭 Sol preflight 两条 truth-binding**：`§0.1.34` 正文原样呈现被上修的初版 verdict（读起来像 terminal closure），已加 initial/superseded 限定并保留原文可追溯，不改写历史；`mk_fulldag` 源码注释把**已被证伪**的 detached/empty-tree 机制写作既证事实（与同一 commit body 自相矛盾），已改为只陈述"去除 ambient/symbolic 依赖"、不归因，归因证据留在本节。见 §0.1.36 |
 | **v1.37** | PR-2 第一轮·operator 架构更正 | **顺序的所有权错了，而且错成了两个所有者。** §5 上一版把「计划顺序」判给 Auto，同表下一行又把 profile/schedule 判给千网游为唯一权威——同一个排序有两个 owner。后果不是措辞不一致：Auto 可以按经纬度排一套顺序，千网游按「环境」（经纬度 **+** 蜂窝/网络/Wi-Fi Hook 字段是一个整体）排另一套，位置于是与网络 Hook 状态漂移。按 operator 裁定更正为：**顺序/优先级归千网游，配额与完成判定归 Auto，推进是二者之间一次幂等握手**。§5 边界表重写；新增 **§6.7 调度身份与「达标→完成→推进」**：`scheduleId`/`scheduleItemId`（稳定、非位置）/`scheduleVersion`（顺序或成员变化必自增）/`currentItemId`；`CompletionProofV1` 由 Auto 出、千网游只记不重算；`CompleteAndAdvanceRequestV1`/`AdvanceReceiptV1` 走 §6.3.4 同一套 digest，**compare-and-advance**：`expectedCurrentItemId` 与 `expectedScheduleVersion` 双前置，新增 wire **14 `SCHEDULE_ITEM_MISMATCH`**（挡错项/重复推进）、**15 `SCHEDULE_VERSION_STALE`**（判定期间计划被改）、**16 `SCHEDULE_EXHAUSTED`**（终态非失败）；推进与指针同事务、receipt 可按幂等键重取、**Auto 必须 observe 独立验证新生效环境**（receipt 是自述不是生效证据）；千网游隐式首行/遗留行序迁移到显式 `currentItemId`。原 §6.7 兼容矩阵顺延为 §6.8，5 处旧引用同步。见 §5 / §6.7 |
+| **v1.38** | PR-2 第二轮 | **digest 与 recovery 一起收口。** ①每个 digest 加 **domain tag** 作首个 framed 字段（`:intent`/`:advance-request`/`:advance-receipt`）——长度前缀只让**一个**序列单射，不阻止「为用途 A 编码的序列」等于「为用途 B 的」，不加 domain 就是把正确性押在「不会有构造输入跨用途碰撞」上，而这正是 §6.3.1 拒绝分隔符时不肯押的巧合；framing 收敛为**一个共享 helper**（第二份手写副本是第二个漂移点，且漂移的 framing 不会响亮失败，只会算出不同 digest）。②**冻结 `receiptDigest`**（此前完全无算法）：绑 `requestDigest` + `idempotencyKey` + outcome，`verify()` 是信任前必跑的一步——**重算不上的 receipt 不是弱证据，它不是 receipt**；null target 用哨兵编码，与空串不碰撞。③`AdvanceOutcomeV1` 由两个 `const` 改为**枚举**，从而自动继承 yaml↔Kotlin 绑定与 derived probe 覆盖（const 不被任何 carrier 看见，改一侧全绿），并补 `advancedOrFailClosed` 未知即非推进。④**冻结 release↔advance 顺序**：先 release 再 advance；lease **不跨项**；`CompleteAndAdvanceRequestV1.leaseId` 是配额挣得处的**历史引用**而非活动持有——不写死会被合理读成两种互斥实现（见 §6.7.4a）。⑤§8.1 增 advance 状态边，§10 增 **M-AD-01..11**（missing proof / same-key replay / new-key double / wrong item / stale version / lost receipt / digest 不符 / 推进后 observe 不符 / 耗尽终态 / 耗尽后再请求），§10.1 台账同步 11 行，矩阵↔台账集合相等 101==101。见 §6.3.1 / §6.7.3 / §6.7.4a / §10 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1881,6 +1882,21 @@ data class AdvanceReceiptV1(
 
 任一条不满足 → **不推进、不改指针**，返回 typed failure。「跳项」不需要单独 wire：跳项要么撞 14，要么撞 15。
 
+#### 6.7.4a release 与 advance 的顺序，以及 lease 是否跨项（冻结）
+
+**顺序：先 release，再 advance。**
+
+`apply` 拿到的 lease 绑定的是**当前项的环境**。推进会改变生效环境——若在持有该 lease 期间推进，provider 就会在一个**活动 lease 之下**换掉环境，这正是 `ENVIRONMENT_DRIFT`（wire 9）存在要拦的形态，只不过由我们自己制造。所以：
+
+```
+QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
+                → completeAndAdvance → observe（独立验证新环境）→ 下一项 apply
+```
+
+**lease 不跨项。** 一个 lease 属于一个 schedule item 的环境；推进即意味着该 lease 的环境不再有效。因此推进时**不得**存在该 caller 的活动 lease。
+
+**那么 `CompleteAndAdvanceRequestV1.leaseId` 是什么？** 它是**配额在哪个 lease 下挣得**的历史引用，用于归因与审计，**不是一个活动持有**。这一点必须写死：不写死的话，实现者会合理地把它读成「推进时仍持有该 lease」，于是要么在活动 lease 下换环境，要么在 release 之后拿一个已 RELEASED 的 id 去做前置校验而失败——两种读法都自洽，所以歧义本身就是缺陷。
+
 #### 6.7.5 崩溃恢复与 reconcile
 
 - **推进与 `currentItemId` 指针必须在同一事务**：重启后只能观察到「已推进」或「未推进」，不存在中间态。
@@ -1956,7 +1972,14 @@ data class AdvanceReceiptV1(
 | `QUOTA_COMMITTED` | `BEGIN_RELEASE` | `RELEASE_PENDING` | 保存 release key | 忘记清理环境 |
 | `UNVERIFIED_RECORDED` | `BEGIN_RELEASE` | `RELEASE_PENDING` | 保存 release key | 自动升级为可信 |
 | `RECOVERY_REQUIRED` | `RECONCILE` | 合法中间态或 `RELEASE_PENDING` | 先 observe/取 receipt | 无证据跳状态 |
-| `RELEASE_PENDING` | `RELEASE_RECEIPT` | `CLOSED` | 保存 release receipt | release 别人的 lease |
+| `RELEASE_PENDING` | `RELEASE_RECEIPT`（**未提交配额**路径） | `CLOSED` | 保存 release receipt | release 别人的 lease |
+| `RELEASE_PENDING` | `RELEASE_RECEIPT`（**配额已提交**路径） | `ADVANCE_PENDING` | 保存 release receipt + advance 幂等键与 `requestDigest`（**先 release 再 advance**，§6.7.4a） | 在**活动 lease 之下**推进——那是自己制造 `ENVIRONMENT_DRIFT` |
+| `ADVANCE_PENDING` | `ADVANCE_RECEIPT_VERIFIED` | `ADVANCE_OBSERVING` | 保存 receipt（`receiptDigest` **已重算通过**才保存） | 收到 receipt 就认定环境已换 |
+| `ADVANCE_PENDING` | `CRASH_RECOVER` | `ADVANCE_PENDING` | **同键**重放 `completeAndAdvance` 取回原 receipt | 换新键重发——会撞 `M-AD-04` 并可能双推进 |
+| `ADVANCE_PENDING` | `ADVANCE_DIGEST_MISMATCH` | `RECOVERY_REQUIRED` | 拒绝该 receipt、暂停、告警 | 当作「弱一点的证据」继续 |
+| `ADVANCE_PENDING` | `ADVANCE_EXHAUSTED` | `CLOSED` | 记录终态（`outcomeWire = EXHAUSTED`、target 为 null）；plan 正常完成 | 当作失败去重试 |
+| `ADVANCE_OBSERVING` | `OBSERVED_ITEM_MATCHES` | `CLOSED` | 记录 `observation.scheduleItemId == receipt.advancedToItemId` | **只比环境不比 item**——同一 profile 可跨项复用 |
+| `ADVANCE_OBSERVING` | `OBSERVED_ITEM_MISMATCH` | `RECOVERY_REQUIRED` | 判**错环境归因**：不计数、不继续 | 继续下一项 |
 | `RELEASE_PENDING` | `RELEASE_INCOMPLETE` | `RECOVERY_REQUIRED` | 暂停 plan、现场提示 | 继续下一地址 |
 | `CLOSED` | 任意重复事件 | `CLOSED` | no-op + audit | 复活 attempt |
 
@@ -2266,6 +2289,17 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-CO-04` | completion | 两次**合法**运行产生完全相同分数 | 两次都必须计入——禁止按分数判重（upstream INV-7） | 26 |
 | `M-CO-05` | completion | 分数数值缺失回退到评级词，同一结果跨轮给出不同键 | 不得据此判为两次运行 | 26 |
 | `M-CO-06` | completion | 设备上完全不出现 running marker 文本 | 全部判未验证并显式告警；**不得回退到 disabled-Start 弱信号** | 11 |
+| `M-AD-01` | advance | 无 `CompletionProofV1` 或 proof 的 `scheduleItemId` ≠ 当前项 | typed `REQUEST_INVALID`；**不推进**、指针不动 | 4,13 |
+| `M-AD-02` | advance | 同 key + 同 digest 重放（Auto 在收到 receipt 前崩溃） | 返回**原 receipt**，**不产生第二次推进**；指针只前移一次 | 13,15 |
+| `M-AD-03` | advance | 同 key + **异** digest（前置被改） | typed `IDEMPOTENCY_CONFLICT`；不推进 | 13 |
+| `M-AD-04` | advance | **新** key 重发同一次完成（Auto 丢了幂等键） | `expectedCurrentItemId` 已过期 → typed `SCHEDULE_ITEM_MISMATCH`；**这是防双推进的最后一道**，不依赖 Auto 记得键 | 13,15 |
+| `M-AD-05` | advance | `expectedCurrentItemId` 指向非当前项 | typed `SCHEDULE_ITEM_MISMATCH`；不推进 | 15 |
+| `M-AD-06` | advance | 判定配额期间计划被改（版本前移） | typed `SCHEDULE_VERSION_STALE`；不推进；Auto 需重取当前项重来 | 15,17 |
+| `M-AD-07` | advance | 千网游已推进、Auto 未收到 receipt（连接中断） | **无 receipt 即视为未推进**；Auto 以同键重放取回原 receipt。**禁止**据「环境看起来变了」推断已推进 | 13,15,23 |
+| `M-AD-08` | advance | receipt 取回但 `receiptDigest` 重算不上 | **不是弱证据，是无证据**：拒绝该 receipt、不前移本地状态、告警 | 13,23 |
+| `M-AD-09` | advance | 推进后 `observe` 的 `scheduleItemId` ≠ receipt 的 `advancedToItemId` | 判**错环境归因**：不计数、不继续；同一 profile 可跨项复用，故环境相符**不足以**替代本条 | 8,23,26 |
+| `M-AD-10` | advance | 最后一项完成 | receipt `outcomeWire = EXHAUSTED`、`advancedToItemId = null`；**终态非失败**，当前项保持、不回绕 | 17 |
+| `M-AD-11` | advance | 已耗尽后再次请求推进 | typed `SCHEDULE_EXHAUSTED`；与 M-AD-10 是两件事 | 17 |
 | `M-RC-02` | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | `M-RC-03` | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |
 | `M-RC-04` | recovery | qwy release 只能部分清理 | plan 暂停，显示人工恢复 | 14,21 |
@@ -2392,6 +2426,17 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 
 | ID | 类别 | evidence class | owner | 精确入口 |
 |---|---|---|---|---|
+| `M-AD-01` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_01` |
+| `M-AD-02` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_02` |
+| `M-AD-03` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_03` |
+| `M-AD-04` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_04` |
+| `M-AD-05` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_05` |
+| `M-AD-06` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_06` |
+| `M-AD-07` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_07` |
+| `M-AD-08` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_08` |
+| `M-AD-09` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_09` |
+| `M-AD-10` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_10` |
+| `M-AD-11` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_11` |
 | `M-CR-01` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_01` |
 | `M-CR-02` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_02` |
 | `M-CR-03` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_03` |
