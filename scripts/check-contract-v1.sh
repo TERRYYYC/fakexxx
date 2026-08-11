@@ -351,6 +351,63 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "5b. inline NAME(wire) references in prose match the authoritative enum"
+
+# Section 5 binds the §6.3.3 TABLE to Kotlin and to compatibility.yaml. It says
+# nothing about the dozens of places the prose writes a wire number inline --
+# "not REQUEST_INVALID(4)", "returns LEASE_CONFLICT(7)". Those references carry
+# real normative weight: an implementer reading §6.7.4b writes the number that
+# is printed there, not the one in a table 400 lines up.
+#
+# This gate exists because that gap was exercised, not hypothesised. A revision
+# froze an advance precedence order citing REQUEST_INVALID(4) and
+# IDEMPOTENCY_CONFLICT(13); the authoritative values are 13 and 12, and 4 is
+# CAPABILITY_UNAVAILABLE -- so a whole paragraph of reasoning argued about an
+# error code unrelated to the case. Sections 1-7 all passed and CI was 4/4,
+# because nothing compared prose numbers against the enum. A reviewer caught it.
+#
+# Deliberately not restricted to §6.3.3 or to any section: the failure mode is a
+# number written far away from the table, so the scan is whole-document.
+if python3 - "$KT_DIR/ContractErrorCodeV1.kt" "$SPEC_PATH" <<'PY'
+import re, sys
+kt_path, spec_path = sys.argv[1], sys.argv[2]
+
+kt = open(kt_path, encoding="utf-8").read()
+# Authoritative source: the Kotlin enum constants, e.g. REQUEST_INVALID(13).
+truth = {m.group(1): int(m.group(2))
+         for m in re.finditer(r'^\s*([A-Z][A-Z0-9_]*)\((\d+)\)', kt, re.M)}
+if not truth:
+    print("  FAIL  5b: parsed zero enum constants from ContractErrorCodeV1.kt")
+    sys.exit(1)
+
+spec = open(spec_path, encoding="utf-8").read().split("\n")
+# Accept both ASCII and full-width parens, with or without backticks/spaces --
+# the document uses every combination.
+ref = re.compile(r'`?(' + '|'.join(sorted(truth, key=len, reverse=True)) +
+                 r')`?\s*[（(](\d+)[）)]')
+
+bad = checked = 0
+for i, line in enumerate(spec, 1):
+    for m in ref.finditer(line):
+        name, cited = m.group(1), int(m.group(2))
+        checked += 1
+        if truth[name] != cited:
+            bad += 1
+            owner = next((n for n, w in truth.items() if w == cited), "no enum constant")
+            print("  FAIL  %s:%d cites %s(%d); authoritative is %s(%d) and wire %d is %s"
+                  % (spec_path, i, name, cited, name, truth[name], cited, owner))
+
+if bad == 0:
+    print("  PASS  %d inline wire reference(s) match ContractErrorCodeV1" % checked)
+sys.exit(1 if bad else 0)
+PY
+then
+  pass "prose wire references are bound to the authoritative enum"
+else
+  fail "at least one inline NAME(wire) reference contradicts ContractErrorCodeV1"
+fi
+
+# ---------------------------------------------------------------------------
 section "6. the method surface agrees across all four carriers"
 
 # completeAndAdvance was added to the real AIDL interface and to nowhere else:
