@@ -52,10 +52,17 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
                 `completionEvidenceWire` INTEGER NOT NULL,
                 `evidencePayloadDigest` TEXT NOT NULL,
                 `startedAt` INTEGER NOT NULL,
-                `classifiedAt` INTEGER
+                `classifiedAt` INTEGER,
+                `startedAtElapsed` INTEGER NOT NULL,
+                `runningConfirmedAtElapsed` INTEGER NOT NULL,
+                `completedAtElapsed` INTEGER NOT NULL
             )
             """.trimIndent()
         )
+        // §6.4.2 clock discipline: the three *Elapsed columns are the ONLY mutually comparable
+        // timestamps (SystemClock.elapsedRealtime). Added in R3-1 alongside the entity fields;
+        // a fresh v5 table has no rows, so INTEGER NOT NULL needs no default. Without these the
+        // entity DDL (5.json) would not match the migration DDL and Room schema validation throws.
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS `index_cellrebel_executions_attemptId` " +
                 "ON `cellrebel_executions`(`attemptId`)"
