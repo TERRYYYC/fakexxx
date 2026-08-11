@@ -1359,7 +1359,15 @@ acceptedIntentHash = lowercase hex of SHA-256(canonical)
 
 **为什么是长度前缀而不是分隔符连接**：四个 ref 字段是自由字符串，用任何固定分隔符连接都可构造碰撞——例如以换行连接时，`runId="a\nb", attemptId="c"` 与 `runId="a", attemptId="b\nc"` 产生**完全相同**的 canonical 字节，于是两个不同意图共享同一 `acceptedIntentHash`，INV-23 的绑定被绕过。长度前缀让编码单射，碰撞不再依赖"字段里恰好没有分隔符"这种运行期巧合。禁止改回分隔符方案，也禁止用"契约上不允许出现换行"来代偿——那是把不变量的正确性押在输入校验上。
 
-**v1.38 增补：每个 digest 必须带 domain。** 长度前缀只让**一个**字段序列单射，它不阻止「为用途 A 编码的序列」等于「为用途 B 编码的序列」——`len||bytes` 里没有任何东西说明这些字段是什么意思。没有 domain tag 时，intent preimage 与 advance-request preimage 共用同一个空间，正确性就押在「不会有构造输入跨用途碰撞」上。**这正是本节拒绝分隔符连接时用过的同一条理由**（「碰撞不再依赖运行期巧合」），只是上移了一层。所以 domain 作为**首个 framed 字段**写进每个 preimage：`:intent` / `:advance-request` / `:advance-receipt`，三者永不复用。
+**v1.38 增补：每个 digest 必须带 domain。** 长度前缀只让**一个**字段序列单射，它不阻止「为用途 A 编码的序列」等于「为用途 B 编码的序列」——`len||bytes` 里没有任何东西说明这些字段是什么意思。没有 domain tag 时，intent preimage 与 advance-request preimage 共用同一个空间，正确性就押在「不会有构造输入跨用途碰撞」上。**这正是本节拒绝分隔符连接时用过的同一条理由**（「碰撞不再依赖运行期巧合」），只是上移了一层。所以 domain 作为**首个 framed 字段**写进每个 preimage。**exact ASCII 值就此冻结**（三者永不复用、永不改写）：
+
+```text
+intent           "fakexxx:contract:v1:intent"
+advance-request  "fakexxx:contract:v1:advance-request"
+advance-receipt  "fakexxx:contract:v1:advance-receipt"
+```
+
+只写「加个 domain」而不冻结逐字节值，两侧独立实现会各取各的字符串，digest 永不相等——而那读起来会像「对端不同意」，不像「我们的 domain 拼写不同」。
 
 禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。
 
@@ -1444,7 +1452,7 @@ data class ReleaseReceiptV1(
 |---|---|---|---|
 | 1 | `NOT_PAIRED` | 调用方不在 caller allowlist（或 Auto 侧 provider 未批准，本地态） | INV-02；pairing 行 |
 | 2 | `CALLER_NOT_ALLOWED` | 身份解析失败或被拒：`getPackagesForUid` ≠ 1 个包、多签名者、signer 与快照不符、已 revoke | INV-02；bypass/pairing 行 |
-| 3 | `INCOMPATIBLE_PROTOCOL` | `protocolVersion` 不在支持集合，或**载荷枚举**（`VerificationLevelV1`/`ContinuityCoverageV1`/`DeliveryModeV1`/`ScheduleDecisionV1`）出现未知 wire code | INV-03,04,19；version 行 |
+| 3 | `INCOMPATIBLE_PROTOCOL` | `protocolVersion` 不在支持集合，或**载荷枚举**（`VerificationLevelV1`/`ContinuityCoverageV1`/`DeliveryModeV1`/`ScheduleDecisionV1`/`AdvanceOutcomeV1`）出现未知 wire code | INV-03,04,19；version 行 |
 | 4 | `CAPABILITY_UNAVAILABLE` | 请求的模式/profile/schedule 当前不可用 | INV-01,03 |
 | 5 | `SCHEDULE_DENIED` | `scheduleDecision == DENIED` | INV-17；recovery 行 |
 | 6 | `CONTINUITY_NOT_FULL` | coverage 为 `PARTIAL/NONE` | INV-08,09；crash/bypass 行 |
@@ -1457,7 +1465,7 @@ data class ReleaseReceiptV1(
 | **13** | **`REQUEST_INVALID`** | **请求结构性非法：必填 ref 为空、坐标越界、`deadline ≤ notBefore`** | **INV-04；contract round-trip 负例** |
 | **14** | **`SCHEDULE_ITEM_MISMATCH`** | **`expectedCurrentItemId` ≠ 实际 `currentItemId`；挡住错项推进与重复推进** | **§6.7.4；advance 负例** |
 | **15** | **`SCHEDULE_VERSION_STALE`** | **`expectedScheduleVersion` ≠ 实际 `scheduleVersion`：判定配额期间计划被改** | **§6.7.4；advance 负例** |
-| **16** | **`SCHEDULE_EXHAUSTED`** | **无下一项。终态而非失败：当前项保持，不回绕** | **§6.7.4；advance 终态例** |
+| **16** | **`SCHEDULE_EXHAUSTED`** | **计划已经耗尽时又请求推进——没有可完成的当前项，是真正的调用方错误**。〔v1.39 更正：本行旧文写「终态而非失败」，与 §6.7.4 冲突。**完成末项**是成功，走 receipt `outcomeWire = EXHAUSTED` + null target；本 wire 只用于**已耗尽之后再请求**〕 | **§6.7.4；advance 负例** |
 
 **两个方向必须分清**：上表全部是**服务端→调用方**的失败码。`PreflightReportV1` 里 `scheduleDecision == WAIT_UNTIL` 却缺 `waitUntilEpochMs`，是**应答**结构性非法，不是请求非法，因此**不能**用 `REQUEST_INVALID` 表示——那会把服务端缺陷伪装成调用方错误。冻结消费方处置：Auto 收到自相矛盾的应答一律 **fail-closed**，按 §6.4.1 矛盾 tuple 处理（不进入可信判定、不启动 CellRebel、写未验证并记 typed reason），并在预检页给出可操作错误。同类规则适用于任何应答级矛盾。
 
@@ -1798,7 +1806,14 @@ receiptDigest = lowercase hex of SHA-256(canonical)
 
 **为什么 receipt 必须绑回请求**：不绑请求的 receipt 不构成任何证据——重试时调用方拿回一份 receipt，却无法区分「这是**我这个请求**的存档应答」与「这是 provider 手上碰巧有的另一份应答」。Auto **在信任 receipt 之前先重算它**；重算不上的 receipt 不是「弱一点的 receipt」，**它不是 receipt**。
 
-`advancedToItemId` 为 null（耗尽）时用**构造上不可能出现在真实 id 中**的哨兵编码，而不是空串——否则「推进到无」与「推进到一个 id 恰好为空的项」会碰撞，这与 §6.3.1 拒绝让值吞掉分隔符是同一条理由。
+`advancedToItemId` 为 null（耗尽）时用**显式存在性判别位**编码，**不是哨兵值**：
+
+```text
+缺省：framed "0"，其后不跟任何字段
+存在：framed "1"，其后紧跟 framed 的 id
+```
+
+〔**v1.39 更正**：上一版写的是「构造上不可能出现在真实 id 中的哨兵」，并以「§6.7.1 要求 id 可打印」为依据——**§6.7.1 并没有这条要求**。于是编码的单射性只靠一个无人强制的假设，一个恰好等于哨兵的 id 会与 null 产生同一 digest。**判别位没有「取值不可达」这项义务**：任何 id 都不可能被读成缺省。这与 §6.3.1 拒绝分隔符是同一条理由——不要把正确性押在运行期巧合上。〕
 
 **幂等语义**：同 `idempotencyKey` + 同 `requestDigest` → 返回**同一份 receipt**，**不产生第二次推进**；同键异 digest → `IDEMPOTENCY_CONFLICT`（wire 12）。
 

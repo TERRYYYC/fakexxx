@@ -201,6 +201,32 @@ class CanonicalAdvanceDigestV1Test {
     }
 
     /**
+     * No id can be read as absence.
+     *
+     * The first encoding used a magic sentinel and justified it with "no real id
+     * looks like this" -- an assumption nothing enforces, so an id equal to the
+     * sentinel collided with null. The presence discriminator removes that
+     * obligation entirely, so this walks ids chosen to be hostile to it,
+     * including the exact old sentinel.
+     */
+    @Test
+    fun `no schedule item id can collide with absence`() {
+        val absent = CanonicalAdvanceReceiptDigestV1.compute(
+            receipt(outcome = AdvanceOutcomeV1.EXHAUSTED.wire, to = null), "req-a", "k1",
+        )
+        val hostile = listOf("", "0", "1", "null", "\u0000null", "0\u0000", "1item-8")
+        for (id in hostile) {
+            assertNotEquals(
+                "id must not digest as absence: " + id,
+                absent,
+                CanonicalAdvanceReceiptDigestV1.compute(
+                    receipt(outcome = AdvanceOutcomeV1.EXHAUSTED.wire, to = id), "req-a", "k1",
+                ),
+            )
+        }
+    }
+
+    /**
      * Exhausted is null, not empty. If null encoded as "", a receipt saying
      * "advanced to nothing" and one saying "advanced to an item whose id is
      * empty" would be the same bytes.
