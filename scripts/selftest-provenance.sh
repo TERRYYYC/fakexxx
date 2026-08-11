@@ -18,6 +18,54 @@ TREE_AUTO=0553fcb46f02e7211f4496e4a98b846ec70ef9a2
 TREE_QWY=f4bdce23c65e6227cf43dab5fe0416120b95134e
 POS=0; NEG=0; MUT=0; FAILURES=0; PASSED=""
 
+# The pristine baseline, resolved from the RECORDED upstream root trees rather
+# than from whatever the working tree happens to look like today.
+#
+# Every fixture below that calls itself "pristine" used to be built with
+# `git archive HEAD`. That silently assumed the vendored apps never move. The
+# moment a PR legitimately wires the contract module into the app Gradle roots
+# — which PR-1's own design explicitly permits at --stage contract — the
+# fixtures inherited that delta, so:
+#
+#   * P-3 "squash-merged history, pristine trees" ran against a tree that was
+#     not pristine and went red;
+#   * P-4's shape assertion "parent prefix tree == upstream" could not hold,
+#     which then made M-2 report INCONCLUSIVE for a reason unrelated to M-2;
+#   * the TAB negatives went red because the app had moved, not because of the
+#     tamper each one is named after — a case that reports the wrong reason is
+#     the exact failure this suite exists to prevent.
+#
+# So the baseline is the newest ancestor of HEAD whose vendored trees still
+# equal the recorded upstream root trees. Tree equality against the recorded
+# constants is the same trust root check-provenance.sh itself uses, so this is
+# provable rather than assumed, and it keeps working however far HEAD moves.
+baseline_commit() {
+  local c
+  for c in $(git -C "$REPO_ROOT" rev-list HEAD); do
+    if [ "$(git -C "$REPO_ROOT" rev-parse "$c:apps/cellrebel-auto" 2>/dev/null)" = "$TREE_AUTO" ] &&
+       [ "$(git -C "$REPO_ROOT" rev-parse "$c:apps/qianwangyou"    2>/dev/null)" = "$TREE_QWY"  ]; then
+      printf '%s\n' "$c"; return 0
+    fi
+  done
+  return 1
+}
+
+if ! BASELINE="$(baseline_commit)"; then
+  printf 'selftest-provenance: FAIL — no ancestor of HEAD carries the recorded upstream root trees;\n'
+  printf '  the pristine fixtures cannot be built, so every "pristine" case below would test the wrong tree.\n'
+  exit 1
+fi
+
+# HEAD is pristine only while its own vendored trees still equal the recorded
+# ones. This is a fact about the repo, not a policy, and P-1 below branches on
+# it instead of hard-coding one stage forever.
+if [ "$(git -C "$REPO_ROOT" rev-parse "HEAD:apps/cellrebel-auto" 2>/dev/null)" = "$TREE_AUTO" ] &&
+   [ "$(git -C "$REPO_ROOT" rev-parse "HEAD:apps/qianwangyou"    2>/dev/null)" = "$TREE_QWY"  ]; then
+  HEAD_PRISTINE=1
+else
+  HEAD_PRISTINE=0
+fi
+
 ok()  { printf '  PASS  %s\n' "$1"; PASSED="$PASSED
 $1"; }
 bad() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
@@ -27,7 +75,7 @@ bad() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 mk_squashed() {
   local d; d="$(mktemp -d)"
   ( cd "$d" && git init -q . && git config user.email s@s && git config user.name s )
-  ( cd "$REPO_ROOT" && git archive HEAD ) | tar -x -C "$d"
+  ( cd "$REPO_ROOT" && git archive "$BASELINE" ) | tar -x -C "$d"
   cp "$PROD" "$d/scripts/check-provenance.sh"
   cp "$REPO_ROOT/$DOC" "$d/$DOC"          # working-tree doc, not the committed one
   ( cd "$d" && git add -A >/dev/null && git commit -qm "squash merge of PR #10" )
@@ -46,7 +94,7 @@ mk_squashed() {
 # import-commit cell through different code paths, and a counterproof on only one
 # of them says nothing about the other.
 mk_fulldag() {
-  local d sha; d="$(mktemp -d)"; sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  local d sha; d="$(mktemp -d)"; sha="$BASELINE"
   # Both hardenings below REMOVE AN AMBIENT DEPENDENCY; neither one asserts a
   # mechanism. Checking the exact commit out by SHA removes the dependency on the
   # source repo's symbolic HEAD. Persisting user.email/user.name removes the
@@ -112,7 +160,23 @@ neg() { # <label> <dir> <args...>
 }
 
 printf '== positives (legal states that must stay green) ==\n'
-pos "P-1 production repo, full DAG, --stage import"   "$REPO_ROOT" --stage import
+# P-1 asserts the production repo is green at the stage that matches what the
+# repo ACTUALLY is, and it stays load-bearing in both worlds. Hard-coding
+# --stage import made this case a promise that the apps would never move, which
+# PR-1 never intended: its own comment says the CI stage line moves when a later
+# PR legitimately changes an app. When that happened, P-1 went red and reported
+# it as a provenance defect.
+#
+# Diverged is not the weaker branch. It asserts BOTH that the permissive stage
+# accepts the divergence AND that the strict stage still rejects it — if
+# --stage import ever stopped firing on a moved tree, that is a real regression
+# and P-1/strict is what catches it.
+if [ "$HEAD_PRISTINE" -eq 1 ]; then
+  pos "P-1 production repo pristine, full DAG, --stage import"   "$REPO_ROOT" --stage import
+else
+  pos "P-1 production repo diverged, full DAG, --stage contract" "$REPO_ROOT" --stage contract
+  neg "P-1/strict diverged production repo must still be rejected by --stage import" "$REPO_ROOT" --stage import
+fi
 pos "P-2 production repo, full DAG, --stage contract" "$REPO_ROOT" --stage contract
 D="$(mk_squashed)"
 pos "P-3 squash-merged history, pristine trees"       "$D" --stage contract
@@ -339,12 +403,19 @@ mutate() { # <label> <target-case-id> <sed-script-applied-to-the-checker>
     return
   fi
   local m; m="$(mktemp -d)"
-  # The copy must be a real git repository: the inner run's mk_squashed calls
-  # `git archive HEAD` on it. A plain file copy made every fixture fail to build,
-  # which the harness then reported as "not bound" — a mutation result produced
-  # by a broken mutation harness, which is the very thing this section exists to
-  # rule out.
-  ( cd "$REPO_ROOT" && git archive HEAD ) | tar -x -C "$m" 2>/dev/null
+  # The copy must be a real git repository: the inner run's fixtures do git work
+  # on it. A plain file copy made every fixture fail to build, which the harness
+  # then reported as "not bound" — a mutation result produced by a broken
+  # mutation harness, which is the very thing this section exists to rule out.
+  #
+  # It is archived from $BASELINE, not HEAD, for that same reason. This copy is a
+  # single commit, so it IS its own history: archiving a diverged HEAD gave the
+  # inner run a one-commit repo with no pristine ancestor, the inner run bailed
+  # out before reaching any case, and the outer harness read "the target never
+  # failed" as "the fix is not load-bearing" — all five mutations went red at
+  # once while every fix was still perfectly load-bearing. Same failure shape as
+  # the file-copy bug above, one layer further in.
+  ( cd "$REPO_ROOT" && git archive "$BASELINE" ) | tar -x -C "$m" 2>/dev/null
   cp "$REPO_ROOT/scripts/check-provenance.sh" "$REPO_ROOT/scripts/selftest-provenance.sh" "$m/scripts/"
   cp "$REPO_ROOT/$DOC" "$m/$DOC"
   ( cd "$m" && git init -q . && git config user.email m@m && git config user.name m \
