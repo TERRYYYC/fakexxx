@@ -60,6 +60,11 @@ enums:
     ENVIRONMENT_DRIFT: 9
     RELEASE_INCOMPLETE: 10
     INTERNAL_FAILURE: 11
+    IDEMPOTENCY_CONFLICT: 12
+    REQUEST_INVALID: 13
+    SCHEDULE_ITEM_MISMATCH: 14
+    SCHEDULE_VERSION_STALE: 15
+    SCHEDULE_EXHAUSTED: 16
 
 # Skew cases. Every row is covered by ContractWireCompatibilityTest.
 skew:

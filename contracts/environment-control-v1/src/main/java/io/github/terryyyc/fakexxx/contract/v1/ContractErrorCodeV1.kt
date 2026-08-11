@@ -55,6 +55,37 @@ enum class ContractErrorCodeV1(val wire: Int) {
 
     /** Unclassified provider-side failure, and the sink for unknown wire codes. */
     INTERNAL_FAILURE(11),
+
+    /** Same `idempotencyKey` replayed with a different payload digest (§6.3.3, INV-13). */
+    IDEMPOTENCY_CONFLICT(12),
+
+    /** Structurally invalid request: empty required ref, out-of-range coordinate,
+     *  `deadline <= notBefore` (§6.3.3, INV-04). */
+    REQUEST_INVALID(13),
+
+    /**
+     * `expectedCurrentItemId` does not match the owner's `currentItemId` (§6.7.4).
+     *
+     * This is what makes advance a compare-and-advance rather than a blind
+     * increment: it is the single code that stops BOTH a wrong-item advance and a
+     * double advance, because a caller holding a stale current item produces the
+     * same mismatch in either case. A skipped item needs no code of its own — it
+     * arrives here or at [SCHEDULE_VERSION_STALE].
+     */
+    SCHEDULE_ITEM_MISMATCH(14),
+
+    /**
+     * `expectedScheduleVersion` does not match the owner's `scheduleVersion` (§6.7.4):
+     * the schedule changed while Auto was proving quota, so the completion result no
+     * longer provably belongs to the same item.
+     */
+    SCHEDULE_VERSION_STALE(15),
+
+    /**
+     * No next item. Terminal, NOT a failure: the current item is retained and the
+     * schedule does not wrap (§6.7.4). Callers must not retry this into an advance.
+     */
+    SCHEDULE_EXHAUSTED(16),
     ;
 
     companion object {
