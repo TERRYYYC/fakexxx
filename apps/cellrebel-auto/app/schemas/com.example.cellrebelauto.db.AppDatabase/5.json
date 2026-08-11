@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "633b16681a4f31cb35b27d6b45372218",
+    "identityHash": "d7b376c6a93b8068f5635c6a56750359",
     "entities": [
       {
         "tableName": "test_results",
@@ -487,7 +487,7 @@
       },
       {
         "tableName": "cellrebel_executions",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `executionId` TEXT NOT NULL, `attemptId` INTEGER NOT NULL, `completionEvidenceWire` INTEGER NOT NULL, `evidencePayloadDigest` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `classifiedAt` INTEGER)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `executionId` TEXT NOT NULL, `attemptId` INTEGER NOT NULL, `completionEvidenceWire` INTEGER NOT NULL, `evidencePayloadDigest` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `classifiedAt` INTEGER, `startedAtElapsed` INTEGER NOT NULL, `runningConfirmedAtElapsed` INTEGER NOT NULL, `completedAtElapsed` INTEGER NOT NULL)",
         "fields": [
           {
             "fieldPath": "id",
@@ -529,6 +529,24 @@
             "fieldPath": "classifiedAt",
             "columnName": "classifiedAt",
             "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "startedAtElapsed",
+            "columnName": "startedAtElapsed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runningConfirmedAtElapsed",
+            "columnName": "runningConfirmedAtElapsed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedAtElapsed",
+            "columnName": "completedAtElapsed",
+            "affinity": "INTEGER",
+            "notNull": true
           }
         ],
         "primaryKey": {
@@ -733,7 +751,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '633b16681a4f31cb35b27d6b45372218')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd7b376c6a93b8068f5635c6a56750359')"
     ]
   }
 }

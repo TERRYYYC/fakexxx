@@ -1,0 +1,211 @@
+---
+feature_ids: ["issue5", "a-plus"]
+topics: ["trusted-ledger", "red-rewrite", "spec-grounding", "recovery"]
+doc_kind: grounding
+created: 2026-08-12
+owner: glm
+status: pre-freeze-red
+audience: next-glm-self
+---
+
+# Issue #5 RED Rewrite — Round 3 Grounding (read FIRST, do not guess)
+
+> Owner: 智谱猫/阿智 (`@glm`, glm-5.2). Audience: the next me (post-compression or fresh session).
+> **Read this BEFORE touching TrustPolicy / CompletionTrustContext / RecoveryCoordinator / PlanScheduler.**
+> Source of truth: `feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md` (read-only; never edit qianwangyou).
+
+## 0. Root-cause admission (do not repeat)
+
+Round 2 failed because I **guessed the trust polarity** (`mode=gps / isMock=false ⇒ PASS`) instead of reading §6.4. The spec mandates the **opposite**: the trusted path is `SYSTEM_MOCK + isMock=true`. My round-2 positive fixture was literally §6.4.1's must-fail矛盾 tuple (`isMock=false + VERIFIED`, line 1561). A bad impl that accepts my wrong tuple greens all 56/152 tests (Sol proved this via isolated `git archive`). **Read the spec, do not reason from intuition.** This is the "我能猜出来" disease — the cure is always Read the source.
+
+## 1. Sol's Round-3 findings (HEAD `4e3d739d`), all accepted, no defense
+
+### Finding 1 [P1] — Trust oracle A+ positive is INVERTED + completion evidence incomplete
+- `TrustedLedgerRedTest` defines `gps/isMock=false ⇒ PASS`, `isMock=true ⇒ FAIL`. Spec §6.4 REQUIRES `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED + deliveryMode=SYSTEM_MOCK + isMock=true + ALLOWED_NOW`. **Inverted.**
+- `CompletionTrustContext` missing: pre/post revision, fingerprint, per-obs coverage, deliveryMode, scheduleDecision, evidenceRefs, continuitySinceElapsed, observedAtElapsed.
+- `CellRebelExecution` has only opaque digest + `startedAt/classifiedAt`; missing §6.4.2 `startedAtElapsed/runningConfirmedAtElapsed/completedAtElapsed`.
+- Bad impl that only checks the wrong/incomplete fields and accepts `gps+isMock=false` ⇒ 16/16 green. RED has no discriminating power.
+
+### Finding 2 [P1] — Durable seam merges external-call + receipt-write; crash window is fake
+- `DurableRecoveryLog.recordApply` simultaneously executes/writes-receipt/increments-count in ONE sync call (`FakeDurableRecoveryLog:36-55`). Coordinator has only `log`, no external executor.
+- `RecoveryIdempotencyRedTest:142-155` asserts "no receipt ⇒ no side effect", but canonical **M-CR-02 = "provider already applied, Auto not yet saved receipt"** — the most dangerous window is eliminated by the model.
+- Bad impl: a coordinator that NEVER calls an external provider, only `log.recordApply(...)`, greens 10/10 recovery tests. Schedule gate only needs `receiptFor(key)!=null && callerSuppliedBoolean`; no RED for mismatch/stale-version/exhausted.
+- `applyCount`/`lastConflictKey` are explicit test observation surfaces → violates canonical **§10.1 "no driver seam in prod for tests"**.
+
+### Finding 3 [P1] — M-MG-02 + sealed template can be greened via isolated helpers; prod path untouched
+- `selectNextTrusted/isTrustedQuotaComplete` have **0 call sites** in main. `AutomationEngine:286,327 → PlanRepository:192-205 → LocationTaskDao.incrementSuccessIfCurrent` still drives legacy `completedSuccesses/status`.
+- Implementing only the 2 isolated helpers greens `TrustedSelectionMmG02RedTest` 6/6; legacy path unchanged.
+- No `APlusRunTemplate`/`APlusAttemptCoordinator`/`AttemptReducer` in main; `APlusTemplateRedTest` tests only guard+pairing, not a fixed typed step sequence. Transition RED missing `CRASH_RECOVER`, `OBSERVATION_UNTRUSTED`, `TIMEOUT/INTERRUPTED`, `RECOVERY_REQUIRED+RECONCILE`.
+
+### The killer fact
+Sol's isolated comprehensive bad impl: **targeted 56/56 pass; full `testDebugUnitTest` 152/152 pass, 0 failures** — yet still calls no external system, can't distinguish call/write crash, accepts wrong tuple, preserves legacy path, has no sealed template. Round-2 RED has ZERO semantic discriminating power.
+
+## 2. §6.4 canonical trust predicate (EXACT — extract from spec lines 1493-1530)
+
+This is the ONLY valid positive tuple. Every field below must hold; any one failing ⇒ FAIL (no trusted quota).
+
+**Per-observation (pre AND post, both must hold independently):**
+- `coverage == FULL`
+- `verificationLevel == SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`
+- `deliveryMode == SYSTEM_MOCK`            (non-null, exactly SYSTEM_MOCK)
+- `isMock == true`                          (non-null, exactly true)  ← I had this INVERTED
+- `scheduleDecision == ALLOWED_NOW`
+- `evidenceRefs` non-empty                  (structural only; format `qwy:<store>:<id>`)
+- `leaseId == apply.leaseId`
+- `acceptedIntentHash == apply.acceptedIntentHash`
+- `effectiveLatitude != null && effectiveLongitude != null`
+- `observedAtElapsedRealtimeMs` is the ONLY comparable timestamp (monotonic; `...EpochMs` is audit-only, NEVER in predicate)
+
+**Cross-observation:**
+- `pre.revision == post.revision`
+- `pre.fingerprint == post.fingerprint`
+- `pre.continuitySinceElapsedRealtimeMs != null && post.continuitySinceElapsedRealtimeMs != null`
+- `pre.continuitySinceElapsedRealtimeMs == post.continuitySinceElapsedRealtimeMs`
+- `post.continuitySinceElapsedRealtimeMs <= pre.observedAtElapsedRealtimeMs`
+
+**Brackets execution window (all monotonic elapsedRealtime):**
+- `pre.observedAtElapsedRealtimeMs < execution.startedAtElapsed`
+- `post.observedAtElapsedRealtimeMs > execution.completedAtElapsed`
+
+**Intent binding (INV-23, independent condition — the most expensive failure is wrong address):**
+- `apply.acceptedIntentHash == localDigest(attempt.intent)`   (Auto recomputes, never trusts peer echo)
+- `haversine(pre.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS`
+- `haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS`
+- `TRUSTED_LOCATION_TOLERANCE_METERS = 1.0` (frozen contract constant)
+
+**Completion evidence:** `CellRebelCompletionEvidence == VERIFIED_NEW_COMPLETION` (wire 1 only).
+
+## 3. §6.4.1 矛盾 tuples — each is an INDEPENDENT must-fail negative (lines 1558-1567)
+
+Every row below must be its own FAIL case (do not collapse):
+- `HOOK + SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` (Hook masquerading as independent verify; INV-06)
+- `isMock=false + VERIFIED` ← my old "positive"; MUST fail
+- `isMock=null + VERIFIED`
+- `DENIED` or `WAIT_UNTIL` + `VERIFIED` (schedule disallows but counted)
+- `coverage=FULL + continuitySince=null`
+- `continuitySince > pre.observedAt`
+- `post.observedAt < CellRebel completedAt` (post-observe before completion)
+- `evidenceRefs empty + VERIFIED`
+
+Plus per-field inversions of every §6.4 predicate field (wire 2-5, mismatched intent hash three-way, different lease, null/out-of-tolerance coord, revision/fingerprint mismatch, continuitySince mismatch/non-null-violation, un-bracketed window).
+
+## 4. §6.4.2 execution-window fields (freeze into CellRebelExecution)
+
+`SystemClock.elapsedRealtime()` is the ONLY comparable clock (monotonic, cross-process, NTP-immune). `...EpochMs` fields stay but are audit-only, never in any trust predicate.
+
+CellRebelExecution freezes (all elapsedRealtime):
+- `startedAtElapsed` — actual Start interaction moment
+- `runningConfirmedAtElapsed` — first moment RUNNING confirmed by marker text
+- `completedAtElapsed` — stable COMPLETED (two consecutive equal scores) moment
+
+`MIN_RUNNING_EVIDENCE_MS = completedAtElapsed − runningConfirmedAtElapsed` (NOT − startedAtElapsed).
+
+**DTO-safety note (Finding 2 guardrail):** `CellRebelExecution` is an Auto-local Room entity (§7.1, owner CellRebelAttemptFlow), NOT a §6.3 contract DTO nor `IEnvironmentControlV1` AIDL. Adding §6.4.2 fields is spec-stable + Auto-owned = NOT a #3 wire change. BUT: if ANY field addition reaches a §6.3 DTO or the AIDL surface, **STOP and report to Sol + operator immediately** (frozen-boundary hard rule).
+
+## 5. §10.1 — no driver seam in production code for tests
+
+`applyCount` and `lastConflictKey` must NOT be test observation surfaces on the production `DurableRecoveryLog` interface. The effect counter must live in the TEST fake / a test-only observation, and must be incremented by an INDEPENDENT external-call executor — NOT by the receipt store. The production seam exposes only: receipt presence, receipt digest, checkpoint state.
+
+## 6. Sol's Round-3 Next Actions (the governing task list)
+
+1. **Separate external-call executor from durable receipt store.** Bank THREE crash windows: (a) before external call, (b) after-call-before-receipt, (c) after-receipt-before-checkpoint. Effect counter NOT incremented by the receipt store. Model M-CR-02 (provider applied, no receipt) as a real distinguishable state.
+2. **Trust positive example field-by-field aligned to §6.4/§8.6** (§2 above). Persist full completion evidence (§6.4.2 fields). Both polarities; every §6.4.1矛盾 tuple a distinct negative.
+3. **M-MG-02 through REAL Room projection + production selection/completion entry** (not isolated helpers that legacy path ignores). Sealed-template RED directly asserts the unique typed step sequence (`APlusRunTemplate`). Add missing transitions: `CRASH_RECOVER`, `OBSERVATION_UNTRUSTED`, `TIMEOUT/INTERRUPTED`, `RECOVERY_REQUIRED+RECONCILE`.
+4. **Comprehensive bad-impl re-red**: build the adversarial impl, require ALL targeted tests STILL red (and full suite still red for the right reason); new exact HEAD + re-red evidence back to dev thread. **Do NOT post until the comprehensive bad impl cannot green the suite.**
+
+## 7. Boundary reminders (still in force)
+
+- Pre-freeze: RED/skeleton ONLY. No production GREEN body. No contract/§6.3-DTO/AIDL edits. No qianwangyou source edits.
+- `#5` formal reviewer = Sol (no self-review). PR #21 stays Draft; merge by operator.
+- Redis 6399 prod (use 6398 dev/test); ports 3003/3004 reserved.
+- Identity: `@glm` / glm-5.2.
+
+## 8. Finding 2 seam design (concrete — execute this in ONE coherent pass, do not leave mid-refactor)
+
+The round-2 seam merges execute + receipt + count in one sync `recordApply` call, eliminating the
+M-CR-02 window (provider applied, Auto no receipt) and letting a coordinator that never calls a
+provider green everything. Fix: split into an independent external-call executor + a pure receipt
+store. **This is a 4-MAIN + 2-TEST-file refactor that only compiles when ALL pieces land — finish it
+in one pass.**
+
+### Production `DurableRecoveryLog` (MAIN seam — strip to pure durable storage, §10.1)
+Remove `applyCount` and `lastConflictKey` (test observation surfaces forbidden on the prod seam).
+Rename `recordApply` → `recordReceipt` and STOP counting effects in it. Final shape:
+```
+interface DurableRecoveryLog {
+    fun receiptFor(idempotencyKey): RecordedReceipt?
+    fun recordReceipt(idempotencyKey, requestDigest, outcome, now): RecordedReceipt?
+        // existing same-key/same-digest ⇒ return prior (replay), NO re-write
+        // existing same-key/different-digest ⇒ return null (conflict), prior preserved
+        // no existing ⇒ write + return new receipt
+    fun checkpointFor(attemptId): RecoveryCheckpoint?
+    fun recordCheckpoint(attemptId, lastDurableStage, receiptKey, now)
+}
+```
+Conflict is observed through the prod seam alone: `recordReceipt` returns null AND `receiptFor(key)?.requestDigest == prior`. No `lastConflictKey` needed.
+
+### NEW `ExternalApplyExecutor` (MAIN seam) — the external provider call
+```
+interface ExternalApplyExecutor {
+    fun apply(attemptId, idempotencyKey, requestDigest, now): ApplyOutcome   // the external call
+}
+data class ApplyOutcome(outcome: String, providerHadAlreadyApplied: Boolean)
+```
+
+### NEW `RecordingExternalApplyExecutor` (TEST fake) — provider-idempotent, with effect + crash injection
+Models the qwy provider's OWN idempotency (§6.3.4: same `(caller, operation, idempotencyKey)` is
+idempotent at the provider). Keeps an `appliedKeys: Map<key, digest>`:
+- key not applied ⇒ apply, `appliedKeys[key]=digest`, **providerEffect[key] += 1**, return `ApplyOutcome(outcome, providerHadAlreadyApplied=false)`.
+- key applied with SAME digest ⇒ idempotent no-op, effect unchanged, return `ApplyOutcome(outcome, providerHadAlreadyApplied=true)`.
+- `crashBeforeReturn: (key) -> Boolean` hook ⇒ throw (simulates process death at window b/c).
+Exposes `providerEffectCount(key)` and `invocationCount(key)` for assertions. **Effect counter lives
+HERE (test fake), never on the prod seam.**
+
+### `RecoveryCoordinator(executor, log)` (MAIN, RED skeleton — reconcile orchestration)
+reconcile(attemptId, idempotencyKey, requestDigest, now):
+1. `receiptFor(key)` existing same-key/same-digest ⇒ **return REPLAYED_APPLY, do NOT call executor** (replay short-circuit — at-most-once).
+2. existing same-key/different-digest ⇒ **return IDEMPOTENCY_CONFLICT, do NOT call executor**, prior preserved.
+3. no receipt ⇒ `executor.apply(...)` (external call) → `recordReceipt(...)` → `recordCheckpoint(...)` ⇒ return ADVANCED_TO_RELEASE.
+The executor may be CALLED twice across crashes (window b); the PROVIDER's idempotency keeps the
+EFFECT at one. Auto records the receipt once. This is exactly M-CR-02 recovery.
+
+### The 3 crash windows (what each test asserts — provider EFFECT, not Auto call count)
+- **(a) crash before external call**: no receipt, executor never invoked. Post-crash reconcile ⇒ executor invoked once, `providerEffectCount==1`, receipt present, ADVANCED.
+- **(b) crash after call, before receipt (M-CR-02)**: executor invoked once (provider effect 1), no receipt written, then crash. Post-crash: receipt absent ⇒ coordinator calls executor AGAIN; provider idempotent ⇒ effect stays 1, `providerHadAlreadyApplied=true`; coordinator records receipt. Final `providerEffectCount==1`, receipt present. **This is the window round-2 eliminated — it must be a distinct, asserting test.**
+- **(c) crash after receipt, before checkpoint**: receipt present post-crash ⇒ REPLAYED_APPLY, executor NOT re-invoked (`invocationCount` does not increase), effect 1.
+- **conflict (same key, different digest)**: executor NOT called; `receiptFor(key).requestDigest == prior`; `recordReceipt` returned null.
+
+### Schedule-advance gate — add stale/exhausted negatives (defeat `receipt≠null ∧ boolean`)
+Extend the gate so ADVANCED requires receipt ∧ intentRevisionMatches ∧ ¬staleRevision ∧ ¬quotaExhausted.
+Add RED/pass negatives:
+- stale-revision (receipt present, intent matches, but revision is stale) ⇒ NOT_ADVANCED
+- quota-exhausted (receipt present, intent matches, task quota full) ⇒ NOT_ADVANCED
+(Both have receipt + intentMatch true, so a `receipt≠null ∧ intentMatch` impl wrongly returns ADVANCED ⇒ RED. That is the discriminating fix Sol requires.)
+
+### Files touched (Finding 2)
+- MAIN: `recovery/DurableRecoveryLog.kt` (strip + rename), `recovery/ExternalApplyExecutor.kt` (NEW), `recovery/RecoveryCoordinator.kt` (ctor + skeletons), `recovery/RecoveryCoordinator.kt` enums unchanged.
+- TEST: `recovery/FakeDurableRecoveryLog.kt` (strip counts/conflict-key), `recovery/RecordingExternalApplyExecutor.kt` (NEW), `recovery/RecoveryIdempotencyRedTest.kt` (rewrite 9→~11 tests around windows + gate).
+- Verify: `./gradlew testDebugUnitTest --tests '...recovery.*'` ⇒ right-reason RED (fresh-advance + window-b + schedule-ADVANCED + stale/exhausted negatives... note: as with Finding 1, negatives pass under skeleton; RED signal = the positive fresh-advance/window-b-then-advance + ADVANCED-gate cases that the skeleton's constant return cannot satisfy). Then run the **comprehensive bad-impl re-red** (R3-4) across ALL findings.
+
+### Finding 3 design (lighter — design TBD in next window, Sol Next Action #3 one-liner in §6)
+M-MG-02 must route through the REAL Room `TrustedQuotaDao.trustedCountForTask` projection + the
+production selection/completion entry, not the 0-call-site isolated `selectNextTrusted`/
+`isTrustedQuotaComplete` helpers. Options for next window: (a) write RED that constructs a real Room
+DB, seeds `TrustedQuotaEntry` rows + `LocationTask`, and asserts the PRODUCTION
+`PlanRepository`/`AutomationEngine` selection+completion path reflects the trusted projection — which
+requires the GREEN to actually rewire those paths (can't be greened by painting an isolated helper);
+(b) add a `APlusRunTemplate` typed-step-sequence RED asserting the exact ordered steps. Add missing
+AttemptTransitions: `CRASH_RECOVER`, `OBSERVATION_UNTRUSTED`, `TIMEOUT_INTERRUPTED`,
+`RECOVERY_REQUIRED + RECONCILE → ...`. Decide concrete approach with fresh budget.
+
+## 9. Build env
+
+```bash
+cd apps/cellrebel-auto
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home   # OR JBR: /Applications/Android Studio.app/Contents/jbr/Contents/Home
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+./gradlew testDebugUnitTest   # expect: right-reason RED (AssertionError, 0 errors)
+```
+
+---
+[智谱猫/阿智 · glm-5.2🐾]
