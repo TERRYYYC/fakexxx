@@ -27,6 +27,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 MODULE="contracts/environment-control-v1"
+# The canonical document this contract claims to freeze. Section 5 binds the
+# code to it; without that binding every other check is internal-consistency
+# only and cannot notice that the frozen version has been superseded.
+SPEC_PATH="feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md"
 KT_DIR="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1"
 AIDL_DIR="$MODULE/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1"
 
@@ -198,6 +202,82 @@ else
     fi
     rm -f "$log"
   done
+fi
+
+# ---------------------------------------------------------------------------
+section "5. canonical spec <-> Kotlin <-> compatibility.yaml (spec binding)"
+
+# Sections 1-3 are all INTERNAL-consistency checks. A contract can satisfy every
+# one of them and still freeze the wrong version of the spec -- which is exactly
+# what happened: the module froze §6 v1.4 while canonical moved to v1.36, and no
+# gate could see it. Worse, ContractWireCompatibilityTest asserts the frozen set
+# is "complete", so a green test was actively certifying the superseded set.
+#
+# This section binds the code to the canonical document. It compares SETS of
+# (name, wire code) in BOTH directions across all three carriers. A count, a
+# token grep, or a section hash cannot prove semantic set equality: equal counts
+# with a renamed constant, or a hash that changes for an unrelated typo, both
+# report the wrong thing.
+if SPEC="$SPEC_PATH" KT_DIR="$KT_DIR" MODULE="$MODULE" python3 - <<'PY'
+import os, pathlib, re, sys
+
+spec = pathlib.Path(os.environ["SPEC"])
+if not spec.exists():
+    print(f"  FAIL  canonical spec not found: {spec}"); sys.exit(1)
+
+text = spec.read_text()
+# Anchor to §6.3.3 exactly. An unanchored scan also matches changelog/finding
+# tables whose first cell is a number, which would silently inflate the set.
+m = re.search(r"^#### 6\.3\.3 .*?$(.*?)^#### ", text, re.S | re.M)
+if not m:
+    print("  FAIL  §6.3.3 anchor not found in canonical spec"); sys.exit(1)
+
+spec_set = {}
+for line in m.group(1).splitlines():
+    r = re.match(r"^\|\s*\*{0,2}(\d+)\*{0,2}\s*\|\s*\*{0,2}`([A-Z_]+)`", line)
+    if r:
+        spec_set[r.group(2)] = int(r.group(1))
+
+kt = pathlib.Path(os.environ["KT_DIR"]) / "ContractErrorCodeV1.kt"
+kt_set = {}
+for r in re.finditer(r"^\s*([A-Z_]+)\s*\(\s*(\d+)\s*\)", kt.read_text(), re.M):
+    kt_set[r.group(1)] = int(r.group(2))
+
+yml = pathlib.Path(os.environ["MODULE"]) / "compatibility.yaml"
+yml_set, inside = {}, False
+for raw in yml.read_text().splitlines():
+    if re.match(r"^\s*ContractErrorCodeV1:\s*$", raw):
+        inside = True; continue
+    if inside:
+        r = re.match(r"^\s+([A-Z_]+):\s*(\d+)\s*$", raw)
+        if r: yml_set[r.group(1)] = int(r.group(2))
+        elif raw.strip() and not raw.startswith((" ", "\t")): inside = False
+
+if not spec_set or not kt_set or not yml_set:
+    print(f"  FAIL  empty carrier: spec={len(spec_set)} kotlin={len(kt_set)} yaml={len(yml_set)}")
+    sys.exit(1)
+
+fail = 0
+for a_name, a, b_name, b in (("spec", spec_set, "kotlin", kt_set),
+                             ("spec", spec_set, "yaml", yml_set),
+                             ("kotlin", kt_set, "yaml", yml_set)):
+    missing = sorted(set(a) - set(b))     # in a, absent from b
+    extra   = sorted(set(b) - set(a))     # in b, absent from a
+    mism    = sorted(n for n in set(a) & set(b) if a[n] != b[n])
+    if missing or extra or mism:
+        fail = 1
+        if missing: print(f"  FAIL  in {a_name} but NOT in {b_name}: {missing}")
+        if extra:   print(f"  FAIL  in {b_name} but NOT in {a_name}: {extra}")
+        for n in mism:
+            print(f"  FAIL  {n} wire code differs: {a_name}={a[n]} {b_name}={b[n]}")
+    else:
+        print(f"  PASS  {a_name} <-> {b_name}: {len(a)} (name, code) pair(s) match in both directions")
+sys.exit(fail)
+PY
+then
+  pass "ContractErrorCodeV1 is bound to canonical §6.3.3 in both directions"
+else
+  fail "ContractErrorCodeV1 is NOT bound to canonical §6.3.3"
 fi
 
 # ---------------------------------------------------------------------------
