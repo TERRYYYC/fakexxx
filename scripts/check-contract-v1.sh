@@ -254,63 +254,100 @@ section "5. canonical spec <-> Kotlin <-> compatibility.yaml (spec binding)"
 if SPEC="$SPEC_PATH" KT_DIR="$KT_DIR" MODULE="$MODULE" python3 - <<'PY'
 import os, pathlib, re, sys
 
-spec = pathlib.Path(os.environ["SPEC"])
-if not spec.exists():
-    print(f"  FAIL  canonical spec not found: {spec}"); sys.exit(1)
+full_spec = pathlib.Path(os.environ["SPEC"]).read_text()
+kt_dir = pathlib.Path(os.environ["KT_DIR"])
 
-text = spec.read_text()
-# Anchor to §6.3.3 exactly. An unanchored scan also matches changelog/finding
-# tables whose first cell is a number, which would silently inflate the set.
-m = re.search(r"^#### 6\.3\.3 .*?$(.*?)^#### ", text, re.S | re.M)
-if not m:
-    print("  FAIL  §6.3.3 anchor not found in canonical spec"); sys.exit(1)
+# Scope to section 6. The contract's wire domains live there; section 8 declares
+# Auto-INTERNAL enums in the same Kotlin syntax (e.g. CellRebelCompletionEvidenceV1
+# in 8.6.2), which are not part of the shared v1 surface. An unscoped scan reports
+# them as "missing from Kotlin/yaml", and obeying that would drag an internal Auto
+# type into the cross-app contract -- a gate over-reaching is not a stricter gate,
+# it is a wrong one.
+_s6 = re.search(r"^## 6\. .*?^## 7\. ", full_spec, re.S | re.M)
+if not _s6:
+    print("  FAIL  section 6 anchor not found in canonical spec"); sys.exit(1)
+spec_text = _s6.group(0)
 
-spec_set = {}
-for line in m.group(1).splitlines():
+# Two shapes carry enum wire values in canonical and BOTH must be read, or a
+# domain declared in one shape escapes the gate entirely:
+#   6.2   one-line  `enum class X(val wire: Int) { A(1), B(2) }`
+#   6.3.3 markdown table, one row per code
+spec_enums = {}
+for m in re.finditer(r"enum class\s+([A-Za-z0-9_]+V1)\s*\(val wire: Int\)\s*\{([^}]*)\}", spec_text):
+    spec_enums[m.group(1)] = {n: int(w) for n, w in re.findall(r"([A-Z][A-Z0-9_]*)\((\d+)\)", m.group(2))}
+
+t = re.search(r"^#### 6\.3\.3 .*?$(.*?)^#### ", spec_text, re.S | re.M)
+if not t:
+    print("  FAIL  6.3.3 anchor not found in canonical spec"); sys.exit(1)
+table = {}
+for line in t.group(1).splitlines():
     r = re.match(r"^\|\s*\*{0,2}(\d+)\*{0,2}\s*\|\s*\*{0,2}`([A-Z_]+)`", line)
     if r:
-        spec_set[r.group(2)] = int(r.group(1))
+        table[r.group(2)] = int(r.group(1))
+if table:
+    spec_enums.setdefault("ContractErrorCodeV1", {}).update(table)
 
-kt = pathlib.Path(os.environ["KT_DIR"]) / "ContractErrorCodeV1.kt"
-kt_set = {}
-for r in re.finditer(r"^\s*([A-Z_]+)\s*\(\s*(\d+)\s*\)", kt.read_text(), re.M):
-    kt_set[r.group(1)] = int(r.group(2))
+kt_enums = {}
+for f in sorted(kt_dir.glob("*.kt")):
+    for m in re.finditer(r"enum class\s+([A-Za-z0-9_]+)\s*\(val wire: Int\)\s*\{(.*?)\n\}", f.read_text(), re.S):
+        kt_enums[m.group(1)] = {n: int(w) for n, w in re.findall(r"(\b[A-Z][A-Z0-9_]*)\((\d+)\)", m.group(2))}
 
-yml = pathlib.Path(os.environ["MODULE"]) / "compatibility.yaml"
-yml_set, inside = {}, False
-for raw in yml.read_text().splitlines():
-    if re.match(r"^\s*ContractErrorCodeV1:\s*$", raw):
-        inside = True; continue
-    if inside:
-        r = re.match(r"^\s+([A-Z_]+):\s*(\d+)\s*$", raw)
-        if r: yml_set[r.group(1)] = int(r.group(2))
-        elif raw.strip() and not raw.startswith((" ", "\t")): inside = False
+yml_enums, cur, in_enums = {}, None, False
+for raw in (pathlib.Path(os.environ["MODULE"]) / "compatibility.yaml").read_text().splitlines():
+    if raw.startswith("enums:"):
+        in_enums = True; continue
+    if in_enums:
+        if raw and not raw.startswith(" "): break
+        m = re.match(r"^  (\w+):\s*$", raw)
+        if m: cur = m.group(1); yml_enums[cur] = {}; continue
+        m = re.match(r"^    (\w+):\s*(\d+)\s*$", raw)
+        if m and cur: yml_enums[cur][m.group(1)] = int(m.group(2))
 
-if not spec_set or not kt_set or not yml_set:
-    print(f"  FAIL  empty carrier: spec={len(spec_set)} kotlin={len(kt_set)} yaml={len(yml_set)}")
-    sys.exit(1)
+carriers = {"canonical": spec_enums, "kotlin": kt_enums, "yaml": yml_enums}
+empty = [n for n, c in carriers.items() if not c]
+if empty:
+    print("  FAIL  empty carrier(s): %s" % empty); sys.exit(1)
 
 fail = 0
-for a_name, a, b_name, b in (("spec", spec_set, "kotlin", kt_set),
-                             ("spec", spec_set, "yaml", yml_set),
-                             ("kotlin", kt_set, "yaml", yml_set)):
-    missing = sorted(set(a) - set(b))     # in a, absent from b
-    extra   = sorted(set(b) - set(a))     # in b, absent from a
-    mism    = sorted(n for n in set(a) & set(b) if a[n] != b[n])
-    if missing or extra or mism:
-        fail = 1
-        if missing: print(f"  FAIL  in {a_name} but NOT in {b_name}: {missing}")
-        if extra:   print(f"  FAIL  in {b_name} but NOT in {a_name}: {extra}")
+
+# Enum-SET equality first, all three ways. The previous version hardcoded
+# ContractErrorCodeV1, so a domain present in canonical and Kotlin but named by
+# no gate was simply never looked at -- which is how AdvanceOutcomeV1 could
+# diverge 2 -> 7 in canonical while every check stayed green. A gate that names
+# what it checks can only check what someone remembered to name.
+names = {n: set(c) for n, c in carriers.items()}
+if not (names["canonical"] == names["kotlin"] == names["yaml"]):
+    fail = 1
+    seen = []
+    for a in carriers:
+        for b in carriers:
+            if a < b:
+                only_a, only_b = sorted(names[a] - names[b]), sorted(names[b] - names[a])
+                if only_a: print("  FAIL  enum in %s but NOT in %s: %s" % (a, b, only_a))
+                if only_b: print("  FAIL  enum in %s but NOT in %s: %s" % (b, a, only_b))
+else:
+    print("  PASS  enum set identical across all three carriers: %d enum(s)" % len(names["kotlin"]))
+
+for name in sorted(set(spec_enums) & set(kt_enums) & set(yml_enums)):
+    sp, kt, ym = spec_enums[name], kt_enums[name], yml_enums[name]
+    bad = False
+    for a_name, a, b_name, b in (("canonical", sp, "kotlin", kt),
+                                 ("canonical", sp, "yaml", ym),
+                                 ("kotlin", kt, "yaml", ym)):
+        missing, extra = sorted(set(a) - set(b)), sorted(set(b) - set(a))
+        mism = sorted(n for n in set(a) & set(b) if a[n] != b[n])
+        if missing: print("  FAIL  %s: in %s but NOT in %s: %s" % (name, a_name, b_name, missing)); bad = True
+        if extra:   print("  FAIL  %s: in %s but NOT in %s: %s" % (name, b_name, a_name, extra)); bad = True
         for n in mism:
-            print(f"  FAIL  {n} wire code differs: {a_name}={a[n]} {b_name}={b[n]}")
-    else:
-        print(f"  PASS  {a_name} <-> {b_name}: {len(a)} (name, code) pair(s) match in both directions")
+            print("  FAIL  %s.%s wire differs: %s=%d %s=%d" % (name, n, a_name, a[n], b_name, b[n])); bad = True
+    if bad: fail = 1
+    else:   print("  PASS  %s: %d (name, code) pair(s) agree across canonical/kotlin/yaml" % (name, len(sp)))
 sys.exit(fail)
 PY
 then
-  pass "ContractErrorCodeV1 is bound to canonical §6.3.3 in both directions"
+  pass "every wire domain is bound across canonical / Kotlin / compatibility.yaml"
 else
-  fail "ContractErrorCodeV1 is NOT bound to canonical §6.3.3"
+  fail "wire domains differ between canonical / Kotlin / compatibility.yaml"
 fi
 
 # ---------------------------------------------------------------------------
