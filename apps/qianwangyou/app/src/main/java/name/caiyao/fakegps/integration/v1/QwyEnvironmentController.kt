@@ -51,6 +51,13 @@ data class ScheduleSnapshot(
     val currentItemId: String?,
     /** Stable item ids in authoritative order; ids never change on reorder (§6.7.1). */
     val itemIds: List<String>,
+    /**
+     * Durable exhausted discriminator: M-AD-10 retains the current item after
+     * the last completion, so "already exhausted" (→ wire 16 on a further
+     * advance, M-AD-11) is NOT derivable from the pointer alone and must be a
+     * durable bit that survives owner restarts.
+     */
+    val exhausted: Boolean,
 )
 
 sealed class AdvancePointerOutcome {

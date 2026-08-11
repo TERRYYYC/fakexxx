@@ -21,22 +21,70 @@ import name.caiyao.fakegps.integration.v1.SignerLookup
  *
  * Restart convention: a component rebuilt over the SAME [InMemoryDurableKv] is
  * "the owner process after a restart" — only durable state survives.
+ *
+ * F-2 fidelity rules (deepseek-flash advisory on af06993):
+ *  - the fake's SCHEDULE state (version / currentItemId / exhausted
+ *    discriminator) is kv-backed, never memory-only — a pointer that only
+ *    lives in fake memory would let a non-persisting implementation pass the
+ *    restart tests (the exact fake-green dsf caught);
+ *  - transactions are REAL: writes inside [DurableKv.transaction] buffer and
+ *    commit atomically, and an exception discards the buffer (rollback);
+ *    without rollback, "crash between two writes" cannot be expressed;
+ *  - [failOnWrite] injects a write fault to simulate a crash mid-operation.
+ * Instrumentation counters (applyCount etc.) are call-counters and stay in
+ * memory deliberately — they count invocations across a whole scenario,
+ * including across restarts, and are not durability claims.
  */
+class SimulatedWriteCrash(namespace: String, key: String) :
+    RuntimeException("simulated write crash at $namespace/$key")
+
 class InMemoryDurableKv : DurableKv {
     private val data = HashMap<String, HashMap<String, String>>()
     private val lock = Any()
+    private var txBuffer: HashMap<Pair<String, String>, String>? = null
 
-    override fun read(namespace: String, key: String): String? =
-        synchronized(lock) { data[namespace]?.get(key) }
+    /** Write-fault injection: return true to crash this write (F-2 item 2). */
+    var failOnWrite: ((namespace: String, key: String) -> Boolean)? = null
 
-    override fun write(namespace: String, key: String, value: String) {
-        synchronized(lock) { data.getOrPut(namespace) { HashMap() }[key] = value }
+    override fun read(namespace: String, key: String): String? = synchronized(lock) {
+        txBuffer?.get(namespace to key) ?: data[namespace]?.get(key)
     }
 
-    override fun keys(namespace: String): Set<String> =
-        synchronized(lock) { data[namespace]?.keys?.toSet() ?: emptySet() }
+    override fun write(namespace: String, key: String, value: String) {
+        synchronized(lock) {
+            if (failOnWrite?.invoke(namespace, key) == true) {
+                throw SimulatedWriteCrash(namespace, key)
+            }
+            val buffer = txBuffer
+            if (buffer != null) {
+                buffer[namespace to key] = value
+            } else {
+                data.getOrPut(namespace) { HashMap() }[key] = value
+            }
+        }
+    }
 
-    override fun <T> transaction(block: () -> T): T = synchronized(lock) { block() }
+    override fun keys(namespace: String): Set<String> = synchronized(lock) {
+        val committed = data[namespace]?.keys?.toSet() ?: emptySet()
+        val buffered = txBuffer?.keys?.filter { it.first == namespace }?.map { it.second } ?: emptyList()
+        committed + buffered
+    }
+
+    override fun <T> transaction(block: () -> T): T = synchronized(lock) {
+        if (txBuffer != null) return@synchronized block() // nested tx joins the outer one
+        txBuffer = HashMap()
+        try {
+            val result = block()
+            // Commit: flush the buffer only on success.
+            txBuffer!!.forEach { (nsKey, value) ->
+                data.getOrPut(nsKey.first) { HashMap() }[nsKey.second] = value
+            }
+            result
+        } finally {
+            // On exception the buffer is discarded — rollback.
+            txBuffer = null
+        }
+    }
 }
 
 /**
@@ -88,37 +136,68 @@ class FakeIdentityResolver : PackageIdentityResolver {
 }
 
 /**
- * Fake of qianwangyou's existing capabilities. Deterministic and steerable:
- * tests mutate schedule/version, break cleanup, or fire relevant-change events
- * (which the production wiring must forward into the revision owner — M-RC-03).
+ * Fake of qianwangyou's existing capabilities. Deterministic and steerable.
+ *
+ * Schedule state is DURABLE (kv-backed) because the real qwy schedule store is
+ * durable — see the F-2 fidelity rules above. Config knobs (cleanupOutcome,
+ * itemIds) and call-counters are memory state by design.
  */
-class FakeQwyEnvironment : QwyEnvironment {
+class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
+
+    companion object {
+        const val SCHEDULE_NAMESPACE = "fakeqwy.schedule"
+    }
+
+    // --- config (memory by design) ---
     var scheduleId: String = "sched-1"
-    var scheduleVersion: Long = 7L
-    var currentItemId: String? = "item-1"
     var itemIds: MutableList<String> = mutableListOf("item-1", "item-2", "item-3")
-
-    var applyCount: Int = 0
-    var cleanupCount: Int = 0
-    var advanceCount: Int = 0
-
     var cleanupOutcome: CleanupOutcome = CleanupOutcome.Complete
-    var effectiveLatitude: Double? = null
-    var effectiveLongitude: Double? = null
     var isMock: Boolean? = true
     var fingerprint: String = "fp-1"
     var evidenceRefs: List<String> = listOf("qwy:audit:1")
 
+    // --- call-count instrumentation (memory by design; counts across restarts) ---
+    var applyCount: Int = 0
+    var cleanupCount: Int = 0
+    var advanceCount: Int = 0
+    var effectiveLatitude: Double? = null
+    var effectiveLongitude: Double? = null
+
     private var relevantChangeListener: ((RevisionBumpReason) -> Unit)? = null
 
-    override fun scheduleSnapshot(): ScheduleSnapshot? =
-        ScheduleSnapshot(scheduleId, scheduleVersion, currentItemId, itemIds.toList())
+    // --- durable schedule state (kv-backed; survives restart ONLY via kv) ---
+    var scheduleVersion: Long
+        get() = kv.read(SCHEDULE_NAMESPACE, "version")?.toLong() ?: 7L
+        set(value) = kv.write(SCHEDULE_NAMESPACE, "version", value.toString())
+
+    var currentItemId: String?
+        get() = when (kv.read(SCHEDULE_NAMESPACE, "currentPresent")) {
+            "0" -> null
+            else -> kv.read(SCHEDULE_NAMESPACE, "current") ?: "item-1"
+        }
+        set(value) {
+            if (value == null) {
+                kv.write(SCHEDULE_NAMESPACE, "currentPresent", "0")
+            } else {
+                kv.write(SCHEDULE_NAMESPACE, "currentPresent", "1")
+                kv.write(SCHEDULE_NAMESPACE, "current", value)
+            }
+        }
+
+    /** Durable exhausted discriminator (M-AD-10/11: current item is retained, so exhaustion needs its own durable bit). */
+    var exhausted: Boolean
+        get() = kv.read(SCHEDULE_NAMESPACE, "exhausted") == "1"
+        set(value) = kv.write(SCHEDULE_NAMESPACE, "exhausted", if (value) "1" else "0")
+
+    override fun scheduleSnapshot(): ScheduleSnapshot =
+        ScheduleSnapshot(scheduleId, scheduleVersion, currentItemId, itemIds.toList(), exhausted)
 
     override fun advancePointer(fromItemId: String): AdvancePointerOutcome {
         advanceCount += 1
         val idx = itemIds.indexOf(fromItemId)
         check(idx >= 0) { "advancePointer from unknown item $fromItemId" }
         return if (idx == itemIds.lastIndex) {
+            exhausted = true
             AdvancePointerOutcome.Exhausted(scheduleVersion)
         } else {
             currentItemId = itemIds[idx + 1]
@@ -160,8 +239,8 @@ class FakeQwyEnvironment : QwyEnvironment {
     }
 
     /**
-     * M-RC-03: an external app steals the mock-location owner and gives it back.
-     * The post state equals the pre state — revision must change anyway.
+     * M-RC-03: an external app steals the mock-location owner and gives it
+     * back. The post state equals the pre state — revision must change anyway.
      */
     fun hijackAndRestoreMockOwner() {
         relevantChangeListener?.invoke(RevisionBumpReason.PERMISSION_OR_OWNER_CHANGED)

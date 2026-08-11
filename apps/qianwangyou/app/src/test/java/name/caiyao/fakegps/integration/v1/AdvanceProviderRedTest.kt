@@ -6,6 +6,7 @@ import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import name.caiyao.fakegps.integration.v1.DurableIdempotencyStore
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
@@ -13,6 +14,7 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -35,6 +37,13 @@ import org.junit.Test
  * and shoot down legal replays), and the schedule gate precedes the lease
  * gate (a stale/exhausted schedule makes lease state irrelevant; lease-first
  * sends Auto through a wasted release-retry into the same terminal).
+ *
+ * RECORDED SHAPE, NO SELF-ASSIGNED ID (dsf F-3, advisory on af06993):
+ * M_AD_12 covers only the SAME-caller active lease; advance while a
+ * FOREIGN-caller / device-level unconverged lease exists (the INV-16
+ * dimension) has no case yet — M-AD-14 candidate or an M_AD_12 extension.
+ * dsf's findings already sit with the Sol review lane; the ID arrives with
+ * Opus5's batch allocation. Not re-delivered from here, not numbered here.
  */
 class AdvanceProviderRedTest {
 
@@ -264,7 +273,15 @@ class AdvanceProviderRedTest {
         assertEquals("current item retained, no wrap-around", "item-3", h.env.currentItemId)
     }
 
-    /** Requesting an advance AFTER exhaustion is the caller error → SCHEDULE_EXHAUSTED wire 16 (M-AD-11 provider half). */
+    /**
+     * Requesting an advance AFTER exhaustion is the caller error →
+     * SCHEDULE_EXHAUSTED wire 16 (M-AD-11 provider half). The owner RESTARTS
+     * between the exhausting advance and the further request: M-AD-10 retains
+     * the current item, so "already exhausted" needs its own DURABLE
+     * discriminator — an implementation keeping it in memory answers the
+     * post-restart request as if item-3 were still completable (dsf F-2
+     * same-class sweep: exhausted-bit persistence was unpinned).
+     */
     @Test
     fun advance_afterExhausted_scheduleExhausted() {
         val h = harness()
@@ -275,12 +292,57 @@ class AdvanceProviderRedTest {
             request(h, leaseId, "adv-k7", expectedItemId = "item-3", completionProof = proof(h, "item-3")),
         )
 
+        h.restart(cleanlinessProvable = true)
+
         expectContractFailure(ContractErrorCodeV1.SCHEDULE_EXHAUSTED) {
             h.handler.completeAndAdvance(
                 AUTO_UID,
                 request(h, leaseId, "adv-k7-again", expectedItemId = "item-3", completionProof = proof(h, "item-3")),
             )
         }
+        assertEquals("current item retained across restart", "item-3", h.env.currentItemId)
+    }
+
+    /**
+     * §6.7.5 crash convergence (dsf F-2 item 3): a write fault between the
+     * pointer write and the receipt write crashes the operation mid-flight.
+     * Because both writes are REQUIRED to share one durable transaction, the
+     * post-restart world has exactly ONE legal terminal shape per key: the
+     * replay either finds the committed receipt (advance happened, exactly
+     * once) or re-executes cleanly (nothing committed) — never a torn state
+     * (pointer moved without a retrievable receipt, or a receipt that
+     * re-advances). Harness rollback semantics make a two-transaction
+     * implementation observably torn here.
+     */
+    @Test
+    fun advance_crashBetweenWrites_convergesToSingleLegalState() {
+        val h = harness()
+        val leaseId = earnAndRelease(h)
+        val req = request(h, leaseId, "adv-crash")
+
+        h.kv.failOnWrite = { namespace, _ ->
+            namespace == DurableIdempotencyStore.RECEIPT_NAMESPACE
+        }
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, req)
+            fail("injected write fault must surface, not be swallowed")
+        } catch (expected: RuntimeException) {
+            // SimulatedWriteCrash (or a transport wrapper) — NOT a typed
+            // ContractException: a crash is not a business answer.
+        }
+        h.kv.failOnWrite = null
+
+        h.restart(cleanlinessProvable = true)
+
+        // Replay converges to exactly one advance...
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("item-2", replay.advancedToItemId)
+        assertEquals("item-2", h.env.currentItemId)
+
+        // ...and is stable: replaying again returns the same durable receipt.
+        val replay2 = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals(replay, replay2)
+        assertEquals("no third pointer move ever happened", "item-2", h.env.currentItemId)
     }
 
     // ------------------------------------------- §6.7.4b ordering facets
