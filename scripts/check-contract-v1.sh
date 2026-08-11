@@ -314,6 +314,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "6. the method surface agrees across all four carriers"
+
+# completeAndAdvance was added to the real AIDL interface and to nowhere else:
+# §6.1's AIDL example, compatibility.yaml's methods list and README's Surface
+# block all still described a five-method contract. §6.3 says "a field not listed
+# here is not part of v1", so the contract was simultaneously declaring and
+# denying the same method.
+#
+# Nothing caught it, because section 3 only asks whether a hardcoded floor of
+# method names EXISTS in the interface. Existence is one direction. Four carriers
+# describing the same surface need set equality across all of them, or three of
+# them are decoration that drifts the moment someone edits the fourth.
+if SPEC="$SPEC_PATH" AIDL_DIR="$AIDL_DIR" MODULE="$MODULE" python3 - <<'PY'
+import os, pathlib, re, sys
+
+aidl = (pathlib.Path(os.environ["AIDL_DIR"]) / "IEnvironmentControlV1.aidl").read_text()
+body = re.search(r"interface\s+IEnvironmentControlV1\s*\{(.*?)\n\}", aidl, re.S)
+if not body: print("  FAIL  cannot parse IEnvironmentControlV1 body"); sys.exit(1)
+iface = set(re.findall(r"^\s*[A-Za-z0-9_]+\s+([a-zA-Z0-9_]+)\s*\(", body.group(1), re.M))
+
+yml = (pathlib.Path(os.environ["MODULE"]) / "compatibility.yaml").read_text()
+m = re.search(r"^\s*methods:\s*\[([^\]]*)\]", yml, re.M)
+if not m: print("  FAIL  compatibility.yaml has no methods: [...] list"); sys.exit(1)
+manifest = {x.strip() for x in m.group(1).split(",") if x.strip()}
+
+rd = (pathlib.Path(os.environ["MODULE"]) / "README.md").read_text()
+sur = re.search(r"IEnvironmentControlV1\n(.*?)```", rd, re.S)
+if not sur: print("  FAIL  README has no IEnvironmentControlV1 surface block"); sys.exit(1)
+readme = set(re.findall(r"^\s*([a-zA-Z0-9_]+)\(\)", sur.group(1), re.M))
+
+spec = pathlib.Path(os.environ["SPEC"]).read_text()
+sm = re.search(r"^### 6\.1 .*?$(.*?)^### ", spec, re.S | re.M)
+if not sm: print("  FAIL  §6.1 anchor not found in canonical spec"); sys.exit(1)
+sb = re.search(r"interface\s+IEnvironmentControlV1\s*\{(.*?)\n\}", sm.group(1), re.S)
+if not sb: print("  FAIL  §6.1 has no IEnvironmentControlV1 example block"); sys.exit(1)
+specm = set(re.findall(r"^\s*[A-Za-z0-9_]+\s+([a-zA-Z0-9_]+)\s*\(", sb.group(1), re.M))
+
+carriers = {"aidl": iface, "yaml": manifest, "readme": readme, "spec-6.1": specm}
+empty = [n for n, s in carriers.items() if not s]
+if empty:
+    print(f"  FAIL  empty carrier(s): {empty}"); sys.exit(1)
+
+ref = iface
+fail = 0
+for name, s in carriers.items():
+    if name == "aidl": continue
+    missing, extra = sorted(ref - s), sorted(s - ref)
+    if missing or extra:
+        fail = 1
+        if missing: print(f"  FAIL  in aidl but NOT in {name}: {missing}")
+        if extra:   print(f"  FAIL  in {name} but NOT in aidl: {extra}")
+    else:
+        print(f"  PASS  aidl <-> {name}: {len(ref)} method(s) match in both directions")
+sys.exit(fail)
+PY
+then
+  pass "method surface identical across aidl / compatibility.yaml / README / spec §6.1"
+else
+  fail "method surface differs between carriers"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if [ "$FAILURES" -eq 0 ] && [ "$SKIP_GRADLE" -eq 0 ] && [ "$INCONCLUSIVE" -eq 0 ]; then
   printf 'check-contract-v1: PASS (all checks)\n'

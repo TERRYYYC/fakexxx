@@ -28,6 +28,7 @@ IEnvironmentControlV1
   apply()     -> ApplyReceiptV1
   observe()   -> EnvironmentObservationV1
   release()   -> ReleaseReceiptV1
+  completeAndAdvance() -> AdvanceReceiptV1
 ```
 
 Expected business failures come back as `ServiceSpecificException` carrying a

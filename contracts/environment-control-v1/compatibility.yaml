@@ -16,7 +16,7 @@ supportedProtocolVersions: [1]
 aidl:
   package: io.github.terryyyc.fakexxx.contract.v1
   interface: IEnvironmentControlV1
-  methods: [discover, preflight, apply, observe, release]
+  methods: [discover, preflight, apply, observe, release, completeAndAdvance]
 
 minSdk: 24   # lower bound of the two consumers: Auto 26, Qianwangyou 24
 

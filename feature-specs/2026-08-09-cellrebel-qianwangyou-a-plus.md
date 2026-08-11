@@ -1215,6 +1215,7 @@ interface IEnvironmentControlV1 {
     ApplyReceiptV1 apply(in ApplyRequestV1 request);
     EnvironmentObservationV1 observe(in ObserveRequestV1 request);
     ReleaseReceiptV1 release(in ReleaseRequestV1 request);
+    AdvanceReceiptV1 completeAndAdvance(in CompleteAndAdvanceRequestV1 request);
 }
 ```
 
