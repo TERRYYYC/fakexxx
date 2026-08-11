@@ -59,6 +59,18 @@ class APlusTemplateRedTest {
     }
 
     @Test
+    fun `a fresh attempt whose prior lease is not released cannot begin an apply`() {
+        val guard = AttemptGuard()
+        // Polarity gap (INV-28): even a CREATED attempt must not begin while the prior lease is not
+        // released — otherwise two attempts could race on the same slot. Skeleton returns true →
+        // fails until GREEN, and anchors that GREEN's lease gate covers the fresh-attempt case too.
+        assertFalse(
+            "a CREATED attempt must not begin an apply while the prior lease is not released",
+            guard.canBeginApply(AttemptState.CREATED, leaseReleased = false)
+        )
+    }
+
+    @Test
     fun `canBeginApply is allowed on a fresh attempt with a released lease`() {
         val guard = AttemptGuard()
         // The legitimate path. RED note: skeleton returns true here too, so this passes now; once
