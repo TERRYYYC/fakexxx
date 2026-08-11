@@ -41,6 +41,12 @@ android {
     }
 }
 
+// Issue #5 Task 4 (INV-24): export Room schema JSON for version control + migration validation.
+// # 导出 Room schema JSON 纳入版本控制，配合 MIGRATION_4_5 校验
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
