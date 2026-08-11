@@ -13,27 +13,33 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 
 /**
  * SUPPLEMENTARY RED LANE — provider-side completeAndAdvance (§6.7).
  *
- * NOT ledger rows: §10.1 assigns M-AD-01..11 to the Auto consumer lane
- * (in-process fake provider proving Auto's replay/verify discipline). The REAL
- * provider's compare-and-advance semantics — precondition checks, atomic
- * pointer+receipt transaction, idempotent receipt retrieval, exhausted duality
- * — are qwy-side behavior with no ledger row today. That seam is flagged back
- * to issue #3; until the ledger catches up, these tests pin the §6.7 semantics
- * the AIDL surface already obligates this provider to implement.
+ * NOT ledger rows and NOT counted as ledger coverage: §10.1 today assigns
+ * M-AD-01..11 to the Auto consumer lane. Provider-side M-AD row IDs are being
+ * added by Opus5 in the contract PR (routed via #3 after Sol's verification of
+ * d21102d); ONLY once those IDs + precedence land in a canonical HEAD do these
+ * methods get bound row-by-row to exact IDs and enter the derived counts.
+ * Until that binding, deleting this file would still leave the verifier
+ * green — this coverage is real but VIRTUAL to the gate (Sol's warning).
+ *
+ * Precedence pinned here (Sol-verified ordering, awaiting canonical freeze):
+ *   1. same-key + same-digest replay short-circuits FIRST (returns the stored
+ *      receipt even if the caller now holds a new active lease);
+ *   2. for a fresh request: schedule preconditions (§6.7.4 wire 14/15/16)
+ *      are judged BEFORE the active-lease gate;
+ *   3. the active-lease gate (§6.7.4a, ruling direction: exact
+ *      LEASE_CONFLICT(7), no new wire) sits AFTER the preconditions and
+ *      BEFORE any mutation — a rejected advance never moves the pointer.
  */
 class AdvanceProviderRedTest {
 
     private fun harness(): ProviderHarness {
         val h = ProviderHarness.create()
         h.pair(AUTO_PKG, AUTO_SIGNER)
-        // Quota earned under a lease that is then released (§6.7.4a order).
         return h
     }
 
@@ -101,7 +107,32 @@ class AdvanceProviderRedTest {
         return CanonicalDigestV1.digest(CanonicalDigestV1.DOMAIN_ADVANCE_RECEIPT, fields)
     }
 
-    /** Missing/mismatched proof → REQUEST_INVALID, pointer untouched (M-AD-01 provider half). */
+    // ---------------------------------------------------------------- proof
+
+    /** MISSING proof (blank required refs) → REQUEST_INVALID via wire 13's frozen trigger, pointer untouched (M-AD-01 "无 proof" half). */
+    @Test
+    fun advance_proofMissing_requestInvalid_pointerUntouched() {
+        val h = harness()
+        val leaseId = earnAndRelease(h)
+
+        val blankProof = CompletionProofV1(
+            scheduleItemId = "",
+            trustedSuccessCount = 0,
+            quotaRequired = 0,
+            ledgerRef = "",
+            verifiedAtElapsedRealtimeMs = h.clock.elapsedRealtimeMs(),
+        )
+        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, "adv-k0", completionProof = blankProof),
+            )
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
+    }
+
+    /** Proof present but pointing at a NON-current item → REQUEST_INVALID, pointer untouched (M-AD-01 mismatch half). */
     @Test
     fun advance_proofItemMismatch_requestInvalid_pointerUntouched() {
         val h = harness()
@@ -116,6 +147,8 @@ class AdvanceProviderRedTest {
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
         assertEquals(0, h.env.advanceCount)
     }
+
+    // ---------------------------------------------------------- idempotency
 
     /** Same key + same digest replay → SAME receipt, pointer moved exactly once (M-AD-02 provider half). */
     @Test
@@ -152,19 +185,46 @@ class AdvanceProviderRedTest {
         assertEquals("no second advance", 1, h.env.advanceCount)
     }
 
-    /** Stale expectedCurrentItemId → SCHEDULE_ITEM_MISMATCH wire 14 (M-AD-04/05 provider half — the last line against double advance). */
+    // -------------------------------------------------------- preconditions
+
+    /**
+     * M-AD-04 provider half — LOST idempotency key: after a successful advance,
+     * the same completion is resent under a NEW key, still expecting item-1.
+     * The stale expectedCurrentItemId is the LAST line against double advance
+     * and must trip wire 14 without moving the pointer again.
+     */
     @Test
-    fun advance_staleItem_scheduleItemMismatch() {
+    fun advance_lostKeyResend_scheduleItemMismatch_noDoubleAdvance() {
         val h = harness()
         val leaseId = earnAndRelease(h)
         h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-k4"))
 
-        // New key, but still expecting item-1 (a lost-idempotency-key resend).
         expectContractFailure(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH) {
             h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-k4-NEW"))
         }
         assertEquals("pointer did not move twice", "item-2", h.env.currentItemId)
         assertEquals(1, h.env.advanceCount)
+    }
+
+    /**
+     * M-AD-05 provider half — WRONG item from the start: no prior advance, the
+     * request simply expects a non-current item. Independent of the lost-key
+     * shape above: here nothing was ever advanced, so a merged test could pass
+     * for the wrong reason.
+     */
+    @Test
+    fun advance_wrongItemExpectation_scheduleItemMismatch_pointerUntouched() {
+        val h = harness()
+        val leaseId = earnAndRelease(h)
+
+        expectContractFailure(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, "adv-k4b", expectedItemId = "item-2", completionProof = proof(h, "item-2")),
+            )
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
     }
 
     /** Schedule edited during quota proving → SCHEDULE_VERSION_STALE wire 15, no advance (M-AD-06 provider half). */
@@ -182,6 +242,8 @@ class AdvanceProviderRedTest {
         assertEquals("item-1", h.env.currentItemId)
         assertEquals(0, h.env.advanceCount)
     }
+
+    // ----------------------------------------------------------- exhaustion
 
     /** Completing the LAST item is success: outcome EXHAUSTED + null target + retained pointer (M-AD-10 provider half). */
     @Test
@@ -220,33 +282,77 @@ class AdvanceProviderRedTest {
         }
     }
 
+    // ---------------------------------------------- lease gate + precedence
+
     /**
-     * §6.7.4a: release comes FIRST; the caller must hold NO active lease at
-     * advance time (request.leaseId is a historical attribution ref, not a
-     * hold). Which wire carries this rejection is NOT yet frozen in the spec —
-     * flagged to #3; until then we pin only "typed failure + no advance".
+     * §6.7.4a active-lease gate: preconditions pass, but the caller still holds
+     * an active lease → rejected with LEASE_CONFLICT(7) and NO mutation.
+     * Code pins the Sol-verified #3 ruling direction (exact LEASE_CONFLICT, no
+     * new wire); re-confirm when the canonical HEAD freezes the mapping.
      */
     @Test
-    fun advance_withActiveLease_rejected_noAdvance() {
+    fun advance_withActiveLease_leaseConflict_noAdvance() {
         val h = harness()
         val receipt = h.apply(key = "adv-active-apply") // NOT released
 
-        try {
+        expectContractFailure(ContractErrorCodeV1.LEASE_CONFLICT) {
             h.handler.completeAndAdvance(AUTO_UID, request(h, receipt.leaseId, "adv-k8"))
-            fail("advance under an active lease must be rejected (§6.7.4a)")
-        } catch (e: ContractException) {
-            // Exact code pending #3 decision; the behavioral floor is: rejected + untouched.
         }
         assertEquals("item-1", h.env.currentItemId)
-        assertEquals(0, h.env.advanceCount)
+        assertEquals("mutation never happened", 0, h.env.advanceCount)
     }
+
+    /**
+     * Precedence 1: same-key + same-digest replay is judged BEFORE the
+     * active-lease gate — a completed advance stays retrievable even after the
+     * caller acquired the next item's lease. Failing this turns every
+     * crash-recovery replay during the next apply into a spurious conflict.
+     */
+    @Test
+    fun advance_replaySameKey_precedesActiveLeaseGate() {
+        val h = harness()
+        val leaseId = earnAndRelease(h)
+        val req = request(h, leaseId, "adv-k9")
+        val first = h.handler.completeAndAdvance(AUTO_UID, req)
+
+        // Next item's lease is now ACTIVE.
+        h.apply(key = "adv-next-apply", intent = h.intent(attemptId = "att-2"))
+
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("stored receipt returned despite active lease", first, replay)
+        assertEquals("no second advance", 1, h.env.advanceCount)
+    }
+
+    /**
+     * Precedence 2: for a FRESH request, schedule preconditions are judged
+     * BEFORE the active-lease gate — stale item reports wire 14, not
+     * LEASE_CONFLICT, even while a lease is active. (Gate order: replay →
+     * preconditions → lease gate → mutation.)
+     */
+    @Test
+    fun advance_freshRequest_preconditionBeatsLeaseGate() {
+        val h = harness()
+        val leaseId = earnAndRelease(h)
+        h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-k10"))
+
+        // Next item's lease ACTIVE + fresh request still expecting item-1.
+        h.apply(key = "adv-next-apply2", intent = h.intent(attemptId = "att-3"))
+
+        expectContractFailure(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-k10-NEW"))
+        }
+        assertEquals("item-2", h.env.currentItemId)
+        assertEquals(1, h.env.advanceCount)
+    }
+
+    // -------------------------------------------------------------- receipt
 
     /** Receipt digest must recompute from the request + outcome via the shared framing — otherwise it is not a receipt (§6.7.3). */
     @Test
     fun advance_receiptDigest_recomputes() {
         val h = harness()
         val leaseId = earnAndRelease(h)
-        val req = request(h, leaseId, "adv-k9")
+        val req = request(h, leaseId, "adv-k11")
 
         val receipt = h.handler.completeAndAdvance(AUTO_UID, req)
 
@@ -257,19 +363,24 @@ class AdvanceProviderRedTest {
         )
     }
 
-    /** Advance receipt + pointer survive an owner restart as ONE fact: replay returns the same receipt, pointer moved once (§6.7.5). */
+    /**
+     * §6.7.5: advance receipt + pointer survive an owner restart as ONE fact —
+     * the replay returns the durable receipt and the pointer moved EXACTLY
+     * once. `== 1` is the whole point: a `<= 2` tolerance would admit exactly
+     * the duplicate advance idempotency exists to prevent (Sol SR on d21102d).
+     */
     @Test
     fun advance_receiptAndPointer_surviveRestart_asOneTransaction() {
         val h = harness()
         val leaseId = earnAndRelease(h)
-        val req = request(h, leaseId, "adv-k10")
+        val req = request(h, leaseId, "adv-k12")
         val first = h.handler.completeAndAdvance(AUTO_UID, req)
 
         h.restart(cleanlinessProvable = true)
 
         val replay = h.handler.completeAndAdvance(AUTO_UID, req)
         assertEquals("same durable receipt after restart", first, replay)
-        assertTrue("no second pointer move", h.env.advanceCount <= 2) // fake pointer already at item-2
+        assertEquals("pointer advanced exactly once across the restart", 1, h.env.advanceCount)
         assertEquals("item-2", h.env.currentItemId)
     }
 }
