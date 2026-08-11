@@ -1,0 +1,2 @@
+plan_row,csv_row,priority,longitude,latitude,success_ordinal,attempt_ordinal,status,failure_reason,started_at,running_observed_at,ended_at,web_score,video_score,session_id,stage_notes
+1,1,1,30.5236,50.45,1,1,succeeded,,2026-08-02 01:11:06,2026-08-02 01:11:14,2026-08-02 01:11:42,9.0,9.0,1,gps_skipped

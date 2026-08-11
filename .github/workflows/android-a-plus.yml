@@ -1,0 +1,150 @@
+name: android-a-plus
+
+# Three independent lanes.
+#
+# `cellrebel-auto` and `qianwangyou` have NO dependency edge between them, by
+# design (INV-19): the two apps build, test and release independently, and a
+# green result on one must never be read as "the other is releasable". Runtime
+# compatibility is decided by the contract handshake, not by a joint build.
+#
+# Spec: feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md §12.1, §14, INV-19.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: android-a-plus-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    name: provenance (vendored trees == upstream SHAs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is required: the gate verifies that the import commit
+          # recorded in docs/provenance/upstream-imports.md exists and carries
+          # the upstream tree. A depth-1 checkout does not contain it.
+          fetch-depth: 0
+
+      - name: check-provenance
+        # --stage is required and has no default (see the script header). At
+        # PR-1 the vendored apps must still be pristine, so this branch runs
+        # the strict stage. When a later PR legitimately changes an app, this
+        # line is what moves to --stage contract/full; the root-tree anchor in
+        # section 1 is checked at every stage regardless. (The import *commit*
+        # is not the anchor — a squash/rebase merge legitimately discards it,
+        # so it is asserted only while still reachable.)
+        run: ./scripts/check-provenance.sh --stage import
+
+      - name: selftest-provenance
+        # The negative matrix is a regression gate, not a table in a document.
+        # It runs the production check-provenance.sh (never a copy) against
+        # throwaway clones, so a negative can only start passing if the real
+        # predicate changed. Several of these were shipped defects a reviewer had
+        # to find by hand. It also mutation-checks itself: reverting a fix must
+        # make the case guarding it fail, otherwise that case proves nothing.
+        run: ./scripts/selftest-provenance.sh
+
+  cellrebel-auto:
+    # Green here covers apps/cellrebel-auto ONLY.
+    name: cellrebel-auto (unit + lint + assemble)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/cellrebel-auto
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: gradle wrapper is executable
+        run: chmod +x ./gradlew
+
+      - name: unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: assemble
+        run: ./gradlew --no-daemon assembleDebug
+
+      # Lint runs through the debt ratchet rather than as `lintDebug`, so a
+      # green check never hides a growing error count. Budget for this app is 0.
+      - name: lint debt ratchet
+        working-directory: .
+        run: ./scripts/check-inherited-lint-debt.sh cellrebel-auto
+
+      - name: record apk digest
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/debug/app-debug.apk
+          printf 'source HEAD : %s\n' "$GITHUB_SHA"
+          printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cellrebel-auto-evidence
+          path: |
+            apps/cellrebel-auto/app/build/reports/**
+            apps/cellrebel-auto/app/build/test-results/**
+            apps/cellrebel-auto/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+  qianwangyou:
+    # Green here covers apps/qianwangyou ONLY. No edge to cellrebel-auto.
+    name: qianwangyou (unit + lint + assemble)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/qianwangyou
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: gradle wrapper is executable
+        run: chmod +x ./gradlew
+
+      - name: unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: assemble
+        run: ./gradlew --no-daemon assembleDebug
+
+      # `lintDebug` exits non-zero here: 23 lint errors came in with
+      # FakeGps-test@285e4ca, which never had CI. They are frozen, not silenced
+      # — this step fails if the count grows. Fixing them is PR-3's disposition.
+      - name: lint debt ratchet
+        working-directory: .
+        run: ./scripts/check-inherited-lint-debt.sh qianwangyou
+
+      - name: record apk digest
+        run: |
+          set -euo pipefail
+          apk=$(find app/build/outputs/apk/debug -name '*.apk' | head -1)
+          printf 'source HEAD : %s\n' "$GITHUB_SHA"
+          printf 'apk         : %s\n' "$apk"
+          printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qianwangyou-evidence
+          path: |
+            apps/qianwangyou/app/build/reports/**
+            apps/qianwangyou/app/build/test-results/**
+            apps/qianwangyou/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn

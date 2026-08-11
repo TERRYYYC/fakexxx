@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Debug/bench builds display a distinct name so the user can tell them apart
+         from the production release at a glance — on the launcher, in settings,
+         and in the Xposed module list. -->
+    <string name="app_name">千网游·测试</string>
+</resources>

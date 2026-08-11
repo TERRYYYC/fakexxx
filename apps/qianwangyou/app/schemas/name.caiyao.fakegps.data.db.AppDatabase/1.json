@@ -1,0 +1,461 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "dda0a6c95a9fee3d0977ca25808f60bc",
+    "entities": [
+      {
+        "tableName": "temp",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `latitude` REAL, `longitude` REAL, `altitude` REAL, `speed` REAL, `bearing` REAL, `accuracy` REAL, `lac` INTEGER, `cid` INTEGER, `addname` TEXT, `mcc` INTEGER, `mnc` INTEGER, `arfcn` INTEGER, `bsic` INTEGER, `psc` INTEGER, `uarfcn` INTEGER, `tac` INTEGER, `ci` INTEGER, `pci` INTEGER, `earfcn` INTEGER, `lte_bandwidth` INTEGER, `nci` INTEGER, `nrarfcn` INTEGER, `nr_pci` INTEGER, `nr_tac` INTEGER, `gsm_rssi` INTEGER, `gsm_ber` INTEGER, `gsm_ta` INTEGER, `wcdma_rssi` INTEGER, `wcdma_rscp` INTEGER, `wcdma_ecno` INTEGER, `lte_rssi` INTEGER, `lte_rsrp` INTEGER, `lte_rsrq` INTEGER, `lte_sinr` INTEGER, `lte_cqi` INTEGER, `lte_ta` INTEGER, `nr_ss_rsrp` INTEGER, `nr_ss_rsrq` INTEGER, `nr_ss_sinr` INTEGER, `nr_csi_rsrp` INTEGER, `nr_csi_rsrq` INTEGER, `nr_csi_sinr` INTEGER, `signal_fluctuation_enabled` INTEGER, `signal_fluctuation_range_db` INTEGER, `network_type` INTEGER, `data_network_type` INTEGER, `voice_network_type` INTEGER, `operator_name` TEXT, `operator_numeric` TEXT, `sim_operator` TEXT, `sim_operator_name` TEXT, `sim_country_iso` TEXT, `network_country_iso` TEXT, `is_roaming` INTEGER, `phone_type` INTEGER, `service_state` INTEGER, `data_state` INTEGER, `data_activity` INTEGER, `override_network_type` INTEGER, `band` INTEGER, `channel_bandwidth` INTEGER, `cell_bandwidth_downlink` INTEGER, `physical_cell_id` INTEGER, `wifi_ssid` TEXT, `wifi_bssid` TEXT, `wifi_rssi` INTEGER, `wifi_frequency` INTEGER, `wifi_link_speed` INTEGER, `wifi_tx_link_speed` INTEGER, `wifi_rx_link_speed` INTEGER, `wifi_channel` INTEGER, `wifi_standard` INTEGER, `wifi_security_type` INTEGER, `wifi_mac` TEXT, `wifi_ip` TEXT, `wifi_hidden` INTEGER, `wifi_enabled` INTEGER, `local_ipv4` TEXT, `local_ipv6` TEXT, `dns_primary` TEXT, `dns_secondary` TEXT, `gateway` TEXT, `subnet_mask` TEXT, `connection_type` TEXT, `interface_name` TEXT, `neighbor_cells_json` TEXT)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "latitude",
+            "columnName": "latitude",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "longitude",
+            "columnName": "longitude",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "altitude",
+            "columnName": "altitude",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "speed",
+            "columnName": "speed",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "bearing",
+            "columnName": "bearing",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "accuracy",
+            "columnName": "accuracy",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "lac",
+            "columnName": "lac",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "cid",
+            "columnName": "cid",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "addname",
+            "columnName": "addname",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mcc",
+            "columnName": "mcc",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "mnc",
+            "columnName": "mnc",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "arfcn",
+            "columnName": "arfcn",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "bsic",
+            "columnName": "bsic",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "psc",
+            "columnName": "psc",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "uarfcn",
+            "columnName": "uarfcn",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "tac",
+            "columnName": "tac",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "ci",
+            "columnName": "ci",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "pci",
+            "columnName": "pci",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "earfcn",
+            "columnName": "earfcn",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteBandwidth",
+            "columnName": "lte_bandwidth",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nci",
+            "columnName": "nci",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrarfcn",
+            "columnName": "nrarfcn",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrPci",
+            "columnName": "nr_pci",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrTac",
+            "columnName": "nr_tac",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "gsmRssi",
+            "columnName": "gsm_rssi",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "gsmBer",
+            "columnName": "gsm_ber",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "gsmTa",
+            "columnName": "gsm_ta",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wcdmaRssi",
+            "columnName": "wcdma_rssi",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wcdmaRscp",
+            "columnName": "wcdma_rscp",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wcdmaEcno",
+            "columnName": "wcdma_ecno",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteRssi",
+            "columnName": "lte_rssi",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteRsrp",
+            "columnName": "lte_rsrp",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteRsrq",
+            "columnName": "lte_rsrq",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteSinr",
+            "columnName": "lte_sinr",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteCqi",
+            "columnName": "lte_cqi",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lteTa",
+            "columnName": "lte_ta",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrSsRsrp",
+            "columnName": "nr_ss_rsrp",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrSsRsrq",
+            "columnName": "nr_ss_rsrq",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrSsSinr",
+            "columnName": "nr_ss_sinr",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrCsiRsrp",
+            "columnName": "nr_csi_rsrp",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrCsiRsrq",
+            "columnName": "nr_csi_rsrq",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "nrCsiSinr",
+            "columnName": "nr_csi_sinr",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "signalFluctuationEnabled",
+            "columnName": "signal_fluctuation_enabled",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "signalFluctuationRangeDb",
+            "columnName": "signal_fluctuation_range_db",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "networkType",
+            "columnName": "network_type",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "dataNetworkType",
+            "columnName": "data_network_type",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "voiceNetworkType",
+            "columnName": "voice_network_type",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "operatorName",
+            "columnName": "operator_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "operatorNumeric",
+            "columnName": "operator_numeric",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "simOperator",
+            "columnName": "sim_operator",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "simOperatorName",
+            "columnName": "sim_operator_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "simCountryIso",
+            "columnName": "sim_country_iso",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "networkCountryIso",
+            "columnName": "network_country_iso",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "isRoaming",
+            "columnName": "is_roaming",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "phoneType",
+            "columnName": "phone_type",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "serviceState",
+            "columnName": "service_state",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "dataState",
+            "columnName": "data_state",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "dataActivity",
+            "columnName": "data_activity",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "overrideNetworkType",
+            "columnName": "override_network_type",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "band",
+            "columnName": "band",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "channelBandwidth",
+            "columnName": "channel_bandwidth",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "cellBandwidthDownlink",
+            "columnName": "cell_bandwidth_downlink",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "physicalCellId",
+            "columnName": "physical_cell_id",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiSsid",
+            "columnName": "wifi_ssid",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "wifiBssid",
+            "columnName": "wifi_bssid",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "wifiRssi",
+            "columnName": "wifi_rssi",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiFrequency",
+            "columnName": "wifi_frequency",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiLinkSpeed",
+            "columnName": "wifi_link_speed",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiTxLinkSpeed",
+            "columnName": "wifi_tx_link_speed",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiRxLinkSpeed",
+            "columnName": "wifi_rx_link_speed",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiChannel",
+            "columnName": "wifi_channel",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiStandard",
+            "columnName": "wifi_standard",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiSecurityType",
+            "columnName": "wifi_security_type",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiMac",
+            "columnName": "wifi_mac",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "wifiIp",
+            "columnName": "wifi_ip",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "wifiHidden",
+            "columnName": "wifi_hidden",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "wifiEnabled",
+            "columnName": "wifi_enabled",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "localIpv4",
+            "columnName": "local_ipv4",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "localIpv6",
+            "columnName": "local_ipv6",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "dnsPrimary",
+            "columnName": "dns_primary",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "dnsSecondary",
+            "columnName": "dns_secondary",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "gateway",
+            "columnName": "gateway",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "subnetMask",
+            "columnName": "subnet_mask",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "connectionType",
+            "columnName": "connection_type",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "interfaceName",
+            "columnName": "interface_name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "neighborCellsJson",
+            "columnName": "neighbor_cells_json",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'dda0a6c95a9fee3d0977ca25808f60bc')"
+    ]
+  }
+}

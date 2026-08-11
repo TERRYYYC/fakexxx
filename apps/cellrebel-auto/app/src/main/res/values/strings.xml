@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CellRebel Auto</string>
+    <string name="accessibility_service_description">Automates CellRebel connection tests and Fake GPS location switching for network quality testing cycles.</string>
+</resources>

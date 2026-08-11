@@ -1,0 +1,41 @@
+{
+  "intervalSec": 5,
+  "prefsPath": "/data/misc/6997007a-de90-4cd8-8b44-9c0a17e91ed1/prefs/name.caiyao.fakegps/spoof_config.xml",
+  "rounds": [
+    {
+      "index": 1,
+      "fp": "sha256:22c2100aefbf65b7",
+      "latencyByPid": {
+        "15414": 0.3210000991821289
+      }
+    },
+    {
+      "index": 2,
+      "fp": "sha256:1894aecc1b41b0c7",
+      "latencyByPid": {
+        "15414": 0.2739999294281006
+      }
+    },
+    {
+      "index": 3,
+      "fp": "sha256:8ab24022d7ca2d44",
+      "latencyByPid": {
+        "15414": 0.2649998664855957
+      }
+    },
+    {
+      "index": 4,
+      "fp": "sha256:de50dc2239eacdc3",
+      "latencyByPid": {
+        "15414": 0.25099992752075195
+      }
+    },
+    {
+      "index": 5,
+      "fp": "sha256:08a97bbe4335d580",
+      "latencyByPid": {
+        "15414": 0.2739999294281006
+      }
+    }
+  ]
+}
