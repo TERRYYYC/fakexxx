@@ -3,40 +3,69 @@ package com.example.cellrebelauto.environment
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 
 /**
- * One CellRebel observation bound to a lease (§6.3 EnvironmentObservationV1 projection). Pre- and
- * post-execution observations must share the same [leaseId] (INV-07), each carrying the
- * [acceptedIntentHash] observed at that point.
+ * One CellRebel observation bound to a lease (§6.4 EnvironmentObservationV1 projection). Pre- and
+ * post-execution observations must each independently satisfy the §6.4 trust field set, and the two
+ * must agree on revision/fingerprint/continuity (§6.4). Every field below has an explicit role in the
+ * §6.4.1 trust-predicate table — "field present but unchecked" is a silent trust hole.
  *
- * # 一次绑定 lease 的 CellRebel 观察（§6.3 投影）：前后观察须同 lease（INV-07）
+ * # 一次绑定 lease 的 CellRebel 观察（§6.4 投影）：每个字段都在 §6.4.1 谓词表里有角色
  */
 data class ObservationSnapshot(
+    /** Must equal the apply receipt's leaseId (INV-07). */
     val leaseId: String,
+    /** Must equal apply.acceptedIntentHash == locallyRecomputedIntentHash (INV-23). */
     val acceptedIntentHash: String,
-    val observedAt: Long,
-    /** Observation mode (e.g. gps/network) — must cross-match [CompletionTrustContext.verificationLevel] (INV-27). */
-    val mode: String,
-    val isMock: Boolean,
-    /** Effective coordinates at observation time; non-null + within tolerance for trust (INV-23). */
+    /** continuityCoverageWire; must be FULL (§6.4). */
+    val coverage: String,
+    /** verificationLevelWire; must be SYSTEM_MOCK_INDEPENDENTLY_VERIFIED (§6.4). */
+    val verificationLevel: String,
+    /** deliveryModeWire; must be non-null SYSTEM_MOCK (§6.4.1 — HOOK masquerading as verify ⇒ fail). */
+    val deliveryMode: String,
+    /** Nullable so the §6.4.1 isMock=null / isMock=false 矛盾 tuples are representable; must be true. */
+    val isMock: Boolean?,
+    /** scheduleDecisionWire; must be ALLOWED_NOW (§6.4.1 — DENIED/WAIT_UNTIL + VERIFIED ⇒ fail). */
+    val scheduleDecision: String,
+    /** Effective coords at observation time; non-null + within tolerance of intent (INV-23). */
     val effectiveLat: Double?,
-    val effectiveLng: Double?
+    val effectiveLng: Double?,
+    /** environmentRevision; pre must equal post (§6.4). */
+    val environmentRevision: Long,
+    /** environmentFingerprint; pre must equal post (§6.4). */
+    val environmentFingerprint: String,
+    /**
+     * §6.4.2 monotonic observation timestamp (SystemClock.elapsedRealtime). The ONLY comparable clock.
+     * pre < execution.startedAtElapsed; post > execution.completedAtElapsed.
+     */
+    val observedAtElapsedRealtimeMs: Long,
+    /** Audit-only wall clock (§6.4.2); NEVER enters a trust predicate. */
+    val observedAtEpochMs: Long,
+    /**
+     * §6.4.2 monotonic continuity-window start. Nullable so the §6.4.1 continuitySince=null 矛盾 tuple
+     * is representable. pre/post must both be non-null, EQUAL, and <= pre.observedAtElapsedRealtimeMs.
+     */
+    val continuitySinceElapsedRealtimeMs: Long?,
+    /** Structural evidence refs (`qwy:<store>:<id>`); non-empty required (§6.4.1 — empty + VERIFIED ⇒ fail). */
+    val evidenceRefs: List<String>
 )
 
 /**
  * The full input bundle [TrustPolicy] evaluates to decide whether a classified CellRebel completion
- * may mint a [com.example.cellrebelauto.model.ledger.TrustedQuotaEntry] (§8.1 DECIDING→QUOTA_COMMITTED).
+ * may mint a [com.example.cellrebelauto.model.ledger.TrustedQuotaEntry] (§8.1 DECIDING → QUOTA_COMMITTED).
  *
- * Carries EVERY discriminator the invariants require, so a policy cannot pass by checking a single
- * field (the false-oracle failure mode). Specifically:
- *  - [completionEvidenceWire] — only VERIFIED_NEW_COMPLETION (1) may pass (INV-11, §8.6.2);
- *  - [preObservation] / [postObservation] — must be bound to the SAME lease (INV-07) and must
- *    bracket the execution window (INV-27);
- *  - three-way intent binding — each observation's [acceptedIntentHash] must equal
- *    [applyReceiptIntentHash] AND [locallyRecomputedIntentHash] (INV-23);
- *  - coordinates — [effectiveLat]/[effectiveLng] non-null and within [locationToleranceMeters] of
- *    the target (INV-23);
- *  - mode/isMock/coverage/timing — must be cross-consistent with [verificationLevel] (INV-27).
+ * Carries EVERY §6.4 discriminator so a policy cannot pass by checking a single field (the false-oracle
+ * failure mode Sol proved: an impl that accepts one wrong tuple greens all tests). The canonical
+ * positive tuple (§6.4 lines 1493-1530) requires ALL of:
+ *  - wire == VERIFIED_NEW_COMPLETION (1) only (INV-11, §8.6.2);
+ *  - each observation: coverage FULL, verificationLevel SYSTEM_MOCK_INDEPENDENTLY_VERIFIED,
+ *    deliveryMode SYSTEM_MOCK, isMock true, scheduleDecision ALLOWED_NOW, evidenceRefs non-empty,
+ *    effectiveLat/Lng non-null, observedAtElapsedRealtimeMs the only comparable clock;
+ *  - cross-obs: revision/fingerprint equal, continuitySince equal + non-null + <= pre.observedAt;
+ *  - window: pre.observedAt < execution.startedAtElapsed < ... < completedAtElapsed < post.observedAt;
+ *  - intent three-way: applyReceiptIntentHash == locallyRecomputedIntentHash == observation hash;
+ *  - coords within [locationToleranceMeters] (= TRUSTED_LOCATION_TOLERANCE_METERS = 1.0 m).
+ * Every §6.4.1 矛盾 tuple is a distinct must-fail case.
  *
- * # 完成信任上下文：携带 INV-07/11/23/27 全部判别项，杜绝单字段通过（反 false-oracle）
+ * # 完成信任上下文：携带 §6.4 全部判别项，杜绝单字段/错 tuple 通过（反 false-oracle）
  */
 data class CompletionTrustContext(
     val execution: CellRebelExecution,
@@ -49,12 +78,8 @@ data class CompletionTrustContext(
     /** Target coordinates the attempt was dispatched to (INV-23). */
     val targetLat: Double,
     val targetLng: Double,
-    /** Frozen location tolerance in meters (INV-23, TRUSTED_LOCATION_TOLERANCE_METERS). */
+    /** Frozen location tolerance in meters (INV-23, TRUSTED_LOCATION_TOLERANCE_METERS = 1.0). */
     val locationToleranceMeters: Double,
-    /** Required verification level; observations must cross-match it (INV-27). */
-    val verificationLevel: String,
-    /** Required coverage; observations must satisfy it (INV-27). */
-    val coverage: String,
     val preObservation: ObservationSnapshot,
     val postObservation: ObservationSnapshot
 )

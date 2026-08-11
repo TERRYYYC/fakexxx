@@ -29,8 +29,21 @@ data class CellRebelExecution(
     val completionEvidenceWire: Int,
     /** Digest of the full evidence payload (baseline state / marker text / RUNNING duration / scores). */
     val evidencePayloadDigest: String,
-    /** When Auto started observing this execution. */
+    /** When Auto started observing this execution (epoch ms, AUDIT ONLY — never in a trust predicate). */
     val startedAt: Long,
-    /** When Auto classified the completion evidence; null until classified. */
-    val classifiedAt: Long?
+    /** When Auto classified the completion evidence; null until classified (epoch ms, audit only). */
+    val classifiedAt: Long?,
+    /**
+     * §6.4.2 frozen monotonic window (SystemClock.elapsedRealtime, NTP-immune). These are the ONLY
+     * comparable timestamps; the epoch fields above are human-readable audit and MUST NOT enter any
+     * trust predicate (a wall-clock NTP pull inside the test window could make "post-observe" numerically
+     * precede completion).
+     *  - [startedAtElapsed]: the actual Start interaction moment.
+     *  - [runningConfirmedAtElapsed]: first moment RUNNING was confirmed by marker text.
+     *  - [completedAtElapsed]: moment stable COMPLETED held (two consecutive equal scores).
+     * MIN_RUNNING_EVIDENCE_MS = completedAtElapsed − runningConfirmedAtElapsed (NOT − startedAtElapsed).
+     */
+    val startedAtElapsed: Long = 0L,
+    val runningConfirmedAtElapsed: Long = 0L,
+    val completedAtElapsed: Long = 0L
 )
