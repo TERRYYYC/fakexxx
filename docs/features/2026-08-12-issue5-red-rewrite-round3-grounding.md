@@ -207,5 +207,31 @@ export ANDROID_HOME="$HOME/Library/Android/sdk"
 ./gradlew testDebugUnitTest   # expect: right-reason RED (AssertionError, 0 errors)
 ```
 
+## 10. Verification log (session)
+
+**Finding 2 verified — right-reason RED (RecoveryIdempotencyRedTest: 11 tests, 6 failed, 0 errors):**
+- fresh-advance (executor invoked once + receipt + ADVANCED_TO_RELEASE)
+- replay same-key/same-digest (NOT re-invoked + REPLAYED_APPLY)
+- same-key/diff-digest conflict (executor not called + prior preserved + IDEMPOTENCY_CONFLICT)
+- crash window b M-CR-02 (provider applied, no receipt ⇒ re-invoke executor idempotently, effect stays 1, record receipt, ADVANCED)
+- crash window c (receipt before checkpoint ⇒ REPLAYED_APPLY, executor not re-invoked)
+- schedule-ADVANCED (receipt + intentMatch + fresh revision + quota open ⇒ ADVANCED)
+- 5 negatives pass under skeleton (window-a fresh advance, no-receipt gate, mismatch-intent, stale-revision, quota-exhausted) — valid, same pattern as Finding 1.
+
+**Finding-1 followup — migration drift fixed (this was a regression, NOT pre-existing RED):** commit 6c692a9
+added `startedAtElapsed`/`runningConfirmedAtElapsed`/`completedAtElapsed` (INTEGER NOT NULL) to the
+`CellRebelExecution` entity + regenerated `5.json`, but did NOT add them to `MIGRATION_4_5`'s
+`cellrebel_executions` CREATE TABLE. Room schema validation (`exportSchema=true`) saw entity-DDL
+(10 cols) ≠ migration-DDL (7 cols) ⇒ the migration tests (`Migration4to5Test` + `MigrationTest`) failed.
+Fix: added the 3 columns to the migration CREATE TABLE (fresh v5 table, no rows ⇒ NOT NULL needs no
+default). Re-ran with F2 applied: **16 tests, 6 failed — all 6 are the recovery RED, 0 migration failures.**
+This drift would have made the suite "red for the wrong reason" and polluted R3-4's baseline, so it had to
+be fixed before the comprehensive re-red. Lesson: any entity change ⇒ also update the corresponding
+`MIGRATION_*` CREATE TABLE so entity-DDL ≡ migration-DDL.
+
+**Next:** commit (a) migration drift fix and (b) F2 (6 files) as separate commits; then Finding 3 (R3-3),
+then R3-4 comprehensive re-red across ALL findings. Do NOT post to Sol until R3-4 proves the bad impl
+cannot green the suite.
+
 ---
 [智谱猫/阿智 · glm-5.2🐾]
