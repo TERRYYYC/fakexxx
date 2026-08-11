@@ -115,6 +115,7 @@ source_threads:
 | **v1.36** | PR-0.2 第三十一轮 | Sol gen-13 判 **0 P1 + 2 P2**，代码侧 blocker 清零。**归因实验**：上一轮我把 `setup()` 诊断与 `mk_fulldag` 两处候选修复放进同一 commit，CI 转绿却说不出是谁修好的；改用一次性 ref + `workflow_dispatch` 只退回硬化（probe `8cde419b` / run `31376782849`，**PR 分支零改动**），CI 精确报 **`Author identity unknown`**——夹具真因确认为 `git clone` 不继承 committer 身份（macOS 从 user@host 推导、runner 拒绝，而 `mk_squashed` 一直持久化身份）。同一日志的 **`INCONCLUSIVE: N-12 was not green before the mutation`** 则给 pre-green guard 自身的承重证据。**P2-1**：两份 PR body 仍把当前 HEAD 投影成我自己撤回的 known-red `40029ae8`——v1.34 的「唯一当前真相块」解决了「有几份」，没解决「是否新鲜」。**P2-2**：`§0.1.35` 声称「塞进每一个字段」而只测第六格，已**六格逐格参数化**（cell 2..6 由内部空白规则判红、cell 1 由 row selector 判红）。**判据补第十五条**（不知根因时只交付诊断，不在同一提交里附带候选修复）。**同轮另闭 Sol preflight 两条 truth-binding**：`§0.1.34` 正文原样呈现被上修的初版 verdict（读起来像 terminal closure），已加 initial/superseded 限定并保留原文可追溯，不改写历史；`mk_fulldag` 源码注释把**已被证伪**的 detached/empty-tree 机制写作既证事实（与同一 commit body 自相矛盾），已改为只陈述"去除 ambient/symbolic 依赖"、不归因，归因证据留在本节。见 §0.1.36 |
 | **v1.37** | PR-2 第一轮·operator 架构更正 | **顺序的所有权错了，而且错成了两个所有者。** §5 上一版把「计划顺序」判给 Auto，同表下一行又把 profile/schedule 判给千网游为唯一权威——同一个排序有两个 owner。后果不是措辞不一致：Auto 可以按经纬度排一套顺序，千网游按「环境」（经纬度 **+** 蜂窝/网络/Wi-Fi Hook 字段是一个整体）排另一套，位置于是与网络 Hook 状态漂移。按 operator 裁定更正为：**顺序/优先级归千网游，配额与完成判定归 Auto，推进是二者之间一次幂等握手**。§5 边界表重写；新增 **§6.7 调度身份与「达标→完成→推进」**：`scheduleId`/`scheduleItemId`（稳定、非位置）/`scheduleVersion`（顺序或成员变化必自增）/`currentItemId`；`CompletionProofV1` 由 Auto 出、千网游只记不重算；`CompleteAndAdvanceRequestV1`/`AdvanceReceiptV1` 走 §6.3.4 同一套 digest，**compare-and-advance**：`expectedCurrentItemId` 与 `expectedScheduleVersion` 双前置，新增 wire **14 `SCHEDULE_ITEM_MISMATCH`**（挡错项/重复推进）、**15 `SCHEDULE_VERSION_STALE`**（判定期间计划被改）、**16 `SCHEDULE_EXHAUSTED`**（终态非失败）；推进与指针同事务、receipt 可按幂等键重取、**Auto 必须 observe 独立验证新生效环境**（receipt 是自述不是生效证据）；千网游隐式首行/遗留行序迁移到显式 `currentItemId`。原 §6.7 兼容矩阵顺延为 §6.8，5 处旧引用同步。见 §5 / §6.7 |
 | **v1.38** | PR-2 第二轮 | **digest 与 recovery 一起收口。** ①每个 digest 加 **domain tag** 作首个 framed 字段（`:intent`/`:advance-request`/`:advance-receipt`）——长度前缀只让**一个**序列单射，不阻止「为用途 A 编码的序列」等于「为用途 B 的」，不加 domain 就是把正确性押在「不会有构造输入跨用途碰撞」上，而这正是 §6.3.1 拒绝分隔符时不肯押的巧合；framing 收敛为**一个共享 helper**（第二份手写副本是第二个漂移点，且漂移的 framing 不会响亮失败，只会算出不同 digest）。②**冻结 `receiptDigest`**（此前完全无算法）：绑 `requestDigest` + `idempotencyKey` + outcome，`verify()` 是信任前必跑的一步——**重算不上的 receipt 不是弱证据，它不是 receipt**；null target 用哨兵编码，与空串不碰撞。③`AdvanceOutcomeV1` 由两个 `const` 改为**枚举**，从而自动继承 yaml↔Kotlin 绑定与 derived probe 覆盖（const 不被任何 carrier 看见，改一侧全绿），并补 `advancedOrFailClosed` 未知即非推进。④**冻结 release↔advance 顺序**：先 release 再 advance；lease **不跨项**；`CompleteAndAdvanceRequestV1.leaseId` 是配额挣得处的**历史引用**而非活动持有——不写死会被合理读成两种互斥实现（见 §6.7.4a）。⑤§8.1 增 advance 状态边，§10 增 **M-AD-01..11**（missing proof / same-key replay / new-key double / wrong item / stale version / lost receipt / digest 不符 / 推进后 observe 不符 / 耗尽终态 / 耗尽后再请求），§10.1 台账同步 11 行，矩阵↔台账集合相等 101==101。见 §6.3.1 / §6.7.3 / §6.7.4a / §10 |
+| **v1.39** | PR-2 第三轮 | **禁令有了规则，但没有判据。** ①§6.7.4a 冻结「推进时不得存在活动 lease」，却没冻结违反时返回哪个 typed code——`LEASE_CONFLICT` / `REQUEST_INVALID` / 新码三种读法都自洽，红测只能接受"任意 `ContractException`"，**因而对错误的 wire 也会全绿**。冻结为 **`LEASE_CONFLICT`(7)，不新增 wire**，并逐条排除：不是 4（请求字节合法，release 后重发即成功，而 4 的语义是重试无用）、不是 `STALE_LEASE`（`leaseId` 按 §6.7.4a 本就是已 RELEASED 的历史引用，"过期"是正常形态不是错误）、不是 9（9 是事后观测到漂移，本条是**事前**阻止漂移发生的门）。②**§6.3.3 对 7 的定义必须同步加宽**：原文只写"与**另一** caller 或**另一** intent 的 lease 冲突"，按字面 caller **自己**持有的活动 lease 不在其中——只在 §6.7.4a 写"返回 7"而不动 §6.3.3，两节即互相矛盾，实现者按 §6.3.3 读会认为本场景不该返回 7。同段 `IDEMPOTENCY_CONFLICT` 对照文字一并加宽。③新增 **§6.7.4b 判定次序（冻结）**：`proof → idempotency → schedule(14/15/16) → lease(7) → mutation`。多条前置可同时不满足，不冻结次序则两个实现对同一请求返回不同 code 而都"符合"前置表，调用方恢复策略不可移植。两处次序各有理由而非任选：**幂等重放必须先于一切前置**（成功推进后 `currentItemId` 已前移，重放携带的 `expectedCurrentItemId` 必然过期，先跑 schedule 门会让 **M-AD-02 与 M-AD-04 塌成同一可观察结果**，防双推进的最后一道变成对合法重放的误杀）；**schedule 门先于 lease 门**（已耗尽时没有可完成的当前项，lease 是否活动无意义，先返回 7 会让 Auto 白跑一轮 release-retry 后仍撞终态 16，反向则无对称浪费）。④§6.7.4 前置由三类增至**四类**。⑤§10 新增 **`M-AD-12`**（lease 门，断言须钉 **exact wire 7**，"任意 typed failure"不构成证据）与 **`M-AD-13`**（同时违反多条时按冻结次序返回首条；次序被实现成任选则本行必红）。两行按 operator option B 归 **provider 侧 Fable5**、锚在 qwy lane——这是 provider-owned advance 覆盖的第一批，用以补上「`M-AD-01..11` 全部落在 Auto lane、真实 provider 的 compare-and-advance 无任何稳定 ledger row」的缺口。矩阵↔台账集合相等由 101==101 同步为 **103==103**。见 §6.3.3 / §6.7.4 / §6.7.4b / §6.7.4a / §10 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1456,7 +1457,7 @@ data class ReleaseReceiptV1(
 | 4 | `CAPABILITY_UNAVAILABLE` | 请求的模式/profile/schedule 当前不可用 | INV-01,03 |
 | 5 | `SCHEDULE_DENIED` | `scheduleDecision == DENIED` | INV-17；recovery 行 |
 | 6 | `CONTINUITY_NOT_FULL` | coverage 为 `PARTIAL/NONE` | INV-08,09；crash/bypass 行 |
-| 7 | `LEASE_CONFLICT` | 与另一 caller 或另一 intent 的 active/未收敛 lease 冲突 | INV-14,16；concurrency 行 |
+| 7 | `LEASE_CONFLICT` | 与某个 active/未收敛 lease 冲突：另一 caller 或另一 intent 的（`apply`，§6.6），**或该 caller 自己在推进时仍持有的**（`completeAndAdvance`，§6.7.4a） | INV-14,16；concurrency 行；advance lease 门 |
 | 8 | `STALE_LEASE` | 该 leaseId 对**本次操作**不可用：非本 caller 所有、已 `RELEASED`，或对 `apply`/`observe` 而言处于 `EXPIRED`/`REVOKED`/`RELEASE_INCOMPLETE`。**`release` 例外见下** | INV-14；release 行 |
 | 9 | `ENVIRONMENT_DRIFT` | `expectedIntentHash` 与当前 lease 生效意图不符，或有效环境已漂移 | INV-08,23；intent 行 |
 | 10 | `RELEASE_INCOMPLETE` | release 无法证明清理完成 | INV-21；release/recovery 行 |
@@ -1482,7 +1483,7 @@ data class ReleaseReceiptV1(
 
 **不为被撤销的 caller 保留任何 post-revoke 能力。** 给一个已失权的调用方开一条"仅用于清理"的口子，等于在鉴权面上开洞去解决一个 provider 自己就能解决的问题——qwy 本来就是环境的唯一权威。Auto 侧在 run 进行中遇到 `CALLER_NOT_ALLOWED`/`NOT_PAIRED`，一律暂停计划并暴露人工恢复，**不得假定环境已干净**，也不负责清理。
 
-`IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 不可互相替代：前者是"你用同一把钥匙提交了不同的内容"（调用方错误，重试无用，必须换 key 或修正 payload），后者是"环境已被别的意图占用"（时序冲突，释放后可重试）。把两者合并会让 Auto 的恢复策略无法区分"该放弃"与"该等待"。
+`IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 不可互相替代：前者是"你用同一把钥匙提交了不同的内容"（调用方错误，重试无用，必须换 key 或修正 payload），后者是"环境仍被某个未收敛的 lease 占用"（时序冲突，释放后可重试）——占用者可能是别的 caller/意图（`apply` 场景），**也可能是 caller 自己那个尚未 release 的 lease**（`completeAndAdvance` 场景，§6.7.4a）。两种占用的恢复动作是同一条：先让 lease 收敛，再重试。把 `IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 合并则会让 Auto 的恢复策略无法区分"该放弃"与"该等待"。
 
 预期业务失败通过 `ServiceSpecificException` 返回稳定的 `ContractErrorCodeV1.wireCode`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
 
@@ -1878,15 +1879,16 @@ data class AdvanceReceiptV1(
 ) : Parcelable
 ```
 
-#### 6.7.4 前置条件即三类防护（compare-and-advance）
+#### 6.7.4 前置条件即四类防护（compare-and-advance）
 
-推进是**比较并推进**，不是无条件自增。三条前置各自对应一类事故：
+推进是**比较并推进**，不是无条件自增。四条前置各自对应一类事故：
 
 | # | 前置条件不满足 | wire | 挡住的事故 |
 |---|---|---|---|
 | 14 | `expectedCurrentItemId` ≠ 实际 `currentItemId` | `SCHEDULE_ITEM_MISMATCH` | **错项推进**与**重复推进**（Auto 拿着过期的当前项发请求） |
 | 15 | `expectedScheduleVersion` ≠ 实际 `scheduleVersion` | `SCHEDULE_VERSION_STALE` | Auto 判定配额**期间**计划被改：顺序已变，达标结论不再适用于同一项 |
 | 16 | 计划**已经**耗尽时又请求推进 | `SCHEDULE_EXHAUSTED` | 越界推进。**没有可完成的当前项**，是真正的调用方错误 |
+| 7 | 推进时该 caller 仍持有**活动 lease**（§6.7.4a） | `LEASE_CONFLICT` | 在活动 lease 之下换环境——自己制造 `ENVIRONMENT_DRIFT` |
 
 > **v1.37 更正——耗尽曾被定义了两次且互斥。** 上一版一处把耗尽写成 `SCHEDULE_EXHAUSTED` typed failure，一处又写成「终态不是失败」的 receipt + null target。**一次调用不可能同时是这两者**，实现者只能靠猜。分开被混为一谈的两种情形即可解开：
 >
@@ -1896,6 +1898,26 @@ data class AdvanceReceiptV1(
 > 所以两者不冗余：**错误码说「没有东西可推进」，outcome 说「推进发生了，并且落在了末尾」**。`AdvanceReceiptV1.outcomeWire` 取值域就此冻结为 **`AdvanceOutcomeV1`**：`ADVANCED = 1` / `EXHAUSTED = 2`。**它是枚举而不是两个 `const`**——第一版写成 const，于是没有任何 carrier 和任何门禁看得见它：改一侧、全绿。改成与其它契约枚举同形后，它自动继承 `compatibility.yaml ↔ Kotlin` 绑定与 derived unknown-probe 覆盖。未知 outcome **必须 fail-closed**（`advancedOrFailClosed`）：把未知乐观读成「已推进」会让 Auto 在完全不知道发生了什么的情况下相信计划已前移，并把结果归因到错误的项——§6.7.5 要防的错环境归因，从 outcome 字段而不是 observation 进来。
 
 任一条不满足 → **不推进、不改指针**，返回 typed failure。「跳项」不需要单独 wire：跳项要么撞 14，要么撞 15。
+
+##### 6.7.4b 判定次序（冻结）
+
+多条前置可以同时不满足，因此**返回哪一个 typed failure 必须是确定的**。不冻结次序，两个实现会对同一请求返回不同的 code，而两者都"符合"上面的表——调用方的恢复策略就此不可移植。冻结为：
+
+```
+1. proof        缺 CompletionProofV1 / proof.scheduleItemId ≠ 当前项 → REQUEST_INVALID(4)
+2. idempotency  同 key + 同 requestDigest → 返回原 receipt（终止，不再走后续任何一条）
+                同 key + 异 requestDigest → IDEMPOTENCY_CONFLICT(13)
+3. schedule     14 SCHEDULE_ITEM_MISMATCH → 15 SCHEDULE_VERSION_STALE → 16 SCHEDULE_EXHAUSTED
+4. lease        该 caller 仍持有活动 lease → LEASE_CONFLICT(7)
+5. mutation     指针前移 + receipt 落库（同一事务，§6.7.5）
+```
+
+两处次序不是任选，各有理由：
+
+- **幂等重放必须先于一切前置。** 一次成功推进之后 `currentItemId` 已经前移；崩溃重启的 Auto 以同键重放同一请求时，它携带的 `expectedCurrentItemId` 必然已经过期。若先跑 schedule 门，重放会撞 14 而不是拿回原 receipt——**M-AD-02 与 M-AD-04 会塌成同一个可观察结果**，而它们恰恰必须可区分：前者是"你已经成功了，这是你的 receipt"，后者是"你丢了键并试图推第二次"。次序放反，防双推进的最后一道就变成了对合法重放的误杀。
+- **schedule 门先于 lease 门。** 计划已耗尽（16）时根本没有可完成的当前项，lease 是否活动是无意义的问题；此时若先返回 `LEASE_CONFLICT`，Auto 会去 release 再重试，然后仍然撞上终态的 16——白跑一轮，且中途还释放了本不必释放的环境。反过来则不会有对称的浪费：lease 冲突在 release 后重试即可成功。
+
+**未在本次序中出现的失败一律不得提前返回。** 特别是 `INTERNAL_FAILURE` 不得用来代替上述任一条——把调用方错误伪装成服务端故障，正是 §6.3.3 引入 13 与 4 时要消除的形态。
 
 #### 6.7.4a release 与 advance 的顺序，以及 lease 是否跨项（冻结）
 
@@ -1909,6 +1931,15 @@ QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
 ```
 
 **lease 不跨项。** 一个 lease 属于一个 schedule item 的环境；推进即意味着该 lease 的环境不再有效。因此推进时**不得**存在该 caller 的活动 lease。
+
+**违反时返回 `LEASE_CONFLICT`（wire 7）。冻结，不新增 wire。** 上一版只冻结了禁令而没有冻结违反它的 typed code，这不是遗漏细节而是同一类契约缺陷：`LEASE_CONFLICT` / `REQUEST_INVALID` / 新码三种读法都自洽，红测只能接受"任意 `ContractException`"，于是**对错误的 wire 也会全绿**——禁令有了规则却没有可执行的判据。逐条排除：
+
+- **不是 `REQUEST_INVALID`（4）。** 请求字节完全合法：同一份字节在 release 之后重发即应成功。4 的语义是结构性非法请求，重试无用；这里重试恰恰有用，只是要先 release。
+- **不是 `STALE_LEASE`。** `CompleteAndAdvanceRequestV1.leaseId` 按本节就是一个**已 RELEASED 的历史引用**，"lease 已过期"是本请求的**正常形态**而非错误。用它会把唯一合法的调用形态判成失败。
+- **不是 `ENVIRONMENT_DRIFT`（9）。** 9 是事后观测到环境已漂移；本条是**事前**阻止漂移发生的预防门禁。用 9 等于承认漂移已经发生，而这道门的全部意义就是不让它发生。
+- **是 `LEASE_CONFLICT`（7）。** §6.3.3 对 7 的恢复语义是"时序冲突，释放后可重试"（见该节 `IDEMPOTENCY_CONFLICT` 对照段）——与本条**逐字吻合**：release 之后重试即成功。Auto 已有的 7 恢复分支可直接复用，不必为一个语义相同的新码再写一条。
+
+**为此 §6.3.3 对 7 的定义必须同步加宽。** 原定义是"与**另一** caller 或**另一** intent 的 active/未收敛 lease 冲突"——按字面，caller **自己**在推进时持有的活动 lease 不在其中。若只在本节写"返回 7"而不动 §6.3.3，两节就会互相矛盾，实现者按 §6.3.3 读会认为本场景不该返回 7。**定义与用法必须同向**，见 §6.3.3 wire 7 行。
 
 **那么 `CompleteAndAdvanceRequestV1.leaseId` 是什么？** 它是**配额在哪个 lease 下挣得**的历史引用，用于归因与审计，**不是一个活动持有**。这一点必须写死：不写死的话，实现者会合理地把它读成「推进时仍持有该 lease」，于是要么在活动 lease 下换环境，要么在 release 之后拿一个已 RELEASED 的 id 去做前置校验而失败——两种读法都自洽，所以歧义本身就是缺陷。
 
@@ -2315,6 +2346,8 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-09` | advance | 推进后 `observe` 的 `scheduleItemId` ≠ receipt 的 `advancedToItemId` | 判**错环境归因**：不计数、不继续；同一 profile 可跨项复用，故环境相符**不足以**替代本条 | 8,23,26 |
 | `M-AD-10` | advance | 最后一项完成 | receipt `outcomeWire = EXHAUSTED`、`advancedToItemId = null`；**终态非失败**，当前项保持、不回绕 | 17 |
 | `M-AD-11` | advance | 已耗尽后再次请求推进 | typed `SCHEDULE_EXHAUSTED`；与 M-AD-10 是两件事 | 17 |
+| `M-AD-12` | advance | 推进时该 caller 仍持有活动 lease（未 release 即 advance） | typed `LEASE_CONFLICT`（§6.7.4a）；**不推进、指针不动**；release 后同一份请求字节重试即应成功。断言必须钉 **exact wire 7**，接受"任意 typed failure"不构成证据 | 14,16,28 |
+| `M-AD-13` | advance | 同时违反多条前置（如既持活动 lease 又 `expectedScheduleVersion` 过期） | 按 §6.7.4b **冻结次序**返回**首条**命中者，此例为 `SCHEDULE_VERSION_STALE`；次序若被实现成任选，本行必红 | 15,16,28 |
 | `M-RC-02` | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | `M-RC-03` | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |
 | `M-RC-04` | recovery | qwy release 只能部分清理 | plan 暂停，显示人工恢复 | 14,21 |
@@ -2452,6 +2485,8 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-AD-09` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_09` |
 | `M-AD-10` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_10` |
 | `M-AD-11` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_11` |
+| `M-AD-12` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_12` |
+| `M-AD-13` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_13` |
 | `M-CR-01` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_01` |
 | `M-CR-02` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_02` |
 | `M-CR-03` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_03` |
