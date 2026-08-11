@@ -409,11 +409,35 @@ for p in kt_dir.glob("*V1.kt"):
     c = classes(p.read_text())
     kt_c.update(c)
 
+# CLASS-SET equality first, in BOTH directions, BEFORE comparing fields.
+#
+# The first version of this section compared only the INTERSECTION and checked
+# only spec-minus-Kotlin. Anything Kotlin declared that canonical never described
+# was silently dropped from the comparison and then counted as green -- and what
+# escaped was precisely the three advance DTOs, the most load-bearing types on
+# the branch. "10 DTO(s), 73 field(s) identical in both directions" was true and
+# meaningless: a set can be internally consistent while not being the whole set.
+#
+# That is the same failure mode this branch keeps dismantling, built into the
+# gate written to dismantle it. So the class set is now proven equal first; a
+# type present on one side only is a failure, never a skip.
+only_kt = sorted(set(kt_c) - set(spec_c))
+only_spec_cls = sorted(set(spec_c) - set(kt_c))
+class_fail = 0
+if only_kt:
+    print(f"  FAIL  Kotlin DTO(s) with no canonical §6.3 exact schema: {only_kt}")
+    class_fail = 1
+if only_spec_cls:
+    print(f"  FAIL  canonical DTO(s) absent from Kotlin: {only_spec_cls}")
+    class_fail = 1
+if not class_fail:
+    print(f"  PASS  class set identical: {len(kt_c)} DTO(s) in canonical and Kotlin")
+
 shared = sorted(set(spec_c) & set(kt_c))
 if not shared:
     print("  FAIL  no DTO appears in both canonical §6.3 and Kotlin"); sys.exit(1)
 
-fail = 0
+fail = class_fail
 for name in shared:
     a, b = spec_c[name], kt_c[name]
     missing, extra = sorted(a - b), sorted(b - a)
@@ -425,10 +449,6 @@ if fail == 0:
     total = sum(len(spec_c[n]) for n in shared)
     print(f"  PASS  {len(shared)} DTO(s), {total} field(s) identical in both directions")
 
-# A DTO that canonical declares but Kotlin never implements is also a defect.
-only_spec = sorted(set(spec_c) - set(kt_c))
-if only_spec:
-    print(f"  FAIL  declared in canonical §6.3 but absent from Kotlin: {only_spec}"); fail = 1
 sys.exit(fail)
 PY
 then

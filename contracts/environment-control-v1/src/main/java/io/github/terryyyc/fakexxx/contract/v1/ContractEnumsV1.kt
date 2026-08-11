@@ -100,6 +100,29 @@ object ContractV1 {
     const val PROTOCOL_VERSION: Int = 1
 
     /**
+     * Frozen domain of [AdvanceReceiptV1.outcomeWire] (§6.7.4).
+     *
+     * §6.7.4 previously described exhaustion twice and inconsistently: once as
+     * ContractErrorCodeV1.SCHEDULE_EXHAUSTED (a typed failure) and once as "a
+     * terminal state, not a failure" carrying a receipt with a null target. Those
+     * two cannot both be the answer to one call, and an implementer had to guess.
+     *
+     * Resolved by separating the two situations that were being conflated:
+     *
+     *  - completing the LAST item SUCCEEDS. The current item really was completed,
+     *    so throwing would make a caller treat a successful completion as an
+     *    error and, worse, retry it. It returns [ADVANCE_OUTCOME_EXHAUSTED] with
+     *    advancedToItemId = null.
+     *  - asking to advance again once the schedule is ALREADY exhausted is a
+     *    genuine caller error and stays ContractErrorCodeV1.SCHEDULE_EXHAUSTED(16).
+     *
+     * So the error code is not redundant: it means "there was nothing to advance",
+     * while this outcome means "the advance happened and landed at the end".
+     */
+    const val ADVANCE_OUTCOME_ADVANCED: Int = 1
+    const val ADVANCE_OUTCOME_EXHAUSTED: Int = 2
+
+    /**
      * Maximum distance between an observation's effective coordinates and the
      * intent's target coordinates for the observation to support trusted quota
      * (INV-23).

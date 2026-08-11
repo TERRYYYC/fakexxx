@@ -1797,6 +1797,47 @@ requestDigest = lowercase hex of SHA-256(canonical)
 
 **长度前缀不是风格选择**：`expectedCurrentItemId`、`ledgerRef`、`scheduleItemId` 都是自由字符串。用任何固定分隔符拼接，都能让一个字段吞掉分隔符并移动边界——`itemId="a|b", ledgerRef="c"` 与 `itemId="a", ledgerRef="b|c"` 会产生**逐字节相同**的 canonical，于是两个不同的推进请求共用一个 digest。这与 §6.3.1 已经踩过的 `\n` 碰撞是同一个 bug，只是换了字段。**判据第十四条在这里再次适用。**
 
+#### 6.7.3a 三个 advance DTO 的 exact schema（冻结）
+
+§6.3 写明「未列字段不属于 v1」，所以这三个类必须与 §6.3 同形地给出 exact schema，而不是只有散文字段清单——否则它们既被实现又被否认，而门禁看不见。
+
+```kotlin
+@Parcelize
+data class CompletionProofV1(
+    val scheduleItemId: String,
+    val trustedSuccessCount: Int,
+    val quotaRequired: Int,
+    val ledgerRef: String,
+    /** 唯一可比时钟（§6.4.2）。 */
+    val verifiedAtElapsedRealtimeMs: Long,
+) : Parcelable
+
+@Parcelize
+data class CompleteAndAdvanceRequestV1(
+    val leaseId: String,
+    val idempotencyKey: String,
+    val requestDigest: String,
+    val expectedScheduleVersion: Long,
+    val expectedCurrentItemId: String,
+    val completionProof: CompletionProofV1,
+    /** 不进 requestDigest preimage（§6.7.3 与 §6.3.4 同一理由）。 */
+    val callerProtocolVersion: Int,
+) : Parcelable
+
+@Parcelize
+data class AdvanceReceiptV1(
+    /** `ContractV1.ADVANCE_OUTCOME_*`，取值域见 §6.7.4。 */
+    val outcomeWire: Int,
+    val advancedFromItemId: String,
+    /** 耗尽时为 null——终态，非失败。 */
+    val advancedToItemId: String?,
+    val scheduleVersionAfter: Long,
+    val effectiveIntentHash: String,
+    val effectiveEnvironmentRevision: Long,
+    val receiptDigest: String,
+) : Parcelable
+```
+
 #### 6.7.4 前置条件即三类防护（compare-and-advance）
 
 推进是**比较并推进**，不是无条件自增。三条前置各自对应一类事故：
@@ -1805,7 +1846,14 @@ requestDigest = lowercase hex of SHA-256(canonical)
 |---|---|---|---|
 | 14 | `expectedCurrentItemId` ≠ 实际 `currentItemId` | `SCHEDULE_ITEM_MISMATCH` | **错项推进**与**重复推进**（Auto 拿着过期的当前项发请求） |
 | 15 | `expectedScheduleVersion` ≠ 实际 `scheduleVersion` | `SCHEDULE_VERSION_STALE` | Auto 判定配额**期间**计划被改：顺序已变，达标结论不再适用于同一项 |
-| 16 | 无下一项 | `SCHEDULE_EXHAUSTED` | 越界推进。这是**终态，不是失败**：当前项保持，不回绕 |
+| 16 | 计划**已经**耗尽时又请求推进 | `SCHEDULE_EXHAUSTED` | 越界推进。**没有可完成的当前项**，是真正的调用方错误 |
+
+> **v1.37 更正——耗尽曾被定义了两次且互斥。** 上一版一处把耗尽写成 `SCHEDULE_EXHAUSTED` typed failure，一处又写成「终态不是失败」的 receipt + null target。**一次调用不可能同时是这两者**，实现者只能靠猜。分开被混为一谈的两种情形即可解开：
+>
+> - **完成最后一项是成功的。** 当前项确实被完成了；抛异常会让调用方把一次成功完成当成错误，并且很可能去重试它。返回 receipt，`outcomeWire = ADVANCE_OUTCOME_EXHAUSTED`、`advancedToItemId = null`。
+> - **在已经耗尽之后再请求推进**才是调用方错误，仍为 `SCHEDULE_EXHAUSTED`（16）。
+>
+> 所以两者不冗余：**错误码说「没有东西可推进」，outcome 说「推进发生了，并且落在了末尾」**。`AdvanceReceiptV1.outcomeWire` 取值域就此冻结为 `ADVANCE_OUTCOME_ADVANCED = 1` / `ADVANCE_OUTCOME_EXHAUSTED = 2`。
 
 任一条不满足 → **不推进、不改指针**，返回 typed failure。「跳项」不需要单独 wire：跳项要么撞 14，要么撞 15。
 

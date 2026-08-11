@@ -3,6 +3,7 @@ package io.github.terryyyc.fakexxx.contract.v1
 import android.os.Parcel
 import android.os.Parcelable
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -62,6 +63,9 @@ class ContractRoundTripTest {
             environmentRevision = 42L,
             profileRefs = listOf("p1", "p2"),
             scheduleRefs = listOf("s1"),
+            currentScheduleId = "s1",
+            currentItemId = "item-7",
+            scheduleVersion = 3L,
         )
         val restored = roundTrip(original)
         assertEquals(original, restored)
@@ -88,6 +92,8 @@ class ContractRoundTripTest {
             continuityCoverageWire = ContinuityCoverageV1.FULL.wire,
             environmentRevision = 7L,
             blockingReasonWires = emptyList(),
+            scheduleItemId = "item-7",
+            scheduleVersion = 3L,
         )
         val restoredPassed = roundTrip(passed)
         assertEquals(passed, restoredPassed)
@@ -144,10 +150,12 @@ class ContractRoundTripTest {
             leaseId = "lease-1",
             acceptedIntentHash = CanonicalIntentDigestV1.compute(intent()),
             observedAtEpochMs = 1_786_000_020_000L,
+            observedAtElapsedRealtimeMs = 620_000L,
             environmentRevision = 8L,
             environmentFingerprint = "fp-abc",
             continuityCoverageWire = ContinuityCoverageV1.FULL.wire,
             continuitySinceEpochMs = 1_786_000_005_000L,
+            continuitySinceElapsedRealtimeMs = 605_000L,
             deliveryModeWire = DeliveryModeV1.SYSTEM_MOCK.wire,
             verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
             effectiveLatitude = -33.8688197,
@@ -155,6 +163,8 @@ class ContractRoundTripTest {
             isMock = true,
             scheduleDecisionWire = ScheduleDecisionV1.ALLOWED_NOW.wire,
             evidenceRefs = listOf("ev-1", "ev-2"),
+            scheduleItemId = "item-7",
+            scheduleVersion = 3L,
         )
         assertEquals(observation, roundTrip(observation))
     }
@@ -172,10 +182,12 @@ class ContractRoundTripTest {
             leaseId = "lease-1",
             acceptedIntentHash = "",
             observedAtEpochMs = 1_786_000_020_000L,
+            observedAtElapsedRealtimeMs = 620_000L,
             environmentRevision = 9L,
             environmentFingerprint = "fp-degraded",
             continuityCoverageWire = ContinuityCoverageV1.NONE.wire,
             continuitySinceEpochMs = null,
+            continuitySinceElapsedRealtimeMs = null,
             deliveryModeWire = null,
             verificationLevelWire = VerificationLevelV1.NONE.wire,
             effectiveLatitude = null,
@@ -183,6 +195,8 @@ class ContractRoundTripTest {
             isMock = null,
             scheduleDecisionWire = ScheduleDecisionV1.DENIED.wire,
             evidenceRefs = emptyList(),
+            scheduleItemId = "item-7",
+            scheduleVersion = 3L,
         )
         val restored = roundTrip(degraded)
         assertEquals(degraded, restored)
@@ -191,6 +205,7 @@ class ContractRoundTripTest {
         assertNull(restored.effectiveLatitude)
         assertNull(restored.effectiveLongitude)
         assertNull(restored.isMock)
+        assertNull(restored.continuitySinceElapsedRealtimeMs)
     }
 
     @Test
@@ -239,6 +254,10 @@ class ContractRoundTripTest {
                 environmentRevision = 1L,
                 profileRefs = emptyList(),
                 scheduleRefs = emptyList(),
+                // No active schedule: §6.7.1 requires all three to be null together.
+                currentScheduleId = null,
+                currentItemId = null,
+                scheduleVersion = null,
             ),
         )
         assertEquals(listOf(1, 2, 99), fromNewerPeer.supportedModeWires)
@@ -246,5 +265,83 @@ class ContractRoundTripTest {
             "unknown coverage code must not decode to a known value",
             ContinuityCoverageV1.fromWire(fromNewerPeer.continuityCoverageWire),
         )
+    }
+
+    private fun proof() = CompletionProofV1(
+        scheduleItemId = "item-7",
+        trustedSuccessCount = 12,
+        quotaRequired = 12,
+        ledgerRef = "ledger-abc",
+        verifiedAtElapsedRealtimeMs = 640_000L,
+    )
+
+    private fun advanceRequest() = CompleteAndAdvanceRequestV1(
+        leaseId = "lease-1",
+        idempotencyKey = "idem-1",
+        requestDigest = "d".repeat(64),
+        expectedScheduleVersion = 3L,
+        expectedCurrentItemId = "item-7",
+        completionProof = proof(),
+        callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
+    )
+
+    /** The advance request must survive Binder with its nested proof intact. */
+    @Test
+    fun `CompleteAndAdvanceRequestV1 survives the parcel with its nested proof`() {
+        val original = advanceRequest()
+        val restored = roundTrip(original)
+        assertEquals(original, restored)
+        // The nested Parcelable is the part most likely to be silently dropped.
+        assertEquals(original.completionProof, restored.completionProof)
+        assertEquals("item-7", restored.completionProof.scheduleItemId)
+    }
+
+    /**
+     * The two preconditions must cross the boundary intact.
+     *
+     * If either were lost or defaulted in transit, the provider would evaluate
+     * compare-and-advance against a value the caller never sent, and
+     * SCHEDULE_ITEM_MISMATCH / SCHEDULE_VERSION_STALE would fire (or fail to
+     * fire) on data that is not the caller's (§6.7.4).
+     */
+    @Test
+    fun `advance preconditions are not lost or defaulted in transit`() {
+        val restored = roundTrip(advanceRequest())
+        assertEquals("item-7", restored.expectedCurrentItemId)
+        assertEquals(3L, restored.expectedScheduleVersion)
+
+        val other = roundTrip(advanceRequest().copy(expectedCurrentItemId = "item-8"))
+        assertEquals("item-8", other.expectedCurrentItemId)
+        // Two requests differing only in the precondition must stay distinguishable
+        // after the round trip; if they collapsed, replay could not tell a
+        // wrong-item advance from a retry of the same one.
+        assertNotEquals(restored, other)
+    }
+
+    /**
+     * Exhaustion is a terminal receipt with a null target, not a failure
+     * (§6.7.4). A null advancedToItemId must survive as null rather than
+     * becoming an empty string, which would read as "advanced to an item".
+     */
+    @Test
+    fun `AdvanceReceiptV1 keeps a null target for the exhausted case`() {
+        val advanced = AdvanceReceiptV1(
+            outcomeWire = ContractV1.ADVANCE_OUTCOME_ADVANCED,
+            advancedFromItemId = "item-7",
+            advancedToItemId = "item-8",
+            scheduleVersionAfter = 4L,
+            effectiveIntentHash = "e".repeat(64),
+            effectiveEnvironmentRevision = 9L,
+            receiptDigest = "r".repeat(64),
+        )
+        assertEquals(advanced, roundTrip(advanced))
+
+        val exhausted = advanced.copy(
+            outcomeWire = ContractV1.ADVANCE_OUTCOME_EXHAUSTED,
+            advancedToItemId = null,
+        )
+        val restored = roundTrip(exhausted)
+        assertEquals(exhausted, restored)
+        assertNull("exhausted must stay null, not become an empty string", restored.advancedToItemId)
     }
 }
