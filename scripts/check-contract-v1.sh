@@ -135,6 +135,15 @@ for f in sorted(kt_dir.glob("*.kt")):
     text = f.read_text()
     for em in re.finditer(r"enum\s+class\s+(\w+)\s*\(val wire: Int\)\s*\{(.*?)\n\}", text, re.S):
         name, body = em.group(1), em.group(2)
+        # NOTE: this comprehension has the dict-collapse weakness section 5
+        # documents (duplicate names overwrite, duplicate wires invisible,
+        # unparseable rows silently dropped). It is NOT hardened here on
+        # purpose: a second hand-written strict parser would be a second drift
+        # point. Section 5 parses these same Kotlin files AND the same yaml with
+        # strict_members(), so the duplicate/malformed class is caught there for
+        # all three carriers before any comparison runs. If section 5 is ever
+        # weakened or removed, this line stops being covered -- harden it then
+        # by extracting the shared parser, not by copying it.
         actual[name] = {c: int(w) for c, w in re.findall(r"(\b[A-Z][A-Z0-9_]*)\((\d+)\)", body)}
 
 ok = True
@@ -272,25 +281,75 @@ spec_text = _s6.group(0)
 # domain declared in one shape escapes the gate entirely:
 #   6.2   one-line  `enum class X(val wire: Int) { A(1), B(2) }`
 #   6.3.3 markdown table, one row per code
+# A dict comprehension over re.findall was the wrong tool for all three carriers
+# and hid four distinct defects at once, because findall CANNOT fail: it returns
+# fewer matches. So the gate compared what it managed to parse, never what was
+# actually written, and any row it could not read simply left the comparison --
+# after which all three carriers agreed on the same reduced set and went green.
+# Keying by name additionally made duplicate wires invisible (two names, one
+# number) and let a repeated name silently overwrite its earlier entry.
+#
+# strict_members() replaces skip-on-unparseable with fail-on-unparseable, and
+# reports duplicate names, duplicate wires and duplicate enum types by name.
+PARSE_ERRORS = []
+
+def strict_members(body, where):
+    """Every member of an enum body must parse, or the gate fails loudly."""
+    body = body.split(";", 1)[0]                       # members end at first ';'
+    body = re.sub(r"/\*.*?\*/", " ", body, flags=re.S)  # block comments
+    body = re.sub(r"//[^\n]*", " ", body)               # line comments
+    out, seen_wire = {}, {}
+    for frag in body.split(","):
+        if not frag.strip():
+            continue
+        m = re.fullmatch(r"\s*([A-Z][A-Z0-9_]*)\s*\(\s*(\d+)\s*\)\s*", frag)
+        if not m:
+            PARSE_ERRORS.append("%s: unparseable enum member %r" % (where, frag.strip()[:60]))
+            continue
+        name, wire = m.group(1), int(m.group(2))
+        if name in out:
+            PARSE_ERRORS.append("%s: duplicate member name %s (%d then %d)"
+                                % (where, name, out[name], wire))
+        if wire in seen_wire:
+            PARSE_ERRORS.append("%s: wire %d used by both %s and %s"
+                                % (where, wire, seen_wire[wire], name))
+        out[name], seen_wire[wire] = wire, name
+    return out
+
+def put(store, key, value, where):
+    """Declaring the same enum type twice must not silently keep only the last."""
+    if key in store:
+        PARSE_ERRORS.append("%s: enum type %s declared more than once" % (where, key))
+    store[key] = value
+
 spec_enums = {}
 for m in re.finditer(r"enum class\s+([A-Za-z0-9_]+V1)\s*\(val wire: Int\)\s*\{([^}]*)\}", spec_text):
-    spec_enums[m.group(1)] = {n: int(w) for n, w in re.findall(r"([A-Z][A-Z0-9_]*)\((\d+)\)", m.group(2))}
+    put(spec_enums, m.group(1),
+        strict_members(m.group(2), "canonical §6.2 %s" % m.group(1)), "canonical §6.2")
 
 t = re.search(r"^#### 6\.3\.3 .*?$(.*?)^#### ", spec_text, re.S | re.M)
 if not t:
     print("  FAIL  6.3.3 anchor not found in canonical spec"); sys.exit(1)
-table = {}
+table, tbl_wire = {}, {}
 for line in t.group(1).splitlines():
     r = re.match(r"^\|\s*\*{0,2}(\d+)\*{0,2}\s*\|\s*\*{0,2}`([A-Z_]+)`", line)
     if r:
-        table[r.group(2)] = int(r.group(1))
+        name, wire = r.group(2), int(r.group(1))
+        if name in table:
+            PARSE_ERRORS.append("canonical §6.3.3: duplicate row for %s (%d then %d)"
+                                % (name, table[name], wire))
+        if wire in tbl_wire:
+            PARSE_ERRORS.append("canonical §6.3.3: wire %d claimed by both %s and %s"
+                                % (wire, tbl_wire[wire], name))
+        table[name], tbl_wire[wire] = wire, name
 if table:
     spec_enums.setdefault("ContractErrorCodeV1", {}).update(table)
 
 kt_enums = {}
 for f in sorted(kt_dir.glob("*.kt")):
     for m in re.finditer(r"enum class\s+([A-Za-z0-9_]+)\s*\(val wire: Int\)\s*\{(.*?)\n\}", f.read_text(), re.S):
-        kt_enums[m.group(1)] = {n: int(w) for n, w in re.findall(r"(\b[A-Z][A-Z0-9_]*)\((\d+)\)", m.group(2))}
+        put(kt_enums, m.group(1),
+            strict_members(m.group(2), "kotlin %s (%s)" % (m.group(1), f.name)), "kotlin " + f.name)
 
 yml_enums, cur, in_enums = {}, None, False
 for raw in (pathlib.Path(os.environ["MODULE"]) / "compatibility.yaml").read_text().splitlines():
@@ -301,12 +360,31 @@ for raw in (pathlib.Path(os.environ["MODULE"]) / "compatibility.yaml").read_text
         m = re.match(r"^  (\w+):\s*$", raw)
         if m: cur = m.group(1); yml_enums[cur] = {}; continue
         m = re.match(r"^    (\w+):\s*(\d+)\s*$", raw)
-        if m and cur: yml_enums[cur][m.group(1)] = int(m.group(2))
+        if m and cur:
+            nm, wr = m.group(1), int(m.group(2))
+            if nm in yml_enums[cur]:
+                PARSE_ERRORS.append("yaml %s: duplicate key %s (%d then %d)"
+                                    % (cur, nm, yml_enums[cur][nm], wr))
+            if wr in yml_enums[cur].values():
+                dup = [k for k, v in yml_enums[cur].items() if v == wr][0]
+                PARSE_ERRORS.append("yaml %s: wire %d used by both %s and %s" % (cur, wr, dup, nm))
+            yml_enums[cur][nm] = wr
+        elif in_enums and cur and raw.strip() and not re.match(r"^  \w+:\s*$", raw):
+            # A member line that does not parse must not vanish from the compare.
+            PARSE_ERRORS.append("yaml %s: unparseable line %r" % (cur, raw.strip()[:60]))
 
 carriers = {"canonical": spec_enums, "kotlin": kt_enums, "yaml": yml_enums}
 empty = [n for n, c in carriers.items() if not c]
 if empty:
     print("  FAIL  empty carrier(s): %s" % empty); sys.exit(1)
+
+# Fail BEFORE comparing. An unparseable or duplicated row makes the three sets
+# agree on a reduced view, so if this ran after the comparison the gate would
+# report "all carriers agree" about a document it could not fully read.
+if PARSE_ERRORS:
+    for e in PARSE_ERRORS:
+        print("  FAIL  %s" % e)
+    sys.exit(1)
 
 fail = 0
 
