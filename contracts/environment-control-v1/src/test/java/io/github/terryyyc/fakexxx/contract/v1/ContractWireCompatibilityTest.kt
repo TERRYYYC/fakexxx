@@ -99,14 +99,36 @@ class ContractWireCompatibilityTest {
 
     @Test
     fun `unknown wire codes decode to null on every enum`() {
-        listOf(0, -1, 4, 99, Int.MAX_VALUE, Int.MIN_VALUE).forEach { unknown ->
-            assertNull("VerificationLevelV1.fromWire($unknown)", VerificationLevelV1.fromWire(unknown))
+        // The probe for "just past the top" is DERIVED, never a literal.
+        //
+        // This test used to assert ContractErrorCodeV1.fromWire(12) == null. 12 was
+        // unknown when the line was written, so the assertion looked permanent. The
+        // moment IDEMPOTENCY_CONFLICT(12) landed, this file became statically
+        // self-contradictory: this test demanded 12 decode to null while
+        // `known wire codes decode back to the same constant` demanded every entry
+        // round-trip. Both cannot hold, and CI reported it as one failing test
+        // rather than as what it was -- a stale literal.
+        //
+        // A hardcoded "this number is unknown" is a claim about the FUTURE of the
+        // enum, which a literal cannot keep. Deriving it from entries keeps the
+        // assertion true by construction however many codes get appended.
+        fun probes(topWire: Int) = listOf(0, -1, topWire + 1, Int.MAX_VALUE, Int.MIN_VALUE)
+
+        probes(VerificationLevelV1.entries.maxOf { it.wire }).forEach {
+            assertNull("VerificationLevelV1.fromWire($it)", VerificationLevelV1.fromWire(it))
         }
-        assertNull(ContinuityCoverageV1.fromWire(0))
-        assertNull(ContinuityCoverageV1.fromWire(4))
-        assertNull(DeliveryModeV1.fromWire(3))
-        assertNull(ScheduleDecisionV1.fromWire(4))
-        assertNull(ContractErrorCodeV1.fromWire(12))
+        probes(ContinuityCoverageV1.entries.maxOf { it.wire }).forEach {
+            assertNull("ContinuityCoverageV1.fromWire($it)", ContinuityCoverageV1.fromWire(it))
+        }
+        probes(DeliveryModeV1.entries.maxOf { it.wire }).forEach {
+            assertNull("DeliveryModeV1.fromWire($it)", DeliveryModeV1.fromWire(it))
+        }
+        probes(ScheduleDecisionV1.entries.maxOf { it.wire }).forEach {
+            assertNull("ScheduleDecisionV1.fromWire($it)", ScheduleDecisionV1.fromWire(it))
+        }
+        probes(ContractErrorCodeV1.entries.maxOf { it.wire }).forEach {
+            assertNull("ContractErrorCodeV1.fromWire($it)", ContractErrorCodeV1.fromWire(it))
+        }
     }
 
     @Test
