@@ -34,8 +34,14 @@ SKIP_GRADLE=0
 [ "${1:-}" = "--static-only" ] && SKIP_GRADLE=1
 
 FAILURES=0
+INCONCLUSIVE=0
 pass() { printf '  PASS  %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
+# A check whose TOOLCHAIN could not run is not a failing check and is not a
+# passing one. Section 4 used to print the same `FAIL <target>` line for "the
+# contract tests failed" and for "this machine has no JDK, so Gradle never
+# started" — two states that call for opposite actions, rendered identically.
+inconc() { printf '  INCONCLUSIVE  %s\n' "$1"; INCONCLUSIVE=$((INCONCLUSIVE + 1)); }
 section() { printf '\n== %s ==\n' "$1"; }
 
 command -v python3 >/dev/null 2>&1 || { printf 'check-contract-v1: python3 required\n' >&2; exit 1; }
@@ -174,23 +180,46 @@ if [ "$SKIP_GRADLE" -eq 1 ]; then
   printf '  NOTE  --static-only is NOT a pass of this gate.\n'
 else
   for app in cellrebel-auto qianwangyou; do
-    if ( cd "apps/$app" && ./gradlew --no-daemon :environment-control-v1:testDebugUnitTest ) >/dev/null 2>&1; then
+    # Capture instead of discarding. The old form sent stdout+stderr to
+    # /dev/null, so the single most useful fact — WHY Gradle exited non-zero —
+    # was destroyed at the exact moment it was produced.
+    log="$(mktemp)"
+    if ( cd "apps/$app" && ./gradlew --no-daemon :environment-control-v1:testDebugUnitTest ) >"$log" 2>&1; then
       pass "apps/$app :environment-control-v1:testDebugUnitTest"
+    elif grep -qE 'Unable to locate a Java Runtime|JAVA_HOME is not set|no Java (runtime|installation)' "$log"; then
+      # No JDK on this machine: Gradle never started, so the contract was never
+      # exercised. Reporting FAIL here would be a false red, and — worse — it
+      # would look exactly like a genuine contract regression.
+      inconc "apps/$app :environment-control-v1:testDebugUnitTest — NO JDK; Gradle never started, contract not exercised"
     else
       fail "apps/$app :environment-control-v1:testDebugUnitTest"
+      printf '        ---- last 15 lines ----\n'
+      tail -15 "$log" | sed 's/^/        /'
     fi
+    rm -f "$log"
   done
 fi
 
 # ---------------------------------------------------------------------------
 printf '\n'
-if [ "$FAILURES" -eq 0 ] && [ "$SKIP_GRADLE" -eq 0 ]; then
+if [ "$FAILURES" -eq 0 ] && [ "$SKIP_GRADLE" -eq 0 ] && [ "$INCONCLUSIVE" -eq 0 ]; then
   printf 'check-contract-v1: PASS (all checks)\n'
   exit 0
 fi
-if [ "$FAILURES" -eq 0 ]; then
+if [ "$FAILURES" -eq 0 ] && [ "$SKIP_GRADLE" -eq 1 ]; then
   printf 'check-contract-v1: INCOMPLETE (static checks passed, Gradle checks skipped)\n'
   exit 1
 fi
-printf 'check-contract-v1: FAIL (%d check(s) failed)\n' "$FAILURES"
+if [ "$FAILURES" -eq 0 ]; then
+  # Static guards green, but the build/test half never ran. This is NOT a pass
+  # and must never be reported as one: the gate's whole claim is "the contract
+  # compiles and its tests pass from BOTH app roots", and that claim is exactly
+  # what went unmeasured.
+  printf 'check-contract-v1: INCONCLUSIVE (static guards passed; %d Gradle check(s) could not run — install a JDK 17 or run in CI)\n' \
+    "$INCONCLUSIVE"
+  exit 1
+fi
+printf 'check-contract-v1: FAIL (%d check(s) failed' "$FAILURES"
+[ "$INCONCLUSIVE" -gt 0 ] && printf ', %d inconclusive' "$INCONCLUSIVE"
+printf ')\n'
 exit 1
