@@ -154,18 +154,51 @@ then :; else FAILURES=$((FAILURES + 1)); fi
 # ---------------------------------------------------------------------------
 section "3. every v1 DTO has a .kt and a .aidl declaration"
 
-DTOS="CapabilitySnapshotV1 EnvironmentIntentV1 PreflightRequestV1 PreflightReportV1 ApplyRequestV1 ApplyReceiptV1 ObserveRequestV1 EnvironmentObservationV1 ReleaseRequestV1 ReleaseReceiptV1"
-for dto in $DTOS; do
-  missing=""
-  [ -f "$KT_DIR/$dto.kt" ] || missing="$missing .kt"
-  [ -f "$AIDL_DIR/$dto.aidl" ] || missing="$missing .aidl"
-  if [ -z "$missing" ]; then pass "$dto has .kt and .aidl"; else fail "$dto missing:$missing"; fi
-done
+# The DTO set is DERIVED from the two carriers, not hardcoded.
+#
+# It used to be a literal list in this script. A hardcoded list is the same drift
+# hazard that let the module freeze a superseded spec: adding a DTO to one
+# carrier and forgetting the other stays green, because the list never mentioned
+# the new name. A list you must remember to update is not a gate, it is a note.
+#
+# Parity is checked in BOTH directions: a .kt @Parcelize class with no .aidl
+# cannot cross Binder, and a `parcelable` declaration with no Kotlin class is a
+# dangling declaration. Either one alone is a defect.
+if KT_DIR="$KT_DIR" AIDL_DIR="$AIDL_DIR" python3 - <<'PY'
+import os, pathlib, re, sys
+kt_dir, aidl_dir = pathlib.Path(os.environ["KT_DIR"]), pathlib.Path(os.environ["AIDL_DIR"])
+
+kt = {p.stem for p in kt_dir.glob("*V1.kt")
+      if re.search(r"^@Parcelize", p.read_text(), re.M)}
+aidl = set()
+for p in aidl_dir.glob("*V1.aidl"):
+    if re.search(r"^\s*parcelable\s+" + re.escape(p.stem) + r"\s*;", p.read_text(), re.M):
+        aidl.add(p.stem)
+
+only_kt, only_aidl = sorted(kt - aidl), sorted(aidl - kt)
+if not kt or not aidl:
+    print(f"  FAIL  empty carrier: kotlin={len(kt)} aidl={len(aidl)}"); sys.exit(1)
+if only_kt:   print(f"  FAIL  @Parcelize class without a .aidl declaration: {only_kt}")
+if only_aidl: print(f"  FAIL  .aidl parcelable without a Kotlin class: {only_aidl}")
+if only_kt or only_aidl: sys.exit(1)
+print(f"  PASS  {len(kt)} DTO(s) declared in BOTH carriers (derived, not a hardcoded list)")
+PY
+then
+  pass "DTO .kt <-> .aidl parity"
+else
+  fail "DTO .kt <-> .aidl parity"
+fi
 for extra in ContractEnumsV1 ContractErrorCodeV1 CanonicalIntentDigestV1; do
   if [ -f "$KT_DIR/$extra.kt" ]; then pass "$extra.kt present"; else fail "$extra.kt missing"; fi
 done
 if [ -f "$AIDL_DIR/IEnvironmentControlV1.aidl" ]; then
-  for method in discover preflight apply observe release; do
+  # A required-floor list, deliberately explicit: unlike the DTO set above it
+  # cannot be derived from the interface itself, because deriving "what the
+  # interface declares" from the interface is circular and always passes. These
+  # names come from spec §6.1 plus §6.7.3's completeAndAdvance seam. Binding this
+  # floor to canonical prose is the remaining spec-binding work; until then this
+  # list can only under-specify, never falsely accept a missing method.
+  for method in discover preflight apply observe release completeAndAdvance; do
     if grep -q "$method(" "$AIDL_DIR/IEnvironmentControlV1.aidl"; then
       pass "IEnvironmentControlV1 declares $method"
     else
