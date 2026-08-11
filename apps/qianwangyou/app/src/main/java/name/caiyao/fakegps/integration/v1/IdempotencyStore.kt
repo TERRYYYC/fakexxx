@@ -40,6 +40,12 @@ interface IdempotencyStore {
 class DurableIdempotencyStore(
     private val storage: DurableKv,
 ) : IdempotencyStore {
+
+    companion object {
+        /** The only namespace receipts live in — referenced by crash-injection tests. */
+        const val RECEIPT_NAMESPACE: String = "integration.v1.receipts"
+    }
+
     override fun find(
         callerApplicationId: String,
         operation: ContractOperation,

@@ -32,7 +32,15 @@ class ProviderHarness private constructor() {
     val kv = InMemoryDurableKv()
     val clock = FakeMonotonicClock()
     val resolver = FakeIdentityResolver()
-    val env = FakeQwyEnvironment()
+
+    /**
+     * Kv-backed fake (F-2): the env INSTANCE survives restart (config knobs and
+     * call-counters are deliberately cross-restart instrumentation), but its
+     * SCHEDULE state lives in [kv] — restart drops every non-durable bit of the
+     * system under test, so a memory-only pointer implementation cannot pass
+     * the restart tests.
+     */
+    val env = FakeQwyEnvironment(kv)
 
     lateinit var pairing: DurablePairingStore
         private set
