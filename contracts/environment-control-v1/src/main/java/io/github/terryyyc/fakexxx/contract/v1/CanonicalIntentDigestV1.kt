@@ -1,9 +1,7 @@
 package io.github.terryyyc.fakexxx.contract.v1
 
-import java.io.ByteArrayOutputStream
 import java.math.BigDecimal
 import java.math.RoundingMode
-import java.security.MessageDigest
 
 /**
  * Canonical digest of an [EnvironmentIntentV1]. Frozen algorithm, spec §6.3.1.
@@ -70,35 +68,26 @@ object CanonicalIntentDigestV1 {
 
     /** @return lowercase hex SHA-256 of the canonical encoding of [intent]. */
     fun compute(intent: EnvironmentIntentV1): String =
-        sha256Hex(canonicalBytes(intent))
+        CanonicalDigestV1.digest(CanonicalDigestV1.DOMAIN_INTENT, fields(intent))
 
     /**
      * The canonical byte string. Exposed so a conformance test can assert the
      * framing directly instead of only observing digests.
      */
-    fun canonicalBytes(intent: EnvironmentIntentV1): ByteArray {
-        val out = ByteArrayOutputStream()
-        appendFramed(out, intent.runId.toByteArray(Charsets.UTF_8))
-        appendFramed(out, intent.attemptId.toByteArray(Charsets.UTF_8))
-        appendFramed(out, intent.profileRef.toByteArray(Charsets.UTF_8))
-        appendFramed(out, intent.scheduleRef.toByteArray(Charsets.UTF_8))
-        appendFramed(out, fixedPoint7(intent.latitude).toByteArray(Charsets.US_ASCII))
-        appendFramed(out, fixedPoint7(intent.longitude).toByteArray(Charsets.US_ASCII))
-        appendFramed(out, intent.requiredVerificationWire.toString().toByteArray(Charsets.US_ASCII))
-        appendFramed(out, intent.notBeforeEpochMs.toString().toByteArray(Charsets.US_ASCII))
-        appendFramed(out, intent.deadlineEpochMs.toString().toByteArray(Charsets.US_ASCII))
-        return out.toByteArray()
-    }
+    fun canonicalBytes(intent: EnvironmentIntentV1): ByteArray =
+        CanonicalDigestV1.canonicalBytes(CanonicalDigestV1.DOMAIN_INTENT, fields(intent))
 
-    /** `uint32be(len) || bytes`. */
-    private fun appendFramed(out: ByteArrayOutputStream, bytes: ByteArray) {
-        val len = bytes.size
-        out.write((len ushr 24) and 0xFF)
-        out.write((len ushr 16) and 0xFF)
-        out.write((len ushr 8) and 0xFF)
-        out.write(len and 0xFF)
-        out.write(bytes, 0, len)
-    }
+    private fun fields(intent: EnvironmentIntentV1): List<ByteArray> = listOf(
+        CanonicalDigestV1.utf8(intent.runId),
+        CanonicalDigestV1.utf8(intent.attemptId),
+        CanonicalDigestV1.utf8(intent.profileRef),
+        CanonicalDigestV1.utf8(intent.scheduleRef),
+        fixedPoint7(intent.latitude).toByteArray(Charsets.US_ASCII),
+        fixedPoint7(intent.longitude).toByteArray(Charsets.US_ASCII),
+        CanonicalDigestV1.decimal(intent.requiredVerificationWire),
+        CanonicalDigestV1.decimal(intent.notBeforeEpochMs),
+        CanonicalDigestV1.decimal(intent.deadlineEpochMs),
+    )
 
     /**
      * Fixed point with exactly [COORDINATE_SCALE] decimals, half-even, plain
@@ -111,15 +100,4 @@ object CanonicalIntentDigestV1 {
             .toPlainString()
     }
 
-    private fun sha256Hex(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
-        val hex = StringBuilder(digest.size * 2)
-        for (b in digest) {
-            val v = b.toInt() and 0xFF
-            hex.append(HEX[v ushr 4]).append(HEX[v and 0x0F])
-        }
-        return hex.toString()
-    }
-
-    private val HEX = "0123456789abcdef".toCharArray()
 }

@@ -1336,10 +1336,12 @@ data class EnvironmentObservationV1(
 `acceptedIntentHash` 是 `EnvironmentIntentV1` 的 canonical digest，两侧必须独立算出同一值：
 
 ```text
-canonical = 按下列顺序，对每个字段依次追加：
+canonical = uint32be(byteLength(domain)) || domain
+            然后按下列顺序，对每个字段依次追加：
               uint32be(byteLength(fieldBytes)) || fieldBytes
             无分隔符、无尾随字节。
 
+  domain                    : ASCII "fakexxx:contract:v1:intent"（**首个 framed 字段**）
   runId                     : UTF-8 bytes，原样
   attemptId                 : UTF-8 bytes，原样
   profileRef                : UTF-8 bytes，原样
@@ -1355,6 +1357,8 @@ acceptedIntentHash = lowercase hex of SHA-256(canonical)
 ```
 
 **为什么是长度前缀而不是分隔符连接**：四个 ref 字段是自由字符串，用任何固定分隔符连接都可构造碰撞——例如以换行连接时，`runId="a\nb", attemptId="c"` 与 `runId="a", attemptId="b\nc"` 产生**完全相同**的 canonical 字节，于是两个不同意图共享同一 `acceptedIntentHash`，INV-23 的绑定被绕过。长度前缀让编码单射，碰撞不再依赖"字段里恰好没有分隔符"这种运行期巧合。禁止改回分隔符方案，也禁止用"契约上不允许出现换行"来代偿——那是把不变量的正确性押在输入校验上。
+
+**v1.38 增补：每个 digest 必须带 domain。** 长度前缀只让**一个**字段序列单射，它不阻止「为用途 A 编码的序列」等于「为用途 B 编码的序列」——`len||bytes` 里没有任何东西说明这些字段是什么意思。没有 domain tag 时，intent preimage 与 advance-request preimage 共用同一个空间，正确性就押在「不会有构造输入跨用途碰撞」上。**这正是本节拒绝分隔符连接时用过的同一条理由**（「碰撞不再依赖运行期巧合」），只是上移了一层。所以 domain 作为**首个 framed 字段**写进每个 preimage：`:intent` / `:advance-request` / `:advance-receipt`，三者永不复用。
 
 禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。
 
@@ -1775,6 +1779,25 @@ ProviderPairingRecord(
 `CompleteAndAdvanceRequestV1`：`leaseId` · `idempotencyKey` · `requestDigest`（§6.3.4 同一套 canonical preimage）· `expectedScheduleVersion` · `expectedCurrentItemId` · `completionProof`
 
 `AdvanceReceiptV1`：`outcomeWire` · `advancedFromItemId` · `advancedToItemId`（耗尽时为 null）· `scheduleVersionAfter` · `effectiveIntentHash` · `effectiveEnvironmentRevision` · `receiptDigest`
+
+**`receiptDigest` 的算法（v1.38 冻结——此前完全未定义）**：
+
+```
+domain = "fakexxx:contract:v1:advance-receipt"
+  requestDigest                 UTF-8（**它应答的那个请求**）
+  idempotencyKey                UTF-8
+  outcomeWire                   ASCII decimal
+  advancedFromItemId            UTF-8
+  advancedToItemId              UTF-8；为 null 时用**哨兵**，不是空串
+  scheduleVersionAfter          ASCII decimal
+  effectiveIntentHash           UTF-8
+  effectiveEnvironmentRevision  ASCII decimal
+receiptDigest = lowercase hex of SHA-256(canonical)
+```
+
+**为什么 receipt 必须绑回请求**：不绑请求的 receipt 不构成任何证据——重试时调用方拿回一份 receipt，却无法区分「这是**我这个请求**的存档应答」与「这是 provider 手上碰巧有的另一份应答」。Auto **在信任 receipt 之前先重算它**；重算不上的 receipt 不是「弱一点的 receipt」，**它不是 receipt**。
+
+`advancedToItemId` 为 null（耗尽）时用**构造上不可能出现在真实 id 中**的哨兵编码，而不是空串——否则「推进到无」与「推进到一个 id 恰好为空的项」会碰撞，这与 §6.3.1 拒绝让值吞掉分隔符是同一条理由。
 
 **幂等语义**：同 `idempotencyKey` + 同 `requestDigest` → 返回**同一份 receipt**，**不产生第二次推进**；同键异 digest → `IDEMPOTENCY_CONFLICT`（wire 12）。
 
