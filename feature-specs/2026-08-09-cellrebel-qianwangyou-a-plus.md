@@ -1021,11 +1021,11 @@ Phase 1 导入完成后：
 
 ### 2.1 Finish line
 
-operator 在 Auto 中导入地址清单、选择千网游已有 profile/schedule、设置每地址可信次数和少量常用参数，点击一次开始；Auto 逐地址运行 CellRebel，崩溃后可恢复，只在环境证据完整时计数，最终输出可追溯的可信结果与独立的未验证结果。
+operator 在**千网游**中维护地址计划（顺序/优先级归千网游，见 §5 / §6.7.1），在 Auto 中选择该 schedule、设置每地址可信次数和少量常用参数，点击一次开始；Auto 逐地址运行 CellRebel，崩溃后可恢复，只在环境证据完整时计数，最终输出可追溯的可信结果与独立的未验证结果。
 
 ### 2.2 首版 A+ 范围
 
-- CSV 地址清单：经度、纬度、优先级、每地址可信次数。
+- 每地址可信次数（配额归 Auto）。**地址、经纬度与优先级不再由 Auto 导入**：它们属于千网游的 schedule item（§6.7.1），Auto 只持有稳定引用 `scheduleItemId` + `scheduleVersion`。〔v1.37 更正：旧版在此导入「优先级」，与 §5 的千网游拥有顺序直接冲突，且会造出第二套排序。〕
 - 一个冻结的合法运行模板 `TRUSTED_SYSTEM_MOCK_BATCH_V1`。
 - 常用参数：地址间等待、尝试超时、可恢复错误重试上限、暂停/继续、跳过当前地址。
 - 从千网游发现可用 profile、schedule、模式、契约版本与连续性能力。
@@ -1121,7 +1121,7 @@ Gate 输出只能是 `stay-a-plus`、`promote-specific-controls-to-b` 或 `rejec
 2. 选择 `TRUSTED_SYSTEM_MOCK_BATCH_V1`。
 3. 选择千网游提供的 profile 与 schedule 引用；Auto 不复制它们的内部字段。
 4. 设置每地址可信次数和常用参数。
-5. 预览将执行的地址顺序、总可信次数、预计可用时间窗和停止条件。
+5. 预览**千网游给出的**计划顺序（Auto 只读、不排序、不重排）、总可信次数、预计可用时间窗和停止条件。
 6. 点击开始后冻结 `PlanSnapshot`；改变“什么算成功”的设置必须生成新 plan version，不能改正在运行的账。
 
 ### 4.3 无人值守执行
@@ -1132,7 +1132,7 @@ Gate 输出只能是 `stay-a-plus`、`promote-specific-controls-to-b` 或 `rejec
 4. 识别 CellRebel 是新执行还是 `PRE_EXISTING_RUN`，记录外部执行实例。
 5. 完成后调用 `observe(post)`。
 6. 只有前后环境、连续性、模式、CellRebel 完成证据全部成立时，事务性插入一次可信配额。
-7. 调用 `release`；完成指定次数后进入下一地址。
+7. 调用 `release`；达到配额后**不自行进入下一地址**，而是带 `CompletionProofV1` 调用 `completeAndAdvance`（compare-and-advance，前置为 `expectedCurrentItemId` + `expectedScheduleVersion`），由千网游原子推进并返回 receipt；Auto 随后**独立 `observe` 验证新生效环境**才继续。〔v1.37 更正：旧版「完成指定次数后进入下一地址」是 Auto 自行推进，与 §6.7 握手直接冲突。〕
 8. 失败按 typed policy 重试、暂停、跳过或 fail-closed；不把未知结果猜成成功。
 
 ### 4.4 崩溃后恢复
