@@ -18,22 +18,23 @@ import org.junit.Test
 /**
  * SUPPLEMENTARY RED LANE — provider-side completeAndAdvance (§6.7).
  *
- * NOT ledger rows and NOT counted as ledger coverage: §10.1 today assigns
- * M-AD-01..11 to the Auto consumer lane. Provider-side M-AD row IDs are being
- * added by Opus5 in the contract PR (routed via #3 after Sol's verification of
- * d21102d); ONLY once those IDs + precedence land in a canonical HEAD do these
- * methods get bound row-by-row to exact IDs and enter the derived counts.
- * Until that binding, deleting this file would still leave the verifier
- * green — this coverage is real but VIRTUAL to the gate (Sol's warning).
+ * NOT ledger rows and NOT counted as ledger coverage. As of exact HEAD
+ * 590ab58 (spec v1.39) the FIRST provider-owned advance rows exist and are
+ * bound in matrix/AdvanceMatrixTest.kt (M_AD_12 lease gate wire 7, M_AD_13
+ * frozen-order first-hit). The REMAINING provider semantics below (CAS gates,
+ * pointer+receipt single transaction, idempotent receipt refetch, exhausted
+ * duality, ordering facets) stay supplemental: Opus5 allocates their IDs in
+ * one batch — do NOT self-assign IDs (ID drift), and do NOT count this file
+ * toward the ledger (deleting it would still leave the verifier green).
  *
- * Precedence pinned here (Sol-verified ordering, awaiting canonical freeze):
- *   1. same-key + same-digest replay short-circuits FIRST (returns the stored
- *      receipt even if the caller now holds a new active lease);
- *   2. for a fresh request: schedule preconditions (§6.7.4 wire 14/15/16)
- *      are judged BEFORE the active-lease gate;
- *   3. the active-lease gate (§6.7.4a, ruling direction: exact
- *      LEASE_CONFLICT(7), no new wire) sits AFTER the preconditions and
- *      BEFORE any mutation — a rejected advance never moves the pointer.
+ * Judgment order is now FROZEN as §6.7.4b:
+ *   proof → idempotency → schedule(14/15/16) → lease(7) → mutation
+ * with two pinned rationales: idempotent replay precedes the schedule gate
+ * (after a successful advance the replayed expectedCurrentItemId is
+ * necessarily expired — schedule-first would collapse M-AD-02 into M-AD-04
+ * and shoot down legal replays), and the schedule gate precedes the lease
+ * gate (a stale/exhausted schedule makes lease state irrelevant; lease-first
+ * sends Auto through a wasted release-retry into the same terminal).
  */
 class AdvanceProviderRedTest {
 
@@ -282,34 +283,47 @@ class AdvanceProviderRedTest {
         }
     }
 
-    // ---------------------------------------------- lease gate + precedence
+    // ------------------------------------------- §6.7.4b ordering facets
+    // (the lease gate row itself is ledger-bound: AdvanceMatrixTest::M_AD_12)
 
     /**
-     * §6.7.4a active-lease gate: preconditions pass, but the caller still holds
-     * an active lease → rejected with LEASE_CONFLICT(7) and NO mutation.
-     * Code pins the Sol-verified #3 ruling direction (exact LEASE_CONFLICT, no
-     * new wire); re-confirm when the canonical HEAD freezes the mapping.
+     * §6.7.4b facet: the proof gate is judged BEFORE idempotency. A reused key
+     * carrying a now-BLANK proof has a different digest — idempotency-first
+     * would answer IDEMPOTENCY_CONFLICT(12); the frozen order answers
+     * REQUEST_INVALID(13) because the proof gate rejects it first.
      */
     @Test
-    fun advance_withActiveLease_leaseConflict_noAdvance() {
+    fun advance_proofGate_precedesIdempotency() {
         val h = harness()
-        val receipt = h.apply(key = "adv-active-apply") // NOT released
+        val leaseId = earnAndRelease(h)
+        h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-k8"))
 
-        expectContractFailure(ContractErrorCodeV1.LEASE_CONFLICT) {
-            h.handler.completeAndAdvance(AUTO_UID, request(h, receipt.leaseId, "adv-k8"))
+        val blankProof = CompletionProofV1(
+            scheduleItemId = "",
+            trustedSuccessCount = 0,
+            quotaRequired = 0,
+            ledgerRef = "",
+            verifiedAtElapsedRealtimeMs = h.clock.elapsedRealtimeMs(),
+        )
+        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, "adv-k8", expectedItemId = "item-2", completionProof = blankProof),
+            )
         }
-        assertEquals("item-1", h.env.currentItemId)
-        assertEquals("mutation never happened", 0, h.env.advanceCount)
+        assertEquals("no second advance", 1, h.env.advanceCount)
     }
 
     /**
-     * Precedence 1: same-key + same-digest replay is judged BEFORE the
-     * active-lease gate — a completed advance stays retrievable even after the
-     * caller acquired the next item's lease. Failing this turns every
+     * §6.7.4b facet: same-key + same-digest replay is judged before BOTH the
+     * schedule gate and the lease gate — after a successful advance the
+     * replayed expectedCurrentItemId is necessarily expired AND the caller may
+     * already hold the next item's lease; the stored receipt must still come
+     * back. Failing this collapses M-AD-02 into M-AD-04 and turns every
      * crash-recovery replay during the next apply into a spurious conflict.
      */
     @Test
-    fun advance_replaySameKey_precedesActiveLeaseGate() {
+    fun advance_replaySameKey_precedesScheduleAndLeaseGates() {
         val h = harness()
         val leaseId = earnAndRelease(h)
         val req = request(h, leaseId, "adv-k9")
@@ -324,10 +338,10 @@ class AdvanceProviderRedTest {
     }
 
     /**
-     * Precedence 2: for a FRESH request, schedule preconditions are judged
-     * BEFORE the active-lease gate — stale item reports wire 14, not
-     * LEASE_CONFLICT, even while a lease is active. (Gate order: replay →
-     * preconditions → lease gate → mutation.)
+     * §6.7.4b facet: for a FRESH request the schedule gate is judged BEFORE
+     * the lease gate — stale item reports wire 14, not LEASE_CONFLICT, even
+     * while a lease is active. (The canonical stale-VERSION + active-lease
+     * combination is the ledger-bound AdvanceMatrixTest::M_AD_13.)
      */
     @Test
     fun advance_freshRequest_preconditionBeatsLeaseGate() {
