@@ -24,4 +24,21 @@ data class CapabilitySnapshotV1(
     val environmentRevision: Long,
     val profileRefs: List<String>,
     val scheduleRefs: List<String>,
+    /**
+     * Identity of the schedule item that is currently effective, and the version
+     * of the schedule it belongs to (§6.7.1).
+     *
+     * Without these, Auto cannot construct the expectedCurrentItemId /
+     * expectedScheduleVersion preconditions that §6.7.4 requires, so
+     * SCHEDULE_ITEM_MISMATCH and SCHEDULE_VERSION_STALE would exist as wire codes
+     * that nothing can ever legitimately trigger -- guards that are present and
+     * unreachable.
+     *
+     * All three are null together when the provider has no active schedule, which
+     * is a legal state at discover() time. Null must be read as "no current item",
+     * never as "any item".
+     */
+    val currentScheduleId: String?,
+    val currentItemId: String?,
+    val scheduleVersion: Long?,
 ) : Parcelable

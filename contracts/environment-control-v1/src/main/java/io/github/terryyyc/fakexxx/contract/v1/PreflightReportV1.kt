@@ -24,4 +24,12 @@ data class PreflightReportV1(
     val environmentRevision: Long,
     /** [ContractErrorCodeV1] wire codes; empty means preflight passed. */
     val blockingReasonWires: List<Int>,
+    /**
+     * The schedule item and version this report is about (§6.7.1). A report that
+     * does not name its item cannot be told apart from a report about the item
+     * that was current a moment ago, which is exactly the confusion an advance
+     * creates.
+     */
+    val scheduleItemId: String,
+    val scheduleVersion: Long,
 ) : Parcelable

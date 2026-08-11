@@ -25,11 +25,26 @@ data class EnvironmentObservationV1(
      */
     val acceptedIntentHash: String,
     val observedAtEpochMs: Long,
+    /**
+     * The ONLY comparable clock (§6.4.2). SystemClock.elapsedRealtime() is device
+     * monotonic, counts from boot, is comparable across processes, and is immune
+     * to NTP correction, timezone and the user changing the clock. All bracketing
+     * and continuity comparison must use this field.
+     *
+     * observedAtEpochMs stays, but for humans and audit only: a wall clock pulled
+     * back by NTP inside the test window makes a POST observation numerically
+     * earlier than the completion it is supposed to follow, and the predicate then
+     * holds while covering nothing.
+     */
+    val observedAtElapsedRealtimeMs: Long,
     val environmentRevision: Long,
     val environmentFingerprint: String,
     /** [ContinuityCoverageV1] wire code. */
     val continuityCoverageWire: Int,
     val continuitySinceEpochMs: Long?,
+    /** Start of the continuity window on elapsedRealtime. Trust decisions use
+     *  THIS field, never the epoch one (§6.4.2). */
+    val continuitySinceElapsedRealtimeMs: Long?,
     /** [DeliveryModeV1] wire code, or null when the provider cannot determine it. */
     val deliveryModeWire: Int?,
     /** [VerificationLevelV1] wire code. */
@@ -40,4 +55,17 @@ data class EnvironmentObservationV1(
     /** [ScheduleDecisionV1] wire code. */
     val scheduleDecisionWire: Int,
     val evidenceRefs: List<String>,
+    /**
+     * Which schedule item this observation is evidence FOR (§6.7.1 / §6.7.5).
+     *
+     * This is what makes post-advance verification possible at all. One profile
+     * may be reused by several schedule items, so matching the profile, the
+     * coordinates or even the environmentFingerprint does NOT prove the
+     * observation belongs to the item the receipt claims to have advanced to.
+     * Auto compares this against AdvanceReceiptV1.advancedToItemId; without it
+     * the only available check is "the environment looks right", which is
+     * precisely wrong-environment attribution.
+     */
+    val scheduleItemId: String,
+    val scheduleVersion: Long,
 ) : Parcelable

@@ -376,6 +376,68 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "7. DTO fields agree between canonical §6.3 and Kotlin"
+
+# Sections 5 and 6 bind the ERROR CODES and the METHOD names. Nothing bound the
+# FIELDS, and the gap proved itself: three DTOs gained schedule identity in
+# Kotlin while canonical's exact-schema snippets still showed the old field
+# lists, and this gate stayed green through it.
+#
+# That is not a cosmetic mismatch. §6.3 says "a field not listed here is not part
+# of v1", so an unlisted field is simultaneously shipped and denied -- the same
+# contradiction P1 #2 created for methods, one level down.
+if SPEC="$SPEC_PATH" KT_DIR="$KT_DIR" python3 - <<'PY'
+import os, pathlib, re, sys
+
+spec = pathlib.Path(os.environ["SPEC"]).read_text()
+kt_dir = pathlib.Path(os.environ["KT_DIR"])
+
+def fields(body):
+    # `val name: Type` at property position; comments and KDoc are skipped by
+    # requiring the line to start (after indent) with `val`.
+    return set(re.findall(r"^\s*val\s+([A-Za-z0-9_]+)\s*:", body, re.M))
+
+def classes(text):
+    out = {}
+    for m in re.finditer(r"data class\s+([A-Za-z0-9_]+V1)\s*\((.*?)\n\)\s*:\s*Parcelable", text, re.S):
+        out[m.group(1)] = fields(m.group(2))
+    return out
+
+spec_c = classes(spec)
+kt_c = {}
+for p in kt_dir.glob("*V1.kt"):
+    c = classes(p.read_text())
+    kt_c.update(c)
+
+shared = sorted(set(spec_c) & set(kt_c))
+if not shared:
+    print("  FAIL  no DTO appears in both canonical §6.3 and Kotlin"); sys.exit(1)
+
+fail = 0
+for name in shared:
+    a, b = spec_c[name], kt_c[name]
+    missing, extra = sorted(a - b), sorted(b - a)
+    if missing or extra:
+        fail = 1
+        if missing: print(f"  FAIL  {name}: in spec but NOT in Kotlin: {missing}")
+        if extra:   print(f"  FAIL  {name}: in Kotlin but NOT in spec: {extra}")
+if fail == 0:
+    total = sum(len(spec_c[n]) for n in shared)
+    print(f"  PASS  {len(shared)} DTO(s), {total} field(s) identical in both directions")
+
+# A DTO that canonical declares but Kotlin never implements is also a defect.
+only_spec = sorted(set(spec_c) - set(kt_c))
+if only_spec:
+    print(f"  FAIL  declared in canonical §6.3 but absent from Kotlin: {only_spec}"); fail = 1
+sys.exit(fail)
+PY
+then
+  pass "DTO field sets bound to canonical §6.3"
+else
+  fail "DTO field sets differ from canonical §6.3"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if [ "$FAILURES" -eq 0 ] && [ "$SKIP_GRADLE" -eq 0 ] && [ "$INCONCLUSIVE" -eq 0 ]; then
   printf 'check-contract-v1: PASS (all checks)\n'

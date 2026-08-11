@@ -1262,6 +1262,13 @@ data class CapabilitySnapshotV1(
     val environmentRevision: Long,
     val profileRefs: List<String>,
     val scheduleRefs: List<String>,
+    /** 当前有效的 schedule 身份与版本（§6.7.1）。三者同为 null 表示provider 当前
+     *  没有活动 schedule——这是 discover() 时的合法状态；null 读作「没有当前项」，
+     *  绝不可读作「任意项」。缺了它们，Auto 无法构造 §6.7.4 的两条前置，
+     *  wire 14/15 就成了**存在但不可达**的守卫。 */
+    val currentScheduleId: String?,
+    val currentItemId: String?,
+    val scheduleVersion: Long?,
 ) : Parcelable
 
 @Parcelize
@@ -1311,6 +1318,13 @@ data class EnvironmentObservationV1(
     val isMock: Boolean?,
     val scheduleDecisionWire: Int,
     val evidenceRefs: List<String>,
+    /** 本观察是**为哪个 schedule item** 作证（§6.7.1 / §6.7.5）。
+     *  一个 profile 可被多个 schedule item 复用，所以匹配 profile、坐标、
+     *  甚至 environmentFingerprint 都**不能**证明观察属于 receipt 声称推进到的那一项。
+     *  Auto 用它与 `AdvanceReceiptV1.advancedToItemId` 比对；没有它，唯一可做的检查
+     *  就只剩「环境看起来对」——那正是错环境归因。 */
+    val scheduleItemId: String,
+    val scheduleVersion: Long,
 ) : Parcelable
 ```
 
@@ -1371,6 +1385,10 @@ data class PreflightReportV1(
     val environmentRevision: Long,
     /** ContractErrorCodeV1.wire 列表；空表示预检通过。 */
     val blockingReasonWires: List<Int>,
+    /** 本报告所针对的 schedule item 与版本（§6.7.1）。不点名 item 的报告，
+     *  与「上一刻还是当前项」的报告无法区分——而推进制造的正是这种混淆。 */
+    val scheduleItemId: String,
+    val scheduleVersion: Long,
 ) : Parcelable
 
 @Parcelize
@@ -1550,6 +1568,8 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 | `observedAtElapsedRealtimeMs` | **谓词** | pre 早于 `startedAtElapsed`，post 晚于 `completedAtElapsed` |
 | `environmentRevision` | 谓词 | `pre == post` |
 | `environmentFingerprint` | 谓词 | `pre == post` |
+| `scheduleItemId` | **谓词** | 推进后必须 `== AdvanceReceiptV1.advancedToItemId`；profile 可跨 item 复用，故环境相符**不能**替代本条 |
+| `scheduleVersion` | **谓词** | 必须 `== AdvanceReceiptV1.scheduleVersionAfter`；不等表示计划在观察窗口内又变了 |
 | `continuityCoverageWire` | 谓词 | `== FULL` |
 | `continuitySinceEpochMs` | 审计 | 人读；禁止参与判定 |
 | `continuitySinceElapsedRealtimeMs` | **谓词（pre 与 post 两侧）** | 两侧均非空、**彼此相等**、且 `<= pre.observedAtElapsed` |
