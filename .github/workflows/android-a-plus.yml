@@ -36,13 +36,27 @@ jobs:
 
       - name: check-provenance
         # --stage is required and has no default (see the script header). At
-        # PR-1 the vendored apps must still be pristine, so this branch runs
-        # the strict stage. When a later PR legitimately changes an app, this
-        # line is what moves to --stage contract/full; the root-tree anchor in
-        # section 1 is checked at every stage regardless. (The import *commit*
-        # is not the anchor — a squash/rebase merge legitimately discards it,
-        # so it is asserted only while still reachable.)
-        run: ./scripts/check-provenance.sh --stage import
+        # PR-1 the vendored apps must still be pristine, so that branch ran the
+        # strict stage, and its comment said this line is what moves when a
+        # later PR legitimately changes an app.
+        #
+        # THIS IS THAT PR. Wiring the contract module into both app Gradle roots
+        # is the first legitimate divergence: 7 app build files, +34 lines, all
+        # of it `include`/`implementation`/`<queries>` plumbing and no upstream
+        # source touched. Measured on this exact tree:
+        #
+        #   --stage import   -> rc=1  (2 checks failed: HEAD tree != upstream)
+        #   --stage contract -> rc=0
+        #   --stage full     -> rc=0
+        #
+        # So the move is the designed behaviour, not a weakening: the root-tree
+        # anchor in section 1 is still checked at EVERY stage, and it is what
+        # proves the vendored history descends from the recorded upstream SHAs.
+        # Only the "current HEAD is still byte-identical" assertion is retired,
+        # and it is retired because it has become false on purpose. (The import
+        # *commit* is not the anchor — a squash/rebase merge legitimately
+        # discards it, so it is asserted only while still reachable.)
+        run: ./scripts/check-provenance.sh --stage contract
 
       - name: selftest-provenance
         # The negative matrix is a regression gate, not a table in a document.
