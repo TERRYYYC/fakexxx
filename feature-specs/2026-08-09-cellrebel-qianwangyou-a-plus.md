@@ -113,6 +113,7 @@ source_threads:
 | **v1.34** | PR-0.2 第三十轮 | Sol gen-11 初判 **0 P1 + 2 P2**〔**当轮记录，随后被 Sol 补充 verdict 更正为 1 P1 + 2 P2**：新 P1 = 第六格 TAB 传输截尾，见 v1.35，勿照本行读作「P1 已闭合」〕。**P2-1**：N-5 在它负责保护的 `readonly -f each_import` 被删除后仍全绿——它不断言退出码、只搜一个 entry-file 段无条件输出的字符串，注入记录仍是旧 4 字段（构成独立失败源），更根本的是「丢掉 qwy」的 fork 本就被 0a 集合检查拦下、**从未触达 `readonly -f`**。改注入**合法 5 格但 SHA 伪造**的 fork，断言 rc 与只来自 doc-binding 循环的证据，新增 **M-4**（删 `readonly -f` 必使 N-5 失败）；并把「逐条变异」收窄为**实际的 4 条具名 mutation**。**P2-2** #10 body 两句 stale current 声明与 4→5 字段文案已收口。见 §0.1.34 |
 | **v1.35** | PR-0.2 第三十轮·补充 | Sol 补充 verdict 把 gen-11 由 `0 P1 + 2 P2` 更正为 **1 P1 + 2 P2**。**新 P1：校验发生在值上，损坏发生在传输上。** `doc_row()` 把六格用 TAB 串行化、消费方一律 `cut -f1..f6`；第六格内部写 `<canonical sha><TAB>JUNK` 会生成**第七个传输字段**，`cut -f6` 静默截尾，于是文档指着一个带垃圾尾巴的值，checker 照样打印 `records the canonical import commit 5687e319f` 并 rc=0——**full-DAG `--stage import` 与 depth-1 history-lost `--stage contract` 两条路径均已复现**。v1.33「只 trim 外围」是对的，但只管到了值：`[[:space:]]` 覆盖 TAB，而内部 TAB 既不在首也不在尾。改为**拒绝任意单元格的内部空白** + **独立断言拼装后恰好六个传输字段**（两层）；补 `N-12`（full-DAG import）/ `N-13`（history-lost contract）两条负例与 `M-5`（同时退两层）。实测修前两条均 rc=0、修后均 rc=1。**判据补第十四条**（拼装再解析时，分隔符必须被证明不可能出现在字段内部）。见 §0.1.35 |
 | **v1.36** | PR-0.2 第三十一轮 | Sol gen-13 判 **0 P1 + 2 P2**，代码侧 blocker 清零。**归因实验**：上一轮我把 `setup()` 诊断与 `mk_fulldag` 两处候选修复放进同一 commit，CI 转绿却说不出是谁修好的；改用一次性 ref + `workflow_dispatch` 只退回硬化（probe `8cde419b` / run `31376782849`，**PR 分支零改动**），CI 精确报 **`Author identity unknown`**——夹具真因确认为 `git clone` 不继承 committer 身份（macOS 从 user@host 推导、runner 拒绝，而 `mk_squashed` 一直持久化身份）。同一日志的 **`INCONCLUSIVE: N-12 was not green before the mutation`** 则给 pre-green guard 自身的承重证据。**P2-1**：两份 PR body 仍把当前 HEAD 投影成我自己撤回的 known-red `40029ae8`——v1.34 的「唯一当前真相块」解决了「有几份」，没解决「是否新鲜」。**P2-2**：`§0.1.35` 声称「塞进每一个字段」而只测第六格，已**六格逐格参数化**（cell 2..6 由内部空白规则判红、cell 1 由 row selector 判红）。**判据补第十五条**（不知根因时只交付诊断，不在同一提交里附带候选修复）。**同轮另闭 Sol preflight 两条 truth-binding**：`§0.1.34` 正文原样呈现被上修的初版 verdict（读起来像 terminal closure），已加 initial/superseded 限定并保留原文可追溯，不改写历史；`mk_fulldag` 源码注释把**已被证伪**的 detached/empty-tree 机制写作既证事实（与同一 commit body 自相矛盾），已改为只陈述"去除 ambient/symbolic 依赖"、不归因，归因证据留在本节。见 §0.1.36 |
+| **v1.37** | PR-2 第一轮·operator 架构更正 | **顺序的所有权错了，而且错成了两个所有者。** §5 上一版把「计划顺序」判给 Auto，同表下一行又把 profile/schedule 判给千网游为唯一权威——同一个排序有两个 owner。后果不是措辞不一致：Auto 可以按经纬度排一套顺序，千网游按「环境」（经纬度 **+** 蜂窝/网络/Wi-Fi Hook 字段是一个整体）排另一套，位置于是与网络 Hook 状态漂移。按 operator 裁定更正为：**顺序/优先级归千网游，配额与完成判定归 Auto，推进是二者之间一次幂等握手**。§5 边界表重写；新增 **§6.7 调度身份与「达标→完成→推进」**：`scheduleId`/`scheduleItemId`（稳定、非位置）/`scheduleVersion`（顺序或成员变化必自增）/`currentItemId`；`CompletionProofV1` 由 Auto 出、千网游只记不重算；`CompleteAndAdvanceRequestV1`/`AdvanceReceiptV1` 走 §6.3.4 同一套 digest，**compare-and-advance**：`expectedCurrentItemId` 与 `expectedScheduleVersion` 双前置，新增 wire **14 `SCHEDULE_ITEM_MISMATCH`**（挡错项/重复推进）、**15 `SCHEDULE_VERSION_STALE`**（判定期间计划被改）、**16 `SCHEDULE_EXHAUSTED`**（终态非失败）；推进与指针同事务、receipt 可按幂等键重取、**Auto 必须 observe 独立验证新生效环境**（receipt 是自述不是生效证据）；千网游隐式首行/遗留行序迁移到显式 `currentItemId`。原 §6.7 兼容矩阵顺延为 §6.8，5 处旧引用同步。见 §5 / §6.7 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -120,7 +121,7 @@ v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做�
 |---|---|---|
 | 意图绑定 | 新增 `EnvironmentObservationV1.acceptedIntentHash`、canonical digest 算法、坐标容差；可信谓词新增意图绑定段 | §6.3、§6.3.1、§6.4、INV-23、AC-13 |
 | DTO 补全 | 补齐 `ApplyRequestV1`/`PreflightRequestV1`/`PreflightReportV1`/`ObserveRequestV1`/`ReleaseRequestV1`/`ReleaseReceiptV1`，`EnvironmentIntentV1` 纳入文件所有权 | §6.3.2、§12 |
-| 枚举 wire | 枚举改为稳定 `Int` wire code + 显式 `fromWire()`，未知值 fail-closed | §6.2、§6.7 |
+| 枚举 wire | 枚举改为稳定 `Int` wire code + 显式 `fromWire()`，未知值 fail-closed | §6.2、§6.8 |
 | 包可见性 | Auto Manifest 新增千网游两个 applicationId 的 `<queries>`，并纳入 owner matrix | §6.1、§12.1、Task 2 |
 | minSdk | contract library 冻结 `minSdk = 24`；Auto 26 / qwy 24 不变 | §6.1 |
 | 配对次序 | 首次配对改为 bind-first，身份来自 `Binder.getCallingUid()` | §4.1、§6.5 |
@@ -1148,10 +1149,14 @@ operator 在运行页直接看到：当前地址、可信完成数、未验证�
 
 ## 5. 职责、API 与日志边界
 
+> **v1.37 边界更正（operator 裁定）**：上一版把「计划顺序」判给 Auto，同一张表下一行又把 profile/schedule 判给千网游为唯一权威——**同一个排序有两个所有者**。这不是措辞问题：Auto 一旦自己排序，就可能按经纬度排出一套顺序，而千网游按「环境」（经纬度 **+** 蜂窝/网络/Wi-Fi Hook 字段是**一个整体**）排出另一套，位置于是与网络 Hook 状态漂移。**顺序归千网游，配额与完成判定归 Auto，推进是二者之间一次幂等握手。**
+
 | 边界 | Auto | 千网游 | 禁止 |
 |---|---|---|---|
-| 地址/配额 | 拥有计划顺序、每地址可信配额 | 不拥有 | 千网游替 Auto 计 CellRebel 次数 |
-| profile/schedule | 仅保存稳定引用和计划快照 | 唯一权威，解析当前有效策略 | Auto 复制或解释内部规则 |
+| 地址计划顺序/优先级 | **不拥有**；只读当前有效项的稳定引用（`scheduleItemId` + `scheduleVersion`） | **唯一权威**：拥有 schedule 的顺序、优先级与版本 | Auto 自行排序；或按 profile 行序、隐式首行推断顺序 |
+| 每地址可信配额与完成判定 | **唯一权威**：定义配额、判定是否达成 | 不推断、不代计 | 千网游替 Auto 计 CellRebel 次数 |
+| 推进（complete → advance） | 证明当前项达标后**发起**幂等推进请求 | **唯一执行方**：校验前置条件、原子推进 current item、返回 receipt | 任一方直接改写对方状态；无 receipt 即认定已推进 |
+| profile/schedule | 仅保存稳定引用和计划快照 | 唯一权威，解析当前有效策略；**profile 是一个完整环境**（位置与蜂窝/网络/Wi-Fi 字段不可分割） | Auto 复制或解释内部规则；把位置与网络字段拆成两个可独立排序的维度 |
 | Hook/System Mock | 请求意图、消费证据 | 唯一实现与模式权威 | Auto 启停 provider、写 prefs、UI 驱动千网游 |
 | CellRebel | 唯一执行与完成判定方 | 不操作 | 千网游推断 CellRebel 完成 |
 | 连续性 | 前后消费并验证 | 产生“相关变化必变”的 revision 与覆盖声明 | 用心跳代替连续性 |
@@ -1239,7 +1244,7 @@ enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DE
 - 可信策略必须显式匹配 `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`；禁止枚举顺序、`ordinal`、`>=` 或“非 NONE 即可信”。
 - **禁止把枚举本体交给 `@Parcelize` 自动编解码。** kotlin-parcelize 的 `IrEnumParcelSerializer` 写入 `Parcel.writeString(value.name)`、读出 `EnumClass.valueOf(readString())`。后果：重排常量顺序是 wire-safe 的（ordinal 不上线），但**改名是破坏性变更，新增常量会让旧读者抛 `IllegalArgumentException`**——异常从生成的 `createFromParcel` 抛出，表现为 unparcel 崩溃，而不是 INV-03 要求的 typed fail-closed。两个 App 独立发布、版本必然 skew（§10 version 行），所以自动编解码在本方案里不可用。承载 `Int` + 显式 `fromWire()` 把 skew 变成可判定的业务错误。
 - `fromWire()` 返回 `null` 时一律 fail-closed：可信路径直接判不可信，握手路径返回 `INCOMPATIBLE_PROTOCOL`。
-- v1 已分配的 wire code 永久不可回收、不可改语义；新增常量只能追加新 code，且必须先通过 §6.7 兼容矩阵。
+- v1 已分配的 wire code 永久不可回收、不可改语义；新增常量只能追加新 code，且必须先通过 §6.8 兼容矩阵。
 
 ### 6.3 核心 DTO
 
@@ -1425,6 +1430,9 @@ data class ReleaseReceiptV1(
 | 11 | `INTERNAL_FAILURE` | 服务端内部错误；**以及未知 `ContractErrorCodeV1` wire 的唯一 fallback** | INV-03 |
 | **12** | **`IDEMPOTENCY_CONFLICT`** | **同 `idempotencyKey` 但 payload digest 不同** | **INV-13；`apply 同键异 payload` 行** |
 | **13** | **`REQUEST_INVALID`** | **请求结构性非法：必填 ref 为空、坐标越界、`deadline ≤ notBefore`** | **INV-04；contract round-trip 负例** |
+| **14** | **`SCHEDULE_ITEM_MISMATCH`** | **`expectedCurrentItemId` ≠ 实际 `currentItemId`；挡住错项推进与重复推进** | **§6.7.4；advance 负例** |
+| **15** | **`SCHEDULE_VERSION_STALE`** | **`expectedScheduleVersion` ≠ 实际 `scheduleVersion`：判定配额期间计划被改** | **§6.7.4；advance 负例** |
+| **16** | **`SCHEDULE_EXHAUSTED`** | **无下一项。终态而非失败：当前项保持，不回绕** | **§6.7.4；advance 终态例** |
 
 **两个方向必须分清**：上表全部是**服务端→调用方**的失败码。`PreflightReportV1` 里 `scheduleDecision == WAIT_UNTIL` 却缺 `waitUntilEpochMs`，是**应答**结构性非法，不是请求非法，因此**不能**用 `REQUEST_INVALID` 表示——那会把服务端缺陷伪装成调用方错误。冻结消费方处置：Auto 收到自相矛盾的应答一律 **fail-closed**，按 §6.4.1 矛盾 tuple 处理（不进入可信判定、不启动 CellRebel、写未验证并记 typed reason），并在预检页给出可操作错误。同类规则适用于任何应答级矛盾。
 
@@ -1472,7 +1480,7 @@ domain（ASCII，逐 operation 唯一）:
 |---|---|
 | `idempotencyKey` | 它是**查找键**不是内容。同键同内容=重放、同键异内容=冲突，键本身进 digest 只会恒等抵消 |
 | `operationId` | **逐次调用变化**。若进 digest，每一次合法重试都会被判成 `IDEMPOTENCY_CONFLICT`，恢复路径直接瘫痪 |
-| `callerProtocolVersion` | 协议兼容由 §6.7 握手判定；进 digest 会让"重试期间调用方升级"变成伪冲突。v1 已冻结，v2 走新 interface |
+| `callerProtocolVersion` | 协议兼容由 §6.8 握手判定；进 digest 会让"重试期间调用方升级"变成伪冲突。v1 已冻结，v2 走新 interface |
 | caller 身份 | receipt 查找本就按 `(caller, operation, idempotencyKey)` 三元组作用域，重复计入无意义 |
 
 **必测**：① 同键同内容重放返回原 receipt；② 同键异内容返回 `IDEMPOTENCY_CONFLICT`；③ **domain separation**——构造使 `apply` 与 `release` 的字段字节序列相同的输入，断言两者 digest 不同；④ 长度前缀单射性（同 §6.3.1 的分隔符碰撞对）；⑤ 同一请求换 `operationId` 重试**不得**冲突。
@@ -1622,7 +1630,7 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 
 **为什么不能直接用 `hasSigningCertificate(uid, digest, …)` 作为配对校验**：该 API 的语义是"该 uid **曾经或当前**使用过这张证书"，它是为**兼容证书轮转**设计的。拿配对时存下的旧 digest 去查，证书轮转之后**仍然返回 true**——于是 §6.5 的"signer 改变必须重新配对"被静默绕过。它可以用于"这是不是同一条轮转链"的辅助判断，但**不能**作为身份等同的判据。
 
-**多签名者：v1 一律 fail-closed 拒绝**（`SigningInfo.hasMultipleSigners()` 为真即拒）。理由是窄接口优先：单一 digest 无法无歧义表示一个签名者集合。若将来产品必须支持，只能冻结"排序后 signer-set 的 canonical digest"并走 §6.7 兼容矩阵，不得用"取第一个"或"任一匹配"含混带过。
+**多签名者：v1 一律 fail-closed 拒绝**（`SigningInfo.hasMultipleSigners()` 为真即拒）。理由是窄接口优先：单一 digest 无法无歧义表示一个签名者集合。若将来产品必须支持，只能冻结"排序后 signer-set 的 canonical digest"并走 §6.8 兼容矩阵，不得用"取第一个"或"任一匹配"含混带过。
 
 24–27 路径必须在配对 UI 上明示"本设备使用降级签名校验"，不得静默等同于 28+ 的保证。两条路径都必须有测试；shared UID 拒绝、多签名者拒绝、**证书轮转后必须要求重新配对**三条都是必测负例。
 
@@ -1687,7 +1695,7 @@ ProviderPairingRecord(
 
 `versionCode` 在两侧都**只是审计与兼容诊断字段**，不参与授权 principal 的精确匹配。授权 principal 恒为 `(applicationId, current signerDigest)`。
 
-理由：双 App 是独立发布的（INV-19），版本 skew 由 §6.7 的 protocol handshake 判定。若把 versionCode 并入身份匹配，任何一侧的正常升级都会要求 operator 重新配对——这与"独立发布 + 能力兼容握手"直接冲突，且会训练 operator 对配对提示脱敏。
+理由：双 App 是独立发布的（INV-19），版本 skew 由 §6.8 的 protocol handshake 判定。若把 versionCode 并入身份匹配，任何一侧的正常升级都会要求 operator 重新配对——这与"独立发布 + 能力兼容握手"直接冲突，且会训练 operator 对配对提示脱敏。
 
 同 signer、新 versionCode → **保持配对**，由握手决定兼容或 `INCOMPATIBLE_PROTOCOL` 停机。
 
@@ -1717,7 +1725,61 @@ ProviderPairingRecord(
 - 明确被否定的只有**"多个进程各自直接写同一份存储"**这一类：`SharedPreferences` 官方声明不支持多进程（`MODE_MULTI_PROCESS` 自 API 23 弃用）；`MultiProcessDataStore` 虽支持多进程，但 API reference 只承诺 cross-process **eventual consistency**，不满足 L5。这条否定针对的是**架构形态**，不是对这些库本身的禁用。
 - **有损事件源必须自我申报**：`PrefsDirectoryObserver` 一类 `FileObserver` 是可丢事件、可被回收的观察器，属于 §6.4 "观察器丢事件"类。其重订阅、失效或任何不可证明的间隙都必须 bump + 降级，不允许"没收到事件"被当作"没有变化"。
 
-### 6.7 兼容矩阵与握手
+### 6.7 调度身份与「达标 → 完成 → 推进」（v1.37 新增）
+
+§5 把顺序判给千网游、把配额与完成判定判给 Auto 之后，两者之间只剩一个动作没有契约：**谁、在什么前提下、如何把当前项推进到下一项。** 本节冻结它。没有这一节，「冻结 contract v1」冻的是一个无法表达自身核心循环的契约。
+
+#### 6.7.1 身份与版本（千网游拥有）
+
+| 字段 | 语义 | 约束 |
+|---|---|---|
+| `scheduleId` | 计划的稳定标识 | 跨重启、跨 revision 不变 |
+| `scheduleItemId` | **计划项**的稳定标识 | **不是位置**。重排、插入、删除其它项都不得改变幸存项的 id |
+| `scheduleVersion` | 计划的单调版本 | 顺序 / 成员 / 优先级**任一**变化都必须自增 |
+| `currentItemId` | 当前有效项指针 | 千网游唯一权威；与「当前生效环境」同源 |
+
+**禁止**：按行序、首行、或 profile 表的隐式顺序推断当前项。千网游现存的「隐式首行 + 遗留行序回退」必须迁移到显式 `currentItemId`；那条未标注的全 profile 折线是**投影**，不得被任何一方当作顺序真相。
+
+**profile 是一个完整环境**：位置与蜂窝/网络/Wi-Fi Hook 字段属于同一 `scheduleItem`，不得被拆成两个可独立排序的维度——这正是双排序会让位置与网络状态漂移的地方。优先级属于**计划项**，不属于可复用的 profile 行。
+
+#### 6.7.2 完成证明（Auto 拥有，千网游不重算）
+
+`CompletionProofV1`：`scheduleItemId` · `trustedSuccessCount` · `quotaRequired` · `ledgerRef` · `verifiedAtElapsedRealtimeMs`。
+
+千网游**只记录、不重算**——它一旦自行推断 CellRebel 是否完成，就违反 §5「千网游推断 CellRebel 完成」的禁止项，配额也就有了第二个所有者。
+
+#### 6.7.3 幂等 request / receipt
+
+`CompleteAndAdvanceRequestV1`：`leaseId` · `idempotencyKey` · `requestDigest`（§6.3.4 同一套 canonical preimage）· `expectedScheduleVersion` · `expectedCurrentItemId` · `completionProof`
+
+`AdvanceReceiptV1`：`outcomeWire` · `advancedFromItemId` · `advancedToItemId`（耗尽时为 null）· `scheduleVersionAfter` · `effectiveIntentHash` · `effectiveEnvironmentRevision` · `receiptDigest`
+
+**幂等语义**：同 `idempotencyKey` + 同 `requestDigest` → 返回**同一份 receipt**，**不产生第二次推进**；同键异 digest → `IDEMPOTENCY_CONFLICT`（wire 12）。
+
+#### 6.7.4 前置条件即三类防护（compare-and-advance）
+
+推进是**比较并推进**，不是无条件自增。三条前置各自对应一类事故：
+
+| # | 前置条件不满足 | wire | 挡住的事故 |
+|---|---|---|---|
+| 14 | `expectedCurrentItemId` ≠ 实际 `currentItemId` | `SCHEDULE_ITEM_MISMATCH` | **错项推进**与**重复推进**（Auto 拿着过期的当前项发请求） |
+| 15 | `expectedScheduleVersion` ≠ 实际 `scheduleVersion` | `SCHEDULE_VERSION_STALE` | Auto 判定配额**期间**计划被改：顺序已变，达标结论不再适用于同一项 |
+| 16 | 无下一项 | `SCHEDULE_EXHAUSTED` | 越界推进。这是**终态，不是失败**：当前项保持，不回绕 |
+
+任一条不满足 → **不推进、不改指针**，返回 typed failure。「跳项」不需要单独 wire：跳项要么撞 14，要么撞 15。
+
+#### 6.7.5 崩溃恢复与 reconcile
+
+- **推进与 `currentItemId` 指针必须在同一事务**：重启后只能观察到「已推进」或「未推进」，不存在中间态。
+- **Auto 崩溃**：以同 `idempotencyKey` 重放，拿回同一 receipt；receipt 必须持久且可按键重取，否则「重试」等于「再推一次」。
+- **千网游崩溃**：Auto 未拿到 receipt 时**不得假定已推进**——无 receipt 即未推进（§5 禁止项）。
+- **推进后必须独立验证**：Auto 以 `observe()` 独立确认新生效环境，与 receipt 里的 `effectiveIntentHash` / `effectiveEnvironmentRevision` 比对。**receipt 是对方的自述，不是生效证据**；只信 receipt 就会把「说推进了」当成「环境真的换了」——这正是错环境归因的入口。
+
+#### 6.7.6 Hook 与 System Mock 的编排等价
+
+推进语义与实现模式**无关**：两种模式都必须产出同样形状的 receipt 和同样可独立验证的 `effectiveEnvironmentRevision`。模式差异只允许出现在千网游内部实现，不得削弱证据语义，也不得让某一模式跳过 §6.7.4 的任何一条前置。
+
+### 6.8 兼容矩阵与握手
 
 `compatibility.yaml` 冻结 `protocolVersion` 与各枚举 wire code 集合。握手在 `discover()` 完成：任一侧发现对端 `protocolVersion` 不在支持集合、或收到未知 wire code，一律返回/映射 `INCOMPATIBLE_PROTOCOL` 并停在预检页，不进入 CellRebel。矩阵测试必须覆盖 新Auto+旧qwy、旧Auto+新qwy、以及未知 wire code 三类 skew。
 
