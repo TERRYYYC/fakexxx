@@ -2453,10 +2453,10 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 |---|---|---|
 | **0** | **证据载体自身故障**——断言写错、harness/fake 有 bug、fixture 过期或损坏、device 环境/lease 异常、evidence manifest 生成有误 | **`evidenceOwner`**（修证据，**不是**修产品）。**本条先于其余所有条判定** |
 | 1 | class = `owner-red` | 就是 `evidenceOwner`（定义上二者同一） |
-| 2 | 断言只涉及 Auto 侧可观察行为 | **Opus5** |
+| 2 | 断言只涉及 Auto 侧可观察行为 | **GLM**（option B 起；`apps/cellrebel-auto/**` 已转 GLM，见 §12.1） |
 | 3 | 断言只涉及千网游 provider 侧可观察行为 | **Fable5** |
 | 4 | 断言涉及两侧交互 | `evidenceOwner` **必须先产出定位证据**（哪一侧先违反 v1 contract），再按 2/3 路由 |
-| 5 | 第 4 条定位不能判定 | **保持红，转 Sol + GLM 联合 triage**；**不得**自动改 contract。只有联合 triage **明确判定 contract 欠定义**后，才路由 Opus5 改 `contracts/**` |
+| 5 | 第 4 条定位不能判定 | **保持红，转联合 triage**；**不得**自动改 contract。只有联合 triage **明确判定 contract 欠定义**后，才路由 Opus5 改 `contracts/**`（`contracts/**` 仍归 Opus5，未随 option B 转移）。**triage 席位按 no-self-review 排除作者**：涉及 `apps/cellrebel-auto/**`（GLM 作者）的红由 **Sol** 单独 triage，GLM 不入席；涉及 `apps/qianwangyou/**` 或 `acceptance/**`（Fable5 作者）的红由 **Sol + GLM** 联合 triage；涉及 `contracts/**`（Opus5 作者）的红由 **Sol + GLM** 联合 triage。**任何情形下作者本人不得裁定自己 lane 的红** |
 | 6 | class = `static-guard`（扫出越界路径） | 该路径在 §12.1 owner matrix 上的 owner |
 
 **第 0 条是必经的第一步（v1.23 冻结）**：任何 red 在进入 2–5 之前，`evidenceOwner` 必须先完成 **evidence-validity triage** 并留证——证明这条红反映的是**产品行为**，而不是证据链自身坏了。
@@ -2474,38 +2474,38 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 
 | ID | 类别 | evidence class | owner | 精确入口 |
 |---|---|---|---|---|
-| `M-AD-01` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_01` |
-| `M-AD-02` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_02` |
-| `M-AD-03` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_03` |
-| `M-AD-04` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_04` |
-| `M-AD-05` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_05` |
-| `M-AD-06` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_06` |
-| `M-AD-07` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_07` |
-| `M-AD-08` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_08` |
-| `M-AD-09` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_09` |
-| `M-AD-10` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_10` |
-| `M-AD-11` | advance | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_11` |
+| `M-AD-01` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_01` |
+| `M-AD-02` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_02` |
+| `M-AD-03` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_03` |
+| `M-AD-04` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_04` |
+| `M-AD-05` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_05` |
+| `M-AD-06` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_06` |
+| `M-AD-07` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_07` |
+| `M-AD-08` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_08` |
+| `M-AD-09` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_09` |
+| `M-AD-10` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_10` |
+| `M-AD-11` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_11` |
 | `M-AD-12` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_12` |
 | `M-AD-13` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_13` |
-| `M-CR-01` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_01` |
-| `M-CR-02` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_02` |
-| `M-CR-03` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_03` |
-| `M-CR-04` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_04` |
-| `M-CR-05` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_05` |
-| `M-CR-06` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_06` |
-| `M-CR-07` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_07` |
-| `M-CR-08` | crash | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_08` |
+| `M-CR-01` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_01` |
+| `M-CR-02` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_02` |
+| `M-CR-03` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_03` |
+| `M-CR-04` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_04` |
+| `M-CR-05` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_05` |
+| `M-CR-06` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_06` |
+| `M-CR-07` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_07` |
+| `M-CR-08` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_08` |
 | `M-CR-09` | crash | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/CrashMatrixTest.kt::M_CR_09` |
-| `M-CC-01` | concurrency | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConcurrencyMatrixTest.kt::M_CC_01` |
-| `M-CC-02` | concurrency | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConcurrencyMatrixTest.kt::M_CC_02` |
+| `M-CC-01` | concurrency | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConcurrencyMatrixTest.kt::M_CC_01` |
+| `M-CC-02` | concurrency | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConcurrencyMatrixTest.kt::M_CC_02` |
 | `M-CC-03` | concurrency | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/ConcurrencyMatrixTest.kt::M_CC_03` |
 | `M-CC-04` | concurrency | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/ConcurrencyMatrixTest.kt::M_CC_04` |
-| `M-RC-01` | recovery | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/RecoveryMatrixTest.kt::M_RC_01` |
-| `M-CO-01` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_01` |
-| `M-CO-02` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_02` |
-| `M-CO-03` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_03` |
-| `M-CO-04` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_04` |
-| `M-CO-05` | completion | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_05` |
+| `M-RC-01` | recovery | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/RecoveryMatrixTest.kt::M_RC_01` |
+| `M-CO-01` | completion | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_01` |
+| `M-CO-02` | completion | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_02` |
+| `M-CO-03` | completion | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_03` |
+| `M-CO-04` | completion | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_04` |
+| `M-CO-05` | completion | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CompletionMatrixTest.kt::M_CO_05` |
 | `M-CO-06` | completion | `device` | Fable5 | `docs/acceptance/a-plus-device-matrix.md#M-CO-06` |
 | `M-RC-02` | recovery | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/RecoveryMatrixTest.kt::M_RC_02` |
 | `M-RC-03` | recovery | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RecoveryMatrixTest.kt::M_RC_03` |
@@ -2515,8 +2515,8 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-BP-03` | bypass | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_03` |
 | `M-BP-04` | bypass | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/BypassMatrixTest.kt::M_BP_04` |
 | `M-BP-05` | bypass | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/BypassMatrixTest.kt::M_BP_05` |
-| `M-BP-06` | bypass | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_06` |
-| `M-BP-07` | bypass | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_07` |
+| `M-BP-06` | bypass | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_06` |
+| `M-BP-07` | bypass | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/BypassMatrixTest.kt::M_BP_07` |
 | `M-RL-01` | release | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/ReleaseMatrixTest.kt::M_RL_01` |
 | `M-VS-01` | version | `device` | Fable5 | `docs/acceptance/a-plus-device-matrix.md#M-VS-01` |
 | `M-VS-02` | version | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/VersionMatrixTest.kt::M_VS_02` |
@@ -2525,26 +2525,26 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-IN-01` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IntentMatrixTest.kt::M_IN_01` |
 | `M-IN-02` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IntentMatrixTest.kt::M_IN_02` |
 | `M-IN-03` | intent | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/IntentMatrixTest.kt::M_IN_03` |
-| `M-IN-04` | intent | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/IntentMatrixTest.kt::M_IN_04` |
+| `M-IN-04` | intent | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/IntentMatrixTest.kt::M_IN_04` |
 | `M-PA-03` | pairing | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_03` |
 | `M-PA-04` | pairing | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/PairingMatrixTest.kt::M_PA_04` |
 | `M-PA-05` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/PairingMatrixTest.kt::M_PA_05` |
-| `M-MG-01` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_01` |
-| `M-MG-02` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_02` |
-| `M-MG-03` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_03` |
-| `M-MG-04` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_04` |
-| `M-MG-05` | migration | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_05` |
+| `M-MG-01` | migration | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_01` |
+| `M-MG-02` | migration | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_02` |
+| `M-MG-03` | migration | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_03` |
+| `M-MG-04` | migration | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_04` |
+| `M-MG-05` | migration | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/MigrationMatrixTest.kt::M_MG_05` |
 | `M-MP-01` | multiproc | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_01` |
 | `M-MP-02` | multiproc | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_02` |
 | `M-MP-03` | multiproc | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/MultiProcessMatrixTest.kt::M_MP_03` |
 | `M-BP-08` | bypass | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_08` |
 | `M-BP-09` | bypass | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/BypassMatrixTest.kt::M_BP_09` |
-| `M-PA-06` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_06` |
-| `M-PA-07` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_07` |
-| `M-PA-08` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_08` |
+| `M-PA-06` | pairing | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_06` |
+| `M-PA-07` | pairing | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_07` |
+| `M-PA-08` | pairing | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_08` |
 | `M-PA-09` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/PairingMatrixTest.kt::M_PA_09` |
-| `M-PA-10` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_10` |
-| `M-PA-11` | pairing | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_11` |
+| `M-PA-10` | pairing | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_10` |
+| `M-PA-11` | pairing | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/PairingMatrixTest.kt::M_PA_11` |
 | `M-TU-01` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_01` |
 | `M-TU-02` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_02` |
 | `M-TU-03` | tuple | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/TrustTupleMatrixTest.kt::M_TU_03` |
@@ -2574,8 +2574,8 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-ID-03` | idempotency | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/IdempotencyMatrixTest.kt::M_ID_03` |
 | `M-RQ-01` | request | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/RequestMatrixTest.kt::M_RQ_01` |
 | `M-RS-01` | response | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/ResponseMatrixTest.kt::M_RS_01` |
-| `M-CF-01` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_01` |
-| `M-CF-02` | config | `owner-red` | Opus5 | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_02` |
+| `M-CF-01` | config | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_01` |
+| `M-CF-02` | config | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/ConfigMatrixTest.kt::M_CF_02` |
 | `M-PA-12` | pairing | `sol-blackbox` | Fable5 | `acceptance/scenarios/src/matrixTest/kotlin/matrix/PairingMatrixTest.kt::M_PA_12` |
 
 **覆盖校验（`scripts/verify-a-plus.sh`）** 必须做三件事，缺一不可：
@@ -2743,14 +2743,14 @@ fakexxx/
 
 | Owner | 独占写入范围 | 可读依赖 | 禁止并行触碰 |
 |---|---|---|---|
-| Opus5 | `contracts/**`、`apps/cellrebel-auto/**`（**含 `app/src/main/AndroidManifest.xml`**）、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、`docs/provenance/**`、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**`。**唯一具名例外：Task 3.5 / PR-3.5**——可写 `docs/provenance/qwy-lint-baseline.md` 冻结的 exact 路径集 ∪ `res/values-en/strings.xml`，该集合 ⊆ `apps/qianwangyou/app/src/main/**` 且与 `integration/**` 不相交；**范围外仍绝对禁止**，由 Task 3.5 的越界断言机器判定 |
+| Opus5 | `contracts/**`、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、`docs/provenance/**`、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**`；**option B 起不触碰 `apps/cellrebel-auto/**`**（该范围已转 GLM，见下行）。**具名例外一：Task 3.5 / PR-3.5**——可写 `docs/provenance/qwy-lint-baseline.md` 冻结的 exact 路径集 ∪ `res/values-en/strings.xml`，该集合 ⊆ `apps/qianwangyou/app/src/main/**` 且与 `integration/**` 不相交。**具名例外二：Issue #13 applicationId cutover**——`INV-29` 现为 deferred gate，本文不声称已覆盖它；cutover 落地时 Opus5 需写 Auto 的 flavor / `applicationId` / Manifest 面，与 GLM 的 `apps/cellrebel-auto/**` 独占**必然相交**，因此该 delta **必须与 GLM 串行**并在 #13 开工前重新冻结 exact 路径集，不得并行。**两处范围外仍绝对禁止**，由 Task 3.5 的越界断言机器判定 |
 | Fable5 | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行；**`acceptance/**`（含 `acceptance/scripts/check-forbidden-boundaries.sh`）、`docs/acceptance/**`、验收 issue 与证据** | frozen contract、两 App | contract、Auto |
-| Sol | **无独占写入范围（review-only）**：review verdict、语义/验收审查报告；若需补测试代码则单独 PR 并由 GLM 审 | 全仓 | 不修改正在审的作者 branch |
-| GLM | review verdict、对抗执行报告；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch |
+| Sol | **无独占写入范围（review-only）**：review verdict、语义/验收审查报告；**含 Issue #5 的语义/验收/对抗 trust-recovery 审查**（option B 后 GLM 成为 #5 作者，#5 的 reviewer 席位由 Sol 承担）；若需补测试代码则单独 PR 并由 GLM 审 | 全仓 | 不修改正在审的作者 branch |
+| GLM | **`apps/cellrebel-auto/**`（含 `app/src/main/AndroidManifest.xml`）——Issue #5，option B 起由 Opus5 转入**；以及 review verdict、对抗执行报告（**仅限 #4/#6/#7**）；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch；**不得 review #5**（自己是作者，铁律 no-self-review）；不触碰 `contracts/**`、`apps/qianwangyou/**`、`acceptance/**` |
 
 **为什么 `acceptance/**` 归 Fable5（2v2 冻结）**：黑盒约束的是**依赖边界**——acceptance 只能消费 public v1 contract + `acceptance/fake-qwy`，不得进入 Auto/qwy 内部实现；它**不要求测试作者与产品作者是不同个体**。铁律"no self-review"约束的是 **author/reviewer 个体**：Fable5 写、Sol + GLM 独立审，铁律成立。若把 acceptance 留给 Sol，则 Sol 既是 #6/#7 的作者又是它们的 reviewer，那才是真的 self-review。
 
-并行成立条件（**随 2v2 重新推导**）：Contract PR exact HEAD 冻结后，写入面收敛为**两个个体、三个不重叠目录**——Opus5 的 `apps/cellrebel-auto/**`，Fable5 的 `apps/qianwangyou/**/integration/**` 与 `acceptance/**`。**Opus5 ↔ Fable5 之间仍可并行**（目录无交集）。但 **PR-3 与 PR-5 现在同属 Fable5，二者不再是跨个体并行**：Fable5 必须串行推进，或在两个独立 worktree 内分别推进并各自绑定 exact HEAD，不得在同一 worktree 混合两个 PR 的改动。任何 contract delta 先停两路、回主 Thread 重新冻结，不允许各自兼容。
+并行成立条件（**随 operator option B 三线重新推导**）：Contract PR exact HEAD 冻结后，写入面收敛为**三个个体、四个不重叠目录**——GLM 的 `apps/cellrebel-auto/**`（#5），Fable5 的 `apps/qianwangyou/**/integration/**`（#4）与 `acceptance/**`（#6/#7），Opus5 的 `contracts/**` ∪ `.github/**` ∪ root `scripts/**` ∪ `docs/provenance/**`（#3/#13）。**三者两两之间目录无交集，因此三线可并行**——这比 2v2 时多了一条并行边，代价是 reviewer 席位变紧：GLM 既是作者又是 #4/#6/#7 的 reviewer，**它审的与它写的必须永不相交**，#5 的 reviewer 席位因此归 Sol。**唯一已知的目录相交是 Issue #13 的 cutover**（Opus5 需写 Auto 面），按 §12.1 具名例外二**串行**处理，不计入并行边。但 **PR-3 与 PR-5 现在同属 Fable5，二者不再是跨个体并行**：Fable5 必须串行推进，或在两个独立 worktree 内分别推进并各自绑定 exact HEAD，不得在同一 worktree 混合两个 PR 的改动。任何 contract delta 先停两路、回主 Thread 重新冻结，不允许各自兼容。
 
 ## 13. 分步 TDD 实施计划
 
@@ -2902,7 +2902,7 @@ cd apps/qianwangyou
 ../../scripts/check-inherited-lint-debt.sh qianwangyou
 
 cd ../..
-./scripts/verify-a-plus.sh --lane pr-3      # 33 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 90 行判红
+./scripts/verify-a-plus.sh --lane pr-3      # 35 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 103 行判红
 ```
 
 **lint 门在本 task 是 ratchet，不是 raw-green（v1.21 消环）**：上一版让 Task 3 直接要求 `lintDebug` exit 0，而基线自带 23 个 inherited error、清债又被冻结在 **PR-3 合入之后**的 Task 3.5——两者互锁，谁都过不去。本 task 只需证明**没有新增** lint error；raw-green 由 Task 3.5 达成。
@@ -3175,7 +3175,7 @@ cd apps/cellrebel-auto
 ./gradlew lintDebug assembleDebug
 
 cd ../..
-./scripts/verify-a-plus.sh --lane pr-4      # 31 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 90 行判红
+./scripts/verify-a-plus.sh --lane pr-4      # 42 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 103 行判红
 ```
 
 ### Task 5 — Auto A+ 执行内核
@@ -3287,9 +3287,9 @@ cd apps/cellrebel-auto
 | **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **33** |
 | **PR-4**（Opus5） | 自有 `owner-red` 行，绑 PR-4 HEAD | **31** |
 | **PR-5**（Fable5 开发 / Sol + GLM 审查） | **不验任何矩阵行**；只验 acceptance **harness 自身**：fake provider 的 negative controls、fixture 装载、`static-guard` 扫描器对**构造违规样本**能判红（self-test） | **0 矩阵行** |
-| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 90 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **90** |
+| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 103 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **90** |
 
-**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——90 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
+**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——103 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
 
 **verifier 必须支持 lane 子集（否则本分工不可执行）**：`scripts/verify-a-plus.sh` 增 `--lane <pr-3|pr-3.5|pr-4|pr-5|pr-6>`。
 
@@ -3297,17 +3297,19 @@ cd apps/cellrebel-auto
 
 | lane | 校验集合（机器判定式） | 行数 | 谁的 exactHead |
 |---|---|---|---|
-| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 33 | PR-3 HEAD |
-| `pr-4` | `class=owner-red` ∧ `evidenceOwner=Opus5` ∧ 入口前缀 `apps/cellrebel-auto/` | 31 | PR-4 HEAD |
+| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 35 | PR-3 HEAD |
+| `pr-4` | `class=owner-red` ∧ `evidenceOwner=GLM` ∧ 入口前缀 `apps/cellrebel-auto/` | 42 | PR-4 HEAD |
 | `pr-3.5` | **空集**；不验矩阵行，仅 `lintDebug` exit 0 + qwy unit + assemble | 0 | PR-3.5 HEAD |
 | `pr-5` | **空集**；仅 harness self-test（见上表 PR-5 行），**不消费 evidence manifest** | 0 | PR-5 HEAD |
-| `pr-6` | **全部 90 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 90 | PR-6 HEAD |
+| `pr-6` | **全部 103 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 103 | PR-6 HEAD |
 
-三元组两两不相交且并集 = 64 个 `owner-red`；26 个非 `owner-red` 行**只出现在 `pr-6`**。**verifier 必须自检这个划分**：若 `pr-3 ∪ pr-4` ≠ 64 或与 `pr-6` 的 90 行不自洽，直接 fail-closed——lane 定义漂移必须比矩阵失败更早被发现。
+三元组两两不相交且并集 = 77 个 `owner-red`；26 个非 `owner-red` 行（`sol-blackbox` 22 + `static-guard` 2 + `device` 2）**只出现在 `pr-6`**。**verifier 必须自检这个划分**：若 `pr-3 ∪ pr-4` ≠ 77 或与 `pr-6` 的 103 行不自洽，直接 fail-closed——lane 定义漂移必须比矩阵失败更早被发现。
 
-**没有 `--lane` 时默认 `pr-6` 语义（全 90 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 90 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
+> **v1.39 更正——这张表的四个计数此前全部过时，而且不是本轮改出来的。** v1.38 往 §10.1 追加 `M-AD-01..11` 时只同步了台账自身与「矩阵↔台账 101==101」，**没有回头改这张 lane selector 表**：它仍写着 90 行 / 64 `owner-red` / Opus5 31 / Fable5 33，那是 11 行加入**之前**的数字。后果不是排版错误——`pr-4` 的机器判定式会选出 42 行却期望 31，自检 `pr-3 ∪ pr-4 ≠ 64` 直接 fail-closed，**PR-4 lane 从 v1.38 起就是不可执行的**。派生计数与台账不在同一次修改里同步，就是给自己留一个必然过期的第二真相源；本轮改 owner 投影时一并校正，并把 `sol-blackbox`/`static-guard`/`device` 的分解写进正文，让下一次漂移在文本层就能被看见。
 
-**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **90 行 / 17 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
+**没有 `--lane` 时默认 `pr-6` 语义（全 103 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 103 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
+
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **103 行 / 17 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
 
 | class | 行数 | **Fable5** 的职责（2v2；Sol + GLM 独立审） |
 |---|---|---|
@@ -3339,7 +3341,7 @@ cd apps/cellrebel-auto
 
 **GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / Fable5 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
 
-**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 90 行同 HEAD，在本 PR 上必红）：**
+**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 103 行同 HEAD，在本 PR 上必红）：**
 
 ```bash
 # PR-5 自身：只自证 harness，不消费 evidence manifest、不验矩阵行
@@ -3398,10 +3400,10 @@ cd apps/cellrebel-auto
 (cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)
 
 ./acceptance/scripts/check-forbidden-boundaries.sh
-./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 90 行、每行 exactHead == PR-6 HEAD
+./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 103 行、每行 exactHead == PR-6 HEAD
 ```
 
-预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 90 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
+预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 103 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
 
 ## 15. PR 顺序与 merge gates
 
