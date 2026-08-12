@@ -1335,6 +1335,8 @@ data class EnvironmentObservationV1(
 
 **exact schema 无省略**：本节与 §6.3.2 列出的字段就是全部字段，逐字段与实现一一对应。v1 的任何 Parcelable 中**不出现 Kotlin enum 类型**（含 `Set<enum>`/`List<enum>`）；枚举一律以 `...Wire: Int` 或 `...Wires: List<Int>` 承载，集合型升序去重。散文说明不得覆盖或补充 exact schema——若某字段没写在这两节里，它就不在 v1 里。`check-contract-v1.sh` 必须包含一条静态检查：contract 模块的 `@Parcelize` 类中出现任何 enum 类型字段即失败。
 
+**字段顺序同属冻结面。** 上述"逐字段一一对应"读作**保序**对应，不是集合意义上的一一对应：本节与 §6.3.2 的 snippet 是 `@Parcelize` Kotlin 代码，而 kotlin-parcelize 按**声明顺序**写入与读回 Parcel。因此互换两个同类型字段会保留全部字段名、两侧都照常编译、运行期什么也不抛，却在 wire 上静默交换二者取值——**这与 §6.1 的 Binder 事务号随方法声明顺序而变是同一件事，低一层**。所以 `check-contract-v1.sh` 比对的是有序的 (字段名, 类型, 可空性, 有无默认值) 元组，而非字段名集合；默认值的**存在与否**参与比对，其**表达式文本**不参与（canonical 写 `= 1`、实现写 `= ContractV1.PROTOCOL_VERSION` 是同值的两种写法）。解析不了的属性行按失败处理，绝不跳过——静默丢弃读不懂的行会让两侧字段表同时变短，然后被判为"一致"。
+
 #### 6.3.1 canonical intent digest（冻结算法）
 
 `acceptedIntentHash` 是 `EnvironmentIntentV1` 的 canonical digest，两侧必须独立算出同一值：

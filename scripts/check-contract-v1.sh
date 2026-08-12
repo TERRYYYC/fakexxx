@@ -4,20 +4,38 @@
 #
 # Spec: feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md §6, §13 Task 2.
 #
-# Four things this proves, in order of how expensive they are to get wrong:
+# What this proves, section by section:
 #
-#   1. No Kotlin enum type appears inside any @Parcelize class. kotlin-parcelize
-#      auto-encodes enums by name, so a constant added by a newer peer makes an
-#      older reader throw IllegalArgumentException from the generated
-#      createFromParcel — an unparcel crash inside a Binder transaction instead
-#      of the typed fail-closed outcome INV-03 requires. Prose cannot enforce
-#      this; a static check can.
-#   2. compatibility.yaml and the Kotlin sources agree on every wire code, so the
-#      machine-readable handshake surface cannot drift from the implementation.
-#   3. Every DTO named in §6.3/§6.3.2 has both a .kt and a .aidl declaration.
-#   4. The contract module compiles and its tests pass from BOTH app Gradle
-#      roots, which is what makes the shared library claim real rather than
-#      "it worked in Auto's build".
+#   1.  No Kotlin enum type appears inside any @Parcelize class. kotlin-parcelize
+#       auto-encodes enums by name, so a constant added by a newer peer makes an
+#       older reader throw IllegalArgumentException from the generated
+#       createFromParcel — an unparcel crash inside a Binder transaction instead
+#       of the typed fail-closed outcome INV-03 requires. Prose cannot enforce
+#       this; a static check can.
+#   2.  compatibility.yaml and the Kotlin sources agree on every wire code, so the
+#       machine-readable handshake surface cannot drift from the implementation.
+#   3.  Every DTO named in §6.3/§6.3.2 has both a .kt and a .aidl declaration.
+#   4.  The contract module compiles and its tests pass from BOTH app Gradle
+#       roots, which is what makes the shared library claim real rather than
+#       "it worked in Auto's build".
+#   5.  The canonical spec, Kotlin and compatibility.yaml agree on the error-code
+#       table. Sections 1-3 are internal-consistency only: they cannot notice that
+#       the document being frozen has been superseded.
+#   5b. Inline NAME(wire) references in prose match the authoritative enum, so a
+#       hand-written wire number in a sentence cannot contradict the table.
+#   6.  The method surface matches across all four carriers (AIDL, yaml, README,
+#       canonical §6.1) — by NAME, which is all README can structurally express.
+#   6b. AIDL and canonical §6.1 additionally agree on the ORDERED full signature:
+#       return type, parameter direction/type/name, and declaration order. Binder
+#       dispatch is positional, so a swapped declaration renumbers transaction ids.
+#   7.  Canonical §6.3/§6.3.2 and Kotlin agree on the DTO schemas: class set, field
+#       names, and the ordered (name, type, nullability, default-presence) tuples.
+#       parcelize is positional too, one level down.
+#
+# The gate's own sensitivity is not self-evident from any of the above, so it is
+# measured separately: scripts/selftest-contract-v1.sh mutates a throwaway copy of
+# the canonical spec once per guard and asserts each guard reports its own finding
+# and nothing else's. Weakening a guard here turns that suite red.
 #
 # Exit codes: 0 = every check passed; 1 = at least one failed.
 
@@ -632,7 +650,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "7. DTO fields agree between canonical §6.3 and Kotlin"
+section "7. DTO schemas agree between canonical §6.3 and Kotlin (name, type, order)"
 
 # Sections 5 and 6 bind the ERROR CODES and the METHOD names. Nothing bound the
 # FIELDS, and the gap proved itself: three DTOs gained schedule identity in
@@ -642,28 +660,94 @@ section "7. DTO fields agree between canonical §6.3 and Kotlin"
 # That is not a cosmetic mismatch. §6.3 says "a field not listed here is not part
 # of v1", so an unlisted field is simultaneously shipped and denied -- the same
 # contradiction P1 #2 created for methods, one level down.
+#
+# The comparison runs in three layers, coarsest failure first, because one
+# ordered-tuple diff reports a single inserted field as a cascade of position
+# mismatches and buries the one fact worth reading:
+#
+#   A. the CLASS set, both directions;
+#   B. the field-NAME set per class, both directions;
+#   C. the ORDERED (name, type, default-presence) tuples per class.
+#
+# Layer C is not decoration on layer B, and it is not a second section: an
+# ordered tuple comparison already contains the name-set comparison, so splitting
+# it out would report every drift twice and imply that getting layer B green were
+# a fix. What layer C adds is everything a name set structurally cannot see.
+# kotlin-parcelize writes fields in DECLARATION ORDER and reads them back in
+# declaration order, so swapping two same-typed fields preserves every name,
+# compiles on both sides, throws nothing, and silently transposes the two values
+# on the wire. A changed type or an added/removed `?` is the same class of
+# defect: invisible to a name set, decisive at unparcel time. That is the §6b
+# argument about Binder transaction ids one level down -- a positional encoding
+# with no positional check.
 if SPEC="$SPEC_PATH" KT_DIR="$KT_DIR" python3 - <<'PY'
 import os, pathlib, re, sys
 
 spec = pathlib.Path(os.environ["SPEC"]).read_text()
 kt_dir = pathlib.Path(os.environ["KT_DIR"])
 
-def fields(body):
-    # `val name: Type` at property position; comments and KDoc are skipped by
-    # requiring the line to start (after indent) with `val`.
-    return set(re.findall(r"^\s*val\s+([A-Za-z0-9_]+)\s*:", body, re.M))
+parse_errs = []
+PROP = re.compile(r"^val\s+([A-Za-z0-9_]+)\s*:\s*(\S.*)$")
 
-def classes(text):
-    out = {}
-    for m in re.finditer(r"data class\s+([A-Za-z0-9_]+V1)\s*\((.*?)\n\)\s*:\s*Parcelable", text, re.S):
-        out[m.group(1)] = fields(m.group(2))
+def props(body, where):
+    """Ordered [(name, normalised type, has-default)] for one class body."""
+    out = []
+    # KDoc and block comments first: a `val x: Int` inside prose is not a field,
+    # and §6.3's snippets carry per-field KDoc.
+    b = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    for raw in b.splitlines():
+        line = raw.split("//")[0].strip()
+        if not line:
+            continue
+        decl, has_default = line, False
+        if "=" in decl:
+            # No Kotlin type contains '='; everything after the first one is the
+            # default expression. Its TEXT is deliberately not compared: canonical
+            # writes `= 1` where Kotlin writes `= ContractV1.PROTOCOL_VERSION`,
+            # which is the same value spelled two ways. Its PRESENCE is compared,
+            # because that is a real difference in the constructor contract.
+            decl, has_default = decl.split("=", 1)[0], True
+        decl = decl.strip().rstrip(",").strip()
+        m = PROP.match(decl)
+        if not m:
+            # An unreadable property line FAILS; it is never skipped. A parser
+            # that silently drops what it cannot read answers "identical" the
+            # moment either side adopts a syntax it does not handle -- the field
+            # would be absent from both the comparison and the report.
+            parse_errs.append("%s: unparseable property line %r" % (where, line))
+            continue
+        out.append((m.group(1), re.sub(r"\s+", "", m.group(2)), has_default))
+    if not out:
+        parse_errs.append("%s: no property parsed from the class body" % where)
     return out
 
-spec_c = classes(spec)
-kt_c = {}
-for p in kt_dir.glob("*V1.kt"):
-    c = classes(p.read_text())
-    kt_c.update(c)
+def classes(text, where, seen):
+    out = {}
+    for m in re.finditer(r"data class\s+([A-Za-z0-9_]+V1)\s*\((.*?)\n\)\s*:\s*Parcelable", text, re.S):
+        name = m.group(1)
+        # Two exact schemas for one type WITHIN one carrier are two sources of
+        # truth, and the dict below would silently let the later one win. The
+        # bookkeeping is per-carrier: canonical and Kotlin each declaring the
+        # type once is not a duplicate, it is the entire premise of comparing
+        # them.
+        if name in seen:
+            parse_errs.append("%s: %s already declared in %s; duplicate exact schema in one carrier"
+                              % (where, name, seen[name]))
+        seen[name] = where
+        out[name] = props(m.group(2), "%s %s" % (where, name))
+    return out
+
+spec_c = classes(spec, "canonical", {})
+kt_c, kt_seen = {}, {}
+for p in sorted(kt_dir.glob("*V1.kt")):
+    kt_c.update(classes(p.read_text(), "kotlin " + p.name, kt_seen))
+
+# Parsing is reported BEFORE any verdict and is fatal on its own. A comparison
+# run over a partially-read schema can only produce an unearned green.
+if parse_errs:
+    for e in parse_errs:
+        print("  FAIL  %s" % e)
+    sys.exit(1)
 
 # CLASS-SET equality first, in BOTH directions, BEFORE comparing fields.
 #
@@ -696,21 +780,51 @@ if not shared:
 fail = class_fail
 for name in shared:
     a, b = spec_c[name], kt_c[name]
-    missing, extra = sorted(a - b), sorted(b - a)
+    an, bn = [p[0] for p in a], [p[0] for p in b]
+
+    # Layer B: the name set. Reported alone, because an inserted or dropped field
+    # shifts every position after it and layer C would bury this line in cascade.
+    missing, extra = sorted(set(an) - set(bn)), sorted(set(bn) - set(an))
     if missing or extra:
         fail = 1
         if missing: print(f"  FAIL  {name}: in spec but NOT in Kotlin: {missing}")
         if extra:   print(f"  FAIL  {name}: in Kotlin but NOT in spec: {extra}")
+        continue
+
+    # Layer C1: same names, different order. Called out on its own line because
+    # the consequence is specific -- parcelize is positional, so two transposed
+    # same-typed fields swap their values on the wire with nothing to observe.
+    if an != bn:
+        fail = 1
+        print(f"  FAIL  {name}: same field names, DIFFERENT declaration order; "
+              f"parcelize reads positionally, so this transposes values on the wire")
+        print(f"  ----  {name}: canonical {an}")
+        print(f"  ----  {name}: kotlin    {bn}")
+        continue
+
+    # Layer C2: same names in the same order -- compare what the names hide.
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x[1] != y[1]:
+            fail = 1
+            kind = "nullability" if x[1].rstrip("?") == y[1].rstrip("?") else "type"
+            print(f"  FAIL  {name}.{x[0]} (position {i}): {kind} differs; "
+                  f"canonical {x[1]!r}, kotlin {y[1]!r}")
+        if x[2] != y[2]:
+            fail = 1
+            only = "canonical" if x[2] else "kotlin"
+            print(f"  FAIL  {name}.{x[0]} (position {i}): default value present only in {only}")
+
 if fail == 0:
     total = sum(len(spec_c[n]) for n in shared)
-    print(f"  PASS  {len(shared)} DTO(s), {total} field(s) identical in both directions")
+    print(f"  PASS  {len(shared)} DTO(s), {total} field(s) identical in name, type, "
+          f"nullability, default-presence and declaration order")
 
 sys.exit(fail)
 PY
 then
-  pass "DTO field sets bound to canonical §6.3"
+  pass "DTO schemas bound to canonical §6.3, ordering included"
 else
-  fail "DTO field sets differ from canonical §6.3"
+  fail "DTO schemas differ from canonical §6.3"
 fi
 
 # ---------------------------------------------------------------------------
