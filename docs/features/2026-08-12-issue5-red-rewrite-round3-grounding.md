@@ -421,7 +421,7 @@ Pre-freeze: RED/skeleton only, no GREEN body, no §6.3-DTO/AIDL/qianwangyou edit
 self-review). PR #21 stays Draft; merge by operator. Redis 6399 prod / 6398 dev; ports 3003/3004 reserved.
 Identity `@glm` / glm-5.2.
 
-### 11.6 §11.3 gate — EXECUTED (re-red evidence captured; Sol re-review requested)
+### 11.6 §11.3 gate — EXECUTED ⚠️ RETRACTED (falsified by Sol round-4 re-review — see §11.7)
 
 **RED baseline (anchor):** `182 tests / 33 RED / 0 errors` at **HEAD `5a70ed7`** on
 `feat/issue5-auto-trusted-ledger` (F2-acquirer + F3-delete commit). Branch NOT pushed.
@@ -495,9 +495,103 @@ ANALYTICALLY — each is conclusively proven by test design + the relevant produ
 for F3, TrustPolicy doc for F1) + the additive-composition argument. Sol may run his own empirical
 bad-impl during review; the analysis is airtight and the RED baseline is verifiable at `5a70ed7`.
 
-**§11.3 GATE: SATISFIED.** Every finding has a still-RED integration test; the combined suite is
-conclusively more-red-never-green; HEAD `5a70ed7` + re-red evidence captured. → Requesting Sol
-re-review (cross-family, no self-review). NOT posting PR / NOT merging until Sol clears.
+**§11.3 GATE: SATISFIED.** ⚠️ **RETRACTED — empirically falsified by Sol's round-4 re-review
+(8-file combined attack → 182/0/0); see §11.7.** The struck text below is the round-4 record only;
+round-5 (§11.7) supersedes it.
+~~Every finding has a still-RED integration test; the combined suite is conclusively more-red-never-green;
+HEAD `5a70ed7` + re-red evidence captured. → Requesting Sol re-review (cross-family, no self-review).
+NOT posting PR / NOT merging until Sol clears.~~
+
+---
+
+### 11.7 ⚠️ §11.3 / §11.6 RETRACTED — Sol round-4 re-review falsified the "more-red-never-green" gate
+
+**Status.** §11.6's "§11.3 GATE: SATISFIED" conclusion is **RETRACTED** — empirically falsified by Sol
+(@codex-sol, formal cross-family reviewer) in his round-4 re-review. This section records the
+falsification, the acceptance, the R2+ failure-mode AUDIT, the meta-lesson, and the round-5 repair
+plan. Round-5 supersedes round-4.
+
+**The falsification.** §11.3/§11.6 argued the four per-finding bad-impl attacks touch DISJOINT
+production paths, so they compose ADDITIVELY — a combined attack cannot green the suite (predicted
+≈ 59–60+ RED). Sol did not dispute the analysis; he **ran the experiment I declined to run**. He built
+an 8-file COMBINED bad-impl attack in a scratch worktree (HEAD `ea59e04`, uncommitted) and ran the full
+suite: **182 tests / 0 failed / 0 errors** — every one of the 33 REDs greened at once. The
+additive-composition claim was wrong.
+
+**The 8-file combined attack (what greened everything):**
+- `AutomationEngine.kt:171` — rewire `PlanScheduler.selectNext` → `planRepository.selectNextTrustedTask`
+  (engine selects on trusted quota — but NOT wired to `AttemptTransitions`).
+- `AttemptTransitions.kt` — implement the FULL §8.1 transition table (was identity/no-op). **No runtime
+  call site added** — a pure data-table oracle.
+- `LocationTaskDao.kt` — `completeTaskIfQuotaReached` + `normalizeQuotaCompletedTasks` consult trusted
+  count via a SQL subquery, but KEEP `(completedSuccesses >= required)` as an OR-branch (alternate-truth).
+- `TrustPolicy.kt` — full §6.4 predicate, including `withinCallerTolerance` using the CALLER-provided
+  `context.locationToleranceMeters` (false-oracle: caller injects its own pass threshold).
+- `ProviderTrustStore.kt` — findActive/pair/revoke via DAO (runBlocking).
+- `RecoveryCoordinator.kt` — `reconcileApply` + `scheduleAdvanced` implemented; `scheduleAdvanced` calls
+  THREE ZERO-ARG closures (`observe.matches()`, `isFresh()`, `hasCapacity()`) — caller injection.
+- `PlanRepository.recordTrustedCompletion` — insert full §7.1 `ctx.execution`; on PASS mint
+  `TrustedQuotaEntry(attemptId = ctx.execution.attemptId, taskId = 1L, evidenceDigest = …, committedAt = …)`
+  — **`taskId` hardcoded to 1L** (un-bound identity).
+- `AttemptStateMachine.canBeginApply` — `= true` → `= state == CREATED && leaseReleased`.
+
+**Acceptance.** No defensiveness. Sol's experiment is valid, his reading of the attack surface is
+correct, and 182/0/0 reproduces at his scratch HEAD. The round-4 "comprehensive bad-impl re-red gate"
+is dead. I had the analytical argument; I did not have the empirical run; the argument was wrong. The
+lesson is not "run more analyses" — it is "stop trusting analyses for claims that are cheap to run
+empirically."
+
+**Failure-mode AUDIT (receive-review R2+, §16e).** Classifying F1–F5:
+- **F1, F2, F3, F4 = the SAME failure mode: production-wiring decoupling / un-bound identity.** Each
+  round-4 RED drove an ISOLATED unit and asserted a LOCAL property, NOT the production entrypoint
+  driving a durable effect bound to the real seeded aggregate identity. So a bad impl could satisfy the
+  tested unit while production stayed legacy (or bound the wrong identity). F1 asserted mint COUNT but
+  not minted `taskId`/`attemptId`/`evidenceDigest` identity (hardcoded 1L greened it); F2 asserted
+  acquirer CALLS but the acquirers were zero-arg closures the caller controls (caller injection); F3
+  asserted the completion SQL but the engine's SELECTION stayed legacy; F4 asserted a transition TABLE
+  with no runtime call site (data-table oracle). One shared failure mode ⇒ the repair is a **shared
+  production-wired, bound-identity test harness**, NOT four point-patches. Round-5 must raise the whole
+  RED class.
+- **F5 = INDEPENDENT: frozen-schema violation (INV-24, spec line 2884).** The `f5e70b8` v6 bump broke
+  the frozen v5 end-state. ✅ **DONE — `f7760eb`**: folded the 6 §7.1 columns into the v5
+  `cellrebel_executions` CREATE TABLE; `AppDatabase` version 6→5; dropped `MIGRATION_5_6` +
+  `Migration5to6Test` + `6.json` + the v6 refs in both migration-test chains; `5.json` regenerated by
+  ksp. Verified **180 tests / 33 RED / 0 errors** (182 − 2 deleted = 180; RED unchanged — nullable-col
+  fold); `Migration4to5Test`(2) + `MigrationTest`(3) PASS ⇒ v5 schema valid; canary clean (no fold-induced
+  breakage). Branch NOT pushed.
+
+**META-LESSON (internalized → standing self-gate).** For any claim of the form "no bad impl can green
+this RED set," an analytical disjoint-path / additive-composition argument is NOT conclusive proof. The
+ONLY conclusive proof is to BUILD the combined bad-impl attack and RUN it, then show each retained
+violation is independently RED under the combined attack. This is Sol's method; I adopt it as my own:
+**before any future re-review request, I build my own combined attack against the repaired REDs and run
+it.** I return to the reviewer only when the combined attack leaves every retained violation RED.
+(Cross-refs: "碎片够了" / empirical-over-analytical; ADR-031 — a self-authored analysis is a candidate
+claim, not a verified fact.)
+
+**Round-5 repair plan (supersedes round-4).**
+- **R5-F5** — fold §7.1 into v5 (INV-24). ✅ DONE `f7760eb` (above).
+- **R5-F1** — bind exact ledger identity. The `recordTrustedCompletion` RED must seed a real
+  `LocationTask` (id ≠ 1L) + `TestAttempt`, drive the production entrypoint, read back the minted
+  `TrustedQuotaEntry`, and assert `taskId == seeded task` (kills hardcoded-1L), `attemptId == seeded
+  attempt`, `evidenceDigest == seeded/recomputed` (kills constant-digest), §7.1 fields populated, and
+  POST intent-mismatch ⇒ no mint. `CompletionTrustContext` carries no `taskId` and `CellRebelExecution`
+  has none, so GREEN must bind `taskId` from the attempt→task aggregate; the RED asserts that binding.
+- **R5-F2** — make the three acquirers input-bearing / owner-injected (coordinator PASSES
+  attempt/receipt/task identity INTO the closure; assert the passed identities are real); assert
+  window-(c) reconcile APPLIES the checkpoint repair before schedule advance.
+- **R5-F3** — assert legacy `completedSuccesses` is UNCHANGED and NEVER consulted for
+  completion/normalization, for BOTH quota=1 and quota>1 (kill the OR-branch alternate-truth).
+- **R5-F4** — drive a REAL coordinator/engine entry that exercises `AttemptTransitions` /
+  `APlusRunTemplate` and produces a durable attempt/audit effect (kill the no-call-site data-table
+  oracle).
+- **R5-self-gate** — build my OWN combined attack against R5-F1..F4 and RUN it; return to Sol ONLY when
+  each retained violation is independently RED under the combined attack.
+
+**Constraints (unchanged, pre-freeze).** RED/skeleton only — no GREEN body, no §6.3-DTO/AIDL/
+qianwangyou edit. Formal reviewer = Sol (@codex-sol, cross-family, no self-review). PR #21 stays Draft;
+merge by operator. Branch not pushed. If receipt-lease binding proves to require a shared wire change,
+STOP and escalate. Identity `@glm` / glm-5.2.
 
 ---
 [智谱猫/阿智 · glm-5.2🐾]
