@@ -23,6 +23,10 @@
 #       the document being frozen has been superseded.
 #   5b. Inline NAME(wire) references in prose match the authoritative enum, so a
 #       hand-written wire number in a sentence cannot contradict the table.
+#   5c. The KDoc on each error constant carries the canonical scope of its §6.3.3
+#       row. 5 and 5b bind wire NUMBERS; nobody opens a 3800-line spec to learn
+#       what STALE_LEASE means, they hover the symbol. Three revisions fixed a
+#       definition on the canonical side only, and every other section stayed green.
 #   6.  The method surface matches across all four carriers (AIDL, yaml, README,
 #       canonical §6.1) — by NAME, which is all README can structurally express.
 #   6b. AIDL and canonical §6.1 additionally agree on the ORDERED full signature:
@@ -501,6 +505,146 @@ then
   pass "prose wire references are bound to the authoritative enum"
 else
   fail "at least one inline NAME(wire) reference contradicts ContractErrorCodeV1"
+fi
+
+# ---------------------------------------------------------------------------
+section "5c. error-code KDoc carries the canonical scope of its 6.3.3 row"
+
+# Sections 5 and 5b bind wire NUMBERS -- the table to the code, and inline prose
+# citations to the enum. Neither reads the one thing an implementer actually
+# reads: the KDoc on the constant. Nobody opens a 3800-line spec to find out what
+# STALE_LEASE means; they hover the symbol their IDE imported.
+#
+# That gap was exercised three times in this document's own history, and all three
+# survived every other section plus 4/4 CI:
+#
+#   7  canonical widened LEASE_CONFLICT to "any non-RELEASED lease REGARDLESS OF
+#      WHICH CALLER owns it" for completeAndAdvance (v1.39 (2)). The KDoc still said
+#      "ANOTHER lease already holds the environment" -- the literal reading that
+#      v1.39 had just recorded as a contradiction, preserved on the code side.
+#   8  canonical NARROWED STALE_LEASE and excepted release / completeAndAdvance
+#      (v1.42 (1)). The KDoc still said "no longer current", unscoped: implemented
+#      literally, completeAndAdvance is unconditionally unusable and 8.4's
+#      EXPIRED -> RELEASING recovery is unreachable.
+#   16 canonical explicitly retired the reading "terminal, not a failure" and froze
+#      the code as a genuine CALLER error (v1.39 correction note). The KDoc still
+#      carried the retired sentence verbatim, in English.
+#
+# Same shape each time: a revision fixed the definition on ONE side. So the two
+# rules below are both derived from canonical, never hardcoded:
+#
+#   A. If a 6.3.3 row scopes the code to specific interface METHODS, the KDoc must
+#      name every one of them. The method universe comes from the AIDL interface,
+#      so adding a method to the contract extends this check for free.
+#   B. If a row carries a correction note (更正 / 旧文), the KDoc must cite the
+#      revision that made it. A recorded correction has to leave a trace on the
+#      side being corrected.
+#
+# WHAT THIS DOES NOT DO. It cannot verify that KDoc prose is semantically right --
+# no string comparison across two natural languages can. It makes OMISSION
+# impossible and forces a human to touch the KDoc when canonical scopes or
+# corrects a code; a wrong sentence that names the right methods still passes.
+# Rule A is also case-insensitive and word-boundary based, so an English "apply"
+# used as a verb would satisfy it. That is a deliberate false-NEGATIVE bias: a
+# gate that cries wolf on legitimate prose gets disabled, and section 5c would
+# then protect nothing. Known uncovered class: a row listing two trigger branches
+# where the KDoc names only one (wire 1 was exactly this) has no method and no
+# correction marker, so neither rule sees it.
+if SPEC="$SPEC_PATH" KT="$KT_DIR/ContractErrorCodeV1.kt" \
+   AIDL="$AIDL_DIR/IEnvironmentControlV1.aidl" python3 - <<'PY'
+import os, pathlib, re, sys
+
+spec = pathlib.Path(os.environ["SPEC"]).read_text(encoding="utf-8")
+kt = pathlib.Path(os.environ["KT"]).read_text(encoding="utf-8")
+aidl = pathlib.Path(os.environ["AIDL"]).read_text(encoding="utf-8")
+
+# Method universe from the interface itself: the contract's own surface decides
+# what "scoped to a method" can mean, so a v1.x method addition is covered without
+# editing this gate.
+body = re.search(r"interface\s+IEnvironmentControlV1\s*\{(.*?)\n\}", aidl, re.S)
+if not body:
+    print("  FAIL  5c: could not locate the IEnvironmentControlV1 interface body")
+    sys.exit(1)
+methods = sorted(set(re.findall(r"\b([a-z][A-Za-z0-9]*)\s*\(", body.group(1))))
+if not methods:
+    print("  FAIL  5c: parsed zero methods from the AIDL interface")
+    sys.exit(1)
+
+# Anchor on the 6.3.3 heading. An unscoped scan would also match the revision-log
+# rows near the top, which quote these same code names and method names while
+# describing history rather than current normative scope.
+sec = re.search(r"^#### 6\.3\.3 .*?(?=^#### |\Z)", spec, re.S | re.M)
+if not sec:
+    print("  FAIL  5c: canonical 6.3.3 anchor not found")
+    sys.exit(1)
+
+rows = {}
+for line in sec.group(0).split("\n"):
+    if not line.startswith("|"):
+        continue
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    if len(cells) < 3:
+        continue
+    name = re.sub(r"[`*]", "", cells[1]).strip()
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+        rows[name] = cells[2]
+if not rows:
+    print("  FAIL  5c: parsed zero code rows out of canonical 6.3.3")
+    sys.exit(1)
+
+# KDoc immediately preceding each constant. Comment lines accumulate; any other
+# non-constant line resets, so the file-level KDoc cannot leak onto NOT_PAIRED.
+kdoc, buf = {}, []
+for line in kt.split("\n"):
+    s = line.strip()
+    if s.startswith("/**") or s.startswith("*"):
+        buf.append(s)
+        continue
+    m = re.match(r"([A-Z][A-Z0-9_]*)\(\d+\)", s)
+    if m:
+        kdoc[m.group(1)] = " ".join(buf)
+    buf = []
+
+fail = 0
+scoped = corrected = 0
+for name, cell in sorted(rows.items()):
+    doc = kdoc.get(name)
+    if doc is None:
+        print("  FAIL  5c: %s is a canonical 6.3.3 row with no KDoc'd constant" % name)
+        fail = 1
+        continue
+
+    # Rule A -- per-method scope.
+    need = [m for m in methods if re.search(r"\b%s\b" % m, cell)]
+    if need:
+        scoped += 1
+        missing = [m for m in need if not re.search(r"\b%s\b" % m, doc, re.I)]
+        if missing:
+            print("  FAIL  5c: %s -- canonical 6.3.3 scopes it per method (%s); "
+                  "its KDoc never names %s" % (name, ", ".join(need), ", ".join(missing)))
+            fail = 1
+
+    # Rule B -- a recorded correction must leave a trace on the corrected side.
+    if re.search(r"更正|旧文", cell):
+        revs = sorted(set(re.findall(r"v(\d+\.\d+)", cell)))
+        if revs:
+            corrected += 1
+            absent = [r for r in revs if ("v" + r) not in doc]
+            if absent:
+                print("  FAIL  5c: %s -- canonical 6.3.3 records a correction in %s; "
+                      "its KDoc cites neither the revision nor the corrected reading"
+                      % (name, ", ".join("v" + r for r in absent)))
+                fail = 1
+
+if not fail:
+    print("  PASS  %d row(s) checked: %d method-scoped, %d carrying a correction note"
+          % (len(rows), scoped, corrected))
+sys.exit(fail)
+PY
+then
+  pass "error-code KDoc agrees with the canonical scope of its 6.3.3 row"
+else
+  fail "at least one error-code KDoc drops the canonical scope of its 6.3.3 row"
 fi
 
 # ---------------------------------------------------------------------------

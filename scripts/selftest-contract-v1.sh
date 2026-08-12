@@ -182,6 +182,28 @@ neg "N-7 field dropped from canonical (name-set layer)" "$SPEC" \
 " "" \
 "in Kotlin but NOT in spec: ['currentItemId']"
 
+# N-8/N-9 mutate the KOTLIN side, not canonical. Every case above drifts the
+# document; section 5c exists for the opposite direction -- canonical is right and
+# the KDoc an implementer reads is the stale half. Both cases restore the exact
+# wording that shipped before 5c existed.
+KT_ERR="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1/ContractErrorCodeV1.kt"
+
+# N-8 Rule A: drop ONE of the two methods canonical scopes wire 7 to. Removing
+# both would also be caught, but the interesting case is a KDoc that looks scoped
+# and silently covers half the surface.
+neg "N-8 KDoc drops one canonical method scope (rule A)" "$KT_ERR" \
+'     *  - `apply` (§6.6): a lease held by *another* caller, or for another intent.' \
+'     *  - a lease held by another caller, or for another intent.' \
+"LEASE_CONFLICT -- canonical 6.3.3 scopes it per method (apply, completeAndAdvance); its KDoc never names apply"
+
+# N-9 Rule B: keep the corrected prose but remove the revision citation. This is
+# the weaker, likelier drift -- someone rewords the KDoc and the audit trail back
+# to the correcting revision goes with it.
+neg "N-9 KDoc drops the correction citation (rule B)" "$KT_ERR" \
+'**Corrected in spec v1.39.**' \
+'**Corrected.**' \
+"SCHEDULE_EXHAUSTED -- canonical 6.3.3 records a correction in v1.39"
+
 # ---------------------------------------------------------------------------
 printf '\n== mutation (disable one guard; its case must stop reporting) ==\n'
 
@@ -267,6 +289,22 @@ mut "M-4 parse-fatal exit catches N-5" 's/^if parse_errs:/if False and parse_err
 "    val serviceVersion: String," \
 "    serviceVersion: String," \
 "unparseable property line"
+
+# M-5/M-6 disable 5c's two rules independently. `if missing:` occurs four times in
+# the gate, so it is NOT usable as an anchor -- sed would silently disable four
+# guards and the case would "pass" for the wrong reason. The rule ENTRY conditions
+# are unique, so each rule is switched off on its own.
+mut "M-5 rule A (method scope) catches N-8" 's/if need:/if False and need:/' \
+  "$KT_ERR" \
+'     *  - `apply` (§6.6): a lease held by *another* caller, or for another intent.' \
+'     *  - a lease held by another caller, or for another intent.' \
+"scopes it per method (apply, completeAndAdvance)"
+
+mut "M-6 rule B (correction citation) catches N-9" 's/if absent:/if False and absent:/' \
+  "$KT_ERR" \
+'**Corrected in spec v1.39.**' \
+'**Corrected.**' \
+"records a correction in v1.39"
 
 # ---------------------------------------------------------------------------
 printf '\n'

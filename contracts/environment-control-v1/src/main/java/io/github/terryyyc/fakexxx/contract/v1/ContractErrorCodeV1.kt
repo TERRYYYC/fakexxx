@@ -17,7 +17,17 @@ package io.github.terryyyc.fakexxx.contract.v1
  * depend on them, and they must never carry pairing secrets (INV-18).
  */
 enum class ContractErrorCodeV1(val wire: Int) {
-    /** Caller has not been approved by the operator on the provider side. */
+    /**
+     * No approved pairing covers this call. Canonical §6.3.3 gives it two
+     * branches, and naming only the first was how this KDoc read before: the
+     * caller is not in the provider's allowlist, **or** — on the Auto side, as
+     * local state — the provider has not been approved. Whichever side owns the
+     * pairing record asserts it.
+     *
+     * Not caught by the §6.3.3 KDoc gate (check-contract-v1.sh section 5c): the
+     * row scopes nothing to a method and carries no correction note, so a KDoc
+     * naming one of two branches satisfies both of its rules.
+     */
     NOT_PAIRED(1),
 
     /**
@@ -38,10 +48,48 @@ enum class ContractErrorCodeV1(val wire: Int) {
     /** Continuity coverage is not FULL, so the observation cannot support trust. */
     CONTINUITY_NOT_FULL(6),
 
-    /** Another lease already holds the environment on this device. */
+    /**
+     * Conflict with an active or unconverged lease. The scope is **per method**,
+     * and the difference between the two is normative (§6.3.3):
+     *
+     *  - `apply` (§6.6): a lease held by *another* caller, or for another intent.
+     *  - `completeAndAdvance` (§6.7.4a): *any* non-`RELEASED` / unconverged lease
+     *    present on the device — **regardless of which caller owns it**, this
+     *    caller's own included.
+     *
+     * Reading the second case as "another caller's lease" is the literal reading
+     * §6.7.4a's lease gate exists to forbid: the gate is pre-emptive, stopping
+     * drift *before* it happens, which is what separates it from
+     * [ENVIRONMENT_DRIFT] (9) — that one is observed after the fact.
+     */
     LEASE_CONFLICT(7),
 
-    /** The referenced lease is no longer current. */
+    /**
+     * The `leaseId` is unusable **for this particular operation**. The scope is
+     * per method, not a property of the lease state alone (§6.3.3):
+     *
+     *  - `apply` / `observe`: every non-`ACTIVE` state (`EXPIRED`, `REVOKED`,
+     *    `RELEASE_INCOMPLETE`), plus not-owned-by-this-caller and already
+     *    `RELEASED`.
+     *  - `release`: **must be accepted** in `ACTIVE`, `EXPIRED` and
+     *    `RELEASE_INCOMPLETE` when the owning caller asks, and must drive the
+     *    state machine. Returning 8 for `EXPIRED` would make §8.4's
+     *    `EXPIRED → RELEASING` convergence unreachable and strand the lease in a
+     *    blocking state permanently. Only "not this caller's" or "already
+     *    `RELEASED`" return 8.
+     *  - `completeAndAdvance`: the already-`RELEASED` branch **does not apply**.
+     *    That `leaseId` is a historical attribution reference to the lease the
+     *    quota was earned under, not a live hold, and §6.7.4a freezes the call
+     *    order as release-then-advance — so "already `RELEASED`" is this
+     *    request's *normal* shape. Rejecting it would fail the only legal call
+     *    form and make the method unconditionally unusable.
+     *
+     * **Not frozen** (§20.1 `KB-5`): what `completeAndAdvance` does with a
+     * `leaseId` owned by a *different* caller. §6.7.4b's precedence order has no
+     * gate for it. Neither side may pick a reading and depend on it before that
+     * is adjudicated — one rejecting with 8 while the other accepts makes Auto's
+     * recovery strategy non-portable.
+     */
     STALE_LEASE(8),
 
     /**
@@ -82,8 +130,17 @@ enum class ContractErrorCodeV1(val wire: Int) {
     SCHEDULE_VERSION_STALE(15),
 
     /**
-     * No next item. Terminal, NOT a failure: the current item is retained and the
-     * schedule does not wrap (§6.7.4). Callers must not retry this into an advance.
+     * Advance requested when the schedule was **already exhausted**: there is no
+     * current item left to complete, so this is a genuine *caller* error (§6.7.4).
+     *
+     * **Corrected in spec v1.39.** This KDoc previously read "terminal, NOT a
+     * failure", which §6.7.4 contradicts. Completing the LAST item is a
+     * **success**: it returns [AdvanceReceiptV1] with
+     * `outcomeWire = AdvanceOutcomeV1.EXHAUSTED` and `advancedToItemId = null`,
+     * never this code. Wire 16 is only for a request that arrives *after*
+     * exhaustion. [AdvanceOutcomeV1] has carried that distinction since the same
+     * revision — this constant was the half that did not get updated, so the two
+     * KDocs in this module stated opposite things about the same wire number.
      */
     SCHEDULE_EXHAUSTED(16),
     ;
