@@ -283,6 +283,38 @@ R3-3 `825e436`; R3-4 re-red proven). Report evidence to the dev thread and reque
 (precondition — bad impl can't green — is satisfied). PR #21 stays Draft; merge by operator. GREEN body
 remains frozen pending #3 contract v1 freeze.
 
+**Round-4 RED partially landed + verified (HEAD `f5e70b8`, 186/37/0):** Sol's re-review (§11) rejected
+round-3 as still greenable by a 7-file false-GREEN counterexample; round-4 requires integration-RED
+through PRODUCTION entrypoints (§11.1 standard). Landed so far:
+- F1a `5281cfb`: §6.4 positive RUN window fixed to ≥10 s (13000−2100 = 10900 ms in TrustedLedgerRedTest)
+  — the prior 2900 ms was internally inconsistent with the ≥10 s RUNNING requirement yet expected wire 1/PASS.
+- F1c `577c6c5`: symmetric POST-observation negatives (coverage/verification/isMock/evidenceRefs/
+  continuity/coord inversions applied to POST) — a PRE-only partial GREEN now fails them.
+- F2 `0b3f3e2`: window-(c) checkpoint durable-effect assertions (receipt present before checkpoint ⇒
+  REPLAYED_APPLY, executor not re-invoked; never writing a checkpoint must fail).
+- F3 `e859b0f`: M-MG-02 routed through the REAL engine selection + production completion transaction
+  (MmG02TrustedProjectionRedTest rewired off the deleted isolated helpers, which are now inert).
+- F4 `b4d8175`+`81a15d0`: sealed APlusRunTemplate typed-step-sequence RED + remaining §8.1 recovery
+  transitions (CRASH_RECOVER / OBSERVATION_UNTRUSTED / TIMEOUT_INTERRUPTED / RECOVERY_REQUIRED+RECONCILE)
+  as state-machine accept/reject assertions + an integration walk oracle.
+- F1 schema scaffold `f5e70b8`: MIGRATION_5_6 adds the six nullable §7.1 columns to cellrebel_executions
+  (non-destructive ADD COLUMN, INV-24; no quota minted, INV-05/06). Schema prerequisite for the F1
+  read-back RED; consumer (entrypoint + test) lands next.
+
+Build: `apps/cellrebel-auto/gradlew -p apps/cellrebel-auto testDebugUnitTest` → **186 tests / 37 failed
+/ 0 errors** (right-reason RED). All migration tests PASS (2→3→4→5→6 chain, Migration4to5Test,
+Migration5to6Test — seeded row survives 5→6 with v5 cols intact + six new cols NULL, trusted count
+unchanged, no destructive fallback). The 37 failures are the behavioral RED across F1/F2/F3/F4.
+
+**Still open before Sol re-review:**
+1. F1 integration-RED body (§11.2 F1 / §11.4 F1): the production persist+mint entrypoint SKELETON
+   (persist digest+3clocks, mint nothing) wired to the real flow + a read-back RED asserting the FULL
+   §7.1 field set populated + symmetric POST + PASS ⇒ exactly one TrustedQuotaEntry minted. The v6
+   columns now exist for this; the entrypoint + read-back test are NOT yet written.
+2. §11.3 comprehensive bad-impl re-red gate across F1/F2/F3/F4 — cannot complete until #1 lands (F1 has
+   no integration test to attack yet). Then capture the new HEAD + re-red evidence and request Sol
+   (do NOT post until the comprehensive bad impl cannot green).
+
 ---
 
 ## 11. Round-4 — Sol re-review NOT CLEARED (round-3 RED was greenable; integration-RED required)
