@@ -91,9 +91,30 @@ data class EffectiveEnvironment(
 
 /**
  * Production adapter over qianwangyou's mockprovider / hook / config / schedule
- * capabilities. Implementation lands in Task 3 GREEN.
+ * capabilities.
+ *
+ * BLOCKED — NOT AN OVERSIGHT. The schedule half of this seam has no existing
+ * logic to call, and this interface's own rule is that adapters CALL existing
+ * logic rather than duplicate it.
+ *
+ * Spec §1036/§1040 place schedule ownership in qianwangyou as an operator-facing
+ * feature: "operator 在千网游中维护地址计划（顺序/优先级归千网游）" and "地址、
+ * 经纬度与优先级不再由 Auto 导入 ... 它们属于千网游的 schedule item". qwy today
+ * has profiles (SpoofConfig) and HookRefreshScheduler (a hook-refresh timer, not
+ * a schedule); there is no scheduleId, no ordered stable itemIds, no durable
+ * currentItemId pointer and no operator UI for any of it.
+ *
+ * Inventing that state inside the provider would create a second source of
+ * order truth — the exact thing §5 and §6.7.1 forbid — so it is escalated as a
+ * scope question rather than absorbed here as an implementation detail.
+ *
+ * Until that is settled these members stay TODO() and
+ * ProviderReachabilityGuardTest stays red on purpose: a red guard naming a real
+ * gap is worth more than a green one standing on invented truth.
  */
-class QwyEnvironmentController : QwyEnvironment {
+class QwyEnvironmentController(
+    @Suppress("UNUSED_PARAMETER") context: android.content.Context,
+) : QwyEnvironment {
     override fun scheduleSnapshot(): ScheduleSnapshot? =
         TODO("Task 3 GREEN: adapt qwy schedule identity (§6.7.1)")
 

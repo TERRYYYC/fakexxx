@@ -114,40 +114,23 @@ class ProviderReachabilityGuardTest {
     }
 
     /**
-     * [QwyEnvironmentController] is the production adapter: the seam where the
-     * contract stops being arithmetic over fakes and starts moving a real
-     * device. Instantiating it and calling the read-only accessors is enough to
-     * prove it is not a stub — a NotImplementedError here means the provider
-     * would answer every observe/advance with a crash.
+     * NOTE — why there is no "instantiate QwyEnvironmentController and probe it"
+     * case here.
      *
-     * Read-only calls only: this test must not mutate device state.
+     * An earlier draft did exactly that. Once the controller took a Context (it
+     * must: every real capability it adapts is Context-bound), the probe could no
+     * longer run in a JVM unit lane, and the honest options were to pull in
+     * Robolectric or to drop it.
+     *
+     * Dropping it costs nothing, because it and
+     * [noProductionStubsRemainInTheV1IntegrationSurface] were asserting the same
+     * fact — "the adapter is still a stub" — and the source scan asserts it
+     * without needing an Android runtime at all. Keeping both would have bought
+     * one claim twice and paid for it with a runtime dependency.
+     *
+     * What genuinely CANNOT be asserted from a unit lane is whether the adapter,
+     * once written, drives the device correctly. That is an instrumented /
+     * on-device claim and belongs to #7 acceptance, not here. This file's scope
+     * is reachability, and it should not pretend otherwise.
      */
-    @Test
-    fun productionEnvironmentControllerIsNotAStub() {
-        val controller = QwyEnvironmentController()
-
-        val notImplemented = mutableListOf<String>()
-        fun probe(name: String, call: () -> Unit) {
-            try {
-                call()
-            } catch (e: NotImplementedError) {
-                notImplemented += name
-            } catch (e: Throwable) {
-                // Any other throwable is a real (possibly environment-dependent)
-                // failure, not the stub signature this guard is about.
-            }
-        }
-
-        probe("scheduleSnapshot") { controller.scheduleSnapshot() }
-        probe("observeEffective") { controller.observeEffective() }
-        probe("scheduleDecisionWire") { controller.scheduleDecisionWire("schedule-probe") }
-        probe("setRelevantChangeListener") { controller.setRelevantChangeListener { } }
-
-        assertEquals(
-            "QwyEnvironmentController still throws NotImplementedError — the provider " +
-                "cannot observe or drive the real qwy environment: $notImplemented",
-            emptyList<String>(),
-            notImplemented
-        )
-    }
 }
