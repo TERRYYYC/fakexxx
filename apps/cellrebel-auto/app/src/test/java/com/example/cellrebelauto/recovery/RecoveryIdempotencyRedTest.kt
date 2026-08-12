@@ -185,91 +185,141 @@ class RecoveryIdempotencyRedTest {
         assertEquals("the provider effect must stay at one", 1, executor.effectCount(8L))
     }
 
-    // ---- Schedule-advance consumer gate (Issue #5 addendum, §5 boundary) ----
+    // ---- Schedule-advance consumer gate (Issue #5 addendum, §5 boundary; Sol round-4 §11.2 F2) ----
+    //
+    // The round-4 signature injects three ACQUIRERS (observe / receipt-revision / trusted-quota) rather
+    // than caller-supplied booleans. The GREEN gate MUST call each acquirer internally to learn its fact
+    // and AND the results against a durable receipt. Each test wires RECORDING fakes (a captured call
+    // counter) so the ADVANCED case can assert the calls happened — defeating a `receipt≠null ∧ boolean`
+    // false oracle that ANDs whatever booleans the test would have passed (§11.2 F2). The three
+    // discriminating negatives each flip ONE acquired fact to false and assert NOT_ADVANCED, so a
+    // hardcode-ADVANCED bad impl that ignores the acquirers fails them. Together: a cheap attack cannot
+    // green the ADVANCED case (zero acquirer calls) nor the negatives (hardcode returns ADVANCED).
 
     @Test
     fun `schedule advance without a durable receipt is never assumed`() {
         val rc = newCoordinator()
-        // No receipt for "k-sched". Passes now (skeleton NOT_ADVANCED) and stays valid GREEN:
-        // without a durable receipt Auto MUST NOT assume the schedule advanced.
+        // No receipt for "k-sched". Passes now (skeleton NOT_ADVANCED, ignores the acquirers) and stays
+        // valid GREEN: without a durable receipt Auto MUST NOT assume the schedule advanced regardless
+        // of what the acquirers would say.
+        val result = rc.scheduleAdvanced(
+            attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
+            observe = ObserveIntentAcquirer { true },
+            receiptRevision = ReceiptRevisionAcquirer { true },
+            trustedQuota = TrustedQuotaAcquirer { true }
+        )
         assertEquals(
+            "no durable receipt ⇒ NOT_ADVANCED regardless of acquired facts",
             ScheduleAdvanceState.NOT_ADVANCED,
-            rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
+            result
         )
     }
 
     @Test
-    fun `schedule advance with a durable receipt, matching intent, fresh revision, and quota open is ADVANCED`() {
+    fun `schedule advance with a durable receipt and all three facts confirming is ADVANCED`() {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         log.seedReceipt(idempotencyKey = "k-sched", requestDigest = "digest-sched", outcome = "RELEASED", createdAt = 500L)
         val rc = RecoveryCoordinator(executor, log)
-        // RED: skeleton returns NOT_ADVANCED even though a durable receipt exists, intent matches, the
-        // revision is fresh, and quota is open. GREEN must read the receipt and ADVANCE.
+
+        var observeCalls = 0
+        var revisionCalls = 0
+        var quotaCalls = 0
+        val observe = ObserveIntentAcquirer { observeCalls++; true }
+        val revision = ReceiptRevisionAcquirer { revisionCalls++; true }
+        val quota = TrustedQuotaAcquirer { quotaCalls++; true }
+
+        // RED: skeleton returns NOT_ADVANCED and acquires NOTHING (zero calls), even though a durable
+        // receipt exists and all three injected facts confirm. GREEN must read the receipt, call all
+        // three acquirers, AND the acquired facts, and ADVANCE.
+        val result = rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", now = 1000L, observe, revision, quota)
         assertEquals(
-            "receipt + matching intent + fresh revision + quota open ⇒ ADVANCED",
+            "receipt + observe-match + fresh revision + quota capacity ⇒ ADVANCED",
             ScheduleAdvanceState.ADVANCED,
-            rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
+            result
         )
         // Window (c) durable effect (Sol round-4 Finding 2): ADVANCED is not a bare return value — it
         // MUST persist a checkpoint bound to the receipt so a post-ADVANCED crash can replay. A GREEN
         // that returns ADVANCED without recording a checkpoint fails here. Dormant under the skeleton
         // (the ADVANCED assertion above fails first), so it adds a durable-effect gate, not a new RED.
-        val advancedCheckpoint = log.checkpointFor(1L)
-        assertNotNull("ADVANCED must record a window-c checkpoint", advancedCheckpoint)
-        assertEquals(
-            "the checkpoint must bind to the advanced receipt key",
-            "k-sched",
-            advancedCheckpoint!!.receiptKey
+        val checkpoint = log.checkpointFor(1L)
+        assertNotNull("ADVANCED must record a window-c checkpoint", checkpoint)
+        assertEquals("the checkpoint must bind to the advanced receipt key", "k-sched", checkpoint!!.receiptKey)
+        // §11.2 F2 acquisition gate: the GREEN body must have called each acquirer exactly once — the
+        // facts were acquired INSIDE the gate, not handed in as booleans. A hardcode-ADVANCED impl that
+        // returns ADVANCED + writes a checkpoint but never acquires (zero calls) fails here. Dormant
+        // under the skeleton (the ADVANCED assertion fails first).
+        assertTrue(
+            "scheduleAdvanced must internally acquire all three facts; got observe=$observeCalls revision=$revisionCalls quota=$quotaCalls",
+            observeCalls == 1 && revisionCalls == 1 && quotaCalls == 1
         )
     }
 
     @Test
-    fun `schedule advance with a receipt but mismatching intent is NOT_ADVANCED`() {
+    fun `schedule advance with a receipt but a mismatching observation is NOT_ADVANCED`() {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         log.seedReceipt(idempotencyKey = "k-sched", requestDigest = "digest-sched", outcome = "RELEASED", createdAt = 500L)
         val rc = RecoveryCoordinator(executor, log)
-        // A durable receipt alone is insufficient — the independent observe() must match. Passes now
-        // (skeleton NOT_ADVANCED) and stays valid GREEN.
-        assertEquals(
-            "receipt but mismatching intent revision ⇒ NOT_ADVANCED",
-            ScheduleAdvanceState.NOT_ADVANCED,
-            rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = false, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
+        // Discriminating negative (defeats a hardcode-ADVANCED-when-receipt≠null bad impl): a durable
+        // receipt is present, but the independent observation does NOT match ⇒ must NOT advance. Passes
+        // now (skeleton NOT_ADVANCED); a bad impl that ignores [observe] and hardcodes ADVANCED fails.
+        val result = rc.scheduleAdvanced(
+            attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
+            observe = ObserveIntentAcquirer { false }, // mismatch
+            receiptRevision = ReceiptRevisionAcquirer { true },
+            trustedQuota = TrustedQuotaAcquirer { true }
         )
-        assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
-    }
-
-    @Test
-    fun `schedule advance with a receipt and matching intent but a STALE revision is NOT_ADVANCED`() {
-        val executor = RecordingExternalApplyExecutor()
-        val log = FakeDurableRecoveryLog()
-        log.seedReceipt(idempotencyKey = "k-sched", requestDigest = "digest-sched", outcome = "RELEASED", createdAt = 500L)
-        val rc = RecoveryCoordinator(executor, log)
-        // Discriminating negative (defeats a `receipt≠null ∧ intentMatch` false oracle): intent matches
-        // but the receipt's revision is STALE ⇒ must NOT advance. Passes now; a false oracle that
-        // ignores [receiptRevisionIsStale] would wrongly return ADVANCED and fail this under GREEN.
         assertEquals(
-            "receipt + matching intent but stale revision ⇒ NOT_ADVANCED",
+            "receipt but mismatching observation ⇒ NOT_ADVANCED",
             ScheduleAdvanceState.NOT_ADVANCED,
-            rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = true, quotaExhausted = false, now = 1000L)
+            result
         )
         assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
     }
 
     @Test
-    fun `schedule advance with a receipt and matching intent but QUOTA EXHAUSTED is NOT_ADVANCED`() {
+    fun `schedule advance with a receipt and matching observation but a STALE revision is NOT_ADVANCED`() {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         log.seedReceipt(idempotencyKey = "k-sched", requestDigest = "digest-sched", outcome = "RELEASED", createdAt = 500L)
         val rc = RecoveryCoordinator(executor, log)
-        // Discriminating negative (defeats a `receipt≠null ∧ intentMatch` false oracle): intent matches
-        // and revision is fresh but the task's trusted quota is EXHAUSTED ⇒ must NOT advance. Passes
-        // now; a false oracle that ignores [quotaExhausted] would wrongly return ADVANCED.
+        // Discriminating negative (defeats a `receipt≠null ∧ observe-match` false oracle): observation
+        // matches but the receipt's revision is STALE ⇒ must NOT advance. Passes now; a bad impl that
+        // ignores [receiptRevision] and hardcodes ADVANCED fails.
+        val result = rc.scheduleAdvanced(
+            attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
+            observe = ObserveIntentAcquirer { true },
+            receiptRevision = ReceiptRevisionAcquirer { false }, // stale
+            trustedQuota = TrustedQuotaAcquirer { true }
+        )
         assertEquals(
-            "receipt + matching intent but quota exhausted ⇒ NOT_ADVANCED",
+            "receipt + matching observation but stale revision ⇒ NOT_ADVANCED",
             ScheduleAdvanceState.NOT_ADVANCED,
-            rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = true, now = 1000L)
+            result
+        )
+        assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
+    }
+
+    @Test
+    fun `schedule advance with a receipt and matching observation but QUOTA EXHAUSTED is NOT_ADVANCED`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReceipt(idempotencyKey = "k-sched", requestDigest = "digest-sched", outcome = "RELEASED", createdAt = 500L)
+        val rc = RecoveryCoordinator(executor, log)
+        // Discriminating negative (defeats a `receipt≠null ∧ observe-match ∧ fresh` false oracle):
+        // observation matches and revision is fresh but the task's trusted quota is EXHAUSTED ⇒ must
+        // NOT advance again. Passes now; a bad impl that ignores [trustedQuota] and hardcodes ADVANCED fails.
+        val result = rc.scheduleAdvanced(
+            attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
+            observe = ObserveIntentAcquirer { true },
+            receiptRevision = ReceiptRevisionAcquirer { true },
+            trustedQuota = TrustedQuotaAcquirer { false } // exhausted
+        )
+        assertEquals(
+            "receipt + matching observation but quota exhausted ⇒ NOT_ADVANCED",
+            ScheduleAdvanceState.NOT_ADVANCED,
+            result
         )
         assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
     }
@@ -279,7 +329,12 @@ class RecoveryIdempotencyRedTest {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         val rc = RecoveryCoordinator(executor, log)
-        rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
+        rc.scheduleAdvanced(
+            attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
+            observe = ObserveIntentAcquirer { true },
+            receiptRevision = ReceiptRevisionAcquirer { true },
+            trustedQuota = TrustedQuotaAcquirer { true }
+        )
         // The consumer gate must not mint receipts, drive the provider, or record a checkpoint as a side
         // effect (no fake trust, no fake advance) — it only READS durable state to gate the consumer.
         assertTrue(
