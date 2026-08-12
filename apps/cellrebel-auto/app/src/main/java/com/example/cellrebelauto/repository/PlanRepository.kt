@@ -189,6 +189,35 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markStaleSessionsInterrupted(nowMs: Long): Int =
         db.runSessionDao().markStaleRunningSessionsInterrupted(nowMs)
 
+    // ---- A+ recovery (R7-F2, §8.2 RECOVERING) ----
+
+    /**
+     * Non-terminal attempts of [planId] that carry an A+ `BEGIN_APPLY` audit row — i.e. attempts
+     * whose apply was already dispatched when the process died (§8.1: `CREATED –BEGIN_APPLY→
+     * APPLY_PENDING` writes attempt + idempotency key FIRST). Each ref recovers the idempotency key
+     * + canonical request digest from that audit row (`correlationRef` / `payloadDigest`), so the
+     * recovery coordinator reconciles the SAME key (§8.1: 同键重放 apply/取旧 receipt; forbidden:
+     * 换键重复 apply). Attempts with NO A+ audit trail never began an apply — no lease can be held —
+     * so they are left to the legacy blind sweep.
+     *
+     * READ-ONLY seam (pre-freeze): no writes, no schema change; the audit-row field semantics
+     * (eventType = §8.1 event name, correlationRef = idempotency key, payloadDigest = canonical
+     * request digest) are Auto-owned audit conventions, not wire surface.
+     *
+     * # A+ 待 reconcile 引用：带 BEGIN_APPLY 审计（含 key+digest）的非终态 attempt；无审计者留给 legacy 清扫
+     */
+    suspend fun findAPlusPendingReconcileRefs(planId: Long): List<APlusReconcileRef> =
+        db.testAttemptDao().getAttemptsForPlan(planId)
+            .filter { it.status == "starting" || it.status == "running" }
+            .mapNotNull { attempt ->
+                val beginApply = db.auditEventDao().forAttempt(attempt.id)
+                    .firstOrNull { it.eventType == com.example.cellrebelauto.automation.aplus.AttemptEvent.BEGIN_APPLY.name }
+                val key = beginApply?.correlationRef?.takeIf { it.isNotEmpty() }
+                val digest = beginApply?.payloadDigest?.takeIf { it.isNotEmpty() }
+                if (key == null || digest == null) null
+                else APlusReconcileRef(attempt.id, key, digest)
+            }
+
     // ---- Task lifecycle ----
 
     suspend fun markTaskActive(taskId: Long) = db.locationTaskDao().updateTaskStatus(taskId, "active")
@@ -303,3 +332,17 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun finishSession(sessionId: Long, status: String, endedAt: Long, totalCycles: Int) =
         db.runSessionDao().finish(sessionId, endedAt, status, totalCycles)
 }
+
+/**
+ * A non-terminal attempt with a recoverable A+ apply identity (R7-F2, §8.2 RECOVERING): the
+ * [idempotencyKey] + [requestDigest] the crashed apply was dispatched with, recovered from the
+ * attempt's durable BEGIN_APPLY audit row — the coordinator reconciles the SAME key, never a fresh
+ * one (§8.1 forbidden bypass: 换键重复 apply).
+ *
+ * # A+ 崩溃恢复引用：从 BEGIN_APPLY 审计行取回的同键身份（key + canonical digest）
+ */
+data class APlusReconcileRef(
+    val attemptId: Long,
+    val idempotencyKey: String,
+    val requestDigest: String
+)

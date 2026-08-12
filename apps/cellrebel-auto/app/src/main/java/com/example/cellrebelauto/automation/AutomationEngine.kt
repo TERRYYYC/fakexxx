@@ -6,9 +6,13 @@ import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptState
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
+import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.recovery.ReconcileOutcome
+import com.example.cellrebelauto.recovery.RecoveryCoordinator
+import com.example.cellrebelauto.recovery.ScheduleAdvanceState
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
@@ -94,7 +98,18 @@ class AutomationEngine(
     // # R6-F4（§11.7）：§8.1 状态机的生产驱动入口。GREEN 在 attempt 生命周期各 §8.1 步驱动它，
     // # 使状态机迁移都落到持久审计流。RED seam：默认 null（既有行为不变）；测试传真实 driver。
     // # 不可为 val 默认非空——engine 不持有 db，driver 由构造方（AutomationService / 测试）注入。
-    private val attemptDriver: APlusAttemptDriver? = null
+    private val attemptDriver: APlusAttemptDriver? = null,
+    // # R7-F2（§11.7）：A+ 崩溃恢复协调器的生产组合 seam。恢复清扫阶段经它对带 BEGIN_APPLY 审计的
+    // # 非终态 attempt 做同键 reconcile + schedule-advance 门（§8.2 RECOVERING：优先 reconcile，
+    // # 不取下一任务）。RED seam：默认 null（既有行为不变——无协调器时走 legacy 盲扫）；测试注入
+    // # 组合好的协调器。AutomationService 暂不传：executor/log 的生产绑定是 GREEN（Room/RPC 依赖
+    // # 冻结的 schema 与 contract），seam 先行使测试可经生产构造路径组合。
+    private val recoveryCoordinator: RecoveryCoordinator? = null,
+    // # R7-F1（§11.7）：可信完成证据的生产获取 seam。成功收尾时 engine 经它取得绑定真实 attempt 的
+    // # §6.4 完成信任上下文，并调用 PlanRepository.recordTrustedCompletion（当前为骨架：persist
+    // # digest-only、恒 FAIL、绝不铸币）。默认 null = legacy 路径（既有行为不变）；真实的
+    // # observe/classify 获取是 GREEN（contract 冻结）。
+    private val completionTrustContextProvider: (suspend (attemptId: Long, outcome: AttemptOutcome.Success) -> CompletionTrustContext?)? = null
 ) {
     companion object {
         private const val TAG = "AutoEngine"
@@ -138,6 +153,43 @@ class AutomationEngine(
      */
     suspend fun run() = coroutineScope {
         try {
+            // ==================== Step 0a: A+ reconcile BEFORE the blind sweep (§8.2 RECOVERING) ====
+            // # R7-F2（§11.7）：带 BEGIN_APPLY 审计的非终态 attempt = 崩溃时 apply 已发出、lease 可能
+            // # 仍被持有。§8.2：进程恢复发现非终态 attempt → RECOVERING，优先 reconcile，不取下一任务。
+            // # 同键 reconcile 收敛 lease 后，还必须过 schedule-advance 消费门（§5 边界：无持久 receipt
+            // # + 三项事实，Auto 绝不假定千网游 schedule 已前进）。证据不足/冲突/门未开 → fail-closed
+            // # 停跑（保留现场证据，绝不满眼推进）。无协调器（生产现状）时整段跳过，走 legacy 盲扫。
+            val coordinator = recoveryCoordinator
+            if (coordinator != null) {
+                for (ref in planRepository.findAPlusPendingReconcileRefs(planId)) {
+                    when (val outcome = coordinator.reconcile(
+                        ref.attemptId, ref.idempotencyKey, ref.requestDigest, nowMs()
+                    )) {
+                        ReconcileOutcome.ADVANCED_TO_RELEASE, ReconcileOutcome.REPLAYED_APPLY -> {
+                            val advance = coordinator.scheduleAdvanced(
+                                ref.attemptId, ref.idempotencyKey, nowMs()
+                            )
+                            if (advance == ScheduleAdvanceState.ADVANCED) {
+                                // # lease 已收敛且 schedule 前进已证实：崩溃 attempt 终态化，计划继续
+                                planRepository.markAttemptInterruptedIfNonTerminal(ref.attemptId, nowMs())
+                                log("A+ recovery: attempt ${ref.attemptId} reconciled ($outcome), gate ADVANCED — resuming plan")
+                            } else {
+                                log("ERROR: A+ recovery gate held for attempt ${ref.attemptId} — " +
+                                    "NOT advancing (§5 boundary); fail closed")
+                                updateState(AutomationState.ERROR)
+                                return@coroutineScope
+                            }
+                        }
+                        ReconcileOutcome.IDEMPOTENCY_CONFLICT, ReconcileOutcome.INSUFFICIENT_EVIDENCE -> {
+                            log("ERROR: A+ reconcile of attempt ${ref.attemptId} = $outcome — " +
+                                "fail closed, evidence preserved (§8.2: 证据不足走 PAUSED)")
+                            updateState(AutomationState.ERROR)
+                            return@coroutineScope
+                        }
+                    }
+                }
+            }
+
             // ==================== Step 0: recovery sweep FIRST (INV-9, F3R1-3) ====================
             // # 清扫永远最先跑：即使随后 both-OFF guard 拒绝启动，
             // # 崩溃残留也必须被终态化
@@ -346,6 +398,14 @@ class AutomationEngine(
                         )
                         if (!finalized) {
                             log("WARNING: finalize skipped (stale expected count) — idempotent guard held")
+                        }
+                        // # R7-F1（§11.7）：A+ 可信完成——经生产完成入口把分类执行证据持久化，并在
+                        // # §6.4 PASS 时铸币（§8.1 DECIDING→QUOTA_COMMITTED）。provider seam 默认 null
+                        // # ⇒ 不取证据、不落账本（既有行为不变）。recordTrustedCompletion 当前为骨架
+                        // #（persist digest-only、恒 FAIL、绝不铸币）⇒ R7-F1 的铸币/证据断言保持 RED。
+                        val trustCtx = completionTrustContextProvider?.invoke(attemptId, outcome)
+                        if (trustCtx != null) {
+                            planRepository.recordTrustedCompletion(trustCtx)
                         }
                         val updated = planRepository.getTask(task.id)
                         if (updated != null) {

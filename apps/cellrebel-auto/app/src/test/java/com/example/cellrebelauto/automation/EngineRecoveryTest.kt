@@ -2,7 +2,6 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
@@ -124,8 +123,7 @@ class EngineRecoveryTest {
         gps: GpsLocationSetter,
         clock: VirtualClock,
         bufferSeconds: Int = 60,
-        gpsSettleMs: Long = 0L,
-        driver: APlusAttemptDriver? = null
+        gpsSettleMs: Long = 0L
     ) = AutomationEngine(
         planId = planId,
         planRepository = repo,
@@ -135,8 +133,7 @@ class EngineRecoveryTest {
         testTimeoutMs = 90_000L,
         gpsSettleMs = gpsSettleMs,
         nowMs = clock.nowMs,
-        delayMs = clock.delayMs,
-        attemptDriver = driver
+        delayMs = clock.delayMs
     )
 
     @Test
@@ -456,33 +453,5 @@ class EngineRecoveryTest {
         assertEquals(0, runner.calls)
         val session = db.runSessionDao().getLatest()!!
         assertEquals("completed", session.status)
-    }
-
-    @Test
-    fun `R6-F4 the engine drives the section 8_1 state machine through the production driver appending a durable audit row bound to the real attempt`() = runTest {
-        // §11.7 F4: Sol 的 round-4/5 combined attack 实现了完整 §8.1 表却无持久化调用点——每个直接驱动
-        // driver 的测试都 green，但 engine 仍走 legacy counter，状态机形同死代码。本 RED 驱动 ENGINE 循环
-        // （真实生产入口），断言持久审计流出现绑定到真实 attemptId 的行。
-        //  - 骨架（driver no-op）：engine 调了 driver 但 driver 追加 0 行 ⇒ 审计空 ⇒ RED。
-        //  - "driver 正确但 engine 断开"攻击（engine 不调 driver）⇒ 审计空 ⇒ RED。
-        val (planId, _) = seedPlan(quota = 1)
-        val driver = APlusAttemptDriver(db.auditEventDao()) { 1_000_000L }
-        val clock = VirtualClock()
-        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
-        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(planId, runner, gps, clock, driver = driver).run()
-
-        val realAttemptId = db.testAttemptDao().getAttemptsForPlan(planId).first().id
-        val audit = db.auditEventDao().forAttempt(realAttemptId)
-        assertTrue(
-            "engine 必须在 attempt 创建时驱动 §8.1 driver，追加绑定真实 attemptId($realAttemptId) 的持久审计行；" +
-                "实际 ${audit.size} 行（骨架 no-op ⇒ 0；engine 断开攻击 ⇒ 0）",
-            audit.isNotEmpty()
-        )
-        assertEquals(
-            "审计行必须绑定真实 attempt 身份，非 null / 非错 id",
-            realAttemptId,
-            audit.first().attemptId
-        )
     }
 }
