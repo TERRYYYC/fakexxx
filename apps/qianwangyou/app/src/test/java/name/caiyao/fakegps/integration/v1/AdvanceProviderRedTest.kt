@@ -805,4 +805,46 @@ class AdvanceProviderRedTest {
         )
         assertEquals("pointer moved exactly once", 1, h.env.advanceCount)
     }
+
+    /**
+     * Terra round-3 "worse" case: after a live-process pointer-apply failure, a
+     * DIFFERENT idempotency key resending the SAME item-1 completion must NOT
+     * mint a second item-1→item-2 receipt over the single pending slot (which
+     * would leave one pointer move but two successful receipts). The owner fence
+     * settles the pending advance BEFORE the new key runs, so the pointer is
+     * already item-2 and the new key's schedule gate fails
+     * SCHEDULE_ITEM_MISMATCH(14). Sensitivity: with settlePendingAdvance()
+     * removed from the fence, the new key sees a stale item-1 pointer, passes
+     * every gate, and commits a second receipt — this asserts it cannot.
+     */
+    @Test
+    fun advance_pointerApplyThrows_liveProcess_newKeySameCompletion_noSecondReceipt() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        val leaseId = earnAndRelease(h)
+
+        // K1 commits its receipt, then the external apply throws; handler survives.
+        h.env.failNextAdvancePointer = true
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k1"))
+            fail("pointer-apply fault must surface, not be swallowed")
+        } catch (expected: RuntimeException) {
+            // crash, not a business answer
+        }
+        assertEquals("pointer not yet applied", "item-1", h.env.currentItemId)
+
+        // A DIFFERENT key with the same item-1 completion: the fenced entry
+        // settles the pending advance first (pointer → item-2), so this new key
+        // now mismatches the schedule instead of minting a second receipt.
+        expectContractFailure(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k2-NEW"))
+        }
+        assertEquals("pending settled before serving the new key", "item-2", h.env.currentItemId)
+        assertEquals("pointer moved exactly once — no second advance", 1, h.env.advanceCount)
+
+        // The ONE durable receipt is K1's; it replays cleanly with no extra move.
+        val k1Replay = h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k1"))
+        assertEquals("item-2", k1Replay.advancedToItemId)
+        assertEquals("still exactly one advance across the whole sequence", 1, h.env.advanceCount)
+    }
 }
