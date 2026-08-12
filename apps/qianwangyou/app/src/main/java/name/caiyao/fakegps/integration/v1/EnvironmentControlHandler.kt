@@ -540,11 +540,11 @@ class EnvironmentControlHandler(
             // committed advance from this slot.
             storage.write(
                 ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY,
-                listOf(
+                encodeFields(listOf(
                     request.expectedCurrentItemId,
                     if (toItemId == null) "0" else "1",
                     toItemId ?: "",
-                ).joinToString(RS),
+                )),
             )
 
             audit.append("advance",
@@ -599,7 +599,7 @@ class EnvironmentControlHandler(
     private fun settlePendingAdvance() {
         val marker = storage.read(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY)
         if (marker.isNullOrEmpty()) return
-        val parts = marker.split(RS)
+        val parts = decodeFields(marker)
         val fromItemId = parts[0]
         val toItemId = if (parts[1] == "1") parts[2] else null
         val schedule = checkNotNull(environment.scheduleSnapshot()) {
@@ -695,37 +695,47 @@ class EnvironmentControlHandler(
         const val ADVANCE_PENDING_KEY: String = "slot"
     }
 
-    private val RS = "\t"
+    // --- Durable field framing (Terra round-4 P1) ----------------------------
+    // All durable carriers (pending-advance marker, receipt payloads) go
+    // through the SHARED total codec [DurableFieldCodec] — free-string fields,
+    // length-prefix framing, presence discriminators instead of sentinels. One
+    // helper by design: a second hand-written framing is a drift point (v1.38).
 
-    private fun serializeApplyReceipt(r: ApplyReceiptV1): String =
+    private fun encodeFields(fields: List<String>): String = DurableFieldCodec.encode(fields)
+
+    private fun decodeFields(encoded: String): List<String> = DurableFieldCodec.decode(encoded)
+
+    private fun serializeApplyReceipt(r: ApplyReceiptV1): String = encodeFields(
         listOf(r.operationId, r.idempotencyKey, r.leaseId, r.acceptedIntentHash,
             r.appliedAtEpochMs.toString(), r.environmentRevision.toString(),
-            r.verificationLevelWire.toString()).joinToString(RS)
+            r.verificationLevelWire.toString()))
 
     private fun deserializeApplyReceipt(s: String): ApplyReceiptV1 {
-        val p = s.split(RS)
+        val p = decodeFields(s)
         return ApplyReceiptV1(p[0], p[1], p[2], p[3], p[4].toLong(), p[5].toLong(), p[6].toInt())
     }
 
-    private fun serializeReleaseReceipt(r: ReleaseReceiptV1): String =
+    private fun serializeReleaseReceipt(r: ReleaseReceiptV1): String = encodeFields(
         listOf(r.operationId, r.idempotencyKey, r.leaseId, r.releasedAtEpochMs.toString(),
             r.environmentRevision.toString(), r.releaseComplete.toString(),
-            r.residualReasonWires.joinToString(",")).joinToString(RS)
+            r.residualReasonWires.joinToString(",")))
 
     private fun deserializeReleaseReceipt(s: String): ReleaseReceiptV1 {
-        val p = s.split(RS)
+        val p = decodeFields(s)
         return ReleaseReceiptV1(p[0], p[1], p[2], p[3].toLong(), p[4].toLong(), p[5].toBoolean(),
             p[6].takeIf { it.isNotEmpty() }?.split(",")?.map { it.toInt() } ?: emptyList())
     }
 
-    private fun serializeAdvanceReceipt(r: AdvanceReceiptV1): String =
-        listOf(r.outcomeWire.toString(), r.advancedFromItemId, r.advancedToItemId ?: "",
+    private fun serializeAdvanceReceipt(r: AdvanceReceiptV1): String = encodeFields(
+        listOf(r.outcomeWire.toString(), r.advancedFromItemId,
+            // presence discriminator, not a sentinel: "" is a legal free string
+            if (r.advancedToItemId == null) "0" else "1", r.advancedToItemId ?: "",
             r.scheduleVersionAfter.toString(), r.effectiveIntentHash,
-            r.effectiveEnvironmentRevision.toString(), r.receiptDigest).joinToString(RS)
+            r.effectiveEnvironmentRevision.toString(), r.receiptDigest))
 
     private fun deserializeAdvanceReceipt(s: String): AdvanceReceiptV1 {
-        val p = s.split(RS)
-        return AdvanceReceiptV1(p[0].toInt(), p[1], p[2].ifEmpty { null },
-            p[3].toLong(), p[4], p[5].toLong(), p[6])
+        val p = decodeFields(s)
+        return AdvanceReceiptV1(p[0].toInt(), p[1], if (p[2] == "1") p[3] else null,
+            p[4].toLong(), p[5], p[6].toLong(), p[7])
     }
 }

@@ -29,7 +29,6 @@ class EnvironmentLeaseStore(
     companion object {
         private const val LEASE_NS = "integration.v1.leases"
         private const val CURRENT_KEY = "__current_lease_id__"
-        private const val DELIM = "\t"
     }
 
     /**
@@ -173,10 +172,13 @@ class EnvironmentLeaseStore(
             r.residualReasonWires.joinToString(",").ifEmpty { "" },
             r.revokeSource?.name ?: "",
             r.recoveryEvidenceRef ?: "",
-        ).joinToString(DELIM)
+        ).let(DurableFieldCodec::encode)
 
     private fun deserialize(s: String): LeaseRecord {
-        val parts = s.split(DELIM)
+        // Shared total codec: applyIdempotencyKey / releaseIdempotencyKey are
+        // FREE strings; tab-framing shifted every field when they held a tab
+        // (Terra round-4 class).
+        val parts = DurableFieldCodec.decode(s)
         return LeaseRecord(
             leaseId = parts[0],
             callerApplicationId = parts[1],
