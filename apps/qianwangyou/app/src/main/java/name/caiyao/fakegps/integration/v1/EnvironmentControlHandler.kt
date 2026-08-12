@@ -540,11 +540,8 @@ class EnvironmentControlHandler(
             // committed advance from this slot.
             storage.write(
                 ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY,
-                encodeFields(listOf(
-                    request.expectedCurrentItemId,
-                    if (toItemId == null) "0" else "1",
-                    toItemId ?: "",
-                )),
+                // (fromItemId, toItemId?) — toItemId is codec-native null when exhausted.
+                DurableFieldCodec.encode(listOf(request.expectedCurrentItemId, toItemId)),
             )
 
             audit.append("advance",
@@ -599,9 +596,9 @@ class EnvironmentControlHandler(
     private fun settlePendingAdvance() {
         val marker = storage.read(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY)
         if (marker.isNullOrEmpty()) return
-        val parts = decodeFields(marker)
-        val fromItemId = parts[0]
-        val toItemId = if (parts[1] == "1") parts[2] else null
+        val parts = DurableFieldCodec.decode(marker)
+        val fromItemId = parts[0]!!
+        val toItemId = parts[1]
         val schedule = checkNotNull(environment.scheduleSnapshot()) {
             "pending advance slot present but environment has no schedule"
         }
@@ -662,7 +659,7 @@ class EnvironmentControlHandler(
         leaseStore.runProviderCleanupForRevoked(environment)
     }
 
-    // --- Receipt serialization (simple tab-delimited, no JSON dependency) ---
+    // --- Receipt serialization via the shared total codec (DurableFieldCodec) ---
 
     /**
      * In-process owner fence. EVERY entry point that reads or mutates lease /
@@ -703,7 +700,7 @@ class EnvironmentControlHandler(
 
     private fun encodeFields(fields: List<String>): String = DurableFieldCodec.encode(fields)
 
-    private fun decodeFields(encoded: String): List<String> = DurableFieldCodec.decode(encoded)
+    private fun decodeFields(encoded: String): List<String> = DurableFieldCodec.decodeNonNull(encoded)
 
     private fun serializeApplyReceipt(r: ApplyReceiptV1): String = encodeFields(
         listOf(r.operationId, r.idempotencyKey, r.leaseId, r.acceptedIntentHash,
@@ -726,16 +723,16 @@ class EnvironmentControlHandler(
             p[6].takeIf { it.isNotEmpty() }?.split(",")?.map { it.toInt() } ?: emptyList())
     }
 
-    private fun serializeAdvanceReceipt(r: AdvanceReceiptV1): String = encodeFields(
-        listOf(r.outcomeWire.toString(), r.advancedFromItemId,
-            // presence discriminator, not a sentinel: "" is a legal free string
-            if (r.advancedToItemId == null) "0" else "1", r.advancedToItemId ?: "",
+    // advancedToItemId is nullable (exhausted → null): the codec encodes null
+    // natively (length "-1:"), so no manual presence bit — one null encoding.
+    private fun serializeAdvanceReceipt(r: AdvanceReceiptV1): String = DurableFieldCodec.encode(
+        listOf(r.outcomeWire.toString(), r.advancedFromItemId, r.advancedToItemId,
             r.scheduleVersionAfter.toString(), r.effectiveIntentHash,
             r.effectiveEnvironmentRevision.toString(), r.receiptDigest))
 
     private fun deserializeAdvanceReceipt(s: String): AdvanceReceiptV1 {
-        val p = decodeFields(s)
-        return AdvanceReceiptV1(p[0].toInt(), p[1], if (p[2] == "1") p[3] else null,
-            p[4].toLong(), p[5], p[6].toLong(), p[7])
+        val p = DurableFieldCodec.decode(s)
+        return AdvanceReceiptV1(p[0]!!.toInt(), p[1]!!, p[2],
+            p[3]!!.toLong(), p[4]!!, p[5]!!.toLong(), p[6]!!)
     }
 }

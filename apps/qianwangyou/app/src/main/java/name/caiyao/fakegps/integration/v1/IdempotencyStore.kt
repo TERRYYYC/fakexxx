@@ -89,7 +89,7 @@ class DurableIdempotencyStore(
         ))
 
     private fun deserialize(s: String): OperationReceiptRecord {
-        val parts = DurableFieldCodec.decode(s)
+        val parts = DurableFieldCodec.decodeNonNull(s)
         return OperationReceiptRecord(
             callerApplicationId = parts[0],
             operation = ContractOperation.valueOf(parts[1]),

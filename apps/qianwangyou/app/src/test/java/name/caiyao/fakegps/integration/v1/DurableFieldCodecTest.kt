@@ -38,4 +38,22 @@ class DurableFieldCodecTest {
         val inner = DurableFieldCodec.encode(listOf("op\t1", "key:2", ""))
         roundTrips(listOf("caller.app", inner, "tail"))
     }
+
+    /** null, "", and non-empty are THREE distinct states that must all survive (round-5). */
+    @Test
+    fun nullDistinctFromEmptyString() {
+        val fields = listOf<String?>(null, "", "x", null, "")
+        assertEquals(fields, DurableFieldCodec.decode(DurableFieldCodec.encode(fields)))
+        org.junit.Assert.assertNotEquals(
+            "null and empty string must encode differently",
+            DurableFieldCodec.encode(listOf<String?>(null)),
+            DurableFieldCodec.encode(listOf<String?>("")),
+        )
+    }
+
+    /** decodeNonNull fails loud if a durable record claims a field is non-null but decoded null. */
+    @Test(expected = IllegalStateException::class)
+    fun decodeNonNullRejectsNullField() {
+        DurableFieldCodec.decodeNonNull(DurableFieldCodec.encode(listOf<String?>("ok", null)))
+    }
 }
