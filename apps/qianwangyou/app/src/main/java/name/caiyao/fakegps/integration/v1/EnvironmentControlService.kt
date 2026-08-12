@@ -2,7 +2,20 @@ package name.caiyao.fakegps.integration.v1
 
 import android.app.Service
 import android.content.Intent
+import android.os.Binder
 import android.os.IBinder
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
+import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
+import io.github.terryyyc.fakexxx.contract.v1.IEnvironmentControlV1
+import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1
+import io.github.terryyyc.fakexxx.contract.v1.PreflightRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.ReleaseReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
 
 /**
  * Binder entry point: name.caiyao.fakegps.integration.v1.EnvironmentControlService
@@ -11,16 +24,81 @@ import android.os.IBinder
  *
  * Glue only:
  *  - resolves Binder.getCallingUid() per call and passes it to the handler
- *  - maps ContractException → ServiceSpecificException(code.wire) (§6.3.3)
  *  - Binder death / RemoteException stay transport failures (recovery path),
  *    never ContractErrorCodeV1 values
  *  - exported across apps, no network surface
+ *
+ * The §6.3.3 typed-failure mapping is NOT implemented here and cannot be until
+ * #3 lands a delta — see [typed] for the verified reason. Success paths are
+ * complete, so bind/discover/apply/observe/release/completeAndAdvance are
+ * reachable today; typed business failures currently surface to Auto as
+ * transport failures (fail-closed) instead of wire codes.
  *
  * All behavior lives in [EnvironmentControlHandler] so unit lanes never need
  * an Android runtime.
  */
 class EnvironmentControlService : Service() {
 
-    override fun onBind(intent: Intent?): IBinder =
-        TODO("Task 3 GREEN: IEnvironmentControlV1.Stub delegating to EnvironmentControlHandler")
+    private val binder: IEnvironmentControlV1.Stub = object : IEnvironmentControlV1.Stub() {
+
+        override fun discover(): CapabilitySnapshotV1 =
+            typed { handler().discover(callingUid()) }
+
+        override fun preflight(request: PreflightRequestV1): PreflightReportV1 =
+            typed { handler().preflight(callingUid(), request) }
+
+        override fun apply(request: ApplyRequestV1): ApplyReceiptV1 =
+            typed { handler().apply(callingUid(), request) }
+
+        override fun observe(request: ObserveRequestV1): EnvironmentObservationV1 =
+            typed { handler().observe(callingUid(), request) }
+
+        override fun release(request: ReleaseRequestV1): ReleaseReceiptV1 =
+            typed { handler().release(callingUid(), request) }
+
+        override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 =
+            typed { handler().completeAndAdvance(callingUid(), request) }
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    private fun handler(): EnvironmentControlHandler = ProviderRuntime.handler(this)
+
+    /**
+     * INV-02: identity is resolved from the kernel-supplied calling uid on every
+     * call. A request never gets to state who it is, and the value is read
+     * inside the Binder transaction — reading it later (e.g. from a worker
+     * thread) would return the provider's own uid.
+     */
+    private fun callingUid(): Int = Binder.getCallingUid()
+
+    /**
+     * §6.3.3 error mapping — BLOCKED ON A CONTRACT DELTA (#3 / PR #11).
+     *
+     * §1506 and the contract README both specify that expected business failures
+     * travel as `ServiceSpecificException(ContractErrorCodeV1.wire)`. That class
+     * is not implementable by an ordinary app: `android.os.ServiceSpecificException`
+     * is absent from the public SDK stub (verified against android-35 and
+     * android-36.1 android.jar, javap, and api-versions.xml — framework sources
+     * such as android/se/omapi/SEService.java do throw it, so it exists at
+     * runtime but is @hide to app compilation).
+     *
+     * It is also the ONLY exception in Parcel's writeException/readException set
+     * that can carry a caller-defined int. So under the public SDK there is no
+     * exception-shaped path for a wire code at all: carrying it would require a
+     * contract change (an error wire field on the receipts, or a result wrapper),
+     * which is #3's call and not something this seam may invent.
+     *
+     * Until that lands, a typed failure propagates instead of being laundered
+     * into a nearby public exception. That is deliberate and fail-closed: Auto
+     * reads it as a TRANSPORT failure and enters recovery, which is honest
+     * ("something went wrong, no environment claim"), whereas reusing
+     * IllegalStateException or an approximate code would let Auto make a trust
+     * decision on a fabricated business outcome. §1506's own rule for an
+     * unrecognized code is fail-closed, never guess-compatible.
+     *
+     * Success paths are unaffected, so the bind + call surface this class exists
+     * to provide is fully reachable today.
+     */
+    private inline fun <T> typed(block: () -> T): T = block()
 }
