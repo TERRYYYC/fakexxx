@@ -140,7 +140,9 @@ class Migration4to5Test {
 
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_4_5)
+            // 本测试聚焦 4→5 的数据语义；追加 5→6 是为了 Room 能把 v4 文件开到当前版本(v6)。
+            // 5→6 只给 cellrebel_executions 加可空列（INV-24 非破坏性），不改变本测试断言。
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
             .allowMainThreadQueries()
             .build()
 

@@ -18,13 +18,14 @@ import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import com.example.cellrebelauto.model.plan.TestAttempt
 
 /**
- * Room database singleton, version 5 (Issue #5 Task 4: trusted ledger + migration).
+ * Room database singleton, version 6 (Issue #5 R4-F1: §7.1 evidence fields on cellrebel_executions).
  *
- * v5 adds the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables and
- * exports the schema JSON for version control (INV-24). `fallbackToDestructiveMigration` is
- * intentionally never used — see MIGRATION_4_5.
+ * v5 added the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables.
+ * v6 adds the §7.1 / §8.6 full completion-evidence columns to `cellrebel_executions` (MIGRATION_5_6,
+ * nullable, non-destructive). The schema JSON is exported for version control (INV-24).
+ * `fallbackToDestructiveMigration` is intentionally never used — see MIGRATION_4_5 / MIGRATION_5_6.
  *
- * # Room 数据库单例，版本 5（可信账本 + 迁移）；exportSchema=true；禁用 destructive fallback
+ * # Room 数据库单例，版本 6（R4-F1：cellrebel_executions 增 §7.1 证据列）；exportSchema=true；禁用 destructive fallback
  */
 @Database(
     entities = [
@@ -39,7 +40,7 @@ import com.example.cellrebelauto.model.plan.TestAttempt
         LegacyCompletionSnapshot::class,
         ProviderPairingRecord::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -137,7 +138,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "cellrebel_auto.db"
                 )
                     // # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }

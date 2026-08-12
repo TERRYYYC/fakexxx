@@ -45,5 +45,33 @@ data class CellRebelExecution(
      */
     val startedAtElapsed: Long = 0L,
     val runningConfirmedAtElapsed: Long = 0L,
-    val completedAtElapsed: Long = 0L
+    val completedAtElapsed: Long = 0L,
+
+    // ---- §7.1 / §8.6 full completion-evidence field set (Issue #5 R4-F1) ----
+    // These carry the ACTUAL completion evidence a trusted quota mint must be bound to (§7.1):
+    // baseline state / marker text / RUNNING duration / per-round timestamps / both scores. They are
+    // NULLABLE because the pre-freeze entrypoint SKELETON persists digest+3clocks only and IGNORES the
+    // evidence detail (§11.4) — so a skeleton-persisted row leaves them null (= RED: the read-back
+    // asserts they are populated). GREEN copies them from the evidence detail before insert. A bad impl
+    // that persists digest-only (the §11.3 F1 attack) leaves them null and fails the read-back.
+    //
+    // Nullable also so a fresh v6 row / a not-yet-classified execution is representable. The trust
+    // predicate never reads these directly (it reads the ObservationSnapshot pair); they are the
+    // DURABLE EVIDENCE the ledger row must carry for audit + replay (§7.1 完整证据).
+    /** §7.1 基线态: observed baseline state text before the run (null until evidence-persisted). */
+    val baselineRunningState: String? = null,
+    /** §7.1 marker 文本: the RUNNING marker text that confirmed the run was in progress. */
+    val runningMarkerText: String? = null,
+    /** §7.1 RUNNING 时长: confirmed RUNNING duration in ms (≥ §6.4.2 MIN_RUNNING_EVIDENCE_MS). */
+    val runningDurationMs: Long? = null,
+    /** §7.1 分数: web-browsing score observed at completion. */
+    val webBrowsingScore: Double? = null,
+    /** §7.1 分数: video-streaming score observed at completion. */
+    val videoStreamingScore: Double? = null,
+    /**
+     * §7.1 各轮时间戳: per-round completion timestamps (elapsedRealtime), ";"-joined. The join is the
+     * entrypoint's internal storage contract (no Room TypeConverter for List exists in this codebase);
+     * GREEN serializes [CompletionEvidenceDetail.roundTimestampsElapsed] with ";" before insert.
+     */
+    val roundTimestampsElapsed: String? = null
 )
