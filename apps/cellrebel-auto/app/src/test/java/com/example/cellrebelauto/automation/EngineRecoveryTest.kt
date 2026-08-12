@@ -2,9 +2,11 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
@@ -122,7 +124,8 @@ class EngineRecoveryTest {
         gps: GpsLocationSetter,
         clock: VirtualClock,
         bufferSeconds: Int = 60,
-        gpsSettleMs: Long = 0L
+        gpsSettleMs: Long = 0L,
+        driver: APlusAttemptDriver? = null
     ) = AutomationEngine(
         planId = planId,
         planRepository = repo,
@@ -132,7 +135,8 @@ class EngineRecoveryTest {
         testTimeoutMs = 90_000L,
         gpsSettleMs = gpsSettleMs,
         nowMs = clock.nowMs,
-        delayMs = clock.delayMs
+        delayMs = clock.delayMs,
+        attemptDriver = driver
     )
 
     @Test
@@ -431,6 +435,16 @@ class EngineRecoveryTest {
                 )
             )
         )
+        // R6-F3（§11.7）：种子可信配额——使该任务"真正可信满配额"，与 TrustedOnlyCompletionRedTest
+        // （counter-full/trusted-empty 须保持 active）不再矛盾。崩溃窗口语义改为可信语义：上次进程已铸币、
+        // 状态未翻转。counter=1 现为遗留 vestigial；trusted 1>=1 才是完成的真正依据。
+        val taskId = db.locationTaskDao().getTasksForPlan(planId).first().id
+        db.trustedQuotaDao().insert(
+            TrustedQuotaEntry(
+                attemptId = 419_419L, taskId = taskId,
+                evidenceDigest = "sha256:r6-f3-recovery-trusted-full", committedAt = 900L
+            )
+        )
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -442,5 +456,33 @@ class EngineRecoveryTest {
         assertEquals(0, runner.calls)
         val session = db.runSessionDao().getLatest()!!
         assertEquals("completed", session.status)
+    }
+
+    @Test
+    fun `R6-F4 the engine drives the section 8_1 state machine through the production driver appending a durable audit row bound to the real attempt`() = runTest {
+        // §11.7 F4: Sol 的 round-4/5 combined attack 实现了完整 §8.1 表却无持久化调用点——每个直接驱动
+        // driver 的测试都 green，但 engine 仍走 legacy counter，状态机形同死代码。本 RED 驱动 ENGINE 循环
+        // （真实生产入口），断言持久审计流出现绑定到真实 attemptId 的行。
+        //  - 骨架（driver no-op）：engine 调了 driver 但 driver 追加 0 行 ⇒ 审计空 ⇒ RED。
+        //  - "driver 正确但 engine 断开"攻击（engine 不调 driver）⇒ 审计空 ⇒ RED。
+        val (planId, _) = seedPlan(quota = 1)
+        val driver = APlusAttemptDriver(db.auditEventDao()) { 1_000_000L }
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, driver = driver).run()
+
+        val realAttemptId = db.testAttemptDao().getAttemptsForPlan(planId).first().id
+        val audit = db.auditEventDao().forAttempt(realAttemptId)
+        assertTrue(
+            "engine 必须在 attempt 创建时驱动 §8.1 driver，追加绑定真实 attemptId($realAttemptId) 的持久审计行；" +
+                "实际 ${audit.size} 行（骨架 no-op ⇒ 0；engine 断开攻击 ⇒ 0）",
+            audit.isNotEmpty()
+        )
+        assertEquals(
+            "审计行必须绑定真实 attempt 身份，非 null / 非错 id",
+            realAttemptId,
+            audit.first().attemptId
+        )
     }
 }

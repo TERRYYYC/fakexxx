@@ -30,7 +30,14 @@ package com.example.cellrebelauto.recovery
  */
 class RecoveryCoordinator(
     private val executor: ExternalApplyExecutor,
-    private val log: DurableRecoveryLog
+    private val log: DurableRecoveryLog,
+    // R6-F2（§11.7）：三个 reader 是协调器**构造期拥有**的依赖，不再逐调用注入。
+    // scheduleAdvanced 只接受协调器拥有的 (attemptId, key, now)；GREEN 用真实身份调用每个 reader
+    // 取事实再 AND。默认 no-op 仅服务于不驱动 scheduleAdvanced 的构造（如 reconcile 测试）——
+    // scheduleAdvanced 的生产/测试构造必传真实 reader。这彻底消除了 R5 残留的"闭包答案仍由调用方注入"。
+    private val observe: ObserveIntentAcquirer = ObserveIntentAcquirer { _ -> false },
+    private val receiptRevision: ReceiptRevisionAcquirer = ReceiptRevisionAcquirer { _, _ -> false },
+    private val trustedQuota: TrustedQuotaAcquirer = TrustedQuotaAcquirer { _ -> false }
 ) {
 
     /**
@@ -64,33 +71,27 @@ class RecoveryCoordinator(
      * hardcode-ADVANCED bad impl that ignores the acquirers is caught twice: the ADVANCED case asserts
      * acquirer calls (zero ⇒ fail), and the three negatives assert NOT_ADVANCED (hardcode ⇒ ADVANCED ⇒ fail).
      *
-     * R5-F2 identity-bearing (§11.7): Sol's round-4 combined attack greened this by relaying THREE
-     * ZERO-ARG closures — the gate "called" each once (call-count satisfied) and ANDed whatever boolean
-     * the caller supplied, never binding the acquisition to the receipt's real (attemptId, key). The
-     * acquirers are now identity-bearing: the GREEN body must forward the REAL [attemptId] / [idempotencyKey]
-     * / [now] into each closure, and the test asserts the captured identity is real (≠ default/garbage).
-     * This defeats the zero-arg caller-injection oracle. Residual delegation: the closure ANSWER remains
-     * caller-supplied; R5-self-gate judges whether closing that residual requires moving acquisition into
-     * the gate (a coordinator-wiring change = the receipt-lease escalation trigger).
+     * R6-F2 ownership rewrite (§11.7): Sol's round-5 verdict — R5's identity-bearing acquirers were STILL
+     * per-call params, so a combined attack relayed caller-supplied closures whose ANSWER the gate ANDed
+     * without the acquisition being bound to anything the coordinator owns. The readers are now
+     * **coordinator-owned constructor dependencies**; [scheduleAdvanced] accepts only the coordinator-owned
+     * (attemptId, key, now). The GREEN body forwards those REAL owned values into each constructor-owned
+     * reader to acquire each fact, then ANDs. The test seeds **identity-keyed** fakes (a Map from the real
+     * identity → fact) so the fact is LOOKED UP by identity, not caller-supplied: forwarding the real
+     * identity yields the seeded fact; forwarding a wrong/garbage identity yields the default (false) and
+     * the result flips. This defeats the caller-injected-answer oracle with no residual.
      *
-     * PRE-FREEZE SKELETON (§11.4 F2 — GREEN body frozen pending contract-v1 freeze #3): always returns
-     * [ScheduleAdvanceState.NOT_ADVANCED], IGNORING [log] and ALL THREE acquirers. The recording-fake
-     * acquirers register zero calls under the skeleton, so the §6.4-positive fixture (durable receipt +
-     * all three facts confirming) stays RED: the ADVANCED assertion fails, and (dormant behind it) the
-     * acquirer-call assertion would also fail. GREEN reads the receipt, calls all three acquirers, ANDs
-     * the acquired facts, ADVANCEs, and records a window-c checkpoint bound to the receipt.
-     *
-     * @param observe acquires whether the independent live observation matches the receipt's intent, for the gate's [attemptId].
-     * @param receiptRevision acquires whether the receipt's revision is fresh (not stale), for the gate's [idempotencyKey] at [now].
-     * @param trustedQuota acquires whether the task's trusted quota still has capacity (not exhausted), for the gate's [attemptId].
+     * PRE-FREEZE SKELETON: always returns [ScheduleAdvanceState.NOT_ADVANCED], IGNORING [log] and ALL
+     * THREE constructor-owned readers (zero reader calls under skeleton). The §6.4-positive fixture
+     * (durable receipt + all three facts seeded true for the real identity) stays RED: the ADVANCED
+     * assertion fails, and the reader-call/identity assertions fail too. GREEN reads the receipt, calls
+     * all three readers with the real owned identity, ANDs the acquired facts, ADVANCEs, and records a
+     * window-c checkpoint bound to the receipt.
      */
     fun scheduleAdvanced(
         attemptId: Long,
         idempotencyKey: String,
-        now: Long,
-        observe: ObserveIntentAcquirer,
-        receiptRevision: ReceiptRevisionAcquirer,
-        trustedQuota: TrustedQuotaAcquirer
+        now: Long
     ): ScheduleAdvanceState = ScheduleAdvanceState.NOT_ADVANCED
 }
 

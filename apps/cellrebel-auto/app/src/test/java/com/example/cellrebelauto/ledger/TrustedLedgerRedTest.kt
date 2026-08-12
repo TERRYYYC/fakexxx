@@ -220,6 +220,7 @@ class TrustedLedgerRedTest {
         completionEvidenceWire = wire,
         applyReceiptIntentHash = INTENT_HASH,
         locallyRecomputedIntentHash = INTENT_HASH,
+        applyReceiptLease = LEASE,
         targetLat = TARGET_LAT,
         targetLng = TARGET_LNG,
         locationToleranceMeters = TOLERANCE_M,
@@ -470,6 +471,50 @@ class TrustedLedgerRedTest {
     fun `a post coordinate outside the 1_0 m tolerance fails`() =
         // Same ~111 m displacement as the PRE coordinate negative, applied to post.
         fail(validContext().copy(postObservation = validPost().copy(effectiveLat = 40.001)))
+
+    // === R6-F1（§11.7）: closes Sol's round-5 F1 residuals — caller-tolerance false-oracle + un-bound lease + POST intent ===
+    //
+    // Sol's round-5 verdict: R5-F1 was still greenable via (a) the predicate using the CALLER-provided
+    // [CompletionTrustContext.locationToleranceMeters] as the pass threshold (grounding §11.7 line 528 — a
+    // caller injects its own loose bound); (b) observations bound to EACH OTHER but not to the receipt's
+    // lease (no applyReceiptLease field, so a `pre.leaseId == post.leaseId` oracle greened it); and
+    // (c) only the PRE observation's intent hash checked against the receipt. Each negative below defeats
+    // one residual. They all PASS under the FAIL skeleton (trivially) but stay RED under the F1 combined
+    // attack (full §6.4 predicate + caller-tolerance + wrong-lease-acceptance) — verified in the R6-C self-gate.
+
+    @Test
+    fun `R6-F1 a caller-injected loose tolerance does NOT override the frozen 1_0 m bound`() =
+        // §11.7 caller-tolerance false-oracle: caller passes locationToleranceMeters = 50.0 m and a PRE coord
+        // ~20 m off intent (≫ frozen 1.0 m, ≪ 50.0 m). GREEN MUST gate on the FROZEN
+        // TRUSTED_LOCATION_TOLERANCE_METERS (1.0 m), not the caller field ⇒ 20 m > 1.0 m ⇒ FAIL. A bad impl
+        // that does `haversine <= context.locationToleranceMeters` sees 20 m < 50.0 m ⇒ PASS ⇒ fails this.
+        fail(
+            validContext().copy(
+                locationToleranceMeters = 50.0,
+                preObservation = validPre().copy(effectiveLat = TARGET_LAT + 0.00018) // ≈ 20 m off
+            )
+        )
+
+    @Test
+    fun `R6-F1 a POST observation intent hash disagreeing with the receipt fails`() =
+        // §11.7 POST-intent residual: the PRE observation's intent matches the receipt, but the POST
+        // observation's acceptedIntentHash differs ⇒ FAIL. A partial GREEN that validates only the PRE
+        // observation's intent (pre==receipt) PASSes this wrong tuple ⇒ fails this negative.
+        fail(validContext().copy(postObservation = validPost().copy(acceptedIntentHash = "other")))
+
+    @Test
+    fun `R6-F1 observations matching each other but NOT the receipt lease fail`() =
+        // §11.7 un-bound-lease residual: pre.leaseId == post.leaseId == LEASE ("L1"), but the receipt's
+        // applyReceiptLease is "L-OTHER". GREEN MUST bind each observation to the RECEIPT's lease (INV-07),
+        // not merely to each other ⇒ FAIL. A `pre.leaseId == post.leaseId` oracle PASSes ⇒ fails this.
+        fail(validContext().copy(applyReceiptLease = "L-OTHER"))
+
+    @Test
+    fun `R6-F1 a PRE observation lease disagreeing with the receipt lease fails`() =
+        // §11.7: pre.leaseId != applyReceiptLease (post still matches the receipt) ⇒ FAIL — pins the PRE
+        // side to the receipt lease explicitly (the existing `different leases` test flips POST; this flips
+        // PRE against the receipt, closing the symmetric direction of the binding).
+        fail(validContext().copy(preObservation = validPre().copy(leaseId = "L-pre-other")))
 
     // ---- AREA 5: production persist+mint entrypoint via PlanRepository (RED — §11.2 F1 / §11.4) ----
     //

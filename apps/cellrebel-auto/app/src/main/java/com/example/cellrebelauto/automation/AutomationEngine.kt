@@ -1,6 +1,9 @@
 package com.example.cellrebelauto.automation
 
 import android.util.Log
+import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
+import com.example.cellrebelauto.automation.aplus.AttemptState
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.model.AutomationState
@@ -87,7 +90,11 @@ class AutomationEngine(
     // # 仅用于 returnToSelf（MIUI 中转）；测试不传
     private val bridge: AccessibilityBridge? = null,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
-    private val delayMs: suspend (Long) -> Unit = { delay(it) }
+    private val delayMs: suspend (Long) -> Unit = { delay(it) },
+    // # R6-F4（§11.7）：§8.1 状态机的生产驱动入口。GREEN 在 attempt 生命周期各 §8.1 步驱动它，
+    // # 使状态机迁移都落到持久审计流。RED seam：默认 null（既有行为不变）；测试传真实 driver。
+    // # 不可为 val 默认非空——engine 不持有 db，driver 由构造方（AutomationService / 测试）注入。
+    private val attemptDriver: APlusAttemptDriver? = null
 ) {
     companion object {
         private const val TAG = "AutoEngine"
@@ -239,6 +246,10 @@ class AutomationEngine(
                     )
                 )
                 currentAttemptId = attemptId
+                // # R6-F4（§11.7）：经生产驱动入口驱动 §8.1 首步迁移——GREEN 在此把 attempt 生命周期
+                // # 接入持久审计流。RED seam：driver 为 no-op 骨架时这里无任何持久副作用，但调用关系
+                // # 已建立（engine→driver→audit），使"driver 正确但 engine 不调用"的攻击无法 green。
+                attemptDriver?.driveTransition(attemptId, AttemptState.CREATED, AttemptEvent.BEGIN_APPLY)
                 _cycleCount.value = _cycleCount.value + 1
                 _currentTask.value = EngineTaskSnapshot(
                     csvRow = task.csvRow,
