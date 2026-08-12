@@ -8,9 +8,13 @@ import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
+import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.execution.CellRebelCompletionEvidenceV1
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
+import com.example.cellrebelauto.model.plan.LocationPlan
+import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -53,9 +57,12 @@ import org.robolectric.RobolectricTestRunner
  * digest + the three §6.4.2 clocks, DROPPING the §7.1 evidence detail, and (2) evaluates [TrustPolicy]
  * but MINTS NOTHING even on PASS. So a §6.4-positive completion read back through the entrypoint shows
  * the §7.1 fields NULL and zero TrustedQuotaEntry (RED). GREEN copies the §7.1 detail into the row and
- * inserts exactly one entry (same transaction) on PASS. A §6.4-failing completion mints nothing and
- * reports FAIL (the negative, which passes under the skeleton too). This is the §11.1 legacy hold-out:
- * a digest-only / false-oracle impl cannot green while the A+ evidence chain is lost.
+ * inserts exactly one entry (same transaction) on PASS. R5-F1 (§11.7): the mint test additionally
+ * READS BACK that entry and asserts it binds the SEEDED attempt→task identity (taskId/attemptId/
+ * evidenceDigest/committedAt), not a constant — so Sol's round-4 `taskId = 1L` combined attack stays
+ * RED. A §6.4-failing completion mints nothing and reports FAIL (the negative, which passes under the
+ * skeleton too). This is the §11.1 legacy hold-out: a digest-only / false-oracle impl cannot green
+ * while the A+ evidence chain is lost.
  *
  * Grounding: docs/features/2026-08-12-issue5-red-rewrite-round3-grounding.md
  *
@@ -239,6 +246,56 @@ class TrustedLedgerRedTest {
     private fun fullContext(wire: Int = WIRE_VERIFIED): CompletionTrustContext =
         validContext(wire).copy(execution = fullEvidenceExecution(wire))
 
+    // ---- AREA 5 identity-binding seed (R5-F1, §11.7) ----
+    //
+    // Sol's round-4 combined attack greened the round-4 "countAll()==1" mint assertion by minting
+    // TrustedQuotaEntry(taskId = 1L, …) — a CONSTANT identity. The round-5 mint test defeats that by
+    // seeding a GENUINE plan→task→session→attempt aggregate with explicit ids (≠ 1L, ≠ the AREA-4
+    // helper defaults), driving the production entrypoint, then reading the minted entry back and
+    // asserting it binds the SEEDED task/attempt/digest/commit-clock — every field a constant-identity
+    // bad impl gets wrong. Room honours an explicit non-zero @PrimaryKey(autoGenerate) id; the helper
+    // validates each seed via read-back so a setup failure is loud, not a silent false GREEN.
+    private val SEEDED_TASK_ID = 42L    // ≠ 1L — the constant Sol's round-4 attack hardcoded
+    private val SEEDED_ATTEMPT_ID = 77L // ≠ the AREA-4 execution() default (10L)
+    private val DISTINCTIVE_DIGEST = "sha256:r5f1-identity:7a3b9e" // ≠ "payload-digest"; defeats a fixed literal
+
+    private class SeededIds(val taskId: Long, val attemptId: Long)
+
+    /** Seeds a real plan→task→session→attempt aggregate with explicit, non-default ids (R5-F1). */
+    private suspend fun seedR5F1Aggregate(): SeededIds {
+        val planId = db.planDao().insertPlan(
+            LocationPlan(
+                sourceFileName = "r5f1.csv", importedAt = 0L,
+                globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1
+            )
+        )
+        db.planDao().insertTasks(
+            listOf(
+                LocationTask(
+                    id = SEEDED_TASK_ID, planId = planId, csvRow = 1,
+                    longitude = TARGET_LNG, latitude = TARGET_LAT,
+                    priority = 1, requiredSuccesses = 1
+                )
+            )
+        )
+        val seededTask = db.locationTaskDao().getTaskById(SEEDED_TASK_ID)
+            ?: error("R5-F1 setup: Room did not honour the explicit task id $SEEDED_TASK_ID")
+        val sessionId = db.runSessionDao().insert(RunSession(startedAt = 0L, planId = planId))
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = SEEDED_ATTEMPT_ID, taskId = seededTask.id, runSessionId = sessionId,
+                attemptOrdinal = 1, successOrdinal = null, startedAt = 0L,
+                runningObservedAt = null, endedAt = null, status = "running",
+                failureReason = null, webBrowsingScore = null, videoStreamingScore = null,
+                latitude = TARGET_LAT, longitude = TARGET_LNG
+            )
+        )
+        val seededAttempt = db.testAttemptDao().getAttemptsForTask(seededTask.id)
+            .firstOrNull { it.id == SEEDED_ATTEMPT_ID }
+            ?: error("R5-F1 setup: Room did not honour the explicit attempt id $SEEDED_ATTEMPT_ID")
+        return SeededIds(taskId = seededTask.id, attemptId = seededAttempt.id)
+    }
+
     private fun fail(ctx: CompletionTrustContext) =
         assertEquals(TrustDecision.FAIL, TrustPolicy().evaluate(ctx))
 
@@ -420,7 +477,9 @@ class TrustedLedgerRedTest {
     // in-memory Room DB and asserts DURABLE EFFECTS through the real DAOs (§11.1 round-4 standard).
     // The skeleton (1) persists digest+3clocks DROPPING the §7.1 detail and (2) mints nothing — so a
     // §6.4-positive completion read back shows the §7.1 fields NULL and zero TrustedQuotaEntry (RED).
-    // GREEN copies the §7.1 detail into the row and mints exactly one entry on PASS.
+    // GREEN copies the §7.1 detail into the row and mints exactly one entry on PASS; R5-F1 (§11.7)
+    // additionally reads that entry back and asserts it binds the SEEDED attempt→task identity (not a
+    // constant), so Sol's round-4 `taskId = 1L` combined attack stays RED.
 
     @Test
     fun `recordTrustedCompletion persists the full section 7_1 evidence detail through the production entrypoint`() = runTest {
@@ -453,20 +512,55 @@ class TrustedLedgerRedTest {
     }
 
     @Test
-    fun `recordTrustedCompletion mints exactly one TrustedQuotaEntry on a section 6_4-positive completion`() = runTest {
+    fun `recordTrustedCompletion mints one TrustedQuotaEntry bound to the seeded attempt-task identity not a constant`() = runTest {
+        // R5-F1 (§11.7): the minted entry must bind the REAL seeded attempt→task aggregate identity,
+        // not a hardcoded constant. Sol's round-4 combined attack greened the round-4 "countAll()==1"
+        // assertion by minting TrustedQuotaEntry(taskId = 1L, …) — a constant. This test seeds a
+        // genuine LocationTask (id ≠ 1L) + TestAttempt, drives the production entrypoint, then READS
+        // BACK the minted entry and asserts every identity field binds the seeded aggregate. A
+        // constant-taskId / constant-attemptId / constant-digest / constant-clock impl fails ≥ 1.
         val repo = PlanRepository(db)
-        val decision = repo.recordTrustedCompletion(fullContext())
-
-        // §6.4-positive ⇒ exactly one trusted entry minted through the entrypoint (skeleton mints
-        // nothing ⇒ 0 ⇒ RED).
-        assertEquals(
-            "a §6.4-positive completion must mint exactly one TrustedQuotaEntry",
-            1,
-            db.trustedQuotaDao().countAll()
+        val aggregate = seedR5F1Aggregate()
+        val ctx = fullContext().copy(
+            execution = fullEvidenceExecution(WIRE_VERIFIED).copy(
+                attemptId = aggregate.attemptId,
+                evidencePayloadDigest = DISTINCTIVE_DIGEST
+            )
         )
-        // The entrypoint must report the policy decision, not a hardcoded value (skeleton returns
-        // FAIL ⇒ RED).
-        assertEquals(TrustDecision.PASS, decision)
+
+        val decision = repo.recordTrustedCompletion(ctx)
+        assertEquals("a §6.4-positive completion must report PASS", TrustDecision.PASS, decision)
+
+        val minted = db.trustedQuotaDao().getByAttempt(aggregate.attemptId)
+        assertNotNull(
+            "a §6.4-positive completion must mint exactly one entry for the seeded attempt (skeleton mints none ⇒ RED)",
+            minted
+        )
+        val entry = minted!!
+        // taskId must bind the REAL seeded task (42L) — NOT a hardcoded 1L (Sol's round-4 attack).
+        assertEquals(
+            "minted taskId must bind the seeded attempt's task, not a constant",
+            aggregate.taskId, entry.taskId
+        )
+        // attemptId must bind the REAL seeded attempt — not a constant.
+        assertEquals(
+            "minted attemptId must bind the seeded attempt, not a constant",
+            aggregate.attemptId, entry.attemptId
+        )
+        // evidenceDigest must bind the execution's evidence payload — not a fixed literal.
+        assertEquals(
+            "minted evidenceDigest must bind the execution evidence, not a constant",
+            DISTINCTIVE_DIGEST, entry.evidenceDigest
+        )
+        // committedAt must bind the execution's §6.4.2 completion clock — not a constant.
+        assertEquals(
+            "minted committedAt must bind the completion clock, not a constant",
+            EXEC_COMPLETED_AT_ELAPSED, entry.committedAt
+        )
+        assertEquals(
+            "exactly one TrustedQuotaEntry through the entrypoint",
+            1, db.trustedQuotaDao().countAll()
+        )
     }
 
     @Test
@@ -481,6 +575,24 @@ class TrustedLedgerRedTest {
             "a §6.4-failing completion must mint no TrustedQuotaEntry",
             0,
             db.trustedQuotaDao().countAll()
+        )
+    }
+
+    @Test
+    fun `recordTrustedCompletion mints nothing when the three-way intent hash mismatches`() = runTest {
+        // R5-F1 (§11.7): an intent mismatch (INV-23) is a trust failure; the entrypoint must mint
+        // NOTHING and report FAIL — it cannot mint-then-ignore. This is a GUARDRAIL: it is green under
+        // the skeleton (which never mints) AND under a correct GREEN (mint is gated on PASS); it goes
+        // RED only under a "mint regardless of decision" bad impl, closing that attack surface for the
+        // round-5 self-gate's combined-attack run.
+        val repo = PlanRepository(db)
+        val intentMismatch = fullContext().copy(applyReceiptIntentHash = "mismatched-receipt-intent")
+        val decision = repo.recordTrustedCompletion(intentMismatch)
+
+        assertEquals(TrustDecision.FAIL, decision)
+        assertEquals(
+            "an intent-mismatch completion must mint no TrustedQuotaEntry",
+            0, db.trustedQuotaDao().countAll()
         )
     }
 }
