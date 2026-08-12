@@ -258,5 +258,30 @@ targeted test still RED and the full suite still red for the right reason; captu
 re-red evidence and report to dev thread `thread_msp2vy3j48b9pl3g`. Do NOT post to Sol until the
 comprehensive bad impl cannot green the suite.
 
+**R3-4 verified — comprehensive bad impl CANNOT green the suite (it makes it MORE red):**
+Combined adversarial impl in Sol's attack style, then reverted (clean HEAD stays 825e436):
+- F1 attack — `TrustPolicy.evaluate` ⇒ constant PASS. Greens the 1 §6.4 positive but FLIPS the 22
+  矛盾/per-field negatives red (isMock=false, HOOK, DENIED, coverage/continuity/coord/intent inversions
+  all now wrongly PASS ⇒ fail their must-FAIL assertions). A bad impl cannot pass the positive AND the
+  discriminating negatives without the real predicate. TrustedLedgerRedTest 1 → 23 failed.
+- F2 attack — `reconcile` ⇒ ADVANCED_TO_RELEASE with NO executor call; `scheduleAdvanced` ⇒
+  `receipt≠null ? ADVANCED : NOT_ADVANCED` (the false oracle). Greens the schedule-ADVANCED positive
+  but flips the stale-revision / quota-exhausted / mismatch-intent negatives red (all have receipt≠null
+  yet must NOT advance); the executor-effect + window-b/c + conflict + replay assertions stay red
+  (no/mis-counted executor call). RecoveryIdempotencyRedTest 6 → 8 failed.
+- F3 attack — re-added the deleted isolated `selectNextTrusted`/`isTrustedQuotaComplete` helpers (Sol's
+  exact vector), correctly implemented. They are now INERT: MmG02TrustedProjectionRedTest still 6 failed
+  because it exercises the REAL completion SQL + `PlanRepository.selectNextTrustedTask`, never these.
+  No isolated-helper shortcut can green F3; GREEN must rewire the real SQL + selection.
+- APlusTemplateRedTest (5) + AttemptTransitionsRedTest (14) unaffected by the attacks.
+- Full suite: clean baseline **167 tests / 32 failed** (right-reason RED, 0 errors) → bad impl
+  **167 tests / 56 failed** (0 errors). The bad impl raised the failure count; it could not green the
+  suite. Every finding retains red targeted tests under the strongest cheap attack.
+
+**Next:** round-3 re-entry fully addressed (R3-1 `6c692a9`, migration drift `cf6f2ac`, R3-2 `b7f7e28`,
+R3-3 `825e436`; R3-4 re-red proven). Report evidence to the dev thread and request Sol's re-review
+(precondition — bad impl can't green — is satisfied). PR #21 stays Draft; merge by operator. GREEN body
+remains frozen pending #3 contract v1 freeze.
+
 ---
 [智谱猫/阿智 · glm-5.2🐾]
