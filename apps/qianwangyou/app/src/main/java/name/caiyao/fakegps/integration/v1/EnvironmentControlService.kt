@@ -28,11 +28,25 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  *    never ContractErrorCodeV1 values
  *  - exported across apps, no network surface
  *
- * The §6.3.3 typed-failure mapping is NOT implemented here and cannot be until
- * #3 lands a delta — see [typed] for the verified reason. Success paths are
- * complete, so bind/discover/apply/observe/release/completeAndAdvance are
- * reachable today; typed business failures currently surface to Auto as
- * transport failures (fail-closed) instead of wire codes.
+ * STATUS — the provider is bindable but NOT yet callable. Do not read the
+ * declared manifest entry or the real Stub below as "it works":
+ *
+ *  - bind succeeds: onBind returns a live binder;
+ *  - the FIRST operation on it does not reach handler logic. It calls
+ *    [ProviderRuntime.handler], whose composition ends in
+ *    onOwnerProcessStart(), which wires the §6.4 relevant-change listener
+ *    through [QwyEnvironmentController.setRelevantChangeListener] — still a
+ *    TODO(). So discover/apply/observe/release/completeAndAdvance all throw
+ *    NotImplementedError before any contract rule runs.
+ *
+ * An earlier revision of this comment claimed success paths were reachable
+ * today. That was false on the actual call chain and is the exact overclaim
+ * this file's own guard exists to prevent — recorded here rather than quietly
+ * corrected. The provider becomes callable when the adapter lands, which is
+ * blocked on schedule ownership, not on this class.
+ *
+ * The §6.3.3 typed-failure mapping is separately NOT implemented and cannot be
+ * until #3 lands a delta — see [typed] for the verified reason.
  *
  * All behavior lives in [EnvironmentControlHandler] so unit lanes never need
  * an Android runtime.
@@ -97,8 +111,9 @@ class EnvironmentControlService : Service() {
      * decision on a fabricated business outcome. §1506's own rule for an
      * unrecognized code is fail-closed, never guess-compatible.
      *
-     * Success paths are unaffected, so the bind + call surface this class exists
-     * to provide is fully reachable today.
+     * Note this mapping is not what currently blocks calls — see the class
+     * comment: the adapter TODO() fails earlier, before any typed failure could
+     * be produced. Both have to land; neither substitutes for the other.
      */
     private inline fun <T> typed(block: () -> T): T = block()
 }

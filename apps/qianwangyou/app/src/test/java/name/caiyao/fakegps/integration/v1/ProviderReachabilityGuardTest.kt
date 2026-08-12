@@ -1,5 +1,8 @@
 package name.caiyao.fakegps.integration.v1
 
+import name.caiyao.fakegps.integration.v1.support.FakeIdentityResolver
+import name.caiyao.fakegps.integration.v1.support.FakeMonotonicClock
+import name.caiyao.fakegps.integration.v1.support.InMemoryDurableKv
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -111,6 +114,82 @@ class ProviderReachabilityGuardTest {
             emptyList<String>(),
             stubs
         )
+    }
+
+    /**
+     * §6.4 / M-RC-03: the revision owner must be subscribed to relevant-change
+     * sources, and subscribed ONCE.
+     *
+     * onOwnerProcessStart already installs that listener. Composition used to
+     * install a second one right after it. With a stub adapter both calls merely
+     * threw, so nothing was visibly wrong; with a real adapter the second
+     * registration would replace the first with an identical-looking lambda and
+     * leave two registrations racing to be the survivor — and a revision owner
+     * reads as "wired" in either case, which is precisely the INV-08 false-trust
+     * shape.
+     *
+     * A reviewer found it by reading the call chain. This asserts it instead.
+     */
+    @Test
+    fun compositionSubscribesTheRevisionOwnerExactlyOnce() {
+        val env = WiringProbeEnvironment()
+
+        ProviderRuntime.compose(
+            kv = InMemoryDurableKv(),
+            clock = FakeMonotonicClock(),
+            resolver = FakeIdentityResolver(),
+            environment = env,
+        )
+
+        assertEquals(
+            "the relevant-change listener must be installed exactly once — " +
+                "zero means an unwired revision owner (INV-08), more than one " +
+                "means registrations competing to be the survivor",
+            1,
+            env.listenerRegistrations
+        )
+    }
+
+    /**
+     * Minimal QwyEnvironment that answers everything blandly and counts listener
+     * registrations. Deliberately not FakeQwyEnvironment: that one is the
+     * behavior matrix's shared fixture, and adding an instrumentation counter to
+     * it for one wiring assertion would couple this guard to it.
+     */
+    private class WiringProbeEnvironment : QwyEnvironment {
+        var listenerRegistrations = 0
+
+        override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
+            listenerRegistrations++
+        }
+
+        override fun scheduleSnapshot(): ScheduleSnapshot? = null
+
+        override fun advancePointer(fromItemId: String): AdvancePointerOutcome =
+            AdvancePointerOutcome.Exhausted(versionAfter = 0L)
+
+        override fun applyEnvironment(
+            intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        ): ApplyOutcome = ApplyOutcome(
+            effectiveLatitude = null,
+            effectiveLongitude = null,
+            deliveryModeWire = null,
+            verificationLevelWire = 0,
+        )
+
+        override fun cleanup(leaseId: String): CleanupOutcome = CleanupOutcome.Complete
+
+        override fun observeEffective(): EffectiveEnvironment = EffectiveEnvironment(
+            latitude = null,
+            longitude = null,
+            isMock = null,
+            deliveryModeWire = null,
+            verificationLevelWire = 0,
+            environmentFingerprint = "probe",
+            evidenceRefs = emptyList(),
+        )
+
+        override fun scheduleDecisionWire(scheduleRef: String): Int = 0
     }
 
     /**
