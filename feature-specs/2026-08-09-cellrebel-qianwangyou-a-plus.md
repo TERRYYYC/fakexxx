@@ -116,6 +116,7 @@ source_threads:
 | **v1.37** | PR-2 第一轮·operator 架构更正 | **顺序的所有权错了，而且错成了两个所有者。** §5 上一版把「计划顺序」判给 Auto，同表下一行又把 profile/schedule 判给千网游为唯一权威——同一个排序有两个 owner。后果不是措辞不一致：Auto 可以按经纬度排一套顺序，千网游按「环境」（经纬度 **+** 蜂窝/网络/Wi-Fi Hook 字段是一个整体）排另一套，位置于是与网络 Hook 状态漂移。按 operator 裁定更正为：**顺序/优先级归千网游，配额与完成判定归 Auto，推进是二者之间一次幂等握手**。§5 边界表重写；新增 **§6.7 调度身份与「达标→完成→推进」**：`scheduleId`/`scheduleItemId`（稳定、非位置）/`scheduleVersion`（顺序或成员变化必自增）/`currentItemId`；`CompletionProofV1` 由 Auto 出、千网游只记不重算；`CompleteAndAdvanceRequestV1`/`AdvanceReceiptV1` 走 §6.3.4 同一套 digest，**compare-and-advance**：`expectedCurrentItemId` 与 `expectedScheduleVersion` 双前置，新增 wire **14 `SCHEDULE_ITEM_MISMATCH`**（挡错项/重复推进）、**15 `SCHEDULE_VERSION_STALE`**（判定期间计划被改）、**16 `SCHEDULE_EXHAUSTED`**（终态非失败）；推进与指针同事务、receipt 可按幂等键重取、**Auto 必须 observe 独立验证新生效环境**（receipt 是自述不是生效证据）；千网游隐式首行/遗留行序迁移到显式 `currentItemId`。原 §6.7 兼容矩阵顺延为 §6.8，5 处旧引用同步。见 §5 / §6.7 |
 | **v1.38** | PR-2 第二轮 | **digest 与 recovery 一起收口。** ①每个 digest 加 **domain tag** 作首个 framed 字段（`:intent`/`:advance-request`/`:advance-receipt`）——长度前缀只让**一个**序列单射，不阻止「为用途 A 编码的序列」等于「为用途 B 的」，不加 domain 就是把正确性押在「不会有构造输入跨用途碰撞」上，而这正是 §6.3.1 拒绝分隔符时不肯押的巧合；framing 收敛为**一个共享 helper**（第二份手写副本是第二个漂移点，且漂移的 framing 不会响亮失败，只会算出不同 digest）。②**冻结 `receiptDigest`**（此前完全无算法）：绑 `requestDigest` + `idempotencyKey` + outcome，`verify()` 是信任前必跑的一步——**重算不上的 receipt 不是弱证据，它不是 receipt**；null target 用哨兵编码，与空串不碰撞。③`AdvanceOutcomeV1` 由两个 `const` 改为**枚举**，从而自动继承 yaml↔Kotlin 绑定与 derived probe 覆盖（const 不被任何 carrier 看见，改一侧全绿），并补 `advancedOrFailClosed` 未知即非推进。④**冻结 release↔advance 顺序**：先 release 再 advance；lease **不跨项**；`CompleteAndAdvanceRequestV1.leaseId` 是配额挣得处的**历史引用**而非活动持有——不写死会被合理读成两种互斥实现（见 §6.7.4a）。⑤§8.1 增 advance 状态边，§10 增 **M-AD-01..11**（missing proof / same-key replay / new-key double / wrong item / stale version / lost receipt / digest 不符 / 推进后 observe 不符 / 耗尽终态 / 耗尽后再请求），§10.1 台账同步 11 行，矩阵↔台账集合相等 101==101。见 §6.3.1 / §6.7.3 / §6.7.4a / §10 |
 | **v1.39** | PR-2 第三轮 | **禁令有了规则，但没有判据。** ①§6.7.4a 冻结「推进时不得存在活动 lease」，却没冻结违反时返回哪个 typed code——`LEASE_CONFLICT` / `REQUEST_INVALID` / 新码三种读法都自洽，红测只能接受"任意 `ContractException`"，**因而对错误的 wire 也会全绿**。冻结为 **`LEASE_CONFLICT`(7)，不新增 wire**，并逐条排除：不是 `REQUEST_INVALID`(**13**)（请求字节合法，release 后重发即成功，而 13 的语义是重试无用）〔**当轮首版把该码误写为 4**——4 是 `CAPABILITY_UNAVAILABLE`，整段排除论证因此指向了一个无关的错误码；同轮 `IDEMPOTENCY_CONFLICT` 亦误写为 13（真值 **12**）。由非作者（Sol）在 `590ab58` 上发现，已于下一 HEAD 全部更正，并新增 §5b 内联 wire 引用门禁使该类错误不能再静默通过〕、不是 `STALE_LEASE`（`leaseId` 按 §6.7.4a 本就是已 RELEASED 的历史引用，"过期"是正常形态不是错误）、不是 9（9 是事后观测到漂移，本条是**事前**阻止漂移发生的门）。②**§6.3.3 对 7 的定义必须同步加宽**：原文只写"与**另一** caller 或**另一** intent 的 lease 冲突"，按字面 caller **自己**持有的活动 lease 不在其中——只在 §6.7.4a 写"返回 7"而不动 §6.3.3，两节即互相矛盾，实现者按 §6.3.3 读会认为本场景不该返回 7。同段 `IDEMPOTENCY_CONFLICT` 对照文字一并加宽。③新增 **§6.7.4b 判定次序（冻结）**：`proof → idempotency → schedule(14/15/16) → lease(7) → mutation`。多条前置可同时不满足，不冻结次序则两个实现对同一请求返回不同 code 而都"符合"前置表，调用方恢复策略不可移植。两处次序各有理由而非任选：**幂等重放必须先于一切前置**（成功推进后 `currentItemId` 已前移，重放携带的 `expectedCurrentItemId` 必然过期，先跑 schedule 门会让 **M-AD-02 与 M-AD-04 塌成同一可观察结果**，防双推进的最后一道变成对合法重放的误杀）；**schedule 门先于 lease 门**（已耗尽时没有可完成的当前项，lease 是否活动无意义，先返回 7 会让 Auto 白跑一轮 release-retry 后仍撞终态 16，反向则无对称浪费）。④§6.7.4 前置由三类增至**四类**。⑤§10 新增 **`M-AD-12`**（lease 门，断言须钉 **exact wire 7**，"任意 typed failure"不构成证据）与 **`M-AD-13`**（同时违反多条时按冻结次序返回首条；次序被实现成任选则本行必红）。两行按 operator option B 归 **provider 侧 Fable5**、锚在 qwy lane——这是 provider-owned advance 覆盖的第一批，用以补上「`M-AD-01..11` 全部落在 Auto lane、真实 provider 的 compare-and-advance 无任何稳定 ledger row」的缺口。矩阵↔台账集合相等由 101==101 同步为 **103==103**。见 §6.3.3 / §6.7.4 / §6.7.4b / §6.7.4a / §10 |
+| **v1.40** | PR-2 第四轮 | **reviewer 拓扑按 durable control event 重投影。** 上一轮我拒绝按聊天 claim 改 reviewer map——理由是 canonical 是可执行边界，两小时内对同一问题给出两个互斥答案而第二个无真相源，比落后于事实更糟。现权威锚点已补齐：[Epic #1 control event 5258691694](https://github.com/TERRYYYC/fakexxx/issues/1#issuecomment-5258691694)（operator，2026-08-11T20:49:23Z），**只 supersede 旧 event 5258089891 的 reviewer-role 条款**，option-B 开发所有权不变。生效映射：#3/#13 作者 Opus5 → **Sol** 线级审（本 thread）；#4/#6/#7 作者 Fable5 → **DeepSeek Flash**；#5 作者 GLM → **Gemini 3.6** 线级对抗 + **Sol** formal backstop（trial reviewer 不得单独承担安全攸关门）；**GLM 作 #5 作者期间无任何 review 席位**，含不审 #4/#6/#7；主线 Sol 只做进展 / merge review / Epic / 派工，**不做 line code review**。据此同步的 live 投影：§12.1 Sol 与 GLM 两行、§10.1 失败路由第 5 条 triage 席位（GLM 全部出席位）、§13 Task 8（由「GLM 独立审查」改为**按 lane 的线级 reviewer**，owner 不再是单一个体）、Task 7/PR-5 审查方、§16 Epic 表 I2/I3/I3.5/I5/I6/#13 六行 reviewer 列按 owner 逐行重投影、§17 线程编排新增线级 reviewer 条、§19 完成定义。**不改写历史区**：§0.1.x 中记录 GLM 曾证伪某条的条目是既成事实，保留。见 §12.1 / §10.1 / §16 / §17 / §19 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -2463,7 +2464,7 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | 2 | 断言只涉及 Auto 侧可观察行为 | **GLM**（option B 起；`apps/cellrebel-auto/**` 已转 GLM，见 §12.1） |
 | 3 | 断言只涉及千网游 provider 侧可观察行为 | **Fable5** |
 | 4 | 断言涉及两侧交互 | `evidenceOwner` **必须先产出定位证据**（哪一侧先违反 v1 contract），再按 2/3 路由 |
-| 5 | 第 4 条定位不能判定 | **保持红，转联合 triage**；**不得**自动改 contract。只有联合 triage **明确判定 contract 欠定义**后，才路由 Opus5 改 `contracts/**`（`contracts/**` 仍归 Opus5，未随 option B 转移）。**triage 席位按 no-self-review 排除作者**：涉及 `apps/cellrebel-auto/**`（GLM 作者）的红由 **Sol** 单独 triage，GLM 不入席；涉及 `apps/qianwangyou/**` 或 `acceptance/**`（Fable5 作者）的红由 **Sol + GLM** 联合 triage；涉及 `contracts/**`（Opus5 作者）的红由 **Sol + GLM** 联合 triage。**任何情形下作者本人不得裁定自己 lane 的红** |
+| 5 | 第 4 条定位不能判定 | **保持红，转联合 triage**；**不得**自动改 contract。只有联合 triage **明确判定 contract 欠定义**后，才路由 Opus5 改 `contracts/**`（`contracts/**` 仍归 Opus5，未随 option B 转移）。**triage 席位按 no-self-review 排除作者**：涉及 `apps/cellrebel-auto/**`（GLM 作者）的红由 **Sol** 单独 triage，GLM 不入席；涉及 `apps/qianwangyou/**` 或 `acceptance/**`（Fable5 作者）的红由 **DeepSeek Flash + Sol** triage；涉及 `contracts/**`（Opus5 作者）的红由 **Sol** triage。**GLM 不入任何 triage 席位**（见 Epic #1 control event [5258691694](https://github.com/TERRYYYC/fakexxx/issues/1#issuecomment-5258691694)）。**任何情形下作者本人不得裁定自己 lane 的红** |
 | 6 | class = `static-guard`（扫出越界路径） | 该路径在 §12.1 owner matrix 上的 owner |
 
 **第 0 条是必经的第一步（v1.23 冻结）**：任何 red 在进入 2–5 之前，`evidenceOwner` 必须先完成 **evidence-validity triage** 并留证——证明这条红反映的是**产品行为**，而不是证据链自身坏了。
@@ -2752,8 +2753,8 @@ fakexxx/
 |---|---|---|---|
 | Opus5 | `contracts/**`、`.github/**`、root `scripts/**`（**不含 `acceptance/scripts/**`**）、`docs/provenance/**`、ownership map；仅在串行 PR-2 修改两 App 的 Gradle contract 接线 | 全仓 | PR-3 开始后不触碰 `apps/qianwangyou/**`、`acceptance/**`；**option B 起不触碰 `apps/cellrebel-auto/**`**（该范围已转 GLM，见下行）。**具名例外一：Task 3.5 / PR-3.5**——可写 `docs/provenance/qwy-lint-baseline.md` 冻结的 exact 路径集 ∪ `res/values-en/strings.xml`，该集合 ⊆ `apps/qianwangyou/app/src/main/**` 且与 `integration/**` 不相交。**具名例外二：Issue #13 applicationId cutover**——`INV-29` 现为 deferred gate，本文不声称已覆盖它；cutover 落地时 Opus5 需写 Auto 的 flavor / `applicationId` / Manifest 面，与 GLM 的 `apps/cellrebel-auto/**` 独占**必然相交**，因此该 delta **必须与 GLM 串行**并在 #13 开工前重新冻结 exact 路径集，不得并行。**两处范围外仍绝对禁止**，由 Task 3.5 的越界断言机器判定 |
 | Fable5 | `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/integration/**`、对应 qwy tests、qwy Manifest/Gradle 的集成行；**`acceptance/**`（含 `acceptance/scripts/check-forbidden-boundaries.sh`）、`docs/acceptance/**`、验收 issue 与证据** | frozen contract、两 App | contract、Auto |
-| Sol | **无独占写入范围（review-only）**：review verdict、语义/验收审查报告；**含 Issue #5 的语义/验收/对抗 trust-recovery 审查**（option B 后 GLM 成为 #5 作者，#5 的 reviewer 席位由 Sol 承担）；若需补测试代码则单独 PR 并由 GLM 审 | 全仓 | 不修改正在审的作者 branch |
-| GLM | **`apps/cellrebel-auto/**`（含 `app/src/main/AndroidManifest.xml`）——Issue #5，option B 起由 Opus5 转入**；以及 review verdict、对抗执行报告（**仅限 #4/#6/#7**）；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch；**不得 review #5**（自己是作者，铁律 no-self-review）；不触碰 `contracts/**`、`apps/qianwangyou/**`、`acceptance/**` |
+| Sol | **无独占写入范围（review-only）**：review verdict、语义/验收审查报告；**#3 的 line review**（本 thread）与 **#5 的 formal backstop**（Gemini 3.6 出对抗发现，Sol 兜底；见 Epic #1 control event [5258691694](https://github.com/TERRYYYC/fakexxx/issues/1#issuecomment-5258691694)）；**不在主线做 line code review**；若需补测试代码则单独 PR 并由 GLM 审 | 全仓 | 不修改正在审的作者 branch |
+| GLM | **`apps/cellrebel-auto/**`（含 `app/src/main/AndroidManifest.xml`）——Issue #5，option B 起由 Opus5 转入**；**无任何 review 角色**——作 #5 作者期间不审 #4/#6/#7 亦不审 #5（见 Epic #1 control event [5258691694](https://github.com/TERRYYYC/fakexxx/issues/1#issuecomment-5258691694)）；若补测试代码则单独 PR | 全仓 | 不修改正在审的作者 branch；**不得 review 任何 lane**（作者期间无 review 席位）；不触碰 `contracts/**`、`apps/qianwangyou/**`、`acceptance/**` |
 
 **为什么 `acceptance/**` 归 Fable5（2v2 冻结）**：黑盒约束的是**依赖边界**——acceptance 只能消费 public v1 contract + `acceptance/fake-qwy`，不得进入 Auto/qwy 内部实现；它**不要求测试作者与产品作者是不同个体**。铁律"no self-review"约束的是 **author/reviewer 个体**：Fable5 写、Sol + GLM 独立审，铁律成立。若把 acceptance 留给 Sol，则 Sol 既是 #6/#7 的作者又是它们的 reviewer，那才是真的 self-review。
 
@@ -3293,7 +3294,7 @@ cd apps/cellrebel-auto
 |---|---|---|
 | **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **33** |
 | **PR-4**（GLM） | 自有 `owner-red` 行，绑 PR-4 HEAD | **42** |
-| **PR-5**（Fable5 开发 / Sol + GLM 审查） | **不验任何矩阵行**；只验 acceptance **harness 自身**：fake provider 的 negative controls、fixture 装载、`static-guard` 扫描器对**构造违规样本**能判红（self-test） | **0 矩阵行** |
+| **PR-5**（Fable5 开发 / DeepSeek Flash 审查） | **不验任何矩阵行**；只验 acceptance **harness 自身**：fake provider 的 negative controls、fixture 装载、`static-guard` 扫描器对**构造违规样本**能判红（self-test） | **0 矩阵行** |
 | **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 103 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **90** |
 
 **为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——103 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
@@ -3318,7 +3319,7 @@ cd apps/cellrebel-auto
 
 **Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **103 行 / 18 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
 
-| class | 行数 | **Fable5** 的职责（2v2；Sol + GLM 独立审） |
+| class | 行数 | **Fable5** 的职责（线级 reviewer = DeepSeek Flash，见 Epic #1 control event 5258691694） |
 |---|---|---|
 | `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
 | `static-guard` | 2 | 编写并执行静态扫描 |
@@ -3331,8 +3332,8 @@ cd apps/cellrebel-auto
 
 **这 33 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
 
-1. **测试代码本身经过独立 review**：那 33 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **Sol + GLM**（§16）。断言写错会在代码 review 阶段被非作者看到。
-2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 Sol + GLM 复核——具体义务写在 **Task 8 第 3 条**（逐条核 `passed` 记录存在性、`exactHead` 相符、**断言语义是否真对应台账「预期终态」列**），并明写机械门 ①②③ 不覆盖最后一项。**v1.23 更正**：上一版此处引用的是「Task 8 第 2 条」，而第 2 条只审 fake 是否迎合自家 provider，**并不包含 owner-red audit 复核**——那是一条当时并不存在的传播。现已把该义务真正写入 Task 8 并把引用指向它。
+1. **测试代码本身经过独立 review**：那 33 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **DeepSeek Flash**（§16）。断言写错会在代码 review 阶段被非作者看到。
+2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 **DeepSeek Flash** 复核——具体义务写在 **Task 8 第 3 条**（逐条核 `passed` 记录存在性、`exactHead` 相符、**断言语义是否真对应台账「预期终态」列**），并明写机械门 ①②③ 不覆盖最后一项。**v1.23 更正**：上一版此处引用的是「Task 8 第 2 条」，而第 2 条只审 fake 是否迎合自家 provider，**并不包含 owner-red audit 复核**——那是一条当时并不存在的传播。现已把该义务真正写入 Task 8 并把引用指向它。
 
 **因此这 33 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 33 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
 
@@ -3361,9 +3362,9 @@ cd apps/cellrebel-auto
 
 **26 行的真实产品通过与 device evidence 在 PR-6 汇合 HEAD 上产生**，届时 `./scripts/verify-a-plus.sh --lane pr-6` 逐字调用 `(cd acceptance && ./gradlew :scenarios:matrixTest)`，并执行 contract + 两 App unit + boundary guards，并做 §10.1 的三项覆盖校验：① §10 与 §10.1 的 ID 集合相等；② 覆盖绑定 evidence manifest 中 `status=passed` 且 `exactHead` 相符的记录；③ 未覆盖行必须显式区分 `not-testable`（永久上限）与 **`deferred:<DP-x>`**，且**清单中存在任一 `deferred` 记录时最终 gate 一律失败**。
 
-### Task 8 — GLM 独立审查与 exact-HEAD 对抗验证
+### Task 8 — 线级独立审查与 exact-HEAD 对抗验证
 
-**Owner:** GLM（非产品代码作者）
+**Owner:** 各 lane 的线级 reviewer（#3 → Sol · #4/#6/#7 → DeepSeek Flash · #5 → Gemini 3.6 + Sol backstop），**不再由 GLM 统一承担**——GLM 作 #5 作者期间无任何 review 席位（见 Epic #1 control event 5258691694）
 
 1. 先审 Fable5 qwy provider：授权、revision 覆盖声明、idempotency、foreign lease、进程死亡。
 2. 再审 **Fable5** acceptance：是否存在 fake 只验证实现细节、未覆盖真实状态边、误把心跳当连续性。**2v2 后 provider 与 acceptance 同属 Fable5，本条须额外证伪一件事**：fake provider 是否被写成"迎合自家 provider 实现"而非迎合 public v1 contract——即对 §10.1 中 `M-CC-03`/`M-RL-01` 一类跨端行，断言是否只在 Fable5 自己的实现语义下成立。
@@ -3376,7 +3377,7 @@ cd apps/cellrebel-auto
 
 **Owner:** Fable5（验收执行，operator 2v2）
 
-**Independent reviewers:** Sol（语义 / 验收）+ GLM（对抗）——与 `I6` / §19 / live [#7](https://github.com/TERRYYYC/fakexxx/issues/7) 的 2v2 配置一致。上一版只写 GLM，与这三处冲突。
+**Independent reviewers（按 lane，见 Epic #1 control event 5258691694）:** #3 → Sol · #4/#6/#7 → DeepSeek Flash · #5 → Gemini 3.6（对抗）+ Sol（formal backstop）——与 `I6` / §19 / live [#7](https://github.com/TERRYYYC/fakexxx/issues/7) 的 2v2 配置一致。上一版只写 GLM，与这三处冲突。
 
 **Merge authority:** operator only
 
@@ -3424,7 +3425,7 @@ PR-2 contract v1（冻结 exact HEAD）
   │      ↓
   │   PR-3.5 Opus5：qwy inherited lint raw-green 清债（§12.1 唯一具名例外）
   ├── PR-4 GLM：Auto data/trust/recovery/core/UI
-  └── PR-5 Fable5：fake provider + acceptance harness（只自证 harness；26 行在 PR-6 验）（Sol + GLM 审查）
+  └── PR-5 Fable5：fake provider + acceptance harness（只自证 harness；26 行在 PR-6 验）（DeepSeek Flash 审查）
           ↓
 PR-6 integration + exact-build device evidence（pre-cutover；只做必要胶合，不吞并三路职责）
           │
@@ -3460,13 +3461,13 @@ Task 6 的两半按 owner 分别随所属 PR 走，不单独成 PR：Auto 侧 UI
 |---|---|---|---|---|
 | EPIC | `[Epic] CellRebel × 千网游 A+ 可信无人值守测试` | 本文 | Sol 主控（**coordination / review only，无写入 lane**） | 所有 P0 child 达标且等待 operator merge/close 决定 |
 | I1 | `[P0] 导入双 App 精确基线并建立 provenance/CI` | EPIC | Opus5 / Sol | PR-1 exact HEAD 通过 gate |
-| I2 | `[P0] 冻结 Environment Control contract v1` | I1 | Opus5 / Sol+GLM | PR-2 exact HEAD + verdict |
-| I3 | `[P0] 千网游 provider：配对、lease、连续性与审计` | I2 | Fable5 / **Sol + GLM** | PR-3 exact HEAD + INV tests |
-| I4 | `[P0] Auto：可信账本、恢复状态机与 A+ 模板` | I2 | **GLM** / **Sol** | PR-4 exact HEAD + INV tests。**reviewer 只列 Sol**：GLM 是本 issue 作者，不得自审 |
-| I5 | `[P0] A+ fake provider、崩溃/并发/旁路矩阵 harness` | I2 | **Fable5** / Sol + GLM | PR-5 exact HEAD + **harness self-test 全绿**（negative controls / fixture 装载 / `static-guard` 对构造违规样本判红）。**不在 PR-5 验任何矩阵行**——26 行的真实产品通过与 device evidence 在 I6/PR-6 汇合 HEAD 上产生，见 Task 7 lane 表 |
-| I3.5 | `[P0] qwy inherited lint raw-green 清债` | I3 | Opus5 / Sol + GLM | `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0** |
-| I6 | `[P0] 双 App 集成与 exact-build 真机验收（pre-cutover）` | I3,I3.5,I4,I5 | **Fable5** / Sol + GLM | device matrix + hashes + verdict（旧 `applicationId` 上成立；**不依赖 #13**） |
-| #13 | `applicationId cutover：flavor / SAF 搬运 / bundle / variant CI` | I1 | Opus5 / Sol + GLM | `M-AC-01..05` 全绿。**与 I6 是 Epic close 的两个 sibling 输入**，二者互不阻断；未闭合只阻断 Epic close，不阻断 I6 |
+| I2 | `[P0] 冻结 Environment Control contract v1` | I1 | Opus5 / Sol | PR-2 exact HEAD + verdict |
+| I3 | `[P0] 千网游 provider：配对、lease、连续性与审计` | I2 | Fable5 / **DeepSeek Flash** | PR-3 exact HEAD + INV tests |
+| I4 | `[P0] Auto：可信账本、恢复状态机与 A+ 模板` | I2 | **GLM** / **Gemini 3.6 + Sol** | PR-4 exact HEAD + INV tests。reviewer = Gemini 3.6 对抗发现 + Sol formal backstop；GLM 是本 issue 作者，不得自审 |
+| I5 | `[P0] A+ fake provider、崩溃/并发/旁路矩阵 harness` | I2 | **Fable5** / DeepSeek Flash | PR-5 exact HEAD + **harness self-test 全绿**（negative controls / fixture 装载 / `static-guard` 对构造违规样本判红）。**不在 PR-5 验任何矩阵行**——26 行的真实产品通过与 device evidence 在 I6/PR-6 汇合 HEAD 上产生，见 Task 7 lane 表 |
+| I3.5 | `[P0] qwy inherited lint raw-green 清债` | I3 | Opus5 / Sol | `(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0** |
+| I6 | `[P0] 双 App 集成与 exact-build 真机验收（pre-cutover）` | I3,I3.5,I4,I5 | **Fable5** / DeepSeek Flash | device matrix + hashes + verdict（旧 `applicationId` 上成立；**不依赖 #13**） |
+| #13 | `applicationId cutover：flavor / SAF 搬运 / bundle / variant CI` | I1 | Opus5 / Sol | `M-AC-01..05` 全绿。**与 I6 是 Epic close 的两个 sibling 输入**，二者互不阻断；未闭合只阻断 Epic close，不阻断 I6 |
 | I7 | `[Product Gate] A+→B→C 触发证据与非重写演进` | EPIC | Sol 主控（**coordination / review only，无写入 lane**） | 每个里程碑记录 stay/promote/reject verdict |
 
 > **Owner 列里的「Sol 主控」不是写入所有权**：本列同时承载 owner 与 reviewer，而 §12.1 已冻结 Sol **无独占写入范围（review-only）**。「主控」指 coordination 与 verdict 汇总，不含任何代码/文档产出义务。此处显式标注以免读者从列名推断 Sol 拥有 Epic 的实现责任。
@@ -3482,7 +3483,8 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 1. **Opus5 核心实现**：I1/I2 与 #13，独立 worktree（**I4 已随 option B 移出**）。
 2. **Fable5 验收与真机**：I5/I6，独立 worktree；只经 public v1 contract + `acceptance/fake-qwy`，不写 Opus5 核心实现。**与下条 #3 同属 Fable5，必须分 worktree/分 PR，不得混提。**
 3. **Fable5 千网游独立模块**：I3；只在 contract exact HEAD 冻结后开工，文件所有权不与 Opus5 重叠。
-4. **GLM**：**I4（Auto）作者线**，独立 worktree；同时对 **Fable5** 的验收设计与 Fable5/Opus5 的 exact HEAD 做独立审查/对抗测试。**不得审 I4**——那是它自己写的，reviewer 由 Sol 承担；不替任何作者自审。
+4. **GLM**：**I4（Auto）作者线**，独立 worktree。**作者期间不持有任何 review 席位**（见 Epic #1 control event [5258691694](https://github.com/TERRYYYC/fakexxx/issues/1#issuecomment-5258691694)）：I4 由 **Gemini 3.6** 出线级对抗发现 + **Sol** formal backstop；#4/#6/#7 由 **DeepSeek Flash** 审。
+5. **线级 reviewer**：Sol（#3）· DeepSeek Flash（#4/#6/#7）· Gemini 3.6 + Sol（#5）。**review 发生在各开发线 thread 内**；主线 Sol 只做进展/merge review/Epic/派工，不做 line code review。
 5. **Sol 独立语义/验收审查**：review-only，无写入 lane；对 I1..I6 出具 exact-HEAD verdict。
 
 主 Thread 只接收六个状态点：文档提交、issues/任务图完成、子 Thread 建立、核心实现 ready for review、验收完成、等待 merge 决策。
@@ -3533,7 +3535,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
-- **Opus5、Fable5 与 GLM**（option B 后三者均有作者改动）的改动各有独立 reviewer：Opus5/Fable5 的由 **Sol + GLM** 审，**GLM 自己的 I4 由 Sol 审**；Sol 与 GLM 均不审自己写的改动，且 Sol 在本 Epic 内无写入 lane；
+- **Opus5、Fable5 与 GLM**（option B 后三者均有作者改动）的改动各有独立 reviewer：Opus5 → **Sol**；Fable5 → **DeepSeek Flash**；GLM → **Gemini 3.6 对抗 + Sol formal backstop**（见 Epic #1 control event [5258691694](https://github.com/TERRYYYC/fakexxx/issues/1#issuecomment-5258691694)）。作者与 reviewer 必须不同个体；Sol 与 GLM 均不审自己写的改动，且 Sol 在本 Epic 内无写入 lane；
 - 所有 candidate PR 均停在未 merge 状态，等待 operator 对每个 PR 决定。
 
 ## 20. 当前开放项
