@@ -147,13 +147,15 @@ class TrustedLedgerRedTest {
     private val TARGET_LAT = 40.0
     private val TARGET_LNG = -74.0
     private val TOLERANCE_M = 1.0 // §6.4.2 TRUSTED_LOCATION_TOLERANCE_METERS (frozen)
-    // §6.4.2 monotonic execution window (elapsedRealtime; epoch audit fields are NOT predicates):
+    // §6.4.2 monotonic execution window (elapsedRealtime; epoch audit fields are NOT predicates).
+    // The RUN phase (completedAt − runningConfirmedAt) must be ≥ §6.4's 10000 ms floor — a sub-10 s run
+    // is NOT a trusted completion (Sol round-3 Finding 1). 13000 − 2100 = 10900 ms ≥ 10000.
     private val EXEC_STARTED_AT_ELAPSED = 2000L
     private val EXEC_RUNNING_CONFIRMED_AT_ELAPSED = 2100L
-    private val EXEC_COMPLETED_AT_ELAPSED = 5000L
-    private val PRE_OBSERVED_AT_ELAPSED = 1000L   // < EXEC_STARTED_AT_ELAPSED
-    private val POST_OBSERVED_AT_ELAPSED = 6000L  // > EXEC_COMPLETED_AT_ELAPSED
-    private val CONTINUITY_SINCE_ELAPSED = 500L   // <= PRE_OBSERVED_AT_ELAPSED; pre==post
+    private val EXEC_COMPLETED_AT_ELAPSED = 13000L
+    private val PRE_OBSERVED_AT_ELAPSED = 1000L    // < EXEC_STARTED_AT_ELAPSED
+    private val POST_OBSERVED_AT_ELAPSED = 14000L  // > EXEC_COMPLETED_AT_ELAPSED (brackets the run)
+    private val CONTINUITY_SINCE_ELAPSED = 500L    // <= PRE_OBSERVED_AT_ELAPSED; pre==post
 
     private fun execution(wire: Int): CellRebelExecution = CellRebelExecution(
         executionId = "exec-$wire",
