@@ -284,4 +284,95 @@ R3-3 `825e436`; R3-4 re-red proven). Report evidence to the dev thread and reque
 remains frozen pending #3 contract v1 freeze.
 
 ---
+
+## 11. Round-4 — Sol re-review NOT CLEARED (round-3 RED was greenable; integration-RED required)
+
+Sol reproduced clean RED (167/32/0) then built a STRONGER 7-file false-GREEN counterexample (diff SHA-256
+`3ac98952e4e4e8b5c9951f069416cf05b84a6613fda5a818a91acfca908529eb`) that makes the full suite **167/0/0**
+while retaining every core violation. R3-4's constant-return / re-added-helper attack was insufficient.
+Round-3 is NOT cleared; round-4 opens. Local HEAD `54b8279` (5 ahead of PR #21 `4e3d739`, unpushed).
+
+### 11.1 The unifying defect + the round-4 standard
+Round-3 REDs are **unit** tests: they instantiate DAOs/selectors and call them directly, or pass
+booleans/contexts to isolated functions. **Production wiring stays on legacy**, so "implement the tested
+unit" greens the suite while the bug remains. Concrete legacy hold-outs Sol cited:
+- `AutomationEngine:171` selects via `PlanScheduler.selectNext(tasks)` (counter path) — `selectNextTrustedTask` has ZERO production call sites.
+- `PlanRepository.finalizeAttemptSuccess:212-235` increments legacy `completedSuccesses` (`incrementSuccessIfCurrent`) then calls `completeTaskIfQuotaReached`; the MmG02 test calls the DAO directly, never this production transaction.
+- `CellRebelExecution` persists only `evidencePayloadDigest` + 3 elapsed clocks — baseline/marker/duration/scores/round-timestamps/pre+post observation fields are NEVER persisted.
+- `scheduleAdvanced` takes caller-supplied `intentRevisionMatches`/`receiptRevisionIsStale`/`quotaExhausted` booleans — tests prove branching, not that production acquires those facts.
+
+**Round-4 standard (governs all four findings):** a RED must drive the **PRODUCTION ENTRYPOINT** and assert
+a **DURABLE EFFECT** observable through it. A bad impl that satisfies the tested unit while production stays
+legacy MUST still leave the test RED. The discriminating proof is an integration assertion the unit-satisfying
+attack cannot meet.
+
+### 11.2 Per-finding production entrypoint + durable-effect spec
+
+**F1 — trust + full-evidence persistence (`TrustedLedgerRedTest`).**
+- Entry point: the production method that, given a classified completion + pre/post observations, persists
+  `CellRebelExecution` (FULL §6.4/§7.1/§8.6 field set) AND mints `TrustedQuotaEntry` via TrustPolicy. No such
+  wired entrypoint exists yet (digest+3clocks only) ⇒ add a **skeleton entrypoint on the real flow** that
+  persists digest+3clocks and mints nothing (= RED). GREEN body frozen; skeleton OK.
+- **Corrected positive (§8.6.3):** `completedAtElapsed − runningConfirmedAtElapsed ≥ 10_000ms`. Current 2900ms
+  (5000−2100) is internally inconsistent with the ≥10s RUNNING requirement yet expects wire 1/PASS
+  (`TrustedLedgerRedTest:150-167,213-220`). Fix to e.g. runningConfirmed=1000, completed=12000.
+- Durable effects asserted THROUGH the entrypoint (read-back persisted rows): persisted `CellRebelExecution`
+  carries baseline/marker/duration/scores/round-timestamps; BOTH pre+post observations persisted with every
+  §6.4 field (symmetric POST negatives — coverage/verification/isMock/evidenceRefs/intent/coords currently
+  exist only for pre); persisted wire == evidence consistency; PASS ⇒ exactly one TrustedQuotaEntry minted,
+  each §6.4.1 矛盾 tuple ⇒ zero.
+- Defeats bad-impl (TrustPolicy single-field PASS + digest-only persist): the read-back asserts the FULL
+  field set + symmetric post negatives, so storing only digest+3clocks or checking only pre fields fails.
+
+**F2 — recovery idempotency + schedule-advance gate (`RecoveryIdempotencyRedTest`).**
+- Entry point: `RecoveryCoordinator.reconcile/scheduleAdvanced` driven with a REAL
+  `RecordingExternalApplyExecutor` + `DurableRecoveryLog`; assert provider EFFECT count, invocation count,
+  receipt presence, AND **checkpoint** presence.
+- **Refactor:** `scheduleAdvanced` must NOT take caller booleans — inject acquirers (observe / live-revision /
+  trusted-quota readers); it calls them internally and the test asserts (via recording fakes) that the calls
+  happened + the durable decision. Skeleton ignores the acquirers = RED.
+- Window (c) (after-receipt-before-checkpoint): assert `checkpointFor`/`recordCheckpoint` — never writing
+  checkpoints MUST fail the test.
+- Defeats bad-impl (`receipt≠null ∧ boolean`, no-checkpoint): booleans are gone; facts internally acquired +
+  call-recorded; checkpoint absence is asserted.
+
+**F3 — M-MG-02 production selection + completion (replace `MmG02TrustedProjectionRedTest`).**
+- SELECTION entrypoint: `AutomationEngine.run()` selection cycle. **Rewire `AutomationEngine:171` from
+  `PlanScheduler.selectNext(tasks)` to `planRepository.selectNextTrustedTask(planId)`** (behavior-preserving
+  under skeleton — both legacy now — so the call-site change is safe pre-freeze). Add an **engine integration
+  test** (faked CellRebelRunner/GpsSetter/BufferGate via existing constructor injection) that seeds a
+  counter-complete/trusted-incomplete task and asserts the engine RE-SELECTS + attempts it (not skips).
+  Under skeleton the engine still skips it ⇒ RED.
+- COMPLETION entrypoint: `PlanRepository.finalizeAttemptSuccess(...)` (the production transaction), NOT the
+  raw DAO. Drive it and assert the trusted projection — not the legacy counter guard — decides completion.
+- Defeats bad-impl (trusted DAO SQL + isolated selector, engine left on `PlanScheduler.selectNext`): the
+  engine integration test fails because the engine never reaches the trusted selector ⇒ task skipped ⇒ no
+  attempt ⇒ RED. To green, the bad impl must BOTH rewire the engine AND implement trusted logic = real GREEN.
+
+**F4 — A+ template + transitions (`APlusTemplateRedTest` / `AttemptTransitionsRedTest`).**
+- Restore the sealed `APlusRunTemplate` RED asserting the UNIQUE typed step sequence
+  (`TRUSTED_SYSTEM_MOCK_BATCH_V1`), driven through the real `AttemptStateMachine` — not enum-presence checks.
+- Add missing-transition REDs (`CRASH_RECOVER`, `OBSERVATION_UNTRUSTED`, `TIMEOUT/INTERRUPTED`,
+  `RECOVERY_REQUIRED+RECONCILE`) as state-machine accept/reject assertions.
+- Defeats bad-impl (asserted-mapping + default-no-op, enum values merely present): the state machine rejects
+  an invalid sequence / requires the missing transitions as real state changes; enum.contains is not an oracle.
+
+### 11.3 Round-4 comprehensive bad-impl (re-red gate before re-review)
+Combine all four unit-satisfying attacks: F1 single-field PASS + digest-only; F2 boolean-AND + no-checkpoint;
+F3 trusted-DAO-SQL + isolated selector (engine legacy); F4 asserted-mapping + enum-present. Require: every
+finding's integration test STILL RED, full suite more-red-never-green. Capture new exact HEAD + re-red
+evidence; THEN request Sol re-review (do NOT post until the comprehensive bad impl cannot green).
+
+### 11.4 Skeleton additions (pre-freeze OK; GREEN body frozen)
+- F1: production evidence-persist + quota-mint entrypoint (skeleton = digest+3clocks, mint nothing).
+- F2: `scheduleAdvanced` signature refactor (drop booleans, inject acquirers); skeleton ignores them.
+- F3: rewire `AutomationEngine:171` → `selectNextTrustedTask` (behavior-preserving); keep skeleton aliasing legacy.
+- F4: sealed `APlusRunTemplate` skeleton + state-machine wiring.
+
+### 11.5 Boundary (unchanged)
+Pre-freeze: RED/skeleton only, no GREEN body, no §6.3-DTO/AIDL/qianwangyou edits. Formal reviewer = Sol (no
+self-review). PR #21 stays Draft; merge by operator. Redis 6399 prod / 6398 dev; ports 3003/3004 reserved.
+Identity `@glm` / glm-5.2.
+
+---
 [智谱猫/阿智 · glm-5.2🐾]
