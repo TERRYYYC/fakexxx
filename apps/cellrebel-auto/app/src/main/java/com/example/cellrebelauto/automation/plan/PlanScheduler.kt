@@ -26,30 +26,11 @@ object PlanScheduler {
     fun isPlanComplete(tasks: List<LocationTask>): Boolean =
         tasks.all { it.status == "completed" }
 
-    // ---------------------------------------------------------------------------------------------
-    // M-MG-02 trusted-aware selection (RED skeleton). The legacy methods above route on the v4
-    // `completedSuccesses` counter — which has NO A+ evidence chain (no observation, no intent hash,
-    // no continuity proof) and must NOT decide quota completion / address selection (INV-05/06,
-    // M-MG-02). GREEN rewires AutomationEngine to the trusted methods below (driven by the
-    // trusted-ledger projection `count(trusted_quota_entries where taskId=…)`) and removes the
-    // direct `completedSuccesses` counter path.
-    //
-    // PRE-FREEZE SKELETON (RED): both trusted methods currently ALIAS the legacy counter path —
-    // exactly the forbidden behaviour — so tests asserting the trusted projection FAIL until GREEN.
-    // A GREEN that forgets to rewire (keeps delegating to the legacy counter) also fails them.
-    // ---------------------------------------------------------------------------------------------
-
-    /**
-     * Trusted quota completion (M-MG-02). RED: aliases legacy [isQuotaComplete] (counter-based) —
-     * GREEN must compare [trustedCount] against [LocationTask.requiredSuccesses] and IGNORE
-     * `completedSuccesses`.
-     */
-    fun isTrustedQuotaComplete(task: LocationTask, trustedCount: Int): Boolean = isQuotaComplete(task)
-
-    /**
-     * Trusted address selection (M-MG-02). RED: aliases legacy [selectNext] (counter-based) —
-     * GREEN must skip a task only when its trusted count has reached `requiredSuccesses`.
-     */
-    fun selectNextTrusted(tasks: List<LocationTask>, trustedCounts: Map<Long, Int>): LocationTask? =
-        selectNext(tasks)
+    // M-MG-02 trusted-aware selection/completion is DB-aware and lives in PlanRepository: the trusted
+    // count must be read from the real TrustedQuotaDao.trustedCountForTask projection, not an in-memory
+    // map. An isolated trusted helper here would let a bad impl green the suite without touching the
+    // production path (Sol round-3 counterexample), so the trusted seam is intentionally NOT on this
+    // pure object. See PlanRepository.selectNextTrustedTask + the trusted-aware completion SQL,
+    // exercised against a real Room DB by MmG02TrustedProjectionRedTest. The pure methods above are
+    // the v4 display-only counter path.
 }

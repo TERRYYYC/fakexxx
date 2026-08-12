@@ -30,6 +30,26 @@ class PlanRepository(private val db: AppDatabase) {
 
     suspend fun getTask(taskId: Long): LocationTask? = db.locationTaskDao().getTaskById(taskId)
 
+    // ---- Trusted selection (M-MG-02, Issue #5 Task 4 area 6) ----
+
+    /**
+     * Trusted-aware address selection (M-MG-02). The next task to attempt is the first in execution
+     * order whose TRUSTED quota — `count(trusted_quota_entries where taskId=…)` — has NOT reached
+     * [LocationTask.requiredSuccesses]; NOT the legacy v4 `completedSuccesses` counter, which carries
+     * no A+ evidence chain and must not decide selection/completion (INV-05/06, M-MG-02). GREEN wires
+     * `AutomationEngine.run()` to this instead of [PlanScheduler.selectNext].
+     *
+     * PRE-FREEZE SKELETON (RED): aliases the legacy counter path — exactly the forbidden behaviour —
+     * so a real-DB fixture asserting the trusted projection FAILS until GREEN reads the trusted count
+     * from [com.example.cellrebelauto.db.TrustedQuotaDao.trustedCountForTask] per task. The trusted
+     * count is read from the REAL projection inside this method (not a test-supplied map), so a bad
+     * impl cannot green it by painting an isolated scheduler helper.
+     */
+    suspend fun selectNextTrustedTask(planId: Long): LocationTask? {
+        val tasks = db.locationTaskDao().getTasksForPlan(planId)
+        return PlanScheduler.selectNext(tasks)
+    }
+
     suspend fun countAttemptsForTask(taskId: Long): Int = db.testAttemptDao().countAttemptsForTask(taskId)
 
     // # 最近一次终态尝试的 endedAt（缓冲投影，INV-5）
