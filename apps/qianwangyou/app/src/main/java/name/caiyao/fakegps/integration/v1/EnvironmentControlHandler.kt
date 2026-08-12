@@ -371,77 +371,105 @@ class EnvironmentControlHandler(
     }
 
     fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 {
+        // §6.7.4b frozen judgment order (v1.42):
+        //   safety(+recompute digest) → idempotency → proof → schedule(14/15/16)
+        //   → lease(7) → mutation
+        // Steps 2–6 run inside ONE serialized transaction, exactly like apply():
+        // the step-5 lease gate is DEVICE-GLOBAL and must serialize against a
+        // concurrent apply, so no new lease can slip in between the gate and the
+        // pointer move (Terra PR#22 P1-3). This replaces the earlier v1.39 order
+        // (proof-first, gates outside the transaction).
+
+        // --- step 1: outer safety gate — auth + recompute requestDigest ---
         val caller = authorizer.authorize(callingUid)
         val proof = request.completionProof
 
-        // §6.7.4 judgment order: proof → idempotency → schedule(14/15/16) → lease(7) → mutation
-
-        // --- proof gate (M-AD-01) ---
-        if (proof.scheduleItemId.isBlank() || proof.ledgerRef.isBlank()) {
+        // Terra PR#22 P1-2 / dsf F-7.3: the caller-supplied requestDigest is
+        // UNTRUSTED input. Recompute it from the RECEIVED fields via the
+        // contract's frozen helper and compare exactly — a mismatch means the
+        // digest does not bind this payload, so a forged (key, digest) pair can
+        // no longer fetch a receipt bound to a different request.
+        // (apply()/release() already recompute; advance was the one path that
+        // trusted the wire value.)
+        val recomputedDigest = RequestDigests.advanceRequestDigest(
+            leaseId = request.leaseId,
+            expectedScheduleVersion = request.expectedScheduleVersion,
+            expectedCurrentItemId = request.expectedCurrentItemId,
+            proofScheduleItemId = proof.scheduleItemId,
+            proofTrustedSuccessCount = proof.trustedSuccessCount,
+            proofQuotaRequired = proof.quotaRequired,
+            proofLedgerRef = proof.ledgerRef,
+        )
+        if (recomputedDigest != request.requestDigest) {
             throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
-                "completion proof missing required refs")
-        }
-        if (proof.scheduleItemId != request.expectedCurrentItemId) {
-            throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
-                "proof.scheduleItemId=${proof.scheduleItemId} does not match expectedCurrentItemId=${request.expectedCurrentItemId}")
+                "requestDigest does not bind the received fields (recompute mismatch)")
         }
 
-        // --- idempotency gate (M-AD-02/03) ---
-        val existing = idempotency.find(caller.applicationId, ContractOperation.ADVANCE, request.idempotencyKey)
-        if (existing != null) {
-            if (existing.requestDigest == request.requestDigest) {
-                // M-AD-02: replay the SAME receipt without a second advance
-                return deserializeAdvanceReceipt(existing.receiptPayload)
-            } else {
-                // M-AD-03: same key + different digest → IDEMPOTENCY_CONFLICT
-                throw ContractException(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
-                    "advance key=${request.idempotencyKey} replayed with different digest")
-            }
-        }
-
-        // --- schedule gates (14/15/16) ---
-        val schedule = environment.scheduleSnapshot()
-            ?: throw ContractException(ContractErrorCodeV1.REQUEST_INVALID, "no active schedule")
-
-        // M-AD-04/05: item mismatch → wire 14
-        if (request.expectedCurrentItemId != schedule.currentItemId) {
-            throw ContractException(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH,
-                "expected=${request.expectedCurrentItemId} current=${schedule.currentItemId}")
-        }
-
-        // M-AD-06: version stale → wire 15
-        if (request.expectedScheduleVersion != schedule.scheduleVersion) {
-            throw ContractException(ContractErrorCodeV1.SCHEDULE_VERSION_STALE,
-                "expected=${request.expectedScheduleVersion} current=${schedule.scheduleVersion}")
-        }
-
-        // M-AD-11: already exhausted → wire 16
-        if (schedule.exhausted) {
-            throw ContractException(ContractErrorCodeV1.SCHEDULE_EXHAUSTED,
-                "schedule already exhausted")
-        }
-
-        // --- lease gate (M-AD-12, §6.7.4a) ---
-        // The caller must hold NO active lease — release comes first
-        val blocking = leaseStore.blockingLease()
-        if (blocking != null) {
-            val effState = leaseStore.effectiveState(blocking.leaseId, tracker.generation)
-            if (effState == LeaseState.ACTIVE || effState == LeaseState.ACQUIRING) {
-                if (blocking.callerApplicationId == caller.applicationId) {
-                    throw ContractException(ContractErrorCodeV1.LEASE_CONFLICT,
-                        "caller holds active lease ${blocking.leaseId}; release first")
+        // Crash between writes must roll back cleanly (advance_crashBetweenWrites);
+        // the gate reads inside this transaction also serialize the device-global
+        // lease gate against a concurrent apply (advance_concurrentAdvances…).
+        return storage.transaction {
+            // --- step 2: idempotency, keyed on the RECOMPUTED digest (M-AD-02/03) ---
+            val existing = idempotency.find(caller.applicationId, ContractOperation.ADVANCE, request.idempotencyKey)
+            if (existing != null) {
+                if (existing.requestDigest == recomputedDigest) {
+                    // M-AD-02: replay the SAME receipt without a second advance
+                    return@transaction deserializeAdvanceReceipt(existing.receiptPayload)
+                } else {
+                    // M-AD-03: same key + different recomputed digest → IDEMPOTENCY_CONFLICT
+                    throw ContractException(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
+                        "advance key=${request.idempotencyKey} replayed with different digest")
                 }
             }
-            // Non-caller blocking leases in other non-released states also block
-            if (effState != LeaseState.RELEASED && effState != LeaseState.EXPIRED) {
-                throw ContractException(ContractErrorCodeV1.LEASE_CONFLICT,
-                    "device lease ${blocking.leaseId} in state $effState blocks advance")
-            }
-        }
 
-        // --- mutation: pointer advance + receipt persist in ONE transaction (§6.7.5) ---
-        // Crash between writes must roll back cleanly (advance_crashBetweenWrites).
-        return storage.transaction {
+            // --- step 3: proof gate (M-AD-01) ---
+            if (proof.scheduleItemId.isBlank() || proof.ledgerRef.isBlank()) {
+                throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
+                    "completion proof missing required refs")
+            }
+            if (proof.scheduleItemId != request.expectedCurrentItemId) {
+                throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
+                    "proof.scheduleItemId=${proof.scheduleItemId} does not match expectedCurrentItemId=${request.expectedCurrentItemId}")
+            }
+
+            // --- step 4: schedule gates (14/15/16) ---
+            val schedule = environment.scheduleSnapshot()
+                ?: throw ContractException(ContractErrorCodeV1.REQUEST_INVALID, "no active schedule")
+
+            // M-AD-04/05: item mismatch → wire 14
+            if (request.expectedCurrentItemId != schedule.currentItemId) {
+                throw ContractException(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH,
+                    "expected=${request.expectedCurrentItemId} current=${schedule.currentItemId}")
+            }
+
+            // M-AD-06: version stale → wire 15
+            if (request.expectedScheduleVersion != schedule.scheduleVersion) {
+                throw ContractException(ContractErrorCodeV1.SCHEDULE_VERSION_STALE,
+                    "expected=${request.expectedScheduleVersion} current=${schedule.scheduleVersion}")
+            }
+
+            // M-AD-11: already exhausted → wire 16
+            if (schedule.exhausted) {
+                throw ContractException(ContractErrorCodeV1.SCHEDULE_EXHAUSTED,
+                    "schedule already exhausted")
+            }
+
+            // --- step 5: lease gate — DEVICE-GLOBAL (§6.7.4a/b, M-AD-12) ---
+            // ANY non-RELEASED / unconverged lease blocks advance, regardless of
+            // caller and WITHOUT an EXPIRED exemption (INV-28: EXPIRED never
+            // auto-releases; TTL is not a bypass). Same predicate as apply()'s
+            // conflict gate; reading it inside this transaction is what
+            // serializes it against a concurrent apply (Terra PR#22 P1-3/P1-4).
+            val blocking = leaseStore.blockingLease()
+            if (blocking != null) {
+                val effState = leaseStore.effectiveState(blocking.leaseId, tracker.generation)
+                if (effState != LeaseState.RELEASED) {
+                    throw ContractException(ContractErrorCodeV1.LEASE_CONFLICT,
+                        "device lease ${blocking.leaseId} in state $effState blocks advance")
+                }
+            }
+
+            // --- step 6: mutation — pointer advance + receipt persist (§6.7.5) ---
             val snap = tracker.snapshot()
             val intentHash = leaseStore.get(request.leaseId)?.acceptedIntentHash ?: ""
 

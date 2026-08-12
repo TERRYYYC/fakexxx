@@ -11,11 +11,18 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_UID
+import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_PKG
+import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_SIGNER
+import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_UID
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * SUPPLEMENTARY RED LANE — provider-side completeAndAdvance (§6.7).
@@ -342,13 +349,23 @@ class AdvanceProviderRedTest {
     // (the lease gate row itself is ledger-bound: AdvanceMatrixTest::M_AD_12)
 
     /**
-     * §6.7.4b facet: the proof gate is judged BEFORE idempotency. A reused key
-     * carrying a now-BLANK proof has a different digest — idempotency-first
-     * would answer IDEMPOTENCY_CONFLICT(12); the frozen order answers
-     * REQUEST_INVALID(13) because the proof gate rejects it first.
+     * §6.7.4b facet — FLIPPED for the v1.42 frozen order (Terra PR#22 P1-2 /
+     * dsf F-7.1). The order is now:
+     *   safety(+recompute digest) → idempotency → proof → schedule → lease → mutation
+     * so idempotency is judged BEFORE proof, the reverse of what this row
+     * asserted under v1.39.
+     *
+     * A reused key carrying a now-BLANK proof is a DIFFERENT payload, so its
+     * recomputed digest differs from the stored one. The safety gate (step 1)
+     * still passes because the request() helper builds a digest that binds its
+     * own blank-proof fields (self-consistent, not forged), so step 1 has
+     * nothing to reject. Step 2 then finds the same key with a different
+     * recomputed digest → IDEMPOTENCY_CONFLICT(12). A proof-first implementation
+     * would instead reach the proof gate and answer REQUEST_INVALID(13); seeing
+     * 12 here is the evidence that idempotency is judged first.
      */
     @Test
-    fun advance_proofGate_precedesIdempotency() {
+    fun advance_idempotencyGate_precedesProof() {
         val h = harness()
         val leaseId = earnAndRelease(h)
         h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-k8"))
@@ -360,7 +377,7 @@ class AdvanceProviderRedTest {
             ledgerRef = "",
             verifiedAtElapsedRealtimeMs = h.clock.elapsedRealtimeMs(),
         )
-        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+        expectContractFailure(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT) {
             h.handler.completeAndAdvance(
                 AUTO_UID,
                 request(h, leaseId, "adv-k8", expectedItemId = "item-2", completionProof = blankProof),
@@ -451,5 +468,148 @@ class AdvanceProviderRedTest {
         assertEquals("same durable receipt after restart", first, replay)
         assertEquals("pointer advanced exactly once across the restart", 1, h.env.advanceCount)
         assertEquals("item-2", h.env.currentItemId)
+    }
+
+    // -------------------------------------- §6.7.4b step 1: recompute requestDigest
+    // (Terra PR#22 P1-2 / dsf F-7.3)
+
+    /**
+     * §6.7.4b step 1: the provider MUST recompute requestDigest from the
+     * RECEIVED fields and compare it to the caller-supplied value; a mismatch
+     * is REQUEST_INVALID(13) BEFORE idempotency ever runs. The caller-supplied
+     * digest is untrusted input — apply()/release() already recompute their own
+     * digests, advance() was the one path that trusted the wire. Without
+     * recompute, an attacker mutates any payload field but keeps the old
+     * (key, digest) pair, hits the stored entry, and gets back a receipt bound
+     * to a DIFFERENT request — the idempotency key decays from "identity of one
+     * call" into "a claim ticket for any stored result".
+     */
+    @Test
+    fun advance_forgedRequestDigest_requestInvalid() {
+        val h = harness()
+        val leaseId = earnAndRelease(h)
+
+        // Fields are legal, but requestDigest does not bind them (a value the
+        // provider never authored from these fields).
+        val forged = request(h, leaseId, "adv-forge").copy(
+            requestDigest = "forged-digest-not-bound-to-these-fields",
+        )
+        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(AUTO_UID, forged)
+        }
+        assertEquals("forged request never advanced the pointer", 0, h.env.advanceCount)
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+    }
+
+    // ------------------------------------- §6.7.4b step 5: device-global lease gate
+    // Supplemental (NO ledger id — same discipline as this file's header).
+    // dsf F-3's (a) branch: a lease held by ANOTHER caller, or an EXPIRED (not
+    // yet converged) lease, must block advance. The DISTINCT open question — how
+    // completeAndAdvance treats a leaseId ARGUMENT owned by a foreign caller — is
+    // §20.1 KB-6 / §6.7.4a "unfrozen" and is deliberately NOT decided here.
+
+    /**
+     * Terra PR#22 P1-4: an EXPIRED-but-not-RELEASED lease is still a blocking
+     * device lease (§8.4 / INV-28: EXPIRED never auto-releases; TTL is not a
+     * bypass of INV-21). The frozen step-5 gate is "ANY non-RELEASED /
+     * unconverged lease → LEASE_CONFLICT(7)" with NO exemption for EXPIRED. The
+     * pre-fix handler exempted EXPIRED and let advance swap the device
+     * environment under a lease that had merely timed out.
+     */
+    @Test
+    fun advance_expiredForeignLease_leaseConflict() {
+        val h = harness()
+        h.pair(OTHER_PKG, OTHER_SIGNER)
+
+        // AUTO earns then releases → device clean; AUTO keeps the historical ref.
+        val leaseId = earnAndRelease(h)
+        // A DIFFERENT caller holds a lease, then lets it lapse past its deadline.
+        h.apply(uid = OTHER_UID, key = "other-apply", intent = h.intent(attemptId = "o1"))
+        h.clock.advance(600_001) // past the 10-minute default deadline → EXPIRED
+
+        expectContractFailure(ContractErrorCodeV1.LEASE_CONFLICT) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-exp"))
+        }
+        assertEquals("expired lease still blocks advance", 0, h.env.advanceCount)
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+    }
+
+    /**
+     * §6.7.4a: the lease gate is DEVICE-GLOBAL, not "this caller's". A lease
+     * held by ANOTHER caller blocks advance just the same — otherwise caller B
+     * holds a lease while caller A advances and swaps the device environment out
+     * from under B. Passes on the pre-fix handler via its generic non-RELEASED
+     * branch; kept as a regression guard (the twin of the EXPIRED hole above) so
+     * a future refactor to a caller-scoped gate fails loudly.
+     */
+    @Test
+    fun advance_foreignActiveLease_deviceGlobalLeaseConflict() {
+        val h = harness()
+        h.pair(OTHER_PKG, OTHER_SIGNER)
+
+        val leaseId = earnAndRelease(h)
+        h.apply(uid = OTHER_UID, key = "other-apply", intent = h.intent(attemptId = "o1"))
+
+        expectContractFailure(ContractErrorCodeV1.LEASE_CONFLICT) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-foreign"))
+        }
+        assertEquals("no advance under a foreign active lease", 0, h.env.advanceCount)
+    }
+
+    // ----------------------------- §6.7.4b step 5+6: gate and mutation are atomic
+    // (Terra PR#22 P1-3)
+
+    /**
+     * Terra PR#22 P1-3: the schedule/lease gate and the pointer mutation must
+     * live in ONE serialized transaction. The pre-fix handler evaluated the
+     * gates OUTSIDE the mutation transaction, so two concurrent advances could
+     * BOTH pass the schedule gate (each sees item-1) and BOTH mutate — the
+     * double advance the compare-and-advance contract exists to make
+     * impossible.
+     *
+     * Real threads, one shared harness: exactly one advance may win; the other
+     * must observe the moved pointer and fail SCHEDULE_ITEM_MISMATCH(14). The
+     * hard invariant is advanceCount == 1 — never 2. Repeated to keep the race
+     * live. (Mirrors the accepted ConcurrencyMatrixTest M-CC-03/04 real-thread
+     * one-winner shape.)
+     */
+    @Test
+    fun advance_concurrentAdvances_serializedNoDoubleAdvance() {
+        repeat(40) {
+            val h = harness()
+            val leaseId = earnAndRelease(h)
+            // Two DISTINCT keys, both a legal advance from item-1 — no idempotency
+            // replay can mask the race; each is a fresh compare-and-advance.
+            val reqA = request(h, leaseId, "adv-race-a")
+            val reqB = request(h, leaseId, "adv-race-b")
+
+            val outcomes = Collections.synchronizedList(mutableListOf<Any>())
+            val start = CountDownLatch(1)
+            val done = CountDownLatch(2)
+            listOf(reqA, reqB).forEach { req ->
+                Thread {
+                    start.await()
+                    try {
+                        outcomes.add(h.handler.completeAndAdvance(AUTO_UID, req))
+                    } catch (t: Throwable) {
+                        outcomes.add(t)
+                    } finally {
+                        done.countDown()
+                    }
+                }.start()
+            }
+            start.countDown()
+            assertTrue("race finished", done.await(30, TimeUnit.SECONDS))
+
+            assertEquals("pointer advanced exactly once, never twice", 1, h.env.advanceCount)
+            assertEquals("item-2", h.env.currentItemId)
+            val failures = outcomes.filterIsInstance<ContractException>()
+            assertEquals("exactly one loser", 1, failures.size)
+            assertEquals(
+                "loser saw the already-moved pointer",
+                ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH,
+                failures.single().code,
+            )
+        }
     }
 }
