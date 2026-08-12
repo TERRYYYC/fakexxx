@@ -32,7 +32,6 @@ class DurableIntegrationAuditStore(
     companion object {
         private const val AUDIT_NS = "integration.v1.audit"
         private const val SEQ_KEY = "__seq__"
-        private const val DELIM = "\t"
     }
 
     override fun append(
@@ -73,10 +72,12 @@ class DurableIntegrationAuditStore(
             e.leaseId ?: "",
             e.operationId ?: "",
             e.payloadDigest ?: "",
-        ).joinToString(DELIM)
+        ).let(DurableFieldCodec::encode)
 
     private fun deserializeEvent(s: String): QwyAuditEvent {
-        val parts = s.split(DELIM)
+        // Shared total codec: operationId is the caller idempotency key (a FREE
+        // string) on advance — tab-framing corrupted the record (Terra round-4 class).
+        val parts = DurableFieldCodec.decode(s)
         return QwyAuditEvent(
             seq = parts[0].toLong(),
             atElapsedRealtimeMs = parts[1].toLong(),

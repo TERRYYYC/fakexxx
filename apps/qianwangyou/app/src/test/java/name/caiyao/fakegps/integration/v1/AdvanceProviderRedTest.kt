@@ -847,4 +847,75 @@ class AdvanceProviderRedTest {
         assertEquals("item-2", k1Replay.advancedToItemId)
         assertEquals("still exactly one advance across the whole sequence", 1, h.env.advanceCount)
     }
+
+    // -------- §6.7.3 free-string IDs × durable framing (Terra round-4 P1)
+    // Item IDs are FREE strings and the spec rejects fixed-separator encodings
+    // (they are not injective: a value containing the separator forges extra
+    // fields). The recovery marker and receipt payloads are durable carriers of
+    // these strings — a codec that only works for tab-free IDs makes a committed
+    // advance UNRECOVERABLE, violating §6.7.5's no-intermediate-state rule.
+
+    /**
+     * Terra round-4 repro 1: the SOURCE item ID contains the marker separator.
+     * Commit the receipt+marker, crash the external apply, keep the process
+     * alive. A separator-framed marker misparses ("item\tfrom" → from="item",
+     * presence="from"), and recovery cannot roll the committed advance forward.
+     * The live same-key retry must instead settle and return the receipt.
+     */
+    @Test
+    fun advance_tabInSourceItemId_recoverySurvivesFraming() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        h.env.itemIds = mutableListOf("item\tfrom", "item-2", "item-3")
+        h.env.currentItemId = "item\tfrom"
+        val leaseId = earnAndRelease(h, key = "tab-src-apply")
+        val req = request(h, leaseId, "adv-tab-src", expectedItemId = "item\tfrom")
+
+        h.env.failNextAdvancePointer = true
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, req)
+            fail("pointer-apply fault must surface")
+        } catch (expected: RuntimeException) {
+            // crash, not a business answer
+        }
+
+        // Live same-key retry: settle must survive the tab-bearing marker.
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("item-2", replay.advancedToItemId)
+        assertEquals("committed advance rolled forward", "item-2", h.env.currentItemId)
+        assertEquals("pointer moved exactly once", 1, h.env.advanceCount)
+    }
+
+    /**
+     * Terra round-4 repro 2: the TARGET item ID contains the separator. A
+     * separator-framed marker truncates it ("item\t2" → "item"), so
+     * applyCommittedAdvance fails its committed-outcome integrity check and the
+     * durable receipt is stranded. The total codec must round-trip the target
+     * exactly; the retry returns the receipt and the pointer lands on the real
+     * tab-bearing item.
+     */
+    @Test
+    fun advance_tabInTargetItemId_recoverySurvivesFraming() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        h.env.itemIds = mutableListOf("item-1", "item\t2", "item-3")
+        val leaseId = earnAndRelease(h, key = "tab-tgt-apply")
+        val req = request(h, leaseId, "adv-tab-tgt")
+
+        h.env.failNextAdvancePointer = true
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, req)
+            fail("pointer-apply fault must surface")
+        } catch (expected: RuntimeException) {
+            // crash, not a business answer
+        }
+
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("target survives framing byte-exactly", "item\t2", replay.advancedToItemId)
+        assertEquals("item\t2", h.env.currentItemId)
+        assertEquals("pointer moved exactly once", 1, h.env.advanceCount)
+
+        // And the durable receipt round-trips stably on a second replay.
+        assertEquals(replay, h.handler.completeAndAdvance(AUTO_UID, req))
+    }
 }

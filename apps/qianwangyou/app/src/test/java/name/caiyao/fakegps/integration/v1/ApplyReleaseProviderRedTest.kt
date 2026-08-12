@@ -162,4 +162,32 @@ class ApplyReleaseProviderRedTest {
         assertEquals("per-caller replay returns the caller's own receipt", b, bReplay)
         assertEquals("replay executed nothing", 2, h.env.applyCount)
     }
+
+    // ------------------------------------------------ durable codec totality
+
+    /**
+     * §6.3.4 idempotency keys are caller FREE strings, and the stored receipt
+     * payload embeds them. Same fault class as the round-4 marker finding: a
+     * separator-framed payload codec shifts every following field when the key
+     * contains the separator, so the REPLAY (which deserializes the stored
+     * payload) corrupts or crashes instead of returning the original receipt.
+     * The codec must be total over all strings — "IDs are printable" is exactly
+     * the assumption §6.7.3 removed.
+     */
+    @Test
+    fun applyRelease_tabInIdempotencyKey_replayRoundTripsReceipt() {
+        val h = harness()
+        val hostileApplyKey = "k\t1:hostile"
+
+        val first = h.apply(key = hostileApplyKey)
+        val replay = h.apply(key = hostileApplyKey)
+        assertEquals("stored apply receipt must round-trip byte-identically", first, replay)
+        assertEquals("replay executed nothing", 1, h.env.applyCount)
+
+        val hostileReleaseKey = "rk\t:x"
+        val rel = h.release(first.leaseId, key = hostileReleaseKey)
+        val relReplay = h.release(first.leaseId, key = hostileReleaseKey)
+        assertEquals("stored release receipt must round-trip byte-identically", rel, relReplay)
+        assertEquals("cleanup ran once", 1, h.env.cleanupCount)
+    }
 }

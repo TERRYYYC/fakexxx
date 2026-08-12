@@ -46,10 +46,14 @@ class DurableIdempotencyStore(
     companion object {
         /** The only namespace receipts live in — referenced by crash-injection tests. */
         const val RECEIPT_NAMESPACE: String = "integration.v1.receipts"
-        private const val DELIM = "\t"
 
+        /**
+         * Scope = (caller, operation, key), framed with the shared total codec:
+         * keys are FREE strings (§6.3.4), so a separator-joined scope key is
+         * forgeable by a key containing the separator (Terra round-4 class).
+         */
         private fun scopeKey(callerApplicationId: String, operation: ContractOperation, idempotencyKey: String) =
-            "$callerApplicationId|${operation.name}|$idempotencyKey"
+            DurableFieldCodec.encode(listOf(callerApplicationId, operation.name, idempotencyKey))
     }
 
     override fun find(
@@ -70,7 +74,10 @@ class DurableIdempotencyStore(
         )
     }
 
-    private fun serialize(r: OperationReceiptRecord): String =
+    // Length-prefix framing via the shared codec: the previous tab-join guarded
+    // only receiptPayload (split limit) while idempotencyKey — a FREE string
+    // that precedes it — could shift every following field (Terra round-4).
+    private fun serialize(r: OperationReceiptRecord): String = DurableFieldCodec.encode(
         listOf(
             r.callerApplicationId,
             r.operation.name,
@@ -79,11 +86,10 @@ class DurableIdempotencyStore(
             r.resultDigest,
             r.createdAtElapsedRealtimeMs.toString(),
             r.receiptPayload,
-        ).joinToString(DELIM)
+        ))
 
     private fun deserialize(s: String): OperationReceiptRecord {
-        // receiptPayload may contain the delimiter, so limit the split
-        val parts = s.split(DELIM, limit = 7)
+        val parts = DurableFieldCodec.decode(s)
         return OperationReceiptRecord(
             callerApplicationId = parts[0],
             operation = ContractOperation.valueOf(parts[1]),
