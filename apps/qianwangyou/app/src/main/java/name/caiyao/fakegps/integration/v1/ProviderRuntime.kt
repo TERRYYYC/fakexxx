@@ -154,16 +154,40 @@ object ProviderRuntime {
         // receipt to land or not land together, and a prefs-per-namespace store
         // commits each write on its own. See FileDurableKv's header.
         val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
-        val clock = AndroidMonotonicClock()
-        val resolver = AndroidPackageIdentityResolver(appContext)
+        return compose(
+            kv = kv,
+            clock = AndroidMonotonicClock(),
+            resolver = AndroidPackageIdentityResolver(appContext),
+            environment = QwyEnvironmentController(appContext),
+        )
+    }
 
+    /**
+     * The composition itself, with every Android-bound choice already made by
+     * the caller.
+     *
+     * Split out from [build] so the wiring can be asserted in a JVM lane. The
+     * bug that motivated it was invisible while this was inline: composition
+     * wired the §6.4 relevant-change listener a second time, on top of the one
+     * onOwnerProcessStart already installs. With a stub adapter that merely
+     * threw; with a real one it would have left two registrations racing to be
+     * the survivor — a revision owner that looks wired either way.
+     *
+     * A reviewer caught that by reading the call chain. Reading is not a
+     * regression test, so the wiring is now measured.
+     */
+    internal fun compose(
+        kv: DurableKv,
+        clock: MonotonicClock,
+        resolver: PackageIdentityResolver,
+        environment: QwyEnvironment,
+    ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
         val tracker = ContinuityTracker(kv, clock)
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
-        val environment = QwyEnvironmentController(appContext)
         val observer = EnvironmentObserver(tracker, environment, clock)
 
         val handler = EnvironmentControlHandler(
@@ -183,11 +207,15 @@ object ProviderRuntime {
         // say so (§8.4): unclean restart moves ACTIVE leases to
         // RELEASE_INCOMPLETE rather than silently to EXPIRED, because the device
         // environment is unknown, not known-clean.
+        //
+        // This call also wires the §6.4 relevant-change listener, because owner
+        // start is exactly when the revision owner must begin observing. An
+        // earlier version of this method wired it a SECOND time right here,
+        // which was redundant at best and, once the adapter is real, would
+        // replace the handler's own listener with an identical-looking one —
+        // two registrations racing to be the survivor. Composition's job is to
+        // call onOwnerProcessStart, not to re-do what it does.
         handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
-
-        // §6.4 / M-RC-03: an unwired listener is the INV-08 false-trust case, so
-        // wiring it is part of composition, not an optional extra.
-        environment.setRelevantChangeListener { reason -> tracker.bump(reason) }
 
         return handler
     }
