@@ -4,6 +4,7 @@ import name.caiyao.fakegps.integration.v1.support.FakeIdentityResolver
 import name.caiyao.fakegps.integration.v1.support.FakeMonotonicClock
 import name.caiyao.fakegps.integration.v1.support.InMemoryDurableKv
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -147,6 +148,43 @@ class ProviderReachabilityGuardTest {
                 "means registrations competing to be the survivor",
             1,
             env.listenerRegistrations
+        )
+    }
+
+    /**
+     * §8.4 clean-shutdown evidence must be earned, single-use, and false by
+     * default.
+     *
+     * This existed as write/read helpers with NO call site for the write, so
+     * `cleanlinessProvable` was a constant false wearing the shape of a check:
+     * every start took the unclean path while §8.4 read as though both of its
+     * cases were live. A branch that can never be taken is worse than a missing
+     * one, because it looks covered.
+     *
+     * The third assertion is the one that bites: if the marker were sticky
+     * rather than consumed, a single orderly stop would make every later crash
+     * report itself as clean, and ACTIVE leases would be assumed released when
+     * the device state is actually unknown.
+     */
+    @Test
+    fun cleanShutdownEvidenceIsEarnedAndSingleUse() {
+        val kv = InMemoryDurableKv()
+
+        assertFalse(
+            "a first start has no evidence of an orderly stop and must say so",
+            ProviderRuntime.CleanShutdownMarker.consume(kv)
+        )
+
+        ProviderRuntime.CleanShutdownMarker.record(kv)
+        assertTrue(
+            "an orderly stop must be provable on the next start",
+            ProviderRuntime.CleanShutdownMarker.consume(kv)
+        )
+
+        assertFalse(
+            "the marker is consumed, not sticky — otherwise one clean stop would " +
+                "make every later crash report itself clean",
+            ProviderRuntime.CleanShutdownMarker.consume(kv)
         )
     }
 

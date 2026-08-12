@@ -53,6 +53,22 @@ class AndroidMonotonicClock : MonotonicClock {
  * empty digest set, and [CallerAuthorizer] turns that into CALLER_NOT_ALLOWED.
  * Returning a partially-trusted answer here would move an authorization decision
  * out of the authorizer, which is where the matrix tests can see it.
+ *
+ * COVERAGE BOUNDARY — stated, not glossed. No unit test references this class.
+ * The §6.5.1 RULES (single package per uid, current-signer-only comparison,
+ * multi-signer rejection, legacy-path fail-closed) are covered, but through
+ * [CallerAuthorizer] over a fake resolver. What is NOT covered is the fidelity
+ * of the mapping below: whether real PackageManager output becomes the
+ * SignerLookup the fake pretends it does — apkContentsSigners vs
+ * signingCertificateHistory under rotation, GET_SIGNATURES on API 24–27, a dead
+ * PackageManager binder.
+ *
+ * That gap cannot be closed in a JVM lane, because the thing under test IS the
+ * Android API. It belongs to #7 instrumented acceptance alongside the adapter,
+ * and is recorded here so it is a known boundary rather than an assumption.
+ * Writing a mock-PackageManager test would only assert that this file matches
+ * my own guess about PackageManager, which is the same false green in a
+ * different costume.
  */
 class AndroidPackageIdentityResolver(context: Context) : PackageIdentityResolver {
 
@@ -140,6 +156,10 @@ object ProviderRuntime {
     @Volatile
     private var handlerRef: EnvironmentControlHandler? = null
 
+    /** Kept so orderly teardown can leave clean-shutdown evidence. */
+    @Volatile
+    private var kvRef: DurableKv? = null
+
     private val bootLock = Any()
 
     fun handler(context: Context): EnvironmentControlHandler {
@@ -154,6 +174,7 @@ object ProviderRuntime {
         // receipt to land or not land together, and a prefs-per-namespace store
         // commits each write on its own. See FileDurableKv's header.
         val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
+        kvRef = kv
         return compose(
             kv = kv,
             clock = AndroidMonotonicClock(),
@@ -221,9 +242,35 @@ object ProviderRuntime {
     }
 
     /**
+     * Called on orderly teardown of the provider service. Without this, [consume]
+     * below can only ever answer false.
+     *
+     * That was the bug: record() existed with no call site, so
+     * cleanlinessProvable was a constant false dressed up as a check. Every
+     * start took the unclean path — ACTIVE leases to RELEASE_INCOMPLETE even
+     * after a clean stop — while the code read as though §8.4's two cases were
+     * both live. A permanently-unreachable branch is worse than a missing one:
+     * it looks covered.
+     *
+     * A no-op when nothing has been composed yet: there is no owner state to
+     * describe as cleanly stopped.
+     */
+    fun recordCleanShutdown() {
+        synchronized(bootLock) {
+            kvRef?.let { CleanShutdownMarker.record(it) }
+        }
+    }
+
+    /**
      * Clean-shutdown evidence. Written when the owner tears down in an orderly
      * way and consumed (cleared) on the next start, so "provable" means "this
      * exact marker survived and nothing else claimed it".
+     *
+     * The asymmetry is deliberate and fail-closed: an orderly stop gets to leave
+     * the marker, and anything else — process kill, low-memory reap, power loss
+     * — simply does not, so the next start correctly reports unclean. There is
+     * no reliable "process is exiting" callback on Android to lean on, and this
+     * design does not need one.
      */
     object CleanShutdownMarker {
         private const val NS = "runtime"
