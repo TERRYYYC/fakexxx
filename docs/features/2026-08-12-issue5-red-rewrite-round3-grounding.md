@@ -187,16 +187,24 @@ Add RED/pass negatives:
 - TEST: `recovery/FakeDurableRecoveryLog.kt` (strip counts/conflict-key), `recovery/RecordingExternalApplyExecutor.kt` (NEW), `recovery/RecoveryIdempotencyRedTest.kt` (rewrite 9→~11 tests around windows + gate).
 - Verify: `./gradlew testDebugUnitTest --tests '...recovery.*'` ⇒ right-reason RED (fresh-advance + window-b + schedule-ADVANCED + stale/exhausted negatives... note: as with Finding 1, negatives pass under skeleton; RED signal = the positive fresh-advance/window-b-then-advance + ADVANCED-gate cases that the skeleton's constant return cannot satisfy). Then run the **comprehensive bad-impl re-red** (R3-4) across ALL findings.
 
-### Finding 3 design (lighter — design TBD in next window, Sol Next Action #3 one-liner in §6)
-M-MG-02 must route through the REAL Room `TrustedQuotaDao.trustedCountForTask` projection + the
-production selection/completion entry, not the 0-call-site isolated `selectNextTrusted`/
-`isTrustedQuotaComplete` helpers. Options for next window: (a) write RED that constructs a real Room
-DB, seeds `TrustedQuotaEntry` rows + `LocationTask`, and asserts the PRODUCTION
-`PlanRepository`/`AutomationEngine` selection+completion path reflects the trusted projection — which
-requires the GREEN to actually rewire those paths (can't be greened by painting an isolated helper);
-(b) add a `APlusRunTemplate` typed-step-sequence RED asserting the exact ordered steps. Add missing
-AttemptTransitions: `CRASH_RECOVER`, `OBSERVATION_UNTRUSTED`, `TIMEOUT_INTERRUPTED`,
-`RECOVERY_REQUIRED + RECONCILE → ...`. Decide concrete approach with fresh budget.
+### Finding 3 design (DONE — Option a executed, see §10 verification)
+M-MG-02 routes through the REAL Room `TrustedQuotaDao.trustedCountForTask` projection + the real
+production selection/completion SQL, not the (now-deleted) 0-call-site isolated `selectNextTrusted`/
+`isTrustedQuotaComplete` helpers. **Scope reduction proved by census:** `APlusRunTemplate` does NOT
+exist (inventing it is GREEN-scope, excluded from RED), and `AttemptTransitions` already has every
+value Sol listed (`CRASH_RECOVER`, `OBSERVATION_UNTRUSTED`, `TIMEOUT_INTERRUPTED`, `RECONCILE` all
+present). So Option (b) was dropped — there is nothing missing to RED.
+
+Executed Option (a): `MmG02TrustedProjectionRedTest` builds a real in-memory Room DB, seeds
+`trusted_quota_entries` + `location_tasks` via `execSQL`, and asserts the REAL production methods —
+`LocationTaskDao.normalizeQuotaCompletedTasks` (the recovery sweep M-MG-02 literally names),
+`LocationTaskDao.completeTaskIfQuotaReached` (success-path completion), and a new DB-aware
+`PlanRepository.selectNextTrustedTask(planId)` — reflect the trusted projection, NOT the legacy
+counter. Both polarities per seam (counter-complete/trusted-incomplete must NOT complete + MUST be
+re-selected; counter-incomplete/trusted-complete MUST complete + be skipped). The trusted count is
+read from the real DB projection (not a test-supplied map), so a bad impl cannot green the suite by
+painting an isolated scheduler helper — it must rewire the real completion SQL and the real selection.
+The isolated helpers + the greenable `TrustedSelectionMmG02RedTest` were removed.
 
 ## 9. Build env
 
@@ -229,9 +237,26 @@ This drift would have made the suite "red for the wrong reason" and polluted R3-
 be fixed before the comprehensive re-red. Lesson: any entity change ⇒ also update the corresponding
 `MIGRATION_*` CREATE TABLE so entity-DDL ≡ migration-DDL.
 
-**Next:** commit (a) migration drift fix and (b) F2 (6 files) as separate commits; then Finding 3 (R3-3),
-then R3-4 comprehensive re-red across ALL findings. Do NOT post to Sol until R3-4 proves the bad impl
-cannot green the suite.
+**Finding 3 verified — right-reason RED (MmG02TrustedProjectionRedTest: 7 tests, 6 failed, 0 errors):**
+- recovery normalize NOT-complete (counter 3/3 + trusted 0 → must stay "active"; skeleton completes it
+  on the counter ⇒ ComparisonFailure)
+- recovery normalize DOES-complete (counter 0/3 + trusted 3 → must become "completed"; skeleton ignores
+  trusted count ⇒ stays "active" ⇒ ComparisonFailure)
+- success-path NOT-complete (counter 3/3 + trusted 0 → `completeTaskIfQuotaReached` must return 0;
+  skeleton returns 1 ⇒ AssertionError)
+- success-path DOES-complete (counter 0/3 + trusted 3 → must return 1; skeleton returns 0 ⇒ AssertionError)
+- selection re-runs trusted-incomplete A (both counter-complete; skeleton `selectNext` ⇒ null ⇒ AssertionError)
+- selection skips trusted-complete A, picks trusted-incomplete B (skeleton ⇒ null ⇒ AssertionError)
+- guard: all-trusted-complete ⇒ null (passes under skeleton — valid negative, not RED signal)
+All 6 failures are behavioral (AssertionError/ComparisonFailure), 0 errors. The whole unit-test source
+set compiled clean (`compileDebugUnitTestKotlin`) ⇒ no other references to the deleted isolated helpers.
+GREEN must rewire the real completion SQL + `PlanRepository.selectNextTrustedTask` to consult
+`TrustedQuotaDao.trustedCountForTask`; the isolated-helper vector is structurally gone.
+
+**Next:** R3-4 — build the comprehensive adversarial bad impl across ALL three findings; require every
+targeted test still RED and the full suite still red for the right reason; capture the new exact HEAD +
+re-red evidence and report to dev thread `thread_msp2vy3j48b9pl3g`. Do NOT post to Sol until the
+comprehensive bad impl cannot green the suite.
 
 ---
 [智谱猫/阿智 · glm-5.2🐾]
