@@ -1,5 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
+import io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1
+
 /**
  * Single-writer revision owner (§6.6 L1–L6, INV-25).
  *
@@ -29,21 +31,84 @@ class ContinuityTracker(
     companion object {
         /** The only namespace this owner writes; static guard M-BP-08 scans for foreign writers. */
         const val REVISION_NAMESPACE: String = "integration.v1.revision"
+        private const val KEY_GENERATION = "generation"
+        private const val KEY_REVISION = "revision"
+        private const val KEY_COVERAGE = "coverage"
+        private const val KEY_CONTINUITY_SINCE = "continuity_since"
+    }
+
+    private var _generation: Long
+
+    init {
+        // §6.6 L6: each owner start allocates+persists a NEW generation.
+        // When generation > 1, continuity with the previous generation's
+        // observation window cannot be proven → bump revision + degrade
+        // coverage to NONE (M-MP-02).
+        _generation = storage.transaction {
+            val prev = storage.read(REVISION_NAMESPACE, KEY_GENERATION)?.toLong() ?: 0L
+            val next = prev + 1L
+            storage.write(REVISION_NAMESPACE, KEY_GENERATION, next.toString())
+            // First generation starts with revision 1; subsequent ones inherit the
+            // persisted revision and keep counting monotonically.
+            val currentRevision = storage.read(REVISION_NAMESPACE, KEY_REVISION)?.toLong()
+            if (currentRevision == null) {
+                storage.write(REVISION_NAMESPACE, KEY_REVISION, "1")
+            } else if (prev > 0L) {
+                // Not the first generation → unprovable continuity → bump revision
+                storage.write(REVISION_NAMESPACE, KEY_REVISION, (currentRevision + 1L).toString())
+            }
+            // New generation starts with NONE coverage (unproven continuity)
+            storage.write(REVISION_NAMESPACE, KEY_COVERAGE,
+                ContinuityCoverageV1.NONE.wire.toString())
+            storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE, "")
+            next
+        }
     }
 
     /** Generation persisted for THIS owner instantiation (§6.6 L6). */
     val generation: Long
-        get() = TODO("Task 3 GREEN: allocate+persist per owner start")
+        get() = _generation
 
     /** Serialized durable bump; returns the post-commit revision (ACK after commit, L3/L4). */
-    fun bump(reason: RevisionBumpReason): Long = TODO("Task 3 GREEN")
+    fun bump(reason: RevisionBumpReason): Long = storage.transaction {
+        val current = storage.read(REVISION_NAMESPACE, KEY_REVISION)?.toLong() ?: 0L
+        val next = current + 1L
+        storage.write(REVISION_NAMESPACE, KEY_REVISION, next.toString())
+        next
+    }
 
     /** Reflects every ACKed bump (L5); coverage honest per §6.4 rules. */
-    fun snapshot(): RevisionSnapshot = TODO("Task 3 GREEN")
+    fun snapshot(): RevisionSnapshot {
+        val revision = storage.read(REVISION_NAMESPACE, KEY_REVISION)?.toLong() ?: 1L
+        val coverageWire = storage.read(REVISION_NAMESPACE, KEY_COVERAGE)?.toInt()
+            ?: ContinuityCoverageV1.NONE.wire
+        val continuitySince = storage.read(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE)
+            ?.takeIf { it.isNotEmpty() }?.toLong()
+        return RevisionSnapshot(
+            revision = revision,
+            coverageWire = coverageWire,
+            generation = _generation,
+            continuitySinceElapsedRealtimeMs = continuitySince,
+        )
+    }
 
     /** Lossy observer self-report (§6.6): bump + degrade, never silent. */
-    fun reportObserverGap(): Unit = TODO("Task 3 GREEN")
+    fun reportObserverGap() {
+        storage.transaction {
+            val current = storage.read(REVISION_NAMESPACE, KEY_REVISION)?.toLong() ?: 0L
+            storage.write(REVISION_NAMESPACE, KEY_REVISION, (current + 1L).toString())
+            storage.write(REVISION_NAMESPACE, KEY_COVERAGE,
+                ContinuityCoverageV1.PARTIAL.wire.toString())
+        }
+    }
 
     /** Mark that full-coverage continuity is established from now (window start). */
-    fun markContinuityEstablished(): Unit = TODO("Task 3 GREEN")
+    fun markContinuityEstablished() {
+        storage.transaction {
+            storage.write(REVISION_NAMESPACE, KEY_COVERAGE,
+                ContinuityCoverageV1.FULL.wire.toString())
+            storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE,
+                clock.elapsedRealtimeMs().toString())
+        }
+    }
 }

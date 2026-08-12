@@ -26,31 +26,87 @@ class EnvironmentLeaseStore(
     private val storage: DurableKv,
     private val clock: MonotonicClock,
 ) {
-    /** The single lease blocking new applies, if any (any non-RELEASED state). */
-    fun blockingLease(): LeaseRecord? = TODO("Task 3 GREEN")
+    companion object {
+        private const val LEASE_NS = "integration.v1.leases"
+        private const val CURRENT_KEY = "__current_lease_id__"
+        private const val DELIM = "\t"
+    }
 
-    fun get(leaseId: String): LeaseRecord? = TODO("Task 3 GREEN")
+    /**
+     * The single lease blocking new applies, if any (any non-RELEASED effective
+     * state). §8.4 INV-28: EXPIRED / REVOKED / RELEASE_INCOMPLETE keep blocking
+     * until explicitly converged — TTL is never a bypass of INV-21.
+     */
+    fun blockingLease(): LeaseRecord? {
+        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return null
+        val record = get(leaseId) ?: return null
+        // Must use stored state to decide blocking — effective state is only
+        // for ACQUIRING/ACTIVE lazy expiration, but ALL non-RELEASED states block.
+        return if (record.state != LeaseState.RELEASED) record else null
+    }
+
+    fun get(leaseId: String): LeaseRecord? {
+        val raw = storage.read(LEASE_NS, "lease:$leaseId") ?: return null
+        return deserialize(raw)
+    }
 
     /**
      * Effective state evaluated lazily against the monotonic clock and the
      * CURRENT owner generation (deadline pass / generation mismatch → EXPIRED).
      */
-    fun effectiveState(leaseId: String, currentGeneration: Long): LeaseState =
-        TODO("Task 3 GREEN")
+    fun effectiveState(leaseId: String, currentGeneration: Long): LeaseState {
+        val record = get(leaseId) ?: return LeaseState.RELEASED
+        return effectiveStateOf(record, currentGeneration)
+    }
+
+    private fun effectiveStateOf(record: LeaseRecord, currentGeneration: Long): LeaseState {
+        val stored = record.state
+        // Only ACQUIRING/ACTIVE have lazy expiration
+        if (stored != LeaseState.ACQUIRING && stored != LeaseState.ACTIVE) return stored
+        // Generation mismatch → EXPIRED (M-LS-12..14)
+        if (record.applyOwnerGeneration != currentGeneration) return LeaseState.EXPIRED
+        // Deadline passed or exactly reached → EXPIRED (M-LS-11: max(0, …) produces
+        // a deadline equal to nowElapsed for past deadlines → immediately expired)
+        if (clock.elapsedRealtimeMs() >= record.deadlineElapsedRealtimeMs) return LeaseState.EXPIRED
+        return stored
+    }
 
     /** Persist a new or transitioned record (serialized read-modify-write). */
-    fun put(record: LeaseRecord): Unit = TODO("Task 3 GREEN")
+    fun put(record: LeaseRecord) {
+        storage.write(LEASE_NS, "lease:${record.leaseId}", serialize(record))
+        storage.write(LEASE_NS, CURRENT_KEY, record.leaseId)
+    }
 
     /** Mark the caller's lease REVOKED when qwy revokes the caller (M-LS-04/M-PA-09). */
-    fun markRevoked(callerApplicationId: String, source: RevokeSource): Unit =
-        TODO("Task 3 GREEN")
+    fun markRevoked(callerApplicationId: String, source: RevokeSource) {
+        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return
+        val record = get(leaseId) ?: return
+        if (record.callerApplicationId != callerApplicationId) return
+        if (record.state == LeaseState.RELEASED) return
+        put(record.copy(state = LeaseState.REVOKED, revokeSource = source))
+    }
 
     /**
      * Provider-driven internal cleanup for REVOKED leases — the former caller
      * cannot call anymore, so qwy converges its own environment (M-LS-04).
      */
-    fun runProviderCleanupForRevoked(environment: QwyEnvironment): Unit =
-        TODO("Task 3 GREEN")
+    fun runProviderCleanupForRevoked(environment: QwyEnvironment) {
+        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return
+        val record = get(leaseId) ?: return
+        if (record.state != LeaseState.REVOKED) return
+        // Transition REVOKED → RELEASING → attempt cleanup → RELEASED or RELEASE_INCOMPLETE
+        put(record.copy(state = LeaseState.RELEASING))
+        val outcome = environment.cleanup(leaseId)
+        when (outcome) {
+            is CleanupOutcome.Complete ->
+                put(record.copy(state = LeaseState.RELEASED))
+            is CleanupOutcome.Incomplete ->
+                put(record.copy(
+                    state = LeaseState.RELEASE_INCOMPLETE,
+                    residualReasonWires = outcome.residualReasonWires,
+                ))
+        }
+    }
 
     /**
      * State-aware restart reconciliation (§8.4 recovery table). Called once when
@@ -60,5 +116,83 @@ class EnvironmentLeaseStore(
         currentGeneration: Long,
         cleanlinessProvable: Boolean,
         environment: QwyEnvironment,
-    ): Unit = TODO("Task 3 GREEN")
+    ) {
+        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return
+        val record = get(leaseId) ?: return
+
+        when (record.state) {
+            // RELEASED/EXPIRED: untouched
+            LeaseState.RELEASED, LeaseState.EXPIRED -> { /* no-op */ }
+
+            // REVOKED/RELEASE_INCOMPLETE: preserved verbatim (M-LS-15/16)
+            LeaseState.REVOKED, LeaseState.RELEASE_INCOMPLETE -> { /* no-op */ }
+
+            // RELEASING: replay release (M-LS-17)
+            LeaseState.RELEASING -> {
+                val outcome = environment.cleanup(record.leaseId)
+                when (outcome) {
+                    is CleanupOutcome.Complete ->
+                        put(record.copy(state = LeaseState.RELEASED))
+                    is CleanupOutcome.Incomplete ->
+                        put(record.copy(
+                            state = LeaseState.RELEASE_INCOMPLETE,
+                            residualReasonWires = outcome.residualReasonWires,
+                        ))
+                }
+            }
+
+            // ACQUIRING/ACTIVE: generation/cleanliness rules (M-LS-07/12)
+            LeaseState.ACQUIRING, LeaseState.ACTIVE -> {
+                if (!cleanlinessProvable) {
+                    // Unclean shutdown → RELEASE_INCOMPLETE (M-LS-07): environment
+                    // state unknown, convergence required before the device can
+                    // accept new applies. NOT EXPIRED — EXPIRED + clean means
+                    // "we know the env is fine, just the clock is stale"; unclean
+                    // means "env might be dirty, caller must release to converge."
+                    put(record.copy(state = LeaseState.RELEASE_INCOMPLETE))
+                } else {
+                    // Clean shutdown + generation mismatch → EXPIRED (M-LS-12)
+                    put(record.copy(state = LeaseState.EXPIRED))
+                }
+            }
+        }
+    }
+
+    private fun serialize(r: LeaseRecord): String =
+        listOf(
+            r.leaseId,
+            r.callerApplicationId,
+            r.callerSignerDigest,
+            r.acceptedIntentHash,
+            r.state.name,
+            r.applyIdempotencyKey,
+            r.startingEnvironmentRevision.toString(),
+            r.deadlineElapsedRealtimeMs.toString(),
+            r.applyOwnerGeneration.toString(),
+            r.releaseIdempotencyKey ?: "",
+            r.residualReasonWires.joinToString(",").ifEmpty { "" },
+            r.revokeSource?.name ?: "",
+            r.recoveryEvidenceRef ?: "",
+        ).joinToString(DELIM)
+
+    private fun deserialize(s: String): LeaseRecord {
+        val parts = s.split(DELIM)
+        return LeaseRecord(
+            leaseId = parts[0],
+            callerApplicationId = parts[1],
+            callerSignerDigest = parts[2],
+            acceptedIntentHash = parts[3],
+            state = LeaseState.valueOf(parts[4]),
+            applyIdempotencyKey = parts[5],
+            startingEnvironmentRevision = parts[6].toLong(),
+            deadlineElapsedRealtimeMs = parts[7].toLong(),
+            applyOwnerGeneration = parts[8].toLong(),
+            releaseIdempotencyKey = parts[9].ifEmpty { null },
+            residualReasonWires = parts[10].takeIf { it.isNotEmpty() }
+                ?.split(",")?.map { it.toInt() } ?: emptyList(),
+            revokeSource = parts[11].takeIf { it.isNotEmpty() }
+                ?.let { RevokeSource.valueOf(it) },
+            recoveryEvidenceRef = parts[12].ifEmpty { null },
+        )
+    }
 }

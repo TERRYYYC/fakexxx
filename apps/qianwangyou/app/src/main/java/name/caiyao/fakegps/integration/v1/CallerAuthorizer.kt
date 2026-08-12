@@ -27,6 +27,73 @@ class CallerAuthorizer(
      * @return the in-call resolved identity when an active PairingRecord matches.
      * @throws ContractException NOT_PAIRED / CALLER_NOT_ALLOWED per the rules above.
      */
-    fun authorize(callingUid: Int): CallerIdentity =
-        TODO("Task 3 GREEN: §6.5.1 two-step identity resolution + snapshot match")
+    fun authorize(callingUid: Int): CallerIdentity {
+        // Step 1: Resolve identity from UID (Binder-resolved, never from request params)
+        val packages = resolver.packagesForUid(callingUid)
+        if (packages.size != 1) {
+            throw ContractException(
+                io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1.CALLER_NOT_ALLOWED,
+                "shared UID or no package: uid=$callingUid packages=${packages.size}",
+            )
+        }
+        val applicationId = packages[0]
+
+        val signerInfo = resolver.signerLookup(applicationId)
+            ?: throw ContractException(
+                io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1.CALLER_NOT_ALLOWED,
+                "unresolvable signer state for $applicationId",
+            )
+
+        if (signerInfo.hasMultipleSigners) {
+            throw ContractException(
+                io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1.CALLER_NOT_ALLOWED,
+                "multiple signers for $applicationId",
+            )
+        }
+
+        if (signerInfo.currentSignerDigests.size != 1) {
+            throw ContractException(
+                io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1.CALLER_NOT_ALLOWED,
+                "expected exactly 1 current signer for $applicationId, got ${signerInfo.currentSignerDigests.size}",
+            )
+        }
+
+        val signerDigest = signerInfo.currentSignerDigests[0]
+
+        // Step 2: Match against pairing store
+        val pairing = pairingStore.findActive(applicationId, signerDigest)
+        if (pairing != null) {
+            return CallerIdentity(
+                uid = callingUid,
+                applicationId = applicationId,
+                signerDigest = signerDigest,
+            )
+        }
+
+        // M-PA-04: distinguish "never paired" vs "signer rotated after pairing".
+        // If any pairing exists for this applicationId (with a DIFFERENT digest),
+        // the current signer doesn't match the paired snapshot → CALLER_NOT_ALLOWED
+        // (rotation requires re-pairing; "has ever used this cert" is NOT an identity
+        // predicate).
+        if (pairingStore.hasAnyPairing(applicationId)) {
+            throw ContractException(
+                io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1.CALLER_NOT_ALLOWED,
+                "signer rotated for $applicationId; re-pairing required",
+            )
+        }
+
+        // Truly unpaired: persist candidate before failing (§4.1 bind-first)
+        pairingStore.recordCandidate(
+            PendingPairingCandidate(
+                callerApplicationId = applicationId,
+                currentSignerDigest = signerDigest,
+                observedVersionCode = signerInfo.versionCode,
+                firstSeenAtElapsedRealtimeMs = clock.elapsedRealtimeMs(),
+            ),
+        )
+        throw ContractException(
+            io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1.NOT_PAIRED,
+            "$applicationId is not paired",
+        )
+    }
 }

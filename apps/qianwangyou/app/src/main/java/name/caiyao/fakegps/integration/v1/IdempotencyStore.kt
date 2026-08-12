@@ -1,5 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalDigestV1
+
 /**
  * Durable operation receipts (§7.2 OperationReceipt, §6.3.4, §6.7.3).
  *
@@ -36,7 +38,7 @@ interface IdempotencyStore {
     fun record(record: OperationReceiptRecord)
 }
 
-/** Durable implementation over [DurableKv]; lands in Task 3 GREEN. */
+/** Durable implementation over [DurableKv]. */
 class DurableIdempotencyStore(
     private val storage: DurableKv,
 ) : IdempotencyStore {
@@ -44,15 +46,54 @@ class DurableIdempotencyStore(
     companion object {
         /** The only namespace receipts live in — referenced by crash-injection tests. */
         const val RECEIPT_NAMESPACE: String = "integration.v1.receipts"
+        private const val DELIM = "\t"
+
+        private fun scopeKey(callerApplicationId: String, operation: ContractOperation, idempotencyKey: String) =
+            "$callerApplicationId|${operation.name}|$idempotencyKey"
     }
 
     override fun find(
         callerApplicationId: String,
         operation: ContractOperation,
         idempotencyKey: String,
-    ): OperationReceiptRecord? = TODO("Task 3 GREEN")
+    ): OperationReceiptRecord? {
+        val raw = storage.read(RECEIPT_NAMESPACE, scopeKey(callerApplicationId, operation, idempotencyKey))
+            ?: return null
+        return deserialize(raw)
+    }
 
-    override fun record(record: OperationReceiptRecord): Unit = TODO("Task 3 GREEN")
+    override fun record(record: OperationReceiptRecord) {
+        storage.write(
+            RECEIPT_NAMESPACE,
+            scopeKey(record.callerApplicationId, record.operation, record.idempotencyKey),
+            serialize(record),
+        )
+    }
+
+    private fun serialize(r: OperationReceiptRecord): String =
+        listOf(
+            r.callerApplicationId,
+            r.operation.name,
+            r.idempotencyKey,
+            r.requestDigest,
+            r.resultDigest,
+            r.createdAtElapsedRealtimeMs.toString(),
+            r.receiptPayload,
+        ).joinToString(DELIM)
+
+    private fun deserialize(s: String): OperationReceiptRecord {
+        // receiptPayload may contain the delimiter, so limit the split
+        val parts = s.split(DELIM, limit = 7)
+        return OperationReceiptRecord(
+            callerApplicationId = parts[0],
+            operation = ContractOperation.valueOf(parts[1]),
+            idempotencyKey = parts[2],
+            requestDigest = parts[3],
+            resultDigest = parts[4],
+            createdAtElapsedRealtimeMs = parts[5].toLong(),
+            receiptPayload = parts[6],
+        )
+    }
 }
 
 /**
@@ -62,10 +103,16 @@ class DurableIdempotencyStore(
  */
 object RequestDigests {
     /** §6.3.4 frozen domain: "fakexxx.contract.v1.apply" (dot form, predates v1.38 colon domains). */
-    fun applyDigest(acceptedIntentHash: String): String = TODO("Task 3 GREEN")
+    fun applyDigest(acceptedIntentHash: String): String =
+        CanonicalDigestV1.digest("fakexxx.contract.v1.apply", listOf(
+            CanonicalDigestV1.utf8(acceptedIntentHash),
+        ))
 
     /** §6.3.4 frozen domain: "fakexxx.contract.v1.release". */
-    fun releaseDigest(leaseId: String): String = TODO("Task 3 GREEN")
+    fun releaseDigest(leaseId: String): String =
+        CanonicalDigestV1.digest("fakexxx.contract.v1.release", listOf(
+            CanonicalDigestV1.utf8(leaseId),
+        ))
 
     /** §6.7.3 advance-request preimage: binds BOTH preconditions + proof fields. */
     fun advanceRequestDigest(
@@ -76,5 +123,13 @@ object RequestDigests {
         proofTrustedSuccessCount: Int,
         proofQuotaRequired: Int,
         proofLedgerRef: String,
-    ): String = TODO("Task 3 GREEN")
+    ): String = CanonicalDigestV1.digest(CanonicalDigestV1.DOMAIN_ADVANCE_REQUEST, listOf(
+        CanonicalDigestV1.utf8(leaseId),
+        CanonicalDigestV1.decimal(expectedScheduleVersion),
+        CanonicalDigestV1.utf8(expectedCurrentItemId),
+        CanonicalDigestV1.utf8(proofScheduleItemId),
+        CanonicalDigestV1.decimal(proofTrustedSuccessCount),
+        CanonicalDigestV1.decimal(proofQuotaRequired),
+        CanonicalDigestV1.utf8(proofLedgerRef),
+    ))
 }

@@ -86,6 +86,7 @@ class ProviderHarness private constructor() {
         observerComponent = EnvironmentObserver(tracker, env, clock)
         handler = EnvironmentControlHandler(
             authorizer = authorizer,
+            pairingStore = pairing,
             leaseStore = leases,
             idempotency = idempotency,
             tracker = tracker,
@@ -93,6 +94,7 @@ class ProviderHarness private constructor() {
             audit = audit,
             environment = env,
             clock = clock,
+            storage = kv,
         )
         if (!firstBoot) {
             handler.onOwnerProcessStart(cleanlinessProvable)
