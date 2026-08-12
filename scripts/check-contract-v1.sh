@@ -548,6 +548,90 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "6b. AIDL and canonical 6.1 agree on the ORDERED full signature"
+
+# Section 6 compares unordered method NAMES across four carriers. That proves the
+# surface exists and nothing at all about its shape: return type, parameter
+# direction/type/name, and declaration order are invisible to it. An AIDL that
+# returns the wrong DTO, takes `out` where the spec froze `in`, renames a
+# parameter, or swaps two methods passes section 6 unchanged.
+#
+# Order is not cosmetic here. Binder dispatch is positional: swapping two method
+# declarations silently renumbers every transaction id after them, so an old peer
+# calls what it believes is `observe` and reaches `release`. That failure is
+# invisible at compile time on both sides.
+#
+# README lists bare `name()` and structurally cannot express a signature, so it
+# stays in section 6's name-only comparison; AIDL and canonical 6.1 both carry the
+# full declaration and are compared here as ordered tuples.
+if python3 - "$AIDL_DIR/IEnvironmentControlV1.aidl" "$SPEC_PATH" <<'PY'
+import io, re, sys
+aidl_path, spec_path = sys.argv[1], sys.argv[2]
+
+DECL = re.compile(r"^\s*([A-Za-z_]\w*)\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)\s*;", re.M)
+
+def sigs(text, where, errs):
+    out = []
+    for m in DECL.finditer(text):
+        ret, name, raw = m.group(1), m.group(2), m.group(3).strip()
+        params = []
+        if raw:
+            for frag in raw.split(","):
+                pm = re.fullmatch(r"\s*(in|out|inout)\s+([A-Za-z_][\w.]*)\s+([a-zA-Z_]\w*)\s*", frag)
+                if not pm:
+                    errs.append("%s: %s() has an unparseable parameter %r" % (where, name, frag.strip()))
+                    params.append(("?", "?", "?"))
+                else:
+                    params.append(pm.groups())
+        out.append((ret, name, tuple(params)))
+    return out
+
+errs = []
+aidl_body = io.open(aidl_path, encoding="utf-8").read()
+aidl_body = aidl_body[aidl_body.index("{") + 1:] if "{" in aidl_body else aidl_body
+a = sigs(aidl_body, "aidl", errs)
+
+spec = io.open(spec_path, encoding="utf-8").read()
+# Same anchoring section 6 already uses and proves: '### 6.1' heading, then the
+# interface block inside it. Deriving my own anchor produced a gate that failed
+# for a reason unrelated to the contract, which is a false red -- the mirror of
+# the false greens this file exists to remove, and just as misleading.
+sm = re.search(r"^### 6\.1 .*?$(.*?)^### ", spec, re.S | re.M)
+if not sm:
+    print("  FAIL  6b: canonical 6.1 heading not found"); sys.exit(1)
+sb = re.search(r"interface\s+IEnvironmentControlV1\s*\{(.*?)\n\}", sm.group(1), re.S)
+if not sb:
+    print("  FAIL  6b: canonical 6.1 has no IEnvironmentControlV1 interface block"); sys.exit(1)
+s = sigs(sb.group(1), "canonical 6.1", errs)
+
+if not a or not s:
+    print("  FAIL  6b: parsed %d aidl and %d canonical signature(s); both must be non-empty" % (len(a), len(s)))
+    sys.exit(1)
+
+def fmt(t):
+    return "%s %s(%s)" % (t[0], t[1], ", ".join("%s %s %s" % p for p in t[2]))
+
+if a != s:
+    for i in range(max(len(a), len(s))):
+        x = fmt(a[i]) if i < len(a) else "<missing>"
+        y = fmt(s[i]) if i < len(s) else "<missing>"
+        if x != y:
+            errs.append("position %d: aidl %r != canonical 6.1 %r" % (i, x, y))
+
+if errs:
+    for e in errs:
+        print("  FAIL  %s" % e)
+    sys.exit(1)
+print("  PASS  %d method(s) identical in return, name, params and order" % len(a))
+sys.exit(0)
+PY
+then
+  pass "ordered full method signature agrees between AIDL and canonical 6.1"
+else
+  fail "AIDL and canonical 6.1 disagree on ordered full method signature"
+fi
+
+# ---------------------------------------------------------------------------
 section "7. DTO fields agree between canonical §6.3 and Kotlin"
 
 # Sections 5 and 6 bind the ERROR CODES and the METHOD names. Nothing bound the
