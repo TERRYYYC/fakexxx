@@ -405,10 +405,23 @@ class EnvironmentControlHandler(
                 "requestDigest does not bind the received fields (recompute mismatch)")
         }
 
-        // Crash between writes must roll back cleanly (advance_crashBetweenWrites);
-        // the gate reads inside this transaction also serialize the device-global
-        // lease gate against a concurrent apply (advance_concurrentAdvances…).
-        return storage.transaction {
+        // §6.7.5 single-commit protocol (Terra PR#22 round-2). The external qwy
+        // pointer does NOT share the provider's transaction: FileDurableKv
+        // commits when the block returns, QwyEnvironment has no shared
+        // tx/prepare/rollback boundary. So mutate-inside-the-block gives
+        // "pointer moved, receipt lost" on a commit failure — the §6.7.5
+        // forbidden middle. Ordering is the fix:
+        //   1. COMMIT { gates + precomputed receipt + pending marker }   ← the advance
+        //   2. apply the external pointer (verified against the receipt)
+        //   3. clear the marker
+        // Crash before 1: nothing anywhere moved (no receipt ⇒ no advance).
+        // Crash after 1: owner startup rolls the pointer FORWARD from the
+        // marker before anything is served. [advanceApplyLock] serializes
+        // commit→apply→clear against concurrent advances; the gates re-read
+        // state inside the tx, which serializes them against concurrent apply().
+        synchronized(advanceApplyLock) {
+        var replayed = true
+        val committed = storage.transaction {
             // --- step 2: idempotency, keyed on the RECOMPUTED digest (M-AD-02/03) ---
             val existing = idempotency.find(caller.applicationId, ContractOperation.ADVANCE, request.idempotencyKey)
             if (existing != null) {
@@ -421,6 +434,7 @@ class EnvironmentControlHandler(
                         "advance key=${request.idempotencyKey} replayed with different digest")
                 }
             }
+            replayed = false
 
             // --- step 3: proof gate (M-AD-01) ---
             if (proof.scheduleItemId.isBlank() || proof.ledgerRef.isBlank()) {
@@ -469,33 +483,25 @@ class EnvironmentControlHandler(
                 }
             }
 
-            // --- step 6: mutation — pointer advance + receipt persist (§6.7.5) ---
+            // --- step 6a: PRECOMPUTE the outcome from the SAME snapshot the
+            // gates passed on. The external pointer is not touched before the
+            // commit point — the receipt IS the advance (§6.7.5).
+            val idx = schedule.itemIds.indexOf(request.expectedCurrentItemId)
+            check(idx >= 0) {
+                "schedule integrity: current item ${request.expectedCurrentItemId} not in ${schedule.itemIds}"
+            }
+            val toItemId = if (idx == schedule.itemIds.lastIndex) null else schedule.itemIds[idx + 1]
+            val outcomeWire =
+                if (toItemId == null) AdvanceOutcomeV1.EXHAUSTED.wire else AdvanceOutcomeV1.ADVANCED.wire
+
             val snap = tracker.snapshot()
             val intentHash = leaseStore.get(request.leaseId)?.acceptedIntentHash ?: ""
-
-            val advanceResult = environment.advancePointer(request.expectedCurrentItemId)
-
-            val outcomeWire: Int
-            val toItemId: String?
-            val versionAfter: Long
-            when (advanceResult) {
-                is AdvancePointerOutcome.Advanced -> {
-                    outcomeWire = AdvanceOutcomeV1.ADVANCED.wire
-                    toItemId = advanceResult.toItemId
-                    versionAfter = advanceResult.versionAfter
-                }
-                is AdvancePointerOutcome.Exhausted -> {
-                    outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire
-                    toItemId = null
-                    versionAfter = advanceResult.versionAfter
-                }
-            }
 
             val receipt = AdvanceReceiptV1(
                 outcomeWire = outcomeWire,
                 advancedFromItemId = request.expectedCurrentItemId,
                 advancedToItemId = toItemId,
-                scheduleVersionAfter = versionAfter,
+                scheduleVersionAfter = schedule.scheduleVersion,
                 effectiveIntentHash = intentHash,
                 effectiveEnvironmentRevision = snap.revision,
                 receiptDigest = "", // Placeholder, computed below
@@ -509,7 +515,7 @@ class EnvironmentControlHandler(
             )
             val finalReceipt = receipt.copy(receiptDigest = receiptDigest)
 
-            // Persist receipt for idempotent replay — same transaction as pointer advance
+            // Persist receipt for idempotent replay — the commit point.
             idempotency.record(OperationReceiptRecord(
                 callerApplicationId = caller.applicationId,
                 operation = ContractOperation.ADVANCE,
@@ -519,6 +525,19 @@ class EnvironmentControlHandler(
                 receiptPayload = serializeAdvanceReceipt(finalReceipt),
                 createdAtElapsedRealtimeMs = clock.elapsedRealtimeMs(),
             ))
+
+            // --- step 6b: the roll-forward instruction, committed WITH the
+            // receipt: (from, presence, to). If the crash lands after this
+            // commit but before the external apply, owner startup finishes the
+            // committed advance from this slot.
+            storage.write(
+                ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY,
+                listOf(
+                    request.expectedCurrentItemId,
+                    if (toItemId == null) "0" else "1",
+                    toItemId ?: "",
+                ).joinToString(RS),
+            )
 
             audit.append("advance",
                 callerApplicationId = caller.applicationId,
@@ -531,6 +550,57 @@ class EnvironmentControlHandler(
 
             finalReceipt
         }
+        if (replayed) return committed
+
+        // Commit point passed — the advance exists regardless of what happens
+        // next. Apply the external mutation and clear the slot; any crash in
+        // this window is finished by completePendingAdvance() at owner startup.
+        applyCommittedAdvance(committed.advancedFromItemId, committed.advancedToItemId)
+        storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
+        return committed
+        }
+    }
+
+    /**
+     * §6.7.5 single-commit protocol: apply the EXTERNAL qwy pointer mutation
+     * for an already-committed advance receipt, and verify the environment
+     * agreed with the committed outcome. Divergence here is an integrity
+     * failure (fail loud), never a typed business answer — the receipt is
+     * already durable truth.
+     */
+    private fun applyCommittedAdvance(fromItemId: String, expectedToItemId: String?) {
+        val actual = when (val outcome = environment.advancePointer(fromItemId)) {
+            is AdvancePointerOutcome.Advanced -> outcome.toItemId
+            is AdvancePointerOutcome.Exhausted -> null
+        }
+        check(actual == expectedToItemId) {
+            "committed advance diverged: receipt says ${expectedToItemId ?: "EXHAUSTED"}, " +
+                "environment answered ${actual ?: "EXHAUSTED"}"
+        }
+    }
+
+    /**
+     * Owner-startup roll-forward (§6.7.5 "重启后只能观察到「已推进」或「未推进」"):
+     * a non-empty pending slot means a receipt committed but the crash landed
+     * before the external pointer apply (or before the slot clear). Finish the
+     * committed advance BEFORE anything is served, then clear the slot. Runs
+     * under no lock — startup is single-threaded by construction.
+     */
+    private fun completePendingAdvance() {
+        val marker = storage.read(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY)
+        if (marker.isNullOrEmpty()) return
+        val parts = marker.split(RS)
+        val fromItemId = parts[0]
+        val toItemId = if (parts[1] == "1") parts[2] else null
+        val schedule = checkNotNull(environment.scheduleSnapshot()) {
+            "pending advance slot present but environment has no schedule"
+        }
+        val alreadyApplied =
+            if (toItemId != null) schedule.currentItemId == toItemId else schedule.exhausted
+        if (!alreadyApplied) {
+            applyCommittedAdvance(fromItemId, toItemId)
+        }
+        storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
     }
 
     /**
@@ -539,6 +609,12 @@ class EnvironmentControlHandler(
      * on create and by tests via harness restart.
      */
     fun onOwnerProcessStart(cleanlinessProvable: Boolean) {
+        // §6.7.5 roll-forward FIRST: a committed advance whose external pointer
+        // apply was interrupted must be finished before ANY state is served or
+        // recovered — lease recovery and callers must never observe the
+        // forbidden middle (receipt durable, pointer stale).
+        completePendingAdvance()
+
         // Tracker already allocated a new generation in its init block.
         // Now do state-aware lease recovery.
         leaseStore.recoverAfterRestart(tracker.generation, cleanlinessProvable, environment)
@@ -576,6 +652,19 @@ class EnvironmentControlHandler(
     }
 
     // --- Receipt serialization (simple tab-delimited, no JSON dependency) ---
+
+    /** In-process serialization of the §6.7.5 commit→apply→clear window. */
+    private val advanceApplyLock = Any()
+
+    companion object {
+        /**
+         * §6.7.5 single-commit protocol: the roll-forward slot for a committed
+         * advance whose external pointer apply has not happened yet. Empty
+         * string = no pending advance (DurableKv has no delete).
+         */
+        const val ADVANCE_PENDING_NAMESPACE: String = "integration.v1.advance.pending"
+        const val ADVANCE_PENDING_KEY: String = "slot"
+    }
 
     private val RS = "\t"
 

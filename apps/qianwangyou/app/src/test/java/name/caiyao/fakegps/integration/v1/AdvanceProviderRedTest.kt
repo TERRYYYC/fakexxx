@@ -612,4 +612,103 @@ class AdvanceProviderRedTest {
             )
         }
     }
+
+    // ------------------- §6.7.5 CROSS-BOUNDARY atomicity (Terra PR#22 round 2)
+    // The shared-store harness cannot represent these torn states at all: the
+    // fake env and the provider share one transaction buffer, so the fake is
+    // silently STRONGER than production (same class as the AndroidDurableKv
+    // finding). Both tests below run on createWithExternalEnvStore(), where the
+    // qwy pointer lives in its OWN store — the real topology.
+
+    /**
+     * Terra round-2 P1, the forbidden direction: "pointer 已变 / receipt 写失败".
+     * The provider's receipt write fails; the qwy pointer must NOT have moved.
+     * §6.7.5: no receipt ⇒ no advance — an implementation that mutates the
+     * external pointer before its own commit point produces a pointer that
+     * moved with no retrievable receipt, and the same-key retry cannot recover
+     * (it re-executes against a schedule that already advanced → wire 14 — the
+     * legal replay is dead).
+     */
+    @Test
+    fun advance_externalStore_receiptWriteFails_pointerNeverMoved() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        val leaseId = earnAndRelease(h)
+        val req = request(h, leaseId, "adv-xb-crash")
+
+        // Fail the provider-side receipt persist. The env's own store is a
+        // DIFFERENT kv, so nothing the provider buffers can mask a premature
+        // external mutation.
+        h.kv.failOnWrite = { namespace, _ ->
+            namespace == DurableIdempotencyStore.RECEIPT_NAMESPACE
+        }
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, req)
+            fail("injected receipt write fault must surface")
+        } catch (expected: RuntimeException) {
+            // crash, not a business answer
+        }
+        h.kv.failOnWrite = null
+
+        // THE assertion of this row: no receipt ⇒ the external pointer did not move.
+        assertEquals("no receipt ⇒ no advance (§6.7.5)", "item-1", h.env.currentItemId)
+        assertEquals("external pointer untouched", 0, h.env.advanceCount)
+
+        // And the failed attempt is fully recoverable: restart, same-key retry
+        // executes cleanly exactly once.
+        h.restart(cleanlinessProvable = true)
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("item-2", replay.advancedToItemId)
+        assertEquals("item-2", h.env.currentItemId)
+        assertEquals("exactly one advance ever", 1, h.env.advanceCount)
+        assertEquals("stable replay", replay, h.handler.completeAndAdvance(AUTO_UID, req))
+    }
+
+    /**
+     * The recoverable window of a single-commit protocol: receipt committed,
+     * crash BEFORE the external pointer apply. The committed receipt IS the
+     * advance (single commit point); recovery must roll the pointer FORWARD at
+     * owner startup — §6.7.5 "重启后只能观察到「已推进」或「未推进」" means the
+     * post-recovery world has the pointer matching the receipt BEFORE any
+     * caller-visible request runs, and the same-key replay returns the original
+     * durable receipt without a second mutation.
+     */
+    @Test
+    fun advance_externalStore_crashAfterCommitBeforePointerApply_rollsForward() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        val leaseId = earnAndRelease(h)
+        val req = request(h, leaseId, "adv-xb-rollfwd")
+
+        // Crash exactly at the external mutation (after the provider's commit
+        // point in a receipt-first protocol; before anything in a mutate-first
+        // one — the post-restart assertions below tell the two apart).
+        h.env.failNextAdvancePointer = true
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, req)
+            fail("injected pointer-apply fault must surface")
+        } catch (expected: RuntimeException) {
+            // crash, not a business answer
+        }
+
+        h.restart(cleanlinessProvable = true)
+
+        // Roll-forward happened at startup, BEFORE any request: the committed
+        // advance is already reflected in the external store.
+        assertEquals(
+            "owner startup completed the committed advance (roll-forward)",
+            "item-2",
+            h.env.currentItemId,
+        )
+
+        // The replay returns the ORIGINAL durable receipt — and is stable.
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("item-2", replay.advancedToItemId)
+        assertEquals(AdvanceOutcomeV1.ADVANCED.wire, replay.outcomeWire)
+        assertEquals("receipt digest binds the original request",
+            recomputeReceiptDigest(req, replay), replay.receiptDigest)
+        assertEquals("stable second replay", replay, h.handler.completeAndAdvance(AUTO_UID, req))
+        assertEquals("pointer moved exactly once across crash + recovery",
+            1, h.env.advanceCount)
+    }
 }

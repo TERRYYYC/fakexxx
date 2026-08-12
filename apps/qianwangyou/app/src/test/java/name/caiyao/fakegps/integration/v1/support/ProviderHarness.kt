@@ -27,20 +27,33 @@ import org.junit.Assert.fail
  * process restart of §8.4/§6.6; reboot=true additionally resets the monotonic
  * clock epoch like a device boot (M-LS-13).
  */
-class ProviderHarness private constructor() {
+class ProviderHarness private constructor(externalEnvStore: Boolean) {
 
     val kv = InMemoryDurableKv()
     val clock = FakeMonotonicClock()
     val resolver = FakeIdentityResolver()
 
     /**
+     * The store the FAKE ENVIRONMENT persists its schedule state in.
+     *
+     * Default: the provider's own [kv] — convenient, but silently STRONGER
+     * than production: provider receipt and qwy pointer share one transaction
+     * buffer, so a cross-boundary torn state is unrepresentable (Terra PR#22
+     * round-2). [createWithExternalEnvStore] gives the env its OWN store, which
+     * is the real topology: qwy's schedule store does not share the provider's
+     * commit — a §6.7.5 protocol that only works on the shared-store harness is
+     * fake-green.
+     */
+    val envKv: InMemoryDurableKv = if (externalEnvStore) InMemoryDurableKv() else kv
+
+    /**
      * Kv-backed fake (F-2): the env INSTANCE survives restart (config knobs and
      * call-counters are deliberately cross-restart instrumentation), but its
-     * SCHEDULE state lives in [kv] — restart drops every non-durable bit of the
-     * system under test, so a memory-only pointer implementation cannot pass
-     * the restart tests.
+     * SCHEDULE state lives in [envKv] — restart drops every non-durable bit of
+     * the system under test, so a memory-only pointer implementation cannot
+     * pass the restart tests.
      */
-    val env = FakeQwyEnvironment(kv)
+    val env = FakeQwyEnvironment(envKv)
 
     lateinit var pairing: DurablePairingStore
         private set
@@ -67,8 +80,18 @@ class ProviderHarness private constructor() {
         const val OTHER_SIGNER = "signer-other-1"
         const val OTHER_UID = 10202
 
-        fun create(): ProviderHarness {
-            val h = ProviderHarness()
+        fun create(): ProviderHarness = build(externalEnvStore = false)
+
+        /**
+         * Env persists in its OWN store (the production topology): provider
+         * receipt commit and qwy pointer mutation cross a real storage
+         * boundary. Use for §6.7.5 cross-boundary atomicity tests — the
+         * shared-store default cannot represent the torn state at all.
+         */
+        fun createWithExternalEnvStore(): ProviderHarness = build(externalEnvStore = true)
+
+        private fun build(externalEnvStore: Boolean): ProviderHarness {
+            val h = ProviderHarness(externalEnvStore)
             h.resolver.register(AUTO_UID, AUTO_PKG, AUTO_SIGNER)
             h.resolver.register(OTHER_UID, OTHER_PKG, OTHER_SIGNER)
             h.boot(cleanlinessProvable = true, firstBoot = true)
