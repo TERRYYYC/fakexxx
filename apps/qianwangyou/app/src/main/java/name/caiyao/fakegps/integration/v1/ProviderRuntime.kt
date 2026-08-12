@@ -54,21 +54,23 @@ class AndroidMonotonicClock : MonotonicClock {
  * Returning a partially-trusted answer here would move an authorization decision
  * out of the authorizer, which is where the matrix tests can see it.
  *
- * COVERAGE BOUNDARY — stated, not glossed. No unit test references this class.
- * The §6.5.1 RULES (single package per uid, current-signer-only comparison,
- * multi-signer rejection, legacy-path fail-closed) are covered, but through
- * [CallerAuthorizer] over a fake resolver. What is NOT covered is the fidelity
- * of the mapping below: whether real PackageManager output becomes the
- * SignerLookup the fake pretends it does — apkContentsSigners vs
- * signingCertificateHistory under rotation, GET_SIGNATURES on API 24–27, a dead
- * PackageManager binder.
+ * COVERAGE — two layers, and neither may be claimed as the other.
  *
- * That gap cannot be closed in a JVM lane, because the thing under test IS the
- * Android API. It belongs to #7 instrumented acceptance alongside the adapter,
- * and is recorded here so it is a known boundary rather than an assumption.
- * Writing a mock-PackageManager test would only assert that this file matches
- * my own guess about PackageManager, which is the same false green in a
- * different costume.
+ * 1. RETRIEVAL (this class): turning PackageManager into [RawSigningFacts].
+ *    Uncovered by design, because the thing under test IS the Android API —
+ *    rotation behavior, GET_SIGNATURES on 24–27, a dead binder. #7 instrumented
+ *    acceptance owns it; §6.5.2 already admits controlled fixtures or injected
+ *    SigningInfo as valid evidence.
+ *
+ * 2. DECISION ([SignerLookupPolicy]): which fact becomes the principal. Pure,
+ *    and covered by SignerLookupPolicyTest.
+ *
+ * The split was not tidiness. While these were fused, this class took the
+ * current signer from `signingCertificateHistory.takeLast(1)` while its own
+ * comment claimed the history was never consulted — a §1682 violation sitting
+ * inside a class nothing could test, contradicted by the comment above it.
+ * Separating the decision made it a pure function, and a pure function can be
+ * handed CONFLICTING sources and asked which one it really uses.
  */
 class AndroidPackageIdentityResolver(context: Context) : PackageIdentityResolver {
 
@@ -88,21 +90,19 @@ class AndroidPackageIdentityResolver(context: Context) : PackageIdentityResolver
             if (signing == null) {
                 null
             } else {
-                // §6.5.1: the principal is the CURRENT signer, never "has ever
-                // used". For a rotated package apkContentsSigners is the current
-                // set; the historical chain is deliberately not consulted.
-                val multiple = signing.hasMultipleSigners()
-                val current = if (multiple) {
-                    signing.apkContentsSigners
-                } else {
-                    signing.signingCertificateHistory?.takeLast(1)?.toTypedArray()
-                        ?: signing.apkContentsSigners
-                }
-                SignerLookup(
-                    currentSignerDigests = current.orEmpty().map { sha256(it.toByteArray()) },
-                    hasMultipleSigners = multiple,
-                    legacyApi = false,
-                    versionCode = versionCodeOf(applicationId),
+                // Retrieval only. Which of these becomes the principal is
+                // SignerLookupPolicy's call, and the history is carried for
+                // diagnostics rather than because anything may authorize on it.
+                SignerLookupPolicy.resolve(
+                    RawSigningFacts(
+                        apkContentsSignerDigests =
+                            signing.apkContentsSigners.orEmpty().map { sha256(it.toByteArray()) },
+                        historyDigests =
+                            signing.signingCertificateHistory.orEmpty().map { sha256(it.toByteArray()) },
+                        hasMultipleSigners = signing.hasMultipleSigners(),
+                        legacyApi = false,
+                        versionCode = versionCodeOf(applicationId),
+                    )
                 )
             }
         } else {
@@ -111,11 +111,17 @@ class AndroidPackageIdentityResolver(context: Context) : PackageIdentityResolver
             // authorizer applies its degraded fail-closed rules.
             val info = pm.getPackageInfo(applicationId, PackageManager.GET_SIGNATURES)
             val sigs = info.signatures.orEmpty()
-            SignerLookup(
-                currentSignerDigests = sigs.map { sha256(it.toByteArray()) },
-                hasMultipleSigners = sigs.size > 1,
-                legacyApi = true,
-                versionCode = versionCodeOf(applicationId),
+            SignerLookupPolicy.resolve(
+                RawSigningFacts(
+                    apkContentsSignerDigests = sigs.map { sha256(it.toByteArray()) },
+                    // GET_SIGNATURES has no history to offer; the degraded path
+                    // is flagged instead, and the authorizer applies its
+                    // fail-closed legacy rules.
+                    historyDigests = emptyList(),
+                    hasMultipleSigners = sigs.size > 1,
+                    legacyApi = true,
+                    versionCode = versionCodeOf(applicationId),
+                )
             )
         }
     } catch (e: PackageManager.NameNotFoundException) {
