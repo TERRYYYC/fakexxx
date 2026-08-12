@@ -343,4 +343,42 @@ class TrustedLedgerRedTest {
     fun `a pre observation not before execution start fails to bracket`() =
         // pre.observedAt > execution.startedAtElapsed ⇒ does not precede the run.
         fail(validContext().copy(preObservation = validPre().copy(observedAtElapsedRealtimeMs = 2500L)))
+
+    // === Symmetric POST-observation inversions (F1c — the predicate must validate POST too, not just PRE) ===
+    //
+    // §6.4 binds pre AND post to the same lease and requires BOTH to carry every discriminator. The PRE
+    // inversions above are necessary but NOT sufficient: a partial GREEN that validates only the pre
+    // observation would PASS the positive (whose post is also valid) and FAIL every PRE negative, greening
+    // the suite while leaving the post observation unvalidated. Each test below inverts exactly ONE field
+    // on the POST observation (pre stays canonical) and asserts FAIL — so a PRE-only impl fails it.
+
+    @Test
+    fun `post isMock false under a verified level fails`() =
+        fail(validContext().copy(postObservation = validPost().copy(isMock = false)))
+
+    @Test
+    fun `post isMock null under a verified level fails`() =
+        fail(validContext().copy(postObservation = validPost().copy(isMock = null)))
+
+    @Test
+    fun `post coverage below FULL fails`() =
+        fail(validContext().copy(postObservation = validPost().copy(coverage = "PARTIAL")))
+
+    @Test
+    fun `post verificationLevel below SYSTEM_MOCK_INDEPENDENTLY_VERIFIED fails`() =
+        fail(validContext().copy(postObservation = validPost().copy(verificationLevel = "HOOK")))
+
+    @Test
+    fun `post continuitySince null fails`() =
+        // post claims FULL coverage but drops the continuity start ⇒ coverage unproven at POST.
+        fail(validContext().copy(postObservation = validPost().copy(continuitySinceElapsedRealtimeMs = null)))
+
+    @Test
+    fun `post empty evidenceRefs fails`() =
+        fail(validContext().copy(postObservation = validPost().copy(evidenceRefs = emptyList())))
+
+    @Test
+    fun `a post coordinate outside the 1_0 m tolerance fails`() =
+        // Same ~111 m displacement as the PRE coordinate negative, applied to post.
+        fail(validContext().copy(postObservation = validPost().copy(effectiveLat = 40.001)))
 }
