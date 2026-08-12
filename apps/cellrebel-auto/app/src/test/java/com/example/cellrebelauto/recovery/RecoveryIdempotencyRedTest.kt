@@ -183,6 +183,19 @@ class RecoveryIdempotencyRedTest {
             executor.invocationCount("k-8")
         )
         assertEquals("the provider effect must stay at one", 1, executor.effectCount(8L))
+        // R5-F2 checkpoint repair (§11.7): window (c) crashed AFTER recording the receipt but BEFORE the
+        // checkpoint. Post-crash reconcile MUST repair that missing checkpoint — record it bound to the
+        // receipt key — so a SECOND post-ADVANCED crash can still replay. This is the durable half of F2
+        // (reconcile holds the log directly; no caller-delegation seam): an attack that returns
+        // REPLAYED_APPLY but skips the checkpoint repair fails here. Dormant under the skeleton (the
+        // REPLAYED_APPLY assertion above fails first), so it is a durable-effect gate, not a new RED.
+        val repairedCheckpoint = log.checkpointFor(8L)
+        assertNotNull("window-c reconcile MUST repair the missing checkpoint", repairedCheckpoint)
+        assertEquals(
+            "the repaired checkpoint must bind to the replayed receipt key",
+            "k-8",
+            repairedCheckpoint!!.receiptKey
+        )
     }
 
     // ---- Schedule-advance consumer gate (Issue #5 addendum, §5 boundary; Sol round-4 §11.2 F2) ----
@@ -204,9 +217,9 @@ class RecoveryIdempotencyRedTest {
         // of what the acquirers would say.
         val result = rc.scheduleAdvanced(
             attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
-            observe = ObserveIntentAcquirer { true },
-            receiptRevision = ReceiptRevisionAcquirer { true },
-            trustedQuota = TrustedQuotaAcquirer { true }
+            observe = ObserveIntentAcquirer { _ -> true },
+            receiptRevision = ReceiptRevisionAcquirer { _, _ -> true },
+            trustedQuota = TrustedQuotaAcquirer { _ -> true }
         )
         assertEquals(
             "no durable receipt ⇒ NOT_ADVANCED regardless of acquired facts",
@@ -225,9 +238,12 @@ class RecoveryIdempotencyRedTest {
         var observeCalls = 0
         var revisionCalls = 0
         var quotaCalls = 0
-        val observe = ObserveIntentAcquirer { observeCalls++; true }
-        val revision = ReceiptRevisionAcquirer { revisionCalls++; true }
-        val quota = TrustedQuotaAcquirer { quotaCalls++; true }
+        var observeAttempt: Long? = null
+        var revisionKey: String? = null
+        var quotaAttempt: Long? = null
+        val observe = ObserveIntentAcquirer { attemptId -> observeAttempt = attemptId; observeCalls++; true }
+        val revision = ReceiptRevisionAcquirer { key, _ -> revisionKey = key; revisionCalls++; true }
+        val quota = TrustedQuotaAcquirer { attemptId -> quotaAttempt = attemptId; quotaCalls++; true }
 
         // RED: skeleton returns NOT_ADVANCED and acquires NOTHING (zero calls), even though a durable
         // receipt exists and all three injected facts confirm. GREEN must read the receipt, call all
@@ -253,6 +269,26 @@ class RecoveryIdempotencyRedTest {
             "scheduleAdvanced must internally acquire all three facts; got observe=$observeCalls revision=$revisionCalls quota=$quotaCalls",
             observeCalls == 1 && revisionCalls == 1 && quotaCalls == 1
         )
+        // R5-F2 identity-coherence gate (§11.7): the gate must forward the REAL receipt identity into
+        // each acquirer — the acquisition is bound to attempt 1L / key "k-sched", NOT a default/garbage
+        // identity. Sol's round-4 zero-arg attack greened this by relaying a caller boolean with no
+        // identity binding at all (it won't compile against the identity-bearing signature); an adapted
+        // attack forwarding a WRONG identity (e.g. 0L / "") fails here. Dormant under the skeleton.
+        assertEquals(
+            "observe must acquire for the REAL attempt identity (not a default/garbage value)",
+            1L,
+            observeAttempt
+        )
+        assertEquals(
+            "revision must acquire for the REAL receipt key (not a default/garbage value)",
+            "k-sched",
+            revisionKey
+        )
+        assertEquals(
+            "quota must acquire for the REAL attempt identity (not a default/garbage value)",
+            1L,
+            quotaAttempt
+        )
     }
 
     @Test
@@ -266,9 +302,9 @@ class RecoveryIdempotencyRedTest {
         // now (skeleton NOT_ADVANCED); a bad impl that ignores [observe] and hardcodes ADVANCED fails.
         val result = rc.scheduleAdvanced(
             attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
-            observe = ObserveIntentAcquirer { false }, // mismatch
-            receiptRevision = ReceiptRevisionAcquirer { true },
-            trustedQuota = TrustedQuotaAcquirer { true }
+            observe = ObserveIntentAcquirer { _ -> false }, // mismatch
+            receiptRevision = ReceiptRevisionAcquirer { _, _ -> true },
+            trustedQuota = TrustedQuotaAcquirer { _ -> true }
         )
         assertEquals(
             "receipt but mismatching observation ⇒ NOT_ADVANCED",
@@ -289,9 +325,9 @@ class RecoveryIdempotencyRedTest {
         // ignores [receiptRevision] and hardcodes ADVANCED fails.
         val result = rc.scheduleAdvanced(
             attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
-            observe = ObserveIntentAcquirer { true },
-            receiptRevision = ReceiptRevisionAcquirer { false }, // stale
-            trustedQuota = TrustedQuotaAcquirer { true }
+            observe = ObserveIntentAcquirer { _ -> true },
+            receiptRevision = ReceiptRevisionAcquirer { _, _ -> false }, // stale
+            trustedQuota = TrustedQuotaAcquirer { _ -> true }
         )
         assertEquals(
             "receipt + matching observation but stale revision ⇒ NOT_ADVANCED",
@@ -312,9 +348,9 @@ class RecoveryIdempotencyRedTest {
         // NOT advance again. Passes now; a bad impl that ignores [trustedQuota] and hardcodes ADVANCED fails.
         val result = rc.scheduleAdvanced(
             attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
-            observe = ObserveIntentAcquirer { true },
-            receiptRevision = ReceiptRevisionAcquirer { true },
-            trustedQuota = TrustedQuotaAcquirer { false } // exhausted
+            observe = ObserveIntentAcquirer { _ -> true },
+            receiptRevision = ReceiptRevisionAcquirer { _, _ -> true },
+            trustedQuota = TrustedQuotaAcquirer { _ -> false } // exhausted
         )
         assertEquals(
             "receipt + matching observation but quota exhausted ⇒ NOT_ADVANCED",
@@ -331,9 +367,9 @@ class RecoveryIdempotencyRedTest {
         val rc = RecoveryCoordinator(executor, log)
         rc.scheduleAdvanced(
             attemptId = 1L, idempotencyKey = "k-sched", now = 1000L,
-            observe = ObserveIntentAcquirer { true },
-            receiptRevision = ReceiptRevisionAcquirer { true },
-            trustedQuota = TrustedQuotaAcquirer { true }
+            observe = ObserveIntentAcquirer { _ -> true },
+            receiptRevision = ReceiptRevisionAcquirer { _, _ -> true },
+            trustedQuota = TrustedQuotaAcquirer { _ -> true }
         )
         // The consumer gate must not mint receipts, drive the provider, or record a checkpoint as a side
         // effect (no fake trust, no fake advance) — it only READS durable state to gate the consumer.
