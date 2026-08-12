@@ -1,7 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
-import io.github.terryyyc.fakexxx.contract.v1.CanonicalDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
@@ -96,26 +96,19 @@ class AdvanceProviderRedTest {
         )
     }
 
-    /** §6.7.3 receipt digest recompute using ONLY the contract's shared framing (a receipt that does not recompute is not a receipt). */
-    private fun recomputeReceiptDigest(request: CompleteAndAdvanceRequestV1, receipt: AdvanceReceiptV1): String {
-        val fields = mutableListOf(
-            CanonicalDigestV1.utf8(request.requestDigest),
-            CanonicalDigestV1.utf8(request.idempotencyKey),
-            CanonicalDigestV1.decimal(receipt.outcomeWire),
-            CanonicalDigestV1.utf8(receipt.advancedFromItemId),
+    /**
+     * §6.7.3 receipt digest recompute — delegated to the contract's OWN helper
+     * (dsf F-8 on af06993): the previous local field assembly was a second copy
+     * of the receipt framing, and v1.38 froze exactly one framing helper
+     * because a drifted copy does not fail loudly, it just computes a
+     * different digest.
+     */
+    private fun recomputeReceiptDigest(request: CompleteAndAdvanceRequestV1, receipt: AdvanceReceiptV1): String =
+        CanonicalAdvanceReceiptDigestV1.compute(
+            receipt = receipt,
+            requestDigest = request.requestDigest,
+            idempotencyKey = request.idempotencyKey,
         )
-        val target = receipt.advancedToItemId
-        if (target == null) {
-            fields.add(CanonicalDigestV1.utf8("0"))
-        } else {
-            fields.add(CanonicalDigestV1.utf8("1"))
-            fields.add(CanonicalDigestV1.utf8(target))
-        }
-        fields.add(CanonicalDigestV1.decimal(receipt.scheduleVersionAfter))
-        fields.add(CanonicalDigestV1.utf8(receipt.effectiveIntentHash))
-        fields.add(CanonicalDigestV1.decimal(receipt.effectiveEnvironmentRevision))
-        return CanonicalDigestV1.digest(CanonicalDigestV1.DOMAIN_ADVANCE_RECEIPT, fields)
-    }
 
     // ---------------------------------------------------------------- proof
 
