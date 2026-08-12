@@ -160,6 +160,14 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var applyCount: Int = 0
     var cleanupCount: Int = 0
     var advanceCount: Int = 0
+
+    /**
+     * Crash injection at the qwy-side pointer mutation (Terra PR#22 round-2:
+     * the §6.7.5 window between the provider's receipt commit and the external
+     * pointer apply). One-shot: throws BEFORE any schedule state is touched,
+     * then re-arms to false so the recovery/replay path runs normally.
+     */
+    var failNextAdvancePointer: Boolean = false
     var effectiveLatitude: Double? = null
     var effectiveLongitude: Double? = null
 
@@ -193,6 +201,10 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         ScheduleSnapshot(scheduleId, scheduleVersion, currentItemId, itemIds.toList(), exhausted)
 
     override fun advancePointer(fromItemId: String): AdvancePointerOutcome {
+        if (failNextAdvancePointer) {
+            failNextAdvancePointer = false
+            throw SimulatedWriteCrash(SCHEDULE_NAMESPACE, "advancePointer")
+        }
         advanceCount += 1
         val idx = itemIds.indexOf(fromItemId)
         check(idx >= 0) { "advancePointer from unknown item $fromItemId" }
