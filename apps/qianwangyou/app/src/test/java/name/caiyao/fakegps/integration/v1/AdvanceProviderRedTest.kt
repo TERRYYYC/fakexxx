@@ -16,6 +16,7 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHE
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_UID
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -23,6 +24,7 @@ import org.junit.Test
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * SUPPLEMENTARY RED LANE — provider-side completeAndAdvance (§6.7).
@@ -710,5 +712,97 @@ class AdvanceProviderRedTest {
         assertEquals("stable second replay", replay, h.handler.completeAndAdvance(AUTO_UID, req))
         assertEquals("pointer moved exactly once across crash + recovery",
             1, h.env.advanceCount)
+    }
+
+    // ---------- §6.7.5 the fence must cover ALL entry points (Terra round 3)
+    // The single-commit protocol only closes the gap if EVERY entry point that
+    // touches lease or pointer is serialized through the pointer change and
+    // settles a pending advance before serving. Fencing only concurrent
+    // advances (round-2 first cut) left two holes.
+
+    /**
+     * Terra round-3 P1(a): the commit→external-apply window. An advance has
+     * committed its receipt + pending slot but has NOT yet moved the external
+     * pointer. A concurrent apply() must NOT be able to grant a device lease in
+     * that window — otherwise the advance then changes the pointer under an
+     * active lease, exactly the §6.7.4b device-global race the protocol claims
+     * to close. apply() must be fenced through the pointer change, not merely
+     * through the provider commit.
+     */
+    @Test
+    fun advance_commitToApplyWindow_concurrentApply_cannotGrantLeaseBeforePointerMoves() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        h.pair(OTHER_PKG, OTHER_SIGNER)
+        val leaseId = earnAndRelease(h)
+        val req = request(h, leaseId, "adv-window")
+
+        val applyLandedWhilePointerStale = AtomicBoolean(false)
+        val applyDone = CountDownLatch(1)
+
+        h.env.beforeAdvancePointer = {
+            // We are past the provider commit, before the pointer moves (still item-1).
+            val racer = Thread {
+                try {
+                    h.apply(uid = OTHER_UID, key = "window-apply", intent = h.intent(attemptId = "w"))
+                    // If apply COMPLETED here while the pointer is still item-1,
+                    // it granted a lease inside the forbidden window.
+                    if (h.env.currentItemId == "item-1") applyLandedWhilePointerStale.set(true)
+                } catch (_: Throwable) {
+                    // typed rejection is fine — it just did not land in the window
+                } finally {
+                    applyDone.countDown()
+                }
+            }
+            racer.start()
+            // Give the racing apply a real chance. A fenced entry blocks on the
+            // owner lock and cannot finish inside this callback.
+            applyDone.await(500, TimeUnit.MILLISECONDS)
+        }
+
+        h.handler.completeAndAdvance(AUTO_UID, req)
+        assertTrue("racing apply eventually finished", applyDone.await(5, TimeUnit.SECONDS))
+
+        assertFalse(
+            "a concurrent apply must not grant a lease while the advance pointer change is still pending",
+            applyLandedWhilePointerStale.get(),
+        )
+        assertEquals("advance completed the pointer move", "item-2", h.env.currentItemId)
+    }
+
+    /**
+     * Terra round-3 P1(b): live-process (no restart) recovery. The external
+     * pointer apply throws but the process SURVIVES — recovery must not depend
+     * on onOwnerProcessStart(). A same-key replay (or any read-side entry) must
+     * settle the committed advance before serving, so it never returns a
+     * receipt that says "advanced" while the external pointer is still stale.
+     */
+    @Test
+    fun advance_pointerApplyThrows_liveProcess_replaySettlesPointer_noDivergence() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        val leaseId = earnAndRelease(h)
+        val req = request(h, leaseId, "adv-live-crash")
+
+        // Pointer apply throws; the handler instance is NOT recreated.
+        h.env.failNextAdvancePointer = true
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, req)
+            fail("pointer-apply fault must surface, not be swallowed")
+        } catch (expected: RuntimeException) {
+            // crash, not a business answer
+        }
+        // Receipt is committed (advance exists) but the external pointer is stale.
+        assertEquals("pointer not yet applied", "item-1", h.env.currentItemId)
+
+        // Same-key replay on the SAME live handler: it must settle the pointer
+        // BEFORE returning the durable receipt — no receipt/pointer divergence.
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("replay returns the durable receipt", "item-2", replay.advancedToItemId)
+        assertEquals(
+            "live replay settled the external pointer before serving",
+            "item-2", h.env.currentItemId,
+        )
+        assertEquals("pointer moved exactly once", 1, h.env.advanceCount)
     }
 }

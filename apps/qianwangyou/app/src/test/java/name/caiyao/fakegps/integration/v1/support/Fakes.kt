@@ -168,6 +168,14 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
      * then re-arms to false so the recovery/replay path runs normally.
      */
     var failNextAdvancePointer: Boolean = false
+
+    /**
+     * Test seam for the §6.7.5 window Terra's interleaving lives in: invoked at
+     * the external pointer-apply point, AFTER the failNext check but BEFORE the
+     * pointer actually moves. Lets a test act while an advance is committed but
+     * its external mutation is still pending.
+     */
+    var beforeAdvancePointer: (() -> Unit)? = null
     var effectiveLatitude: Double? = null
     var effectiveLongitude: Double? = null
 
@@ -205,6 +213,7 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             failNextAdvancePointer = false
             throw SimulatedWriteCrash(SCHEDULE_NAMESPACE, "advancePointer")
         }
+        beforeAdvancePointer?.invoke()
         advanceCount += 1
         val idx = itemIds.indexOf(fromItemId)
         check(idx >= 0) { "advancePointer from unknown item $fromItemId" }
