@@ -595,3 +595,67 @@ STOP and escalate. Identity `@glm` / glm-5.2.
 
 ---
 [智谱猫/阿智 · glm-5.2🐾]
+
+---
+
+### 11.8 Round-7 — production-reachability REDs (Sol round-6 advisory answered; author handoff GLM → 墨墨)
+
+**Status.** R6 (`8d112fe`) was falsified by Sol's round-6 advisory (3 × P1 false-oracle: F1
+`recordTrustedCompletion` zero production call sites; F2 `RecoveryCoordinator(`/`scheduleAdvanced(`
+zero production call sites — isolated impl greens 11/11 while production unreachable; F4 engine drove
+only `CREATED→BEGIN_APPLY` and `EngineRecoveryTest:475-485` asserted `audit.isNotEmpty()`). R7
+(commit `1f3d84a`, branch NOT pushed) rewrites F1/F2/F4 as PRODUCTION-ENTRYPOINT REDs. Authorship
+handed off from GLM to 墨墨 (@kimi) by co-creator dispatch 2026-08-12 22:00 UTC.
+
+**R7 design (the shared repair: drive the REAL consumer, assert durable effects bound to REAL identity).**
+- **R7-F1** — new engine seam `completionTrustContextProvider` + the `recordTrustedCompletion` call
+  site in the engine success branch (skeleton callee). The RED runs `AutomationEngine.run` and asserts
+  the full §7.1 execution row + exactly one minted entry bound to the REAL attempt→task identity
+  (explicit task `42L`; a terminal dummy attempt pushes the real attempt id past `1L`; the provider
+  records the attemptId it was consulted for).
+- **R7-F2** — new engine seam `recoveryCoordinator`; the engine reconciles A+-tracked non-terminal
+  attempts (recovered via `PlanRepository.findAPlusPendingReconcileRefs`: BEGIN_APPLY audit row ⇒
+  (key, digest), §8.1 同键重放) BEFORE the blind sweep, then consults the schedule-advance gate before
+  resuming (§8.2 RECOVERING / §5 boundary), fail-closed otherwise. Crash windows (b)/(c) + a gate-hold
+  guardrail are driven through `AutomationEngine.run` with identity-keyed acquirer fakes.
+- **R7-F4** — R6-F4 retired (superseded). The new RED asserts the COMPLETE ordered canonical §8.1 trail
+  (`CANONICAL_HAPPY_PATH` event names) bound to the real attempt, checked IN STEP: the fake runner
+  observes the durable audit prefix at run-test entry (4 rows) and after RUNNING (5 rows).
+- Pre-freeze boundary kept: seams default null (zero production behavior change); `AutomationService`
+  composition of the coordinator/provider is GREEN (their prod impls need the frozen-later contract +
+  schema); no GREEN body, no contract/AIDL/qianwangyou edits.
+
+**R7 baseline (committed `1f3d84a`):** `198 tests / 44 failed / 0 errors` (R6: 193/41/0; −1 retired
+R6-F4, +6 new = 4 positive RED + 2 guardrails that pass under the skeleton by design). lintDebug +
+assembleDebug SUCCESSFUL. Positive failure points verified at the intended assertions (F1 §7.1
+read-back; F2 executor re-invocation / checkpoint repair; F4 in-step prefix).
+
+**§11.7 self-gate — combined attacks BUILT and RUN (uncommitted, then `git restore`d; tree clean at
+`1f3d84a`, re-verified 198/44/0 after restore):**
+- **Attack A (Sol's round-6 class — full local impls, production disconnected):** full §8.1 table +
+  audit-appending driver + full §6.4 TrustPolicy (frozen 1.0 m, receipt-lease binding) + full
+  recordTrustedCompletion (DB-lookup identity) + full coordinator (receipt-gated reconcile + reader
+  gate) + OR-branch F3 SQL + guard/store impls; engine R7 wiring REMOVED. Result: **198/12/0** — the
+  12 retained violations ALL RED: R7-F1-pos, F2-W(b), F2-W(c), F2-gate-hold, R7-F4; TrustedOnly ×4;
+  MmG02 selection + R6-F3; TrustedLedger persist (attack's mint throws on the unseeded attempt ⇒
+  rollback ⇒ still RED; the constant-mint form is covered by variant C).
+- **Variant B (dump-at-creation):** engine loops all 10 canonical events through the full driver at
+  creation ⇒ R7-F4 RED at the in-step prefix (`got [BEGIN_APPLY, APPLY_RECEIPT, …10 names]` ≠ 4).
+- **Variant C (constant-identity mint, engine call site restored):** mint `taskId=1L` ⇒ R7-F1 RED at
+  `minted taskId must bind the REAL task (42L) expected:<42> but was:<1>`; the repo-level mint test
+  fails identically (both levels pinned).
+- **Variant D (hardcode-gate-ADVANCED, reconcile wiring restored):** R7-F2-W(b)/W(c) pass the
+  executor/receipt/checkpoint assertions and fail exactly at the gate-reader identity pin
+  (`expected:<[77]> but was:<[]>`); the gate-hold guardrail goes RED (`runner.calls expected 0, was 1`);
+  5 coordinator unit tests RED (4 negatives + missing-checkpoint positive).
+
+**Honest disclosures.** (1) The F1-negative and F2-gate-hold tests are GUARDRAIL polarity: they pass
+under the committed skeleton and earn their keep against bypass attacks (proven RED under A/C/D).
+(2) `AutomationService` does not yet inject the coordinator/provider (their production impls are
+GREEN-bound: Room receipt tables need the frozen schema, the provider RPC needs the frozen contract) —
+the engine constructor seams are the production composition path; service wiring lands with GREEN.
+(3) F4's full-lifecycle call sites (events 2–10) are GREEN body; the RED pins their required durable
+effect + in-step ordering, not the call-site text. (4) F3 (OR-branch discriminators) was not
+re-opened by Sol round-6 and stays as R5/R6 banked it.
+
+[墨墨/kimi-k3🐾]
