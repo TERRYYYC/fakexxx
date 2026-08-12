@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.automation.aplus
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -133,6 +134,67 @@ class AttemptTransitionsRedTest {
             "RELEASE_INCOMPLETE must route to RECOVERY_REQUIRED (pause, do not advance)",
             AttemptState.RECOVERY_REQUIRED,
             AttemptTransitions.next(AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_INCOMPLETE)
+        )
+    }
+
+    // ---- Sol round-4 Gap A: remaining §8.1 recovery transitions (lines 1770-1785) ----
+    //
+    // The spec table (feature-specs/2026-08-09-...-a-plus.md §8.1) was located this round; these close
+    // the transition-coverage gap Sol named. Two are REDs (target ≠ source ⇒ skeleton `return current`
+    // fails them); two are ANCHORS whose target the skeleton cannot distinguish from correct, so per TDD
+    // honesty they are labelled anchors (not faked REDs) and their recovery ACTIONS are asserted through
+    // the coordinator in RecoveryIdempotencyRedTest.
+
+    @Test
+    fun `an untrusted pre-observation routes to RELEASE_PENDING - it must not continue as trusted`() {
+        // §8.1 line 1772: ENV_APPLIED + OBSERVATION_UNTRUSTED ⇒ RELEASE_PENDING (record typed reason;
+        // forbidden: 继续可信运行 — continue as a trusted run). RED: skeleton returns ENV_APPLIED.
+        assertEquals(
+            "OBSERVATION_UNTRUSTED must route to RELEASE_PENDING (release the lease, never trust)",
+            AttemptState.RELEASE_PENDING,
+            AttemptTransitions.next(AttemptState.ENV_APPLIED, AttemptEvent.OBSERVATION_UNTRUSTED)
+        )
+    }
+
+    @Test
+    fun `a timeout or interruption during the run routes to RECOVERY_REQUIRED - it must not guess success`() {
+        // §8.1 line 1777 (TIMEOUT/INTERRUPTED): CELLREBEL_RUNNING + TIMEOUT_INTERRUPTED ⇒
+        // RECOVERY_REQUIRED (save typed outcome; forbidden: 猜成功 — guess success). RED: skeleton
+        // returns CELLREBEL_RUNNING.
+        assertEquals(
+            "TIMEOUT_INTERRUPTED must route to RECOVERY_REQUIRED (save outcome, never guess success)",
+            AttemptState.RECOVERY_REQUIRED,
+            AttemptTransitions.next(AttemptState.CELLREBEL_RUNNING, AttemptEvent.TIMEOUT_INTERRUPTED)
+        )
+    }
+
+    @Test
+    fun `a crash during apply recovers in place - same key replays, never switches keys`() {
+        // §8.1 line 1770: APPLY_PENDING + CRASH_RECOVER ⇒ APPLY_PENDING (self-loop; same-key replay
+        // apply / fetch the old receipt; forbidden: 换键重复 apply). ANCHOR, not a RED: the target
+        // equals the source, so `return current` is already correct here — this test cannot fail under
+        // the skeleton. It pins the self-loop so GREEN cannot accidentally route CRASH_RECOVER elsewhere.
+        // The crash-replay ACTION (idempotent same-key re-apply, fetch existing receipt) is asserted
+        // through the coordinator in RecoveryIdempotencyRedTest (crash windows a/b/c).
+        assertEquals(
+            AttemptState.APPLY_PENDING,
+            AttemptTransitions.next(AttemptState.APPLY_PENDING, AttemptEvent.CRASH_RECOVER)
+        )
+    }
+
+    @Test
+    fun `reconcile from recovery never fabricates a trusted or terminal advance without evidence`() {
+        // §8.1 line 1783: RECOVERY_REQUIRED + RECONCILE ⇒ 合法中间态或 RELEASE_PENDING (first observe /
+        // fetch receipt; forbidden: 无证据跳状态 — no evidenceless state jump). The target is evidence-
+        // dependent (coordinator-driven), so at the pure transition-function level we assert the
+        // INVARIANT rather than a guessed target: RECONCILE must NOT yield QUOTA_COMMITTED or CLOSED
+        // (fabricating trust/terminality without evidence). ANCHOR: skeleton returns RECOVERY_REQUIRED,
+        // which satisfies it; the reconcile routing ACTION is asserted via the coordinator.
+        val reconciled = AttemptTransitions.next(AttemptState.RECOVERY_REQUIRED, AttemptEvent.RECONCILE)
+        assertTrue(
+            "RECONCILE must not fabricate a trusted (QUOTA_COMMITTED) or terminal (CLOSED) advance " +
+                "without evidence; got $reconciled",
+            reconciled != AttemptState.QUOTA_COMMITTED && reconciled != AttemptState.CLOSED
         )
     }
 
