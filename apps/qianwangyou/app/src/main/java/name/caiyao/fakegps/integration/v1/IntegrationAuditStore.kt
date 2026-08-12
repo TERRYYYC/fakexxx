@@ -23,18 +23,68 @@ interface IntegrationAuditStore {
     fun all(): List<QwyAuditEvent>
 }
 
-/** Durable implementation over [DurableKv]; lands in Task 3 GREEN. */
+/** Durable implementation over [DurableKv]. */
 class DurableIntegrationAuditStore(
     private val storage: DurableKv,
     private val clock: MonotonicClock,
 ) : IntegrationAuditStore {
+
+    companion object {
+        private const val AUDIT_NS = "integration.v1.audit"
+        private const val SEQ_KEY = "__seq__"
+        private const val DELIM = "\t"
+    }
+
     override fun append(
         event: String,
         callerApplicationId: String?,
         leaseId: String?,
         operationId: String?,
         payloadDigest: String?,
-    ): QwyAuditEvent = TODO("Task 3 GREEN")
+    ): QwyAuditEvent = storage.transaction {
+        val seq = (storage.read(AUDIT_NS, SEQ_KEY)?.toLong() ?: 0L) + 1L
+        storage.write(AUDIT_NS, SEQ_KEY, seq.toString())
+        val auditEvent = QwyAuditEvent(
+            seq = seq,
+            atElapsedRealtimeMs = clock.elapsedRealtimeMs(),
+            event = event,
+            callerApplicationId = callerApplicationId,
+            leaseId = leaseId,
+            operationId = operationId,
+            payloadDigest = payloadDigest,
+        )
+        storage.write(AUDIT_NS, "evt:$seq", serializeEvent(auditEvent))
+        auditEvent
+    }
 
-    override fun all(): List<QwyAuditEvent> = TODO("Task 3 GREEN")
+    override fun all(): List<QwyAuditEvent> {
+        val maxSeq = storage.read(AUDIT_NS, SEQ_KEY)?.toLong() ?: return emptyList()
+        return (1..maxSeq).mapNotNull { seq ->
+            storage.read(AUDIT_NS, "evt:$seq")?.let { deserializeEvent(it) }
+        }
+    }
+
+    private fun serializeEvent(e: QwyAuditEvent): String =
+        listOf(
+            e.seq.toString(),
+            e.atElapsedRealtimeMs.toString(),
+            e.event,
+            e.callerApplicationId ?: "",
+            e.leaseId ?: "",
+            e.operationId ?: "",
+            e.payloadDigest ?: "",
+        ).joinToString(DELIM)
+
+    private fun deserializeEvent(s: String): QwyAuditEvent {
+        val parts = s.split(DELIM)
+        return QwyAuditEvent(
+            seq = parts[0].toLong(),
+            atElapsedRealtimeMs = parts[1].toLong(),
+            event = parts[2],
+            callerApplicationId = parts[3].ifEmpty { null },
+            leaseId = parts[4].ifEmpty { null },
+            operationId = parts[5].ifEmpty { null },
+            payloadDigest = parts.getOrNull(6)?.ifEmpty { null },
+        )
+    }
 }
