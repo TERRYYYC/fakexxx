@@ -16,16 +16,27 @@ import java.io.RandomAccessFile
  * §6.7.5 forbids. The fake the crash matrix runs on DOES roll back, so the lane
  * was green for a guarantee the device never had.
  *
- * WHY NOT Room/SQLite
- * -------------------
- * SQLite would give the same atomicity. It was not chosen because it cannot be
- * exercised where the guarantee actually needs proving: a Room transaction needs
- * an Android runtime, so the production implementation would go back to having
- * no unit coverage — the precise hole that let the untested seam ship in the
- * first place. This store is plain JVM, so
+ * WHY NOT Room/SQLite — corrected, and narrower than first claimed
+ * ----------------------------------------------------------------
+ * An earlier version of this comment said Room "cannot be exercised". A reviewer
+ * pointed out the repo already uses Room 2.7.1 with room-testing,
+ * AppDatabaseMigrationTest and ProfileImportTransactionTest, so that was wrong
+ * as written and is corrected here rather than quietly softened.
+ *
+ * The accurate statement is narrower: both of those live in `src/androidTest`,
+ * `room-testing` is an `androidTestImplementation` dependency, and this project's
+ * CI runs only `testDebugUnitTest` and `assembleDebug` — no emulator job, no
+ * `connectedAndroidTest`. They exist and are never executed by any gate. So on a
+ * Room backend the atomicity guarantee would be verifiable in principle and
+ * unverified in practice until someone stands up an instrumented CI lane.
+ *
+ * That is a real and reasonable option, and it is an infrastructure decision, not
+ * this class's to make. What this store buys meanwhile is that
  * [DurableKvTransactionContractTest] runs the SAME cases against it and against
- * the fake, and a backend that cannot roll back fails instead of never being
- * asked. Schema/migration cost is also avoided for what is a flat key-value map.
+ * the fake, inside the gate that actually runs. If the schedule model lands in
+ * Room — which is where an operator-maintained plan belongs — the thing to carry
+ * over is the contract test: point it at the new backend and the guarantee
+ * travels with it.
  *
  * ATOMICITY MODEL
  * ---------------
@@ -41,7 +52,7 @@ import java.io.RandomAccessFile
  * access is not made safe by this class and is banned by the contract, not
  * guarded against here.
  */
-class FileDurableKv(val directory: File) : DurableKv {
+open class FileDurableKv(val directory: File) : DurableKv {
 
     private val file = File(directory, STORE_FILE)
     private val tempFile = File(directory, "$STORE_FILE.tmp")
@@ -72,9 +83,10 @@ class FileDurableKv(val directory: File) : DurableKv {
             if (buffer != null) {
                 buffer[namespace to key] = value
             } else {
-                // A bare write is its own one-key transaction.
-                data.getOrPut(namespace) { HashMap() }[key] = value
-                persist()
+                // A bare write is its own one-key transaction — same commit path,
+                // so it inherits the same durability-before-memory ordering
+                // instead of quietly having weaker rules than a transaction.
+                commit(mapOf((namespace to key) to value))
             }
         }
     }
@@ -105,22 +117,66 @@ class FileDurableKv(val directory: File) : DurableKv {
             txBuffer = null
             throw t
         }
-        // Success: apply, then make it durable in one rename.
         txBuffer = null
-        buffer.forEach { (nsKey, value) ->
-            data.getOrPut(nsKey.first) { HashMap() }[nsKey.second] = value
-        }
-        persist()
+        commit(buffer)
         result
     }
 
+    /**
+     * Durability first, then memory.
+     *
+     * The earlier order was: mutate [data], then persist. If persist threw — full
+     * disk, revoked permission, a failed rename — the in-process truth had
+     * already moved and the disk had not. The store would keep answering from
+     * the newer state for the rest of the process lifetime and silently revert
+     * on restart, which is worse than the crash it was trying to survive:
+     * a rollback that only happens later, invisibly.
+     *
+     * So the candidate state is built off to the side, persisted, and only
+     * adopted once the bytes are down. A failed commit leaves both memory and
+     * disk on the previous state — same state, one truth.
+     */
+    private fun commit(buffer: Map<Pair<String, String>, String>) {
+        val candidate = HashMap<String, HashMap<String, String>>(data.size)
+        data.forEach { (ns, entries) -> candidate[ns] = HashMap(entries) }
+        buffer.forEach { (nsKey, value) ->
+            candidate.getOrPut(nsKey.first) { HashMap() }[nsKey.second] = value
+        }
+
+        persist(candidate)
+
+        data.clear()
+        data.putAll(candidate)
+    }
+
+    /**
+     * Load, refusing to interpret a damaged file.
+     *
+     * The first version skipped malformed lines. That is the most dangerous
+     * possible reaction: a half-written file would load as a SUBSET of the last
+     * committed state and every later read would answer from it confidently.
+     * Silently dropping records turns "the store is corrupt" into "the pointer
+     * moved back and the receipt vanished" — precisely the torn state the whole
+     * temp+rename design exists to make impossible, reintroduced at read time.
+     *
+     * Given rename-based commits, a malformed line means something outside this
+     * class's model happened (a partial write that still got renamed, external
+     * tampering, a truncating filesystem). None of those are safe to guess
+     * through, so the store fails to open and the caller can decide.
+     */
     private fun load() {
         data.clear()
         if (!file.isFile) return
-        file.forEachLine { line ->
-            if (line.isEmpty()) return@forEachLine
+        file.readLines().forEachIndexed { index, line ->
+            if (line.isEmpty()) return@forEachIndexed
             val parts = line.split(FS)
-            if (parts.size != 3) return@forEachLine
+            if (parts.size != 3) {
+                throw IllegalStateException(
+                    "corrupt durable store at $file line ${index + 1}: expected 3 " +
+                        "unit-separated fields, found ${parts.size}. Refusing to load " +
+                        "a partial state — a subset of the last commit is a torn state."
+                )
+            }
             val (ns, key, value) = parts
             data.getOrPut(unescape(ns)) { HashMap() }[unescape(key)] = unescape(value)
         }
@@ -133,10 +189,17 @@ class FileDurableKv(val directory: File) : DurableKv {
      * flips atomically, not that the bytes it points at reached the disk. Without
      * it a power loss can leave the new name pointing at a truncated file, which
      * would be a torn state wearing a committed state's name.
+     *
+     * There is deliberately NO fallback when rename fails. An earlier version
+     * tried `file.delete()` then renamed again — which converts one atomic
+     * replace into delete-then-create, and a crash in that window leaves NO live
+     * file at all. It traded the single guarantee this class exists to provide
+     * for a slightly better success rate on a path that should be failing loudly.
+     * If rename fails, the previous file is still intact and the caller is told.
      */
-    private fun persist() {
+    private fun persist(state: Map<String, Map<String, String>>) {
         val text = buildString {
-            data.forEach { (ns, entries) ->
+            state.forEach { (ns, entries) ->
                 entries.forEach { (key, value) ->
                     append(escape(ns)).append(FS)
                         .append(escape(key)).append(FS)
@@ -145,15 +208,46 @@ class FileDurableKv(val directory: File) : DurableKv {
             }
         }
 
-        tempFile.writeText(text)
+        writeTempFile(tempFile, text)
         RandomAccessFile(tempFile, "rws").use { it.fd.sync() }
 
         if (!tempFile.renameTo(file)) {
-            // Fall back only after the atomic path failed; a store that cannot
-            // persist must say so rather than pretend the write landed.
-            if (!(file.delete() && tempFile.renameTo(file))) {
-                throw IllegalStateException("could not atomically replace $file")
-            }
+            throw IllegalStateException(
+                "could not atomically replace $file; previous state is intact"
+            )
+        }
+
+        syncDirectory()
+    }
+
+    /**
+     * Overridable purely so the contract test can inject a failure at the exact
+     * point where torn state would appear. Production behavior is [File.writeText].
+     */
+    internal open fun writeTempFile(target: File, text: String) {
+        target.writeText(text)
+    }
+
+    /**
+     * fsync the directory so the rename itself survives power loss.
+     *
+     * Renaming makes the switch atomic; it does not make the DIRECTORY ENTRY
+     * durable. Without this, power loss can roll the directory back to the
+     * previous entry — the old state, whole. That is a durability limit, not a
+     * torn state, which is why this is best-effort rather than fatal.
+     *
+     * Best-effort is also forced: fsync-on-directory has no pre-API-26 Java
+     * surface, and minSdk here is 24. On 24/25 the NoSuchMethodError is caught
+     * and the store degrades to "atomic, but the last commit may not survive a
+     * power cut" — stated rather than assumed.
+     */
+    private fun syncDirectory() {
+        try {
+            java.nio.channels.FileChannel
+                .open(directory.toPath(), java.nio.file.StandardOpenOption.READ)
+                .use { it.force(true) }
+        } catch (t: Throwable) {
+            // API < 26, or a filesystem that refuses to open a directory.
         }
     }
 
