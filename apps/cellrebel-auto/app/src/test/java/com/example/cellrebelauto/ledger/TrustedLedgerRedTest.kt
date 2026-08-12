@@ -11,12 +11,14 @@ import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.model.execution.CellRebelCompletionEvidenceV1
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
+import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -24,7 +26,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * Trusted ledger at-most-once + pre/post-observe attribution (Issue #5 Task 4, areas 1 & 4).
+ * Trusted ledger at-most-once + pre/post-observe attribution (Issue #5 Task 4, areas 1, 4 & 5).
  *
  * AREA 1 (GREEN-from-schema, INV-10): `UNIQUE(attemptId)` is enforced by the schema, so these
  * uniqueness/append-only assertions pass now — including under concurrent insertion — validating
@@ -43,6 +45,17 @@ import org.robolectric.RobolectricTestRunner
  * `gps + isMock=false` tuple greened all 16): the positive is now `isMock=true`, and there is an
  * explicit `isMock=false ⇒ FAIL` negative, so that impl fails both. Only the full §6.4 predicate
  * satisfies every assertion. Only the decision TYPE is frozen pre-freeze.
+ *
+ * AREA 5 (RED, §11.2 F1 / §11.4, round-4 standard): drives the REAL production entrypoint
+ * [com.example.cellrebelauto.repository.PlanRepository.recordTrustedCompletion] against the in-memory
+ * Room DB and asserts DURABLE EFFECTS observable through the real DAOs (not an isolated helper). Today
+ * NO production path persists a CellRebelExecution or mints trusted quota — the skeleton (1) persists
+ * digest + the three §6.4.2 clocks, DROPPING the §7.1 evidence detail, and (2) evaluates [TrustPolicy]
+ * but MINTS NOTHING even on PASS. So a §6.4-positive completion read back through the entrypoint shows
+ * the §7.1 fields NULL and zero TrustedQuotaEntry (RED). GREEN copies the §7.1 detail into the row and
+ * inserts exactly one entry (same transaction) on PASS. A §6.4-failing completion mints nothing and
+ * reports FAIL (the negative, which passes under the skeleton too). This is the §11.1 legacy hold-out:
+ * a digest-only / false-oracle impl cannot green while the A+ evidence chain is lost.
  *
  * Grounding: docs/features/2026-08-12-issue5-red-rewrite-round3-grounding.md
  *
@@ -206,6 +219,25 @@ class TrustedLedgerRedTest {
         preObservation = validPre(),
         postObservation = validPost()
     )
+
+    /**
+     * The canonical execution row carrying the FULL §7.1 / §8.6 evidence detail (baseline state /
+     * marker text / RUNNING duration / both scores / per-round timestamps) — what a GREEN
+     * [PlanRepository.recordTrustedCompletion] must persist verbatim. Built atop [execution] so the
+     * digest + three §6.4.2 clocks are identical to every AREA 4 case.
+     */
+    private fun fullEvidenceExecution(wire: Int): CellRebelExecution = execution(wire).copy(
+        baselineRunningState = "IDLE",
+        runningMarkerText = "RUNNING",
+        runningDurationMs = EXEC_COMPLETED_AT_ELAPSED - EXEC_RUNNING_CONFIRMED_AT_ELAPSED, // ≥ 10000 ms floor
+        webBrowsingScore = 8.0,
+        videoStreamingScore = 7.0,
+        roundTimestampsElapsed = "${EXEC_STARTED_AT_ELAPSED};${EXEC_COMPLETED_AT_ELAPSED}"
+    )
+
+    /** The canonical §6.4-positive bundle with the FULL §7.1 evidence detail attached (AREA 5 driver). */
+    private fun fullContext(wire: Int = WIRE_VERIFIED): CompletionTrustContext =
+        validContext(wire).copy(execution = fullEvidenceExecution(wire))
 
     private fun fail(ctx: CompletionTrustContext) =
         assertEquals(TrustDecision.FAIL, TrustPolicy().evaluate(ctx))
@@ -381,4 +413,74 @@ class TrustedLedgerRedTest {
     fun `a post coordinate outside the 1_0 m tolerance fails`() =
         // Same ~111 m displacement as the PRE coordinate negative, applied to post.
         fail(validContext().copy(postObservation = validPost().copy(effectiveLat = 40.001)))
+
+    // ---- AREA 5: production persist+mint entrypoint via PlanRepository (RED — §11.2 F1 / §11.4) ----
+    //
+    // Drives the REAL production entrypoint [PlanRepository.recordTrustedCompletion] against the
+    // in-memory Room DB and asserts DURABLE EFFECTS through the real DAOs (§11.1 round-4 standard).
+    // The skeleton (1) persists digest+3clocks DROPPING the §7.1 detail and (2) mints nothing — so a
+    // §6.4-positive completion read back shows the §7.1 fields NULL and zero TrustedQuotaEntry (RED).
+    // GREEN copies the §7.1 detail into the row and mints exactly one entry on PASS.
+
+    @Test
+    fun `recordTrustedCompletion persists the full section 7_1 evidence detail through the production entrypoint`() = runTest {
+        val repo = PlanRepository(db)
+        repo.recordTrustedCompletion(fullContext())
+
+        val row = db.attemptExecutionDao().byExecutionId("exec-$WIRE_VERIFIED")
+        assertNotNull("execution row must be persisted through the production entrypoint", row)
+        val exec = row!!
+        // §7.1 detail must survive the entrypoint (GREEN copies it; skeleton drops it ⇒ null ⇒ RED).
+        // assertNotNull precedes every `!!` unwrap so the skeleton fails an AssertionError, never a NPE
+        // (round-4 standard: 0 errors).
+        assertEquals("baseline state must be persisted", "IDLE", exec.baselineRunningState)
+        assertEquals("running marker must be persisted", "RUNNING", exec.runningMarkerText)
+        assertNotNull("RUNNING duration must be persisted", exec.runningDurationMs)
+        assertEquals(
+            "RUNNING duration (≥ §6.4.2 floor)",
+            EXEC_COMPLETED_AT_ELAPSED - EXEC_RUNNING_CONFIRMED_AT_ELAPSED,
+            exec.runningDurationMs!!
+        )
+        assertNotNull("web score must be persisted", exec.webBrowsingScore)
+        assertEquals("web score", 8.0, exec.webBrowsingScore!!, 0.001)
+        assertNotNull("video score must be persisted", exec.videoStreamingScore)
+        assertEquals("video score", 7.0, exec.videoStreamingScore!!, 0.001)
+        assertEquals(
+            "per-round timestamps",
+            "${EXEC_STARTED_AT_ELAPSED};${EXEC_COMPLETED_AT_ELAPSED}",
+            exec.roundTimestampsElapsed
+        )
+    }
+
+    @Test
+    fun `recordTrustedCompletion mints exactly one TrustedQuotaEntry on a section 6_4-positive completion`() = runTest {
+        val repo = PlanRepository(db)
+        val decision = repo.recordTrustedCompletion(fullContext())
+
+        // §6.4-positive ⇒ exactly one trusted entry minted through the entrypoint (skeleton mints
+        // nothing ⇒ 0 ⇒ RED).
+        assertEquals(
+            "a §6.4-positive completion must mint exactly one TrustedQuotaEntry",
+            1,
+            db.trustedQuotaDao().countAll()
+        )
+        // The entrypoint must report the policy decision, not a hardcoded value (skeleton returns
+        // FAIL ⇒ RED).
+        assertEquals(TrustDecision.PASS, decision)
+    }
+
+    @Test
+    fun `recordTrustedCompletion mints nothing and reports FAIL when the section 6_4 predicate fails`() = runTest {
+        val repo = PlanRepository(db)
+        // §6.4.1 contradiction: HOOK deliveryMode masquerading as independently verified ⇒ FAIL (INV-06).
+        val negative = fullContext().copy(preObservation = validPre().copy(deliveryMode = "HOOK"))
+        val decision = repo.recordTrustedCompletion(negative)
+
+        assertEquals(TrustDecision.FAIL, decision)
+        assertEquals(
+            "a §6.4-failing completion must mint no TrustedQuotaEntry",
+            0,
+            db.trustedQuotaDao().countAll()
+        )
+    }
 }
