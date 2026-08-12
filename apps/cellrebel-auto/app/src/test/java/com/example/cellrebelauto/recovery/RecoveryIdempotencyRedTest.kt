@@ -211,6 +211,17 @@ class RecoveryIdempotencyRedTest {
             ScheduleAdvanceState.ADVANCED,
             rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
         )
+        // Window (c) durable effect (Sol round-4 Finding 2): ADVANCED is not a bare return value — it
+        // MUST persist a checkpoint bound to the receipt so a post-ADVANCED crash can replay. A GREEN
+        // that returns ADVANCED without recording a checkpoint fails here. Dormant under the skeleton
+        // (the ADVANCED assertion above fails first), so it adds a durable-effect gate, not a new RED.
+        val advancedCheckpoint = log.checkpointFor(1L)
+        assertNotNull("ADVANCED must record a window-c checkpoint", advancedCheckpoint)
+        assertEquals(
+            "the checkpoint must bind to the advanced receipt key",
+            "k-sched",
+            advancedCheckpoint!!.receiptKey
+        )
     }
 
     @Test
@@ -226,6 +237,7 @@ class RecoveryIdempotencyRedTest {
             ScheduleAdvanceState.NOT_ADVANCED,
             rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = false, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
         )
+        assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
     }
 
     @Test
@@ -242,6 +254,7 @@ class RecoveryIdempotencyRedTest {
             ScheduleAdvanceState.NOT_ADVANCED,
             rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = true, quotaExhausted = false, now = 1000L)
         )
+        assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
     }
 
     @Test
@@ -258,6 +271,7 @@ class RecoveryIdempotencyRedTest {
             ScheduleAdvanceState.NOT_ADVANCED,
             rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = true, now = 1000L)
         )
+        assertNull("NOT_ADVANCED must record no checkpoint", log.checkpointFor(1L))
     }
 
     @Test
@@ -266,10 +280,11 @@ class RecoveryIdempotencyRedTest {
         val log = FakeDurableRecoveryLog()
         val rc = RecoveryCoordinator(executor, log)
         rc.scheduleAdvanced(attemptId = 1L, idempotencyKey = "k-sched", intentRevisionMatches = true, receiptRevisionIsStale = false, quotaExhausted = false, now = 1000L)
-        // The consumer gate must not mint receipts or drive the provider as a side effect (no fake trust).
+        // The consumer gate must not mint receipts, drive the provider, or record a checkpoint as a side
+        // effect (no fake trust, no fake advance) — it only READS durable state to gate the consumer.
         assertTrue(
-            "scheduleAdvanced must record no receipt and invoke no executor",
-            log.receiptFor("k-sched") == null && executor.invocationCount("k-sched") == 0
+            "scheduleAdvanced must record no receipt, no checkpoint, and invoke no executor",
+            log.receiptFor("k-sched") == null && log.checkpointFor(1L) == null && executor.invocationCount("k-sched") == 0
         )
     }
 }
