@@ -1,10 +1,10 @@
 package name.caiyao.fakegps.integration.v1
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
+import java.io.File
 import java.security.MessageDigest
 
 /**
@@ -18,48 +18,21 @@ import java.security.MessageDigest
  * them JVM-testable without an Android runtime.
  */
 
-/**
- * SharedPreferences-backed [DurableKv].
+/*
+ * There WAS a SharedPreferences-backed DurableKv here. It is gone rather than
+ * deprecated, because leaving it importable leaves the bug importable.
  *
- * §6.6 bans multi-process direct writes, not any particular library. This store
- * is therefore MODE_PRIVATE (never MODE_MULTI_PROCESS) and the provider service
- * is declared without android:process so it runs in the main process — qwy's
- * `:hook_verify` process must never write these namespaces.
+ * It kept one prefs file per namespace and implemented transaction() as a bare
+ * monitor while each write committed on its own. That serializes callers but is
+ * not atomic: a crash after the schedule pointer write and before the advance
+ * receipt write left the torn state §6.7.5 forbids — and the crash matrix could
+ * not see it, because the fake it runs on DOES buffer and roll back. The fake
+ * was stronger than production, so the lane was green for a guarantee the device
+ * never had.
  *
- * commit() rather than apply(): the contract's durability claims (INV-25 L3/L4,
- * receipt+pointer in one transaction) are about state that survived, and apply()
- * returns before the write lands. A crash between an apply() and the disk is
- * exactly the torn state the crash matrix exists to forbid.
+ * [FileDurableKv] replaces it and is held to that same contract by
+ * DurableKvTransactionContractTest, which runs identical cases against both.
  */
-class AndroidDurableKv(context: Context) : DurableKv {
-
-    private val appContext = context.applicationContext
-    private val lock = Any()
-
-    private fun prefs(namespace: String) =
-        appContext.getSharedPreferences("$PREFS_PREFIX$namespace", Context.MODE_PRIVATE)
-
-    override fun read(namespace: String, key: String): String? =
-        synchronized(lock) { prefs(namespace).getString(key, null) }
-
-    @SuppressLint("ApplySharedPref")
-    override fun write(namespace: String, key: String, value: String) {
-        synchronized(lock) { prefs(namespace).edit().putString(key, value).commit() }
-    }
-
-    override fun keys(namespace: String): Set<String> =
-        synchronized(lock) { prefs(namespace).all.keys.toSet() }
-
-    /**
-     * §6.6 L3 serialized read-modify-write. Single-process by construction, so a
-     * monitor is sufficient and is what the lease/advance atomicity rules assume.
-     */
-    override fun <T> transaction(block: () -> T): T = synchronized(lock) { block() }
-
-    private companion object {
-        const val PREFS_PREFIX = "qwy_env_control_v1_"
-    }
-}
 
 /**
  * §6.4.2: elapsedRealtime is the only clock trust predicates may compare — it
@@ -177,7 +150,10 @@ object ProviderRuntime {
     }
 
     private fun build(appContext: Context): EnvironmentControlHandler {
-        val kv = AndroidDurableKv(appContext)
+        // FileDurableKv, not SharedPreferences: §6.7.5 needs the pointer and the
+        // receipt to land or not land together, and a prefs-per-namespace store
+        // commits each write on its own. See FileDurableKv's header.
+        val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
         val clock = AndroidMonotonicClock()
         val resolver = AndroidPackageIdentityResolver(appContext)
 
