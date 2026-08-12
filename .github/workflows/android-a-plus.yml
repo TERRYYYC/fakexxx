@@ -87,6 +87,21 @@ jobs:
       - name: check-contract-v1
         run: ./scripts/check-contract-v1.sh
 
+      - name: selftest-contract-v1
+        # check-contract-v1.sh being green says something only while it is still
+        # sensitive to the drift it claims to catch, and nothing measured that:
+        # the mutation proofs behind its guards were one-off scripts run by hand,
+        # so a change that quietly weakened one would land on a green board.
+        #
+        # This runs the PRODUCTION gate against mutated throwaway copies of the
+        # canonical spec and asserts each guard reports its OWN finding and
+        # nothing else's -- a case that goes red for the wrong reason is a false
+        # red, and reads identical here to a true one. The M-* cases then disable
+        # one guard at a time and require the matching finding to disappear,
+        # which is what distinguishes a load-bearing guard from dead code that a
+        # broader older check happens to cover for.
+        run: ./scripts/selftest-contract-v1.sh
+
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.
     name: cellrebel-auto (unit + lint + assemble)
