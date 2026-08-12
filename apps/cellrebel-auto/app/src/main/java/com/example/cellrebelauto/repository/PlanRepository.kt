@@ -4,6 +4,9 @@ import androidx.room.withTransaction
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
+import com.example.cellrebelauto.environment.CompletionTrustContext
+import com.example.cellrebelauto.environment.TrustDecision
+import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.plan.AttemptWithTask
 import com.example.cellrebelauto.model.plan.LocationPlan
@@ -246,6 +249,49 @@ class PlanRepository(private val db: AppDatabase) {
     // # 停止/取消：仅在途尝试仍为非终态时标记 interrupted
     suspend fun markAttemptInterruptedIfNonTerminal(attemptId: Long, nowMs: Long) =
         db.testAttemptDao().markInterruptedIfNonTerminal(attemptId, nowMs)
+
+    // ---- Trusted completion persistence (R4-F1, §11.2 / §11.4) ----
+
+    /**
+     * Production trust-gated completion entrypoint (Issue #5 R4-F1, §11.2 / §11.4).
+     *
+     * THE production method that, given a classified completion bound to pre/post observations,
+     * persists the [com.example.cellrebelauto.model.execution.CellRebelExecution] evidence row AND
+     * mints a [com.example.cellrebelauto.model.ledger.TrustedQuotaEntry] when [TrustPolicy] admits it
+     * (§8.1 DECIDING → QUOTA_COMMITTED). Today NO production path persists a CellRebelExecution or
+     * mints trusted quota — completion goes through the legacy counter in [finalizeAttemptSuccess],
+     * which a digest-only / false-oracle impl can green while the A+ evidence chain is lost (§11.1
+     * legacy hold-out; `AttemptExecutionDao.insert` has zero production call sites).
+     *
+     * SKELETON (pre-freeze, §11.4 — GREEN body frozen pending contract-v1 freeze #3):
+     *  (1) persists ONLY digest + the three §6.4.2 elapsed clocks, DROPPING the §7.1 evidence detail
+     *      (baseline state / marker text / RUNNING duration / both scores / per-round timestamps);
+     *  (2) evaluates [TrustPolicy] for the returned decision but MINTS NOTHING — even on PASS.
+     * Both are the R4-F1 RED: the read-back of a §6.4-positive completion must show the full §7.1
+     * field set populated and exactly one TrustedQuotaEntry. GREEN copies the §7.1 detail into the
+     * row and inserts the entry (same transaction) when PASS.
+     *
+     * Drives the REAL Room `cellrebel_executions` + `trusted_quota_entries` tables — no isolated helper.
+     *
+     * # 生产信任收尾入口（R4-F1 骨架）：持久化 digest+3clocks、丢弃 §7.1 证据、绝不铸币；GREEN 再补全字段并在 PASS 时铸币
+     */
+    suspend fun recordTrustedCompletion(ctx: CompletionTrustContext): TrustDecision = db.withTransaction {
+        // (1) Persist the evidence row — SKELETON keeps digest + 3 §6.4.2 clocks and DROPS the §7.1
+        //     detail (the §11.3 F1 digest-only attack surface). GREEN copies ctx.execution's §7.1
+        //     fields through verbatim before insert.
+        val skeletonRow = ctx.execution.copy(
+            baselineRunningState = null,
+            runningMarkerText = null,
+            runningDurationMs = null,
+            webBrowsingScore = null,
+            videoStreamingScore = null,
+            roundTimestampsElapsed = null
+        )
+        db.attemptExecutionDao().insert(skeletonRow)
+        // (2) Evaluate the §6.4 predicate for the returned decision. SKELETON mints nothing; GREEN
+        //     inserts exactly one TrustedQuotaEntry here when PASS, atomically with the persist above.
+        TrustPolicy().evaluate(ctx)
+    }
 
     // ---- Session lifecycle ----
 
