@@ -64,11 +64,11 @@ class EnvironmentControlHandler(
     private val clock: MonotonicClock,
     private val storage: DurableKv,
 ) {
-    fun discover(callingUid: Int): CapabilitySnapshotV1 {
+    fun discover(callingUid: Int): CapabilitySnapshotV1 = withOwnerFence {
         authorizer.authorize(callingUid)
         val snap = tracker.snapshot()
         val schedule = environment.scheduleSnapshot()
-        return CapabilitySnapshotV1(
+        CapabilitySnapshotV1(
             protocolVersion = ContractV1.PROTOCOL_VERSION,
             serviceVersion = "1.0.0",
             supportedModeWires = listOf(DeliveryModeV1.SYSTEM_MOCK.wire),
@@ -85,7 +85,7 @@ class EnvironmentControlHandler(
         )
     }
 
-    fun preflight(callingUid: Int, request: PreflightRequestV1): PreflightReportV1 {
+    fun preflight(callingUid: Int, request: PreflightRequestV1): PreflightReportV1 = withOwnerFence {
         authorizer.authorize(callingUid)
         val intentHash = CanonicalIntentDigestV1.compute(request.intent)
         val snap = tracker.snapshot()
@@ -102,7 +102,7 @@ class EnvironmentControlHandler(
             }
         }
 
-        return PreflightReportV1(
+        PreflightReportV1(
             acceptedIntentHash = intentHash,
             scheduleDecisionWire = scheduleDecision,
             waitUntilEpochMs = null,
@@ -145,7 +145,7 @@ class EnvironmentControlHandler(
         }
     }
 
-    fun apply(callingUid: Int, request: ApplyRequestV1): ApplyReceiptV1 {
+    fun apply(callingUid: Int, request: ApplyRequestV1): ApplyReceiptV1 = withOwnerFence {
         val caller = authorizer.authorize(callingUid)
         val intent = request.intent
         val intentHash = CanonicalIntentDigestV1.compute(intent)
@@ -158,7 +158,10 @@ class EnvironmentControlHandler(
         // Critical section: idempotency check + conflict predicate + lease
         // creation + environment apply + receipt persist all run under a
         // serialized transaction (M-CC-03/04: exactly one winner when racing).
-        return storage.transaction {
+        // The owner fence additionally serializes this against the advance
+        // commit→external-apply window, so a lease can never be granted while a
+        // committed advance still has an unapplied pointer change (Terra round-3).
+        storage.transaction {
             // §6.3.4: idempotency check
             val existing = idempotency.find(caller.applicationId, ContractOperation.APPLY, request.idempotencyKey)
             if (existing != null) {
@@ -254,7 +257,10 @@ class EnvironmentControlHandler(
         }
     }
 
-    fun observe(callingUid: Int, request: ObserveRequestV1): EnvironmentObservationV1 {
+    fun observe(callingUid: Int, request: ObserveRequestV1): EnvironmentObservationV1 = withOwnerFence {
+        // Read-side entry is fenced too (Terra round-3 P1(b)): settling a
+        // pending advance first means an observation can never report an
+        // environment whose pointer lags a committed advance receipt.
         val caller = authorizer.authorize(callingUid)
 
         val lease = leaseStore.get(request.leaseId)
@@ -273,10 +279,10 @@ class EnvironmentControlHandler(
                 "lease ${request.leaseId} effective state is $effState")
         }
 
-        return observer.observe(lease, request)
+        observer.observe(lease, request)
     }
 
-    fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 {
+    fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {
         val caller = authorizer.authorize(callingUid)
 
         val lease = leaseStore.get(request.leaseId)
@@ -292,7 +298,7 @@ class EnvironmentControlHandler(
         val existing = idempotency.find(caller.applicationId, ContractOperation.RELEASE, request.idempotencyKey)
         if (existing != null) {
             if (existing.requestDigest == requestDigest) {
-                return deserializeReleaseReceipt(existing.receiptPayload)
+                return@withOwnerFence deserializeReleaseReceipt(existing.receiptPayload)
             } else {
                 throw ContractException(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
                     "release key=${request.idempotencyKey} replayed with different digest")
@@ -309,7 +315,7 @@ class EnvironmentControlHandler(
 
         // Entire mutation (state transition + cleanup + receipt) in ONE transaction
         // so a crash between writes rolls back cleanly (release_crashBetweenWrites).
-        return storage.transaction {
+        storage.transaction {
             // Transition to RELEASING
             leaseStore.put(lease.copy(state = LeaseState.RELEASING, releaseIdempotencyKey = request.idempotencyKey))
 
@@ -370,7 +376,7 @@ class EnvironmentControlHandler(
         }
     }
 
-    fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 {
+    fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
         // §6.7.4b frozen judgment order (v1.42):
         //   safety(+recompute digest) → idempotency → proof → schedule(14/15/16)
         //   → lease(7) → mutation
@@ -378,7 +384,10 @@ class EnvironmentControlHandler(
         // the step-5 lease gate is DEVICE-GLOBAL and must serialize against a
         // concurrent apply, so no new lease can slip in between the gate and the
         // pointer move (Terra PR#22 P1-3). This replaces the earlier v1.39 order
-        // (proof-first, gates outside the transaction).
+        // (proof-first, gates outside the transaction). The whole method runs
+        // under withOwnerFence, so the commit→external-apply window is closed to
+        // apply()/replay too (Terra round-3), and settlePendingAdvance() has
+        // already reconciled any earlier interrupted advance before this runs.
 
         // --- step 1: outer safety gate — auth + recompute requestDigest ---
         val caller = authorizer.authorize(callingUid)
@@ -415,11 +424,10 @@ class EnvironmentControlHandler(
         //   2. apply the external pointer (verified against the receipt)
         //   3. clear the marker
         // Crash before 1: nothing anywhere moved (no receipt ⇒ no advance).
-        // Crash after 1: owner startup rolls the pointer FORWARD from the
-        // marker before anything is served. [advanceApplyLock] serializes
-        // commit→apply→clear against concurrent advances; the gates re-read
-        // state inside the tx, which serializes them against concurrent apply().
-        synchronized(advanceApplyLock) {
+        // Crash after 1: the next fenced entry (or owner startup) rolls the
+        // pointer FORWARD from the marker before anything is served. The owner
+        // fence serializes commit→apply→clear against every other entry point,
+        // and the gates re-read state inside the tx.
         var replayed = true
         val committed = storage.transaction {
             // --- step 2: idempotency, keyed on the RECOMPUTED digest (M-AD-02/03) ---
@@ -550,15 +558,15 @@ class EnvironmentControlHandler(
 
             finalReceipt
         }
-        if (replayed) return committed
+        if (replayed) return@withOwnerFence committed
 
         // Commit point passed — the advance exists regardless of what happens
         // next. Apply the external mutation and clear the slot; any crash in
-        // this window is finished by completePendingAdvance() at owner startup.
+        // this window is finished by settlePendingAdvance() at the next fenced
+        // entry or owner startup.
         applyCommittedAdvance(committed.advancedFromItemId, committed.advancedToItemId)
         storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
-        return committed
-        }
+        committed
     }
 
     /**
@@ -580,13 +588,15 @@ class EnvironmentControlHandler(
     }
 
     /**
-     * Owner-startup roll-forward (§6.7.5 "重启后只能观察到「已推进」或「未推进」"):
-     * a non-empty pending slot means a receipt committed but the crash landed
-     * before the external pointer apply (or before the slot clear). Finish the
-     * committed advance BEFORE anything is served, then clear the slot. Runs
-     * under no lock — startup is single-threaded by construction.
+     * §6.7.5 roll-forward, invoked by EVERY fenced entry (via [withOwnerFence])
+     * and once at owner startup: a non-empty pending slot means a receipt
+     * committed but the crash/exception landed before the external pointer
+     * apply (or before the slot clear). Finish the committed advance BEFORE
+     * anything is served, then clear the slot. Idempotent — the alreadyApplied
+     * check makes a repeat call a no-op. Callers hold [ownerLock] (startup is
+     * single-threaded); the operation is not itself re-entrant-safe without it.
      */
-    private fun completePendingAdvance() {
+    private fun settlePendingAdvance() {
         val marker = storage.read(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY)
         if (marker.isNullOrEmpty()) return
         val parts = marker.split(RS)
@@ -612,8 +622,9 @@ class EnvironmentControlHandler(
         // §6.7.5 roll-forward FIRST: a committed advance whose external pointer
         // apply was interrupted must be finished before ANY state is served or
         // recovered — lease recovery and callers must never observe the
-        // forbidden middle (receipt durable, pointer stale).
-        completePendingAdvance()
+        // forbidden middle (receipt durable, pointer stale). Startup is
+        // single-threaded, so this runs without the owner fence here.
+        settlePendingAdvance()
 
         // Tracker already allocated a new generation in its init block.
         // Now do state-aware lease recovery.
@@ -633,7 +644,7 @@ class EnvironmentControlHandler(
      * revoked, the caller's lease is marked REVOKED (M-PA-09/M-LS-04), audit
      * records the source. New calls from that identity fail typed immediately.
      */
-    fun onCallerRevoked(applicationId: String, signerDigest: String) {
+    fun onCallerRevoked(applicationId: String, signerDigest: String): Unit = withOwnerFence {
         // §6.5: revoke the pairing so authorize() rejects with CALLER_NOT_ALLOWED
         // on any subsequent call from this identity (M-LS-04/09).
         pairingStore.revoke(applicationId, signerDigest, clock.elapsedRealtimeMs())
@@ -647,14 +658,32 @@ class EnvironmentControlHandler(
      * former caller cannot call in, so qwy converges REVOKED → RELEASING →
      * RELEASED itself. No post-revoke capability is granted to the caller.
      */
-    fun runRevokedLeaseCleanup() {
+    fun runRevokedLeaseCleanup(): Unit = withOwnerFence {
         leaseStore.runProviderCleanupForRevoked(environment)
     }
 
     // --- Receipt serialization (simple tab-delimited, no JSON dependency) ---
 
-    /** In-process serialization of the §6.7.5 commit→apply→clear window. */
-    private val advanceApplyLock = Any()
+    /**
+     * In-process owner fence. EVERY entry point that reads or mutates lease /
+     * schedule-pointer state runs under this lock via [withOwnerFence] and
+     * settles a pending advance before serving, so the §6.7.5 commit→external-
+     * apply window is closed to ALL callers — not only to a concurrent advance
+     * (Terra round-3: fencing only advances left apply() and the live-process
+     * replay path able to observe the forbidden middle).
+     */
+    private val ownerLock = Any()
+
+    /**
+     * Run [block] under the owner fence, after finishing any advance whose
+     * receipt committed but whose external pointer apply had not completed.
+     * Settling FIRST means no entry — write, read, or replay — is served while
+     * a committed advance is unreflected in the external schedule.
+     */
+    private inline fun <T> withOwnerFence(block: () -> T): T = synchronized(ownerLock) {
+        settlePendingAdvance()
+        block()
+    }
 
     companion object {
         /**
