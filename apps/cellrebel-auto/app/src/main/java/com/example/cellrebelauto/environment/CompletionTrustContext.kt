@@ -75,10 +75,23 @@ data class CompletionTrustContext(
     val applyReceiptIntentHash: String,
     /** Intent hash Auto recomputes locally from the canonical intent preimage (INV-23). */
     val locallyRecomputedIntentHash: String,
+    /**
+     * The lease id recorded in the durable apply receipt (INV-07). R6-F1 (§11.7): each observation's
+     * [ObservationSnapshot.leaseId] must equal THIS receipt lease — binding the observations to the
+     * receipt, not merely to each other. Without this field a predicate that checks only
+     * `pre.leaseId == post.leaseId` is a false oracle (two observations can agree on the wrong lease).
+     */
+    val applyReceiptLease: String,
     /** Target coordinates the attempt was dispatched to (INV-23). */
     val targetLat: Double,
     val targetLng: Double,
-    /** Frozen location tolerance in meters (INV-23, TRUSTED_LOCATION_TOLERANCE_METERS = 1.0). */
+    /**
+     * Location tolerance in meters (INV-23, TRUSTED_LOCATION_TOLERANCE_METERS = 1.0). R6-F1 (§11.7): this
+     * is a CALLER-supplied field; the GREEN predicate MUST gate on the FROZEN 1.0 m constant, NOT on this
+     * value — otherwise a caller injects its own pass threshold (Sol's round-5 caller-tolerance false-oracle).
+     * Kept on the context for audit/projection only; the `R6-F1 caller-injected loose tolerance` negative
+     * pins GREEN to the frozen bound by passing 50.0 here with coords ~20 m off.
+     */
     val locationToleranceMeters: Double,
     val preObservation: ObservationSnapshot,
     val postObservation: ObservationSnapshot

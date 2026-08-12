@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.data.PlanConfigStore
 import com.example.cellrebelauto.db.AppDatabase
@@ -291,7 +292,10 @@ class AutomationService : AccessibilityService() {
                     val c = configStore.config.first()
                     StageToggles(c.locationStageEnabled, c.testStageEnabled)
                 },
-                bridge = bridge
+                bridge = bridge,
+                // # R6-F4（§11.7）：生产构造真实 driver——使 §8.1 状态机在生产有真实消费者，
+                // # 杜绝"driver 仅测试构造、生产零调用点"。driver 当前为 no-op 骨架，注入无运行时副作用。
+                attemptDriver = APlusAttemptDriver(db.auditEventDao())
             )
             engine = newEngine
 

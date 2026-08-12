@@ -213,4 +213,39 @@ class MmG02EngineSelectionRedTest {
             task.status
         )
     }
+
+    // ---- R6-F3（§11.7）: completion-direction NEGATIVE through the production finalize entry ----
+
+    @Test
+    fun `R6-F3 finalizeAttemptSuccess must NOT complete a counter-full trusted-empty task on the legacy counter`() = runTest {
+        // §11.7 F3: Sol 的 combined attack 在同一个包里同时保留「trusted-only DAO 投影」+「finalize 仍自增
+        // legacy counter 并保留 counter 达成即 completed 的回退」——正反两个方向的既有 RED 都被 green，
+        // 因为没有 RED 断言「counter-full/trusted-empty 经生产 finalize 不得完成」。
+        // 本 RED 补这个负向：counter 满(1/1)、trusted 空(0)，经生产事务 finalizeAttemptSuccess 后，
+        // 任务必须保持未完成（completion 不得走 legacy counter）。
+        //   • 现状 finalize：自增 1→2 + completeTaskIfQuotaReached(counter 2>=1) ⇒ completed ⇒ RED。
+        //   • GREEN（finalize consult trusted）：trusted 0<1 ⇒ 不完成 ⇒ active ⇒ 通过。
+        //   • dual-path 攻击（保留 counter 回退）：counter 2>=1 ⇒ completed ⇒ 期望 active ⇒ 失败 ⇒ 杀攻击。
+        val (planId, taskId) = seedTask(completed = 1, required = 1, trusted = 0)
+        val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId))
+        val attemptId = db.testAttemptDao().insert(
+            TestAttempt(
+                taskId = taskId, runSessionId = sessionId, attemptOrdinal = 1,
+                successOrdinal = null, startedAt = 600L, runningObservedAt = 650L,
+                endedAt = null, status = "running", failureReason = null,
+                webBrowsingScore = null, videoStreamingScore = null,
+                latitude = 39.9, longitude = 116.4
+            )
+        )
+        repo.finalizeAttemptSuccess(
+            attemptId = attemptId, taskId = taskId, expectedCompletedSuccesses = 1,
+            runningObservedAt = 650L, endedAt = 700L, webScore = 8.0, videoScore = 7.0
+        )
+        val task = db.locationTaskDao().getTaskById(taskId)!!
+        assertTrue(
+            "R6-F3: counter-full(1/1)/trusted-empty(0) 任务经生产 finalize 不得被 legacy counter 完成；" +
+                "completion 必须只走 trusted 账本。实际 status=${task.status}（现状/dual-path 攻击 ⇒ completed）",
+            task.status != "completed"
+        )
+    }
 }
