@@ -48,26 +48,40 @@ class RecoveryCoordinator(
     ): ReconcileOutcome = ReconcileOutcome.INSUFFICIENT_EVIDENCE
 
     /**
-     * Schedule-advance consumer gate. Without a durable receipt Auto never assumes the schedule
-     * advanced (§5 boundary / Issue #5 addendum). ADVANCED requires ALL of: a durable receipt for
-     * [idempotencyKey], [intentRevisionMatches] (independent observe() agrees), [receiptRevisionIsStale]
-     * false, and [quotaExhausted] false — so a `receipt≠null ∧ boolean` impl that ignores stale /
-     * exhausted cannot pass the negatives. RED: always [ScheduleAdvanceState.NOT_ADVANCED], ignoring [log].
+     * Schedule-advance consumer gate (Sol round-4 §11.2 F2). Without a durable receipt Auto never
+     * assumes the schedule advanced (§5 boundary / Issue #5 addendum). ADVANCED requires ALL of: a
+     * durable receipt for [idempotencyKey] AND three facts that the gate ACQUIRES INSIDE this method
+     * (never caller-supplied): [observe] (the independent live observation matches the intent the
+     * receipt claims to have advanced past), [receiptRevision] (the receipt's revision is still fresh
+     * vs the live schedule), and [trustedQuota] (the task's trusted quota still has capacity).
      *
-     * @param intentRevisionMatches true iff an independent observe() matches the effective
-     *        intent / revision the receipt claims to have advanced past.
-     * @param receiptRevisionIsStale true iff the receipt's revision is stale relative to the live
-     *        schedule (a stale receipt must NOT advance).
-     * @param quotaExhausted true iff the task's trusted quota is already complete (an exhausted task
-     *        must NOT advance again).
+     * Why inject acquirers instead of booleans: the round-3 signature passed three caller-supplied
+     * booleans, which a `receipt≠null ∧ (a ∧ b ∧ c)` impl can satisfy by ANDing whatever the test
+     * passed — the facts are never independently observed, so the gate is a false oracle the test can
+     * only assert the branching of, not the acquisition. By moving the acquisition inside the gate, the
+     * GREEN body MUST call each acquirer to learn the fact, and the test asserts (via recording fakes)
+     * that the calls happened AND that each negative fact independently gates the decision (§11.2). A
+     * hardcode-ADVANCED bad impl that ignores the acquirers is caught twice: the ADVANCED case asserts
+     * acquirer calls (zero ⇒ fail), and the three negatives assert NOT_ADVANCED (hardcode ⇒ ADVANCED ⇒ fail).
+     *
+     * PRE-FREEZE SKELETON (§11.4 F2 — GREEN body frozen pending contract-v1 freeze #3): always returns
+     * [ScheduleAdvanceState.NOT_ADVANCED], IGNORING [log] and ALL THREE acquirers. The recording-fake
+     * acquirers register zero calls under the skeleton, so the §6.4-positive fixture (durable receipt +
+     * all three facts confirming) stays RED: the ADVANCED assertion fails, and (dormant behind it) the
+     * acquirer-call assertion would also fail. GREEN reads the receipt, calls all three acquirers, ANDs
+     * the acquired facts, ADVANCEs, and records a window-c checkpoint bound to the receipt.
+     *
+     * @param observe acquires whether the independent live observation matches the receipt's intent.
+     * @param receiptRevision acquires whether the receipt's revision is fresh (not stale).
+     * @param trustedQuota acquires whether the task's trusted quota still has capacity (not exhausted).
      */
     fun scheduleAdvanced(
         attemptId: Long,
         idempotencyKey: String,
-        intentRevisionMatches: Boolean,
-        receiptRevisionIsStale: Boolean,
-        quotaExhausted: Boolean,
-        now: Long
+        now: Long,
+        observe: ObserveIntentAcquirer,
+        receiptRevision: ReceiptRevisionAcquirer,
+        trustedQuota: TrustedQuotaAcquirer
     ): ScheduleAdvanceState = ScheduleAdvanceState.NOT_ADVANCED
 }
 
@@ -80,3 +94,35 @@ enum class ReconcileOutcome {
 }
 
 enum class ScheduleAdvanceState { ADVANCED, NOT_ADVANCED }
+
+/**
+ * Acquires (internally, never caller-supplied) whether the independent live observation matches the
+ * intent revision the receipt claims to have advanced past (Sol round-4 §11.2 F2). Injected into
+ * [RecoveryCoordinator.scheduleAdvanced] so the gate cannot be fooled by a caller-supplied boolean.
+ *
+ * # 观察匹配获取器：内部获取"独立观察是否匹配 receipt 声称的 intent"，杜绝调用方布尔注入
+ */
+fun interface ObserveIntentAcquirer {
+    /** @return true iff the live observation matches the receipt's claimed intent. */
+    fun matches(): Boolean
+}
+
+/**
+ * Acquires whether the receipt's revision is still fresh relative to the live schedule (§11.2 F2).
+ *
+ * # receipt 版本新鲜度获取器：receipt 版本相对当前 schedule 是否仍新鲜
+ */
+fun interface ReceiptRevisionAcquirer {
+    /** @return true iff the receipt's revision is fresh (not stale). */
+    fun isFresh(): Boolean
+}
+
+/**
+ * Acquires whether the task's trusted quota still has capacity (is NOT yet exhausted) (§11.2 F2).
+ *
+ * # 可信配额容量获取器：任务的可信配额是否仍有余量（未满）
+ */
+fun interface TrustedQuotaAcquirer {
+    /** @return true iff the task's trusted quota still has capacity. */
+    fun hasCapacity(): Boolean
+}
