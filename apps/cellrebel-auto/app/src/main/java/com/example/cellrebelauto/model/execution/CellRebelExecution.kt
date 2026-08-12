@@ -55,7 +55,7 @@ data class CellRebelExecution(
     // asserts they are populated). GREEN copies them from the evidence detail before insert. A bad impl
     // that persists digest-only (the §11.3 F1 attack) leaves them null and fails the read-back.
     //
-    // Nullable also so a fresh v6 row / a not-yet-classified execution is representable. The trust
+    // Nullable also so a fresh v5 row / a not-yet-classified execution is representable. The trust
     // predicate never reads these directly (it reads the ObservationSnapshot pair); they are the
     // DURABLE EVIDENCE the ledger row must carry for audit + replay (§7.1 完整证据).
     /** §7.1 基线态: observed baseline state text before the run (null until evidence-persisted). */
