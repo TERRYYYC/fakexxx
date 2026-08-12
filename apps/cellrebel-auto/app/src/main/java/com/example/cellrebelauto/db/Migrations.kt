@@ -55,7 +55,13 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
                 `classifiedAt` INTEGER,
                 `startedAtElapsed` INTEGER NOT NULL,
                 `runningConfirmedAtElapsed` INTEGER NOT NULL,
-                `completedAtElapsed` INTEGER NOT NULL
+                `completedAtElapsed` INTEGER NOT NULL,
+                `baselineRunningState` TEXT,
+                `runningMarkerText` TEXT,
+                `runningDurationMs` INTEGER,
+                `webBrowsingScore` REAL,
+                `videoStreamingScore` REAL,
+                `roundTimestampsElapsed` TEXT
             )
             """.trimIndent()
         )
@@ -135,32 +141,5 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
             SELECT id, completedSuccesses, status, 4, $migratedAt FROM location_tasks
             """.trimIndent()
         )
-    }
-}
-
-/**
- * v5 → v6 (Issue #5 R4-F1): adds the §7.1 / §8.6 full completion-evidence field set to
- * `cellrebel_executions` — baseline state / marker text / RUNNING duration / both scores / per-round
- * timestamps.
- *
- * Non-destructive (INV-24): every new column is NULLABLE and added with `ALTER TABLE … ADD COLUMN`, so
- * no existing row is rebuilt or lost. Existing rows (and the skeleton entrypoint) leave the new columns
- * NULL; the §11.4 skeleton persists digest+3clocks only. The GREEN entrypoint populates them from the
- * evidence detail before insert. No trusted quota is minted by this migration (INV-05/06 — a migration
- * never produces an A+ evidence chain).
- *
- * Nullable columns need no DEFAULT (SQLite allows ADD COLUMN of a nullable column without one), so this
- * works on both fresh-upgrade (no rows) and populated databases.
- *
- * # v5→v6 迁移：cellrebel_executions 增 6 个可空证据列（基线/marker/时长/分数×2/轮时间戳），非破坏性
- */
-val MIGRATION_5_6 = object : Migration(5, 6) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("ALTER TABLE cellrebel_executions ADD COLUMN baselineRunningState TEXT")
-        db.execSQL("ALTER TABLE cellrebel_executions ADD COLUMN runningMarkerText TEXT")
-        db.execSQL("ALTER TABLE cellrebel_executions ADD COLUMN runningDurationMs INTEGER")
-        db.execSQL("ALTER TABLE cellrebel_executions ADD COLUMN webBrowsingScore REAL")
-        db.execSQL("ALTER TABLE cellrebel_executions ADD COLUMN videoStreamingScore REAL")
-        db.execSQL("ALTER TABLE cellrebel_executions ADD COLUMN roundTimestampsElapsed TEXT")
     }
 }

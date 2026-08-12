@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "d7b376c6a93b8068f5635c6a56750359",
+    "identityHash": "7c6f56a161586956e4affff41c439210",
     "entities": [
       {
         "tableName": "test_results",
@@ -487,7 +487,7 @@
       },
       {
         "tableName": "cellrebel_executions",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `executionId` TEXT NOT NULL, `attemptId` INTEGER NOT NULL, `completionEvidenceWire` INTEGER NOT NULL, `evidencePayloadDigest` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `classifiedAt` INTEGER, `startedAtElapsed` INTEGER NOT NULL, `runningConfirmedAtElapsed` INTEGER NOT NULL, `completedAtElapsed` INTEGER NOT NULL)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `executionId` TEXT NOT NULL, `attemptId` INTEGER NOT NULL, `completionEvidenceWire` INTEGER NOT NULL, `evidencePayloadDigest` TEXT NOT NULL, `startedAt` INTEGER NOT NULL, `classifiedAt` INTEGER, `startedAtElapsed` INTEGER NOT NULL, `runningConfirmedAtElapsed` INTEGER NOT NULL, `completedAtElapsed` INTEGER NOT NULL, `baselineRunningState` TEXT, `runningMarkerText` TEXT, `runningDurationMs` INTEGER, `webBrowsingScore` REAL, `videoStreamingScore` REAL, `roundTimestampsElapsed` TEXT)",
         "fields": [
           {
             "fieldPath": "id",
@@ -547,6 +547,36 @@
             "columnName": "completedAtElapsed",
             "affinity": "INTEGER",
             "notNull": true
+          },
+          {
+            "fieldPath": "baselineRunningState",
+            "columnName": "baselineRunningState",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "runningMarkerText",
+            "columnName": "runningMarkerText",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "runningDurationMs",
+            "columnName": "runningDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "webBrowsingScore",
+            "columnName": "webBrowsingScore",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "videoStreamingScore",
+            "columnName": "videoStreamingScore",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "roundTimestampsElapsed",
+            "columnName": "roundTimestampsElapsed",
+            "affinity": "TEXT"
           }
         ],
         "primaryKey": {
@@ -751,7 +781,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd7b376c6a93b8068f5635c6a56750359')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7c6f56a161586956e4affff41c439210')"
     ]
   }
 }
