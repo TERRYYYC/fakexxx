@@ -306,14 +306,29 @@ Build: `apps/cellrebel-auto/gradlew -p apps/cellrebel-auto testDebugUnitTest` �
 Migration5to6Test — seeded row survives 5→6 with v5 cols intact + six new cols NULL, trusted count
 unchanged, no destructive fallback). The 37 failures are the behavioral RED across F1/F2/F3/F4.
 
+**Round-4 F1 integration-RED landed + verified (HEAD `74464f1`, 189/39/0):** the §11.2 F1 / §11.4 F1
+production persist+mint entrypoint — the integration RED that was the critical path to §11.3 — is done.
+- `PlanRepository.recordTrustedCompletion(ctx)` (new): the production trust-gated completion entrypoint.
+  Persists the `CellRebelExecution` evidence row + mints `TrustedQuotaEntry` on `TrustPolicy` PASS
+  (§8.1 DECIDING→QUOTA_COMMITTED). SKELETON (pre-freeze, GREEN body frozen): (1) persists ONLY digest +
+  the three §6.4.2 elapsed clocks, DROPPING the §7.1 detail; (2) evaluates `TrustPolicy` but MINTS
+  NOTHING. Drives the REAL Room `cellrebel_executions` + `trusted_quota_entries` tables — no isolated
+  helper. (`AttemptExecutionDao.insert` previously had zero production call sites.)
+- AREA 5 in `TrustedLedgerRedTest` (3 tests) drives the entrypoint against the in-memory DB and asserts
+  durable effects through the real DAOs: (a) RED — a §6.4-positive completion read back by executionId
+  carries the FULL §7.1 field set (skeleton nulls them); (b) RED — §6.4-positive ⇒ exactly one
+  TrustedQuotaEntry + PASS (skeleton mints nothing, returns FAIL); (c) negative — §6.4-failing (HOOK
+  contradiction) ⇒ zero entries + FAIL (passes under skeleton, guards unconditional-mint GREEN).
+  `assertNotNull` precedes every `!!` unwrap ⇒ 0 errors.
+- Build: 186 → **189 tests** (+3 AREA 5), 37 → **39 failed** (+2 new RED; the AREA 5 negative passes),
+  **0 errors**. No regression to the 37 pre-existing REDs; all migration tests still PASS.
+
 **Still open before Sol re-review:**
-1. F1 integration-RED body (§11.2 F1 / §11.4 F1): the production persist+mint entrypoint SKELETON
-   (persist digest+3clocks, mint nothing) wired to the real flow + a read-back RED asserting the FULL
-   §7.1 field set populated + symmetric POST + PASS ⇒ exactly one TrustedQuotaEntry minted. The v6
-   columns now exist for this; the entrypoint + read-back test are NOT yet written.
-2. §11.3 comprehensive bad-impl re-red gate across F1/F2/F3/F4 — cannot complete until #1 lands (F1 has
-   no integration test to attack yet). Then capture the new HEAD + re-red evidence and request Sol
-   (do NOT post until the comprehensive bad impl cannot green).
+1. ~~F1 integration-RED body~~ — **DONE** (`74464f1`, 189/39/0).
+2. §11.3 comprehensive bad-impl re-red gate across F1/F2/F3/F4 — now UNBLOCKED (F1 has its integration
+   test). Construct the combined 4-finding unit-satisfying attack; require every finding's integration
+   test STILL RED + full suite more-red-never-green. Then capture the new HEAD + re-red evidence and
+   request Sol (do NOT post until the comprehensive bad impl cannot green).
 
 ---
 
