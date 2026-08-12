@@ -157,44 +157,48 @@ class EnvironmentLeaseStore(
         }
     }
 
+    // Shared total codec (Terra round-4/5): FREE strings frame without a
+    // separator, and nullable fields (releaseIdempotencyKey, revokeSource,
+    // recoveryEvidenceRef) encode null NATIVELY — no `?: ""` / `.ifEmpty{null}`
+    // sentinel, so an empty idempotency key survives as "" not null.
     private fun serialize(r: LeaseRecord): String =
-        listOf(
-            r.leaseId,
-            r.callerApplicationId,
-            r.callerSignerDigest,
-            r.acceptedIntentHash,
-            r.state.name,
-            r.applyIdempotencyKey,
-            r.startingEnvironmentRevision.toString(),
-            r.deadlineElapsedRealtimeMs.toString(),
-            r.applyOwnerGeneration.toString(),
-            r.releaseIdempotencyKey ?: "",
-            r.residualReasonWires.joinToString(",").ifEmpty { "" },
-            r.revokeSource?.name ?: "",
-            r.recoveryEvidenceRef ?: "",
-        ).let(DurableFieldCodec::encode)
+        DurableFieldCodec.encode(
+            listOf(
+                r.leaseId,
+                r.callerApplicationId,
+                r.callerSignerDigest,
+                r.acceptedIntentHash,
+                r.state.name,
+                r.applyIdempotencyKey,
+                r.startingEnvironmentRevision.toString(),
+                r.deadlineElapsedRealtimeMs.toString(),
+                r.applyOwnerGeneration.toString(),
+                r.releaseIdempotencyKey,
+                // residualReasonWires is a non-null Int list; "" ⟺ empty is
+                // injective (an Int list can encode to nothing else).
+                r.residualReasonWires.joinToString(","),
+                r.revokeSource?.name,
+                r.recoveryEvidenceRef,
+            ),
+        )
 
     private fun deserialize(s: String): LeaseRecord {
-        // Shared total codec: applyIdempotencyKey / releaseIdempotencyKey are
-        // FREE strings; tab-framing shifted every field when they held a tab
-        // (Terra round-4 class).
         val parts = DurableFieldCodec.decode(s)
         return LeaseRecord(
-            leaseId = parts[0],
-            callerApplicationId = parts[1],
-            callerSignerDigest = parts[2],
-            acceptedIntentHash = parts[3],
-            state = LeaseState.valueOf(parts[4]),
-            applyIdempotencyKey = parts[5],
-            startingEnvironmentRevision = parts[6].toLong(),
-            deadlineElapsedRealtimeMs = parts[7].toLong(),
-            applyOwnerGeneration = parts[8].toLong(),
-            releaseIdempotencyKey = parts[9].ifEmpty { null },
-            residualReasonWires = parts[10].takeIf { it.isNotEmpty() }
+            leaseId = parts[0]!!,
+            callerApplicationId = parts[1]!!,
+            callerSignerDigest = parts[2]!!,
+            acceptedIntentHash = parts[3]!!,
+            state = LeaseState.valueOf(parts[4]!!),
+            applyIdempotencyKey = parts[5]!!,
+            startingEnvironmentRevision = parts[6]!!.toLong(),
+            deadlineElapsedRealtimeMs = parts[7]!!.toLong(),
+            applyOwnerGeneration = parts[8]!!.toLong(),
+            releaseIdempotencyKey = parts[9],
+            residualReasonWires = parts[10]!!.takeIf { it.isNotEmpty() }
                 ?.split(",")?.map { it.toInt() } ?: emptyList(),
-            revokeSource = parts[11].takeIf { it.isNotEmpty() }
-                ?.let { RevokeSource.valueOf(it) },
-            recoveryEvidenceRef = parts[12].ifEmpty { null },
+            revokeSource = parts[11]?.let { RevokeSource.valueOf(it) },
+            recoveryEvidenceRef = parts[12],
         )
     }
 }

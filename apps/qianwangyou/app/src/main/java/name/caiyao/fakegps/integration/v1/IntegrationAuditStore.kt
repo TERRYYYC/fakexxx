@@ -63,29 +63,33 @@ class DurableIntegrationAuditStore(
         }
     }
 
+    // Shared total codec (Terra round-4/5): operationId is the caller idempotency
+    // key (a FREE string) on advance; correlation ids are nullable and encode
+    // null NATIVELY — no sentinel, so operationId="" survives as "" not null and
+    // append-only correlation identity stays faithful.
     private fun serializeEvent(e: QwyAuditEvent): String =
-        listOf(
-            e.seq.toString(),
-            e.atElapsedRealtimeMs.toString(),
-            e.event,
-            e.callerApplicationId ?: "",
-            e.leaseId ?: "",
-            e.operationId ?: "",
-            e.payloadDigest ?: "",
-        ).let(DurableFieldCodec::encode)
+        DurableFieldCodec.encode(
+            listOf(
+                e.seq.toString(),
+                e.atElapsedRealtimeMs.toString(),
+                e.event,
+                e.callerApplicationId,
+                e.leaseId,
+                e.operationId,
+                e.payloadDigest,
+            ),
+        )
 
     private fun deserializeEvent(s: String): QwyAuditEvent {
-        // Shared total codec: operationId is the caller idempotency key (a FREE
-        // string) on advance — tab-framing corrupted the record (Terra round-4 class).
         val parts = DurableFieldCodec.decode(s)
         return QwyAuditEvent(
-            seq = parts[0].toLong(),
-            atElapsedRealtimeMs = parts[1].toLong(),
-            event = parts[2],
-            callerApplicationId = parts[3].ifEmpty { null },
-            leaseId = parts[4].ifEmpty { null },
-            operationId = parts[5].ifEmpty { null },
-            payloadDigest = parts.getOrNull(6)?.ifEmpty { null },
+            seq = parts[0]!!.toLong(),
+            atElapsedRealtimeMs = parts[1]!!.toLong(),
+            event = parts[2]!!,
+            callerApplicationId = parts[3],
+            leaseId = parts[4],
+            operationId = parts[5],
+            payloadDigest = parts[6],
         )
     }
 }
