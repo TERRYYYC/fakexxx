@@ -270,6 +270,61 @@ class ContractRoundTripTest {
         )
     }
 
+    /**
+     * A schedule that has been exhausted — the terminal item is retained, the
+     * schedule does not wrap, and [CapabilitySnapshotV1.exhausted] is true (§6.7.1,
+     * v1.54/v1.55). The `currentItemId` is the terminal item (not null — null is
+     * outcome encoding in [AdvanceReceiptV1.advancedToItemId], not state encoding).
+     */
+    @Test
+    fun `CapabilitySnapshotV1 with exhausted schedule survives the parcel`() {
+        val exhaustedSchedule = CapabilitySnapshotV1(
+            serviceVersion = "3.0.0",
+            supportedModeWires = listOf(DeliveryModeV1.SYSTEM_MOCK.wire),
+            supportedVerificationLevelWires = listOf(
+                VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            ),
+            continuityCoverageWire = ContinuityCoverageV1.FULL.wire,
+            environmentRevision = 50L,
+            profileRefs = listOf("p1"),
+            scheduleRefs = listOf("s1"),
+            currentScheduleId = "s1",
+            currentItemId = "item-last",
+            scheduleVersion = 7L,
+            exhausted = true,
+        )
+        val restored = roundTrip(exhaustedSchedule)
+        assertEquals(exhaustedSchedule, restored)
+        assertEquals(true, restored.exhausted)
+        assertEquals("item-last", restored.currentItemId)
+        assertEquals(7L, restored.scheduleVersion)
+    }
+
+    /**
+     * PreflightReportV1 with no active schedule: all three schedule group fields
+     * must be null together (§6.7.1 group invariant, v1.55).
+     */
+    @Test
+    fun `PreflightReportV1 all-null schedule group survives the parcel`() {
+        val noSchedule = PreflightReportV1(
+            acceptedIntentHash = CanonicalIntentDigestV1.compute(intent()),
+            scheduleDecisionWire = ScheduleDecisionV1.DENIED.wire,
+            waitUntilEpochMs = null,
+            achievableVerificationLevelWire = VerificationLevelV1.NONE.wire,
+            continuityCoverageWire = ContinuityCoverageV1.NONE.wire,
+            environmentRevision = 1L,
+            blockingReasonWires = listOf(ContractErrorCodeV1.SCHEDULE_DENIED.wire),
+            scheduleItemId = null,
+            scheduleVersion = null,
+            exhausted = null,
+        )
+        val restored = roundTrip(noSchedule)
+        assertEquals(noSchedule, restored)
+        assertNull("scheduleItemId must stay null", restored.scheduleItemId)
+        assertNull("scheduleVersion must stay null", restored.scheduleVersion)
+        assertNull("exhausted must stay null", restored.exhausted)
+    }
+
     private fun proof() = CompletionProofV1(
         scheduleItemId = "item-7",
         trustedSuccessCount = 12,
