@@ -213,20 +213,25 @@ class EngineTrustedPathRedTest {
         clock: VirtualClock,
         driver: APlusAttemptDriver? = null,
         backend: APlusBackend? = null
-    ) = AutomationEngine(
-        planId = planId,
-        planRepository = repo,
-        cellRebelRunner = runner,
-        gpsSetter = gps,
-        bufferGate = BufferGate(0, clock.nowMs),
-        testTimeoutMs = 90_000L,
-        gpsSettleMs = 0L,
-        nowMs = clock.nowMs,
-        delayMs = clock.delayMs,
-        attemptDriver = driver,
-        recoveryCoordinator = backend?.let { APlusComposition.recoveryCoordinator(it) },
-        completionEvidenceSource = backend?.let { APlusComposition.completionEvidenceSource(it) }
-    )
+    ): AutomationEngine {
+        // Service-used composition oracle (Sol round-11 P1-1): the SAME engineAplusParams the Service
+        // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
+        val params = backend?.let { APlusComposition.engineAplusParams(it) }
+        return AutomationEngine(
+            planId = planId,
+            planRepository = repo,
+            cellRebelRunner = runner,
+            gpsSetter = gps,
+            bufferGate = BufferGate(0, clock.nowMs),
+            testTimeoutMs = 90_000L,
+            gpsSettleMs = 0L,
+            nowMs = clock.nowMs,
+            delayMs = clock.delayMs,
+            attemptDriver = driver,
+            recoveryCoordinator = params?.first,
+            completionEvidenceSource = params?.second
+        )
+    }
 
     // ---- Seed helpers ----
 
@@ -366,6 +371,8 @@ class EngineTrustedPathRedTest {
         assertEquals("§7.1 baseline state must survive (skeleton drops it ⇒ RED)", "IDLE", rows.first().baselineRunningState)
         assertNotNull("a §6.4-passing completion must mint a trusted entry (skeleton ⇒ RED)", db.trustedQuotaDao().getByAttempt(realAttemptId))
         assertEquals("a §6.4-passing completion must terminalize succeeded (skeleton ⇒ RED)", "succeeded", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.status)
+        // P2 dormant guardrail (GREEN): successOrdinal is the trusted count, 1-based (never 0).
+        assertEquals("a first trusted success must carry successOrdinal = 1", 1, db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.successOrdinal)
         // legacy-zero
         assertEquals(0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
     }
@@ -439,6 +446,7 @@ class EngineTrustedPathRedTest {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -495,6 +503,7 @@ class EngineTrustedPathRedTest {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
         val backend = FakeBackend(executor, log, SeededObserve(mapOf(77L to true)), SeededRevision(mapOf(applyKey(77L) to true)), SeededQuota(mapOf(77L to true)), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)

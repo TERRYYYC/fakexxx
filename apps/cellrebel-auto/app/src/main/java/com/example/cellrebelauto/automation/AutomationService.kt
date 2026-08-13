@@ -280,12 +280,10 @@ class AutomationService : AccessibilityService() {
                 return@launch
             }
 
-            // # R8-F1/F2（Sol round-7 P1-1 / round-8 P1-1）：A+ 组合根。生产经 productionBackend() 取得
-            // # 非 null 的 fail-closed 骨架束（adapter 骨架恒 fail-closed），使引擎走 A+ 路径而非 legacy。
-            // # 测试经同样的 recoveryCoordinator/completionEvidenceSource 两函数接线（同一组合点）。
+            // # R8-F1/F2（Sol round-7 P1-1 / round-11 P1-1）：A+ 组合根。生产经 engineAplusParams 从
+            // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
             val aplusBackend: APlusBackend = APlusComposition.productionBackend()
-            val aplusCoordinator = APlusComposition.recoveryCoordinator(aplusBackend)
-            val aplusEvidence = APlusComposition.completionEvidenceSource(aplusBackend)
+            val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
             val newEngine = AutomationEngine(
                 planId = planId,
                 planRepository = planRepository,

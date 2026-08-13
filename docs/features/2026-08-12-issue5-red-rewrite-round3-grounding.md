@@ -871,3 +871,32 @@ re-preobserve/classify/postobserve/ledger-truth crash matrix — GREEN body. (3)
 exact fields are asserted (R11); the residual is that the GREEN must produce them.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.14 Round-13 — Service-used composition oracle + M-CR-08 replay + fixture receipt seeds + carrier precision (Sol round-11 advisory answered)
+
+**Status.** Sol's round-11 advisory (`2594095`) left 6 P1 + P2. R13 closes the tractable gaps on top of R12.
+**Baseline: `202 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.**
+Schema stays exact v5.
+
+**Repairs.**
+- **P1-1 Service-used composition oracle** — `APlusComposition.engineAplusParams(backend)` is now the SINGLE
+  composition point `AutomationService` uses (coordinator + evidence source from a backend); the tests drive
+  through the SAME function (`buildEngine` destructures it). A Service-disconnect bad impl cannot diverge
+  from what the tests exercise.
+- **P1-3 release replay** — `releaseLease` now replays a durable release receipt (same lease + key + digest)
+  WITHOUT re-calling the provider (M-CR-08 zero-reinvoke); a FAILED release outcome returns null (no forged
+  RELEASED receipt). Two new guardrail tests pin both polarities.
+- **P1-4 receipt-first fixture** — the RELEASE_PENDING / DECIDING crash fixtures now seed a durable apply
+  receipt (not just the provider effect), so a correct receipt-first schedule gate can hold.
+- **P2 carrier precision** — `releaseCallsFor(attemptId)` now filters by attemptId (the ReleaseCall carries
+  it); the F1 positive pins `successOrdinal == 1` (1-based trusted count, never 0).
+
+**Honest disclosures (GREEN-bound, not addressed pre-freeze).** (1) `RecordedReceipt.leaseId` — the
+window-c `ReplayedApply` must recover the opaque lease from the receipt without re-calling the provider; that
+is the GREEN reconcile orchestration (skeleton returns InsufficientEvidence). (2) The full M-CR-03..07 phase
+restart matrix (QUOTA_COMMITTED/UNVERIFIED_RECORDED/CLOSED crash → re-preobserve/classify/postobserve /
+ledger-truth replay) — GREEN body. (3) §6.3.1 `acceptedIntentHash` vs §6.3.4 `requestDigest` are still folded
+into one placeholder; the frozen domain-separated framing (profile/schedule/verification/window, length-prefix)
+is contract-owned (#3). (4) The negative's distinctive evidenceDigest is produced by the GREEN carrier.
+
+[深深/deepseek-v4-pro🐾]
