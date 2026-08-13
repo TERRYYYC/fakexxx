@@ -990,3 +990,28 @@ ledger-truth replay/unique-insert) and the Service-owned factory / production ca
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.18 Round-17 — recover by append-only carrier truth + release dual-index atomic (Sol round-16 advisory answered, partially)
+
+**Status.** Sol's round-16 advisory (`b7106c8`). R17 closes the core Auto-local seam: recovery consults the
+append-only ledger/unverified carrier as the source of truth, never the bare phase string. **Baseline:
+`209 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repairs.**
+- **P1-1 recover by carrier truth** — `advanceAfterRelease` now projects the terminal truth from
+  `hasTrustedEntry` / `hasUnverifiedRecord` (the append-only ledger / unverified record), never the bare
+  `aplusState` string. An M-CR-07 crash (ledger committed, phase not yet updated) projects to succeeded from
+  the ledger, and an unverified truth to failed/UNTRUSTED — the phase string can no longer degrade a
+  committed truth to `interrupted`.
+- **P1-4 release dual-index atomic** — `releaseLease` requires BOTH the key-index and lease-index to resolve
+  to the SAME receipt; a partial (key-only / lease-only) or divergent index is fail-closed (never a success
+  replay), and only "both null" proceeds to a fresh provider call.
+
+**Remaining owner-red (not yet in this SHA):** the `CrashMatrixTest` M-CR-03..07 per-phase RED harness, the
+CLOSED→terminal single-transaction window, the durable `ADVANCE_PENDING`/gate-custody owner + second-restart
+RED, and the Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

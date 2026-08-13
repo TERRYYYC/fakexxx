@@ -766,15 +766,16 @@ class AutomationEngine(
         return advanceAfterRelease(crashed, coordinator)
     }
 
-    /** After a durable release receipt, project the terminal truth, then gate the resume. */
+    /** After a durable release receipt, project the terminal truth from the append-only carrier, then gate resume. */
     private suspend fun advanceAfterRelease(crashed: TestAttempt, coordinator: RecoveryCoordinator): Boolean {
-        // Terminal truth projection FIRST (Sol round-15 P1-1): it must NOT be blocked by the schedule gate —
-        // a committed trusted truth (quota reached ⇒ hasCapacity=false ⇒ gate holds) must still project to
-        // succeeded, and an unverified truth to failed/UNTRUSTED. The gate only decides RESUME, not truth.
-        when (crashed.aplusState) {
-            "QUOTA_COMMITTED" -> planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
-            "UNVERIFIED_RECORDED" -> planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
-            "CLOSED" -> {} // already terminal — no-op
+        // Terminal truth projection FIRST, sourced from the append-only carrier (Sol round-16 P1-1): the
+        // trusted ledger / unverified record is the durable authority — NEVER the bare phase string. An
+        // M-CR-07 crash (ledger committed, phase not yet updated) must project from the ledger, not DECIDING.
+        when {
+            planRepository.hasTrustedEntry(crashed.id) ->
+                planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
+            planRepository.hasUnverifiedRecord(crashed.id) ->
+                planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
             else -> planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
         }
         planRepository.markAplusState(crashed.id, "CLOSED")

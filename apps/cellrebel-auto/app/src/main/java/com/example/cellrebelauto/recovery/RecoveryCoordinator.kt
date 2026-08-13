@@ -162,24 +162,24 @@ class RecoveryCoordinator(
         // ZERO provider call and the prior receipt preserved.
         val byKey = log.releaseReceiptForKey(idempotencyKey)
         val byLease = log.releaseReceiptFor(leaseId)
-        // Dual-index consistency (Sol round-15 P1-2): if both indexes resolve but to DIFFERENT receipts,
-        // the store is inconsistent → conflict, never a success replay.
-        if (byKey != null && byLease != null && byKey != byLease) {
+        // Dual-index consistency (Sol round-15 P1-2 / round-16 P1-4): a PARTIAL (key-only or lease-only) or
+        // DIVERGENT index is fail-closed; only "both null" (no receipt) proceeds to a fresh provider call,
+        // and "both non-null + equal" replays when the exact tuple + RELEASED hold.
+        if (byKey == null && byLease == null) {
+            val releaseOutcome = executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
+            if (releaseOutcome.outcome != "RELEASED") {
+                // Release incomplete / failed → fail-closed (§8.1 RELEASE_INCOMPLETE → RECOVERY_REQUIRED).
+                return null
+            }
+            return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now)
+        }
+        if (byKey == null || byLease == null || byKey != byLease) {
             return null
         }
-        if (byKey != null && byKey.leaseId == leaseId && byKey.releaseDigest == releaseDigest && byKey.resultOutcome == "RELEASED") {
+        if (byKey.leaseId == leaseId && byKey.releaseDigest == releaseDigest && byKey.resultOutcome == "RELEASED") {
             return byKey
         }
-        if (byKey != null || byLease != null) {
-            return null
-        }
-        val releaseOutcome = executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
-        if (releaseOutcome.outcome != "RELEASED") {
-            // Release incomplete / failed → fail-closed: no durable release receipt, the lease is still
-            // unresolved (§8.1 RELEASE_INCOMPLETE → RECOVERY_REQUIRED; Sol round-10 P1-3).
-            return null
-        }
-        return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now)
+        return null
     }
 }
 
