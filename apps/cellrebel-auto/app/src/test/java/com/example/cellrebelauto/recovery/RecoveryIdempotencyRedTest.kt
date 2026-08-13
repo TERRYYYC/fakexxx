@@ -500,4 +500,32 @@ class RecoveryIdempotencyRedTest {
         assertTrue("zero provider call for this attempt (shadow-key oracle)", executor.releaseCallsFor(1L).isEmpty())
         assertEquals("zero release effect", 0, executor.releaseEffectCount(1L))
     }
+
+    // ---- release partial-index (Sol round-18 P1-5) ----
+
+    @Test
+    fun `release with a key-only partial index fails closed`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceiptKeyOnly(idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("a key-only (partial) index must fail closed, never a success replay", receipt)
+        assertTrue("zero provider call", executor.releaseCallsFor(1L).isEmpty())
+    }
+
+    @Test
+    fun `release with a lease-only partial index fails closed`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceiptLeaseOnly(idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("a lease-only (partial) index must fail closed, never a success replay", receipt)
+        assertTrue("zero provider call", executor.releaseCallsFor(1L).isEmpty())
+    }
 }

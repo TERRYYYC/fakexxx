@@ -768,13 +768,27 @@ class AutomationEngine(
 
     /** After a durable release receipt, project the terminal truth from the append-only carrier, then gate resume. */
     private suspend fun advanceAfterRelease(crashed: TestAttempt, coordinator: RecoveryCoordinator): Boolean {
-        // Terminal truth projection FIRST, sourced from the append-only carrier (Sol round-16 P1-1): the
-        // trusted ledger / unverified record is the durable authority — NEVER the bare phase string. An
-        // M-CR-07 crash (ledger committed, phase not yet updated) must project from the ledger, not DECIDING.
+        // Terminal truth projection FIRST, sourced from the append-only carrier (Sol round-16/18 P1-1/2):
+        // the trusted ledger / unverified record is the durable authority — never the bare phase string.
+        val trusted = planRepository.getTrustedEntry(crashed.id)
+        val unverified = planRepository.getUnverifiedRecord(crashed.id)
+        // Conflicting append-only truths (both a trusted mint AND an unverified record) are a fail-closed
+        // invariant break (§8.1 PASS/FAIL are mutually exclusive), never silently promoted to trusted.
+        if (trusted != null && unverified != null) {
+            planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+            aplusPause("conflicting trusted + unverified carriers for attempt ${crashed.id}")
+            return false
+        }
         when {
-            planRepository.hasTrustedEntry(crashed.id) ->
+            trusted != null && trusted.taskId == crashed.taskId ->
                 planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
-            planRepository.hasUnverifiedRecord(crashed.id) ->
+            trusted != null && trusted.taskId != crashed.taskId -> {
+                // A wrong-task carrier violates §7.1 attempt+task binding → fail-closed, never succeeded.
+                planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                aplusPause("trusted carrier taskId mismatch for attempt ${crashed.id} (${trusted.taskId} != ${crashed.taskId})")
+                return false
+            }
+            unverified != null ->
                 planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
             else -> planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
         }

@@ -1039,3 +1039,27 @@ RED, and the Service-owned factory / production call-site disconnect attack.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.20 Round-19 — carrier task binding + dual-truth conflict + release partial-index (Sol round-18 advisory answered)
+
+**Status.** Sol's round-18 advisory (`fd32e88`). R19 closes the carrier-identity + partial-index owner-red.
+**Baseline: `215 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.**
+Schema exact v5.
+
+**Repairs.**
+- **P1-1 carrier task binding** — the recovery now reads the TYPED carrier (`getTrustedEntry` /
+  `getUnverifiedRecord`) and verifies the trusted entry's `taskId == crashed.taskId`; a wrong-task carrier
+  is fail-closed (`RECOVERY_REQUIRED`), never projected to succeeded.
+- **P1-2 dual-truth conflict** — a conflicting trusted + unverified carrier (both append-only rows for the
+  same attempt) is fail-closed (`RECOVERY_REQUIRED`), never silently promoted to trusted via code order.
+- **P1-5 release partial-index** — `FakeDurableRecoveryLog` gains key-only / lease-only seed variants; two
+  guardrail tests prove a partial index fails closed (never a success replay).
+
+**Remaining owner-red (next SHA):** gate-held second-restart custody (durable `ADVANCE_PENDING`/checkpoint
+owner), CLOSED→generic-terminal single-transaction window, M-CR-03..05 re-preobserve/classify/postobserve
+(GREEN body), and the Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

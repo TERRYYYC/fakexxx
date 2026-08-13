@@ -8,6 +8,8 @@ import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
+import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.AttemptWithTask
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
@@ -226,12 +228,13 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getAplusLeaseId(attemptId: Long): String? =
         db.testAttemptDao().getAplusLeaseId(attemptId)
 
-    // # 恢复真相载体（Sol round-16 P1-1）：可信账本 / 未验证记录是 append-only 权威，绝不信裸 phase 字符串
-    suspend fun hasTrustedEntry(attemptId: Long): Boolean =
-        db.trustedQuotaDao().getByAttempt(attemptId) != null
+    // # 恢复真相载体（Sol round-16 P1-1 / round-18 P1-1）：可信账本 / 未验证记录是 append-only 权威，
+    // # 返回 typed entry 以绑定 attempt+task 并检测跨表矛盾，绝不信裸 phase 字符串
+    suspend fun getTrustedEntry(attemptId: Long): TrustedQuotaEntry? =
+        db.trustedQuotaDao().getByAttempt(attemptId)
 
-    suspend fun hasUnverifiedRecord(attemptId: Long): Boolean =
-        db.unverifiedAttemptRecordDao().getByAttempt(attemptId) != null
+    suspend fun getUnverifiedRecord(attemptId: Long): UnverifiedAttemptRecord? =
+        db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
 
     // # A+ PASS 终态化（P1-5）：标记 attempt succeeded，successOrdinal 由可信计数投影 1-based（Sol round-9
     // # P1-6：绝不动 legacy completedSuccesses、绝不写 successOrdinal=0）。
