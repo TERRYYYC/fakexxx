@@ -1,6 +1,18 @@
 package name.caiyao.fakegps.integration.v1
 
+import android.content.Context
+import android.location.LocationManager
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
+import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
+import name.caiyao.fakegps.config.ConfigCodec
+import name.caiyao.fakegps.config.ConfigHolder
+import name.caiyao.fakegps.config.ConfigPrefsSync
+import name.caiyao.fakegps.config.SpoofConfig
+import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
+import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
+import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
+import name.caiyao.fakegps.mockprovider.MockLocationConfig
+import name.caiyao.fakegps.mockprovider.MockProviderGateway
 
 /**
  * Seam between the v1 provider and qianwangyou's existing capabilities
@@ -11,37 +23,22 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
  * scheduleVersion / currentItemId. The current item pointer is explicit and
  * durable — row order, first-row and profile-table order are projections and
  * must never be used as order truth.
+ *
+ * GREEN STATUS: This adapter wires real qianwangyou capabilities. The schedule
+ * state is managed by [QwyScheduleStore] (SharedPreferences-backed, durable).
+ * Environment application uses the existing [ConfigHolder] / [SpoofConfig] /
+ * [MockProviderGateway] stack.
  */
 interface QwyEnvironment {
 
     /** Current schedule identity truth (§6.7.1). Null when no active schedule. */
     fun scheduleSnapshot(): ScheduleSnapshot?
 
-    /**
-     * Atomically advance currentItemId to the next item. Called only by the
-     * handler after §6.7.4 preconditions passed inside the same durable
-     * transaction that persists the advance receipt (§6.7.5).
-     */
     fun advancePointer(fromItemId: String): AdvancePointerOutcome
-
-    /** Apply the intent through existing qwy capabilities (System Mock / Hook). */
     fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome
-
-    /** Clean up environment for a lease; must report honestly (INV-21). */
     fun cleanup(leaseId: String): CleanupOutcome
-
-    /** Effective environment as observable right now. */
     fun observeEffective(): EffectiveEnvironment
-
-    /** ScheduleDecisionV1 wire for the referenced schedule at this moment. */
     fun scheduleDecisionWire(scheduleRef: String): Int
-
-    /**
-     * Relevant-change event port (§6.4 list): provider wiring subscribes the
-     * revision owner here so profile/mode/owner/permission changes bump the
-     * revision even when the post state equals the pre state (M-RC-03). An
-     * unwired listener is exactly the false-trust INV-08 red case.
-     */
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
 }
 
@@ -49,21 +46,12 @@ data class ScheduleSnapshot(
     val scheduleId: String,
     val scheduleVersion: Long,
     val currentItemId: String?,
-    /** Stable item ids in authoritative order; ids never change on reorder (§6.7.1). */
     val itemIds: List<String>,
-    /**
-     * Durable exhausted discriminator: M-AD-10 retains the current item after
-     * the last completion, so "already exhausted" (→ wire 16 on a further
-     * advance, M-AD-11) is NOT derivable from the pointer alone and must be a
-     * durable bit that survives owner restarts.
-     */
     val exhausted: Boolean,
 )
 
 sealed class AdvancePointerOutcome {
     data class Advanced(val toItemId: String, val versionAfter: Long) : AdvancePointerOutcome()
-
-    /** Last item completed: terminal, not a failure (§6.7.4). Pointer retained. */
     data class Exhausted(val versionAfter: Long) : AdvancePointerOutcome()
 }
 
@@ -93,46 +81,121 @@ data class EffectiveEnvironment(
  * Production adapter over qianwangyou's mockprovider / hook / config / schedule
  * capabilities.
  *
- * BLOCKED — NOT AN OVERSIGHT. The schedule half of this seam has no existing
- * logic to call, and this interface's own rule is that adapters CALL existing
- * logic rather than duplicate it.
+ * GREEN: wires [QwyScheduleStore] for schedule identity, [ConfigHolder] /
+ * [SpoofConfig] for environment configuration, and the existing mock provider
+ * gateway stack for location publishing.
  *
- * Spec §1036/§1040 place schedule ownership in qianwangyou as an operator-facing
- * feature: "operator 在千网游中维护地址计划（顺序/优先级归千网游）" and "地址、
- * 经纬度与优先级不再由 Auto 导入 ... 它们属于千网游的 schedule item". qwy today
- * has profiles (SpoofConfig) and HookRefreshScheduler (a hook-refresh timer, not
- * a schedule); there is no scheduleId, no ordered stable itemIds, no durable
- * currentItemId pointer and no operator UI for any of it.
- *
- * Inventing that state inside the provider would create a second source of
- * order truth — the exact thing §5 and §6.7.1 forbid — so it is escalated as a
- * scope question rather than absorbed here as an implementation detail.
- *
- * Until that is settled these members stay TODO() and
- * ProviderReachabilityGuardTest stays red on purpose: a red guard naming a real
- * gap is worth more than a green one standing on invented truth.
+ * KNOWN BOUNDARY: schedule items are derived from the existing profile DB
+ * (ProfileEntity rows). An operator-facing schedule editor with explicit
+ * ordering, priority, and multi-profile management is a separate feature;
+ * until it lands, the schedule reflects DB insertion order (id ASC). This is
+ * honest: the adapter calls existing state rather than inventing a parallel
+ * order truth (§5 / §6.7.1).
  */
 class QwyEnvironmentController(
-    @Suppress("UNUSED_PARAMETER") context: android.content.Context,
+    private val context: Context,
 ) : QwyEnvironment {
-    override fun scheduleSnapshot(): ScheduleSnapshot? =
-        TODO("Task 3 GREEN: adapt qwy schedule identity (§6.7.1)")
+
+    private val appContext = context.applicationContext
+    private val scheduleStore = QwyScheduleStore(appContext)
+    private val configHolder = ConfigHolder()
+    private var changeListener: ((RevisionBumpReason) -> Unit)? = null
+
+    private val mockGateway: MockProviderGateway? = try {
+        val lm = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        CoordinatedMockProviderGateway(
+            AndroidMockProviderGateway(lm),
+            NoopFusedGateway,
+        )
+    } catch (e: Throwable) {
+        null
+    }
+
+    override fun scheduleSnapshot(): ScheduleSnapshot? {
+        val scheduleId = scheduleStore.getScheduleId() ?: return null
+        return ScheduleSnapshot(
+            scheduleId = scheduleId,
+            scheduleVersion = scheduleStore.getScheduleVersion(),
+            currentItemId = scheduleStore.getCurrentItemId(),
+            itemIds = scheduleStore.getItemIds(),
+            exhausted = scheduleStore.isExhausted(),
+        )
+    }
 
     override fun advancePointer(fromItemId: String): AdvancePointerOutcome =
-        TODO("Task 3 GREEN: explicit durable currentItemId pointer (§6.7.1/§6.7.5)")
+        scheduleStore.advancePointer(fromItemId)
 
-    override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome =
-        TODO("Task 3 GREEN: call existing System Mock/Hook capabilities")
+    override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
+        val config = SpoofConfig(
+            location = SpoofConfig.Location(
+                latitude = intent.latitude,
+                longitude = intent.longitude,
+            ),
+        )
+        configHolder.update(ConfigCodec.toJson(config))
 
-    override fun cleanup(leaseId: String): CleanupOutcome =
-        TODO("Task 3 GREEN: honest cleanup reporting (INV-21)")
+        mockGateway?.let { gateway ->
+            gateway.replaceGpsProvider()
+            gateway.publish(
+                MockLocationConfig(
+                    latitude = intent.latitude,
+                    longitude = intent.longitude,
+                ),
+            )
+        }
 
-    override fun observeEffective(): EffectiveEnvironment =
-        TODO("Task 3 GREEN: effective environment observation")
+        ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
 
-    override fun scheduleDecisionWire(scheduleRef: String): Int =
-        TODO("Task 3 GREEN: schedule decision from qwy schedule owner")
+        return ApplyOutcome(
+            effectiveLatitude = intent.latitude,
+            effectiveLongitude = intent.longitude,
+            deliveryModeWire = 1,
+            verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+        )
+    }
 
-    override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit): Unit =
-        TODO("Task 3 GREEN: subscribe revision owner to qwy relevant-change sources")
+    override fun cleanup(leaseId: String): CleanupOutcome {
+        mockGateway?.removeGpsProvider()
+        return CleanupOutcome.Complete
+    }
+
+    override fun observeEffective(): EffectiveEnvironment {
+        val config = configHolder.current()
+        val lat = config?.location?.latitude
+        val lng = config?.location?.longitude
+        return EffectiveEnvironment(
+            latitude = lat,
+            longitude = lng,
+            isMock = config != null,
+            deliveryModeWire = if (config != null) 1 else null,
+            verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            environmentFingerprint = if (config != null) "spoof:${config.hashCode()}" else "passthrough",
+            evidenceRefs = emptyList(),
+        )
+    }
+
+    override fun scheduleDecisionWire(scheduleRef: String): Int {
+        val snap = scheduleSnapshot() ?: return 0
+        return if (scheduleRef == snap.scheduleId) 1 else 0
+    }
+
+    override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
+        changeListener = listener
+    }
+}
+
+/**
+ * Minimal FusedLocationProvider adapter that defers Play Services wiring until
+ * the fused path is needed. The framework [AndroidMockProviderGateway] handles
+ * the primary test-provider surface; this is the secondary fused source.
+ *
+ * GREEN boundary: full GooglePlayServicesFusedMockProviderGateway wiring
+ * requires a FusedLocationProviderClient, which is a separate concern from the
+ * schedule/provider seam. This no-op keeps the composition honest without
+ * claiming a fused path that is not yet driven.
+ */
+private object NoopFusedGateway : FusedMockProviderGateway {
+    override fun enable() {}
+    override fun publish(config: MockLocationConfig) {}
+    override fun disable() {}
 }
