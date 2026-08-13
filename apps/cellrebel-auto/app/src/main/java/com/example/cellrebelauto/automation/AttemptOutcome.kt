@@ -10,7 +10,9 @@ enum class FailureReason {
     FAKE_GPS_NOT_ACTIVE, FOREGROUND_SWITCH_FAILED, NO_RUNNING_EVIDENCE,
     CELLREBEL_TIMEOUT, SCORE_PARSE_FAILED, CANCELLED, INTERRUPTED,
     // # F1：Start 交互前屏幕上已存在 RUNNING —— 属于上一次运行，拒绝归属
-    PRE_EXISTING_RUN
+    PRE_EXISTING_RUN,
+    // # A+（§8.1 UNVERIFIED_RECORDED）：完成证据未过 §6.4 信任判定，写独立未验证记录，绝不计可信配额
+    UNTRUSTED
 }
 
 /**

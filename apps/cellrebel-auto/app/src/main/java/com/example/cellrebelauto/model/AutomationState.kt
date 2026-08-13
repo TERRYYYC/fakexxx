@@ -58,5 +58,11 @@ enum class AutomationState(val displayName: String) {
     // # 所有循环已完成
     DONE("Done"),
     // # 发生不可恢复的错误
-    ERROR("Error")
+    ERROR("Error"),
+
+    // --- A+ recovery (§8.2, R8) ---
+    // # 正在 reconcile 崩溃残留 attempt（优先于取下一任务）
+    RECOVERING("Recovering interrupted attempts..."),
+    // # 恢复证据不足/门未开：持久停跑（durable PAUSED），保留现场证据
+    PAUSED("Paused (recovery held)")
 }

@@ -24,6 +24,10 @@ interface RunSessionDao {
     @Query("SELECT * FROM run_sessions ORDER BY startedAt DESC LIMIT 1")
     suspend fun getLatest(): RunSession?
 
+    // # A+ 恢复态投影（§8.2 RECOVERING/PAUSED）：仅改状态，不结束会话
+    @Query("UPDATE run_sessions SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: Long, status: String)
+
     @Query("SELECT * FROM run_sessions WHERE id = :id")
     suspend fun getById(id: Long): RunSession?
 

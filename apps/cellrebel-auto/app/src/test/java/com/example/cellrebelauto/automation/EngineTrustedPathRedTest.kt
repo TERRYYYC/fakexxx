@@ -3,24 +3,27 @@ package com.example.cellrebelauto.automation
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
+import com.example.cellrebelauto.automation.aplus.APlusBackend
+import com.example.cellrebelauto.automation.aplus.APlusCompletionEvidence
+import com.example.cellrebelauto.automation.aplus.APlusEvidenceSource
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.aplus.APlusRunTemplate
-import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.model.RunSession
-import com.example.cellrebelauto.model.audit.AutoAuditEvent
 import com.example.cellrebelauto.model.execution.CellRebelCompletionEvidenceV1
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.recovery.DurableRecoveryLog
+import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.FakeDurableRecoveryLog
 import com.example.cellrebelauto.recovery.ObserveIntentAcquirer
 import com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer
 import com.example.cellrebelauto.recovery.RecordingExternalApplyExecutor
-import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.test.runTest
@@ -36,34 +39,38 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * R7 — production-reachability REDs (Issue #5, §11.7 meta-lesson; Sol round-6 advisory).
+ * R8 — production-reachability REDs driven through the SINGLE composition root (Issue #5, §11.7;
+ * Sol round-7 advisory).
  *
- * Sol's round-6 falsification: R6's REDs drove ISOLATED units (repo method / coordinator / driver),
- * so an isolated counterexample — correct local implementation, production NEVER calling it — greened
- * them while the engine kept walking the legacy path:
- *  - F1: `PlanRepository.recordTrustedCompletion` had zero production call sites; `CompletionTrustContext`
- *    was never constructed in main. → R7-F1 drives the REAL completion entry (`AutomationEngine.run`
- *    success path) and asserts the durable execution row + minted ledger entry bound to the REAL
- *    attempt→task identity.
- *  - F2: `RecoveryCoordinator(` / `scheduleAdvanced(` had zero production call sites. → R7-F2 drives the
- *    REAL recovery consumer (the engine sweep, §8.2 RECOVERING) with the coordinator composed through the
- *    engine's production seam, and asserts provider-effect / receipt / checkpoint / gate-acquisition
- *    durable effects through the injected fakes.
- *  - F4: the engine drove only `CREATED→BEGIN_APPLY`; the R6-F4 assertion (`audit.isNotEmpty()`) greened
- *    under that partial lifecycle. → R7-F4 asserts the COMPLETE ordered canonical §8.1 audit trail bound
- *    to the real attempt, checked IN STEP with the lifecycle (the fake runner observes the audit prefix
- *    at run-test entry and right after RUNNING is observed), so "dump the whole trail at creation or at
- *    finalize" attacks also stay RED.
+ * Sol's round-7 falsification: the engine seams (`recoveryCoordinator` / `completionTrustContextProvider`)
+ * defaulted null in production while tests injected real objects directly — so a fully-implemented-but-
+ * disconnected attack greened every TrustedLedger + coordinator test while `AutomationService` still
+ * passed null and the engine kept walking the legacy counter path. R8 closes that with ONE composition
+ * point ([APlusComposition]) wired from an [APlusBackend]: production and tests both go through it, so
+ * there is no hand-wired alternate path a test can take that production does not also take.
  *
- * The seams under test are the engine's production composition seams ([AutomationEngine.recoveryCoordinator],
- * [AutomationEngine.completionTrustContextProvider], [AutomationEngine.attemptDriver]) — the same params
- * production wiring (AutomationService / GREEN) uses. An attack that implements every unit correctly but
- * leaves the engine disconnected CANNOT green any positive test here; the negatives/guardrails pin the
- * bypass polarities. Polarities that hold under the committed skeleton are labelled GUARDRAIL/ANCHOR.
+ * The five Sol round-7 findings each map to a concrete repair + RED:
+ *  - P1-1 (composition) → the engine's A+ seams are produced by `APlusComposition` from a `FakeBackend`
+ *    here, the same path `AutomationService` takes; a disconnected impl cannot green the positive tests.
+ *  - P1-2 (state-owner identity) → recovery identity (apply/release key + intent digest) is RECOMPUTED
+ *    from the durable attempt row ([APlusOperationIdentity]), never read from the append-only audit
+ *    stream. The crash seed writes NO audit row — the attempt owner state is the only source.
+ *  - P1-3 (legacy-zero / unverified) → the A+ mode NEVER calls `finalizeAttemptSuccess`; a trust-fail is
+ *    finalized `UNTRUSTED` and the legacy `completedSuccesses` counter stays 0.
+ *  - P1-4 (release convergence) → after a recovered apply the engine must `releaseLease` before
+ *    advancing (dormant under the skeleton coordinator, asserted as the release-invocation gate).
+ *  - P1-5 (clock) → the virtual clock starts at 1000, after the seeded session (500) and dummy attempt
+ *    timestamps, so `getLatest()` resolves the engine's own session, not the seed.
+ *
+ * Under the pre-freeze skeletons the A+ lifecycle is fail-closed: the recovery coordinator's
+ * [com.example.cellrebelauto.recovery.RecoveryCoordinator.reconcile] returns INSUFFICIENT_EVIDENCE and
+ * [com.example.cellrebelauto.repository.PlanRepository.recordTrustedCompletion] drops the §7.1 evidence
+ * detail and never mints — so every positive assertion here stays RED, and the guardrail polarities
+ * (at-most-once effect, legacy-zero, fail-closed PAUSED) hold.
  *
  * Grounding: docs/features/2026-08-12-issue5-red-rewrite-round3-grounding.md §11.7–§11.8.
  *
- * # R7 生产可达性 RED：F1 真实完成入口铸币 / F2 真实恢复消费者+组合 seam / F4 完整有序 §8.1 审计（含 in-step 前缀）
+ * # R8 生产可达性 RED（经单一组合根）：F1 可信完成入口 / F2 恢复 owner 态身份+release 收敛 / F4 完整 §8.1 审计
  */
 @RunWith(RobolectricTestRunner::class)
 class EngineTrustedPathRedTest {
@@ -85,7 +92,7 @@ class EngineTrustedPathRedTest {
         db.close()
     }
 
-    // ---- Fakes (mirror EngineRecoveryTest / RecoveryIdempotencyRedTest; kept local) ----
+    // ---- Fakes ----
 
     /** # 脚本化假 CellRebel 执行器 */
     private class FakeCellRebelRunner(
@@ -117,14 +124,13 @@ class EngineTrustedPathRedTest {
             if (queue.size > 1) queue.removeAt(0) else queue.first()
     }
 
-    /** # 虚拟时钟：时间只在 delay 时前进 */
-    private class VirtualClock {
-        var now = 0L
+    /** # 虚拟时钟：时间只在 delay 时前进；初始时刻在 seed 时间戳之后（P1-5） */
+    private class VirtualClock(initialNow: Long = 1000L) {
+        var now = initialNow
         val nowMs: () -> Long = { now }
         val delayMs: suspend (Long) -> Unit = { ms -> now += ms }
     }
 
-    /** Identity-keyed observe fake: the fact is LOOKED UP by the identity the coordinator forwards. */
     private class SeededObserve(private val facts: Map<Long, Boolean>) : ObserveIntentAcquirer {
         val calls = mutableListOf<Long>()
         override fun matches(attemptId: Long): Boolean {
@@ -133,7 +139,6 @@ class EngineTrustedPathRedTest {
         }
     }
 
-    /** Identity-keyed revision fake (keyed by idempotency key). */
     private class SeededRevision(private val facts: Map<String, Boolean>) : ReceiptRevisionAcquirer {
         val calls = mutableListOf<Pair<String, Long>>()
         override fun isFresh(idempotencyKey: String, now: Long): Boolean {
@@ -142,7 +147,6 @@ class EngineTrustedPathRedTest {
         }
     }
 
-    /** Identity-keyed quota fake (keyed by attempt id). */
     private class SeededQuota(private val facts: Map<Long, Boolean>) : TrustedQuotaAcquirer {
         val calls = mutableListOf<Long>()
         override fun hasCapacity(attemptId: Long): Boolean {
@@ -151,18 +155,48 @@ class EngineTrustedPathRedTest {
         }
     }
 
+    /** # A+ 证据源假：返回脚本化的 pre/post observation + 完成证据 */
+    private class FakeEvidenceSource(
+        private val pre: ObservationSnapshot?,
+        private val post: ObservationSnapshot?,
+        private val completion: APlusCompletionEvidence?
+    ) : APlusEvidenceSource {
+        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? = pre
+        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? = post
+        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? = completion
+    }
+
+    /**
+     * # A+ 后端假束：把 recovery 五件套 + 证据源捆成一个 APlusBackend，经 APlusComposition 组合（P1-1）
+     */
+    private class FakeBackend(
+        private val exec: RecordingExternalApplyExecutor,
+        private val log: FakeDurableRecoveryLog,
+        private val observe: SeededObserve,
+        private val revision: SeededRevision,
+        private val quota: SeededQuota,
+        private val evidence: FakeEvidenceSource
+    ) : APlusBackend {
+        override val executor: ExternalApplyExecutor = exec
+        override val recoveryLog: DurableRecoveryLog = log
+        override val observeIntent: ObserveIntentAcquirer = observe
+        override val receiptRevision: ReceiptRevisionAcquirer = revision
+        override val trustedQuota: TrustedQuotaAcquirer = quota
+        override val evidenceSource: APlusEvidenceSource = evidence
+    }
+
     private val successTemplate = AttemptOutcome.Success(
         webScore = 8.0, videoScore = 7.0, runningObservedAt = 0L, startedAt = 0L, endedAt = 0L
     )
 
+    /** # 单一组合点：生产与测试都从这里把 backend 接成 coordinator + evidence source（P1-1） */
     private fun buildEngine(
         planId: Long,
         runner: CellRebelRunner,
         gps: GpsLocationSetter,
         clock: VirtualClock,
         driver: APlusAttemptDriver? = null,
-        coordinator: RecoveryCoordinator? = null,
-        trustProvider: (suspend (Long, AttemptOutcome.Success) -> CompletionTrustContext?)? = null
+        backend: APlusBackend? = null
     ) = AutomationEngine(
         planId = planId,
         planRepository = repo,
@@ -174,8 +208,8 @@ class EngineTrustedPathRedTest {
         nowMs = clock.nowMs,
         delayMs = clock.delayMs,
         attemptDriver = driver,
-        recoveryCoordinator = coordinator,
-        completionTrustContextProvider = trustProvider
+        recoveryCoordinator = backend?.let { APlusComposition.recoveryCoordinator(it) },
+        completionEvidenceSource = backend?.let { APlusComposition.completionEvidenceSource(it) }
     )
 
     // ---- Seed helpers ----
@@ -184,7 +218,7 @@ class EngineTrustedPathRedTest {
     private suspend fun seedPlan(taskId: Long, quota: Int): Long {
         val planId = db.planDao().insertPlan(
             LocationPlan(
-                sourceFileName = "r7.csv", importedAt = 1000L,
+                sourceFileName = "r8.csv", importedAt = 1000L,
                 globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = quota
             )
         )
@@ -197,7 +231,7 @@ class EngineTrustedPathRedTest {
             )
         )
         check(db.locationTaskDao().getTaskById(taskId) != null) {
-            "R7 setup: Room did not honour the explicit task id $taskId"
+            "R8 setup: Room did not honour the explicit task id $taskId"
         }
         return planId
     }
@@ -217,19 +251,13 @@ class EngineTrustedPathRedTest {
     }
 
     /**
-     * Seeds an A+ crash window: a NON-terminal attempt whose BEGIN_APPLY audit row carries the apply's
-     * idempotency key (correlationRef) + canonical request digest (payloadDigest) — the durable state a
-     * crashed process leaves behind after §8.1 `CREATED –BEGIN_APPLY→ APPLY_PENDING` (attempt + key are
-     * written FIRST). The recovery sweep recovers (key, digest) from this row (§8.1: 同键重放, never
-     * 换键重复 apply).
+     * Seeds an A+ crash window: a NON-terminal attempt (status `starting`) with NO audit row. Its apply/
+     * release identity is RECOMPUTED by the engine from this durable owner state via
+     * [APlusOperationIdentity] (§7.1: the Attempt owns its 当前 operation; `AutoAuditEvent` is append-only,
+     * never a state owner — Sol round-7 P1-4). The seed therefore cannot smuggle a key/digest in through
+     * the audit stream.
      */
-    private suspend fun seedAPlusCrashAttempt(
-        planId: Long,
-        taskId: Long,
-        attemptId: Long,
-        key: String,
-        digest: String
-    ) {
+    private suspend fun seedAPlusCrashAttempt(planId: Long, taskId: Long, attemptId: Long) {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId))
         db.testAttemptDao().insert(
             TestAttempt(
@@ -238,12 +266,6 @@ class EngineTrustedPathRedTest {
                 status = "starting", failureReason = null,
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4
-            )
-        )
-        db.auditEventDao().insert(
-            AutoAuditEvent(
-                seq = 1L, attemptId = attemptId, correlationRef = key,
-                eventType = AttemptEvent.BEGIN_APPLY.name, payloadDigest = digest, recordedAt = 650L
             )
         )
     }
@@ -259,11 +281,11 @@ class EngineTrustedPathRedTest {
     private val TARGET_LNG = -74.0
     private val EXEC_STARTED_AT_ELAPSED = 2000L
     private val EXEC_RUNNING_CONFIRMED_AT_ELAPSED = 2100L
-    private val EXEC_COMPLETED_AT_ELAPSED = 13000L // RUN 10900 ms ≥ §6.4.2 10000 ms floor
+    private val EXEC_COMPLETED_AT_ELAPSED = 13000L
     private val PRE_OBSERVED_AT_ELAPSED = 1000L
     private val POST_OBSERVED_AT_ELAPSED = 14000L
     private val CONTINUITY_SINCE_ELAPSED = 500L
-    private val DISTINCTIVE_DIGEST = "sha256:r7f1-identity:9c2e7a" // ≠ any constant literal
+    private val DISTINCTIVE_DIGEST = "sha256:r8f1-identity:9c2e7a"
 
     private fun validPre(): ObservationSnapshot = ObservationSnapshot(
         leaseId = LEASE,
@@ -289,10 +311,10 @@ class EngineTrustedPathRedTest {
     )
 
     private fun fullEvidenceExecution(wire: Int): CellRebelExecution = CellRebelExecution(
-        executionId = "exec-r7-$wire",
-        attemptId = 0L, // caller binds the REAL attempt id
+        executionId = "exec-r8-$wire",
+        attemptId = 0L, // the engine binds the REAL attempt id
         completionEvidenceWire = wire,
-        evidencePayloadDigest = "payload-digest",
+        evidencePayloadDigest = DISTINCTIVE_DIGEST,
         startedAt = 1000L,
         classifiedAt = 1100L,
         startedAtElapsed = EXEC_STARTED_AT_ELAPSED,
@@ -306,253 +328,194 @@ class EngineTrustedPathRedTest {
         roundTimestampsElapsed = "$EXEC_STARTED_AT_ELAPSED;$EXEC_COMPLETED_AT_ELAPSED"
     )
 
-    /** The canonical §6.4-positive bundle carrying the FULL §7.1 evidence detail. */
-    private fun fullContext(wire: Int = WIRE_VERIFIED): CompletionTrustContext = CompletionTrustContext(
-        execution = fullEvidenceExecution(wire),
-        completionEvidenceWire = wire,
-        applyReceiptIntentHash = INTENT_HASH,
-        locallyRecomputedIntentHash = INTENT_HASH,
-        applyReceiptLease = LEASE,
-        targetLat = TARGET_LAT,
-        targetLng = TARGET_LNG,
-        locationToleranceMeters = 1.0,
-        preObservation = validPre(),
-        postObservation = validPost()
+    /** # 后端供的完成证据 artifact（不含目标坐标与本地重算 hash——由持久 intent 组装，INV-23） */
+    private fun fullCompletionEvidence(wire: Int = WIRE_VERIFIED): APlusCompletionEvidence =
+        APlusCompletionEvidence(
+            execution = fullEvidenceExecution(wire),
+            completionEvidenceWire = wire,
+            applyReceiptIntentHash = INTENT_HASH,
+            applyReceiptLease = LEASE
+        )
+
+    /** # §6.4-passing 后端：观察 + 完成证据齐全；recovery 五件套空实现（正路径用不到 reconcile 门） */
+    private fun passingBackend(): FakeBackend = FakeBackend(
+        RecordingExternalApplyExecutor(),
+        FakeDurableRecoveryLog(),
+        SeededObserve(emptyMap()),
+        SeededRevision(emptyMap()),
+        SeededQuota(emptyMap()),
+        FakeEvidenceSource(validPre(), validPost(), fullCompletionEvidence())
     )
 
-    // ---- R7-F1: trusted ledger through the REAL completion entry (the engine success path) ----
+    private fun applyKey(attemptId: Long): String = APlusOperationIdentity.applyIdempotencyKey(attemptId)
+    private fun releaseKey(attemptId: Long): String = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+
+    // ---- R8-F1: trusted ledger through the REAL A+ completion entry (P1-1/2/3) ----
 
     @Test
-    fun `R7-F1 the engine success path persists the full evidence row and mints the trusted entry bound to the real attempt-task identity`() = runTest {
-        // Sol round-6 F1 kill: R6's repo-level RED greened under "recordTrustedCompletion fully
-        // implemented but NEVER called by production". Here the durable effects must appear through
-        // the ENGINE's success path — a correct-but-disconnected repo method leaves zero rows (RED).
-        // Identity is bound twice: the task id is explicit 42L (kills a hardcoded 1L mint — Sol's
-        // round-4 attack), and the real attempt id is pushed past 1L by a terminal dummy (kills a
-        // constant-attemptId mint / a constant-ctx provider).
+    fun `R8-F1 the engine A+ mode drives the trusted completion entry - section7-1 detail and mint are RED and the legacy counter stays zero`() = runTest {
+        // Sol round-7 P1-1/P1-3: the engine's A+ mode (composed via APlusComposition) must reach
+        // recordTrustedCompletion and decide PASS/FAIL — never the legacy finalizeAttemptSuccess. Under
+        // the skeleton the §7.1 detail is dropped (null), nothing mints, and the legacy counter stays 0.
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         seedTerminalDummyAttempt(taskId = taskId, attemptId = 77L)
-        val providerCalls = mutableListOf<Long>()
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(
-            planId, runner, gps, clock,
-            trustProvider = { attemptId, _ ->
-                providerCalls += attemptId
-                fullContext().copy(
-                    execution = fullEvidenceExecution(WIRE_VERIFIED).copy(
-                        attemptId = attemptId,
-                        evidencePayloadDigest = DISTINCTIVE_DIGEST
-                    )
-                )
-            }
-        ).run()
+        buildEngine(planId, runner, gps, clock, backend = passingBackend()).run()
 
-        val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId)
-            .first { it.status == "succeeded" }.id
+        val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
         assertTrue("the real attempt id must be past the dummy (≠ 1L)", realAttemptId > 77L)
-        assertEquals(
-            "the engine must acquire trust evidence exactly once, for the REAL attempt identity " +
-                "(a provider consulted for a wrong/constant id is a false oracle)",
-            listOf(realAttemptId),
-            providerCalls
-        )
 
+        // The A+ mode reached recordTrustedCompletion: exactly one execution row persisted.
         val rows = db.attemptExecutionDao().forAttempt(realAttemptId)
         assertEquals(
-            "exactly one execution row must be persisted for the real attempt THROUGH the engine " +
-                "(skeleton entrypoint persists digest-only; a disconnected-impl attack persists nothing)",
+            "the A+ mode must persist exactly one execution row through the engine's trusted completion entry",
             1, rows.size
         )
         val exec = rows.first()
-        // §7.1 detail must survive the production path (skeleton drops it ⇒ null ⇒ RED).
-        assertEquals("baseline state must be persisted", "IDLE", exec.baselineRunningState)
-        assertEquals("running marker must be persisted", "RUNNING", exec.runningMarkerText)
+        // RED: the skeleton drops the §7.1 evidence detail.
+        assertEquals("§7.1 baseline state must survive the production path (skeleton drops it ⇒ RED)", "IDLE", exec.baselineRunningState)
+        assertEquals("§7.1 running marker must survive (skeleton drops it ⇒ RED)", "RUNNING", exec.runningMarkerText)
         assertEquals(
-            "RUNNING duration (≥ §6.4.2 floor)",
+            "§7.1 RUNNING duration must survive (skeleton drops it ⇒ RED)",
             EXEC_COMPLETED_AT_ELAPSED - EXEC_RUNNING_CONFIRMED_AT_ELAPSED,
             exec.runningDurationMs
         )
-        assertEquals("web score", 8.0, exec.webBrowsingScore!!, 0.001)
-        assertEquals("video score", 7.0, exec.videoStreamingScore!!, 0.001)
+        assertEquals("§7.1 web score must survive (skeleton drops it ⇒ RED)", 8.0, exec.webBrowsingScore ?: -1.0, 0.001)
+        assertEquals("§7.1 video score must survive (skeleton drops it ⇒ RED)", 7.0, exec.videoStreamingScore ?: -1.0, 0.001)
         assertEquals(
-            "per-round timestamps",
+            "§7.1 per-round timestamps must survive (skeleton drops it ⇒ RED)",
             "$EXEC_STARTED_AT_ELAPSED;$EXEC_COMPLETED_AT_ELAPSED",
             exec.roundTimestampsElapsed
         )
-
-        val minted = db.trustedQuotaDao().getByAttempt(realAttemptId)
+        // RED: a §6.4-passing completion must mint exactly one TrustedQuotaEntry (skeleton never mints).
         assertNotNull(
-            "a §6.4-positive completion THROUGH the engine must mint exactly one TrustedQuotaEntry " +
-                "(skeleton mints none ⇒ RED; disconnected-impl attack mints none ⇒ RED)",
-            minted
+            "a §6.4-passing completion must mint a trusted entry (skeleton mints none ⇒ RED)",
+            db.trustedQuotaDao().getByAttempt(realAttemptId)
         )
-        val entry = minted!!
-        assertEquals("minted taskId must bind the REAL task (42L), not a constant", taskId, entry.taskId)
-        assertEquals("minted attemptId must bind the REAL attempt, not a constant", realAttemptId, entry.attemptId)
-        assertEquals("minted evidenceDigest must bind the execution evidence", DISTINCTIVE_DIGEST, entry.evidenceDigest)
-        assertEquals("minted committedAt must bind the completion clock", EXEC_COMPLETED_AT_ELAPSED, entry.committedAt)
-        assertEquals("exactly one TrustedQuotaEntry through the engine path", 1, db.trustedQuotaDao().countAll())
-    }
-
-    @Test
-    fun `R7-F1 the engine success path mints nothing when the trust predicate fails`() = runTest {
-        // GUARDRAIL polarity (passes under the committed skeleton AND under a correct GREEN; RED only
-        // under a "mint regardless of decision" attack): a §6.4-FAILING context (HOOK deliveryMode
-        // masquerading as independently verified, INV-06) must mint NOTHING through the engine path.
-        val taskId = 42L
-        val planId = seedPlan(taskId = taskId, quota = 1)
-        val clock = VirtualClock()
-        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
-        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(
-            planId, runner, gps, clock,
-            trustProvider = { attemptId, _ ->
-                fullContext().copy(
-                    execution = fullEvidenceExecution(WIRE_VERIFIED).copy(attemptId = attemptId),
-                    preObservation = validPre().copy(deliveryMode = "HOOK")
-                )
-            }
-        ).run()
-
+        // P1-3 legacy-zero: the A+ mode never touches the legacy completedSuccesses counter.
         assertEquals(
-            "a §6.4-failing completion must mint no TrustedQuotaEntry through the engine path",
-            0, db.trustedQuotaDao().countAll()
+            "trust-fail must never increment the legacy counter (Sol round-7 P1-3)",
+            0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses
         )
+        // P1-3 unverified: the attempt is finalized UNTRUSTED, never finalizeAttemptSuccess.
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }
+        assertEquals("a trust-failing completion is UNVERIFIED_RECORDED (failed), never succeeded", "failed", attempt.status)
+        assertEquals("UNTRUSTED", attempt.failureReason)
+        // Fail-closed: the plan PAUSED rather than silently retrying or walking the legacy counter.
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
     }
 
-    // ---- R7-F2: crash-window reconcile + schedule-advance gate through the REAL recovery consumer ----
+    // ---- R8-F2: crash-window reconcile + release convergence through the REAL recovery consumer (P1-2/4) ----
 
     @Test
-    fun `R7-F2 crash window b - provider applied but no receipt - engine recovery re-invokes the executor idempotently, records receipt and checkpoint, gates, then advances`() = runTest {
-        // M-CR-02 THROUGH the engine: the prior process called the provider (effect 1) but crashed
-        // before recording the receipt. Sol round-6 F2 kill: a fully-implemented but NEVER-called
-        // coordinator leaves invocation=1 / no receipt / no checkpoint (RED); the committed skeleton
-        // coordinator returns INSUFFICIENT_EVIDENCE and the engine fails closed (also RED here).
+    fun `R8-F2 crash window b - engine recovery reconciles from OWNER state, re-invokes the executor, converges release, and gates`() = runTest {
+        // M-CR-02 through the engine, with the identity recomputed from the durable attempt (no audit
+        // row). Sol round-7 P1-4: the reconcile must re-invoke with the SAME recomputed key; P1-4/P1-6
+        // release convergence: after ADVANCED the engine must releaseLease before advancing. Under the
+        // skeleton reconcile returns INSUFFICIENT_EVIDENCE ⇒ fail-closed PAUSED ⇒ every positive is RED.
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, key = "k-77", digest = "digest-77")
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = "k-77", requestDigest = "digest-77", now = 1000L)
-        assertNull("M-CR-02: provider applied but no durable receipt exists", log.receiptFor("k-77"))
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "digest-77", now = 1000L)
+        assertNull("M-CR-02: provider applied but no durable receipt exists", log.receiptFor(applyKey(77L)))
         val observe = SeededObserve(mapOf(77L to true))
-        val revision = SeededRevision(mapOf("k-77" to true))
+        val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
-        val coordinator = RecoveryCoordinator(executor, log, observe, revision, quota)
+        val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(null, null, null))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(planId, runner, gps, clock, coordinator = coordinator).run()
+        buildEngine(planId, runner, gps, clock, backend = backend).run()
 
         assertEquals(
-            "M-CR-02: the engine-driven reconcile must RE-INVOKE the executor (receipt was absent) — 1 → 2",
-            2, executor.invocationCount("k-77")
+            "the engine-driven reconcile must RE-INVOKE the executor (receipt absent) — 1 → 2",
+            2, executor.invocationCount(applyKey(77L))
         )
-        assertEquals("the provider effect must stay at one (provider idempotency, at-most-once)", 1, executor.effectCount(77L))
-        assertNotNull("a durable receipt must now exist (recorded through the engine-driven reconcile)", log.receiptFor("k-77"))
-        assertEquals("digest-77", log.receiptFor("k-77")!!.requestDigest)
+        assertEquals("the provider effect must stay at one (idempotency, at-most-once)", 1, executor.effectCount(77L))
+        assertNotNull("a durable receipt must be recorded through the engine-driven reconcile", log.receiptFor(applyKey(77L)))
         assertNotNull("a checkpoint must be recorded for the reconciled attempt", log.checkpointFor(77L))
-        assertEquals("the checkpoint must bind the receipt key", "k-77", log.checkpointFor(77L)!!.receiptKey)
-        // The schedule-advance gate must acquire each fact for the REAL identity (identity-keyed fakes:
-        // a wrong/garbage identity returns the default false ⇒ gate holds ⇒ no advance ⇒ earlier asserts fail).
+        // P1-4 release convergence: after ADVANCED the engine must releaseLease (skeleton never reaches it).
+        assertEquals(
+            "the engine must converge release exactly once after a recovered apply (RED under skeleton)",
+            1, executor.releaseInvocationCount(releaseKey(77L))
+        )
+        // The gate acquires each fact for the REAL recomputed identity.
         assertEquals("the gate must acquire the observation fact for the REAL attempt", listOf(77L), observe.calls)
-        assertEquals("the gate must acquire the revision fact for the REAL receipt key", listOf("k-77"), revision.calls.map { it.first })
+        assertEquals("the gate must acquire the revision fact for the REAL receipt key", listOf(applyKey(77L)), revision.calls.map { it.first })
         assertEquals("the gate must acquire the quota fact for the REAL attempt", listOf(77L), quota.calls)
-        // Converged: the crashed attempt is terminalized and the plan resumes to completion.
-        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
-        assertEquals("interrupted", attempts.first { it.id == 77L }.status)
-        assertTrue("the task must be re-attempted after recovery", attempts.any { it.id != 77L && it.status == "succeeded" })
-        assertEquals("completed", db.locationTaskDao().getTaskById(taskId)!!.status)
-        assertEquals("completed", db.runSessionDao().getLatest()!!.status)
+        // Fail-closed under the skeleton: the plan PAUSED and did not resume.
+        assertEquals("reconcile INSUFFICIENT_EVIDENCE ⇒ durable PAUSED", "paused", db.runSessionDao().getLatest()!!.status)
     }
 
     @Test
-    fun `R7-F2 crash window c - receipt present before checkpoint - engine recovery replays without re-invoking the executor, repairs the checkpoint, then advances`() = runTest {
-        // Window (c) THROUGH the engine: provider applied AND receipt recorded; crash before checkpoint.
-        // Post-crash the engine must REPLAY (no second provider call) and repair the checkpoint.
+    fun `R8-F2 crash window c - receipt present - engine recovery replays without re-invoking and repairs the checkpoint`() = runTest {
+        // Window (c): provider applied AND receipt recorded; crash before checkpoint. Post-crash the
+        // engine must REPLAY (no second provider call) and repair the checkpoint.
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, key = "k-77", digest = "digest-77")
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = "k-77", requestDigest = "digest-77", now = 1000L)
-        log.seedReceipt(idempotencyKey = "k-77", requestDigest = "digest-77", outcome = "RELEASED", createdAt = 1000L)
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "digest-77", now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = "digest-77", outcome = "RELEASED", createdAt = 1000L)
         val observe = SeededObserve(mapOf(77L to true))
-        val revision = SeededRevision(mapOf("k-77" to true))
+        val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
-        val coordinator = RecoveryCoordinator(executor, log, observe, revision, quota)
+        val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(null, null, null))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(planId, runner, gps, clock, coordinator = coordinator).run()
+        buildEngine(planId, runner, gps, clock, backend = backend).run()
 
-        assertEquals(
-            "REPLAYED_APPLY: the executor must NOT be re-invoked when a receipt already exists",
-            1, executor.invocationCount("k-77")
-        )
+        assertEquals("REPLAYED_APPLY: the executor must NOT be re-invoked when a receipt exists", 1, executor.invocationCount(applyKey(77L)))
         assertEquals("the provider effect must stay at one", 1, executor.effectCount(77L))
         assertNotNull("window-c reconcile MUST repair the missing checkpoint", log.checkpointFor(77L))
-        assertEquals("the repaired checkpoint must bind the replayed receipt key", "k-77", log.checkpointFor(77L)!!.receiptKey)
-        assertEquals("the gate must acquire the observation fact for the REAL attempt", listOf(77L), observe.calls)
-        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
-        assertEquals("interrupted", attempts.first { it.id == 77L }.status)
-        assertTrue("the plan must resume after a replayed recovery", attempts.any { it.id != 77L && it.status == "succeeded" })
-        assertEquals("completed", db.runSessionDao().getLatest()!!.status)
+        assertEquals("the repaired checkpoint must bind the replayed receipt key", applyKey(77L), log.checkpointFor(77L)!!.receiptKey)
     }
 
     @Test
-    fun `R7-F2 the engine does not advance to the next task when the schedule-advance gate holds`() = runTest {
-        // GUARDRAIL polarity under the committed skeleton (the skeleton coordinator returns
-        // INSUFFICIENT_EVIDENCE ⇒ fail-closed stop ⇒ no advance — passes), RED under both bypass
-        // attacks: "coordinator correct but engine never consults it" (legacy sweep re-attempts ⇒
-        // runner.calls = 1) and "gate hardcoded ADVANCED" (advances despite the false fact ⇒ 1).
-        // §5 boundary: without the observation fact Auto must NOT assume the schedule advanced.
+    fun `R8-F2 the engine does not advance to the next task when the recovery cannot converge`() = runTest {
+        // GUARDRAIL polarity: under the skeleton the reconcile returns INSUFFICIENT_EVIDENCE ⇒ the engine
+        // fails closed (PAUSED) and must NOT start a fresh attempt (§8.2 RECOVERING / §5 boundary). RED
+        // under a "hardcode ADVANCED" attack (which would resume and start a fresh runner call).
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, key = "k-77", digest = "digest-77")
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = "k-77", requestDigest = "digest-77", now = 1000L)
-        log.seedReceipt(idempotencyKey = "k-77", requestDigest = "digest-77", outcome = "RELEASED", createdAt = 1000L)
-        val observe = SeededObserve(mapOf(77L to false)) // observation does NOT match ⇒ gate must hold
-        val revision = SeededRevision(mapOf("k-77" to true))
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "digest-77", now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = "digest-77", outcome = "RELEASED", createdAt = 1000L)
+        val observe = SeededObserve(mapOf(77L to false)) // observation does NOT match ⇒ gate would hold
+        val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
-        val coordinator = RecoveryCoordinator(executor, log, observe, revision, quota)
+        val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(null, null, null))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(planId, runner, gps, clock, coordinator = coordinator).run()
+        buildEngine(planId, runner, gps, clock, backend = backend).run()
 
-        assertEquals(
-            "gate held ⇒ the engine must NOT start a fresh attempt (§5 boundary / §8.2: 证据不足走 PAUSED)",
-            0, runner.calls
-        )
+        assertEquals("the engine must NOT start a fresh attempt when recovery cannot converge", 0, runner.calls)
         assertTrue(
-            "gate held ⇒ no succeeded attempt may appear",
+            "no succeeded attempt may appear when recovery fails closed",
             db.testAttemptDao().getAttemptsForTask(taskId).none { it.status == "succeeded" }
         )
-        assertNotEquals(
-            "gate held ⇒ the task must NOT complete",
-            "completed",
-            db.locationTaskDao().getTaskById(taskId)!!.status
-        )
+        assertNotEquals("the task must NOT complete", "completed", db.locationTaskDao().getTaskById(taskId)!!.status)
     }
 
-    // ---- R7-F4: the complete ordered §8.1 audit trail through the engine success path ----
+    // ---- R8-F4: the complete ordered §8.1 audit trail through the engine A+ path ----
 
     @Test
-    fun `R7-F4 the engine success path appends the complete ordered canonical §8_1 audit trail bound to the real attempt, in step with the lifecycle`() = runTest {
-        // Sol round-6 F4 kill: the R6 engine test asserted `audit.isNotEmpty()` + first-row attemptId,
-        // which greened while the engine drove only ONE of the ten §8.1 transitions. Here the FULL
-        // ordered canonical trail must appear bound to the REAL attempt — and it must appear IN STEP:
-        // the fake runner observes the durable audit prefix at run-test entry (apply + pre-observe +
-        // start MUST already be audited — §8.1 forbids starting CellRebel without a pre-observation)
-        // and again right after RUNNING is observed. A "dump the whole trail at creation" attack fails
-        // the entry prefix (10 ≠ 4); a "dump at finalize" attack fails it too (0 ≠ 4); a partial
-        // lifecycle (Sol's round-6 counterexample) fails both the prefix and the final trail.
+    fun `R8-F4 the engine A+ path appends the complete ordered canonical section8-1 audit trail in step with the lifecycle`() = runTest {
+        // The driver is a no-op skeleton, so the durable audit trail is EMPTY — RED. The fake runner
+        // observes the audit prefix at run-test entry (apply + pre-observe + start MUST already be
+        // audited) and right after RUNNING is observed. A correct GREEN driver consults AttemptTransitions
+        // and appends the canonical trail in step; a partial-lifecycle or dump-at-creation attack fails
+        // the in-step prefix.
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         val auditDao = db.auditEventDao()
@@ -578,18 +541,15 @@ class EngineTrustedPathRedTest {
         buildEngine(
             planId, runner, gps, clock,
             driver = APlusAttemptDriver(auditDao) { 1_000_000L },
-            trustProvider = { attemptId, _ ->
-                fullContext().copy(execution = fullEvidenceExecution(WIRE_VERIFIED).copy(attemptId = attemptId))
-            }
+            backend = passingBackend()
         ).run()
 
-        val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId)
-            .first { it.status == "succeeded" }.id
+        val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first().id
         val canonical = APlusRunTemplate.CANONICAL_HAPPY_PATH.map { it.name }
         assertEquals(
             "at run-test entry the durable audit must already hold the pre-run §8.1 prefix " +
                 "(BEGIN_APPLY → APPLY_RECEIPT → PRE_OBSERVATION_OK → START_CELLREBEL); got $atRunEntry " +
-                "(skeleton/empty ⇒ RED; partial lifecycle ⇒ RED; dumped-at-creation ⇒ RED)",
+                "(skeleton/empty ⇒ RED)",
             canonical.take(4),
             atRunEntry
         )
@@ -600,8 +560,7 @@ class EngineTrustedPathRedTest {
         )
         val trail = auditDao.forAttempt(realAttemptId)
         assertEquals(
-            "the engine success path must append the COMPLETE ordered canonical §8.1 trail " +
-                "(${canonical.size} transitions) bound to the real attempt",
+            "the engine A+ path must append the COMPLETE ordered canonical §8.1 trail bound to the real attempt",
             canonical,
             trail.map { it.eventType }
         )

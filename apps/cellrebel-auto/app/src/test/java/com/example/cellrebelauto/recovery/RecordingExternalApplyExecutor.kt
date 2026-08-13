@@ -43,6 +43,30 @@ class RecordingExternalApplyExecutor(
         return ApplyOutcome(outcome = outcome, providerHadAlreadyApplied = alreadyApplied)
     }
 
+    // ---- release (§8.1 BEGIN_RELEASE → RELEASE_RECEIPT; §8.2: no fresh apply until RELEASED) ----
+    // # release 与 apply 同幂等契约、不同操作域（release key 独立派生）。effect 计数也独立，
+    // # 使 finding ③（release 收敛）的 GREEN 可断言"释放 effect 至多一次 + 按真实 release key 调用"。
+
+    private val releasedKeys = mutableSetOf<String>()
+    private val releaseEffectCounts = mutableMapOf<Long, Int>()
+    private val releaseInvocationCounts = mutableMapOf<String, Int>()
+
+    override fun release(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
+        releaseInvocationCounts[idempotencyKey] = (releaseInvocationCounts[idempotencyKey] ?: 0) + 1
+        val already = idempotencyKey in releasedKeys
+        if (!already) {
+            releasedKeys.add(idempotencyKey)
+            releaseEffectCounts[attemptId] = (releaseEffectCounts[attemptId] ?: 0) + 1
+        }
+        return ApplyOutcome(outcome = outcome, providerHadAlreadyApplied = already)
+    }
+
+    /** Times the provider actually performed the release side effect for [attemptId] (at-most-once). */
+    fun releaseEffectCount(attemptId: Long): Int = releaseEffectCounts[attemptId] ?: 0
+
+    /** Times Auto has invoked release for [idempotencyKey]. */
+    fun releaseInvocationCount(idempotencyKey: String): Int = releaseInvocationCounts[idempotencyKey] ?: 0
+
     /** Times the provider actually performed the side effect for [attemptId] (at-most-once ⇒ 0 or 1). */
     fun effectCount(attemptId: Long): Int = effectCounts[attemptId] ?: 0
 

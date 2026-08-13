@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
+import com.example.cellrebelauto.automation.aplus.APlusBackend
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.data.PlanConfigStore
 import com.example.cellrebelauto.db.AppDatabase
@@ -279,6 +280,12 @@ class AutomationService : AccessibilityService() {
                 return@launch
             }
 
+            // # R8-F1/F2（Sol round-7 P1-1）：A+ 组合根。pre-freeze backend = null（纯 legacy 引擎行为）；
+            // # #3 冻结 + GREEN 落地后，同样的 APlusComposition 两函数用真实 backend（frozen Room
+            // # receipt schema + contract RPC）构造 coordinator + evidence。生产与测试走同一组合点。
+            val aplusBackend: APlusBackend? = null // GREEN: 由 frozen schema + contract RPC 构造
+            val aplusCoordinator = aplusBackend?.let { APlusComposition.recoveryCoordinator(it) }
+            val aplusEvidence = aplusBackend?.let { APlusComposition.completionEvidenceSource(it) }
             val newEngine = AutomationEngine(
                 planId = planId,
                 planRepository = planRepository,
@@ -295,7 +302,9 @@ class AutomationService : AccessibilityService() {
                 bridge = bridge,
                 // # R6-F4（§11.7）：生产构造真实 driver——使 §8.1 状态机在生产有真实消费者，
                 // # 杜绝"driver 仅测试构造、生产零调用点"。driver 当前为 no-op 骨架，注入无运行时副作用。
-                attemptDriver = APlusAttemptDriver(db.auditEventDao())
+                attemptDriver = APlusAttemptDriver(db.auditEventDao()),
+                recoveryCoordinator = aplusCoordinator,
+                completionEvidenceSource = aplusEvidence
             )
             engine = newEngine
 

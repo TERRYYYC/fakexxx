@@ -35,6 +35,17 @@ interface ExternalApplyExecutor {
      *         replay at the provider — the signal that distinguishes crash window (b) recovery).
      */
     fun apply(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome
+
+    /**
+     * Drive the external lease RELEASE for [idempotencyKey] (§8.1 BEGIN_RELEASE → RELEASE_RECEIPT;
+     * §8.2: no fresh apply until RELEASED). Same provider idempotency contract as [apply] — a repeat
+     * call with the same key is an idempotent no-op EFFECT — but a DISTINCT operation domain (the
+     * release key is derived separately, see
+     * [com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey]).
+     *
+     * # 外部 lease 释放调用：与 apply 同幂等契约、不同操作域
+     */
+    fun release(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome
 }
 
 /**
