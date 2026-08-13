@@ -436,6 +436,8 @@ class RecoveryIdempotencyRedTest {
 
         assertNull("a FAILED release receipt must not be returned as a successful replay", receipt)
         assertEquals("a FAILED receipt must not re-call the provider", 0, executor.releaseInvocationCount("r-1"))
+        assertTrue("zero provider call for this attempt (shadow-key oracle)", executor.releaseCallsFor(1L).isEmpty())
+        assertEquals("zero release effect", 0, executor.releaseEffectCount(1L))
     }
 
     // ---- apply/release conflict preflight (Sol round-14 P1-1/P1-2) ----
@@ -465,6 +467,8 @@ class RecoveryIdempotencyRedTest {
 
         assertNull("same lease / different key must fail closed", receipt)
         assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
+        assertTrue("zero provider call for this attempt (shadow-key oracle)", executor.releaseCallsFor(1L).isEmpty())
+        assertEquals("zero release effect", 0, executor.releaseEffectCount(1L))
     }
 
     @Test
@@ -478,6 +482,8 @@ class RecoveryIdempotencyRedTest {
 
         assertNull("same key / different lease must fail closed", receipt)
         assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
+        assertTrue("zero provider call for this attempt (shadow-key oracle)", executor.releaseCallsFor(1L).isEmpty())
+        assertEquals("zero release effect", 0, executor.releaseEffectCount(1L))
     }
 
     @Test
@@ -491,5 +497,7 @@ class RecoveryIdempotencyRedTest {
 
         assertNull("exact key+lease but wrong digest must fail closed", receipt)
         assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
+        assertTrue("zero provider call for this attempt (shadow-key oracle)", executor.releaseCallsFor(1L).isEmpty())
+        assertEquals("zero release effect", 0, executor.releaseEffectCount(1L))
     }
 }
