@@ -135,6 +135,14 @@ interface TestAttemptDao {
     @Query("SELECT aplusLeaseId FROM test_attempts WHERE id = :attemptId")
     suspend fun getAplusLeaseId(attemptId: Long): String?
 
+    /** Persist the current §8.6.1 executionId (Sol R35 P1-2: recovery must locate the CURRENT execution). */
+    @Query("UPDATE test_attempts SET currentExecutionId = :executionId WHERE id = :attemptId")
+    suspend fun markCurrentExecutionId(attemptId: Long, executionId: String)
+
+    /** The persisted current executionId for an attempt. */
+    @Query("SELECT currentExecutionId FROM test_attempts WHERE id = :attemptId")
+    suspend fun getCurrentExecutionId(attemptId: Long): String?
+
     /**
      * A+ recoverable attempts: non-terminal rows that entered the A+ lifecycle (aplusState non-null) —
      * recovery branches on their persisted phase, never on a generic `starting|running` status

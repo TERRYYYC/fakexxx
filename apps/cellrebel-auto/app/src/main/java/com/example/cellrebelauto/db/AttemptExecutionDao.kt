@@ -20,4 +20,12 @@ interface AttemptExecutionDao {
 
     @Query("SELECT * FROM cellrebel_executions WHERE executionId = :executionId LIMIT 1")
     suspend fun byExecutionId(executionId: String): CellRebelExecution?
+
+    /** Count executions by executionId (Sol R35 P1-2: detects cross-attempt executionId collision). */
+    @Query("SELECT COUNT(*) FROM cellrebel_executions WHERE executionId = :executionId")
+    suspend fun countByExecutionId(executionId: String): Int
+
+    /** Count all executions for an attempt (Sol R35 P1-2: detects decoy/current confusion). */
+    @Query("SELECT COUNT(*) FROM cellrebel_executions WHERE attemptId = :attemptId")
+    suspend fun countForAttempt(attemptId: Long): Int
 }

@@ -105,7 +105,11 @@ data class TestAttempt(
     val aplusState: String? = null,
     // # R9（Sol round-8 P1-4）：apply 返回的 lease id（provider 单调值，不可派生，必须持久）。release
     // # 收敛与 §8.4 lease 冲突谓词都绑定它。null = 尚未取得 lease。
-    val aplusLeaseId: String? = null
+    val aplusLeaseId: String? = null,
+    // # R36（Sol R35 P1-2）：§8.1 START 前持久化的 current executionId（Auto-local，§8.6.1）。
+    // # null = 尚未进入 CELLREBEL_START_PENDING（未派发 execution）。§7.1：一个 attempt 可有多个
+    // # execution（历史 decoy + current），恢复必须按此字段定位 current execution，不可靠"只有一行"。
+    val currentExecutionId: String? = null
 )
 
 /**
