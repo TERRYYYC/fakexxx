@@ -369,6 +369,10 @@ class AutomationEngine(
                         }
                         is AttemptOutcome.Success -> {
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.COMPLETION_OBSERVED) ?: aplusState
+                            // §8.1: COMPLETION_OBSERVED → POST_OBSERVE_PENDING is persisted BEFORE the post-observe
+                            // call (Sol round-23 P1-1): a crash in the post-observe call must recover as
+                            // POST_OBSERVE_PENDING, not CELLREBEL_RUNNING.
+                            planRepository.markAplusState(attemptId, "POST_OBSERVE_PENDING")
                             val postObservation = aplusEvidenceSrc.acquirePostObservation(attemptId)
                             if (postObservation == null) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
@@ -379,7 +383,9 @@ class AutomationEngine(
                                 return@coroutineScope
                             }
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.POST_OBSERVATION_OK) ?: aplusState
-                            planRepository.markAplusState(attemptId, "POST_OBSERVE_PENDING")
+                            // §8.1: POST_OBSERVATION_OK → DECIDING is persisted right after the observation succeeds
+                            // (Sol round-23 P1-1).
+                            planRepository.markAplusState(attemptId, "DECIDING")
                             // # DECIDE：ctx 由持久 intent（目标坐标、本地重算 hash）+ 后端 artifact 组装（INV-23）
                             val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId)
                             if (evidence == null) {
@@ -390,7 +396,6 @@ class AutomationEngine(
                                 aplusPause("completion evidence unavailable for attempt $attemptId")
                                 return@coroutineScope
                             }
-                            planRepository.markAplusState(attemptId, "DECIDING")
                             val trustCtx = CompletionTrustContext(
                                 execution = evidence.execution.copy(attemptId = attemptId),
                                 completionEvidenceWire = evidence.completionEvidenceWire,

@@ -40,6 +40,11 @@ class RecoveryCoordinator(
     private val trustedQuota: TrustedQuotaAcquirer = TrustedQuotaAcquirer { _ -> false }
 ) {
 
+    /** Number of [reconcile] invocations — the engine must NOT reconcile a non-APPLY_PENDING phase
+     *  (Sol round-23 P1-3): an illegal reconcile is observable through this counter. */
+    var reconcileInvocationCount = 0
+        private set
+
     /**
      * Reconcile a non-terminal attempt after crash/restart (§8.1 RECOVERY_REQUIRED). Returns a TYPED
      * result carrying the durable apply receipt + provider lease the engine MUST persist — the lease is
@@ -59,7 +64,10 @@ class RecoveryCoordinator(
         idempotencyKey: String,
         requestDigest: String,
         now: Long
-    ): ReconcileResult = ReconcileResult.InsufficientEvidence
+    ): ReconcileResult {
+        reconcileInvocationCount++
+        return ReconcileResult.InsufficientEvidence
+    }
 
     /**
      * Schedule-advance consumer gate (Sol round-4 §11.2 F2). Without a durable receipt Auto never
