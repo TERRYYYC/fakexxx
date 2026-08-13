@@ -199,6 +199,7 @@ class CrashMatrixTest {
         assertEquals("M-CR-06: the mint must bind the correct task", 42L, entry!!.taskId)
         assertTrue("M-CR-06: the mint must carry a distinctive evidence digest", entry.evidenceDigest.isNotEmpty())
         assertTrue("M-CR-06: the mint must carry a non-zero commit clock", entry.committedAt > 0)
+        assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row (no unrelated rows)", 1, db.trustedQuotaDao().countAll())
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
