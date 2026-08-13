@@ -61,8 +61,9 @@ source_threads:
 > 不意味着它们消失。
 >
 > **这三条不是已知边界的全集。** 连同 `INV-29`（`deferred`）、`KB-5`（契约留白）、
-> `KB-6`（provider 侧 advance 的覆盖缺口）与 `KB-7`（错误传输通道不在 public SDK）
-> 的完整**七条**见 **§20.1**——那里是"还有哪些没被证明／没被冻结"的唯一入口。
+> `KB-6`（provider 侧 advance 的覆盖缺口）、`KB-7`（错误传输通道不在 public SDK）
+> 与 `KB-8`（坐标所有权未冻结）的完整**八条**见 **§20.1**——那里是"还有哪些没被
+> 证明／没被冻结"的唯一入口。
 > 本告示只做提醒，**不做全集**：此前它与 §19 各列两条、§20 写作"无"，三个入口
 > 给出三个不同的子集，读者无从分辨"我没读到"与"它不存在"。
 
@@ -138,6 +139,7 @@ source_threads:
 | **v1.52** | PR-2 第十轮（同轮第二项） | **上一轮刚修完「关闭 P1 的守卫自己没被测量」，新造的守卫又是零覆盖。** ①v1.51 的 §7b 为关闭 Terra 的 P1-2 而生，落地时**没有任何 `N-*`／`M-*` 案例**——与本轮刚补完的 §5／§6b 缺口同形，区别只是**这次没被测量的守卫是一小时前自己造的**。②而 §7b 恰恰最需要负例：它在被写出来的过程中**三次红错了地方**（正则依次漏掉 `domain : ASCII` 写法、```text 围栏、块内反引号），三次症状都是把「存在」报成「缺席」。一个曾经三次误判的守卫，若没有负例把行为钉死，下一次收窄或放宽都无人察觉。③补 `N-13`（抹掉某 preimage 块的 domain 行 → 必须报出该块）与 `M-10`（关掉 `missing` 的**计算**而非它的输出文案 → finding 必须消失，沿用 `M-9` 的教训）。suite 由 1+12+9 增至 **1 positive / 13 negative / 10 mutation**。④记一条通用要求：**新增门禁节的同一个 commit 内必须带上它的负例与承重证明**——否则「我加了守卫」与「我加了一段从未被要求失败过的代码」在看板上无从分辨。见 `scripts/selftest-contract-v1.sh` |
 | **v1.53** | PR-2 第十一轮（Terra P1-3） | **守卫用自己的盲区当单位报了一个计数，那个计数读起来像覆盖率。** ①§7b 只认以 `canonical`／裸 `domain` 开头的围栏块，而 §6.3.4 写作 `canonicalRequest =`、其 domain 用 `apply → "..."` 映射记法——于是 `fakexxx.contract.v1.apply` 与 `.release` **从未进入守卫**，§7b 却打印 `PASS 3 canonical preimage block(s)` 并全绿。**「3 块」不是覆盖率，是它认得的块数**；改 apply/release 的 domain 或改该块写法，§7b 与 CI 都会继续通过。②改为**全量清单**：识别 4 个 preimage 块、5 个 domain 并逐个列名（`intent`／`advance-request`／`advance-receipt` 用**冒号**分隔，`apply`／`release` 用**点号**——同一份契约里两套 domain 命名法，已提请 reviewer 裁定是否收敛）。module 的 3 个常量必须是 canonical 清单的**子集**；反向包含**刻意不断言**，因为 apply/release 是 canonical-only、provider 侧、无 module 常量——该边界现写在守卫注释里，不留给下一个读者猜。③仅「每块至少一个 domain」不够：§6.3.4 声明两个，删掉 `apply` 还剩 `release`，逐块检查照绿而一个 wire 级身份已消失。故**冻结完整 inventory**，删除或重命名任一 domain 即红，新增 domain 必须显式改 §7b 而不能悄悄放宽。④补 `N-14`（重命名 canonical-only 的 apply domain → 必须红）与 `M-11`；suite 增至 **1 positive / 14 negative / 11 mutation**。⑤`M-10` 的变异锚随本轮重写而失效，mut() 报 `INCONCLUSIVE：变异根本没改动 gate`——**它拒绝把「变异没生效」当成「守卫承重」**，已重新对准现判据。⑥**本轮是同一形态的第四、五次**：写 §7b 时正则三次比文档窄，本轮又两次（漏 `canonicalRequest`、过滤器用合取而非析取漏掉 receipt 块）。**每一次的症状都是把「存在」报成「缺席」，而每一次我都以为已经扫干净了。** 见 §7b |
 | **v1.54** | PR-2 第十二轮 | **耗尽状态模型冻结与步 4 内序重排。** 来源：Fable5 四答定稿（Q1-Q4）。**状态模型**（独立判别位 + 末项保持）已由既有实现验证（660 tests + 5 轮 DSF review + `FakeQwyEnvironment` 判别位持久 + 生产 `QwyScheduleStore:107` 同构），非新设计而是 ratify；**步内 16-first 行为**是本轮冻结的新次序，provider handler（`EnvironmentControlHandler.completeAndAdvance`）仍实际执行旧序 14→15→16，待 provider lane 落 RED test + handler 重排后生效。①**冻结 `exhausted` 独立判别位**：schedule 运行时状态冻结为 `(currentItemId: 非null String, exhausted: Boolean)` 三态模型（无 schedule / 进行中 / 已耗尽）。排除 null 指针（与"尚未开始"撞 + 14-shadows-16 + sentinel 反模式）与越界魔值（§6.7.3 取消 ID 受限假设）。bit 生命周期：完成末项的 committed advance 置位，schedule (re)init / version 变更清零。receipt `advancedToItemId = null` 是 OUTCOME 编码，STATE 里没有 null。②**步 4 内序由 `14→15→16` 重排为 `16→14→15`**（exhausted-first）。三条推理各自充分联合必要：(a) 规范自身先例——步间已裁定 16 先于 7，步内同理；(b) 恢复语义诚实——14/15 承诺可恢复，耗尽后无一可恢复，答 14/15 是谎报；(c) 确定性——M-AD-11 的"稳定 16"从条件命题变恒真。**唯一行为 delta = 耗尽后陈旧期望：旧答 14，新答 16**，恰是被修缺陷本身。现有 14→15 相对序不重开。③**M-AD-10/11/13/21 同步刷新**：M-AD-10 加 bit + 指针持久性与 restart 存活；M-AD-11 加三变体（保持项期望 / 历史 non-null 期望 / restart 间隔）全 →16；M-AD-13 加步内多重违反例（exhausted + stale item + stale version → 首命中 16）；M-AD-21 并发分叉精确化（非末项 loser 精确 14——winner 同时移 item + version 但步内序 14 先于 15 故 item 失配已确定答案；末项 loser 精确 16——winner 置 exhausted 后步内序首命中 16）。见 §6.7.4 / §6.7.4b / §10 |
+| **v1.56** | PR-2 第十二轮（版本语义 + KB-8） | **终末项推进返回 V 还是 V+1 没人说过，而 v1.54 的清零触发能把自己写的位在同一事务内抹掉。** ①Sol 的 exact-HEAD review 抓到：M-AD-21 非末项写了「`scheduleVersion` 递增」但 M-AD-10（末项完成）**零字**提及版本行为；v1.54 写「schedule (re)init / version 变更清零」，若终末项也递增版本，同一 committed advance 事务既置 exhausted=true 又因版本变更清零——**自己写的位在同一提交内被自己清除**。provider 证据不一致：production `QwyScheduleStore` 返回 V+1，fake 返回 V，handler 用 pre-advance version 构造 receipt。②**冻结统一规则**：每次 committed advance（含末项）在其 CAS 事务内将 `scheduleVersion` 恰递增 1，receipt 的 `scheduleVersionAfter = expectedScheduleVersion + 1`——终末项与非末项同规则，无特殊分支。§6.7.1 同步扩展定义域：`scheduleVersion` 不只跟踪计划配置变化，也跟踪 committed advance。③**消歧 v1.54 清零触发**：置 exhausted、保持指针、递增版本是同一 CAS 事务的三个组成部分。「version 变更清零」现收窄为**外部** schedule (re)initialization（operator 发起、不经 advance 协议），advance 自身的原子版本递增不是清零触发——否则 exhausted 在写入它的同一事务即被清除而不可能存活。④M-AD-10 补 `scheduleVersionAfter = expectedScheduleVersion + 1` + 原子三态；M-AD-21 末项 case 补版本递增。⑤**KB-8 登记坐标所有权**（Sol P1-2）：§2.2 与 `EnvironmentIntentV1` 的坐标归属矛盾此前只活在 Decision Packet v2 消息里，§20.1 零条——与 KB-7 同病。现登记为 `unfrozen`，operator 裁定后冻结 wire 行为。顶部告示七条→**八条**，§19 同步。见 §6.7.1 / §6.7.4 / §10 / §20.1 |
 | **v1.55** | PR-2 第十二轮（wire 投影） | **`exhausted` 状态存在于 provider 内部却不上线，消费者只能猜。** ①v1.54 冻结了 `exhausted` 独立判别位，但 `CapabilitySnapshotV1`（§6.3 discover DTO）与 `PreflightReportV1`（§6.3.2 preflight DTO）未携带该字段——Auto 能读 `currentItemId` / `scheduleVersion` 却读不到 `exhausted`，无法构造 §6.7.4b 第 4 步 16-first 的前置。②`CapabilitySnapshotV1` 新增 `val exhausted: Boolean?`，位于 `scheduleVersion: Long?` 之后。**Group invariant**：`currentScheduleId` / `currentItemId` / `scheduleVersion` / `exhausted` 四者同为 null（无活动 schedule）或同为非 null。null 读作「没有 schedule」而非「未耗尽」。③`PreflightReportV1` 新增 `val exhausted: Boolean?` 并将 `scheduleItemId: String` / `scheduleVersion: Long` 改为 nullable。v1.55 前这两个字段非空，handler 用 `?: ""` / `?: 0L` 填充——round-5 sentinel 反模式在 wire 层。三者同为 null 或同为非 null，与 `CapabilitySnapshotV1` 一致。④**preimage 安全**：`CapabilitySnapshotV1` 经实查不在任何 canonical digest preimage（`CanonicalDigestV1.kt` 零 import / 零引用），新增字段不变更 digest；`PreflightReportV1` 同理。⑤kotlin-parcelize 按声明顺序 read/write，`exhausted` 追加在末尾，**不扰动已有字段的 parcel 位置**——但 v1 协议尚未冻结 wire（Draft PR），版本 skew 不适用。见 §6.3 / §6.3.2 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
@@ -1823,7 +1825,7 @@ ProviderPairingRecord(
 |---|---|---|
 | `scheduleId` | 计划的稳定标识 | 跨重启、跨 revision 不变 |
 | `scheduleItemId` | **计划项**的稳定标识 | **不是位置**。重排、插入、删除其它项都不得改变幸存项的 id |
-| `scheduleVersion` | 计划的单调版本 | 顺序 / 成员 / 优先级**任一**变化都必须自增 |
+| `scheduleVersion` | 计划与执行的单调版本 | 顺序 / 成员 / 优先级变化，或 committed advance（含末项完成）——**任一**都必须自增；每次 committed advance 在其 CAS 事务内恰递增 1（v1.56 冻结） |
 | `currentItemId` | 当前有效项指针 | 千网游唯一权威；与「当前生效环境」同源 |
 
 **禁止**：按行序、首行、或 profile 表的隐式顺序推断当前项。千网游现存的「隐式首行 + 遗留行序回退」必须迁移到显式 `currentItemId`；那条未标注的全 profile 折线是**投影**，不得被任何一方当作顺序真相。
@@ -1925,6 +1927,7 @@ data class AdvanceReceiptV1(
     val advancedFromItemId: String,
     /** 耗尽时为 null——终态，非失败。 */
     val advancedToItemId: String?,
+    /** 始终 = expectedScheduleVersion + 1，无论 ADVANCED 还是 EXHAUSTED（v1.56 冻结）。 */
     val scheduleVersionAfter: Long,
     val effectiveIntentHash: String,
     val effectiveEnvironmentRevision: Long,
@@ -1962,7 +1965,7 @@ data class AdvanceReceiptV1(
 >
 > **排除 null 指针作为耗尽表示**：① 与"尚未开始"态撞（首项 advance 在 `currentItemId = null` 上发 CAS 即踩空）；② 违反 M-AD-10 保持条款（receipt `advancedFromItemId` 需要它）；③ 制造 14-shadows-16 陷阱（null 不等于任何 `expectedCurrentItemId`，步内旧序 14 先于 16 时恒答 14，16 永不可达）；④ null-as-state 就是 §6.3.1 / round-5 刚杀掉的 sentinel 反模式。**排除指针越界魔值**：§6.7.3 明文取消了"ID 受限"假设，任何魔值 ID 都可能合法存在。**独立布尔**是显式状态判别位，与本 PR 五轮 review 烧进去的哲学（explicit discriminator / no sentinel / no unreachable value）同一坐标系。
 >
-> **Bit 生命周期**：仅由完成末项的 committed advance 置位（单写者 = §6.7.5 单提交协议 / CAS 事务边界内）；仅由 schedule (re)initialization / version 变更清零。注意区分：receipt 的 `advancedToItemId = null` 是 **OUTCOME 编码**（已冻结，codec-native null），与 schedule **STATE 编码** `(currentItemId, exhausted)` 是两个问题——STATE 里没有 null。
+> **Bit 生命周期**：仅由完成末项的 committed advance 置位（单写者 = §6.7.5 单提交协议 / CAS 事务边界内）——该事务**原子地**同时置 `exhausted = true`、保持 `currentItemId` 为末项、并递增 `scheduleVersion`（V→V+1），三者是同一提交的组成部分（v1.56 冻结 `scheduleVersionAfter = expectedScheduleVersion + 1`，与非末项推进同规则）。仅由**外部** schedule (re)initialization（operator 发起、不经 advance 协议）清零——advance 自身的原子版本递增不是清零触发，否则 `exhausted` 在写入它的同一事务即被清除而不可能存活。注意区分：receipt 的 `advancedToItemId = null` 是 **OUTCOME 编码**（已冻结，codec-native null），与 schedule **STATE 编码** `(currentItemId, exhausted)` 是两个问题——STATE 里没有 null。
 
 ##### 6.7.4b 判定次序（冻结）
 
@@ -2425,7 +2428,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-07` | advance | 千网游已推进、Auto 未收到 receipt（连接中断） | **无 receipt 即视为未推进**；Auto 以同键重放取回原 receipt。**禁止**据「环境看起来变了」推断已推进 | 13,15,23 |
 | `M-AD-08` | advance | receipt 取回但 `receiptDigest` 重算不上 | **不是弱证据，是无证据**：拒绝该 receipt、不前移本地状态、告警 | 13,23 |
 | `M-AD-09` | advance | 推进后 `observe` 的 `scheduleItemId` ≠ receipt 的 `advancedToItemId` | 判**错环境归因**：不计数、不继续；同一 profile 可跨项复用，故环境相符**不足以**替代本条 | 8,23,26 |
-| `M-AD-10` | advance | 最后一项完成 | receipt `outcomeWire = EXHAUSTED`、`advancedToItemId = null`；**终态非失败**。`currentItemId` 保持末项、`exhausted` 置 `true`、不回绕。restart 后 bit + 指针双存活（§6.7.5 事务持久性）。状态模型见 v1.54 冻结 | 17 |
+| `M-AD-10` | advance | 最后一项完成 | receipt `outcomeWire = EXHAUSTED`、`advancedToItemId = null`、`scheduleVersionAfter = expectedScheduleVersion + 1`；**终态非失败**。`currentItemId` 保持末项、`exhausted` 置 `true`、`scheduleVersion` 递增 V→V+1、不回绕——三态均在同一 CAS 事务内原子提交。restart 后 bit + 指针 + 版本三存活（§6.7.5 事务持久性）。状态模型见 v1.54 冻结，版本规则见 v1.56 冻结 | 17 |
 | `M-AD-11` | advance | 已耗尽后再次请求推进 | typed `SCHEDULE_EXHAUSTED(16)`，**无条件精确 16**（§6.7.4b 步内序 16→14→15）；与 M-AD-10 是两件事。三变体：(a) 保持项期望→16；(b) 历史 non-null 期望（如耗尽于 item-3 后期望 item-1，fresh key）→**精确 16**（v1.54 步内重排的核心行为 delta）；(c) 耗尽与请求之间 restart（判别位持久）→16 | 17 |
 | `M-AD-12` | advance | 推进时设备上存在非 `RELEASED` lease——**本 caller 自持**与**另一 caller 持有**两种情形各测一遍 | typed `LEASE_CONFLICT`（§6.7.4a）；**不推进、指针不动**；release 后同一份请求字节重试即应成功。断言必须钉 **exact wire 7**，接受"任意 typed failure"不构成证据 | 14,16,28 |
 | `M-AD-13` | advance | 同时违反多条前置（如既持活动 lease 又 `expectedScheduleVersion` 过期；或 exhausted + 陈旧 item + 陈旧 version） | 按 §6.7.4b **冻结次序**返回**首条**命中者：跨步例为 `SCHEDULE_VERSION_STALE`（步 4 先于步 5）；步内例为 `SCHEDULE_EXHAUSTED`（步 4 内序 16→14→15）。次序若被实现成任选，本行必红 | 15,16,28 |
@@ -2436,7 +2439,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-18` | advance | 推进后 `observe` 的 `environmentRevision` ≠ receipt 的 `effectiveEnvironmentRevision`（**item 与 hash 都对得上**） | 同上；typed reason 必须指明是 revision 这条腿。本行与 `M-AD-17` 分立：单腿读法会各自放过对方 | 25 |
 | `M-AD-19` | advance | 跨新分叉的同键重放（未达标路径与已达标路径各一次） | 可信配额保持幂等、最多增加一次；不得产生第二次推进 | 10,13 |
 | `M-AD-20` | advance | **合法序列**：release 后以已 `RELEASED` 的历史 `leaseId` 调 `completeAndAdvance`，随后以**同一** `leaseId` 调 `observe` | 两者都必须被受理，`observe` 返回新生效环境；仅当该 caller 已获授新 lease 或 `leaseId` 非该历史引用时才 `STALE_LEASE`(8)。**这是 §6.7.4a 序列唯一的合法形态，此前 `M-AD-01..13` 无一行断言它** | 28 |
-| `M-AD-21` | advance | **两个不同新 key** 的 `completeAndAdvance` 并发到达，均在指针前移前读到同一 `currentItemId` | **恰好一次**推进，**不得两次都成功**。loser 的 typed code 按争用项是否末项**分叉**：**非末项** → winner 提交后 `currentItemId` 前移 + `scheduleVersion` 递增 + `exhausted` 保持 `false`，loser 重进 CAS 临界区后 16 不命中、`expectedCurrentItemId ≠ actual` 先于 version 判定命中，**精确 `SCHEDULE_ITEM_MISMATCH(14)`**（非 15——winner 同时移了 item 与 version，但步内序 14 先于 15，item 失配已确定答案）；**末项** → winner 置 `exhausted = true` 且**指针保持末项**，故 loser 的 item CAS 恒过、在步 4 内序首命中 `SCHEDULE_EXHAUSTED(16)`（**不是** 14）。不分叉则本行与 §6.7.4b 步内序 16→14→15 直接矛盾。单看每一次都合法，所以必须由事务边界而非请求内容拦截 | 15,16 |
+| `M-AD-21` | advance | **两个不同新 key** 的 `completeAndAdvance` 并发到达，均在指针前移前读到同一 `currentItemId` | **恰好一次**推进，**不得两次都成功**。loser 的 typed code 按争用项是否末项**分叉**：**非末项** → winner 提交后 `currentItemId` 前移 + `scheduleVersion` 递增 + `exhausted` 保持 `false`，loser 重进 CAS 临界区后 16 不命中、`expectedCurrentItemId ≠ actual` 先于 version 判定命中，**精确 `SCHEDULE_ITEM_MISMATCH(14)`**（非 15——winner 同时移了 item 与 version，但步内序 14 先于 15，item 失配已确定答案）；**末项** → winner 置 `exhausted = true`、`scheduleVersion` 递增、且**指针保持末项**，故 loser 的 item CAS 恒过、在步 4 内序首命中 `SCHEDULE_EXHAUSTED(16)`（**不是** 14）。不分叉则本行与 §6.7.4b 步内序 16→14→15 直接矛盾。单看每一次都合法，所以必须由事务边界而非请求内容拦截 | 15,16 |
 | `M-AD-22` | advance | 在**谓词读与指针提交之间**注入故障（进程被杀／事务中止） | 恢复后只能观察到「已推进」或「未推进」，且幂等记录与 receipt 与指针三者状态一致；**不得出现指针已动而幂等记录未落**（后果是同一次完成可再推进一次） | 13,15,16 |
 | `M-RC-02` | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | `M-RC-03` | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |
@@ -3625,7 +3628,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 - **`I3.5` 已闭合**：`(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**（raw-green 终态门；ratchet 仅为中间证据）；
 - **`#13` 已闭合**：`M-AC-01..05` 全绿，设备层 cutover 与旧 App 移除完成 —— **Epic #1 不得在 #13 未闭合时 close**；
 - §20.1 表中**全部** `limit` 条目已在验收报告中显式记录、未被写成全绿：`KB-1`（§8.6.5 completion 跨 attempt 去重）、`KB-2`（§18.1 的 `FULL` 依赖）、`KB-3`（§6.5.3 的 TOFU 上限）。**以 §20.1 为准，不以本行的枚举为准**——本行此前只列前两条、漏掉 `KB-3`，正是 §20.1 要消除的"多入口各列子集"；
-- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row 并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"；
+- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`／`KB-8`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row 并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
@@ -3662,6 +3665,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | `KB-4` | `applicationId` cutover 不得孤儿化用户可见状态 | `deferred` 可触达、待闭合 | `INV-29`（§9）／§21 DP-2 | [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 闭合 | 未闭合前**不得**声称 `INV-29` 已覆盖，且**不得**执行任何 `applicationId` mutation |
 | `KB-5` | `completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时如何处置 | `unfrozen` 契约留白 | §6.3.3 wire 8 例外段／§6.7.4a | `M-AD-12`／`M-AD-13` 的 owner 裁定后冻结（属 provider 侧行为，非本 PR 可单方决定） | 冻结前两侧**都不得**擅自选一种读法并依赖它——一侧用 8 拒绝、另一侧放行，Auto 的恢复策略即不可移植（§6.7.4b 冻结判定次序所要消除的正是这一形态） |
 | `KB-7` | §6.3.2 冻结「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」，但 **`android.os.ServiceSpecificException` 不在 public SDK 里**：对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举，`android/os/ServiceSpecificException` **零命中**（对照项 `android/os/Parcel.class` 命中，证明扫描方法有效而非空转）。它是 `@hide`，app 代码无法直接引用 | `unfrozen` 契约留白 | §6.3.2 散文（全文**仅一处**）／`ContractErrorCodeV1` 文件级 KDoc | **operator 裁定错误传输通道**（Decision Packet 已投；本表只登记，不代为选定）。裁定后应补一道门禁，断言契约引用的每个 `android.*` 类型都存在于编译 SDK——本轮不加，因为该断言的形状取决于所选通道 | 冻结前**不得**声称错误传输已可实现。它此前**只存在于聊天里**：本文档零处记录，而 §20.1 自己冻结的规则是"新增边界必须同时进两处"——违反者正是本条。两处载体都是散文，所以编译器与现有九节门禁**都**看不见它 |
+| `KB-8` | §2.2 声称 Auto 不再导入地址/经纬度、只持有 `scheduleItemId + scheduleVersion`，但 `EnvironmentIntentV1` 仍要求 Auto 发送 `latitude/longitude` 且进入 `acceptedIntentHash` 的 preimage；`discover()` 不暴露 schedule-item 坐标。provider 可以信 Auto 坐标、信自己 schedule 坐标、或拒绝不匹配——**契约未冻结选择，也无 wire 表达它**。Decision Packet v2 已投 | `unfrozen` 契约留白 | §2.2 / §6.3（`EnvironmentIntentV1`）/ §6.3.1（digest preimage） | **operator 裁定坐标所有权**（Decision Packet v2 已投）。裁定后冻结 wire 级行为（provider 用谁的坐标、不匹配时返回什么 code、discover 是否投影 item 坐标） | 冻结前**不得**声称坐标归属已解决。两侧实现各自选一种读法即不可移植——与 `KB-5` 同形，层不同（`KB-5` 在 lease 层，本条在 intent 层） |
 | `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为**五行**，但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
 
 **四个类别不可互相改写**，因为每一类要求的下一步动作完全不同：`limit` 是**已经知道证明不了**（只能接受并披露）；`unfrozen` 是**还没决定**（需要 owner 裁定）；`deferred` 是**可触达、有确定载体、尚未闭合**（等载体，与 §10.1 对 `deferred:<DP-x>` 的规定同源）；`gap` 是**契约已冻结、但没有稳定 ledger row 证明实现符合它**（需要补行并执行）。把留白写成上限，等于宣布它永远不修；把上限写成留白，等于承诺一件交付不出来的东西；把任一者写成 `deferred`，等于给它一个并不存在的闭合路径。而把 `gap` 写成 `limit`——**把"还没测"说成"测不了"**——是其中最该防的一种：它让一件待办永久退出待办清单，且伪装成物理限制之后没有人会再去挑战它。

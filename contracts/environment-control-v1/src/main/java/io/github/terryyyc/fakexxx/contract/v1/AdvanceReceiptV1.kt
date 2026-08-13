@@ -25,6 +25,12 @@ data class AdvanceReceiptV1(
     val outcomeWire: Int,
     val advancedFromItemId: String,
     val advancedToItemId: String?,
+    /**
+     * Always `expectedScheduleVersion + 1`, regardless of whether outcome is
+     * [AdvanceOutcomeV1.ADVANCED] or [AdvanceOutcomeV1.EXHAUSTED] (§6.7.1,
+     * v1.56). A terminal advance atomically sets the exhausted bit AND
+     * increments the version in the same CAS transaction.
+     */
     val scheduleVersionAfter: Long,
     val effectiveIntentHash: String,
     val effectiveEnvironmentRevision: Long,
