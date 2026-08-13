@@ -205,6 +205,16 @@ neg "N-9 KDoc drops the correction citation (rule B)" "$KT_ERR" \
 "SCHEDULE_EXHAUSTED -- canonical 6.3.3 records a correction in v1.39"
 
 # ---------------------------------------------------------------------------
+# N-10 exists because 5b had ZERO selftest coverage, and that is precisely how
+# its blind spot survived: the reference regex required bare digits inside the
+# parens, so the canonical text's own `NAME`(**13**) form was never counted.
+# Mutating that citation to a wrong wire produced no finding at all. A guard
+# with no negative case is a guard nobody has measured.
+neg "N-10 bold inline wire citation contradicts the enum" "$SPEC" \
+  'REQUEST_INVALID`(**13**)' \
+  'REQUEST_INVALID`(**4**)' \
+  "cites REQUEST_INVALID(4); authoritative is REQUEST_INVALID(13)"
+
 printf '\n== mutation (disable one guard; its case must stop reporting) ==\n'
 
 # Each case above proves the gate is red while the drift is present. None of them
@@ -307,6 +317,16 @@ mut "M-6 rule B (correction citation) catches N-9" 's/if absent:/if False and ab
 "records a correction in v1.39"
 
 # ---------------------------------------------------------------------------
+# M-7 proves the bold tolerance is what catches N-10, not some older check
+# happening to cover for it. Strip \*{0,2} back out of the reference regex and
+# the finding must disappear entirely.
+mut "M-7 5b bold tolerance catches N-10" \
+  "s/^BOLD = r'.*/BOLD = r''/" \
+  "$SPEC" \
+  'REQUEST_INVALID`(**13**)' \
+  'REQUEST_INVALID`(**4**)' \
+  "cites REQUEST_INVALID(4)"
+
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
   printf 'selftest-contract-v1: PASS (%d positive, %d negative, %d mutation self-check(s) — every case ran against the production gate)\n' \

@@ -481,10 +481,26 @@ if not truth:
     sys.exit(1)
 
 spec = open(spec_path, encoding="utf-8").read().split("\n")
-# Accept both ASCII and full-width parens, with or without backticks/spaces --
-# the document uses every combination.
-ref = re.compile(r'`?(' + '|'.join(sorted(truth, key=len, reverse=True)) +
-                 r')`?\s*[（(](\d+)[）)]')
+# Accept both ASCII and full-width parens, with or without backticks/spaces,
+# AND with markdown bold around either the name or the number -- the document
+# uses every combination.
+#
+# The bold tolerance was missing until now, and it mattered: the canonical text
+# really does contain `REQUEST_INVALID`(**13**), and this regex could not see
+# it. So the one inline citation inside the revision note that announced "5b
+# makes this class of error impossible to slip through" was itself the citation
+# 5b could not read. Mutating it to (**4**) produced zero FAIL.
+#
+# The 6.3.3 TABLE parser above already tolerated \*{0,2} on both the wire and
+# the name. Two parsers in one file disagreeing about the same markdown is how a
+# guard ends up covering less than its own documentation claims.
+# Named on purpose: the bold tolerance is the knob this guard can lose, so it
+# must be mutable in ONE place. Inlining it four times would make the selftest
+# unable to disable it without also disabling the 6.3.3 table parser, and a
+# mutation that turns off two guards cannot prove which one was load-bearing.
+BOLD = r'\*{0,2}'
+ref = re.compile(BOLD + r'`?(' + '|'.join(sorted(truth, key=len, reverse=True)) +
+                 r')`?' + BOLD + r'\s*[（(]\s*' + BOLD + r'(\d+)' + BOLD + r'\s*[）)]')
 
 bad = checked = 0
 for i, line in enumerate(spec, 1):
