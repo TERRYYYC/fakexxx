@@ -45,7 +45,7 @@ import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
         ProviderPairingRecord::class,
         UnverifiedAttemptRecord::class
     ],
-    version = 6,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -144,7 +144,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "cellrebel_auto.db"
                 )
                     // # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

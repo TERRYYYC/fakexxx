@@ -66,5 +66,12 @@ interface ExternalApplyExecutor {
  *           `(idempotencyKey, requestDigest)` and this call was an idempotent no-op EFFECT — the
  *           M-CR-02 window (b) recovery signal (Auto called twice across a crash; the provider
  *           applied once).
+ * @property leaseId the provider-returned lease id this apply acquired (Sol round-9 P1-2: the normal
+ *           path MUST obtain the lease from the apply, never invent it). Null = fail-closed / no lease
+ *           acquired (a release call also leaves it null — it is apply-domain only).
  */
-data class ApplyOutcome(val outcome: String, val providerHadAlreadyApplied: Boolean)
+data class ApplyOutcome(
+    val outcome: String,
+    val providerHadAlreadyApplied: Boolean,
+    val leaseId: String? = null
+)

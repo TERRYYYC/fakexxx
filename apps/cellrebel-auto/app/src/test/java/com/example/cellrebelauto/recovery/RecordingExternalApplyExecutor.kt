@@ -39,8 +39,9 @@ class RecordingExternalApplyExecutor(
             appliedKeys.add(idempotencyKey)
             effectCounts[attemptId] = (effectCounts[attemptId] ?: 0) + 1
         }
-        // If alreadyApplied: idempotent no-op EFFECT — count unchanged, signal the replay (M-CR-02).
-        return ApplyOutcome(outcome = outcome, providerHadAlreadyApplied = alreadyApplied)
+        // The provider returns a STABLE lease per attempt (derived from the attempt id) — the same
+        // key replays the same lease (idempotent). The RED asserts the lease is persisted, not invented.
+        return ApplyOutcome(outcome = outcome, providerHadAlreadyApplied = alreadyApplied, leaseId = "lease-$attemptId")
     }
 
     // ---- release (§8.1 BEGIN_RELEASE → RELEASE_RECEIPT; §8.2: no fresh apply until RELEASED) ----

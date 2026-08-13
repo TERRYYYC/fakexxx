@@ -50,11 +50,7 @@ class RecoveryIdempotencyRedTest {
 
         // RED (INV-15): skeleton returns INSUFFICIENT_EVIDENCE and never calls the executor. GREEN must
         // drive the external apply exactly once, record a receipt, and return ADVANCED_TO_RELEASE.
-        assertEquals(
-            "a fresh recoverable attempt must advance to release (got $outcome)",
-            ReconcileOutcome.ADVANCED_TO_RELEASE,
-            outcome
-        )
+        assertTrue("a fresh recoverable attempt must advance to release (got $outcome)", outcome is ReconcileResult.AdvancedToRelease)
         assertEquals(
             "the provider side effect must happen exactly once (at-most-once effect)",
             1,
@@ -80,11 +76,7 @@ class RecoveryIdempotencyRedTest {
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must short-circuit on the existing receipt
         // (REPLAYED_APPLY) WITHOUT calling the executor again — at-most-once.
-        assertEquals(
-            "same-key/same-digest replay must be REPLAYED_APPLY (got $outcome)",
-            ReconcileOutcome.REPLAYED_APPLY,
-            outcome
-        )
+        assertTrue("same-key/same-digest replay must be REPLAYED_APPLY (got $outcome)", outcome is ReconcileResult.ReplayedApply)
         assertEquals(
             "replaying a receipt must NOT re-invoke the executor (at-most-once)",
             1,
@@ -105,11 +97,7 @@ class RecoveryIdempotencyRedTest {
         val outcome = rc.reconcile(attemptId = 42L, idempotencyKey = "k-42", requestDigest = "digest-v2", now = 2000L)
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must surface the conflict.
-        assertEquals(
-            "same-key/different-digest must be IDEMPOTENCY_CONFLICT (got $outcome)",
-            ReconcileOutcome.IDEMPOTENCY_CONFLICT,
-            outcome
-        )
+        assertTrue("same-key/different-digest must be IDEMPOTENCY_CONFLICT (got $outcome)", outcome is ReconcileResult.IdempotencyConflict)
         assertEquals(
             "a conflicting apply must NOT invoke the executor (no second side effect)",
             0,
@@ -140,11 +128,7 @@ class RecoveryIdempotencyRedTest {
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must recover M-CR-02: re-invoke the
         // executor (the provider idempotently no-ops, effect stays 1), record the receipt, advance.
-        assertEquals(
-            "M-CR-02 post-crash reconcile must advance to release (got $outcome)",
-            ReconcileOutcome.ADVANCED_TO_RELEASE,
-            outcome
-        )
+        assertTrue("M-CR-02 post-crash reconcile must advance to release (got $outcome)", outcome is ReconcileResult.AdvancedToRelease)
         assertEquals(
             "the executor MUST be re-invoked post-crash (receipt was absent) — invocation goes 1 → 2",
             2,
@@ -170,11 +154,7 @@ class RecoveryIdempotencyRedTest {
             .reconcile(attemptId = 8L, idempotencyKey = "k-8", requestDigest = "digest-8", now = 3000L)
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must see the receipt and REPLAY (no re-apply).
-        assertEquals(
-            "post-crash reconcile with a receipt present must be REPLAYED_APPLY (got $outcome)",
-            ReconcileOutcome.REPLAYED_APPLY,
-            outcome
-        )
+        assertTrue("post-crash reconcile with a receipt present must be REPLAYED_APPLY (got $outcome)", outcome is ReconcileResult.ReplayedApply)
         assertEquals(
             "the executor MUST NOT be re-invoked when a receipt already exists",
             1,

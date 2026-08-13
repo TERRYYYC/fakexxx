@@ -32,12 +32,24 @@ interface RunSessionDao {
     suspend fun getById(id: Long): RunSession?
 
     /**
-     * The active (running) session for a plan — the crashed owner session the A+ recovery must
-     * TRANSITION (RECOVERING → RUNNING/PAUSED) rather than mint a second active run
-     * (Sol round-8 P1-6).
+     * The active session for a plan — the crashed owner session the A+ recovery must TRANSITION
+     * (RECOVERING → RUNNING/PAUSED) rather than mint a second active run (Sol round-8 P1-6). Recognizes
+     * BOTH `running` and `recovering`: a crash DURING the first recovery persists `recovering`, and the
+     * next restart must still find + supersede it (Sol round-9 addendum: second-restart polarity).
      */
-    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status = 'running' ORDER BY startedAt DESC LIMIT 1")
+    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status IN ('running','recovering') ORDER BY startedAt DESC LIMIT 1")
     suspend fun findActiveRunningSession(planId: Long): RunSession?
+
+    /**
+     * Recovery sweep (O4) that EXCLUDES the current owner session: sessions left `running` by a dead
+     * process → interrupted, but the A+-recovered owner (which recovery just marked `running`) must not
+     * be clobbered (Sol round-9 P1-4: the global sweep used to interrupt the just-recovered owner).
+     */
+    @Query(
+        "UPDATE run_sessions SET status = 'interrupted', endedAt = :nowMs " +
+            "WHERE status = 'running' AND id != :excludeId"
+    )
+    suspend fun markStaleSessionsInterruptedExcept(nowMs: Long, excludeId: Long): Int
 
     /**
      * Recovery sweep (O4): sessions left `running` by a dead process → interrupted.

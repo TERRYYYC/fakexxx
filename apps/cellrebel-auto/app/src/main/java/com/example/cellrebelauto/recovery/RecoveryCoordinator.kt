@@ -41,8 +41,15 @@ class RecoveryCoordinator(
 ) {
 
     /**
-     * Reconcile a non-terminal attempt after crash/restart. RED: always [ReconcileOutcome.INSUFFICIENT_EVIDENCE],
-     * ignoring [executor] and [log] entirely.
+     * Reconcile a non-terminal attempt after crash/restart (§8.1 RECOVERY_REQUIRED). Returns a TYPED
+     * result carrying the durable apply receipt + provider lease the engine MUST persist — the lease is
+     * NOT invented by the caller; it comes back from the (idempotent) apply (Sol round-9 P1-3: the
+     * M-CR-02 window has no pre-existing lease, the replay yields it).
+     *
+     * PRE-FREEZE SKELETON (RED): always returns [ReconcileResult.InsufficientEvidence], ignoring
+     * [executor] and [log]. GREEN: same-key/same-digest → [ReconcileResult.ReplayedApply] (no executor
+     * call) with the prior receipt + lease; same-key/different-digest → IdempotencyConflict; no receipt →
+     * executor.apply + recordReceipt + recordCheckpoint → AdvancedToRelease with the fresh receipt + lease.
      *
      * @param idempotencyKey the frozen idempotency key for this attempt's apply (INV-13).
      * @param requestDigest the §6.3.4 canonical digest of the apply request (NOT the result digest).
@@ -52,7 +59,7 @@ class RecoveryCoordinator(
         idempotencyKey: String,
         requestDigest: String,
         now: Long
-    ): ReconcileOutcome = ReconcileOutcome.INSUFFICIENT_EVIDENCE
+    ): ReconcileResult = ReconcileResult.InsufficientEvidence
 
     /**
      * Schedule-advance consumer gate (Sol round-4 §11.2 F2). Without a durable receipt Auto never
@@ -95,21 +102,41 @@ class RecoveryCoordinator(
     ): ScheduleAdvanceState = ScheduleAdvanceState.NOT_ADVANCED
 
     /**
+     * Normal-path apply dispatch (§8.1 BEGIN_APPLY→APPLY_RECEIPT): drive the external apply for
+     * [idempotencyKey] + [requestDigest] and record the durable receipt. Returns the [ApplyOutcome]
+     * carrying the provider lease ([ApplyOutcome.leaseId]) — the normal path MUST obtain its lease from
+     * here, never invent it (Sol round-9 P1-2: the normal chain forges APPLY_RECEIPT if it never drives
+     * the provider). A fail-closed executor yields `leaseId == null` (no lease).
+     *
+     * This is orchestration over the two seams ([ExternalApplyExecutor] + [DurableRecoveryLog]); the
+     * GREEN body is their production bindings (RPC + Room), not this call order.
+     *
+     * # 正路径 apply 派发：驱动执行器 + 落 receipt；lease 由 ApplyOutcome 带回（绝不凭空发明）
+     */
+    fun dispatchApply(
+        attemptId: Long,
+        idempotencyKey: String,
+        requestDigest: String,
+        now: Long
+    ): ApplyOutcome {
+        val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
+        if (outcome.leaseId != null) {
+            log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
+        }
+        return outcome
+    }
+
+    /**
      * Lease-release convergence (§8.1 BEGIN_RELEASE→RELEASE_RECEIPT; §8.2: no fresh apply until
      * RELEASED): drive the external release for [leaseId] and record the DURABLE release receipt.
      * Returns the typed [RecordedReleaseReceipt], or null when the release is not durable (fail-closed).
      *
-     * LEASE-BOUND + DURABLE (Sol round-8 P1-4): a Boolean "released" is not a proof — an impl that does
-     * `executor.release(...); return true` with no durable receipt must not green. The engine asserts the
-     * returned receipt's lease/digest binding, not a boolean.
+     * LEASE-BOUND + DURABLE (Sol round-8 P1-4 / round-9 P1-5): drives [ExternalApplyExecutor.release]
+     * (the provider effect) and records the receipt bound to [leaseId] + [releaseDigest] — a Boolean
+     * "released" is not a proof. The normal path MUST release through here, never emit RELEASE_RECEIPT
+     * without the provider call.
      *
-     * Sol round-7 P1-4 (history): the R7 recovery returned ADVANCED and immediately marked the attempt
-     * interrupted and resumed — NO release convergence — leaving the lease unresolved before a fresh
-     * apply (§8.2: no fresh apply until RELEASED).
-     *
-     * PRE-FREEZE SKELETON (RED): returns null and touches nothing (fail-closed).
-     *
-     * # lease 释放收敛骨架（RED）：恒 null、无副作用；GREEN 驱动释放并落 lease-bound release receipt
+     * # lease 释放收敛：驱动 release + 落 lease-bound release receipt（typed，非 Boolean）
      */
     fun releaseLease(
         attemptId: Long,
@@ -117,15 +144,28 @@ class RecoveryCoordinator(
         leaseId: String,
         releaseDigest: String,
         now: Long
-    ): RecordedReleaseReceipt? = null
+    ): RecordedReleaseReceipt? {
+        executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
+        return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, "RELEASED", now)
+    }
 }
 
-enum class ReconcileOutcome {
-    ADVANCED_TO_RELEASE,
-    REPLAYED_APPLY,
+/**
+ * Typed result of a recovery reconcile (Sol round-9 P1-3): carries the durable apply receipt + provider
+ * lease the engine must persist — the lease comes back from the (idempotent) apply, never pre-seeded.
+ */
+sealed class ReconcileResult {
+    /** A fresh apply recovered: the executor applied + receipt recorded; [leaseId] is the acquired lease. */
+    data class AdvancedToRelease(val applyReceipt: RecordedReceipt, val leaseId: String) : ReconcileResult()
+
+    /** A prior apply replayed (same key + digest): no executor call; [leaseId] is the prior lease. */
+    data class ReplayedApply(val applyReceipt: RecordedReceipt, val leaseId: String) : ReconcileResult()
+
     /** Same idempotency key, different canonical request digest (INV-13). */
-    IDEMPOTENCY_CONFLICT,
-    INSUFFICIENT_EVIDENCE
+    object IdempotencyConflict : ReconcileResult()
+
+    /** Not enough evidence to reconcile (fail-closed). */
+    object InsufficientEvidence : ReconcileResult()
 }
 
 enum class ScheduleAdvanceState { ADVANCED, NOT_ADVANCED }
