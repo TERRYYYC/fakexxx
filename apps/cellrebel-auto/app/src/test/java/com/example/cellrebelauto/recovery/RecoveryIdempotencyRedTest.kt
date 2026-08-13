@@ -436,4 +436,46 @@ class RecoveryIdempotencyRedTest {
         assertNull("a FAILED release receipt must not be returned as a successful replay", receipt)
         assertEquals("a FAILED receipt must not re-call the provider", 0, executor.releaseInvocationCount("r-1"))
     }
+
+    // ---- apply/release conflict preflight (Sol round-14 P1-1/P1-2) ----
+
+    @Test
+    fun `dispatchApply with a known conflicting receipt fails closed BEFORE the provider call`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReceipt(idempotencyKey = "k-1", requestDigest = "digest-other", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val outcome = rc.dispatchApply(attemptId = 1L, idempotencyKey = "k-1", requestDigest = "digest-v1", now = 2000L)
+
+        assertNull("a known conflict must not leak a lease", outcome.leaseId)
+        assertEquals("a known conflict must produce ZERO provider effect (preflight)", 0, executor.invocationCount("k-1"))
+        assertEquals(0, executor.effectCount(1L))
+    }
+
+    @Test
+    fun `release with the same lease but a different operation key fails closed with zero provider call`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(idempotencyKey = "r-other", leaseId = "lease-1", releaseDigest = "rd-1", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("same lease / different key must fail closed", receipt)
+        assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
+    }
+
+    @Test
+    fun `release with the same operation key but a different lease fails closed with zero provider call`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(idempotencyKey = "r-1", leaseId = "lease-other", releaseDigest = "rd-1", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("same key / different lease must fail closed", receipt)
+        assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
+    }
 }

@@ -935,3 +935,32 @@ declare closure on items it cannot close; the correct state is **#5 RED blocked 
 these five seams, and #5's own bankable RED surface is otherwise complete.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.16 Round-15 — apply/release conflict preflight + phase-specific terminal projection (Sol round-14 advisory answered)
+
+**Status.** Sol's round-14 advisory (`3fd86b9`) corrected my classification: the phase matrix + Service
+call-site are **Auto-local owner-red** (§10.1), NOT blocked-on-#3. R15 addresses the tractable owner-red items.
+**Baseline: `208 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.**
+Schema exact v5.
+
+**Repairs (Auto-local owner-red).**
+- **P1-1 apply-conflict preflight** — `dispatchApply` now checks a known conflicting receipt (same key +
+  different digest) BEFORE the provider call → zero external effect, no lease. Guardrail test asserts
+  provider zero-call/zero-effect.
+- **P1-2 release exact-tuple mismatch matrix** — `DurableRecoveryLog` gains `releaseReceiptForKey`; `releaseLease`
+  replays ONLY the exact tuple (key + lease + digest + RELEASED), and any mismatch (same lease / wrong key,
+  same key / wrong lease/digest, FAILED) fails closed with zero provider call. Two guardrail tests pin the
+  same-lease/wrong-key and same-key/wrong-lease polarities.
+- **P1-4 phase-specific terminal projection** — `advanceAfterRelease` now branches on the persisted phase:
+  `QUOTA_COMMITTED` → `finalizeAplusSuccess` (succeeded, legacy-zero), `UNVERIFIED_RECORDED` →
+  `finalizeAttemptFailure(UNTRUSTED)`, `CLOSED` → no-op, else interrupted. Dormant under the skeleton
+  schedule gate (NOT_ADVANCED pauses first); the projection is exercised once GREEN advance lands.
+
+**Remaining owner-red (not yet in this SHA):** the full M-CR-03..07 `CrashMatrixTest` per-phase RED
+(re-preobserve/classify/postobserve, ledger-truth replay, unique-insert) and the Service-owned factory /
+production call-site disconnect attack — both are Auto-local, next SHA.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

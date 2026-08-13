@@ -119,12 +119,17 @@ class RecoveryCoordinator(
         requestDigest: String,
         now: Long
     ): ApplyOutcome {
+        // INV-13 conflict preflight (Sol round-14 P1-1): a known conflicting receipt (same key + different
+        // digest) MUST fail-closed BEFORE the provider call — zero external effect, no lease.
+        val prior = log.receiptFor(idempotencyKey)
+        if (prior != null && prior.requestDigest != requestDigest) {
+            return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)
+        }
         val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
         if (outcome.leaseId != null) {
             val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
             if (receipt == null) {
-                // Receipt not durable (storage failed / same-key-different-digest conflict) → fail-closed:
-                // the apply is NOT proven, so no lease may be returned (Sol round-10 P1-2).
+                // Receipt not durable (storage failed) → fail-closed: the apply is NOT proven, no lease.
                 return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)
             }
         }
@@ -150,20 +155,17 @@ class RecoveryCoordinator(
         releaseDigest: String,
         now: Long
     ): RecordedReleaseReceipt? {
-        // M-CR-08 zero-reinvoke + receipt outcome gate (Sol round-11/13 P1-3): a durable release receipt
-        // for the SAME lease is authoritative — replay ONLY the exact tuple with a RELEASED outcome
-        // (no provider call); any mismatch (key/digest) or a FAILED outcome is fail-closed (prior preserved,
-        // provider zero-call).
-        val existing = log.releaseReceiptFor(leaseId)
-        if (existing != null) {
-            return if (existing.idempotencyKey == idempotencyKey &&
-                existing.releaseDigest == releaseDigest &&
-                existing.resultOutcome == "RELEASED"
-            ) {
-                existing
-            } else {
-                null
-            }
+        // INV-13 conflict preflight (Sol round-14 P1-2): any existing receipt is authoritative. Replay
+        // ONLY the exact tuple (key + lease + digest) with a RELEASED outcome; any mismatch (same key /
+        // different lease-or-digest, same lease / different key-or-digest, or FAILED) is fail-closed with
+        // ZERO provider call and the prior receipt preserved.
+        val byKey = log.releaseReceiptForKey(idempotencyKey)
+        val byLease = log.releaseReceiptFor(leaseId)
+        if (byKey != null && byKey.leaseId == leaseId && byKey.releaseDigest == releaseDigest && byKey.resultOutcome == "RELEASED") {
+            return byKey
+        }
+        if (byKey != null || byLease != null) {
+            return null
         }
         val releaseOutcome = executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
         if (releaseOutcome.outcome != "RELEASED") {
