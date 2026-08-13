@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "aab51c0ddcd4bf2b3909996b374787f8",
+    "identityHash": "e611172778fe826d1df7c7e079193c0a",
     "entities": [
       {
         "tableName": "test_results",
@@ -842,7 +842,7 @@
       },
       {
         "tableName": "durable_observation_records",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `attemptId` INTEGER NOT NULL, `phase` TEXT NOT NULL, `leaseId` TEXT NOT NULL, `acceptedIntentHash` TEXT NOT NULL, `coverage` TEXT NOT NULL, `verificationLevel` TEXT NOT NULL, `deliveryMode` TEXT NOT NULL, `isMock` INTEGER, `scheduleDecision` TEXT NOT NULL, `effectiveLat` REAL, `effectiveLng` REAL, `environmentRevision` INTEGER NOT NULL, `environmentFingerprint` TEXT NOT NULL, `observedAtElapsedRealtimeMs` INTEGER NOT NULL, `observedAtEpochMs` INTEGER NOT NULL, `continuitySinceElapsedRealtimeMs` INTEGER, `evidenceRefs` TEXT NOT NULL)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `attemptId` INTEGER NOT NULL, `phase` TEXT NOT NULL, `leaseId` TEXT NOT NULL, `acceptedIntentHash` TEXT NOT NULL, `coverage` TEXT NOT NULL, `verificationLevel` TEXT NOT NULL, `deliveryMode` TEXT NOT NULL, `isMock` INTEGER, `scheduleDecision` TEXT NOT NULL, `effectiveLat` REAL, `effectiveLng` REAL, `environmentRevision` INTEGER NOT NULL, `environmentFingerprint` TEXT NOT NULL, `observedAtElapsedRealtimeMs` INTEGER NOT NULL, `observedAtEpochMs` INTEGER NOT NULL, `continuitySinceElapsedRealtimeMs` INTEGER, `continuitySinceEpochMs` INTEGER, `evidenceRefsJson` TEXT NOT NULL, `evidenceRefs` TEXT NOT NULL)",
         "fields": [
           {
             "fieldPath": "id",
@@ -943,6 +943,17 @@
             "affinity": "INTEGER"
           },
           {
+            "fieldPath": "continuitySinceEpochMs",
+            "columnName": "continuitySinceEpochMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "evidenceRefsJson",
+            "columnName": "evidenceRefsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
             "fieldPath": "evidenceRefs",
             "columnName": "evidenceRefs",
             "affinity": "TEXT",
@@ -1033,7 +1044,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'aab51c0ddcd4bf2b3909996b374787f8')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e611172778fe826d1df7c7e079193c0a')"
     ]
   }
 }

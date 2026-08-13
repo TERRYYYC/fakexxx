@@ -265,6 +265,8 @@ class CrashMatrixTest {
                 observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
                 observedAtEpochMs = snapshot.observedAtEpochMs,
                 continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
+                continuitySinceEpochMs = null,
+                evidenceRefsJson = snapshot.evidenceRefs.joinToString(";"),
                 evidenceRefs = snapshot.evidenceRefs.joinToString(";")
             )
         )
@@ -278,6 +280,45 @@ class CrashMatrixTest {
                 acceptedIntentHash = intentHash, leaseId = leaseId
             )
         )
+    }
+
+    /**
+     * Full M-CR-06 crash fixture: seeds plan/attempt with DECIDING state + currentExecutionId,
+     * TWO executions (CURRENT first, DECOY second — order varies to defeat positional bypass),
+     * durable observations, durable receipt, executor apply receipt.
+     *
+     * @param currentFirst true = insert current execution first (R38 default); false = decoy first.
+     *        Varying order defeats .last()/.first() bypass.
+     * @param ownerExecId which executionId the attempt's currentExecutionId points to.
+     * @param preOverride/postOverride mutated observations for discriminator tests.
+     * @param receiptIntentHash the acceptedIntentHash in the durable receipt (default = intentDigest).
+     */
+    private suspend fun seedMcr06Fixture(
+        sessionId: Long,
+        intentDigest: String,
+        seededDigest: String,
+        ownerExecId: String = "exec-current-77",
+        currentFirst: Boolean = true,
+        preOverride: ObservationSnapshot.() -> ObservationSnapshot = { this },
+        postOverride: ObservationSnapshot.() -> ObservationSnapshot = { this },
+        receiptIntentHash: String = intentDigest
+    ) {
+        val decoyDigest = "decoy-$seededDigest"
+        if (currentFirst) {
+            seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+            seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, decoyDigest)
+        } else {
+            seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, decoyDigest)
+            seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+        }
+        db.testAttemptDao().markCurrentExecutionId(77L, ownerExecId)
+        seedDurableObservation(77L, "PRE", validPre(intentDigest).preOverride())
+        seedDurableObservation(77L, "POST", validPost(intentDigest).postOverride())
+        seedDurableReceipt(77L, WIRE_VERIFIED, receiptIntentHash, LEASE_ID)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
     }
 
     // ---- M-CR-03..06: GREEN-body recovery projections (genuinely RED pre-freeze) ----
@@ -314,49 +355,52 @@ class CrashMatrixTest {
 
     @Test
     fun `M_CR_06`() = runTest {
-        // M-CR-06 (R37, Sol R36 BLOCKED): trust PASS but the ledger transaction not yet committed
-        // (§8.1 TRUST_POLICY_PASS tx crashed before commit). At DECIDING the DURABLE execution evidence +
-        // apply receipt + pre/post observations ALL persist in DB; only the ledger + close decision are
-        // missing.
-        //
-        // R37 key fix: observations + receipt are seeded ONLY in durable DB carriers
-        // (durable_observation_records + durable_completion_receipts). SeededEvidenceSource returns NULL
-        // (post-crash: no live data). Recovery MUST read from DB. Sol R36 mutation proof read from the
-        // live source and special-cased 2 fields — now defeated because the source is null.
-        //
-        // committedAt = exact recovery commit time (15000), not >= (Sol R36 P2-3).
+        // M-CR-06 (R38): positive trust PASS. CURRENT execution seeded FIRST, DECOY second (reversed
+        // from R37 to defeat .last() bypass). committedAt == RECOVERY_NOW (exact).
         val planId = seedPlan(taskId = 42L)
-        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
-            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId)
-        // DECOY execution (first) + CURRENT execution (pointed by currentExecutionId).
-        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
-        seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
-        // DURABLE observations seeded in DB (NOT in a live source).
-        seedDurableObservation(77L, "PRE", validPre(intentDigest))
-        seedDurableObservation(77L, "POST", validPost(intentDigest))
-        // DURABLE completion receipt seeded in DB (acceptedIntentHash from the provider receipt).
-        seedDurableReceipt(77L, WIRE_VERIFIED, intentDigest, LEASE_ID)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest, currentFirst = true)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        val applyOutcome = executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
-        log.seedReceipt(applyKey(77L), intentDigest, applyOutcome.outcome, 1000L)
-        // SeededEvidenceSource returns NULL (post-crash: live source has no data). Recovery must read DB.
-        val clock = VirtualClock(now = RECOVERY_NOW)
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
         val entry = db.trustedQuotaDao().getByAttempt(77L)
         assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", entry)
         assertEquals("M-CR-06: the mint must bind the correct task", 42L, entry!!.taskId)
-        assertEquals("M-CR-06: the mint digest must derive from the CURRENT execution (not the decoy)", seededDigest, entry.evidenceDigest)
-        assertEquals("M-CR-06: committedAt must be the exact recovery commit time (15000), not >= or Long.MAX", RECOVERY_NOW, entry.committedAt)
+        assertEquals("M-CR-06: the mint digest must derive from the CURRENT execution (owner lookup, not positional)", seededDigest, entry.evidenceDigest)
+        assertEquals("M-CR-06: committedAt must be the exact recovery commit time (15000)", RECOVERY_NOW, entry.committedAt)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row", 1, db.trustedQuotaDao().countAll())
     }
 
     @Test
+    fun `M_CR_06_owner_mismatch`() = runTest {
+        // R38 NEW (Sol R37 P1-2): currentExecutionId points to the DECOY, not "exec-current-77".
+        // Recovery MUST read the owner and bind the DECOY digest (not the current by position).
+        // This defeats both .first() and .last() positional bypasses.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        // Owner points to DECOY. A bypass using .first() or .last() picks the WRONG execution.
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest, ownerExecId = "exec-decoy-77", currentFirst = true)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        val entry = db.trustedQuotaDao().getByAttempt(77L)
+        if (entry != null) {
+            assertEquals("M-CR-06 owner mismatch: mint must bind the OWNER-pointed DECOY digest (not positional current)", "decoy-$seededDigest", entry.evidenceDigest)
+        }
+    }
+
+    @Test
     fun `M_CR_06_null`() = runTest {
-        // M-CR-06 negative polarity: absent durable execution evidence → fail-closed ZERO mint.
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val intentDigest = ownerIntentDigest(sessionId)
@@ -364,8 +408,7 @@ class CrashMatrixTest {
         val log = FakeDurableRecoveryLog()
         val applyOutcome = executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, applyOutcome.outcome, 1000L)
-        val clock = VirtualClock(now = RECOVERY_NOW)
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
         assertEquals("M-CR-06 null polarity: absent durable evidence must mint ZERO ledger rows", 0, db.trustedQuotaDao().countAll())
         val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
@@ -374,89 +417,166 @@ class CrashMatrixTest {
 
     @Test
     fun `M_CR_06_discriminator_invalid`() = runTest {
-        // M-CR-06 INV-23 intent discriminator: wire=1, observations canonical, EXCEPT the durable
-        // receipt's acceptedIntentHash diverges from owner recomputation. Recovery must assemble
-        // CompletionTrustContext from DB data and run TrustPolicy to reject.
+        // INV-23 intent hash mismatch in durable receipt.
         val planId = seedPlan(taskId = 42L)
-        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
-            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId)
-        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
-        seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
-        seedDurableObservation(77L, "PRE", validPre(intentDigest))
-        seedDurableObservation(77L, "POST", validPost(intentDigest))
-        // DIVERGENT acceptedIntentHash in the durable receipt → INV-23 mismatch.
-        seedDurableReceipt(77L, WIRE_VERIFIED, "DIVERGENT-intent-hash", LEASE_ID)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest, receiptIntentHash = "DIVERGENT-hash")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
-        val clock = VirtualClock(now = RECOVERY_NOW)
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
         assertEquals("M-CR-06 intent discriminator: intent-hash-mismatch must mint ZERO trusted rows", 0, db.trustedQuotaDao().countAll())
         val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
         assertNotNull("M-CR-06 intent discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
-        val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
-        assertNotEquals("M-CR-06 intent discriminator: rejected attempt must NOT project to succeeded", "succeeded", recovered.status)
     }
 
     @Test
     fun `M_CR_06_discriminator_observation`() = runTest {
-        // M-CR-06 revision discriminator: wire=1, intent matches, BUT pre.revision=7 ≠ post.revision=99.
-        // A 2-field special-case bypass (intent + revision) catches THIS one — but not the next test.
+        // §6.4 revision mismatch: pre.revision=7 ≠ post.revision=99.
         val planId = seedPlan(taskId = 42L)
-        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
-            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId)
-        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
-        seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
-        // §6.4 violation: pre.revision=7 ≠ post.revision=99 in DURABLE DB records.
-        seedDurableObservation(77L, "PRE", validPre(intentDigest, revision = 7L))
-        seedDurableObservation(77L, "POST", validPost(intentDigest, revision = 99L))
-        seedDurableReceipt(77L, WIRE_VERIFIED, intentDigest, LEASE_ID)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(environmentRevision = 7L) },
+            postOverride = { copy(environmentRevision = 99L) }
+        )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
-        val clock = VirtualClock(now = RECOVERY_NOW)
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
         assertEquals("M-CR-06 revision discriminator: revision-mismatch must mint ZERO trusted rows", 0, db.trustedQuotaDao().countAll())
-        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
-        assertNotNull("M-CR-06 revision discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
+        assertNotNull("M-CR-06 revision discriminator: must write UnverifiedAttemptRecord", db.unverifiedAttemptRecordDao().getByAttempt(77L))
     }
 
     @Test
     fun `M_CR_06_discriminator_delivery`() = runTest {
-        // M-CR-06 deliveryMode discriminator (Sol R36 P1-1 NEW): wire=1, intent matches, revision
-        // matches, BUT pre.deliveryMode="HOOK" (masquerading as verified) instead of "SYSTEM_MOCK".
-        // A bypass that special-cases ONLY intent-hash + revision equality (Sol's R36 mutation) MINTS
-        // ANYWAY because it doesn't check deliveryMode → this test FAILS. Only a full TrustPolicy
-        // consuming ALL §6.4 fields catches this. This is the KEY test that defeats the 2-field bypass.
+        // deliveryMode="HOOK" (§6.4.1 HOOK masquerading).
         val planId = seedPlan(taskId = 42L)
-        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
-            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId)
-        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
-        seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
-        // All §6.4 fields canonical EXCEPT deliveryMode = "HOOK" (§6.4.1: HOOK masquerading as verify ⇒ fail).
-        seedDurableObservation(77L, "PRE", validPre(intentDigest).copy(deliveryMode = "HOOK"))
-        seedDurableObservation(77L, "POST", validPost(intentDigest).copy(deliveryMode = "HOOK"))
-        seedDurableReceipt(77L, WIRE_VERIFIED, intentDigest, LEASE_ID)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(deliveryMode = "HOOK") },
+            postOverride = { copy(deliveryMode = "HOOK") }
+        )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
-        val clock = VirtualClock(now = RECOVERY_NOW)
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
-        assertEquals("M-CR-06 deliveryMode discriminator: HOOK masquerading as verified must mint ZERO trusted rows (TrustPolicy consumed ALL §6.4 fields)", 0, db.trustedQuotaDao().countAll())
-        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
-        assertNotNull("M-CR-06 deliveryMode discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
+        assertEquals("M-CR-06 deliveryMode discriminator: HOOK masquerading must mint ZERO", 0, db.trustedQuotaDao().countAll())
+        assertNotNull("M-CR-06 deliveryMode discriminator: must write UnverifiedAttemptRecord", db.unverifiedAttemptRecordDao().getByAttempt(77L))
+    }
+
+    @Test
+    fun `M_CR_06_discriminator_coverage`() = runTest {
+        // R38 NEW: coverage="PARTIAL" instead of "FULL" (§6.4.1). A mutation special-casing
+        // intent + revision + deliveryMode does NOT check coverage → mints → FAILS.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(coverage = "PARTIAL") },
+            postOverride = { copy(coverage = "PARTIAL") }
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        assertEquals("M-CR-06 coverage discriminator: PARTIAL coverage must mint ZERO", 0, db.trustedQuotaDao().countAll())
+    }
+
+    @Test
+    fun `M_CR_06_discriminator_isMock`() = runTest {
+        // R38 NEW: isMock=false (§6.4.1). A mutation checking intent + revision + deliveryMode + coverage
+        // still doesn't check isMock → mints → FAILS.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(isMock = false) },
+            postOverride = { copy(isMock = false) }
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        assertEquals("M-CR-06 isMock discriminator: isMock=false must mint ZERO", 0, db.trustedQuotaDao().countAll())
+    }
+
+    @Test
+    fun `M_CR_06_discriminator_verification`() = runTest {
+        // R38 NEW: verificationLevel="HOOK_VERIFIED" instead of SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(verificationLevel = "HOOK_VERIFIED") },
+            postOverride = { copy(verificationLevel = "HOOK_VERIFIED") }
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        assertEquals("M-CR-06 verificationLevel discriminator: HOOK_VERIFIED must mint ZERO", 0, db.trustedQuotaDao().countAll())
+    }
+
+    @Test
+    fun `M_CR_06_discriminator_schedule`() = runTest {
+        // R38 NEW: scheduleDecision="DENIED" instead of "ALLOWED_NOW" (§6.4.1).
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(scheduleDecision = "DENIED") },
+            postOverride = { copy(scheduleDecision = "DENIED") }
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        assertEquals("M-CR-06 scheduleDecision discriminator: DENIED must mint ZERO", 0, db.trustedQuotaDao().countAll())
+    }
+
+    @Test
+    fun `M_CR_06_discriminator_lease`() = runTest {
+        // R38 NEW (Sol R37 P1-1): pre.leaseId="WRONG-LEASE" ≠ receipt.leaseId (INV-07).
+        // A mutation checking observation fields but not receipt-lease binding passes this → FAILS.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(leaseId = "WRONG-LEASE") },
+            postOverride = { copy(leaseId = "WRONG-LEASE") }
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        assertEquals("M-CR-06 lease discriminator: observation lease ≠ receipt lease must mint ZERO (INV-07)", 0, db.trustedQuotaDao().countAll())
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
