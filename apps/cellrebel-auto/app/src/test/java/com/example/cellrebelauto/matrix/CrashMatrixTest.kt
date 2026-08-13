@@ -188,9 +188,10 @@ class CrashMatrixTest {
 
     @Test
     fun `M_CR_06`() = runTest {
-        // Trust PASS but the ledger transaction not yet committed: phase DECIDING, no carrier.
-        val recovered = seedObservePhaseCrash("DECIDING")
-        assertNotEquals("M-CR-06: a DECIDING crash must re-decide, not be interrupted", "interrupted", recovered.status)
+        // M-CR-06: trust PASS but the ledger transaction not yet committed (phase DECIDING, no carrier).
+        // GREEN: re-decide from the persisted evidence → recompute + unique insert ONCE.
+        seedObservePhaseCrash("DECIDING")
+        assertEquals("M-CR-06: a trust-pass/pre-ledger crash must re-decide and mint once", 1, db.trustedQuotaDao().countAll())
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----

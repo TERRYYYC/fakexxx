@@ -1188,3 +1188,28 @@ single-transaction window, Service-owned factory / production call-site disconne
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.26 Round-25 — cross-instance reconcile recorder + M-CR-06 re-decide oracle (Sol round-24 advisory answered)
+
+**Status.** Sol's round-24 advisory (`2e737d73`). R25 fixes the cross-instance reconcile observation and the
+M-CR-06 oracle. **Baseline: `226 tests / 49 failed / 0 errors`, lintDebug + assembleDebug green,
+`git diff --check` clean.** Schema exact v5.
+
+**Repairs.**
+- **P1-1 cross-instance reconcile recorder** — the second-restart tests now accumulate EVERY coordinator the
+  engine constructs (a list, not just the last) and assert `all { reconcileInvocationCount == 0 }`, so an
+  illegal reconcile on the FIRST restart (which then flips to RECOVERY_REQUIRED and hides the second
+  coordinator's count) is observed.
+- **P1-2 M-CR-06 re-decide oracle** — M-CR-06 now asserts the trust-pass/pre-ledger crash must RE-DECIDE and
+  mint exactly once (`countAll() == 1`), not just "not interrupted"; it is a genuine RED (the re-decide GREEN
+  body is unwritten).
+
+**Remaining owner-red (next SHA):** M-CR-03..05 behavioral/durable-outcome fixtures (re-preobserve/classify/
+post-observe with call-count + durable outcome), the two phase-order crash probes (POST_OBSERVE_PENDING /
+DECIDING) banked into the canonical suite, gate-held second-restart custody, CLOSED→generic-terminal single-
+transaction window, Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]
