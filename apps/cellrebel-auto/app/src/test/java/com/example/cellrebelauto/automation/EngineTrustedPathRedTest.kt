@@ -143,7 +143,10 @@ class EngineTrustedPathRedTest {
         private val deliveryMode: String,
         private val present: Boolean = true
     ) : APlusEvidenceSource {
-        private fun intentHash(attemptId: Long) = APlusOperationIdentity.requestDigest(lat, lng, attemptId)
+        // Placeholder run id — the INV-23 three-way hash is GREEN (skeleton TrustPolicy does not check it);
+        // the frozen digest preimage (§6.3.4) is contract-owned. The fake only proves the shape is
+        // recomputable from owner state, not that the value matches (that is GREEN).
+        private fun intentHash(attemptId: Long) = APlusOperationIdentity.requestDigest(lat, lng, attemptId, 0L)
 
         override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? =
             if (!present) null else ObservationSnapshot(
@@ -379,7 +382,12 @@ class EngineTrustedPathRedTest {
 
         val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
         // RED (P2): a rejected completion must leave a durable UnverifiedAttemptRecord (skeleton writes none).
-        assertNotNull("a trust-failing completion must leave a durable unverified record (skeleton ⇒ RED)", db.unverifiedAttemptRecordDao().getByAttempt(realAttemptId))
+        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(realAttemptId)
+        assertNotNull("a trust-failing completion must leave a durable unverified record (skeleton ⇒ RED)", unverified)
+        // P2 dormant guardrail (GREEN): the carrier binds the EXACT evidence, not a constant.
+        assertEquals("unverified attemptId binds the real attempt", realAttemptId, unverified!!.attemptId)
+        assertEquals("unverified reason is typed UNTRUSTED", "UNTRUSTED", unverified.reason)
+        assertTrue("unverified evidenceDigest is non-empty", unverified.evidenceDigest.isNotEmpty())
         assertEquals("never mint on fail", 0, db.trustedQuotaDao().countAll())
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
         assertEquals("UNTRUSTED", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.failureReason)
@@ -394,7 +402,8 @@ class EngineTrustedPathRedTest {
         val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "APPLY_PENDING") // NO lease pre-seeded (P1-3)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "digest-77", now = 1000L)
+        // P1-4: the fixture uses the SAME frozen digest the recovery recomputes (never a divergent constant).
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -417,10 +426,10 @@ class EngineTrustedPathRedTest {
     fun `R10-F2 release-in-flight recovery converges a lease-bound release receipt and never re-applies`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "RELEASE_PENDING", aplusLeaseId = "lease-77")
+        val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "RELEASE_PENDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "digest-77", now = 1000L)
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -438,6 +447,11 @@ class EngineTrustedPathRedTest {
         assertEquals("release receipt leaseId", "lease-77", receipt.leaseId)
         assertEquals("release receipt digest over the lease", releaseDigest("lease-77"), receipt.releaseDigest)
         assertEquals("release effect once", 1, executor.releaseEffectCount(77L))
+        // P1-5: the provider call args must bind operation key ↔ lease ↔ digest, not a bare call count.
+        val releaseCall = executor.releaseCallsFor(77L).single()
+        assertEquals("release call key", releaseKey(77L), releaseCall.idempotencyKey)
+        assertEquals("release call lease", "lease-77", releaseCall.leaseId)
+        assertEquals("release call digest over the lease", releaseDigest("lease-77"), releaseCall.releaseDigest)
         // RED: the schedule gate must acquire each fact for the REAL identity and ADVANCE
         // (skeleton NOT_ADVANCED acquires nothing → PAUSED, never resumed).
         assertEquals("the gate must acquire the observation fact for the REAL attempt", listOf(77L), observe.calls)
@@ -468,10 +482,10 @@ class EngineTrustedPathRedTest {
     fun `R10-F2 a DECIDING crash is release-converged and never re-applied`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "digest-77", now = 1000L)
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
         val backend = FakeBackend(executor, log, SeededObserve(mapOf(77L to true)), SeededRevision(mapOf(applyKey(77L) to true)), SeededQuota(mapOf(77L to true)), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
@@ -489,9 +503,11 @@ class EngineTrustedPathRedTest {
     fun `R10-F4 the engine A+ path appends the complete ordered canonical section8-1 audit trail in step`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
+        seedTerminalDummyAttempt(taskId = taskId, attemptId = 77L) // force real id ≠ 1 (P1-6)
         val auditDao = db.auditEventDao()
         var atRunEntry: List<String>? = null
         var afterRunningObserved: List<String>? = null
+        var realAttemptId = -1L
         val clock = VirtualClock()
         val runner = object : CellRebelRunner {
             override suspend fun runTest(
@@ -499,9 +515,12 @@ class EngineTrustedPathRedTest {
                 testTimeoutMs: Long,
                 onRunningObserved: suspend (Long) -> Unit
             ): AttemptOutcome {
-                atRunEntry = auditDao.all().map { it.eventType }
+                // P1-6: query the REAL attempt's audit (never global auditDao.all()), so a wrong-id
+                // prefix attack cannot green the in-step checks.
+                realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id != 77L }.id
+                atRunEntry = auditDao.forAttempt(realAttemptId).map { it.eventType }
                 onRunningObserved(4242L)
-                afterRunningObserved = auditDao.all().map { it.eventType }
+                afterRunningObserved = auditDao.forAttempt(realAttemptId).map { it.eventType }
                 return AttemptOutcome.Success(
                     webScore = 8.0, videoScore = 7.0, runningObservedAt = 4242L,
                     startedAt = startedAt, endedAt = 4300L
@@ -511,12 +530,38 @@ class EngineTrustedPathRedTest {
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
         buildEngine(planId, runner, gps, clock, driver = APlusAttemptDriver(auditDao) { 1_000_000L }, backend = passingBackend()).run()
 
-        val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first().id
+        assertTrue("the real attempt id must be past the dummy (≠ 1L)", realAttemptId > 77L)
         val canonical = APlusRunTemplate.CANONICAL_HAPPY_PATH.map { it.name }
         assertEquals("at run-test entry the audit must hold the pre-run §8.1 prefix; got $atRunEntry (skeleton/empty ⇒ RED)", canonical.take(4), atRunEntry)
         assertEquals("after RUNNING the audit must hold prefix + NEW_RUN_OBSERVED; got $afterRunningObserved", canonical.take(5), afterRunningObserved)
         val trail = auditDao.forAttempt(realAttemptId)
         assertEquals("the A+ path must append the COMPLETE ordered §8.1 trail", canonical, trail.map { it.eventType })
         assertTrue("every audit row binds the REAL attempt", trail.isNotEmpty() && trail.all { it.attemptId == realAttemptId })
+        // P1-6: no foreign audit rows for any other attempt (the dummy must have zero rows).
+        assertEquals("the audit stream must have zero foreign rows (dummy attempt must carry none)", trail.size, auditDao.all().size)
+        assertEquals("the terminal dummy must carry no audit rows", 0, auditDao.forAttempt(77L).size)
+    }
+
+    // ---- R10-P1-1: the SHIPPED production backend is non-null fail-closed ----
+
+    @Test
+    fun `R10-P1-1 the shipped production backend is non-null and fails closed - no lease, no mint, PAUSED`() = runTest {
+        // The shipped skeleton (APlusComposition.productionBackend()) must be exercised: it yields NO lease
+        // (fail-closed executor) → the A+ path PAUSES at apply, never reaches decide, never mints, never
+        // touches the legacy counter. A green-but-disconnected helper cannot satisfy this.
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val backend = APlusComposition.productionBackend()
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = backend).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).first()
+        assertEquals("the shipped backend must fail closed at apply (no lease) — aplusState stays APPLY_PENDING", "APPLY_PENDING", attempt.aplusState)
+        assertNull("the shipped skeleton must never persist a lease", db.testAttemptDao().getAplusLeaseId(attempt.id))
+        assertEquals("no trusted mint through the shipped skeleton", 0, db.trustedQuotaDao().countAll())
+        assertEquals("legacy-zero through the shipped skeleton", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
     }
 }
