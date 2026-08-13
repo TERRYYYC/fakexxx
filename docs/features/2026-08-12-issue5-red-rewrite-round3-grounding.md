@@ -1372,3 +1372,29 @@ post-observe GREEN body; opaque lease carrier; 9-field digest vectors; releaseCo
 #3-contract-blocked.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.34 Round-33 — M-CR-06 canonical PASS bundle + TrustPolicy-consumption negative (Sol R32 advisory answered)
+
+**Status.** Sol's R32 advisory (`6c65933`) — P1 + P2: the positive bundle was NOT judgeable PASS by a correct
+TrustPolicy (source pre/post returned null, execution had zero clocks + null §7.1 detail, receipt hash was a
+literal `"h"` ≠ owner-state requestDigest), and the readback only asserted `count == 1`; the wrong_attempt
+test mis-attributed INV-23 to the source attemptId (the normal path overwrites it via `copy(attemptId = …)`).
+R33 fixes both. **Baseline: `228 tests / 49 failed / 0 errors`, lintDebug + assembleDebug green,
+`git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **Canonical §6.4-PASS source** — `FakeEvidenceSource` now mirrors the canonical fixture (valid pre/post
+  observations, matching lease + owner-state `requestDigest` intent hash, coords within 1.0 m, legal monotonic
+  window, `wire=1`, full §7.1 detail + elapsed clocks). M-CR-06 supplies the real crashed `sessionId` so the
+  receipt hash matches the owner recomputation.
+- **Full-field exact readback** — M-CR-06 reads the persisted row back by `executionId` and asserts every field
+  (attemptId overwritten 0→77, wire, digest, three elapsed clocks, six §7.1 detail), only the DB-generated id
+  may differ. A forged execution row or bypass-TrustPolicy mint fails.
+- **TrustPolicy-consumption negative** — `M_CR_06_wrong_attempt` is REPLACED by `M_CR_06_discriminator_invalid`
+  (same attempt, `wire=2` PRE_EXISTING_RUN) → ZERO mint + ZERO execution. This proves the recovery consumes
+  TrustPolicy, not merely that the source entity attempt matches (which the owner overwrites anyway).
+
+**Remaining #3/GREEN-blocked (unchanged, declared):** M-CR-03..05 re-observe/classify/post-observe GREEN body;
+opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]
