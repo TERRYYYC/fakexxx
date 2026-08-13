@@ -964,3 +964,29 @@ production call-site disconnect attack — both are Auto-local, next SHA.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.17 Round-16 — authoritative phase persistence + terminal-truth-before-gate + IDEMPOTENCY_CONFLICT (Sol round-15 advisory answered)
+
+**Status.** Sol's round-15 advisory (`ba58523`). R16 closes the tractable Auto-local seams.
+**Baseline: `209 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.**
+Schema exact v5.
+
+**Repairs.**
+- **P1-1 phase persistence + order** — the normal path now persists `QUOTA_COMMITTED` / `UNVERIFIED_RECORDED`
+  (not only `DECIDING`), so an M-CR-07 crash (after the ledger commit) recovers as the authoritative phase,
+  not `DECIDING`. `advanceAfterRelease` projects the terminal truth BEFORE the schedule gate (the gate only
+  decides resume, never blocks a committed trusted truth from projecting to succeeded) and writes `CLOSED`.
+- **P1-2 release dual-index consistency** — `releaseLease` verifies the key-index and lease-index resolve to
+  the SAME receipt; a divergent dual index fails closed (never a success replay).
+- **P2-3 apply conflict typed outcome** — the same-key/different-digest preflight now returns
+  `IDEMPOTENCY_CONFLICT` (canonical INV-13), and the reversed oracle is corrected.
+- **P2-4 release mismatch matrix** — added the exact key+lease / wrong-digest negative (zero provider call),
+  and the M-CR-08 test now asserts the returned receipt is the durable readback (never a forged non-durable one).
+
+**Remaining owner-red (next SHA):** the full M-CR-03..07 `CrashMatrixTest` (re-preobserve/classify/postobserve,
+ledger-truth replay/unique-insert) and the Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]
