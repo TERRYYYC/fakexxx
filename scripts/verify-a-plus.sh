@@ -83,6 +83,7 @@ GATES="
 3|acceptance-scenarios|PR-5|acceptance/scenarios|cd acceptance && ./gradlew test
 3|matrix-coverage|PR-5|scripts/check-matrix-coverage.sh|./scripts/check-matrix-coverage.sh
 3|forbidden-boundaries|PR-5|acceptance/scripts/check-forbidden-boundaries.sh|./acceptance/scripts/check-forbidden-boundaries.sh
+3|release-debt|PR-2|scripts/check-release-debt.sh|./scripts/check-release-debt.sh
 "
 
 if [ "$LIST_ONLY" -eq 1 ]; then
