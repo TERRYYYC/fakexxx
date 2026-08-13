@@ -710,3 +710,49 @@ is never reached pre-freeze (recordTrustedCompletion never PASSes). (3) The engi
 only when BOTH `recoveryCoordinator` and `completionEvidenceSource` are non-null (a full backend).
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.10 Round-9 — persisted current operation + lease-bound durable release + non-null production composition (Sol round-8 advisory answered)
+
+**Status.** Sol's round-8 advisory (`7934902`) left 6 P1 + 1 P2. R9 closes them. **Baseline: `198 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema bump v5→v6 (MIGRATION_5_6 + `6.json` exported).
+
+**Repairs (map to Sol's findings).**
+- **P1-1 composition still disconnected** — `APlusComposition.productionBackend()` returns a NON-NULL
+  fail-closed skeleton bundle (all adapters RED skeletons: null evidence / null receipts / fail-closed
+  executor); `AutomationService` composes `recoveryCoordinator` + `completionEvidenceSource` through it
+  (no more `backend = null`). The tests compose through the SAME two functions — the disconnect is
+  structurally impossible.
+- **P1-2 F1 not a satisfiable positive** — split into R9-F1-positive (PASS → mint + terminal-success)
+  and R9-F1-negative (FAIL → unverified + legacy-zero). The §6.4 fixture is CONSISTENT: observation
+  coords == task target 39.9/116.4, and the intent hash is the engine's `requestDigest(coords, attemptId)`
+  (the fake evidence source recomputes it from the attempt id) — `requestDigest` dropped the sessionId
+  so it is underivable from the attempt alone, which also unblocks the INV-23 three-way recomputation.
+- **P1-3 no persisted current operation** — `TestAttempt` gains `aplusState` + `aplusLeaseId` (v6).
+  Recovery branches on the persisted phase: `RELEASE_PENDING` → reconcile release (never re-apply);
+  apply-in-flight → reconcile apply then release; pre-BEGIN-APPLY (aplusState null) → excluded from the
+  A+ recovery query, left to the legacy sweep.
+- **P1-4 release not lease-bound/durable** — `ExternalApplyExecutor.release` takes `leaseId` +
+  `releaseDigest` (over the lease, §6.3.4); `releaseLease` returns a typed `RecordedReleaseReceipt`;
+  `DurableRecoveryLog` gains `releaseReceiptFor`/`recordReleaseReceipt`. The RED asserts receipt readback,
+  not a call count.
+- **P1-5 terminal/crash ownership unsafe** — release happens BEFORE terminalize (`aplusReleaseAndFinalize`),
+  missing evidence releases + terminalizes + PAUSED (never pauses without release), and PASS terminalizes
+  the attempt (`finalizeAplusSuccess`, no legacy counter).
+- **P1-6 two active PlanRuns** — recovery REUSES the crashed running session (`findActiveRunSession`),
+  transitioning it RECOVERING → RUNNING/PAUSED, never minting a second active run.
+- **P2 no unverified carrier** — new `UnverifiedAttemptRecord` entity/table (UNIQUE(attemptId),
+  insert-only) + DAO + readback oracle.
+
+**§11.7 self-gate (BUILT and RUN, then reverted).** Greened `reconcile` (executor + receipt + checkpoint
+→ ADVANCED) and `releaseLease` (drives `executor.release` but returns a receipt WITHOUT recording it):
+R9-F2 apply-in-flight shifted its RED from "re-invoke the apply executor" to **"a lease-bound release
+receipt must be durable"** — proving the durable readback is the gate, not a Boolean. Reverted; baseline
+re-verified 198/45/0.
+
+**Honest disclosures.** (1) The apply/release EXTERNAL calls remain GREEN (their GREEN bodies land with
+the frozen contract/schema); pre-freeze the normal path drives the §8.1 transitions + persists the owner
+state, so the decision is reachable while the terminal-success (PASS) is GREEN-deferred behind the release
+skeleton. (2) `completeTaskIfQuotaReached` is still the legacy-counter SQL; trusted-only completion is F3's
+GREEN, never reached pre-freeze. (3) The A+ mode pauses fail-closed on ANY non-PASS outcome (typed failure
+/ trust-fail / missing evidence), which terminates the loop the skeleton would otherwise spin.
+
+[深深/deepseek-v4-pro🐾]

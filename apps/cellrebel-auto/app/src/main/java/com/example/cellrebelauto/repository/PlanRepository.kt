@@ -189,30 +189,50 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markStaleSessionsInterrupted(nowMs: Long): Int =
         db.runSessionDao().markStaleRunningSessionsInterrupted(nowMs)
 
-    // ---- A+ recovery (R8-F2, §8.2 RECOVERING) ----
+    // ---- A+ recovery (R9, §8.2 RECOVERING) ----
 
     /**
-     * Non-terminal attempts of [planId] (status `starting`/`running`) — the A+ crash-recovery
-     * candidates (§8.2: 进程恢复发现非终态 attempt → RECOVERING). Their apply/release identity is NOT
-     * read from any row here and NOT from the audit stream: it is RECOMPUTED from the returned rows'
-     * durable identity (attempt id + dispatched coords + run id) via
-     * [com.example.cellrebelauto.automation.aplus.APlusOperationIdentity] — the Attempt owns its
-     * current operation (§7.1), and `AutoAuditEvent` is append-only, never a state owner (Sol
-     * round-7 P1-4). READ-ONLY seam.
-     *
-     * # A+ 待恢复 attempt（owner 态查询）：身份由持久行重算，绝不从审计流反推
+     * A+ crash-recovery candidates: non-terminal attempts that entered the A+ lifecycle
+     * (`aplusState` non-null) — their persisted current operation (phase + leaseId) is the ONLY
+     * authority the recovery branches on (§7.1: the Attempt owns its 当前 operation; `AutoAuditEvent`
+     * is append-only, never a state owner — Sol round-8 P1-3). READ-ONLY seam.
      */
     suspend fun findAPlusRecoverableAttempts(planId: Long): List<TestAttempt> =
-        db.testAttemptDao().getAttemptsForPlan(planId)
-            .filter { it.status == "starting" || it.status == "running" }
+        db.testAttemptDao().findAplusRecoverableAttempts(planId)
 
-    // # A+ 恢复态投影（§8.2）：持久化 RECOVERING/PAUSED
+    /** The active (running) session the recovery supersedes rather than duplicating (Sol round-8 P1-6). */
+    suspend fun findActiveRunSession(planId: Long): RunSession? =
+        db.runSessionDao().findActiveRunningSession(planId)
+
+    // # A+ 恢复态投影（§8.2）：持久化 RECOVERING/PAUSED/RUNNING
     suspend fun markSessionStatus(sessionId: Long, status: String) =
         db.runSessionDao().updateStatus(sessionId, status)
 
-    // # A+ 可信完成投影（§7.3）：任务完成 = 可信计数达成；GREEN 由 F3 可信 SQL 承载
+    // # 可信完成投影（§7.3）：任务完成 = 可信计数达成；GREEN 由 F3 可信 SQL 承载
     suspend fun completeTaskIfQuotaReached(taskId: Long): Int =
         db.locationTaskDao().completeTaskIfQuotaReached(taskId)
+
+    // # A+ 当前操作持久化（§7.1）：阶段 + lease（Sol round-8 P1-3/P1-4）
+    suspend fun markAplusState(attemptId: Long, aplusState: String) =
+        db.testAttemptDao().markAplusState(attemptId, aplusState)
+
+    suspend fun markAplusLease(attemptId: Long, leaseId: String) =
+        db.testAttemptDao().markAplusLease(attemptId, leaseId)
+
+    suspend fun getAplusLeaseId(attemptId: Long): String? =
+        db.testAttemptDao().getAplusLeaseId(attemptId)
+
+    // # A+ PASS 终态化（P1-5）：标记 attempt succeeded，但绝不动 legacy completedSuccesses（Sol round-8 P1-3）
+    suspend fun finalizeAplusSuccess(attemptId: Long, endedAt: Long, webScore: Double?, videoScore: Double?) =
+        db.testAttemptDao().markSucceeded(
+            attemptId = attemptId,
+            successOrdinal = 0, // GREEN 由可信计数投影计算真实 ordinal
+            runningObservedAt = null,
+            endedAt = endedAt,
+            webScore = webScore,
+            videoScore = videoScore,
+            status = "succeeded"
+        )
 
     // ---- Task lifecycle ----
 

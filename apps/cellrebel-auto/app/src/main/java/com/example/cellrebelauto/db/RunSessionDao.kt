@@ -32,6 +32,14 @@ interface RunSessionDao {
     suspend fun getById(id: Long): RunSession?
 
     /**
+     * The active (running) session for a plan — the crashed owner session the A+ recovery must
+     * TRANSITION (RECOVERING → RUNNING/PAUSED) rather than mint a second active run
+     * (Sol round-8 P1-6).
+     */
+    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status = 'running' ORDER BY startedAt DESC LIMIT 1")
+    suspend fun findActiveRunningSession(planId: Long): RunSession?
+
+    /**
      * Recovery sweep (O4): sessions left `running` by a dead process → interrupted.
      * # 恢复清扫（O4）：进程死亡残留的 running 会话 → interrupted
      */

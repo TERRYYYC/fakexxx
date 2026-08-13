@@ -51,7 +51,13 @@ class RecordingExternalApplyExecutor(
     private val releaseEffectCounts = mutableMapOf<Long, Int>()
     private val releaseInvocationCounts = mutableMapOf<String, Int>()
 
-    override fun release(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
+    override fun release(
+        attemptId: Long,
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        now: Long
+    ): ApplyOutcome {
         releaseInvocationCounts[idempotencyKey] = (releaseInvocationCounts[idempotencyKey] ?: 0) + 1
         val already = idempotencyKey in releasedKeys
         if (!already) {
