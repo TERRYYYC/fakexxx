@@ -19,6 +19,6 @@ created: 2026-08-09
 
 ## Code Quality
 
-- Biome: `pnpm check` / `pnpm check:fix`
-- Types: `pnpm lint`
-- File limits: 200 lines warn / 350 hard cap
+- CI: `.github/workflows/android-a-plus.yml` runs provenance plus independent Gradle unit-test and assemble gates for each app.
+- Lint: the same workflow runs a per-app lint debt ratchet via `scripts/check-inherited-lint-debt.sh`.
+- File limits: no repository file-size limit is configured.
