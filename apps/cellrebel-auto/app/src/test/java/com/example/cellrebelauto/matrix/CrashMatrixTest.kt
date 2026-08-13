@@ -143,13 +143,18 @@ class CrashMatrixTest {
         private val sessionId: Long,
         private val digest: String,
         private val wire: Int = 1,
-        private val present: Boolean = true
+        private val present: Boolean = true,
+        private val receiptIntentHashMismatch: Boolean = false
     ) : APlusEvidenceSource {
         var completionRequests = mutableListOf<Long>()
         // The intent hash MUST match the owner-state recomputation (INV-23 three-way): the recovery re-decides
         // from the crashed attempt's durable coords + id + runSessionId, never a divergent literal.
         private fun intentHash(attemptId: Long) = APlusOperationIdentity.requestDigest(TARGET_LAT, TARGET_LNG, attemptId, sessionId)
         private fun providerLease(attemptId: Long) = "lease-$attemptId"
+        // The receipt intent hash diverges from the owner recomputation when the mismatch flag is set —
+        // a non-wire TrustPolicy discriminator (INV-23 three-way) that a wire-only bypass cannot see.
+        private fun receiptIntentHash(attemptId: Long) =
+            if (receiptIntentHashMismatch) "mismatched-receipt-intent" else intentHash(attemptId)
 
         override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? =
             if (!present) null else ObservationSnapshot(
@@ -182,7 +187,7 @@ class CrashMatrixTest {
             return APlusCompletionEvidence(
                 execution = fullEvidenceExecution(attemptId, wire, digest),
                 completionEvidenceWire = wire,
-                applyReceiptIntentHash = intentHash(attemptId),
+                applyReceiptIntentHash = receiptIntentHash(attemptId),
                 applyReceiptLease = providerLease(attemptId)
             )
         }
@@ -312,6 +317,8 @@ class CrashMatrixTest {
         assertEquals("M-CR-06 readback: the owner must overwrite the source attemptId to the crashed attempt", 77L, persisted!!.attemptId)
         assertEquals("M-CR-06 readback: the wire must be the verified value", WIRE_VERIFIED, persisted.completionEvidenceWire)
         assertEquals("M-CR-06 readback: the digest must be the source's exact digest", seededDigest, persisted.evidencePayloadDigest)
+        assertEquals("M-CR-06 readback: startedAt epoch must survive", 1000L, persisted.startedAt)
+        assertEquals("M-CR-06 readback: classifiedAt epoch must survive", 1100L, persisted.classifiedAt)
         assertEquals("M-CR-06 readback: startedAtElapsed must survive", EXEC_STARTED_AT_ELAPSED, persisted.startedAtElapsed)
         assertEquals("M-CR-06 readback: runningConfirmedAtElapsed must survive", EXEC_RUNNING_CONFIRMED_AT_ELAPSED, persisted.runningConfirmedAtElapsed)
         assertEquals("M-CR-06 readback: completedAtElapsed must survive", EXEC_COMPLETED_AT_ELAPSED, persisted.completedAtElapsed)
@@ -344,21 +351,39 @@ class CrashMatrixTest {
 
     @Test
     fun `M_CR_06_discriminator_invalid`() = runTest {
-        // M-CR-06 negative polarity (Sol R32 P1): the SAME attempt, but one TrustPolicy discriminator is
-        // invalid (wire=2 PRE_EXISTING_RUN, not VERIFIED) → the recovery must consume TrustPolicy and mint
-        // ZERO rows. This proves the re-decide actually evaluates TrustPolicy, not merely that the source
-        // entity's attempt matches the crashed attempt (the attemptId is owner-overwritten anyway).
+        // M-CR-06 negative polarity (Sol R33 P1-1): the SAME attempt, wire STILL 1 (VERIFIED), all other
+        // discriminators canonical, EXCEPT the receipt intent hash mismatches the owner recomputation — a
+        // non-wire TrustPolicy discriminator (INV-23 three-way). A wire-only bypass GREEN (checks only
+        // `completionEvidenceWire == 1`) mints anyway and fails this; only a recovery that actually
+        // assembles the CompletionTrustContext and runs TrustPolicy rejects it.
+        //
+        // FAIL durable effects (Sol R33 P1-2): the correct re-decide FAIL is 0 trusted ledger + the rejected
+        // source execution PERSISTED + one exact UnverifiedAttemptRecord — NOT "discard the execution".
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock(now = 4242L)
-        val backend = FakeBackend(executor, log, FakeEvidenceSource(sessionId = sessionId, digest = "ev-"+java.util.UUID.randomUUID(), wire = 2, present = true))
+        val backend = FakeBackend(executor, log, FakeEvidenceSource(sessionId = sessionId, digest = seededDigest, wire = WIRE_VERIFIED, present = true, receiptIntentHashMismatch = true))
         buildEngine(planId, clock, backend).run()
 
-        assertEquals("M-CR-06 discriminator polarity: a wire=2 same-attempt completion must mint ZERO ledger rows (TrustPolicy consumed)", 0, db.trustedQuotaDao().countAll())
-        assertEquals("M-CR-06 discriminator polarity: a wire=2 completion must persist NO trusted-mint execution row", 0, db.attemptExecutionDao().forAttempt(77L).size)
+        assertEquals("M-CR-06 discriminator polarity: an intent-hash-mismatch completion must mint ZERO trusted rows (TrustPolicy consumed)", 0, db.trustedQuotaDao().countAll())
+        // The rejected completion's source execution is still durable (not discarded) — full-field exact.
+        val persisted = db.attemptExecutionDao().byExecutionId("exec-77")
+        assertNotNull("M-CR-06 discriminator polarity: the rejected source execution must be persisted", persisted)
+        assertEquals("M-CR-06 discriminator polarity: rejected execution attemptId overwritten to the crashed attempt", 77L, persisted!!.attemptId)
+        assertEquals("M-CR-06 discriminator polarity: rejected execution digest is the source's exact digest", seededDigest, persisted.evidencePayloadDigest)
+        assertEquals("M-CR-06 discriminator polarity: rejected execution wire survives", WIRE_VERIFIED, persisted.completionEvidenceWire)
+        // The exact unverified carrier (typed reason + evidence digest), not a synthesized discard.
+        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
+        assertNotNull("M-CR-06 discriminator polarity: the rejected completion must write an exact UnverifiedAttemptRecord", unverified)
+        assertEquals("M-CR-06 discriminator polarity: unverified attemptId binds the crashed attempt", 77L, unverified!!.attemptId)
+        assertEquals("M-CR-06 discriminator polarity: unverified reason is typed UNTRUSTED", "UNTRUSTED", unverified.reason)
+        assertEquals("M-CR-06 discriminator polarity: unverified evidenceDigest binds the rejected source digest", seededDigest, unverified.evidenceDigest)
+        val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
+        assertNotEquals("M-CR-06 discriminator polarity: the rejected attempt must NOT project to succeeded", "succeeded", recovered.status)
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----

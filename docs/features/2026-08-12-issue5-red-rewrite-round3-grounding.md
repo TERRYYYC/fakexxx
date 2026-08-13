@@ -1398,3 +1398,27 @@ R33 fixes both. **Baseline: `228 tests / 49 failed / 0 errors`, lintDebug + asse
 opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.35 Round-34 — M-CR-06 hash-mismatch discriminator + FAIL durable effects (Sol R33 advisory answered)
+
+**Status.** Sol's R33 advisory (`b1fdadb`) — 2×P1 + 1×P2: the wire=2 negative was a wire-only bypass target
+(an impl checking only `completionEvidenceWire == 1` greened all three), and its "0 execution" expectation
+reversed the durable carrier contract (a correct FAIL preserves the rejected execution + writes an exact
+UnverifiedAttemptRecord). R34 fixes both. **Baseline: `228 tests / 50 failed / 0 errors`, lintDebug +
+assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **Non-wire discriminator** — `M_CR_06_discriminator_invalid` now keeps `wire=1` and flips ONLY the receipt
+  intent hash (`FakeEvidenceSource.receiptIntentHashMismatch = true` → `applyReceiptIntentHash` diverges from
+  the owner `requestDigest`), a three-way INV-23 discriminator a wire-only bypass cannot see.
+- **FAIL durable effects** — the negative now asserts the correct re-decide FAIL: `0` trusted ledger + the
+  rejected source execution PERSISTED (attemptId overwritten 0→77, exact digest + wire) + one exact
+  `UnverifiedAttemptRecord(77L, "UNTRUSTED", seededDigest)` + attempt NOT `succeeded`. This pins recovery to the
+  unified `recordTrustedCompletion` entrypoint instead of discarding the evidence.
+- **Positive epoch readback** — M-CR-06 now also asserts `startedAt == 1000L` and `classifiedAt == 1100L`
+  (the two entity fields P2 found missing).
+
+**Remaining #3/GREEN-blocked (unchanged, declared):** M-CR-03..05 re-observe/classify/post-observe GREEN body;
+opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]
