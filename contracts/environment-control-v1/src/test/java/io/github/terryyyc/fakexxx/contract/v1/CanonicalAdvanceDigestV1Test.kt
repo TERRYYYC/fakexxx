@@ -22,12 +22,13 @@ class CanonicalAdvanceDigestV1Test {
         trusted: Int = 12,
         quota: Int = 12,
         ledger: String = "ledger-abc",
+        measuredAt: Long = 640_000L,
     ) = CompletionProofV1(
         scheduleItemId = itemId,
         trustedSuccessCount = trusted,
         quotaRequired = quota,
         ledgerRef = ledger,
-        verifiedAtElapsedRealtimeMs = 640_000L,
+        verifiedAtElapsedRealtimeMs = measuredAt,
     )
 
     private fun request(
@@ -214,7 +215,14 @@ class CanonicalAdvanceDigestV1Test {
         val absent = CanonicalAdvanceReceiptDigestV1.compute(
             receipt(outcome = AdvanceOutcomeV1.EXHAUSTED.wire, to = null), "req-a", "k1",
         )
-        val hostile = listOf("", "0", "1", "null", "\u0000null", "0\u0000", "1item-8")
+        // Unicode belongs here, not only in the intent domain: the discriminator
+        // is a UTF-8 framed field like any other, and multi-byte / astral ids are
+        // where a length-vs-byte-count confusion would show up first.
+        val hostile = listOf(
+            "", "0", "1", "null", "\u0000null", "0\u0000", "1item-8",
+            "\u9879\u76ee-8", "1\u9879\u76ee", "\uD83D\uDC3E", "1\uD83D\uDC3E",
+            "item-\u0000-8", "\u00E9", "e\u0301",
+        )
         for (id in hostile) {
             assertNotEquals(
                 "id must not digest as absence: " + id,
@@ -241,5 +249,39 @@ class CanonicalAdvanceDigestV1Test {
                 receipt(outcome = AdvanceOutcomeV1.EXHAUSTED.wire, to = ""), "req-a", "k1",
             ),
         )
+    }
+
+    /**
+     * `verifiedAtElapsedRealtimeMs` is audit metadata about WHEN the quota was
+     * measured, not part of WHICH completion is being reported (§6.7.3). A retry
+     * that re-measures would otherwise carry a new timestamp, change the digest,
+     * and be answered as a different request -- turning the one comparable proof
+     * clock into a replay breaker.
+     *
+     * Until this test existed the exclusion was asserted nowhere: adding the
+     * field to the preimage left every other test in this file green. The
+     * decision was documented and then left unguarded, which is how a documented
+     * decision quietly becomes a former decision.
+     */
+    @Test
+    fun `re-measuring the proof clock is not a different request`() {
+        assertEquals(
+            CanonicalAdvanceDigestV1.compute(request(proof = proof(measuredAt = 640_000L))),
+            CanonicalAdvanceDigestV1.compute(request(proof = proof(measuredAt = 999_999L))),
+        )
+    }
+
+    /**
+     * The mirror of the above: fields that ARE identity must still separate.
+     * Without this, "the clock is excluded" could be satisfied by a digest that
+     * ignores the whole proof.
+     */
+    @Test
+    fun `the proof fields that are identity still separate requests`() {
+        val base = CanonicalAdvanceDigestV1.compute(request(proof = proof()))
+        assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(itemId = "item-9"))))
+        assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(trusted = 13))))
+        assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(quota = 13))))
+        assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(ledger = "ledger-z"))))
     }
 }

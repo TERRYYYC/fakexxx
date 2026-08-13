@@ -1863,7 +1863,7 @@ requestDigest = lowercase hex of SHA-256(canonical)
 
 **为什么这是承重的而不是登记**：幂等重放靠「同键 + 同 digest」判定「这是同一个请求」。若 `expectedCurrentItemId` 不在 preimage 里，那么**指向不同当前项的两个请求会得到同一个 digest**——重放检查会把它们认成同一个，于是返回旧 receipt 或直接放行，**这正是 wrong-item 与 double advance**。`expectedScheduleVersion` 同理对应 skip。换句话说：**digest 漏掉哪条前置，§6.7.4 就少哪一条防护**，而表面上三个 wire code 一个不少。
 
-`idempotencyKey` 与 `callerProtocolVersion` **不进** preimage：前者是查找键（进 preimage 会自我指涉），后者按 §6.3.4 已冻结的理由排除（重试期间调用方升级不得变成伪冲突）。
+`idempotencyKey`、`callerProtocolVersion` 与 `completionProof.verifiedAtElapsedRealtimeMs` **不进** preimage：前者是查找键（进 preimage 会自我指涉），第二个按 §6.3.4 已冻结的理由排除（重试期间调用方升级不得变成伪冲突）；**第三个是「配额在何时被测量」的审计元数据，不是「在报告哪一次完成」的身份**——重试若重新测量就会带上新时间戳、改变 digest、被当成另一个请求处理，于是 §6.4.2 唯一可比时钟反而成了重放的破坏者。**排除它是身份判定，不是省略**，因此写在这里而不只写在 KDoc 里：上一轮它只活在 `CanonicalDigestV1` 的注释里，本文只在字段表列出该字段、对它是否属于 digest 身份只字未提，读者据本节实现会直接把它算进去。
 
 **长度前缀不是风格选择**：`expectedCurrentItemId`、`ledgerRef`、`scheduleItemId` 都是自由字符串。用任何固定分隔符拼接，都能让一个字段吞掉分隔符并移动边界——`itemId="a|b", ledgerRef="c"` 与 `itemId="a", ledgerRef="b|c"` 会产生**逐字节相同**的 canonical，于是两个不同的推进请求共用一个 digest。这与 §6.3.1 已经踩过的 `\n` 碰撞是同一个 bug，只是换了字段。**判据第十四条在这里再次适用。**
 
@@ -1878,7 +1878,7 @@ data class CompletionProofV1(
     val trustedSuccessCount: Int,
     val quotaRequired: Int,
     val ledgerRef: String,
-    /** 唯一可比时钟（§6.4.2）。 */
+    /** 唯一可比时钟（§6.4.2）。**不进 `requestDigest` preimage**——审计元数据，非完成身份，见 §6.7.3。 */
     val verifiedAtElapsedRealtimeMs: Long,
 ) : Parcelable
 

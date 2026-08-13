@@ -158,16 +158,40 @@ object CanonicalAdvanceReceiptDigestV1 {
     fun compute(receipt: AdvanceReceiptV1, requestDigest: String, idempotencyKey: String): String =
         CanonicalDigestV1.digest(
             CanonicalDigestV1.DOMAIN_ADVANCE_RECEIPT,
-            listOf(
-                CanonicalDigestV1.utf8(requestDigest),
-                CanonicalDigestV1.utf8(idempotencyKey),
-                CanonicalDigestV1.decimal(receipt.outcomeWire),
-                CanonicalDigestV1.utf8(receipt.advancedFromItemId),
-            ) + presence(receipt.advancedToItemId) + listOf(
-                CanonicalDigestV1.decimal(receipt.scheduleVersionAfter),
-                CanonicalDigestV1.utf8(receipt.effectiveIntentHash),
-                CanonicalDigestV1.decimal(receipt.effectiveEnvironmentRevision),
-            ),
+            fields(receipt, requestDigest, idempotencyKey),
+        )
+
+    /**
+     * Exposed so a conformance test can assert the framing, not only the digest.
+     *
+     * The other two digests already expose this; this one did not, so the
+     * advance-receipt domain was the one preimage whose first-field framing
+     * could not be asserted at all.
+     */
+    fun canonicalBytes(
+        receipt: AdvanceReceiptV1,
+        requestDigest: String,
+        idempotencyKey: String,
+    ): ByteArray =
+        CanonicalDigestV1.canonicalBytes(
+            CanonicalDigestV1.DOMAIN_ADVANCE_RECEIPT,
+            fields(receipt, requestDigest, idempotencyKey),
+        )
+
+    private fun fields(
+        receipt: AdvanceReceiptV1,
+        requestDigest: String,
+        idempotencyKey: String,
+    ): List<ByteArray> =
+        listOf(
+            CanonicalDigestV1.utf8(requestDigest),
+            CanonicalDigestV1.utf8(idempotencyKey),
+            CanonicalDigestV1.decimal(receipt.outcomeWire),
+            CanonicalDigestV1.utf8(receipt.advancedFromItemId),
+        ) + presence(receipt.advancedToItemId) + listOf(
+            CanonicalDigestV1.decimal(receipt.scheduleVersionAfter),
+            CanonicalDigestV1.utf8(receipt.effectiveIntentHash),
+            CanonicalDigestV1.decimal(receipt.effectiveEnvironmentRevision),
         )
 
     /** `"0"` alone when absent; `"1"` followed by the framed id when present. */
