@@ -137,6 +137,7 @@ source_threads:
 | **v1.51** | PR-2 第十轮（Terra lease 外裁定回修） | **契约在纸面上不可互操作，而所谓「两个独立实现互证」证明不了这一点。** ①§6.7.3 的 advance-**request** preimage 代码块从 `leaseId` 起列，**没有 domain 行**；而 `CanonicalDigestV1` 把 `DOMAIN_ADVANCE_REQUEST` 固定为首个 framed 字段，§6.7.4b 第 1 步又要求 provider **由收到字段重算 requestDigest**。于是照 canonical 实现的独立 provider 算出无 domain 的 digest、Auto 算出有 domain 的，**字段全对仍必落 `REQUEST_INVALID`(13)**——该方法对任何第三方实现无条件不可用。②v1.47 的 golden 向量号称「两个独立读法互证」，**但两个读法同源**：那个 Node 实现是照着 Kotlin 写的，不是照着 canonical 写的。**同源的双实现只是把一个读法拼写两遍**，spec↔impl 分歧从一开始就在它能表达的范围之外。③同段第二处：receipt preimage 仍写 `为 null 时用哨兵`，而紧接其下五行的散文写的是「**显式存在性判别位**，**不是哨兵值**」——**规范代码块与它自己的更正互相矛盾**。④新增门禁 §7b：解析 canonical 每个 preimage 代码块，要求它声明 domain，且该字面量必须等于 module 常量。**先红后绿留痕**：加 §7b 时 domain 还缺着，它先红在真缺陷上。⑤§7b 前三版都**红错了地方**——正则先只认 `domain = `（漏掉 intent 的 `domain : ASCII` 写法）、再只认裸 ``` 围栏（漏掉 ```text）、再用 `[^`]*?` 匹配块体（遇块内反引号即断）。**三次都是模式比文档实际记法窄，症状都是把「存在」报成「缺席」**——与 §5b 那次同形，犯者是刚修完 §5b 的人。⑥P2：两处 EOF 空行清理。此前我曾误判它与 provenance 冲突，实测该门禁报的是「工作树未提交」而非「与 upstream 不符」，且 vendored apps 本就允许被 PR-2/3/4 合法修改——**差点用一个错误归因驳回 reviewer 的正确意见**。见 §6.7.3 / §7b |
 | **v1.52** | PR-2 第十轮（同轮第二项） | **上一轮刚修完「关闭 P1 的守卫自己没被测量」，新造的守卫又是零覆盖。** ①v1.51 的 §7b 为关闭 Terra 的 P1-2 而生，落地时**没有任何 `N-*`／`M-*` 案例**——与本轮刚补完的 §5／§6b 缺口同形，区别只是**这次没被测量的守卫是一小时前自己造的**。②而 §7b 恰恰最需要负例：它在被写出来的过程中**三次红错了地方**（正则依次漏掉 `domain : ASCII` 写法、```text 围栏、块内反引号），三次症状都是把「存在」报成「缺席」。一个曾经三次误判的守卫，若没有负例把行为钉死，下一次收窄或放宽都无人察觉。③补 `N-13`（抹掉某 preimage 块的 domain 行 → 必须报出该块）与 `M-10`（关掉 `missing` 的**计算**而非它的输出文案 → finding 必须消失，沿用 `M-9` 的教训）。suite 由 1+12+9 增至 **1 positive / 13 negative / 10 mutation**。④记一条通用要求：**新增门禁节的同一个 commit 内必须带上它的负例与承重证明**——否则「我加了守卫」与「我加了一段从未被要求失败过的代码」在看板上无从分辨。见 `scripts/selftest-contract-v1.sh` |
 | **v1.53** | PR-2 第十一轮（Terra P1-3） | **守卫用自己的盲区当单位报了一个计数，那个计数读起来像覆盖率。** ①§7b 只认以 `canonical`／裸 `domain` 开头的围栏块，而 §6.3.4 写作 `canonicalRequest =`、其 domain 用 `apply → "..."` 映射记法——于是 `fakexxx.contract.v1.apply` 与 `.release` **从未进入守卫**，§7b 却打印 `PASS 3 canonical preimage block(s)` 并全绿。**「3 块」不是覆盖率，是它认得的块数**；改 apply/release 的 domain 或改该块写法，§7b 与 CI 都会继续通过。②改为**全量清单**：识别 4 个 preimage 块、5 个 domain 并逐个列名（`intent`／`advance-request`／`advance-receipt` 用**冒号**分隔，`apply`／`release` 用**点号**——同一份契约里两套 domain 命名法，已提请 reviewer 裁定是否收敛）。module 的 3 个常量必须是 canonical 清单的**子集**；反向包含**刻意不断言**，因为 apply/release 是 canonical-only、provider 侧、无 module 常量——该边界现写在守卫注释里，不留给下一个读者猜。③仅「每块至少一个 domain」不够：§6.3.4 声明两个，删掉 `apply` 还剩 `release`，逐块检查照绿而一个 wire 级身份已消失。故**冻结完整 inventory**，删除或重命名任一 domain 即红，新增 domain 必须显式改 §7b 而不能悄悄放宽。④补 `N-14`（重命名 canonical-only 的 apply domain → 必须红）与 `M-11`；suite 增至 **1 positive / 14 negative / 11 mutation**。⑤`M-10` 的变异锚随本轮重写而失效，mut() 报 `INCONCLUSIVE：变异根本没改动 gate`——**它拒绝把「变异没生效」当成「守卫承重」**，已重新对准现判据。⑥**本轮是同一形态的第四、五次**：写 §7b 时正则三次比文档窄，本轮又两次（漏 `canonicalRequest`、过滤器用合取而非析取漏掉 receipt 块）。**每一次的症状都是把「存在」报成「缺席」，而每一次我都以为已经扫干净了。** 见 §7b |
+| **v1.54** | PR-2 第十二轮 | **耗尽状态模型冻结与步 4 内序重排。** 来源：Fable5 四答定稿（Q1-Q4），已验证实现（660 tests + 5 轮 DSF review + `FakeQwyEnvironment` 判别位持久 + 生产 `QwyScheduleStore:107` 同构），非新设计而是 ratify。①**冻结 `exhausted` 独立判别位**：schedule 运行时状态冻结为 `(currentItemId: 非null String, exhausted: Boolean)` 三态模型（无 schedule / 进行中 / 已耗尽）。排除 null 指针（与"尚未开始"撞 + 14-shadows-16 + sentinel 反模式）与越界魔值（§6.7.3 取消 ID 受限假设）。bit 生命周期：完成末项的 committed advance 置位，schedule (re)init / version 变更清零。receipt `advancedToItemId = null` 是 OUTCOME 编码，STATE 里没有 null。②**步 4 内序由 `14→15→16` 重排为 `16→14→15`**（exhausted-first）。三条推理各自充分联合必要：(a) 规范自身先例——步间已裁定 16 先于 7，步内同理；(b) 恢复语义诚实——14/15 承诺可恢复，耗尽后无一可恢复，答 14/15 是谎报；(c) 确定性——M-AD-11 的"稳定 16"从条件命题变恒真。**唯一行为 delta = 耗尽后陈旧期望：旧答 14，新答 16**，恰是被修缺陷本身。现有 14→15 相对序不重开。③**M-AD-10/11/13/21 同步刷新**：M-AD-10 加 bit + 指针持久性与 restart 存活；M-AD-11 加三变体（保持项期望 / 历史 non-null 期望 / restart 间隔）全 →16；M-AD-13 加步内多重违反例（exhausted + stale item + stale version → 首命中 16）；M-AD-21 加末项并发分叉（loser 在 winner 置 exhausted 后精确答 16 而非 14）。见 §6.7.4 / §6.7.4b / §10 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1943,6 +1944,18 @@ data class AdvanceReceiptV1(
 
 任一条不满足 → **不推进、不改指针**，返回 typed failure。「跳项」不需要单独 wire：跳项要么撞 14，要么撞 15。
 
+> **v1.54 冻结——耗尽状态模型（`exhausted` 独立判别位）。** schedule 的运行时状态冻结为 `(currentItemId: 非null String, exhausted: Boolean)`，三态如下：
+>
+> | 态 | 表示 | `completeAndAdvance` 应答 |
+> |---|---|---|
+> | 无 schedule（DB 空 / 未 init） | `scheduleSnapshot()` = null / 空 items | `REQUEST_INVALID(13)` "no active schedule" |
+> | 尚未开始或进行中 | `currentItemId = 当前项`，`exhausted = false` | 正常 CAS 判定（§6.7.4b 步 4） |
+> | 已耗尽 | `currentItemId = 末项`（**保持**），`exhausted = true` | `SCHEDULE_EXHAUSTED(16)` |
+>
+> **排除 null 指针作为耗尽表示**：① 与"尚未开始"态撞（首项 advance 在 `currentItemId = null` 上发 CAS 即踩空）；② 违反 M-AD-10 保持条款（receipt `advancedFromItemId` 需要它）；③ 制造 14-shadows-16 陷阱（null 不等于任何 `expectedCurrentItemId`，步内旧序 14 先于 16 时恒答 14，16 永不可达）；④ null-as-state 就是 §6.3.1 / round-5 刚杀掉的 sentinel 反模式。**排除指针越界魔值**：§6.7.3 明文取消了"ID 受限"假设，任何魔值 ID 都可能合法存在。**独立布尔**是显式状态判别位，与本 PR 五轮 review 烧进去的哲学（explicit discriminator / no sentinel / no unreachable value）同一坐标系。
+>
+> **Bit 生命周期**：仅由完成末项的 committed advance 置位（单写者 = §6.7.5 单提交协议 / CAS 事务边界内）；仅由 schedule (re)initialization / version 变更清零。注意区分：receipt 的 `advancedToItemId = null` 是 **OUTCOME 编码**（已冻结，codec-native null），与 schedule **STATE 编码** `(currentItemId, exhausted)` 是两个问题——STATE 里没有 null。
+
 ##### 6.7.4b 判定次序（冻结）
 
 多条前置可以同时不满足，因此**返回哪一个 typed failure 必须是确定的**。不冻结次序，两个实现会对同一请求返回不同的 code，而两者都"符合"上面的表——调用方的恢复策略就此不可移植。冻结为：
@@ -1956,7 +1969,7 @@ data class AdvanceReceiptV1(
 3. proof        缺 CompletionProofV1 / proof **内部**不自洽（含 `proof.scheduleItemId` ≠ `expectedCurrentItemId`）
                 → REQUEST_INVALID(13)。**本步只判请求自身是否自洽，不与设备实际 `currentItemId` 比对**
 4. schedule     **与实际 `currentItemId` 的 CAS 在本步、且只在本步判定**：
-                14 SCHEDULE_ITEM_MISMATCH → 15 SCHEDULE_VERSION_STALE → 16 SCHEDULE_EXHAUSTED
+                16 SCHEDULE_EXHAUSTED → 14 SCHEDULE_ITEM_MISMATCH → 15 SCHEDULE_VERSION_STALE
 5. lease        设备上存在任一非 RELEASED / 未收敛 lease（**不限本 caller**）→ LEASE_CONFLICT(7)
 6. mutation     指针前移 + receipt 落库（同一事务，§6.7.5）
 
@@ -1969,6 +1982,10 @@ data class AdvanceReceiptV1(
 - **`requestDigest` 必须由 provider 用收到的字段重算，不得采信请求自带的那一份。** 自带值是**未受信输入**。只按 `(key, 自带 digest)` 查表，攻击者改掉 payload 的任意字段却原样回填 key 与 digest，即可命中旧条目并取回一份与当前 payload 毫无关系的 receipt——幂等键从"同一次调用的标识"退化成"任取一份历史结果的提货券"。重算并精确比对之后，digest 才真正绑定内容。
 - **幂等查表先于 proof 与其余一切前置。** 一次成功推进之后 `currentItemId` 已经前移；崩溃重启的 Auto 以同键重放同一请求时，它携带的 `expectedCurrentItemId` 与 `proof.scheduleItemId` **必然都已过期**。若先跑 proof 或 schedule 门，重放会撞 `REQUEST_INVALID(13)` 或 14 而不是拿回原 receipt——**M-AD-02 与 M-AD-04 会塌成同一个可观察结果**，而它们恰恰必须可区分：前者是"你已经成功了，这是你的 receipt"，后者是"你丢了键并试图推第二次"。次序放反，防双推进的最后一道就变成了对合法重放的误杀。
 - **schedule 门先于 lease 门。** 计划已耗尽（16）时根本没有可完成的当前项，lease 是否活动是无意义的问题；此时若先返回 `LEASE_CONFLICT`，Auto 会去 release 再重试，然后仍然撞上终态的 16——白跑一轮，且中途还释放了本不必释放的环境。反过来则不会有对称的浪费：lease 冲突在 release 后重试即可成功。
+- **第 4 步步内次序：`16 SCHEDULE_EXHAUSTED` → `14 SCHEDULE_ITEM_MISMATCH` → `15 SCHEDULE_VERSION_STALE`。** 三条推理各自充分，联合必要：
+  1. **规范自身先例。** schedule 门先于 lease 门的冻结理由是"已耗尽时没有可完成的当前项，lease 是否活动是无意义的问题"——**同一论证在步内同样成立**：耗尽让 item/version CAS 成为无意义的问题。步间已裁定 16 先于 7，步内同理裁定 16 先于 14/15。
+  2. **恢复语义诚实性。** 14（`SCHEDULE_ITEM_MISMATCH`）和 15（`SCHEDULE_VERSION_STALE`）的恢复语义承诺"修正期望后重试**可成功**"；耗尽后任何修正都不可能成功——答 14/15 是对可恢复性的谎报，Auto 会走一轮必然终结于 16 的 discover → 重试白跑。正是 v1.39 拒绝 lease-first 的那种浪费，只是从步间搬到步内。
+  3. **确定性。** 16-first 让**每一个**耗尽后的 fresh 请求无条件精确答 16，无论期望多陈旧——M-AD-11 的"稳定返回 `SCHEDULE_EXHAUSTED`"从条件命题变成恒真。**唯一行为 delta = 耗尽后陈旧期望：旧答 14，新答 16**，恰好就是被修的缺陷本身。现有 14→15 相对序不重开。
 
 **第 5 步的 lease 门是设备全局的，不是"本 caller 的"。** 推进改变的是**设备上生效的环境**，而不是某个 caller 私有的东西。只挡本 caller 自己的 lease，则 caller B 持有 lease 的同时 caller A 可以合法推进，于是 B 的环境在它脚下被换掉——这正是 §6.6 的 lease 机制存在要防的形态，只是换了个入口。因此该门必须与并发 `apply` **以及并发 `completeAndAdvance`** 双向**串行化**（只串 `apply` 则两个并发推进各自读到无 lease、各自放行，门形同虚设）：推进期间不得有新 lease 被授予，已存在的任一非 `RELEASED` / 未收敛 lease（无论属于谁）都必须阻断推进。
 
@@ -2400,10 +2417,10 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-07` | advance | 千网游已推进、Auto 未收到 receipt（连接中断） | **无 receipt 即视为未推进**；Auto 以同键重放取回原 receipt。**禁止**据「环境看起来变了」推断已推进 | 13,15,23 |
 | `M-AD-08` | advance | receipt 取回但 `receiptDigest` 重算不上 | **不是弱证据，是无证据**：拒绝该 receipt、不前移本地状态、告警 | 13,23 |
 | `M-AD-09` | advance | 推进后 `observe` 的 `scheduleItemId` ≠ receipt 的 `advancedToItemId` | 判**错环境归因**：不计数、不继续；同一 profile 可跨项复用，故环境相符**不足以**替代本条 | 8,23,26 |
-| `M-AD-10` | advance | 最后一项完成 | receipt `outcomeWire = EXHAUSTED`、`advancedToItemId = null`；**终态非失败**，当前项保持、不回绕 | 17 |
-| `M-AD-11` | advance | 已耗尽后再次请求推进 | typed `SCHEDULE_EXHAUSTED`；与 M-AD-10 是两件事 | 17 |
+| `M-AD-10` | advance | 最后一项完成 | receipt `outcomeWire = EXHAUSTED`、`advancedToItemId = null`；**终态非失败**。`currentItemId` 保持末项、`exhausted` 置 `true`、不回绕。restart 后 bit + 指针双存活（§6.7.5 事务持久性）。状态模型见 v1.54 冻结 | 17 |
+| `M-AD-11` | advance | 已耗尽后再次请求推进 | typed `SCHEDULE_EXHAUSTED(16)`，**无条件精确 16**（§6.7.4b 步内序 16→14→15）；与 M-AD-10 是两件事。三变体：(a) 保持项期望→16；(b) 历史 non-null 期望（如耗尽于 item-3 后期望 item-1，fresh key）→**精确 16**（v1.54 步内重排的核心行为 delta）；(c) 耗尽与请求之间 restart（判别位持久）→16 | 17 |
 | `M-AD-12` | advance | 推进时设备上存在非 `RELEASED` lease——**本 caller 自持**与**另一 caller 持有**两种情形各测一遍 | typed `LEASE_CONFLICT`（§6.7.4a）；**不推进、指针不动**；release 后同一份请求字节重试即应成功。断言必须钉 **exact wire 7**，接受"任意 typed failure"不构成证据 | 14,16,28 |
-| `M-AD-13` | advance | 同时违反多条前置（如既持活动 lease 又 `expectedScheduleVersion` 过期） | 按 §6.7.4b **冻结次序**返回**首条**命中者，此例为 `SCHEDULE_VERSION_STALE`；次序若被实现成任选，本行必红 | 15,16,28 |
+| `M-AD-13` | advance | 同时违反多条前置（如既持活动 lease 又 `expectedScheduleVersion` 过期；或 exhausted + 陈旧 item + 陈旧 version） | 按 §6.7.4b **冻结次序**返回**首条**命中者：跨步例为 `SCHEDULE_VERSION_STALE`（步 4 先于步 5）；步内例为 `SCHEDULE_EXHAUSTED`（步 4 内序 16→14→15）。次序若被实现成任选，本行必红 | 15,16,28 |
 | `M-AD-14` | advance | 配额**已提交但未达标**（`count(TrustedQuotaEntry) < requiredSuccesses`）时 release 完成 | **不推进**、当前项保留待下一 attempt；推进请求根本不得发出。把「提交过一次」读成「已达标」会让 `requiredSuccesses = 3` 的任务在第 1 次 attempt 后推进 | 10,11 |
 | `M-AD-15` | advance | 配额提交后、达标判定前崩溃 | 恢复**先 reconcile 重算达标**再决定是否推进，禁止直接推进下一项（INV-15） | 10,15 |
 | `M-AD-16` | advance | **耗尽** receipt 的 `receiptDigest` 重算不上 | 拒绝该 receipt、**不落终态**、进恢复；与 `ADVANCED` 同等对待——`outcomeWire` 本就在 preimage 内，耗尽 receipt 同样可验证 | 17 |
@@ -2411,7 +2428,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-18` | advance | 推进后 `observe` 的 `environmentRevision` ≠ receipt 的 `effectiveEnvironmentRevision`（**item 与 hash 都对得上**） | 同上；typed reason 必须指明是 revision 这条腿。本行与 `M-AD-17` 分立：单腿读法会各自放过对方 | 25 |
 | `M-AD-19` | advance | 跨新分叉的同键重放（未达标路径与已达标路径各一次） | 可信配额保持幂等、最多增加一次；不得产生第二次推进 | 10,13 |
 | `M-AD-20` | advance | **合法序列**：release 后以已 `RELEASED` 的历史 `leaseId` 调 `completeAndAdvance`，随后以**同一** `leaseId` 调 `observe` | 两者都必须被受理，`observe` 返回新生效环境；仅当该 caller 已获授新 lease 或 `leaseId` 非该历史引用时才 `STALE_LEASE`(8)。**这是 §6.7.4a 序列唯一的合法形态，此前 `M-AD-01..13` 无一行断言它** | 28 |
-| `M-AD-21` | advance | **两个不同新 key** 的 `completeAndAdvance` 并发到达，均在指针前移前读到同一 `currentItemId` | **恰好一次**推进：一个成功，另一个因 CAS 前置失配返回 14／15，**不得两次都成功**。单看每一次都合法，所以必须由事务边界而非请求内容拦截 | 15,16 |
+| `M-AD-21` | advance | **两个不同新 key** 的 `completeAndAdvance` 并发到达，均在指针前移前读到同一 `currentItemId` | **恰好一次**推进，**不得两次都成功**。loser 的 typed code 按争用项是否末项**分叉**：**非末项** → CAS 前置失配返回 14／15；**末项** → winner 置 `exhausted = true` 且**指针保持末项**，故 loser 的 item CAS 恒过、在步 4 内序首命中 `SCHEDULE_EXHAUSTED(16)`（**不是** 14）。不分叉则本行与 §6.7.4b 步内序 16→14→15 直接矛盾。单看每一次都合法，所以必须由事务边界而非请求内容拦截 | 15,16 |
 | `M-AD-22` | advance | 在**谓词读与指针提交之间**注入故障（进程被杀／事务中止） | 恢复后只能观察到「已推进」或「未推进」，且幂等记录与 receipt 与指针三者状态一致；**不得出现指针已动而幂等记录未落**（后果是同一次完成可再推进一次） | 13,15,16 |
 | `M-RC-02` | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | `M-RC-03` | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |
