@@ -25,11 +25,22 @@ data class PreflightReportV1(
     /** [ContractErrorCodeV1] wire codes; empty means preflight passed. */
     val blockingReasonWires: List<Int>,
     /**
-     * The schedule item and version this report is about (§6.7.1). A report that
-     * does not name its item cannot be told apart from a report about the item
-     * that was current a moment ago, which is exactly the confusion an advance
-     * creates.
+     * Schedule projection group (§6.7.1, v1.55). The item and version this report
+     * is about, plus whether the schedule is exhausted. A report that does not
+     * name its item cannot be told apart from a report about the item that was
+     * current a moment ago, which is exactly the confusion an advance creates.
+     *
+     * **Group invariant**: all three are null together when the provider has no
+     * active schedule, and all three are non-null together otherwise. The handler
+     * must NOT substitute sentinel values (empty string, zero) for null — that is
+     * the round-5 sentinel anti-pattern at the wire layer.
+     *
+     * Prior to v1.55 these fields were non-nullable and the handler used `?: ""`
+     * / `?: 0L` when no schedule existed — sentinel values masquerading as real
+     * data (`EnvironmentControlHandler.kt:113-114`). Now nullable, consistent
+     * with [CapabilitySnapshotV1]'s schedule projection group.
      */
-    val scheduleItemId: String,
-    val scheduleVersion: Long,
+    val scheduleItemId: String?,
+    val scheduleVersion: Long?,
+    val exhausted: Boolean?,
 ) : Parcelable

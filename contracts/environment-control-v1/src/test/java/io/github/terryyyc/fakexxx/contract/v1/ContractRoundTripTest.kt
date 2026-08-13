@@ -66,6 +66,7 @@ class ContractRoundTripTest {
             currentScheduleId = "s1",
             currentItemId = "item-7",
             scheduleVersion = 3L,
+            exhausted = false,
         )
         val restored = roundTrip(original)
         assertEquals(original, restored)
@@ -94,6 +95,7 @@ class ContractRoundTripTest {
             blockingReasonWires = emptyList(),
             scheduleItemId = "item-7",
             scheduleVersion = 3L,
+            exhausted = false,
         )
         val restoredPassed = roundTrip(passed)
         assertEquals(passed, restoredPassed)
@@ -254,10 +256,11 @@ class ContractRoundTripTest {
                 environmentRevision = 1L,
                 profileRefs = emptyList(),
                 scheduleRefs = emptyList(),
-                // No active schedule: §6.7.1 requires all three to be null together.
+                // No active schedule: §6.7.1 requires all four to be null together.
                 currentScheduleId = null,
                 currentItemId = null,
                 scheduleVersion = null,
+                exhausted = null,
             ),
         )
         assertEquals(listOf(1, 2, 99), fromNewerPeer.supportedModeWires)

@@ -25,8 +25,9 @@ data class CapabilitySnapshotV1(
     val profileRefs: List<String>,
     val scheduleRefs: List<String>,
     /**
-     * Identity of the schedule item that is currently effective, and the version
-     * of the schedule it belongs to (§6.7.1).
+     * Schedule projection group: identity of the schedule item that is currently
+     * effective, its version, and whether the schedule is exhausted (§6.7.1,
+     * v1.54 state model).
      *
      * Without these, Auto cannot construct the expectedCurrentItemId /
      * expectedScheduleVersion preconditions that §6.7.4 requires, so
@@ -34,11 +35,15 @@ data class CapabilitySnapshotV1(
      * that nothing can ever legitimately trigger -- guards that are present and
      * unreachable.
      *
-     * All three are null together when the provider has no active schedule, which
-     * is a legal state at discover() time. Null must be read as "no current item",
-     * never as "any item".
+     * **Group invariant**: all four fields are null together when the provider has
+     * no active schedule (a legal state at discover() time), and all four are
+     * non-null together otherwise. Null must be read as "no schedule", never as
+     * "any item" or "not exhausted". [exhausted] = true means the schedule's
+     * last item has been completed; [currentItemId] retains the last item (never
+     * null while exhausted). See §6.7.4 v1.54 frozen state model.
      */
     val currentScheduleId: String?,
     val currentItemId: String?,
     val scheduleVersion: Long?,
+    val exhausted: Boolean?,
 ) : Parcelable

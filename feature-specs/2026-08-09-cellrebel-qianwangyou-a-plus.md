@@ -138,6 +138,7 @@ source_threads:
 | **v1.52** | PR-2 第十轮（同轮第二项） | **上一轮刚修完「关闭 P1 的守卫自己没被测量」，新造的守卫又是零覆盖。** ①v1.51 的 §7b 为关闭 Terra 的 P1-2 而生，落地时**没有任何 `N-*`／`M-*` 案例**——与本轮刚补完的 §5／§6b 缺口同形，区别只是**这次没被测量的守卫是一小时前自己造的**。②而 §7b 恰恰最需要负例：它在被写出来的过程中**三次红错了地方**（正则依次漏掉 `domain : ASCII` 写法、```text 围栏、块内反引号），三次症状都是把「存在」报成「缺席」。一个曾经三次误判的守卫，若没有负例把行为钉死，下一次收窄或放宽都无人察觉。③补 `N-13`（抹掉某 preimage 块的 domain 行 → 必须报出该块）与 `M-10`（关掉 `missing` 的**计算**而非它的输出文案 → finding 必须消失，沿用 `M-9` 的教训）。suite 由 1+12+9 增至 **1 positive / 13 negative / 10 mutation**。④记一条通用要求：**新增门禁节的同一个 commit 内必须带上它的负例与承重证明**——否则「我加了守卫」与「我加了一段从未被要求失败过的代码」在看板上无从分辨。见 `scripts/selftest-contract-v1.sh` |
 | **v1.53** | PR-2 第十一轮（Terra P1-3） | **守卫用自己的盲区当单位报了一个计数，那个计数读起来像覆盖率。** ①§7b 只认以 `canonical`／裸 `domain` 开头的围栏块，而 §6.3.4 写作 `canonicalRequest =`、其 domain 用 `apply → "..."` 映射记法——于是 `fakexxx.contract.v1.apply` 与 `.release` **从未进入守卫**，§7b 却打印 `PASS 3 canonical preimage block(s)` 并全绿。**「3 块」不是覆盖率，是它认得的块数**；改 apply/release 的 domain 或改该块写法，§7b 与 CI 都会继续通过。②改为**全量清单**：识别 4 个 preimage 块、5 个 domain 并逐个列名（`intent`／`advance-request`／`advance-receipt` 用**冒号**分隔，`apply`／`release` 用**点号**——同一份契约里两套 domain 命名法，已提请 reviewer 裁定是否收敛）。module 的 3 个常量必须是 canonical 清单的**子集**；反向包含**刻意不断言**，因为 apply/release 是 canonical-only、provider 侧、无 module 常量——该边界现写在守卫注释里，不留给下一个读者猜。③仅「每块至少一个 domain」不够：§6.3.4 声明两个，删掉 `apply` 还剩 `release`，逐块检查照绿而一个 wire 级身份已消失。故**冻结完整 inventory**，删除或重命名任一 domain 即红，新增 domain 必须显式改 §7b 而不能悄悄放宽。④补 `N-14`（重命名 canonical-only 的 apply domain → 必须红）与 `M-11`；suite 增至 **1 positive / 14 negative / 11 mutation**。⑤`M-10` 的变异锚随本轮重写而失效，mut() 报 `INCONCLUSIVE：变异根本没改动 gate`——**它拒绝把「变异没生效」当成「守卫承重」**，已重新对准现判据。⑥**本轮是同一形态的第四、五次**：写 §7b 时正则三次比文档窄，本轮又两次（漏 `canonicalRequest`、过滤器用合取而非析取漏掉 receipt 块）。**每一次的症状都是把「存在」报成「缺席」，而每一次我都以为已经扫干净了。** 见 §7b |
 | **v1.54** | PR-2 第十二轮 | **耗尽状态模型冻结与步 4 内序重排。** 来源：Fable5 四答定稿（Q1-Q4）。**状态模型**（独立判别位 + 末项保持）已由既有实现验证（660 tests + 5 轮 DSF review + `FakeQwyEnvironment` 判别位持久 + 生产 `QwyScheduleStore:107` 同构），非新设计而是 ratify；**步内 16-first 行为**是本轮冻结的新次序，provider handler（`EnvironmentControlHandler.completeAndAdvance`）仍实际执行旧序 14→15→16，待 provider lane 落 RED test + handler 重排后生效。①**冻结 `exhausted` 独立判别位**：schedule 运行时状态冻结为 `(currentItemId: 非null String, exhausted: Boolean)` 三态模型（无 schedule / 进行中 / 已耗尽）。排除 null 指针（与"尚未开始"撞 + 14-shadows-16 + sentinel 反模式）与越界魔值（§6.7.3 取消 ID 受限假设）。bit 生命周期：完成末项的 committed advance 置位，schedule (re)init / version 变更清零。receipt `advancedToItemId = null` 是 OUTCOME 编码，STATE 里没有 null。②**步 4 内序由 `14→15→16` 重排为 `16→14→15`**（exhausted-first）。三条推理各自充分联合必要：(a) 规范自身先例——步间已裁定 16 先于 7，步内同理；(b) 恢复语义诚实——14/15 承诺可恢复，耗尽后无一可恢复，答 14/15 是谎报；(c) 确定性——M-AD-11 的"稳定 16"从条件命题变恒真。**唯一行为 delta = 耗尽后陈旧期望：旧答 14，新答 16**，恰是被修缺陷本身。现有 14→15 相对序不重开。③**M-AD-10/11/13/21 同步刷新**：M-AD-10 加 bit + 指针持久性与 restart 存活；M-AD-11 加三变体（保持项期望 / 历史 non-null 期望 / restart 间隔）全 →16；M-AD-13 加步内多重违反例（exhausted + stale item + stale version → 首命中 16）；M-AD-21 并发分叉精确化（非末项 loser 精确 14——winner 同时移 item + version 但步内序 14 先于 15 故 item 失配已确定答案；末项 loser 精确 16——winner 置 exhausted 后步内序首命中 16）。见 §6.7.4 / §6.7.4b / §10 |
+| **v1.55** | PR-2 第十二轮（wire 投影） | **`exhausted` 状态存在于 provider 内部却不上线，消费者只能猜。** ①v1.54 冻结了 `exhausted` 独立判别位，但 `CapabilitySnapshotV1`（§6.3 discover DTO）与 `PreflightReportV1`（§6.3.2 preflight DTO）未携带该字段——Auto 能读 `currentItemId` / `scheduleVersion` 却读不到 `exhausted`，无法构造 §6.7.4b 第 4 步 16-first 的前置。②`CapabilitySnapshotV1` 新增 `val exhausted: Boolean?`，位于 `scheduleVersion: Long?` 之后。**Group invariant**：`currentScheduleId` / `currentItemId` / `scheduleVersion` / `exhausted` 四者同为 null（无活动 schedule）或同为非 null。null 读作「没有 schedule」而非「未耗尽」。③`PreflightReportV1` 新增 `val exhausted: Boolean?` 并将 `scheduleItemId: String` / `scheduleVersion: Long` 改为 nullable。v1.55 前这两个字段非空，handler 用 `?: ""` / `?: 0L` 填充——round-5 sentinel 反模式在 wire 层。三者同为 null 或同为非 null，与 `CapabilitySnapshotV1` 一致。④**preimage 安全**：`CapabilitySnapshotV1` 经实查不在任何 canonical digest preimage（`CanonicalDigestV1.kt` 零 import / 零引用），新增字段不变更 digest；`PreflightReportV1` 同理。⑤kotlin-parcelize 按声明顺序 read/write，`exhausted` 追加在末尾，**不扰动已有字段的 parcel 位置**——但 v1 协议尚未冻结 wire（Draft PR），版本 skew 不适用。见 §6.3 / §6.3.2 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1287,13 +1288,15 @@ data class CapabilitySnapshotV1(
     val environmentRevision: Long,
     val profileRefs: List<String>,
     val scheduleRefs: List<String>,
-    /** 当前有效的 schedule 身份与版本（§6.7.1）。三者同为 null 表示provider 当前
+    /** 当前有效的 schedule 投影组（§6.7.1, v1.55）。四者同为 null 表示 provider 当前
      *  没有活动 schedule——这是 discover() 时的合法状态；null 读作「没有当前项」，
-     *  绝不可读作「任意项」。缺了它们，Auto 无法构造 §6.7.4 的两条前置，
-     *  wire 14/15 就成了**存在但不可达**的守卫。 */
+     *  绝不可读作「任意项」或「未耗尽」。缺了它们，Auto 无法构造 §6.7.4 的前置，
+     *  wire 14/15/16 就成了**存在但不可达**的守卫。exhausted = true 表示最后一项
+     *  已完成；currentItemId 保留末项（耗尽时不为 null）。见 §6.7.4 v1.54 状态模型。 */
     val currentScheduleId: String?,
     val currentItemId: String?,
     val scheduleVersion: Long?,
+    val exhausted: Boolean?,
 ) : Parcelable
 
 @Parcelize
@@ -1430,10 +1433,15 @@ data class PreflightReportV1(
     val environmentRevision: Long,
     /** ContractErrorCodeV1.wire 列表；空表示预检通过。 */
     val blockingReasonWires: List<Int>,
-    /** 本报告所针对的 schedule item 与版本（§6.7.1）。不点名 item 的报告，
-     *  与「上一刻还是当前项」的报告无法区分——而推进制造的正是这种混淆。 */
-    val scheduleItemId: String,
-    val scheduleVersion: Long,
+    /** Schedule 投影组（§6.7.1, v1.55）。三者同为 null 表示 provider 当前没有活动
+     *  schedule；三者同为非 null 表示有。不点名 item 的报告，与「上一刻还是当前项」
+     *  的报告无法区分——而推进制造的正是这种混淆。
+     *  v1.55 前这两个字段为非空，handler 用 `?: ""` / `?: 0L` 填充——哨兵值冒充
+     *  真实数据（round-5 sentinel 反模式）。现改为 nullable，与 CapabilitySnapshotV1
+     *  的投影组一致。 */
+    val scheduleItemId: String?,
+    val scheduleVersion: Long?,
+    val exhausted: Boolean?,
 ) : Parcelable
 
 @Parcelize
