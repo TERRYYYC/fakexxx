@@ -175,18 +175,17 @@ class QwyEnvironmentController(
             ),
         )
 
-        // P2 fix (dsf round-3): persist intent coords so observeEffective
-        // returns what the mock provider actually has, not DB profile coords.
-        // ConfigPrefsSync.sync(profileId=null) reads DB active profile which
-        // may carry different coordinates.
-        scheduleStore.recordLastApplied(
-            intent.latitude, intent.longitude, android.os.SystemClock.elapsedRealtime(),
-        )
-
         val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
 
+        // P2 fix (dsf round-3/4): persist intent coords + publish outcome so
+        // observeEffective returns what the mock provider actually has (intent
+        // coords), with verification level matching the real sync result.
+        scheduleStore.recordLastApplied(
+            intent.latitude, intent.longitude, android.os.SystemClock.elapsedRealtime(),
+            verified = published,
+        )
+
         // P1-2 fix: verification level reflects actual publish outcome.
-        // If sync failed, we did not get verified delivery — honest downgrade.
         val verificationLevel = if (published)
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
@@ -202,14 +201,18 @@ class QwyEnvironmentController(
 
     override fun cleanup(leaseId: String): CleanupOutcome {
         // P3-1 fix: report honestly whether removal actually happened.
+        // P2-2 fix (dsf round-4): clear lastApplied so observe no longer
+        // reports stale mock coordinates after cleanup.
         return if (mockGateway != null) {
             try {
                 mockGateway!!.removeGpsProvider()
+                scheduleStore.clearLastApplied()
                 CleanupOutcome.Complete
             } catch (e: Throwable) {
                 CleanupOutcome.Incomplete(emptyList())
             }
         } else {
+            scheduleStore.clearLastApplied()
             CleanupOutcome.Incomplete(emptyList())
         }
     }
@@ -232,8 +235,10 @@ class QwyEnvironmentController(
             // Intent coordinates are what the mock provider has right now.
             lat = lastApplied.latitude
             lng = lastApplied.longitude
-            isMock = true
-            fingerprint = "intent:${lastApplied.latitude},${lastApplied.longitude}@${lastApplied.atMs}"
+            // P2-1 fix (dsf round-4): verification must match the actual
+            // publish outcome recorded at apply time, not just "apply happened".
+            isMock = lastApplied.verified
+            fingerprint = "intent:${lastApplied.latitude},${lastApplied.longitude}@${lastApplied.atMs}:verified=${lastApplied.verified}"
         } else {
             // No intent applied yet — read what the hook transport says.
             val published = when (payload) {

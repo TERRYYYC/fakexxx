@@ -41,6 +41,7 @@ class QwyScheduleStore(context: Context) {
         private const val KEY_LAST_APPLIED_LAT = "lastAppliedLat"
         private const val KEY_LAST_APPLIED_LNG = "lastAppliedLng"
         private const val KEY_LAST_APPLIED_AT = "lastAppliedAtMs"
+        private const val KEY_LAST_APPLIED_VERIFIED = "lastAppliedVerified"
 
         const val DEFAULT_SCHEDULE_ID = "qwy-default-schedule"
     }
@@ -122,21 +123,35 @@ class QwyScheduleStore(context: Context) {
     }
 
     /**
-     * Persist the last-applied intent coordinates (dsf P2 fix).
+     * Persist the last-applied intent coordinates + publish outcome (dsf P2 fix).
      *
      * The mock provider publishes intent coords, but ConfigPrefsSync publishes
      * DB active-profile coords. observeEffective must return what the mock
      * provider actually has (intent coords), so we persist them here.
+     *
+     * `verified` is the ConfigPrefsSync.sync() outcome — observe must not claim
+     * INDEPENDENTLY_VERIFIED if the publish failed (P2-1 fix).
      */
-    fun recordLastApplied(latitude: Double, longitude: Double, elapsedRealtimeMs: Long) {
+    fun recordLastApplied(latitude: Double, longitude: Double, elapsedRealtimeMs: Long, verified: Boolean) {
         prefs.edit()
             .putFloat(KEY_LAST_APPLIED_LAT, latitude.toFloat())
             .putFloat(KEY_LAST_APPLIED_LNG, longitude.toFloat())
             .putLong(KEY_LAST_APPLIED_AT, elapsedRealtimeMs)
+            .putBoolean(KEY_LAST_APPLIED_VERIFIED, verified)
             .commit()
     }
 
-    data class LastApplied(val latitude: Double, val longitude: Double, val atMs: Long)
+    /** Clear last-applied state on cleanup/release (P2-2 fix). */
+    fun clearLastApplied() {
+        prefs.edit()
+            .remove(KEY_LAST_APPLIED_LAT)
+            .remove(KEY_LAST_APPLIED_LNG)
+            .remove(KEY_LAST_APPLIED_AT)
+            .remove(KEY_LAST_APPLIED_VERIFIED)
+            .commit()
+    }
+
+    data class LastApplied(val latitude: Double, val longitude: Double, val atMs: Long, val verified: Boolean)
 
     fun getLastApplied(): LastApplied? {
         val atMs = prefs.getLong(KEY_LAST_APPLIED_AT, 0L)
@@ -145,6 +160,7 @@ class QwyScheduleStore(context: Context) {
             latitude = prefs.getFloat(KEY_LAST_APPLIED_LAT, 0f).toDouble(),
             longitude = prefs.getFloat(KEY_LAST_APPLIED_LNG, 0f).toDouble(),
             atMs = atMs,
+            verified = prefs.getBoolean(KEY_LAST_APPLIED_VERIFIED, false),
         )
     }
 
