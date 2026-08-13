@@ -421,7 +421,7 @@ class AutomationEngine(
                                 preObservation = preObservation,
                                 postObservation = postObservation
                             )
-                            val decision = planRepository.recordTrustedCompletion(trustCtx)
+                            val decision = planRepository.recordTrustedCompletion(trustCtx, nowMs())
                             val trusted = decision == TrustDecision.PASS
                             if (trusted) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_PASS) ?: aplusState

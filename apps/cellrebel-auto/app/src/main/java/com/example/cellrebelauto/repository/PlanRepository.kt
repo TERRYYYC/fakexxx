@@ -382,7 +382,7 @@ class PlanRepository(private val db: AppDatabase) {
      * # 生产信任收尾入口（R4-F1 骨架）：持久化 digest+3clocks、丢弃 §7.1 证据、绝不铸币；GREEN 再补全字段并在 PASS 时铸币
      */
     suspend fun recordTrustedCompletion(ctx: CompletionTrustContext): TrustDecision =
-        recordTrustedCompletion(ctx, ctx.execution.completedAtElapsed)
+        recordTrustedCompletion(ctx, 0L) // deprecated one-arg: test-only fallback; production must use two-arg
 
     /**
      * R38 (Sol R37 P2-4): canonical production entrypoint with injected monotonic commit clock.
