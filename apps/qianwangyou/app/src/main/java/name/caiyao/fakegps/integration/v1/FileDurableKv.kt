@@ -241,6 +241,7 @@ open class FileDurableKv(val directory: File) : DurableKv {
      * and the store degrades to "atomic, but the last commit may not survive a
      * power cut" — stated rather than assumed.
      */
+    @Suppress("NewApi")
     private fun syncDirectory() {
         try {
             java.nio.channels.FileChannel
