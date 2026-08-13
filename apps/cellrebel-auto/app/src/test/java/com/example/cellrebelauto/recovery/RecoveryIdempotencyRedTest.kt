@@ -391,4 +391,49 @@ class RecoveryIdempotencyRedTest {
 
         assertNull("a FAILED release must not record a durable RELEASED receipt", receipt)
     }
+
+    // ---- apply receipt rejection + true M-CR-08 + release receipt conflict (Sol round-13) ----
+
+    @Test
+    fun `dispatchApply with a conflicting receipt does not leak the lease`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        // A prior receipt for the same key but a DIFFERENT digest → recordReceipt rejects (conflict).
+        log.seedReceipt(idempotencyKey = "k-1", requestDigest = "digest-other", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val outcome = rc.dispatchApply(attemptId = 1L, idempotencyKey = "k-1", requestDigest = "digest-v1", now = 2000L)
+
+        assertNull("a rejected/conflicting receipt must not leak the lease", outcome.leaseId)
+        assertEquals("RECEIPT_NOT_DURABLE", outcome.outcome)
+    }
+
+    @Test
+    fun `release re-invoked after provider released but before receipt records the receipt and keeps effect at one`() {
+        // True M-CR-08: provider release EFFECT done, Auto receipt NOT yet saved → re-invoke (1→2), effect stays 1.
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.release(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 1000L)
+        assertNull("M-CR-08: provider released but no durable receipt", log.releaseReceiptFor("lease-1"))
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNotNull("the re-invoked release must record a durable receipt", receipt)
+        assertEquals("release re-invoked (1 → 2)", 2, executor.releaseInvocationCount("r-1"))
+        assertEquals("release effect stays at one (at-most-once)", 1, executor.releaseEffectCount(1L))
+    }
+
+    @Test
+    fun `a FAILED release receipt for the same tuple is not returned as success`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", outcome = "FAILED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("a FAILED release receipt must not be returned as a successful replay", receipt)
+        assertEquals("a FAILED receipt must not re-call the provider", 0, executor.releaseInvocationCount("r-1"))
+    }
 }

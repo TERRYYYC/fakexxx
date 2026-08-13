@@ -751,6 +751,10 @@ class AutomationEngine(
             nowMs()
         )
         if (receipt == null) {
+            // RELEASE_INCOMPLETE → RECOVERY_REQUIRED (§8.1): the release failed, the lease is unresolved —
+            // persist the phase, never silently advance (Sol round-13 P1-4).
+            attemptDriver?.driveTransition(crashed.id, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_INCOMPLETE)
+            planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
             aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
             return false
         }
@@ -809,6 +813,10 @@ class AutomationEngine(
             nowMs()
         )
         if (receipt == null) {
+            // RELEASE_INCOMPLETE → RECOVERY_REQUIRED (§8.1): the release failed, the lease is unresolved —
+            // persist the phase, never silently advance (Sol round-13 P1-4).
+            attemptDriver?.driveTransition(attemptId, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_INCOMPLETE)
+            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
             aplusPause("release receipt not durable for attempt $attemptId")
             return false
         }
