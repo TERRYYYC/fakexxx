@@ -838,3 +838,36 @@ GREEN-bound (contract #3 / schema owner). (2) The INV-23 three-way intent hash e
 (skeleton TrustPolicy does not check it); the RED pins the recomputable shape, not the equality.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.13 Round-12 — forged release/receipt closed + reversed fixtures + paused-owner custody (Sol round-10 advisory answered)
+
+**Status.** Sol's round-10 advisory (`3a6cbbf`) left 7 P1/P2. R12 closes the tractable safety gaps; the deep
+crash matrix + receipt carrier remain GREEN-bound (documented). **Baseline: `200 tests / 45 failed / 0
+errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema stays exact v5.
+
+**Repairs.**
+- **P1-3 release success forged** — `releaseLease` now checks the executor release outcome: any outcome
+  other than `RELEASED` (partial/FAILED) returns null (fail-closed, no durable release receipt), so a
+  failed cleanup never terminalizes/advances.
+- **P1-2 apply receipt-first** — `dispatchApply` now checks the `recordReceipt` result: a null receipt
+  (storage failure / same-key-different-digest conflict) returns `RECEIPT_NOT_DURABLE` with no lease —
+  the apply is not proven, so no lease may be handed back.
+- **P1-1 reversed fixture** — the R10-F2 apply RED's `assertNull(aplusLeaseId)` was a reverse-block (it
+  asserted the lease stays null, which a CORRECT reconcile violates); flipped to `assertNotNull` + exact
+  `lease-77`. The PASS fixture's observation/evidence lease now matches the provider apply lease
+  (`lease-$attemptId`, INV-07/23), never a fixed "L1".
+- **P1-5 paused-owner custody** — `findActiveRunningSession` now recognizes `paused` (a cancel/throw
+  persists `paused` with a live lease the next start must reconcile, never orphan); the A+ cancel/throw
+  `aplusPause` is wrapped in `withContext(NonCancellable)` so the paused persistence completes in a
+  cancelled context.
+- **P1-6 normal receipt durability** — the F1 positive now asserts the durable apply receipt readback
+  (a drop-receipt bad impl leaves it null).
+
+**Honest disclosures (GREEN-bound, not addressed pre-freeze).** (1) `RecordedReceipt.leaseId` — the
+window-c replay must return the lease from the receipt without re-calling the provider; that is the GREEN
+reconcile's orchestration (the skeleton reconcile returns InsufficientEvidence). (2) The full M-CR-03..07
+re-preobserve/classify/postobserve/ledger-truth crash matrix — GREEN body. (3) The frozen §6.3.4 preimage
+(run/profile/schedule/verification/timing framing) — contract-owned (#3). (4) `successOrdinal`/unverified
+exact fields are asserted (R11); the residual is that the GREEN must produce them.
+
+[深深/deepseek-v4-pro🐾]

@@ -121,7 +121,12 @@ class RecoveryCoordinator(
     ): ApplyOutcome {
         val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
         if (outcome.leaseId != null) {
-            log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
+            val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
+            if (receipt == null) {
+                // Receipt not durable (storage failed / same-key-different-digest conflict) → fail-closed:
+                // the apply is NOT proven, so no lease may be returned (Sol round-10 P1-2).
+                return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)
+            }
         }
         return outcome
     }
@@ -145,8 +150,13 @@ class RecoveryCoordinator(
         releaseDigest: String,
         now: Long
     ): RecordedReleaseReceipt? {
-        executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
-        return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, "RELEASED", now)
+        val releaseOutcome = executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
+        if (releaseOutcome.outcome != "RELEASED") {
+            // Release incomplete / failed → fail-closed: no durable release receipt, the lease is still
+            // unresolved (§8.1 RELEASE_INCOMPLETE → RECOVERY_REQUIRED; Sol round-10 P1-3).
+            return null
+        }
+        return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now)
     }
 }
 
