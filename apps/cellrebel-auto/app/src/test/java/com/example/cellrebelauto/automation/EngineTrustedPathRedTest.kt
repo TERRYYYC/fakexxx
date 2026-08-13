@@ -595,7 +595,8 @@ class EngineTrustedPathRedTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
-        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        val insertedId = db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        val seededEntry = TrustedQuotaEntry(id = insertedId, attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
@@ -606,12 +607,9 @@ class EngineTrustedPathRedTest {
 
         // The ledger is the authority: the phase string "DECIDING" must NOT degrade a committed truth to interrupted.
         assertEquals("a committed trusted entry must project to succeeded (not interrupted)", "succeeded", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }.status)
-        // P1-6 preservation/count/legacy-zero: the carrier is append-only and must NOT be changed.
+        // P1-6 preservation: full data-class equality (id/attemptId/taskId/digest/committedAt) + per-task/legacy-zero.
+        assertEquals("the trusted carrier must be byte-for-byte preserved (no tamper)", seededEntry, db.trustedQuotaDao().getByAttempt(77L))
         assertEquals("the trusted ledger count must stay 1 (no re-mint)", 1, db.trustedQuotaDao().countAll())
-        val entry = db.trustedQuotaDao().getByAttempt(77L)!!
-        assertEquals("carrier evidenceDigest preserved", "d", entry.evidenceDigest)
-        assertEquals("carrier taskId preserved", taskId, entry.taskId)
-        assertEquals("carrier committedAt preserved", 1000L, entry.committedAt)
         assertEquals("per-task trusted count preserved", 1, db.trustedQuotaDao().trustedCountForTask(taskId))
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
     }
@@ -711,5 +709,50 @@ class EngineTrustedPathRedTest {
         assertNotEquals("conflicting append-only truths must NOT be promoted to trusted", "succeeded", recovered.status)
         assertEquals("conflicting truths must persist RECOVERY_REQUIRED", "RECOVERY_REQUIRED", recovered.aplusState)
         assertEquals("conflicting truths must leave the attempt NON-terminal (recoverable, not terminalized)", "starting", recovered.status)
+    }
+
+    @Test
+    fun `R22 a wrong-task carrier is re-selected on second restart without creating a new attempt`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = 999L, evidenceDigest = "d", committedAt = 1000L))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        val backend = crashBackend(executor, log)
+        buildEngine(planId, runner, gps, clock, backend = backend).run()
+        buildEngine(planId, runner, gps, clock, backend = backend).run() // second restart
+
+        assertEquals("the attempt count must stay 1 (no new attempt on second restart)", 1, db.testAttemptDao().getAttemptsForTask(taskId).size)
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertEquals("RECOVERY_REQUIRED must still be selected by recovery", "RECOVERY_REQUIRED", recovered.aplusState)
+        assertEquals("the attempt must stay non-terminal (recoverable)", "starting", recovered.status)
+    }
+
+    @Test
+    fun `R22 conflicting truths are re-selected on second restart without creating a new attempt`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        val backend = crashBackend(executor, log)
+        buildEngine(planId, runner, gps, clock, backend = backend).run()
+        buildEngine(planId, runner, gps, clock, backend = backend).run() // second restart
+
+        assertEquals("the attempt count must stay 1 (no new attempt on second restart)", 1, db.testAttemptDao().getAttemptsForTask(taskId).size)
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertEquals("RECOVERY_REQUIRED must still be selected by recovery", "RECOVERY_REQUIRED", recovered.aplusState)
+        assertEquals("the attempt must stay non-terminal (recoverable)", "starting", recovered.status)
     }
 }
