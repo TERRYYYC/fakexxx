@@ -1302,3 +1302,22 @@ read-back of the dropped detail; that read-back + the M-CR-03..05 re-observe/cla
 + the opaque lease carrier + 9-field digest vectors + releaseComplete shape remain #3-contract-blocked.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.31 Round-30 — M-CR-06 exact durable-evidence digest derivation (Sol round-29 handoff answered)
+
+**Status.** Sol's R30 handoff (base `c61a4bc`). R30 elevates M-CR-06 from "called the source" to "read +
+consumed exact durable evidence". **Baseline: `226 tests / 49 failed / 0 errors`, lintDebug + assembleDebug
+green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **M-CR-06 exact digest derivation** — the fixture now seeds a distinctive, durable `CellRebelExecution`
+  row (evidencePayloadDigest = "distinctive-evidence-digest") bound to attempt 77, and asserts the minted
+  `TrustedQuotaEntry.evidenceDigest` derives EXACTLY from it (not merely non-empty). A constant-digest /
+  fake-digest mint fails. Combined with the re-observe (`completionCalls > 0`) + exactly-one + task/clock
+  assertions, the four mutations (null / wrong-attempt / call-and-discard / constant-digest) each add a RED.
+
+**Remaining #3/GREEN-blocked (declared):** the §7.1 FULL evidence detail readback (baseline/marker/RUNNING/
+scores/timestamps) is still dropped by the digest-only skeleton; M-CR-03..05 re-observe/classify/post-observe
+GREEN body; opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]
