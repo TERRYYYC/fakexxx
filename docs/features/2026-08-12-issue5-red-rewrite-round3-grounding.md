@@ -1321,3 +1321,28 @@ scores/timestamps) is still dropped by the digest-only skeleton; M-CR-03..05 re-
 GREEN body; opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.32 Round-31 — M-CR-06 anti-counterfeit digest + exact clock (Sol R30 advisory answered)
+
+**Status.** Sol's R30 advisory (head `0983314`) — P1: M-CR-06 still false-greens on "call-and-discard +
+constant digest/clock mint". The digest was a fixed literal, so a counterfeit that calls
+`acquireCompletionEvidence`, discards the result, and mints a constant `evidenceDigest` + `committedAt=1`
+passed. R31 removes the literal. **Baseline: `226 tests / 49 failed / 0 errors`, lintDebug + assembleDebug
+green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **Non-literal digest** — the fixture seeds `evidencePayloadDigest = "ev-" + UUID.randomUUID()` (per-test
+  random), so the minted `evidenceDigest` can only be produced by READING the durable execution row back; a
+  hardcoded/constant mint no longer matches.
+- **Exact injected clock** — `VirtualClock(now = 4242L)`; asserts `committedAt == 4242L` (the injected
+  virtual-clock value, not merely `> 0`), so `committedAt=1` counterfeits fail.
+- **Exact-attempt re-observe** — `FakeEvidenceSource` records `completionRequests`, and M-CR-06 asserts the
+  re-observe targets EXACTLY `[77L]` (not a different attempt, not "any call"), and supplies the full
+  `APlusCompletionEvidence` (execution row + wire + receipt fields) as the evaluator input.
+
+**Remaining #3/GREEN-blocked (unchanged, declared):** §7.1 FULL evidence detail readback (baseline/marker/
+RUNNING/scores/timestamps) still dropped by the digest-only skeleton; M-CR-03..05 re-observe/classify/
+post-observe GREEN body; opaque lease carrier; 9-field digest vectors; releaseComplete shape — all
+#3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]
