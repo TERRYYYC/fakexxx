@@ -102,9 +102,15 @@ class CrashMatrixTest {
         var preCalls = 0
         var postCalls = 0
         var completionCalls = 0
+        var completionRequests = mutableListOf<Long>()
+        var completionEvidence: APlusCompletionEvidence? = null
         override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? { preCalls++; return null }
         override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? { postCalls++; return null }
-        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? { completionCalls++; return null }
+        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? {
+            completionCalls++
+            completionRequests.add(attemptId)
+            return completionEvidence
+        }
     }
 
     private class FakeBackend(
@@ -197,27 +203,35 @@ class CrashMatrixTest {
     fun `M_CR_06`() = runTest {
         // M-CR-06: trust PASS but the ledger transaction not yet committed (phase DECIDING, no carrier).
         // GREEN: re-decide from the PERSISTED durable evidence (the execution row) → recompute + unique insert
-        // ONCE, whose digest derives EXACTLY from that evidence (a wrong-task / fake-digest / zero-clock /
-        // constant mint is NOT a re-decision).
+        // ONCE, whose digest derives EXACTLY from that evidence. The digest is a NON-LITERAL (random per-test)
+        // value so a constant/hardcoded mint cannot fake a re-decision; the commit clock is the INJECTED
+        // virtual-clock value (exact), not a non-zero constant.
         val planId = seedPlan(taskId = 42L)
         seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
-        db.attemptExecutionDao().insert(CellRebelExecution(
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val execution = CellRebelExecution(
             executionId = "exec-77", attemptId = 77L, completionEvidenceWire = 1,
-            evidencePayloadDigest = "distinctive-evidence-digest", startedAt = 1L, classifiedAt = 2L
-        ))
+            evidencePayloadDigest = seededDigest, startedAt = 1L, classifiedAt = 2L
+        )
+        db.attemptExecutionDao().insert(execution)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
-        val clock = VirtualClock()
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        val clock = VirtualClock(now = 4242L)
+        val backend = FakeBackend(executor, log)
+        backend.evidence.completionEvidence = APlusCompletionEvidence(
+            execution = execution, completionEvidenceWire = 1,
+            applyReceiptIntentHash = "h", applyReceiptLease = "lease-77"
+        )
+        buildEngine(planId, clock, backend).run()
 
         val entry = db.trustedQuotaDao().getByAttempt(77L)
         assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", entry)
         assertEquals("M-CR-06: the mint must bind the correct task", 42L, entry!!.taskId)
-        assertEquals("M-CR-06: the mint digest must derive EXACTLY from the durable execution evidence", "distinctive-evidence-digest", entry.evidenceDigest)
-        assertTrue("M-CR-06: the mint must carry a non-zero commit clock", entry.committedAt > 0)
+        assertEquals("M-CR-06: the mint digest must derive EXACTLY from the durable execution evidence (read back, never hardcoded)", seededDigest, entry.evidenceDigest)
+        assertEquals("M-CR-06: the mint must commit with the INJECTED virtual-clock value (exact), never a non-zero constant", 4242L, entry.committedAt)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row (no unrelated rows)", 1, db.trustedQuotaDao().countAll())
-        assertTrue("M-CR-06: the recovery must RE-OBSERVE (re-invoke completion evidence) to re-decide, never forge from nothing", lastEvidence!!.completionCalls > 0)
+        assertEquals("M-CR-06: the recovery must RE-OBSERVE the EXACT crashed attempt (not some other attempt, never forge from nothing)", listOf(77L), lastEvidence!!.completionRequests)
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
