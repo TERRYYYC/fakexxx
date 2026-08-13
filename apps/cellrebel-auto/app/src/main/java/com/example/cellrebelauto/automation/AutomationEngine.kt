@@ -19,12 +19,14 @@ import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.ScheduleAdvanceState
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -557,9 +559,12 @@ class AutomationEngine(
         } catch (e: CancellationException) {
             // # 停止/取消：legacy 在途尝试标记 interrupted；A+ 模式绝不盲目标记 terminal——cancel 后可能
             // # 仍持有未收敛 lease，必须保持 recoverable 由下次恢复 reconcile（Sol round-9 addendum）。
+            // # withContext(NonCancellable) 保证 paused 持久化在取消上下文中仍完成（Sol round-10 P1-5）。
             _cooldown.value = null
             if (recoveryCoordinator != null) {
-                aplusPause("cancelled with an unresolved A+ lease — recoverable, not terminalized")
+                withContext(NonCancellable) {
+                    aplusPause("cancelled with an unresolved A+ lease — recoverable, not terminalized")
+                }
             } else {
                 currentAttemptId?.let { planRepository.markAttemptInterruptedIfNonTerminal(it, nowMs()) }
                 updateState(AutomationState.IDLE)
@@ -573,7 +578,9 @@ class AutomationEngine(
         } catch (e: Exception) {
             // # 不可恢复的错误：legacy 在飞 attempt 终态化（F7 不留孤儿）；A+ 模式保持 recoverable。
             if (recoveryCoordinator != null) {
-                aplusPause("exception with an unresolved A+ lease: ${e.message}")
+                withContext(NonCancellable) {
+                    aplusPause("exception with an unresolved A+ lease: ${e.message}")
+                }
             } else {
                 currentAttemptId?.let { attemptId ->
                     runCatching {

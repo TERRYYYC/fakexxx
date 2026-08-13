@@ -148,9 +148,13 @@ class EngineTrustedPathRedTest {
         // recomputable from owner state, not that the value matches (that is GREEN).
         private fun intentHash(attemptId: Long) = APlusOperationIdentity.requestDigest(lat, lng, attemptId, 0L)
 
+        // The observation/evidence lease MUST match the provider's apply lease (INV-07/23) — Sol round-10
+        // P1-1: a fixed "L1" would be rejected by a correct lease binding, so it must be the provider lease.
+        private fun providerLease(attemptId: Long) = "lease-$attemptId"
+
         override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? =
             if (!present) null else ObservationSnapshot(
-                leaseId = LEASE,
+                leaseId = providerLease(attemptId),
                 acceptedIntentHash = intentHash(attemptId),
                 coverage = "FULL",
                 verificationLevel = "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED",
@@ -178,7 +182,7 @@ class EngineTrustedPathRedTest {
                 execution = fullEvidenceExecution(wire),
                 completionEvidenceWire = wire,
                 applyReceiptIntentHash = intentHash(attemptId),
-                applyReceiptLease = LEASE
+                applyReceiptLease = providerLease(attemptId)
             )
     }
 
@@ -352,6 +356,9 @@ class EngineTrustedPathRedTest {
         assertEquals("the normal chain must drive the apply executor exactly once", 1, executor.invocationCount(applyKey(realAttemptId)))
         assertEquals("the provider apply effect must happen exactly once", 1, executor.effectCount(realAttemptId))
         assertEquals("the lease must be persisted from the apply (never invented)", "lease-$realAttemptId", db.testAttemptDao().getAplusLeaseId(realAttemptId))
+        // Finding #6 (normal receipt durability): the apply receipt must be DURABLE — a drop-receipt bad
+        // impl would leave it null.
+        assertNotNull("the normal apply must record a durable apply receipt", log.receiptFor(applyKey(realAttemptId)))
         assertEquals("the normal chain must drive the release executor exactly once", 1, executor.releaseInvocationCount(releaseKey(realAttemptId)))
         // RED: the skeleton decision drops the §7.1 detail, never mints, never terminalizes succeeded.
         val rows = db.attemptExecutionDao().forAttempt(realAttemptId)
@@ -416,7 +423,9 @@ class EngineTrustedPathRedTest {
         // RED: skeleton reconcile returns InsufficientEvidence — never re-invokes, never yields the lease.
         assertEquals("reconcile must re-invoke the apply executor (1 → 2)", 2, executor.invocationCount(applyKey(77L)))
         assertEquals("provider effect stays at one", 1, executor.effectCount(77L))
-        assertNull("the lease must come back from the reconcile, not stay unpersisted (skeleton ⇒ RED)", db.testAttemptDao().getAplusLeaseId(77L))
+        // The lease must come BACK from the reconcile (never pre-seeded): skeleton leaves it null ⇒ RED.
+        assertNotNull("the lease must come back from the reconcile and be persisted (skeleton ⇒ RED)", db.testAttemptDao().getAplusLeaseId(77L))
+        assertEquals("the persisted lease is the provider lease, not a constant", "lease-77", db.testAttemptDao().getAplusLeaseId(77L))
         assertEquals("the crashed owner session must be reused, not duplicated", sessionId, db.runSessionDao().getLatest()!!.id)
     }
 

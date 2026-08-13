@@ -34,10 +34,11 @@ interface RunSessionDao {
     /**
      * The active session for a plan — the crashed owner session the A+ recovery must TRANSITION
      * (RECOVERING → RUNNING/PAUSED) rather than mint a second active run (Sol round-8 P1-6). Recognizes
-     * BOTH `running` and `recovering`: a crash DURING the first recovery persists `recovering`, and the
-     * next restart must still find + supersede it (Sol round-9 addendum: second-restart polarity).
+     * `running`, `recovering` AND `paused`: a crash DURING recovery persists `recovering` (second-restart),
+     * and a cancel/throw persists `paused` with a still-live lease that the next start must reconcile, not
+     * orphan (Sol round-10 P1-5).
      */
-    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status IN ('running','recovering') ORDER BY startedAt DESC LIMIT 1")
+    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status IN ('running','recovering','paused') ORDER BY startedAt DESC LIMIT 1")
     suspend fun findActiveRunningSession(planId: Long): RunSession?
 
     /**
