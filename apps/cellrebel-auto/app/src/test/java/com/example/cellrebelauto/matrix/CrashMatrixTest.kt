@@ -189,9 +189,11 @@ class CrashMatrixTest {
     @Test
     fun `M_CR_06`() = runTest {
         // M-CR-06: trust PASS but the ledger transaction not yet committed (phase DECIDING, no carrier).
-        // GREEN: re-decide from the persisted evidence → recompute + unique insert ONCE.
+        // GREEN: re-decide from the persisted evidence → recompute + unique insert ONCE, bound to the attempt
+        // (a global row count / constant mint is NOT a re-decision).
         seedObservePhaseCrash("DECIDING")
-        assertEquals("M-CR-06: a trust-pass/pre-ledger crash must re-decide and mint once", 1, db.trustedQuotaDao().countAll())
+        assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", db.trustedQuotaDao().getByAttempt(77L))
+        assertEquals("M-CR-06: re-decide must insert exactly one entry", 1, db.trustedQuotaDao().countAll())
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
