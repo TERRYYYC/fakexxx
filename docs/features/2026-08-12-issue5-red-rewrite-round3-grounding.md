@@ -1133,3 +1133,31 @@ transaction window, Service-owned factory / production call-site disconnect atta
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.24 Round-23 — frozen M_CR_03..08 exact entry + intermediate phase persistence + second-restart session/apply (Sol round-22 advisory answered)
+
+**Status.** Sol's round-22 advisory (`6ebe67b`). R23 lands the frozen crash-matrix entry with exact testIds,
+persists the intermediate observe phases, and pins same-session + no-apply in the second-restart oracle.
+**Baseline: `226 tests / 49 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.**
+Schema exact v5.
+
+**Repairs.**
+- **frozen `M_CR_03()..M_CR_08()`** — `matrix/CrashMatrixTest.kt` now has the six EXACT `owner-red` testIds.
+  M-CR-07 (ledger truth → succeeded through the engine, full row equality, no-remint, legacy-zero) and
+  M-CR-08 (release replay 1→2 effect 1) are banked; M-CR-03..06 (re-preobserve / classify / post-observe /
+  re-decide) are genuine RED — they assert the GREEN projection (attempt must NOT collapse to interrupted)
+  and fail pre-freeze, per §10.1 (not degraded).
+- **intermediate phase persistence** — the normal path now persists `PRE_OBSERVED` / `CELLREBEL_RUNNING` /
+  `POST_OBSERVE_PENDING` (not just DECIDING/QUOTA/UNVERIFIED), so those crash windows are owner-red
+  observable.
+- **second-restart same-session + no-apply** — the two second-restart tests capture the seed session id and
+  assert it is reused (never duplicated), and that apply invocation/effect do NOT increase (no illegal
+  reconcile on DECIDING/RECOVERY_REQUIRED).
+
+**Remaining owner-red (next SHA):** gate-held second-restart custody, CLOSED→generic-terminal single-
+transaction window, Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

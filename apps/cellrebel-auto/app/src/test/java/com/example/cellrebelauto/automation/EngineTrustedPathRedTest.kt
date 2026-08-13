@@ -715,7 +715,7 @@ class EngineTrustedPathRedTest {
     fun `R22 a wrong-task carrier is re-selected on second restart without creating a new attempt`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val seedSessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = 999L, evidenceDigest = "d", committedAt = 1000L))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
@@ -728,6 +728,9 @@ class EngineTrustedPathRedTest {
         buildEngine(planId, runner, gps, clock, backend = backend).run() // second restart
 
         assertEquals("the attempt count must stay 1 (no new attempt on second restart)", 1, db.testAttemptDao().getAttemptsForTask(taskId).size)
+        assertEquals("the owner session must be reused (never duplicated)", seedSessionId, db.runSessionDao().getLatest()!!.id)
+        assertEquals("apply must NOT be re-invoked for a non-APPLY_PENDING crash", 1, executor.invocationCount(applyKey(77L)))
+        assertEquals("apply effect must NOT increase", 1, executor.effectCount(77L))
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertEquals("RECOVERY_REQUIRED must still be selected by recovery", "RECOVERY_REQUIRED", recovered.aplusState)
         assertEquals("the attempt must stay non-terminal (recoverable)", "starting", recovered.status)
@@ -737,7 +740,7 @@ class EngineTrustedPathRedTest {
     fun `R22 conflicting truths are re-selected on second restart without creating a new attempt`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val seedSessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
         db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
         val executor = RecordingExternalApplyExecutor()
@@ -751,6 +754,9 @@ class EngineTrustedPathRedTest {
         buildEngine(planId, runner, gps, clock, backend = backend).run() // second restart
 
         assertEquals("the attempt count must stay 1 (no new attempt on second restart)", 1, db.testAttemptDao().getAttemptsForTask(taskId).size)
+        assertEquals("the owner session must be reused (never duplicated)", seedSessionId, db.runSessionDao().getLatest()!!.id)
+        assertEquals("apply must NOT be re-invoked for a non-APPLY_PENDING crash", 1, executor.invocationCount(applyKey(77L)))
+        assertEquals("apply effect must NOT increase", 1, executor.effectCount(77L))
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertEquals("RECOVERY_REQUIRED must still be selected by recovery", "RECOVERY_REQUIRED", recovered.aplusState)
         assertEquals("the attempt must stay non-terminal (recoverable)", "starting", recovered.status)

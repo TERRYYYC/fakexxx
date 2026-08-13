@@ -343,12 +343,14 @@ class AutomationEngine(
                         return@coroutineScope
                     }
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.PRE_OBSERVATION_OK) ?: aplusState
+                    planRepository.markAplusState(attemptId, "PRE_OBSERVED")
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.START_CELLREBEL) ?: aplusState
                     planRepository.markAplusState(attemptId, "CELLREBEL_START_PENDING")
                     updateState(AutomationState.LAUNCHING_CELLREBEL)
                     val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
                         planRepository.markAttemptRunning(attemptId, runningAt)
                         aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
+                        planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
                     }
                     ensureActive()
                     when (outcome) {
@@ -377,6 +379,7 @@ class AutomationEngine(
                                 return@coroutineScope
                             }
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.POST_OBSERVATION_OK) ?: aplusState
+                            planRepository.markAplusState(attemptId, "POST_OBSERVE_PENDING")
                             // # DECIDE：ctx 由持久 intent（目标坐标、本地重算 hash）+ 后端 artifact 组装（INV-23）
                             val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId)
                             if (evidence == null) {

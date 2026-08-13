@@ -2,21 +2,38 @@ package com.example.cellrebelauto.matrix
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.AttemptOutcome
+import com.example.cellrebelauto.automation.CellRebelRunner
+import com.example.cellrebelauto.automation.GpsLocationSetter
+import com.example.cellrebelauto.automation.GpsOutcome
+import com.example.cellrebelauto.automation.APlusComposition
+import com.example.cellrebelauto.automation.AutomationEngine
+import com.example.cellrebelauto.automation.aplus.APlusBackend
+import com.example.cellrebelauto.automation.aplus.APlusCompletionEvidence
+import com.example.cellrebelauto.automation.aplus.APlusEvidenceSource
 import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.recovery.DurableRecoveryLog
+import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.FakeDurableRecoveryLog
+import com.example.cellrebelauto.recovery.ObserveIntentAcquirer
+import com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer
 import com.example.cellrebelauto.recovery.RecordingExternalApplyExecutor
-import com.example.cellrebelauto.recovery.RecoveryCoordinator
+import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -25,23 +42,18 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * Frozen §10.1 owner-red crash matrix entry (Issue #5, `matrix/CrashMatrixTest.kt`). Each test id maps to
- * a §10 M-CR-xx row.
+ * Frozen §10.1 owner-red crash matrix entry (Issue #5, `matrix/CrashMatrixTest.kt`). Each `M_CR_NN()`
+ * method maps to a §10 M-CR-xx row and drives the REAL recovery path.
  *
- * BANKED (testable pre-freeze, carrier/ledger authority):
- *  - M-CR-07 — crash after the ledger commit, before the attempt-state update: recovery projects the
- *    terminal truth from the append-only trusted ledger, NOT the phase string.
- *  - M-CR-08 — crash after the provider release EFFECT, before Auto saves the receipt: recovery re-invokes
- *    the release (idempotent), effect stays 1, receipt null→present.
- *
- * GREEN-BOUND (not yet testable — the re-observe/classify/post-observe/decide body is GREEN):
- *  - M-CR-03 (pre-observe → CellRebel click), M-CR-04 (click → running evidence), M-CR-05 (complete →
- *    post-observe), M-CR-06 (trust pass → ledger transaction).
+ * M-CR-03..06 are GREEN-body (re-preobserve / classify / post-observe / re-decide) — their recovery body is
+ * not yet written, so these REDs assert the GREEN projection (attempt must NOT be collapsed to interrupted)
+ * and genuinely FAIL pre-freeze. M-CR-07 (ledger truth → succeeded) and M-CR-08 (release replay) are banked.
  */
 @RunWith(RobolectricTestRunner::class)
 class CrashMatrixTest {
 
     private lateinit var db: AppDatabase
+    private lateinit var repo: PlanRepository
 
     @Before
     fun setUp() {
@@ -49,6 +61,7 @@ class CrashMatrixTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
+        repo = PlanRepository(db)
     }
 
     @After
@@ -56,10 +69,71 @@ class CrashMatrixTest {
         db.close()
     }
 
-    private fun applyKey(attemptId: Long) = APlusOperationIdentity.applyIdempotencyKey(attemptId)
-    private fun releaseKey(attemptId: Long) = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+    // ---- minimal engine harness (mirrors EngineTrustedPathRedTest) ----
 
-    private suspend fun seedAttempt(planId: Long, taskId: Long, attemptId: Long, aplusState: String?, aplusLeaseId: String? = null) {
+    private class FakeCellRebelRunner(private val outcome: AttemptOutcome) : CellRebelRunner {
+        override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome = outcome
+    }
+
+    private class FakeGpsSetter : GpsLocationSetter {
+        override suspend fun setLocation(lat: Double, lng: Double): GpsOutcome = GpsOutcome.Active
+    }
+
+    private class VirtualClock(var now: Long = 1000L) {
+        val nowMs: () -> Long = { now }
+        val delayMs: suspend (Long) -> Unit = { ms -> now += ms }
+    }
+
+    private class SeededObserve(private val facts: Map<Long, Boolean>) : ObserveIntentAcquirer {
+        override fun matches(attemptId: Long): Boolean = facts[attemptId] ?: false
+    }
+    private class SeededRevision(private val facts: Map<String, Boolean>) : ReceiptRevisionAcquirer {
+        override fun isFresh(idempotencyKey: String, now: Long): Boolean = facts[idempotencyKey] ?: false
+    }
+    private class SeededQuota(private val facts: Map<Long, Boolean>) : TrustedQuotaAcquirer {
+        override fun hasCapacity(attemptId: Long): Boolean = facts[attemptId] ?: false
+    }
+
+    private class FakeEvidenceSource : APlusEvidenceSource {
+        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? = null
+        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? = null
+        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? = null
+    }
+
+    private class FakeBackend(
+        private val exec: RecordingExternalApplyExecutor,
+        private val log: FakeDurableRecoveryLog
+    ) : APlusBackend {
+        override val executor: ExternalApplyExecutor = exec
+        override val recoveryLog: DurableRecoveryLog = log
+        override val observeIntent: ObserveIntentAcquirer = SeededObserve(emptyMap())
+        override val receiptRevision: ReceiptRevisionAcquirer = SeededRevision(emptyMap())
+        override val trustedQuota: TrustedQuotaAcquirer = SeededQuota(emptyMap())
+        override val evidenceSource: APlusEvidenceSource = FakeEvidenceSource()
+    }
+
+    private fun buildEngine(planId: Long, clock: VirtualClock, backend: APlusBackend): AutomationEngine {
+        val params = APlusComposition.engineAplusParams(backend)
+        return AutomationEngine(
+            planId = planId, planRepository = repo,
+            cellRebelRunner = FakeCellRebelRunner(AttemptOutcome.Success(8.0, 7.0, 0L, 0L, 0L)),
+            gpsSetter = FakeGpsSetter(),
+            bufferGate = BufferGate(0, clock.nowMs),
+            testTimeoutMs = 90_000L, gpsSettleMs = 0L,
+            nowMs = clock.nowMs, delayMs = clock.delayMs,
+            attemptDriver = null,
+            recoveryCoordinator = params.first,
+            completionEvidenceSource = params.second
+        )
+    }
+
+    private suspend fun seedPlan(taskId: Long): Long {
+        val planId = db.planDao().insertPlan(LocationPlan(sourceFileName = "m.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1))
+        db.planDao().insertTasks(listOf(LocationTask(id = taskId, planId = planId, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1)))
+        return planId
+    }
+
+    private suspend fun seedAttempt(planId: Long, taskId: Long, attemptId: Long, aplusState: String?, aplusLeaseId: String? = null): Long {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
         db.testAttemptDao().insert(
             TestAttempt(
@@ -71,55 +145,87 @@ class CrashMatrixTest {
                 aplusState = aplusState, aplusLeaseId = aplusLeaseId
             )
         )
+        return sessionId
+    }
+
+    private fun applyKey(attemptId: Long) = APlusOperationIdentity.applyIdempotencyKey(attemptId)
+    private fun releaseKey(attemptId: Long) = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+
+    // ---- M-CR-03..06: GREEN-body recovery projections (genuinely RED pre-freeze) ----
+
+    private suspend fun seedObservePhaseCrash(phase: String): TestAttempt {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(planId, 42L, attemptId = 77L, aplusState = phase, aplusLeaseId = "lease-77")
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        return db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
     }
 
     @Test
-    fun `M-CR-07 recovery projects the committed trusted entry to succeeded`() = runTest {
-        val planId = db.planDao().insertPlan(
-            LocationPlan(sourceFileName = "m.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1)
-        )
-        db.planDao().insertTasks(listOf(LocationTask(id = 42L, planId = planId, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1)))
+    fun `M_CR_03`() = runTest {
+        val recovered = seedObservePhaseCrash("PRE_OBSERVED")
+        // GREEN: re-preobserve the environment, never collapse an observed crash to interrupted.
+        assertNotEquals("M-CR-03: a PRE_OBSERVED crash must re-preobserve, not be interrupted", "interrupted", recovered.status)
+    }
+
+    @Test
+    fun `M_CR_04`() = runTest {
+        val recovered = seedObservePhaseCrash("CELLREBEL_RUNNING")
+        assertNotEquals("M-CR-04: a CELLREBEL_RUNNING crash must classify, not be interrupted", "interrupted", recovered.status)
+    }
+
+    @Test
+    fun `M_CR_05`() = runTest {
+        val recovered = seedObservePhaseCrash("POST_OBSERVE_PENDING")
+        assertNotEquals("M-CR-05: a POST_OBSERVE_PENDING crash must post-observe, not be interrupted", "interrupted", recovered.status)
+    }
+
+    @Test
+    fun `M_CR_06`() = runTest {
+        // Trust PASS but the ledger transaction not yet committed: phase DECIDING, no carrier.
+        val recovered = seedObservePhaseCrash("DECIDING")
+        assertNotEquals("M-CR-06: a DECIDING crash must re-decide, not be interrupted", "interrupted", recovered.status)
+    }
+
+    // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
+
+    @Test
+    fun `M_CR_07`() = runTest {
         val taskId = 42L
+        val planId = seedPlan(taskId = taskId)
         seedAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
-        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        val insertedId = db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        val seededEntry = TrustedQuotaEntry(id = insertedId, attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        buildEngine(planId, clock, FakeBackend(executor, log)).run()
 
-        // M-CR-07 crash window: the ledger is committed, the phase is still DECIDING.
-        val repo = PlanRepository(db)
-        val recovered = repo.getTrustedEntry(77L)
-        assertNotNull("the committed trusted entry is the durable authority", recovered)
-        assertEquals("the carrier binds the attempt", 77L, recovered!!.attemptId)
-        assertEquals("the carrier binds the task", taskId, recovered.taskId)
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertEquals("M-CR-07: the committed ledger must project to succeeded", "succeeded", recovered.status)
+        assertEquals("no re-mint", 1, db.trustedQuotaDao().countAll())
+        assertEquals("row preserved byte-for-byte", seededEntry, db.trustedQuotaDao().getByAttempt(77L))
+        assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
     }
 
+    // ---- M-CR-08: release replay after provider released but before receipt ----
+
     @Test
-    fun `M-CR-08 recovery re-invokes the release after the provider released but before the receipt`() = runTest {
+    fun `M_CR_08`() = runTest {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.release(attemptId = 1L, idempotencyKey = releaseKey(1L), leaseId = "lease-1", releaseDigest = "rd-1", now = 1000L)
         assertNull("M-CR-08: provider released but Auto has no durable receipt", log.releaseReceiptFor("lease-1"))
 
-        val rc = RecoveryCoordinator(executor, log)
+        val rc = com.example.cellrebelauto.recovery.RecoveryCoordinator(executor, log)
         val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = releaseKey(1L), leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
 
         assertNotNull("the re-invoked release must record a durable receipt", receipt)
         assertEquals("release re-invoked (1 → 2)", 2, executor.releaseInvocationCount(releaseKey(1L)))
         assertEquals("release effect stays at one (at-most-once)", 1, executor.releaseEffectCount(1L))
-    }
-
-    @Test
-    fun `unverified carrier is the durable authority for a rejected completion`() = runTest {
-        val planId = db.planDao().insertPlan(
-            LocationPlan(sourceFileName = "m.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1)
-        )
-        db.planDao().insertTasks(listOf(LocationTask(id = 42L, planId = planId, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1)))
-        val taskId = 42L
-        seedAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
-        db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
-
-        val repo = PlanRepository(db)
-        val unverified = repo.getUnverifiedRecord(77L)
-        assertNotNull("the unverified record is the durable authority", unverified)
-        assertEquals("UNTRUSTED", unverified!!.reason)
-        assertEquals("d", unverified.evidenceDigest)
     }
 }
