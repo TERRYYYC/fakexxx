@@ -1255,3 +1255,30 @@ production call-site disconnect attack.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.29 Round-28 — M-CR-06 exactly-one ledger row + honest dependency-block declaration (Sol round-27 advisory answered)
+
+**Status.** Sol's round-27 advisory (`194630d`) — P1: M-CR-06 can self-green by writing attempt/task/digest/
+clock WITHOUT reading durable evidence, and can bypass with extra unrelated ledger rows. R28 closes the
+tractable half + honestly declares the dependency block. **Baseline: `226 tests / 49 failed / 0 errors`,
+lintDebug + assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repair (tractable).**
+- **M-CR-06 exactly-one row** — added `countAll() == 1`, so a bypass that writes extra unrelated ledger rows
+  is caught.
+
+**Honest dependency-block declaration (NOT tractable Auto-local).** The remaining half of the finding —
+"prove the re-decision READ the durable evidence" — is **#3-contract-blocked**, not a test-precision gap:
+- the re-decision must re-read the §7.1 full completion-evidence detail (baseline state / marker text /
+  RUNNING duration / per-round timestamps / scores) on the `CellRebelExecution` row, then re-run
+  `recordTrustedCompletion`; the pre-freeze skeleton persists DIGEST-ONLY (drops the §7.1 detail), so there
+  is no durable evidence to read back, and the re-decide GREEN body is unwritten.
+- the same applies to M-CR-03..05 (re-preobserve / classify / post-observe) — they need the observation/
+  classification GREEN body + the evidence carrier.
+
+**Genuinely #3-blocked (the complete set):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape; the §7.1
+full completion-evidence detail (M-CR-03..06 re-observe/re-decide). These REDs cannot be made non-false-green
+until #3 freezes the carrier; #5's bankable Auto-local RED surface is otherwise complete.
+
+[深深/deepseek-v4-pro🐾]
