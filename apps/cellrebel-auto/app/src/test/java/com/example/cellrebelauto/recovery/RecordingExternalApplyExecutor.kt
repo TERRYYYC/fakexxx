@@ -51,7 +51,7 @@ class RecordingExternalApplyExecutor(
     private val releaseInvocationCounts = mutableMapOf<String, Int>()
 
     /** Every release call's exact args — the RED asserts these, not a bare call count (P1-5). */
-    data class ReleaseCall(val idempotencyKey: String, val leaseId: String, val releaseDigest: String)
+    data class ReleaseCall(val attemptId: Long, val idempotencyKey: String, val leaseId: String, val releaseDigest: String)
     private val releaseCalls = mutableListOf<ReleaseCall>()
 
     override fun release(
@@ -62,7 +62,7 @@ class RecordingExternalApplyExecutor(
         now: Long
     ): ApplyOutcome {
         releaseInvocationCounts[idempotencyKey] = (releaseInvocationCounts[idempotencyKey] ?: 0) + 1
-        releaseCalls += ReleaseCall(idempotencyKey, leaseId, releaseDigest)
+        releaseCalls += ReleaseCall(attemptId, idempotencyKey, leaseId, releaseDigest)
         val prior = releaseBindings[idempotencyKey]
         if (prior != null && (prior.first != leaseId || prior.second != releaseDigest)) {
             // Same key + different lease/digest → conflict.
@@ -79,7 +79,7 @@ class RecordingExternalApplyExecutor(
 
     fun releaseEffectCount(attemptId: Long): Int = releaseEffectCounts[attemptId] ?: 0
     fun releaseInvocationCount(idempotencyKey: String): Int = releaseInvocationCounts[idempotencyKey] ?: 0
-    fun releaseCallsFor(attemptId: Long): List<ReleaseCall> = releaseCalls.toList()
+    fun releaseCallsFor(attemptId: Long): List<ReleaseCall> = releaseCalls.filter { it.attemptId == attemptId }
     fun effectCount(attemptId: Long): Int = effectCounts[attemptId] ?: 0
     fun invocationCount(idempotencyKey: String): Int = invocationCounts[idempotencyKey] ?: 0
 }

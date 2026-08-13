@@ -56,6 +56,15 @@ object APlusComposition {
     fun completionEvidenceSource(backend: APlusBackend): APlusEvidenceSource = backend.evidenceSource
 
     /**
+     * The SINGLE composition point [AutomationService] uses: a backend → the engine's two A+ seams
+     * (coordinator + evidence source). Tests drive through this SAME function (with a FakeBackend or the
+     * shipped [productionBackend]), so a Service-disconnect bad impl cannot green while production is
+     * wired differently (Sol round-11 P1-1: the Service-used composition oracle).
+     */
+    fun engineAplusParams(backend: APlusBackend): Pair<RecoveryCoordinator, APlusEvidenceSource> =
+        recoveryCoordinator(backend) to completionEvidenceSource(backend)
+
+    /**
      * The production backend — a NON-NULL, fail-closed A+ bundle (Sol round-8 P1-1). Every adapter is
      * a RED skeleton that fails closed (null evidence / null receipts / a no-op fail-closed executor);
      * the GREEN bodies land with the frozen contract (#3) + schema. Because it is non-null, the engine

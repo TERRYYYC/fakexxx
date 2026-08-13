@@ -362,4 +362,33 @@ class RecoveryIdempotencyRedTest {
             log.receiptFor("k-sched") == null && log.checkpointFor(1L) == null && executor.invocationCount("k-sched") == 0
         )
     }
+
+    // ---- release durability (Sol round-10 P1-3 / round-11 P1-3) ----
+
+    @Test
+    fun `release with a durable receipt replays WITHOUT re-calling the provider`() {
+        // M-CR-08 zero-reinvoke: a durable release receipt for the same lease/key/digest is a REPLAY.
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNotNull("a durable release receipt must replay", receipt)
+        assertEquals("release must NOT re-call the provider when a durable receipt exists", 0, executor.releaseInvocationCount("r-1"))
+        assertEquals("the release effect stays at zero (replay, no new effect)", 0, executor.releaseEffectCount(1L))
+    }
+
+    @Test
+    fun `release whose provider returns FAILED yields no durable release receipt`() {
+        // A failed/incomplete release must NOT forge a RELEASED receipt (Sol round-10 P1-3).
+        val executor = RecordingExternalApplyExecutor(outcome = "FAILED")
+        val log = FakeDurableRecoveryLog()
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("a FAILED release must not record a durable RELEASED receipt", receipt)
+    }
 }

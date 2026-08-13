@@ -150,6 +150,12 @@ class RecoveryCoordinator(
         releaseDigest: String,
         now: Long
     ): RecordedReleaseReceipt? {
+        // M-CR-08 zero-reinvoke (Sol round-11 P1-3): a durable release receipt for the SAME lease + key +
+        // digest is an idempotent REPLAY — never re-call the provider (at-most-once release effect).
+        val existing = log.releaseReceiptFor(leaseId)
+        if (existing != null && existing.idempotencyKey == idempotencyKey && existing.releaseDigest == releaseDigest) {
+            return existing
+        }
         val releaseOutcome = executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
         if (releaseOutcome.outcome != "RELEASED") {
             // Release incomplete / failed → fail-closed: no durable release receipt, the lease is still
