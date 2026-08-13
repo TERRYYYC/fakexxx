@@ -266,7 +266,7 @@ class CrashMatrixTest {
                 observedAtEpochMs = snapshot.observedAtEpochMs,
                 continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
                 continuitySinceEpochMs = null,
-                evidenceRefsJson = snapshot.evidenceRefs.joinToString(";"),
+                evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
                 evidenceRefs = snapshot.evidenceRefs.joinToString(";")
             )
         )
@@ -301,20 +301,22 @@ class CrashMatrixTest {
         currentFirst: Boolean = true,
         preOverride: ObservationSnapshot.() -> ObservationSnapshot = { this },
         postOverride: ObservationSnapshot.() -> ObservationSnapshot = { this },
-        receiptIntentHash: String = intentDigest
+        receiptIntentHash: String = intentDigest,
+        execWire: Int = WIRE_VERIFIED,
+        receiptWire: Int = WIRE_VERIFIED
     ) {
         val decoyDigest = "decoy-$seededDigest"
         if (currentFirst) {
-            seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
-            seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, decoyDigest)
+            seedDurableExecution("exec-current-77", 77L, execWire, seededDigest)
+            seedDurableExecution("exec-decoy-77", 77L, execWire, decoyDigest)
         } else {
-            seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, decoyDigest)
-            seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+            seedDurableExecution("exec-decoy-77", 77L, execWire, decoyDigest)
+            seedDurableExecution("exec-current-77", 77L, execWire, seededDigest)
         }
         db.testAttemptDao().markCurrentExecutionId(77L, ownerExecId)
         seedDurableObservation(77L, "PRE", validPre(intentDigest).preOverride())
         seedDurableObservation(77L, "POST", validPost(intentDigest).postOverride())
-        seedDurableReceipt(77L, WIRE_VERIFIED, receiptIntentHash, LEASE_ID)
+        seedDurableReceipt(77L, receiptWire, receiptIntentHash, LEASE_ID)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
@@ -434,15 +436,19 @@ class CrashMatrixTest {
     }
 
     // ---- §6.4 discriminator negatives: each asserts BOTH zero-mint AND UnverifiedAttemptRecord ----
-    // A refuse-all bypass (Sol R38 mutation) passes zero-mint but FAILS UnverifiedAttemptRecord.
-    // Only a correct GREEN that assembles CompletionTrustContext + runs TrustPolicy writes both.
+    // R39: A refuse-all bypass passes zero-mint but FAILS UnverifiedAttemptRecord.
+    // R40 (Sol R39): Asymmetric PRE-only and POST-only inversions for each field family.
+    //   A bypass checking only PRE passes POST-only-violation but FAILS PRE-only-violation, and vice versa.
+    //   Together with symmetric (both) inversions, every field must be independently validated in BOTH phases.
 
     private suspend fun assertDiscriminatorReject(
         label: String,
         violation: String,
         preOverride: ObservationSnapshot.() -> ObservationSnapshot = { this },
         postOverride: ObservationSnapshot.() -> ObservationSnapshot = { this },
-        receiptIntentHash: String? = null
+        receiptIntentHash: String? = null,
+        execWire: Int = WIRE_VERIFIED,
+        receiptWire: Int = WIRE_VERIFIED
     ) {
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val planId = seedPlan(taskId = 42L)
@@ -450,7 +456,8 @@ class CrashMatrixTest {
         val intentDigest = ownerIntentDigest(sessionId)
         seedMcr06Fixture(sessionId, intentDigest, seededDigest,
             preOverride = preOverride, postOverride = postOverride,
-            receiptIntentHash = receiptIntentHash ?: intentDigest
+            receiptIntentHash = receiptIntentHash ?: intentDigest,
+            execWire = execWire, receiptWire = receiptWire
         )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
@@ -463,6 +470,8 @@ class CrashMatrixTest {
         assertNotNull("$label: rejected completion MUST write an UnverifiedAttemptRecord (defeats refuse-all bypass)", unverified)
         assertEquals("$label: unverified reason must be typed UNTRUSTED", "UNTRUSTED", unverified!!.reason)
     }
+
+    // ---- Symmetric inversions (both PRE + POST mutated) ----
 
     @Test fun `M_CR_06_discriminator_invalid`() = runTest {
         assertDiscriminatorReject("M-CR-06 intent discriminator", "INV-23 receipt intent-hash mismatch",
@@ -519,7 +528,7 @@ class CrashMatrixTest {
 
     @Test fun `M_CR_06_discriminator_bracketing`() = runTest {
         assertDiscriminatorReject("M-CR-06 bracketing discriminator", "post.observedAt < execution.completedAt (monotonic window violated)",
-            postOverride = { copy(observedAtElapsedRealtimeMs = 5000L) }) // 5000 < completedAtElapsed(13000)
+            postOverride = { copy(observedAtElapsedRealtimeMs = 5000L) })
     }
 
     @Test fun `M_CR_06_discriminator_continuity`() = runTest {
@@ -530,7 +539,7 @@ class CrashMatrixTest {
 
     @Test fun `M_CR_06_discriminator_coords`() = runTest {
         assertDiscriminatorReject("M-CR-06 coordinates discriminator", "effectiveLat/Lng ~20m off target (>1m tolerance)",
-            preOverride = { copy(effectiveLat = 39.9002) }, // ~22m off 39.9 at lat ~40
+            preOverride = { copy(effectiveLat = 39.9002) },
             postOverride = { copy(effectiveLat = 39.9002) })
     }
 
@@ -538,6 +547,123 @@ class CrashMatrixTest {
         assertDiscriminatorReject("M-CR-06 evidenceRefs discriminator", "empty evidenceRefs",
             preOverride = { copy(evidenceRefs = emptyList()) },
             postOverride = { copy(evidenceRefs = emptyList()) })
+    }
+
+    // ---- Wire disagreement (Sol R39: execution.wire ≠ receipt.wire) ----
+
+    @Test fun `M_CR_06_discriminator_wire_disagreement`() = runTest {
+        assertDiscriminatorReject("M-CR-06 wire discriminator", "execution.wire=1 but receipt.wire=2 (disagreement)",
+            receiptWire = 2)
+    }
+
+    // ---- Asymmetric PRE-only inversions (R40: Sol R39 P1-1) ----
+    // PRE is violated, POST stays canonical. A bypass checking only POST passes this but the
+    // symmetric version catches it. A bypass checking only PRE fails here.
+    // Together with POST-only, each field must be validated in BOTH phases independently.
+
+    @Test fun `M_CR_06_discriminator_pre_only_delivery`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only deliveryMode", "PRE deliveryMode=HOOK, POST canonical",
+            preOverride = { copy(deliveryMode = "HOOK") })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_delivery`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only deliveryMode", "POST deliveryMode=HOOK, PRE canonical",
+            postOverride = { copy(deliveryMode = "HOOK") })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_coverage`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only coverage", "PRE coverage=PARTIAL, POST canonical",
+            preOverride = { copy(coverage = "PARTIAL") })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_coverage`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only coverage", "POST coverage=PARTIAL, PRE canonical",
+            postOverride = { copy(coverage = "PARTIAL") })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_isMock`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only isMock", "PRE isMock=false, POST canonical",
+            preOverride = { copy(isMock = false) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_isMock`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only isMock", "POST isMock=false, PRE canonical",
+            postOverride = { copy(isMock = false) })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_verification`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only verificationLevel", "PRE HOOK_VERIFIED, POST canonical",
+            preOverride = { copy(verificationLevel = "HOOK_VERIFIED") })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_verification`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only verificationLevel", "POST HOOK_VERIFIED, PRE canonical",
+            postOverride = { copy(verificationLevel = "HOOK_VERIFIED") })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_schedule`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only scheduleDecision", "PRE DENIED, POST canonical",
+            preOverride = { copy(scheduleDecision = "DENIED") })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_schedule`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only scheduleDecision", "POST DENIED, PRE canonical",
+            postOverride = { copy(scheduleDecision = "DENIED") })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_lease`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only lease binding", "PRE wrong lease, POST canonical",
+            preOverride = { copy(leaseId = "WRONG-LEASE") })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_lease`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only lease binding", "POST wrong lease, PRE canonical",
+            postOverride = { copy(leaseId = "WRONG-LEASE") })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_coords`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE lat off-target, POST canonical",
+            preOverride = { copy(effectiveLat = 39.9002) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_coords`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST lat off-target, PRE canonical",
+            postOverride = { copy(effectiveLat = 39.9002) })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_lng`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE lng off-target, POST canonical",
+            preOverride = { copy(effectiveLng = 116.4002) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_lng`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST lng off-target, PRE canonical",
+            postOverride = { copy(effectiveLng = 116.4002) })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_evidence_refs`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only evidenceRefs", "PRE empty evidenceRefs, POST canonical",
+            preOverride = { copy(evidenceRefs = emptyList()) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_evidence_refs`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only evidenceRefs", "POST empty evidenceRefs, PRE canonical",
+            postOverride = { copy(evidenceRefs = emptyList()) })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_bracketing`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only bracketing", "PRE observedAt > execution.startedAt (violates pre < startedAt)",
+            preOverride = { copy(observedAtElapsedRealtimeMs = 3000L) }) // 3000 > startedAtElapsed(2000)
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_continuity_null`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only continuity null", "PRE continuitySince=null (§6.4.1 requires non-null)",
+            preOverride = { copy(continuitySinceElapsedRealtimeMs = null) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_continuity_null`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only continuity null", "POST continuitySince=null (§6.4.1 requires non-null)",
+            postOverride = { copy(continuitySinceElapsedRealtimeMs = null) })
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
