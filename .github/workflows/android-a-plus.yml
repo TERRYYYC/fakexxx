@@ -102,6 +102,24 @@ jobs:
         # broader older check happens to cover for.
         run: ./scripts/selftest-contract-v1.sh
 
+      - name: check-derived-counts
+        # Every count in prose (§15 lane selectors, §16 task scopes, the
+        # aggregation and class-responsibility tables) is a CACHE of a number
+        # derived from the §10.1 ledger. Keeping those caches in sync by hand
+        # has now failed four times: v1.38 synced the ledger and left the lane
+        # selector table; v1.39 fixed the lane selector table and left two
+        # others twenty lines away, while claiming it had fixed all four; v1.46
+        # recomputed 29 cache points by hand and still shipped one stale number,
+        # and that miss was a SECOND stale number later in a line already edited
+        # in the same pass -- the exact failure mode that commit's own message
+        # named.
+        #
+        # v1.46 responded by FREEZING the rule "derived counts may only be
+        # computed from the §10.1 ledger" and enforcing it with nothing. This
+        # step is the enforcement. It recomputes the ledger truth and fails when
+        # active prose states a count the ledger cannot produce.
+        run: ./scripts/check-derived-counts.sh
+
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.
     name: cellrebel-auto (unit + lint + assemble)
