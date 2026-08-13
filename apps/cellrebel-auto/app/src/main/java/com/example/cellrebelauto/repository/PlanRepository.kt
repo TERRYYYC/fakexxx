@@ -255,7 +255,7 @@ class PlanRepository(private val db: AppDatabase) {
                 observedAtEpochMs = snapshot.observedAtEpochMs,
                 continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
                 continuitySinceEpochMs = null,
-                evidenceRefsJson = snapshot.evidenceRefs.joinToString(";"),
+                evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
                 evidenceRefs = snapshot.evidenceRefs.joinToString(";")
             )
         )
@@ -381,28 +381,14 @@ class PlanRepository(private val db: AppDatabase) {
      *
      * # 生产信任收尾入口（R4-F1 骨架）：持久化 digest+3clocks、丢弃 §7.1 证据、绝不铸币；GREEN 再补全字段并在 PASS 时铸币
      */
-    suspend fun recordTrustedCompletion(ctx: CompletionTrustContext): TrustDecision = db.withTransaction {
-        // (1) Persist the evidence row — SKELETON keeps digest + 3 §6.4.2 clocks and DROPS the §7.1
-        //     detail (the §11.3 F1 digest-only attack surface). GREEN copies ctx.execution's §7.1
-        //     fields through verbatim before insert.
-        val skeletonRow = ctx.execution.copy(
-            baselineRunningState = null,
-            runningMarkerText = null,
-            runningDurationMs = null,
-            webBrowsingScore = null,
-            videoStreamingScore = null,
-            roundTimestampsElapsed = null
-        )
-        db.attemptExecutionDao().insert(skeletonRow)
-        // (2) Evaluate the §6.4 predicate for the returned decision. SKELETON mints nothing; GREEN
-        //     inserts exactly one TrustedQuotaEntry here when PASS, atomically with the persist above.
-        TrustPolicy().evaluate(ctx)
-    }
+    suspend fun recordTrustedCompletion(ctx: CompletionTrustContext): TrustDecision =
+        recordTrustedCompletion(ctx, ctx.execution.completedAtElapsed)
 
     /**
-     * R38 (Sol R37 P2-4): recordTrustedCompletion with an injected monotonic commit clock.
+     * R38 (Sol R37 P2-4): canonical production entrypoint with injected monotonic commit clock.
+     * Both the one-arg overload and AutomationEngine delegate through HERE.
      * The committedAt of the minted TrustedQuotaEntry MUST bind this caller-injected clock,
-     * never execution.completedAtElapsed or a default constant.
+     * never a default constant or execution.completedAtElapsed.
      */
     suspend fun recordTrustedCompletion(ctx: CompletionTrustContext, commitClockMs: Long): TrustDecision = db.withTransaction {
         val skeletonRow = ctx.execution.copy(
