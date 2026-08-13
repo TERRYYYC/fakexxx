@@ -1213,3 +1213,24 @@ transaction window, Service-owned factory / production call-site disconnect atta
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.27 Round-26 — M-CR-06 attempt-bound re-decision oracle (Sol round-25 advisory answered)
+
+**Status.** Sol's round-25 advisory (`a237fe3`) — a single P1: M-CR-06's global `countAll()` is a false-green.
+R26 pins the re-decision to the attempt. **Baseline: `226 tests / 49 failed / 0 errors`, lintDebug + assembleDebug
+green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **M-CR-06 attempt-bound** — the re-decision oracle now asserts a trusted entry is minted BOUND to the
+  attempt (`getByAttempt(77L) != null`) + exactly one insert, not a global row count; a constant mint / wrong
+  attempt cannot fake a re-decision. (The evidence-digest binding remains GREEN-bound — the persisted
+  evidence carrier is §3 contract-owned.)
+
+**Remaining owner-red (next SHA):** M-CR-03..05 behavioral/durable-outcome fixtures, two phase-order crash
+probes, gate-held second-restart custody, CLOSED→terminal single-transaction window, Service-owned factory /
+production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]
