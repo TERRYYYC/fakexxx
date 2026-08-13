@@ -1161,3 +1161,30 @@ transaction window, Service-owned factory / production call-site disconnect atta
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.25 Round-24 — phase persistence order + M_CR_04 window + recordable reconcile seam (Sol round-23 advisory answered)
+
+**Status.** Sol's round-23 advisory (`f07ef23`). R24 fixes the §8.1 phase-persistence order, the M-CR-04 crash
+window, and makes the illegal reconcile observable. **Baseline: `226 tests / 49 failed / 0 errors`, lintDebug
++ assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repairs.**
+- **phase persistence order** — the normal path now persists `POST_OBSERVE_PENDING` AFTER `COMPLETION_OBSERVED`
+  and BEFORE the post-observe call, and `DECIDING` right after `POST_OBSERVATION_OK` (before completion
+  evidence) — matching §8.1. A crash in the post-observe call recovers as `POST_OBSERVE_PENDING`, not
+  `CELLREBEL_RUNNING`.
+- **M-CR-04 window** — the M-CR-04 fixture now seeds `CELLREBEL_START_PENDING` (the "click 后、running 证据前"
+  window), not `CELLREBEL_RUNNING`.
+- **recordable reconcile seam** — `RecoveryCoordinator.reconcileInvocationCount` records reconcile calls; the
+  M-CR-07 and both second-restart tests assert `reconcileInvocationCount == 0`, so an illegal reconcile on a
+  non-APPLY_PENDING phase adds a recognizable RED (the skeleton reconcile returns InsufficientEvidence and
+  never reaches the executor, so executor counts could not see it).
+
+**Remaining owner-red (next SHA):** M-CR-03..05 behavioral/durable-outcome fixtures (re-preobserve/classify/
+post-observe with call-count + durable outcome assertions), gate-held second-restart custody, CLOSED→terminal
+single-transaction window, Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

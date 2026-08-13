@@ -28,6 +28,7 @@ import com.example.cellrebelauto.recovery.FakeDurableRecoveryLog
 import com.example.cellrebelauto.recovery.ObserveIntentAcquirer
 import com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer
 import com.example.cellrebelauto.recovery.RecordingExternalApplyExecutor
+import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.test.runTest
@@ -54,6 +55,7 @@ class CrashMatrixTest {
 
     private lateinit var db: AppDatabase
     private lateinit var repo: PlanRepository
+    private lateinit var lastCoordinator: RecoveryCoordinator
 
     @Before
     fun setUp() {
@@ -114,6 +116,7 @@ class CrashMatrixTest {
 
     private fun buildEngine(planId: Long, clock: VirtualClock, backend: APlusBackend): AutomationEngine {
         val params = APlusComposition.engineAplusParams(backend)
+        lastCoordinator = params.first
         return AutomationEngine(
             planId = planId, planRepository = repo,
             cellRebelRunner = FakeCellRebelRunner(AttemptOutcome.Success(8.0, 7.0, 0L, 0L, 0L)),
@@ -173,8 +176,8 @@ class CrashMatrixTest {
 
     @Test
     fun `M_CR_04`() = runTest {
-        val recovered = seedObservePhaseCrash("CELLREBEL_RUNNING")
-        assertNotEquals("M-CR-04: a CELLREBEL_RUNNING crash must classify, not be interrupted", "interrupted", recovered.status)
+        val recovered = seedObservePhaseCrash("CELLREBEL_START_PENDING")
+        assertNotEquals("M-CR-04: a CELLREBEL_START_PENDING crash must classify, not be interrupted", "interrupted", recovered.status)
     }
 
     @Test
@@ -207,6 +210,7 @@ class CrashMatrixTest {
 
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertEquals("M-CR-07: the committed ledger must project to succeeded", "succeeded", recovered.status)
+        assertEquals("M-CR-07: no illegal reconcile for a DECIDING crash", 0, lastCoordinator.reconcileInvocationCount)
         assertEquals("no re-mint", 1, db.trustedQuotaDao().countAll())
         assertEquals("row preserved byte-for-byte", seededEntry, db.trustedQuotaDao().getByAttempt(77L))
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
