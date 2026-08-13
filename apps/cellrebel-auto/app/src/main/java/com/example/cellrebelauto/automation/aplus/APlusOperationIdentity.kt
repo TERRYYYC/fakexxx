@@ -28,16 +28,14 @@ object APlusOperationIdentity {
     fun releaseIdempotencyKey(attemptId: Long): String = "auto-aplus-release-$attemptId"
 
     /**
-     * Canonical request digest of the attempt's apply intent, derived ONLY from durable owner state
-     * (dispatched coordinates + attempt id) so it is recomputable post-crash from the attempt row alone
-     * (§7.1: the Attempt owns its 当前 operation). The run session is deliberately EXCLUDED — the intent
-     * is "apply to these coords for this attempt", and including the session would make the digest
-     * underivable from the attempt alone, breaking the INV-23 three-way hash recomputation the RED
-     * positive case requires (Sol round-8 P1-2). Placeholder encoding — GREEN replaces it with the
-     * §6.3.4 frozen preimage encoding.
+     * Canonical request digest of the attempt's apply intent, over the FROZEN intent fields (dispatched
+     * coords + attempt id + run id). The full frozen §6.3.4 preimage additionally covers profileRef /
+     * scheduleRef / verification / time-window (Sol round-9 P1-4) — those are contract-owned and land with
+     * #3; the DERIVATION SOURCE here is the durable owner state, not a divergent constant. Placeholder
+     * encoding — GREEN replaces it with the §6.3.4 frozen domain-separated preimage.
      */
-    fun requestDigest(latitude: Double, longitude: Double, attemptId: Long): String =
-        "auto-aplus-intent:v0-placeholder:$latitude,$longitude,$attemptId"
+    fun requestDigest(latitude: Double, longitude: Double, attemptId: Long, runSessionId: Long): String =
+        "auto-aplus-intent:v0-placeholder:$latitude,$longitude,$attemptId,$runSessionId"
 
     /**
      * Canonical release digest, derived over the LEASE id (§6.3.4: the release operation is about the

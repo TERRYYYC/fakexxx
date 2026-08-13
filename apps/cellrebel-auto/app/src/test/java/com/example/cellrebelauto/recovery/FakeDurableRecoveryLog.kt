@@ -61,9 +61,10 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         checkpoints[attemptId] = RecoveryCheckpoint(attemptId, lastDurableStage, receiptKey, now)
     }
 
-    // ---- release receipts (Sol round-8 P1-4: lease-bound durable proof) ----
+    // ---- release receipts (Sol round-8 P1-4: lease-bound durable proof; round-9 P1-5: operation-key binding) ----
 
-    val releaseReceipts = mutableMapOf<String, RecordedReleaseReceipt>()
+    private val releaseReceiptsByKey = mutableMapOf<String, RecordedReleaseReceipt>()
+    private val releaseReceiptsByLease = mutableMapOf<String, RecordedReleaseReceipt>()
 
     /** Pre-populate a durable release receipt (to seed a release-replay scenario). */
     fun seedReleaseReceipt(
@@ -73,10 +74,12 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         outcome: String,
         createdAt: Long
     ) {
-        releaseReceipts[leaseId] = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        val receipt = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        releaseReceiptsByKey[idempotencyKey] = receipt
+        releaseReceiptsByLease[leaseId] = receipt
     }
 
-    override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = releaseReceipts[leaseId]
+    override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = releaseReceiptsByLease[leaseId]
 
     override fun recordReleaseReceipt(
         idempotencyKey: String,
@@ -85,13 +88,15 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         outcome: String,
         now: Long
     ): RecordedReleaseReceipt? {
-        val existing = releaseReceipts[leaseId]
+        val existing = releaseReceiptsByKey[idempotencyKey]
         if (existing != null) {
-            if (existing.releaseDigest == releaseDigest) return existing
+            // Same operation key: replay iff the lease AND digest match (INV-13); else conflict.
+            if (existing.leaseId == leaseId && existing.releaseDigest == releaseDigest) return existing
             return null
         }
         val receipt = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, now)
-        releaseReceipts[leaseId] = receipt
+        releaseReceiptsByKey[idempotencyKey] = receipt
+        releaseReceiptsByLease[leaseId] = receipt
         return receipt
     }
 }

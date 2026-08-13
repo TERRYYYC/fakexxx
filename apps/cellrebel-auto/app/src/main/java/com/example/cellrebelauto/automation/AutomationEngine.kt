@@ -313,7 +313,7 @@ class AutomationEngine(
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
                     var aplusState = AttemptState.CREATED
                     // # intent 身份由持久 attempt intent 重算（目标坐标 + attempt id，INV-23，Sol round-8 P1-2）。
-                    val intentDigest = APlusOperationIdentity.requestDigest(task.latitude, task.longitude, attemptId)
+                    val intentDigest = APlusOperationIdentity.requestDigest(task.latitude, task.longitude, attemptId, runSessionId)
                     // # P1-3：持久化当前操作（§7.1 Attempt 拥有当前 operation）。
                     planRepository.markAplusState(attemptId, "APPLY_PENDING")
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.BEGIN_APPLY) ?: aplusState
@@ -716,7 +716,7 @@ class AutomationEngine(
         // replay) to obtain the lease, which comes BACK from the apply — never pre-seeded (Sol round-9 P1-3).
         if (crashed.aplusState == "APPLY_PENDING") {
             val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
-            val intentDigest = APlusOperationIdentity.requestDigest(crashed.latitude, crashed.longitude, crashed.id)
+            val intentDigest = APlusOperationIdentity.requestDigest(crashed.latitude, crashed.longitude, crashed.id, crashed.runSessionId)
             val result = coordinator.reconcile(crashed.id, applyKey, intentDigest, nowMs())
             val leaseId = when (result) {
                 is ReconcileResult.AdvancedToRelease -> result.leaseId

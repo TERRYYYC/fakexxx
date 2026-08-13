@@ -799,3 +799,42 @@ completion is F3 GREEN, never reached pre-freeze). (4) The normal-path terminal-
 behind the skeleton decision, but the apply→lease→release chain is now provider-driven and RED-asserted.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.12 Round-11 — frozen digest + operation-key release binding + shipped-backend + F4 per-attempt (Sol round-9 full advisory answered)
+
+**Status.** Sol's full round-9 advisory (`4eb03eb` → R10 `3a6cbbf`) left 7 P1 + P2 (plus the round-10 delta). R11
+closes the remaining precision gaps on top of R10. **Baseline: `200 tests / 45 failed / 0 errors`, lintDebug +
+assembleDebug green, `git diff --check` clean.** Schema stays exact v5.
+
+**Repairs (map to the full advisory).**
+- **P1-4 frozen digest** — `APlusOperationIdentity.requestDigest` now covers the frozen intent fields
+  (coords + attempt id + run id); the F2 fixture seeds the SAME digest the recovery recomputes (never a
+  divergent "digest-77" constant); `RecordingExternalApplyExecutor.apply` is digest-bound — same key +
+  different digest returns `IDEMPOTENCY_CONFLICT` (no effect, no lease). The full §6.3.4 preimage
+  (profileRef/scheduleRef/verification/time-window) stays contract-owned.
+- **P1-5 release binding** — `RecordingExternalApplyExecutor.release` records exact (key, lease, digest)
+  args + returns conflict on same-key/different-lease/digest; `FakeDurableRecoveryLog` keys release
+  receipts by the OPERATION key (idempotencyKey) and re-keys the leaseId lookup separately. The RED
+  asserts the provider call args via `releaseCallsFor`, not a bare count.
+- **P1-6 F4 wrong-attempt prefix** — the F4 in-step checks query `auditDao.forAttempt(realAttemptId)`
+  (never global `all()`), a terminal dummy forces real id ≠ 1, and it asserts zero foreign audit rows +
+  zero rows on the dummy.
+- **P1-1 shipped backend** — new test drives `APlusComposition.productionBackend()` (the shipped skeleton):
+  it fails closed at apply (no lease → `APPLY_PENDING`, PAUSED, no mint, legacy-zero), so a green-but-
+  disconnected helper cannot satisfy the positive.
+- **P2 unverified binding** — the F1 negative asserts the unverified record's exact attemptId / typed reason /
+  non-empty evidenceDigest (dormant under the skeleton, exact under GREEN); `UnverifiedAttemptRecordDao`
+  insert is `IGNORE` (crash-replay re-insert is an idempotent no-op, never throws).
+- **P1-3 (partial)** — CLOSED-crash now falls to release-only (never re-applied), and the release-before-
+  terminalize ordering is asserted; the fully atomic per-window crash matrix remains GREEN-bound.
+
+**§11.7 self-gate.** Combined with R10's release-receipt self-gate (release-without-durable-receipt shifts the
+RED to the receipt readback), the four round-9 attacks are now structurally closed: zero-apply/lease/release
+(provider-effect + lease + release args asserted), RECOVERING second-crash (session continuity + sweep
+exclusion), same-key/different-lease/digest (fake conflict), wrong-id-prefix (F4 forAttempt + foreign-row zero).
+
+**Honest disclosures.** (1) The frozen §6.3.4 preimage + the full atomic write-window crash matrix remain
+GREEN-bound (contract #3 / schema owner). (2) The INV-23 three-way intent hash equality is still GREEN
+(skeleton TrustPolicy does not check it); the RED pins the recomputable shape, not the equality.
+
+[深深/deepseek-v4-pro🐾]
