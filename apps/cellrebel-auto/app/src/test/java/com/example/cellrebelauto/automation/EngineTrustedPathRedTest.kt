@@ -606,6 +606,29 @@ class EngineTrustedPathRedTest {
 
         // The ledger is the authority: the phase string "DECIDING" must NOT degrade a committed truth to interrupted.
         assertEquals("a committed trusted entry must project to succeeded (not interrupted)", "succeeded", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }.status)
+        // P1-6 preservation/count/legacy-zero: the carrier is append-only and must NOT be changed.
+        assertEquals("the trusted ledger count must stay 1 (no re-mint)", 1, db.trustedQuotaDao().countAll())
+        assertEquals("the trusted carrier must be preserved unchanged", "d", db.trustedQuotaDao().getByAttempt(77L)!!.evidenceDigest)
+        assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
+    }
+
+    @Test
+    fun `R18 a foreign-attempt trusted carrier must not fake-green the recovery`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        // A decoy: a trusted entry for a DIFFERENT attempt (99). The recovery must NOT let it fake-green 77.
+        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 99L, taskId = taskId, evidenceDigest = "decoy", committedAt = 1000L))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertNotEquals("a foreign-attempt carrier must NOT project 77 to succeeded", "succeeded", recovered.status)
     }
 
     @Test
