@@ -54,6 +54,7 @@ MODULE="contracts/environment-control-v1"
 # only and cannot notice that the frozen version has been superseded.
 SPEC_PATH="feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md"
 KT_DIR="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1"
+KT_DIGEST="$KT_DIR/CanonicalDigestV1.kt"
 AIDL_DIR="$MODULE/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1"
 
 SKIP_GRADLE=0
@@ -810,6 +811,91 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "7b. canonical digest preimages declare the same domain the module frames"
+# WHY THIS EXISTS.
+# §6.3.1 freezes the domain tag as the FIRST framed field of every preimage, and
+# CanonicalDigestV1 implements exactly that. But the canonical advance-REQUEST
+# preimage block listed its fields starting at leaseId with no domain line at
+# all, while the advance-RECEIPT block did declare one. An independent provider
+# implementing from the canonical text would therefore compute a domain-less
+# digest, Auto would compute a domain-ful one, and §6.7.4b step 1 ("recompute
+# requestDigest from the received fields") would reject EVERY well-formed
+# request with REQUEST_INVALID(13). The contract was not interoperable on paper.
+#
+# Nothing could see it. The module's own tests agree with the module. The golden
+# vectors added in v1.47 were computed by a second implementation written from
+# the CODE, so both readings shared one source and the divergence was outside
+# what they could express. Two implementations only cross-check each other when
+# they are derived from two different SOURCES -- otherwise it is one reading
+# spelled twice.
+#
+# This binds the canonical text itself: each preimage block must declare a
+# domain, and that literal must equal the module constant it claims to freeze.
+if python3 - "$SPEC_PATH" "$KT_DIGEST" <<'PY'
+import re, sys
+spec, kt = open(sys.argv[1], encoding="utf-8").read(), open(sys.argv[2], encoding="utf-8").read()
+
+consts = dict(re.findall(r'const val (DOMAIN_[A-Z_]+): String = "([^"]+)"', kt))
+if len(consts) != 3:
+    print("  FAIL  7b: expected 3 DOMAIN_* constants in the module, found %d" % len(consts))
+    sys.exit(1)
+
+# Each fenced block that defines a preimage must carry a domain line.
+# Fences carry an optional language tag (```text) and blocks open with either
+# `canonical = ` or `domain = `. Accepting only a bare fence missed the intent
+# block entirely -- the third time in this file that a guard's pattern was
+# narrower than the notation the document actually uses. Each time the symptom
+# was the same: it reported absence where there was presence.
+blocks = re.findall(r"```(?:[a-z]*)\n((?:canonical|domain)\s*[:=].*?)```", spec, re.S)
+if len(blocks) < 3:
+    print("  FAIL  7b: found %d preimage block(s); the module defines 3 domains, so the"
+          " block matcher is not seeing them all" % len(blocks))
+    sys.exit(1)
+found = []
+for b in blocks:
+    # BOTH notations are in use: `domain = "..."` (receipt) and
+    # `domain : ASCII "..."` (intent). The first version of this check accepted
+    # only `=` and therefore reported the intent block as declaring no domain --
+    # a guard whose pattern is narrower than the document's real notation
+    # reports absence where there is presence. That is the §5b failure repeated
+    # by the person who had just fixed §5b.
+    m = re.search(r'domain\s*[:=]\s*(?:ASCII\s+)?"([^"]+)"', b)
+    first = next((l.strip() for l in b.splitlines() if l.strip() and not l.strip().startswith("canonical")), "")
+    found.append((m.group(1) if m else None, first[:60]))
+
+missing = [f for d, f in found if d is None]
+declared = {d for d, _ in found if d}
+
+bad = 0
+if missing:
+    bad += 1
+    for f in missing:
+        print("  FAIL  7b: a canonical preimage block declares no domain; first field is %r" % f)
+        print("            §6.3.1 freezes the domain as the FIRST framed field, and the module")
+        print("            frames one. A provider implementing from this block computes a")
+        print("            different digest than the module for identical field values.")
+
+for d in declared:
+    if d not in consts.values():
+        bad += 1
+        print("  FAIL  7b: canonical declares domain %r, which no module constant defines" % d)
+
+for name, val in sorted(consts.items()):
+    if val not in declared:
+        bad += 1
+        print("  FAIL  7b: module %s = %r is never declared by any canonical preimage block" % (name, val))
+
+if not bad:
+    print("  PASS  %d canonical preimage block(s) declare domains matching all 3 module constants"
+          % len(found))
+sys.exit(1 if bad else 0)
+PY
+then
+  pass "canonical preimages and the module agree on the domain tag"
+else
+  fail "a canonical preimage block disagrees with the module about its domain tag"
+fi
+
 section "7. DTO schemas agree between canonical §6.3 and Kotlin (name, type, order)"
 
 # Sections 5 and 6 bind the ERROR CODES and the METHOD names. Nothing bound the
