@@ -129,6 +129,7 @@ source_threads:
 | **v1.43** | PR-2 第七轮 | **「定义与用法必须同向」的第三处：canonical 修了，实现者真正会读的那一半没修。** ①三条 `ContractErrorCodeV1` KDoc 与 §6.3.3 直接矛盾，且每一条都是历轮"只修一个方向"的残留：wire **7** 的 KDoc 写 "**Another** lease already holds…"，而 v1.39 ② 已把本节对 7 的定义加宽为「推进时设备上任一非 `RELEASED` lease——**无论属于哪个 caller**」，KDoc 保留的恰是 v1.39 当轮判定为矛盾的那个字面读法；wire **8** 的 KDoc 写 "The referenced lease is no longer current"，**无方法作用域、无例外**，而 v1.42 ① 已收窄 8 并给 `release`／`completeAndAdvance` 双例外——**按该 KDoc 字面实现，`completeAndAdvance` 无条件不可用，§8.4 的 `EXPIRED → RELEASING` 收敛也永远走不到**，即 v1.42 在 spec 侧刚消除的那两个后果，在代码侧一直活着；wire **16** 的 KDoc 逐字保留 v1.39 **明确作废**的「终态而非失败」（"Terminal, NOT a failure"），而同模块的 `AdvanceOutcomeV1` KDoc 自同一轮起就写着更正后语义并点名 `SCHEDULE_EXHAUSTED(16)` 是"a real caller error"——**同一个 wire 号，同一个模块里两份 KDoc 互相矛盾**，更正只落到了一个文件。②为什么前九节全绿仍然漏：§5／§5b 绑的都是 **wire 数字**（表↔代码↔yaml、散文内联引用↔枚举），没有任何一节读**实现者真正会读的东西**——没人为查 `STALE_LEASE` 的含义去翻 3800 行文档，他们 hover IDE 里导入的那个符号。③新增 **§5c**，两条规则**都从 canonical 派生**而非硬编码：**A** 若某行把 code 作用域限定到接口方法，KDoc 必须逐个点名（方法全集取自 AIDL `interface`，v1.x 新增方法自动纳管，不需要改门禁）；**B** 若某行带更正标记（`更正`／`旧文`），KDoc 必须引用做出该更正的版本号——**被更正的一侧必须留下痕迹**。④**明写门禁做不到什么**：它证不了 KDoc 散文语义正确（跨自然语言的字符串比对做不到），只能让**漏写**不可能、并强制人在 canonical 限定或更正某码时去碰 KDoc；点名了正确方法的错句子仍会通过。Rule A 大小写不敏感且按词边界，英文动词 `apply` 也能满足它——这是**刻意的假阴性偏向**：对合法散文误报的门禁最终会被人关掉，那时 §5c 什么都保护不了。已知未覆盖类：一行列**两个**触发分支而 KDoc 只写一个（wire **1** 正是此例，本轮手工补齐并在 KDoc 内自陈该盲区）——该行无方法、无更正标记，两条规则都看不见。⑤**该未覆盖类不进 §20.1**：§20.1 的口径是「**契约**还有哪些没被证明／没被冻结」，本条是**守卫敏感性**的边界，其真相源是 selftest 套件（本轮由 `N-8`/`N-9` + `M-5`/`M-6` 承担）；把守卫盲区混进去会稀释上一轮刚冻结的四分类。⑥selftest 增至 **1 positive / 9 negative / 6 mutation**，两条新规则各自被证明承重且隔离（每条负例仍断言**恰好一个** check 失败）。M-5/M-6 记一笔方法论：`if missing:` 在门禁里出现 **4 次**，**不能**用作 sed 锚——sed 对多处匹配全部生效，会静默废掉四个守卫而变异用例照样"通过"，得出的"承重"结论是假的；改用唯一的**规则入口条件** `if need:`／`if absent:` 分别单独关闭。见 §6.3.3 / `scripts/check-contract-v1.sh` §5c / `scripts/selftest-contract-v1.sh` |
 | **v1.44** | PR-2 第七轮（同轮第二项） | **一条阻塞冻结的已知边界，此前只活在聊天里。** ①§6.3.2 冻结「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」，而 **`android.os.ServiceSpecificException` 不在 public SDK**——独立复验：对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举，`android/os/ServiceSpecificException` **零命中**，同时对照项 `android/os/Parcel.class` **命中**（对照项的作用是证明扫描方法有效，否则"零命中"与"我扫错了地方"不可区分）。它是 `@hide`，app 代码无法直接引用，因此本文冻结的错误传输通道**按字面不可实现**。②**本轮真正的缺陷不是这个事实，而是它的位置**：该事实此前**零处**出现在本文档，只存在于投给 operator 的 Decision Packet 消息里——而 §20.1 上一轮刚冻结的规则正是"**新增边界必须同时进两处**（本表管完整性，权威节管内容）"。一条阻塞契约冻结的开项，其唯一载体是聊天记录，任何读文档的人都无从知道它存在；这与 v1.42 ⑤ 要消除的"三个入口三个子集"是同一种病，只是这次的子集是**空集**。③故登记为 **`KB-7`**（`unfrozen`），同步顶部告示（六条→**七条**）与 §19 的 `unfrozen`／`gap` 枚举（`KB-5`／`KB-6`→ 追加 `KB-7`）。**本表只登记，不代为裁定**：选哪条传输通道是 operator 的价值取舍（Decision Packet 已投），按 §19 规则它在被处置前阻塞完成声明——一份错误传输不可实现的契约不能自称已冻结。④为什么九节门禁全绿仍然漏：两处载体（§6.3.2 散文、`ContractErrorCodeV1` 文件级 KDoc）**都是散文**，而本轮新增的 §5c 只覆盖 §6.3.3 **逐 code 行**的 KDoc，管不到文件级 KDoc 里的传输机制陈述。裁定后应补一道门禁，断言契约引用的每个 `android.*` 类型都存在于编译 SDK——**本轮不加**，因为该断言的形状取决于所选通道，先写会把门禁钉在一个可能被推翻的答案上。见 §6.3.2 / §20.1 / §19 |
 | **v1.45** | PR-2 第八轮 | **冻结为「必须」的验证步骤，其前置条件在它被调用的那一刻不可满足。** ①§6.7.5 冻结「推进后**必须**独立 `observe()` 验证新环境」，理由是「receipt 是对方的自述，不是生效证据」；但该调用夹在 `completeAndAdvance` 与下一项 `apply` 之间，而 §6.7.4b 第 5 步的 lease 门是**设备全局**的——推进期间不得存在任何非 `RELEASED` lease，新 lease 要到下一项 `apply` 才授予。于是这一刻 `ObserveRequestV1.leaseId`（非空必填）唯一能填的就是已 `RELEASED` 的历史引用，而 §6.3.3 wire 8 把 `observe` 的「已 `RELEASED`」无条件列为失败。**按字面实现，一道被冻结为「必须」的步骤无条件不可达**，Auto 只剩「只信 receipt」一条路——正是 §6.7.5 指名要堵的错环境归因入口。②本轮冻结窄例外：`leaseId` 恰为本 caller 最近一次成功 `completeAndAdvance` 所携带的历史引用、且此后未获授新 lease 时，`observe` 必须受理；窗口外仍返回 8，「非本 caller」分支不动。不需要新增字段或方法——provider 为 §6.7.5 幂等重取本就必须留存 advance receipt；也因此**伪造 `leaseId` 落不进窗口**。③明确本例外不吞并发失配：他方抢先 `apply` 时 `observe` 仍受理，由 §6.7.5 的 hash／revision 比对判失配进恢复——**受理后判失配可诊断，返回 8 不可诊断**（与「lease 过期」同形，调用方无从区分该重试还是该恢复）。④**这是同一处缺陷的第三次同类**：v1.42 加宽 wire 7 漏了 wire 8 的对称收窄，v1.43 补了 `completeAndAdvance`，而紧邻**一跳之后**的 `observe` 仍留在拒绝侧。v1.42 自己写的「修一个方向而不扫同类，矛盾只会挪到相邻一行」再次应验，只是这次挪到了**下一跳**。故补通用要求：**冻结「必须」的调用序列时须逐跳检查每一跳前置条件在该时刻是否可满足**——序列可执行性是逐跳的合取，一跳不可达则整条序列是死的。⑤为什么九节门禁全绿仍然漏：§5c 只能强制 KDoc **点到** §6.3.3 行所辖的方法名，不能判断句子把该方法放在了准入侧还是拒绝侧——两侧都点了 `observe`，所以恒绿。见 §6.3.3 / §6.7.4a / §6.7.5 |
+| **v1.46** | PR-2 第八轮（同轮第二项） | **状态机把「提交过一次配额」当成了「该项已达标」。** ①§8.1 的推进分叉判据是「配额已提交」——即成功插入一行 `TrustedQuotaEntry`——而达标判据在 §7.3 是 `count(TrustedQuotaEntry where taskId) >= requiredSuccesses`。两者不是一回事：`requiredSuccesses = 3` 的任务在**第 1 次** attempt 提交配额后就走上 `ADVANCE_PENDING`，日程被推进，剩下两次成功再也没有机会发生。§5 边界表写着「证明当前项**达标**后发起推进」，但那句话从未变成状态机上的门。现拆成未达标／已达标两条边，未达标边**不推进**。②`ADVANCE_EXHAUSTED` 直接落终态，绕过 `receiptDigest` 重算，而紧邻的 `ADVANCE_RECEIPT_VERIFIED` 边要求重算通过——§6.7.3 冻结「重算不上的 receipt 不是「弱一点的 receipt」，它不是 receipt」，且 `outcomeWire` 本就在 preimage 内，**耗尽 receipt 与推进 receipt 同样可验证，没有任何理由只验一个**。现改为 `ADVANCE_EXHAUSTED_VERIFIED`。③推进后观察只比 `scheduleItemId` 一条腿，而 §6.7.5 要求同时比 `effectiveIntentHash` 与 `effectiveEnvironmentRevision`。**要求写在 §6.7.5，实现读的是 §8.1**，于是少比的两条腿没有任何载体会报错——这正是 v1.42「定义与用法必须同向」的形态，只是这次错位发生在散文与状态机之间。现冻结 `OBSERVED_TUPLE_MATCHES`／`OBSERVED_TUPLE_MISMATCH` 三腿合取，并在两节间补双向交叉引用。注意两种单腿读法**互为镜像**：只比 item 会放过「环境根本没换」，只比环境会放过「同 profile 跨项复用」。④补 `M-AD-14..20` 七行：未达标不推进、达标判定前崩溃、耗尽 receipt 摘要失败、intentHash 腿失配、revision 腿失配、跨新分叉同键重放幂等，以及 **`M-AD-20` 合法序列**——`M-AD-01..13` 竟无一行断言 §6.7.4a 序列唯一的合法形态（以已 `RELEASED` 历史 `leaseId` 推进、再以同一 `leaseId` observe），v1.45 冻结了该规则却没有留下台账行，本轮补上。⑤§10／§10.1 由 103 增至 **110 行**；`owner-red` 64→**84**（GLM 48 / Fable5 36），`sol-blackbox` 22 · `static-guard` 2 · `device` 2 不变；22 行散文共 29 处派生计数**从台账现算后一次改完**。并冻结规则：**派生计数只能从 §10.1 现算，散文里的都是缓存**，增删台账行必须在同一 commit 内重算全部缓存点。见 §7.3 / §8.1 / §6.7.5 / §10 / §10.1 / §15 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1984,7 +1985,7 @@ QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
 - **推进与 `currentItemId` 指针必须在同一事务**：重启后只能观察到「已推进」或「未推进」，不存在中间态。
 - **Auto 崩溃**：以同 `idempotencyKey` 重放，拿回同一 receipt；receipt 必须持久且可按键重取，否则「重试」等于「再推一次」。
 - **千网游崩溃**：Auto 未拿到 receipt 时**不得假定已推进**——无 receipt 即未推进（§5 禁止项）。
-- **推进后必须独立验证**：Auto 以 `observe()` 独立确认新生效环境，与 receipt 里的 `effectiveIntentHash` / `effectiveEnvironmentRevision` 比对。**receipt 是对方的自述，不是生效证据**；只信 receipt 就会把「说推进了」当成「环境真的换了」——这正是错环境归因的入口。
+- **推进后必须独立验证**：Auto 以 `observe()` 独立确认新生效环境，与 receipt 里的 `effectiveIntentHash` / `effectiveEnvironmentRevision` 比对。**receipt 是对方的自述，不是生效证据**；只信 receipt 就会把「说推进了」当成「环境真的换了」——这正是错环境归因的入口。**该比对的状态机形态冻结在 §8.1 的 `OBSERVED_TUPLE_MATCHES` / `OBSERVED_TUPLE_MISMATCH` 两条边**，三条腿必须合取；两节互为定义与用法，改一处必须改另一处（v1.42「定义与用法必须同向」）。本节此前只在散文里要求三条腿，而 §8.1 的边只比 `scheduleItemId` 一条——**要求写在这里，实现读的是那里**，于是少比的两条腿没有任何载体会报错。
 
 #### 6.7.6 Hook 与 System Mock 的编排等价
 
@@ -2055,13 +2056,14 @@ QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
 | `UNVERIFIED_RECORDED` | `BEGIN_RELEASE` | `RELEASE_PENDING` | 保存 release key | 自动升级为可信 |
 | `RECOVERY_REQUIRED` | `RECONCILE` | 合法中间态或 `RELEASE_PENDING` | 先 observe/取 receipt | 无证据跳状态 |
 | `RELEASE_PENDING` | `RELEASE_RECEIPT`（**未提交配额**路径） | `CLOSED` | 保存 release receipt | release 别人的 lease |
-| `RELEASE_PENDING` | `RELEASE_RECEIPT`（**配额已提交**路径） | `ADVANCE_PENDING` | 保存 release receipt + advance 幂等键与 `requestDigest`（**先 release 再 advance**，§6.7.4a） | 在**活动 lease 之下**推进——那是自己制造 `ENVIRONMENT_DRIFT` |
+| `RELEASE_PENDING` | `RELEASE_RECEIPT`（配额已提交但**未达标**：`count(TrustedQuotaEntry where taskId) < requiredSuccesses`，§7.3） | `CLOSED` | 保存 release receipt；**不推进**，当前项保留待下一 attempt | 把「提交了一次配额」当成「该项已达标」——`requiredSuccesses = 3` 的任务会在第 1 次 attempt 后就推进日程 |
+| `RELEASE_PENDING` | `RELEASE_RECEIPT`（配额已提交且**已达标**：`count(...) >= requiredSuccesses`，§7.3） | `ADVANCE_PENDING` | 保存 release receipt + advance 幂等键与 `requestDigest`（**先 release 再 advance**，§6.7.4a） | 在**活动 lease 之下**推进——那是自己制造 `ENVIRONMENT_DRIFT` |
 | `ADVANCE_PENDING` | `ADVANCE_RECEIPT_VERIFIED` | `ADVANCE_OBSERVING` | 保存 receipt（`receiptDigest` **已重算通过**才保存） | 收到 receipt 就认定环境已换 |
 | `ADVANCE_PENDING` | `CRASH_RECOVER` | `ADVANCE_PENDING` | **同键**重放 `completeAndAdvance` 取回原 receipt | 换新键重发——会撞 `M-AD-04` 并可能双推进 |
 | `ADVANCE_PENDING` | `ADVANCE_DIGEST_MISMATCH` | `RECOVERY_REQUIRED` | 拒绝该 receipt、暂停、告警 | 当作「弱一点的证据」继续 |
-| `ADVANCE_PENDING` | `ADVANCE_EXHAUSTED` | `CLOSED` | 记录终态（`outcomeWire = EXHAUSTED`、target 为 null）；plan 正常完成 | 当作失败去重试 |
-| `ADVANCE_OBSERVING` | `OBSERVED_ITEM_MATCHES` | `CLOSED` | 记录 `observation.scheduleItemId == receipt.advancedToItemId` | **只比环境不比 item**——同一 profile 可跨项复用 |
-| `ADVANCE_OBSERVING` | `OBSERVED_ITEM_MISMATCH` | `RECOVERY_REQUIRED` | 判**错环境归因**：不计数、不继续 | 继续下一项 |
+| `ADVANCE_PENDING` | `ADVANCE_EXHAUSTED_VERIFIED` | `CLOSED` | 记录终态（`outcomeWire = EXHAUSTED`、target 为 null）；**`receiptDigest` 已重算通过才落终态**；plan 正常完成 | 当作失败去重试；或**跳过重算**直接落终态——§6.7.3 冻结「重算不上的 receipt 不是「弱一点的 receipt」，它不是 receipt」，而 `outcomeWire` 本身就在 preimage 里，耗尽 receipt 与推进 receipt **同样可验证**，没有任何理由只验一个 |
+| `ADVANCE_OBSERVING` | `OBSERVED_TUPLE_MATCHES` | `CLOSED` | 记录**三条腿同时成立**（§6.7.5）：`observation.scheduleItemId == receipt.advancedToItemId` **∧** `observation.acceptedIntentHash == receipt.effectiveIntentHash` **∧** `observation.environmentRevision == receipt.effectiveEnvironmentRevision` | **只比环境不比 item**——同一 profile 可跨项复用；**只比 item 不比环境**——item 对上了而环境根本没换，receipt 的自述就成了唯一依据，正是 §6.7.5 要堵的入口。两种单腿读法互为镜像，**必须三条腿合取** |
+| `ADVANCE_OBSERVING` | `OBSERVED_TUPLE_MISMATCH`（三条腿**任一**不成立） | `RECOVERY_REQUIRED` | 判**错环境归因**：不计数、不继续；typed reason 必须记录**是哪条腿**不成立 | 继续下一项；或只在 item 失配时进恢复而放过 hash/revision 失配 |
 | `RELEASE_PENDING` | `RELEASE_INCOMPLETE` | `RECOVERY_REQUIRED` | 暂停 plan、现场提示 | 继续下一地址 |
 | `CLOSED` | 任意重复事件 | `CLOSED` | no-op + audit | 复活 attempt |
 
@@ -2384,6 +2386,13 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-11` | advance | 已耗尽后再次请求推进 | typed `SCHEDULE_EXHAUSTED`；与 M-AD-10 是两件事 | 17 |
 | `M-AD-12` | advance | 推进时设备上存在非 `RELEASED` lease——**本 caller 自持**与**另一 caller 持有**两种情形各测一遍 | typed `LEASE_CONFLICT`（§6.7.4a）；**不推进、指针不动**；release 后同一份请求字节重试即应成功。断言必须钉 **exact wire 7**，接受"任意 typed failure"不构成证据 | 14,16,28 |
 | `M-AD-13` | advance | 同时违反多条前置（如既持活动 lease 又 `expectedScheduleVersion` 过期） | 按 §6.7.4b **冻结次序**返回**首条**命中者，此例为 `SCHEDULE_VERSION_STALE`；次序若被实现成任选，本行必红 | 15,16,28 |
+| `M-AD-14` | advance | 配额**已提交但未达标**（`count(TrustedQuotaEntry) < requiredSuccesses`）时 release 完成 | **不推进**、当前项保留待下一 attempt；推进请求根本不得发出。把「提交过一次」读成「已达标」会让 `requiredSuccesses = 3` 的任务在第 1 次 attempt 后推进 | 10,11 |
+| `M-AD-15` | advance | 配额提交后、达标判定前崩溃 | 恢复**先 reconcile 重算达标**再决定是否推进，禁止直接推进下一项（INV-15） | 10,15 |
+| `M-AD-16` | advance | **耗尽** receipt 的 `receiptDigest` 重算不上 | 拒绝该 receipt、**不落终态**、进恢复；与 `ADVANCED` 同等对待——`outcomeWire` 本就在 preimage 内，耗尽 receipt 同样可验证 | 17 |
+| `M-AD-17` | advance | 推进后 `observe` 的 `acceptedIntentHash` ≠ receipt 的 `effectiveIntentHash`（**item 对得上**） | `OBSERVED_TUPLE_MISMATCH` → `RECOVERY_REQUIRED`；typed reason 必须指明是 intentHash 这条腿 | 23 |
+| `M-AD-18` | advance | 推进后 `observe` 的 `environmentRevision` ≠ receipt 的 `effectiveEnvironmentRevision`（**item 与 hash 都对得上**） | 同上；typed reason 必须指明是 revision 这条腿。本行与 `M-AD-17` 分立：单腿读法会各自放过对方 | 25 |
+| `M-AD-19` | advance | 跨新分叉的同键重放（未达标路径与已达标路径各一次） | 可信配额保持幂等、最多增加一次；不得产生第二次推进 | 10,13 |
+| `M-AD-20` | advance | **合法序列**：release 后以已 `RELEASED` 的历史 `leaseId` 调 `completeAndAdvance`，随后以**同一** `leaseId` 调 `observe` | 两者都必须被受理，`observe` 返回新生效环境；仅当该 caller 已获授新 lease 或 `leaseId` 非该历史引用时才 `STALE_LEASE`(8)。**这是 §6.7.4a 序列唯一的合法形态，此前 `M-AD-01..13` 无一行断言它** | 28 |
 | `M-RC-02` | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | `M-RC-03` | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |
 | `M-RC-04` | recovery | qwy release 只能部分清理 | plan 暂停，显示人工恢复 | 14,21 |
@@ -2523,6 +2532,13 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 | `M-AD-11` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_11` |
 | `M-AD-12` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_12` |
 | `M-AD-13` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_13` |
+| `M-AD-14` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_14` |
+| `M-AD-15` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_15` |
+| `M-AD-16` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_16` |
+| `M-AD-17` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_17` |
+| `M-AD-18` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_18` |
+| `M-AD-19` | advance | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt::M_AD_19` |
+| `M-AD-20` | advance | `owner-red` | Fable5 | `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/matrix/AdvanceMatrixTest.kt::M_AD_20` |
 | `M-CR-01` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_01` |
 | `M-CR-02` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_02` |
 | `M-CR-03` | crash | `owner-red` | GLM | `apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/CrashMatrixTest.kt::M_CR_03` |
@@ -2682,7 +2698,7 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 - **同报告内的绑定**：记录里的 `testId` 必须在该原始报告中出现，且其 outcome 与本记录的 `status` **一致**。缺这一条时，清单可以声称 `passed` 而报告里写着 failed——那样 manifest 又退回成自说自话，正是引入它要消除的东西。
 - 清单本身进 PR evidence，**Fable5** 的矩阵报告消费它，而不是逐行手工声明。
 
-Task 7 的表述同步改为：**Fable5** 负责 `sol-blackbox`/`static-guard`/`device` 三类的编写与执行，并对 `owner-red` 行做 **evidence audit**（核对报告中存在该 ID 的通过用例、绑定 exact HEAD、断言与该行预期终态一致）。**Fable5** 不写 `owner-red` 测试，也不再声称"为每一行提供失败场景"。**Sol 不编写、不执行本文任何一类矩阵行**——它对 Fable5 的 26 行与该 evidence audit 本身做独立 review（[#6](https://github.com/TERRYYYC/fakexxx/issues/6) T0：*Fable5 implements the 26 acceptance-lane rows and audits the remaining 64 owner rows*；reviewers Sol + GLM）。
+Task 7 的表述同步改为：**Fable5** 负责 `sol-blackbox`/`static-guard`/`device` 三类的编写与执行，并对 `owner-red` 行做 **evidence audit**（核对报告中存在该 ID 的通过用例、绑定 exact HEAD、断言与该行预期终态一致）。**Fable5** 不写 `owner-red` 测试，也不再声称"为每一行提供失败场景"。**Sol 不编写、不执行本文任何一类矩阵行**——它对 Fable5 的 26 行与该 evidence audit 本身做独立 review（[#6](https://github.com/TERRYYYC/fakexxx/issues/6) T0：*Fable5 implements the 26 acceptance-lane rows and audits the remaining 64 owner rows*〔**逐字引用 Issue #6 的 T0，刻意不改**：该 `64` 是立 issue 当轮的值，现行为 **84**（§10.1 现算）。静默改写他人 issue 的原文会让引用与被引用方永久对不上——要么由 #6 的 owner 改 T0，要么保留原文并在此注明，二者都不是本文单方能做的**改数**〕；reviewers Sol + GLM）。
 
 ## 11. 日志与证据契约
 
@@ -2938,7 +2954,7 @@ cd apps/qianwangyou
 ../../scripts/check-inherited-lint-debt.sh qianwangyou
 
 cd ../..
-./scripts/verify-a-plus.sh --lane pr-3      # 35 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 103 行判红
+./scripts/verify-a-plus.sh --lane pr-3      # 36 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 110 行判红
 ```
 
 **lint 门在本 task 是 ratchet，不是 raw-green（v1.21 消环）**：上一版让 Task 3 直接要求 `lintDebug` exit 0，而基线自带 23 个 inherited error、清债又被冻结在 **PR-3 合入之后**的 Task 3.5——两者互锁，谁都过不去。本 task 只需证明**没有新增** lint error；raw-green 由 Task 3.5 达成。
@@ -3211,7 +3227,7 @@ cd apps/cellrebel-auto
 ./gradlew lintDebug assembleDebug
 
 cd ../..
-./scripts/verify-a-plus.sh --lane pr-4      # 42 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 103 行判红
+./scripts/verify-a-plus.sh --lane pr-4      # 48 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 110 行判红
 ```
 
 ### Task 5 — Auto A+ 执行内核
@@ -3320,64 +3336,66 @@ cd apps/cellrebel-auto
 
 | PR | 必须证明 | 行数 |
 |---|---|---|
-| **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **33** |
-| **PR-4**（GLM） | 自有 `owner-red` 行，绑 PR-4 HEAD | **42** |
+| **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **36** |
+| **PR-4**（GLM） | 自有 `owner-red` 行，绑 PR-4 HEAD | **48** |
 | **PR-5**（Fable5 开发 / DeepSeek Flash 审查） | **不验任何矩阵行**；只验 acceptance **harness 自身**：fake provider 的 negative controls、fixture 装载、`static-guard` 扫描器对**构造违规样本**能判红（self-test） | **0 矩阵行** |
-| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 103 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **90** |
+| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 110 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **110** |
 
-**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——103 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
+**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——110 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
 
 **verifier 必须支持 lane 子集（否则本分工不可执行）**：`scripts/verify-a-plus.sh` 增 `--lane <pr-3|pr-3.5|pr-4|pr-5|pr-6>`。
 
-**lane selector 必须是机器可判定的行集合，不能写「该 lane 自有行」**——Fable5 同时拥有 PR-3 的 33 行与 PR-5 交付的 26 行，仅凭 owner 无法区分。冻结为 `(class, evidenceOwner, 入口路径前缀)` 三元组：
+**lane selector 必须是机器可判定的行集合，不能写「该 lane 自有行」**——Fable5 同时拥有 PR-3 的 36 行与 PR-5 交付的 26 行，仅凭 owner 无法区分。冻结为 `(class, evidenceOwner, 入口路径前缀)` 三元组：
 
 | lane | 校验集合（机器判定式） | 行数 | 谁的 exactHead |
 |---|---|---|---|
-| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 35 | PR-3 HEAD |
-| `pr-4` | `class=owner-red` ∧ `evidenceOwner=GLM` ∧ 入口前缀 `apps/cellrebel-auto/` | 42 | PR-4 HEAD |
+| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 36 | PR-3 HEAD |
+| `pr-4` | `class=owner-red` ∧ `evidenceOwner=GLM` ∧ 入口前缀 `apps/cellrebel-auto/` | 48 | PR-4 HEAD |
 | `pr-3.5` | **空集**；不验矩阵行，仅 `lintDebug` exit 0 + qwy unit + assemble | 0 | PR-3.5 HEAD |
 | `pr-5` | **空集**；仅 harness self-test（见上表 PR-5 行），**不消费 evidence manifest** | 0 | PR-5 HEAD |
-| `pr-6` | **全部 103 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 103 | PR-6 HEAD |
+| `pr-6` | **全部 110 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 110 | PR-6 HEAD |
 
-三元组两两不相交且并集 = 77 个 `owner-red`；26 个非 `owner-red` 行（`sol-blackbox` 22 + `static-guard` 2 + `device` 2）**只出现在 `pr-6`**。**verifier 必须自检这个划分**：若 `pr-3 ∪ pr-4` ≠ 77 或与 `pr-6` 的 103 行不自洽，直接 fail-closed——lane 定义漂移必须比矩阵失败更早被发现。
+三元组两两不相交且并集 = 84 个 `owner-red`；26 个非 `owner-red` 行（`sol-blackbox` 22 + `static-guard` 2 + `device` 2）**只出现在 `pr-6`**。**verifier 必须自检这个划分**：若 `pr-3 ∪ pr-4` ≠ 84 或与 `pr-6` 的 110 行不自洽，直接 fail-closed——lane 定义漂移必须比矩阵失败更早被发现。
 
 > **v1.39 更正——这张表的四个计数此前全部过时，而且不是本轮改出来的。** v1.38 往 §10.1 追加 `M-AD-01..11` 时只同步了台账自身与「矩阵↔台账 101==101」，**没有回头改这张 lane selector 表**：它仍写着 90 行 / 64 `owner-red` / Opus5 31 / Fable5 33，那是 11 行加入**之前**的数字。后果不是排版错误——`pr-4` 的机器判定式会选出 42 行却期望 31，自检 `pr-3 ∪ pr-4 ≠ 64` 直接 fail-closed，**PR-4 lane 从 v1.38 起就是不可执行的**。派生计数与台账不在同一次修改里同步，就是给自己留一个必然过期的第二真相源；本轮改 owner 投影时一并校正，并把 `sol-blackbox`/`static-guard`/`device` 的分解写进正文，让下一次漂移在文本层就能被看见。
+>
+> **v1.46 再更正——上面这条自述本身也过度声称了。** 它写「这张表的四个计数此前全部过时……本轮一并校正」，但本轮实测：v1.39 只改了紧邻的 **lane selector 表**（`pr-3`/`pr-4`/`pr-6`/并集自检），**没有**碰 20 行外的聚合表（`PR-3` 33 / `PR-6` 90）与 class 责任表（`owner-red` 64）——那两处一直停在 v1.38 之前的值，直到 v1.46 才随 `M-AD-14..20` 一并重算。**一条声称「我已经扫了同类」的更正note，本身没有扫同类**，于是后来的读者读到它会认为该问题已闭合而不再复查——这比不写更糟：它把一个未完成的清扫伪装成已完成的。故本轮除改数外，另立规则：**派生计数只能从 §10.1 台账现算，任何散文里的计数都是缓存**，新增或删除台账行必须在**同一个 commit** 内重算全部缓存点（本轮共 22 行 29 处），且更正note只能声称自己**实际验证过**的范围。
 
-**没有 `--lane` 时默认 `pr-6` 语义（全 103 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 103 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
+**没有 `--lane` 时默认 `pr-6` 语义（全 110 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 110 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
 
-**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **103 行 / 18 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
+**Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **110 行 / 18 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
 
 | class | 行数 | **Fable5** 的职责（线级 reviewer = DeepSeek Flash，见 Epic #1 control event 5258691694） |
 |---|---|---|
 | `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
 | `static-guard` | 2 | 编写并执行静态扫描 |
 | `device` | 2 | 在授权 device lease 内执行并留存证据 |
-| `owner-red` | 64 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
+| `owner-red` | 84 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
-**已知性质（显式记录，不隐藏）**：`owner-red` 64 行中有 33 行的 code owner 本身就是 Fable5，因此该 evidence audit 包含**对自有 33 行的自审**。
+**已知性质（显式记录，不隐藏）**：`owner-red` 84 行中有 36 行的 code owner 本身就是 Fable5，因此该 evidence audit 包含**对自有 36 行的自审**。
 
 > **v1.22 更正——上一版给的理由是错的，由 GLM 证伪。** 上一版写「可接受的唯一理由是它不是终门，终门是 `verify-a-plus.sh` 的 owner-independent 机械校验」。**这条论证不成立**：本 Task 的 Verify ①②③ 校验的是「ID 集合相等」「覆盖绑 `status=passed` 且 `exactHead` 相符」「未覆盖行分类 `not-testable` / `deferred`」——**没有任何一条校验「断言语义是否真对应该行的预期终态」**。而「断言与预期终态一致」恰恰是 evidence audit 在做的事。**机械门覆盖不到自审所校验的东西，因此它不能充当自审的兜底。**
 
-**这 33 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
+**这 36 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
 
-1. **测试代码本身经过独立 review**：那 33 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **DeepSeek Flash**（§16）。断言写错会在代码 review 阶段被非作者看到。
+1. **测试代码本身经过独立 review**：那 36 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **DeepSeek Flash**（§16）。断言写错会在代码 review 阶段被非作者看到。
 2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 **DeepSeek Flash** 复核——具体义务写在 **Task 8 第 3 条**（逐条核 `passed` 记录存在性、`exactHead` 相符、**断言语义是否真对应台账「预期终态」列**），并明写机械门 ①②③ 不覆盖最后一项。**v1.23 更正**：上一版此处引用的是「Task 8 第 2 条」，而第 2 条只审 fake 是否迎合自家 provider，**并不包含 owner-red audit 复核**——那是一条当时并不存在的传播。现已把该义务真正写入 Task 8 并把引用指向它。
 
-**因此这 33 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 33 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
+**因此这 36 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 36 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
 
 **RED（三处，各自绑不同 HEAD——上一版把它们混成一句，与「PR-5 = 0 矩阵行」冲突）：**
 
 | 在哪 | 什么先红 | 涉及行 |
 |---|---|---|
 | **PR-5** | **只有 harness self-test 先红**：negative-control 断言、fixture loader 对损坏 fixture、guard 对构造违规样本。**不是任何一条矩阵行** | **0 矩阵行** |
-| PR-3 / PR-4 | 各自 `owner-red` 行先红 | Fable5 35 / GLM 42 |
+| PR-3 / PR-4 | 各自 `owner-red` 行先红 | Fable5 36 / GLM 48 |
 | **PR-6** | 22 `sol-blackbox` + 2 `static-guard` 对**真实 Auto/provider** 的 RED→GREEN；2 `device` 行在授权 lease 内产生首份真机证据 | 26 |
 
 上一版写「26 行的测试代码在 PR-5 上写就、各自失败场景先红」有两处不成立：**①** 与本 Task 已冻结的「PR-5 = 0 矩阵行」直接冲突；**②** 26 行里有 **2 条是 `device` 类**，它们的载体是 `docs/acceptance/**` 的**证据登记，根本没有可以"先红"的测试代码**。**在 PR-5 的 HEAD 上，被断言的实现尚不存在，任何「矩阵行先红」都不是有效 RED，只是编译不过或断言恒假。**
 
-**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **64 行 `owner-red`** 已归各自 code owner（Opus5 31 / Fable5 33），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
+**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **84 行 `owner-red`** 已归各自 code owner（GLM 48 / Fable5 36），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
 
-**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 103 行同 HEAD，在本 PR 上必红）：**
+**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 110 行同 HEAD，在本 PR 上必红）：**
 
 ```bash
 # PR-5 自身：只自证 harness，不消费 evidence manifest、不验矩阵行
@@ -3396,7 +3414,7 @@ cd apps/cellrebel-auto
 
 1. 先审 Fable5 qwy provider：授权、revision 覆盖声明、idempotency、foreign lease、进程死亡。
 2. 再审 **Fable5** acceptance：是否存在 fake 只验证实现细节、未覆盖真实状态边、误把心跳当连续性。**2v2 后 provider 与 acceptance 同属 Fable5，本条须额外证伪一件事**：fake provider 是否被写成"迎合自家 provider 实现"而非迎合 public v1 contract——即对 §10.1 中 `M-CC-03`/`M-RL-01` 一类跨端行，断言是否只在 Fable5 自己的实现语义下成立。
-3. **复核 Fable5 对 64 行 `owner-red` 的 evidence audit（v1.23 新增，非可选）**——其中 **33 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 33 行的断言正确性除 PR-3 的代码 review 外，只有本条覆盖。发现 audit 与台账预期终态不符时，按 §10.1 失败路由表处置，**不得**因 CI 全绿而放行。
+3. **复核 Fable5 对 84 行 `owner-red` 的 evidence audit（v1.23 新增，非可选）**——其中 **36 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 33 行的断言正确性除 PR-3 的代码 review 外，只有本条覆盖。发现 audit 与台账预期终态不符时，按 §10.1 失败路由表处置，**不得**因 CI 全绿而放行。
 4. 对 **GLM** 的 Auto 做可信账本与 `PRE_EXISTING_RUN` 对抗审查（option B 后 Auto 作者是 GLM）。
 5. 每个 finding 给 `block/approve`、精确文件/行、复现命令和 exact HEAD。
 6. behavioral delta 后旧 verdict 失效，必须重跑受影响矩阵。
@@ -3436,10 +3454,10 @@ cd apps/cellrebel-auto
 (cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)
 
 ./acceptance/scripts/check-forbidden-boundaries.sh
-./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 103 行、每行 exactHead == PR-6 HEAD
+./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 110 行、每行 exactHead == PR-6 HEAD
 ```
 
-预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 103 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
+预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 110 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
 
 ## 15. PR 顺序与 merge gates
 
