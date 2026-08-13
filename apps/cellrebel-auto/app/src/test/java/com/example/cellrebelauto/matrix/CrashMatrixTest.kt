@@ -202,18 +202,23 @@ class CrashMatrixTest {
     @Test
     fun `M_CR_06`() = runTest {
         // M-CR-06: trust PASS but the ledger transaction not yet committed (phase DECIDING, no carrier).
-        // GREEN: re-decide from the PERSISTED durable evidence (the execution row) → recompute + unique insert
-        // ONCE, whose digest derives EXACTLY from that evidence. The digest is a NON-LITERAL (random per-test)
-        // value so a constant/hardcoded mint cannot fake a re-decision; the commit clock is the INJECTED
-        // virtual-clock value (exact), not a non-zero constant.
+        // FROZEN SEMANTIC (Sol R30 re-review): the GREEN writes execution + ledger in the SAME Room
+        // transaction (PlanRepository.recordTrustedCompletion), so "execution durable / ledger absent" is
+        // UNREACHABLE. The reachable pre-transaction crash is: DECIDING persisted, NEITHER execution NOR
+        // ledger row present. Recovery must RE-DECIDE: re-acquire a non-null, complete, dynamically-unique
+        // PASS bundle from the source, run TrustPolicy, then write execution + ledger atomically.
+        //
+        // The digest is a NON-LITERAL (random per-test) value so a call-and-discard / constant-digest mint
+        // cannot fake a re-decision; the commit clock is the INJECTED virtual-clock value (exact), not a
+        // non-zero constant.
         val planId = seedPlan(taskId = 42L)
         seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        // NO pre-seeded execution row — the crash happened BEFORE the atomic execution+ledger write.
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val execution = CellRebelExecution(
             executionId = "exec-77", attemptId = 77L, completionEvidenceWire = 1,
             evidencePayloadDigest = seededDigest, startedAt = 1L, classifiedAt = 2L
         )
-        db.attemptExecutionDao().insert(execution)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
@@ -228,10 +233,56 @@ class CrashMatrixTest {
         val entry = db.trustedQuotaDao().getByAttempt(77L)
         assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", entry)
         assertEquals("M-CR-06: the mint must bind the correct task", 42L, entry!!.taskId)
-        assertEquals("M-CR-06: the mint digest must derive EXACTLY from the durable execution evidence (read back, never hardcoded)", seededDigest, entry.evidenceDigest)
+        assertEquals("M-CR-06: the mint digest must derive EXACTLY from the re-acquired evidence (read back, never hardcoded)", seededDigest, entry.evidenceDigest)
         assertEquals("M-CR-06: the mint must commit with the INJECTED virtual-clock value (exact), never a non-zero constant", 4242L, entry.committedAt)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row (no unrelated rows)", 1, db.trustedQuotaDao().countAll())
         assertEquals("M-CR-06: the recovery must RE-OBSERVE the EXACT crashed attempt (not some other attempt, never forge from nothing)", listOf(77L), lastEvidence!!.completionRequests)
+        // The re-decide writes execution + ledger atomically, so the durable evidence the mint is bound to
+        // must ALSO be persisted (the §7.1 read-back source), not just a bare ledger row.
+        assertEquals("M-CR-06: the re-decide must persist the execution evidence it read (same atomic write)", 1, db.attemptExecutionDao().forAttempt(77L).size)
+    }
+
+    @Test
+    fun `M_CR_06_null`() = runTest {
+        // M-CR-06 negative polarity: a DECIDING crash whose completion evidence is unavailable (source
+        // returns null) must FAIL-CLOSED with ZERO mint — never forge a trusted entry from nothing.
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock(now = 4242L)
+        val backend = FakeBackend(executor, log)
+        // backend.evidence.completionEvidence stays null → acquireCompletionEvidence returns null.
+        buildEngine(planId, clock, backend).run()
+
+        assertEquals("M-CR-06 null polarity: null evidence must mint ZERO ledger rows (fail-closed)", 0, db.trustedQuotaDao().countAll())
+        assertEquals("M-CR-06 null polarity: null evidence must persist NO execution row", 0, db.attemptExecutionDao().forAttempt(77L).size)
+        val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
+        assertNotEquals("M-CR-06 null polarity: null evidence must NOT project to succeeded", "succeeded", recovered.status)
+    }
+
+    @Test
+    fun `M_CR_06_wrong_attempt`() = runTest {
+        // M-CR-06 negative polarity: the source returns evidence for a DIFFERENT attempt (caller-inconsistent
+        // context, INV-23) → the recovery must NOT mint for the crashed attempt (zero mint for attempt 77).
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock(now = 4242L)
+        val backend = FakeBackend(executor, log)
+        backend.evidence.completionEvidence = APlusCompletionEvidence(
+            execution = CellRebelExecution(
+                executionId = "exec-other", attemptId = 999L, completionEvidenceWire = 1,
+                evidencePayloadDigest = "ev-" + java.util.UUID.randomUUID().toString(), startedAt = 1L, classifiedAt = 2L
+            ),
+            completionEvidenceWire = 1, applyReceiptIntentHash = "h", applyReceiptLease = "lease-77"
+        )
+        buildEngine(planId, clock, backend).run()
+
+        assertEquals("M-CR-06 wrong-attempt polarity: wrong-attempt evidence must mint ZERO rows for the crashed attempt", 0, db.trustedQuotaDao().countAll())
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----

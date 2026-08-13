@@ -1346,3 +1346,29 @@ post-observe GREEN body; opaque lease carrier; 9-field digest vectors; releaseCo
 #3-contract-blocked.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.33 Round-32 — M-CR-06 reachable crash boundary + negative polarity (Sol R30 re-review answered)
+
+**Status.** Sol's R30 re-review (`0001786614438654`) — P1 未闭合: R31 still failed open. The frozen GREEN
+writes execution + ledger in the SAME Room transaction (`PlanRepository.recordTrustedCompletion`), so the
+"execution durable / ledger absent" seed is UNREACHABLE; and the oracle had no null / wrong-attempt
+polarity. R32 freezes a reachable recovery semantic + adds negative polarity. **Baseline: `228 tests /
+49 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **Frozen reachable semantic (pre-transaction crash)** — M-CR-06 now seeds DECIDING with NEITHER execution
+  NOR ledger row (the crash is BEFORE the atomic execution+ledger write), and the source returns a non-null,
+  complete, dynamically-unique PASS bundle. GREEN re-decides: re-acquire → TrustPolicy → write execution +
+  ledger atomically. Adds the assertion that the re-decide ALSO persists the execution row it read (same
+  atomic write), not just a bare ledger row.
+- **`null => zero mint` polarity** — new `M_CR_06_null`: null completion evidence must fail-closed with ZERO
+  ledger rows + ZERO execution rows, and the attempt must NOT project to `succeeded`.
+- **wrong-attempt polarity** — new `M_CR_06_wrong_attempt`: source returns evidence for a DIFFERENT attempt
+  (caller-inconsistent context, INV-23) → ZERO mint for the crashed attempt.
+
+**Remaining #3/GREEN-blocked (unchanged, declared):** §7.1 FULL evidence detail readback (baseline/marker/
+RUNNING/scores/timestamps) still dropped by the digest-only skeleton; M-CR-03..05 re-observe/classify/
+post-observe GREEN body; opaque lease carrier; 9-field digest vectors; releaseComplete shape — all
+#3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]
