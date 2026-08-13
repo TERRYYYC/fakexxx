@@ -40,5 +40,9 @@ data class DurableObservationRecord(
     val observedAtElapsedRealtimeMs: Long,
     val observedAtEpochMs: Long,
     val continuitySinceElapsedRealtimeMs: Long?,
+    val continuitySinceEpochMs: Long?,
+    /** JSON array of evidence ref strings (round-trippable, no lossy joinToString). */
+    val evidenceRefsJson: String,
+    /** Legacy evidenceRefs column kept for migration compatibility (semicolon-joined). */
     val evidenceRefs: String
 )

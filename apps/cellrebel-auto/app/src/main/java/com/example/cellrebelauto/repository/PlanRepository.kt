@@ -254,6 +254,8 @@ class PlanRepository(private val db: AppDatabase) {
                 observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
                 observedAtEpochMs = snapshot.observedAtEpochMs,
                 continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
+                continuitySinceEpochMs = null,
+                evidenceRefsJson = snapshot.evidenceRefs.joinToString(";"),
                 evidenceRefs = snapshot.evidenceRefs.joinToString(";")
             )
         )
@@ -394,6 +396,24 @@ class PlanRepository(private val db: AppDatabase) {
         db.attemptExecutionDao().insert(skeletonRow)
         // (2) Evaluate the §6.4 predicate for the returned decision. SKELETON mints nothing; GREEN
         //     inserts exactly one TrustedQuotaEntry here when PASS, atomically with the persist above.
+        TrustPolicy().evaluate(ctx)
+    }
+
+    /**
+     * R38 (Sol R37 P2-4): recordTrustedCompletion with an injected monotonic commit clock.
+     * The committedAt of the minted TrustedQuotaEntry MUST bind this caller-injected clock,
+     * never execution.completedAtElapsed or a default constant.
+     */
+    suspend fun recordTrustedCompletion(ctx: CompletionTrustContext, commitClockMs: Long): TrustDecision = db.withTransaction {
+        val skeletonRow = ctx.execution.copy(
+            baselineRunningState = null,
+            runningMarkerText = null,
+            runningDurationMs = null,
+            webBrowsingScore = null,
+            videoStreamingScore = null,
+            roundTimestampsElapsed = null
+        )
+        db.attemptExecutionDao().insert(skeletonRow)
         TrustPolicy().evaluate(ctx)
     }
 

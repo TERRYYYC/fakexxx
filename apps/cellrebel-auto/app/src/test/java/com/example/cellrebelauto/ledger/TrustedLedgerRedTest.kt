@@ -176,6 +176,7 @@ class TrustedLedgerRedTest {
     private val PRE_OBSERVED_AT_ELAPSED = 1000L    // < EXEC_STARTED_AT_ELAPSED
     private val POST_OBSERVED_AT_ELAPSED = 14000L  // > EXEC_COMPLETED_AT_ELAPSED (brackets the run)
     private val CONTINUITY_SINCE_ELAPSED = 500L    // <= PRE_OBSERVED_AT_ELAPSED; pre==post
+    private val REPO_COMMIT_CLOCK = 99999L // R38: distinctive injected commit clock (≠ completedAt, ≠ Long.MAX)
 
     private fun execution(wire: Int): CellRebelExecution = CellRebelExecution(
         executionId = "exec-$wire",
@@ -573,7 +574,7 @@ class TrustedLedgerRedTest {
             )
         )
 
-        val decision = repo.recordTrustedCompletion(ctx)
+        val decision = repo.recordTrustedCompletion(ctx, REPO_COMMIT_CLOCK)
         assertEquals("a §6.4-positive completion must report PASS", TrustDecision.PASS, decision)
 
         val minted = db.trustedQuotaDao().getByAttempt(aggregate.attemptId)
@@ -597,12 +598,12 @@ class TrustedLedgerRedTest {
             "minted evidenceDigest must bind the execution evidence, not a constant",
             DISTINCTIVE_DIGEST, entry.evidenceDigest
         )
-        // committedAt must be the COMMIT time (>= completion clock), not a constant and not < completion.
-        // Sol R35 P2-3: TrustedQuotaEntry.committedAt docs say "commit timestamp"; binding it == to the
-        // evidence completion clock is reverse-defined. The commit happens at or after completion.
-        assertTrue(
-            "minted committedAt must be the commit time (>= completedAtElapsed $EXEC_COMPLETED_AT_ELAPSED), not a constant",
-            entry.committedAt >= EXEC_COMPLETED_AT_ELAPSED
+        // committedAt must bind the injected monotonic commit clock (R38: exact, not >=).
+        // Sol R37 P2-4: Long.MAX_VALUE and wall-clock must FAIL. The exact value is a distinctive
+        // constant that only a GREEN body threading the injected clock can produce.
+        assertEquals(
+            "minted committedAt must bind the injected commit clock (99999), not >= or Long.MAX",
+            99999L, entry.committedAt
         )
         assertEquals(
             "exactly one TrustedQuotaEntry through the entrypoint",

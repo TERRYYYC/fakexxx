@@ -187,6 +187,8 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
                 `observedAtElapsedRealtimeMs` INTEGER NOT NULL,
                 `observedAtEpochMs` INTEGER NOT NULL,
                 `continuitySinceElapsedRealtimeMs` INTEGER,
+                `continuitySinceEpochMs` INTEGER,
+                `evidenceRefsJson` TEXT NOT NULL,
                 `evidenceRefs` TEXT NOT NULL
             )
             """.trimIndent()
