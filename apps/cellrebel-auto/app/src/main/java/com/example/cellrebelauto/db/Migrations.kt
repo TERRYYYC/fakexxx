@@ -74,7 +74,7 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
                 "ON `cellrebel_executions`(`attemptId`)"
         )
         db.execSQL(
-            "CREATE INDEX IF NOT EXISTS `index_cellrebel_executions_executionId` " +
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_cellrebel_executions_executionId` " +
                 "ON `cellrebel_executions`(`executionId`)"
         )
 
@@ -163,6 +163,56 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         db.execSQL(
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_unverified_attempt_records_attemptId` " +
                 "ON `unverified_attempt_records`(`attemptId`)"
+        )
+
+        // ---- Durable observation + completion receipt carriers (R37, Sol R36 P1-1: recovery must
+        //      re-decide from durable DB data, not a stale live source). Folded INTO v5 per INV-24. ----
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `durable_observation_records` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `attemptId` INTEGER NOT NULL,
+                `phase` TEXT NOT NULL,
+                `leaseId` TEXT NOT NULL,
+                `acceptedIntentHash` TEXT NOT NULL,
+                `coverage` TEXT NOT NULL,
+                `verificationLevel` TEXT NOT NULL,
+                `deliveryMode` TEXT NOT NULL,
+                `isMock` INTEGER,
+                `scheduleDecision` TEXT NOT NULL,
+                `effectiveLat` REAL,
+                `effectiveLng` REAL,
+                `environmentRevision` INTEGER NOT NULL,
+                `environmentFingerprint` TEXT NOT NULL,
+                `observedAtElapsedRealtimeMs` INTEGER NOT NULL,
+                `observedAtEpochMs` INTEGER NOT NULL,
+                `continuitySinceElapsedRealtimeMs` INTEGER,
+                `evidenceRefs` TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_durable_observation_records_attemptId_phase` " +
+                "ON `durable_observation_records`(`attemptId`, `phase`)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_durable_observation_records_attemptId` " +
+                "ON `durable_observation_records`(`attemptId`)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `durable_completion_receipts` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `attemptId` INTEGER NOT NULL,
+                `completionEvidenceWire` INTEGER NOT NULL,
+                `acceptedIntentHash` TEXT NOT NULL,
+                `leaseId` TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_durable_completion_receipts_attemptId` " +
+                "ON `durable_completion_receipts`(`attemptId`)"
         )
     }
 }

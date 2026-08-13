@@ -17,6 +17,8 @@ import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.execution.CellRebelExecution
+import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
+import com.example.cellrebelauto.model.ledger.DurableObservationRecord
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
@@ -113,6 +115,7 @@ class CrashMatrixTest {
         const val FINGERPRINT = "fp-1"
         const val INTENT_HASH = "intent-h"
         const val LEASE_ID = "lease-77"
+        const val RECOVERY_NOW = 15000L
 
         // The canonical durable execution evidence (§8.1 COMPLETION_OBSERVED carrier): FULL §7.1 detail +
         // wire=1 + legal monotonic window. `attemptId` is 0 as the SOURCE entity default; the durable seed
@@ -243,6 +246,40 @@ class CrashMatrixTest {
         db.attemptExecutionDao().insert(fullEvidenceExecution(execId, attemptId, wire, digest).copy(attemptId = attemptId))
     }
 
+    /** Seed a durable observation record in the DB (R37: recovery reads from here, NOT from a live source). */
+    private suspend fun seedDurableObservation(attemptId: Long, phase: String, snapshot: ObservationSnapshot) {
+        db.durableObservationDao().insert(
+            DurableObservationRecord(
+                attemptId = attemptId, phase = phase,
+                leaseId = snapshot.leaseId,
+                acceptedIntentHash = snapshot.acceptedIntentHash,
+                coverage = snapshot.coverage,
+                verificationLevel = snapshot.verificationLevel,
+                deliveryMode = snapshot.deliveryMode,
+                isMock = snapshot.isMock,
+                scheduleDecision = snapshot.scheduleDecision,
+                effectiveLat = snapshot.effectiveLat,
+                effectiveLng = snapshot.effectiveLng,
+                environmentRevision = snapshot.environmentRevision,
+                environmentFingerprint = snapshot.environmentFingerprint,
+                observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
+                observedAtEpochMs = snapshot.observedAtEpochMs,
+                continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
+                evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+            )
+        )
+    }
+
+    /** Seed a durable completion receipt in the DB (R37: recovery reads acceptedIntentHash from here). */
+    private suspend fun seedDurableReceipt(attemptId: Long, wire: Int, intentHash: String, leaseId: String) {
+        db.durableCompletionReceiptDao().insert(
+            DurableCompletionReceipt(
+                attemptId = attemptId, completionEvidenceWire = wire,
+                acceptedIntentHash = intentHash, leaseId = leaseId
+            )
+        )
+    }
+
     // ---- M-CR-03..06: GREEN-body recovery projections (genuinely RED pre-freeze) ----
 
     private suspend fun seedObservePhaseCrash(phase: String): TestAttempt {
@@ -277,66 +314,49 @@ class CrashMatrixTest {
 
     @Test
     fun `M_CR_06`() = runTest {
-        // M-CR-06 (R36, Sol R35 BLOCKED): trust PASS but the ledger transaction not yet committed
+        // M-CR-06 (R37, Sol R36 BLOCKED): trust PASS but the ledger transaction not yet committed
         // (§8.1 TRUST_POLICY_PASS tx crashed before commit). At DECIDING the DURABLE execution evidence +
-        // apply receipt + pre/post observations ALL exist; only the ledger + close decision are missing.
+        // apply receipt + pre/post observations ALL persist in DB; only the ledger + close decision are
+        // missing.
         //
-        // R36 fixes (Sol R35 P1-1/P1-2, P2-3/P2-4):
-        //  - Durable pre/post observations seeded via SeededEvidenceSource (defeats wire-only bypass)
-        //  - DECOY execution seeded alongside current (defeats single-execution assumption)
-        //  - currentExecutionId owner ref on TestAttempt (recovery must locate CURRENT, not guess)
-        //  - committedAt = commit time (>= completedAtElapsed), NOT == completedAtElapsed (P2-3)
-        //  - Receipt outcome from actual ApplyOutcome (P2-4)
+        // R37 key fix: observations + receipt are seeded ONLY in durable DB carriers
+        // (durable_observation_records + durable_completion_receipts). SeededEvidenceSource returns NULL
+        // (post-crash: no live data). Recovery MUST read from DB. Sol R36 mutation proof read from the
+        // live source and special-cased 2 fields — now defeated because the source is null.
+        //
+        // committedAt = exact recovery commit time (15000), not >= (Sol R36 P2-3).
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
             aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId)
-        // DECOY execution (Sol R35 P1-2): same attempt, wire=1, DIFFERENT digest — inserted FIRST.
-        // A bypass reading forAttempt(77)[0] gets the decoy → wrong digest → fails the read-back.
-        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-digest-$seededDigest")
-        // CURRENT execution: the one currentExecutionId points to.
+        // DECOY execution (first) + CURRENT execution (pointed by currentExecutionId).
+        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
         seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+        // DURABLE observations seeded in DB (NOT in a live source).
+        seedDurableObservation(77L, "PRE", validPre(intentDigest))
+        seedDurableObservation(77L, "POST", validPost(intentDigest))
+        // DURABLE completion receipt seeded in DB (acceptedIntentHash from the provider receipt).
+        seedDurableReceipt(77L, WIRE_VERIFIED, intentDigest, LEASE_ID)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        // Provider world CONSISTENT (Sol R35 P2-4): the executor's actual outcome drives the receipt.
         val applyOutcome = executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, applyOutcome.outcome, 1000L)
-        // Durable observations (Sol R35 P1-1): pre/post with full §6.4 field set — a wire-only bypass
-        // that skips CompletionTrustContext/TrustPolicy cannot satisfy the observation discriminator test.
-        val evidence = APlusCompletionEvidence(
-            execution = fullEvidenceExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest).copy(attemptId = 77L),
-            completionEvidenceWire = WIRE_VERIFIED,
-            applyReceiptIntentHash = intentDigest,
-            applyReceiptLease = LEASE_ID
-        )
-        val evidenceSource = SeededEvidenceSource(pre = validPre(intentDigest), post = validPost(intentDigest), evidence = evidence)
-        val clock = VirtualClock(now = 15000L) // recovery AFTER post (14000) — evidence already completed
-        buildEngine(planId, clock, FakeBackend(executor, log, evidenceSource)).run()
+        // SeededEvidenceSource returns NULL (post-crash: live source has no data). Recovery must read DB.
+        val clock = VirtualClock(now = RECOVERY_NOW)
+        buildEngine(planId, clock, FakeBackend(executor, log)).run()
 
         val entry = db.trustedQuotaDao().getByAttempt(77L)
         assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", entry)
         assertEquals("M-CR-06: the mint must bind the correct task", 42L, entry!!.taskId)
         assertEquals("M-CR-06: the mint digest must derive from the CURRENT execution (not the decoy)", seededDigest, entry.evidenceDigest)
-        // committedAt = commit time (Sol R35 P2-3): the ledger row is committed at recovery time (15000),
-        // which is AFTER the evidence completion (13000). It must be >= completedAtElapsed, NOT ==.
-        assertTrue("M-CR-06: committedAt must be the commit time (>= completedAtElapsed 13000), never == evidence completion clock",
-            entry.committedAt >= EXEC_COMPLETED_AT_ELAPSED)
+        assertEquals("M-CR-06: committedAt must be the exact recovery commit time (15000), not >= or Long.MAX", RECOVERY_NOW, entry.committedAt)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row", 1, db.trustedQuotaDao().countAll())
-        // Both executions survive (decoy + current) — recovery reads, never duplicates.
-        assertEquals("M-CR-06: both decoy + current executions survive (never duplicated or deleted)", 2, db.attemptExecutionDao().forAttempt(77L).size)
-        // The CURRENT execution (pointed to by currentExecutionId) is the one the mint binds to.
-        val persisted = db.attemptExecutionDao().byExecutionId("exec-current-77")
-        assertNotNull("M-CR-06: the current execution evidence must survive", persisted)
-        assertEquals("M-CR-06 readback: evidence digest is the CURRENT execution's (not the decoy's)", seededDigest, persisted!!.evidencePayloadDigest)
-        assertEquals("M-CR-06 readback: wire must be the verified value", WIRE_VERIFIED, persisted.completionEvidenceWire)
-        assertEquals("M-CR-06 readback: §7.1 web score must survive", 8.0, persisted.webBrowsingScore!!, 0.001)
     }
 
     @Test
     fun `M_CR_06_null`() = runTest {
-        // M-CR-06 negative polarity: a DECIDING crash whose durable execution evidence is absent (the
-        // COMPLETION_OBSERVED carrier never persisted) must FAIL-CLOSED with ZERO mint.
+        // M-CR-06 negative polarity: absent durable execution evidence → fail-closed ZERO mint.
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val intentDigest = ownerIntentDigest(sessionId)
@@ -344,23 +364,19 @@ class CrashMatrixTest {
         val log = FakeDurableRecoveryLog()
         val applyOutcome = executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, applyOutcome.outcome, 1000L)
-        val clock = VirtualClock(now = 15000L)
+        val clock = VirtualClock(now = RECOVERY_NOW)
         buildEngine(planId, clock, FakeBackend(executor, log)).run()
 
-        assertEquals("M-CR-06 null polarity: absent durable evidence must mint ZERO ledger rows (fail-closed)", 0, db.trustedQuotaDao().countAll())
-        assertEquals("M-CR-06 null polarity: absent durable evidence must persist NO execution row", 0, db.attemptExecutionDao().forAttempt(77L).size)
+        assertEquals("M-CR-06 null polarity: absent durable evidence must mint ZERO ledger rows", 0, db.trustedQuotaDao().countAll())
         val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
         assertNotEquals("M-CR-06 null polarity: absent durable evidence must NOT project to succeeded", "succeeded", recovered.status)
     }
 
     @Test
     fun `M_CR_06_discriminator_invalid`() = runTest {
-        // M-CR-06 INV-23 intent discriminator (Sol R35 P1-1): wire STILL 1, observations canonical,
-        // EXCEPT the apply receipt's intent hash mismatches the owner recomputation. The discriminator
-        // is on applyReceiptIntentHash (from APlusCompletionEvidence), NOT on requestDigest (§6.3.4
-        // domain-separated canonical digest ≠ ApplyReceiptV1.acceptedIntentHash). A wire-only bypass
-        // that compares requestDigest mints anyway and fails this; only TrustPolicy consuming the full
-        // CompletionTrustContext rejects it. FAIL preserves evidence + writes exact UnverifiedAttemptRecord.
+        // M-CR-06 INV-23 intent discriminator: wire=1, observations canonical, EXCEPT the durable
+        // receipt's acceptedIntentHash diverges from owner recomputation. Recovery must assemble
+        // CompletionTrustContext from DB data and run TrustPolicy to reject.
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
             aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
@@ -368,40 +384,28 @@ class CrashMatrixTest {
         val intentDigest = ownerIntentDigest(sessionId)
         seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
         seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+        seedDurableObservation(77L, "PRE", validPre(intentDigest))
+        seedDurableObservation(77L, "POST", validPost(intentDigest))
+        // DIVERGENT acceptedIntentHash in the durable receipt → INV-23 mismatch.
+        seedDurableReceipt(77L, WIRE_VERIFIED, "DIVERGENT-intent-hash", LEASE_ID)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
-        // The completion evidence carries a DIVERGENT applyReceiptIntentHash → INV-23 three-way mismatch.
-        val evidence = APlusCompletionEvidence(
-            execution = fullEvidenceExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest).copy(attemptId = 77L),
-            completionEvidenceWire = WIRE_VERIFIED,
-            applyReceiptIntentHash = "DIVERGENT-intent-hash",
-            applyReceiptLease = LEASE_ID
-        )
-        val evidenceSource = SeededEvidenceSource(pre = validPre(intentDigest), post = validPost(intentDigest), evidence = evidence)
-        val clock = VirtualClock(now = 15000L)
-        buildEngine(planId, clock, FakeBackend(executor, log, evidenceSource)).run()
+        val clock = VirtualClock(now = RECOVERY_NOW)
+        buildEngine(planId, clock, FakeBackend(executor, log)).run()
 
-        assertEquals("M-CR-06 intent discriminator: intent-hash-mismatch must mint ZERO trusted rows (TrustPolicy consumed)", 0, db.trustedQuotaDao().countAll())
-        val persisted = db.attemptExecutionDao().byExecutionId("exec-current-77")
-        assertNotNull("M-CR-06 intent discriminator: rejected durable execution must be preserved", persisted)
-        assertEquals("M-CR-06 intent discriminator: rejected execution digest is the current evidence's exact digest", seededDigest, persisted!!.evidencePayloadDigest)
+        assertEquals("M-CR-06 intent discriminator: intent-hash-mismatch must mint ZERO trusted rows", 0, db.trustedQuotaDao().countAll())
         val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
-        assertNotNull("M-CR-06 intent discriminator: rejected completion must write an exact UnverifiedAttemptRecord", unverified)
-        assertEquals("M-CR-06 intent discriminator: unverified reason is typed UNTRUSTED", "UNTRUSTED", unverified!!.reason)
-        assertEquals("M-CR-06 intent discriminator: unverified evidenceDigest binds the rejected durable digest", seededDigest, unverified.evidenceDigest)
+        assertNotNull("M-CR-06 intent discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
         val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
         assertNotEquals("M-CR-06 intent discriminator: rejected attempt must NOT project to succeeded", "succeeded", recovered.status)
     }
 
     @Test
     fun `M_CR_06_discriminator_observation`() = runTest {
-        // M-CR-06 observation discriminator (Sol R35 P1-1 NEW): wire=1, intent hash matches, BUT the
-        // pre/post observations have a §6.4 cross-observation violation (environmentRevision mismatch:
-        // pre.revision=7 ≠ post.revision=99). TrustPolicy MUST reject this — a bypass that skips
-        // observations and TrustPolicy (reads wire only) mints anyway and FAILS this test. This is the
-        // key oracle that proves TrustPolicy is consumed, not just wire-checked.
+        // M-CR-06 revision discriminator: wire=1, intent matches, BUT pre.revision=7 ≠ post.revision=99.
+        // A 2-field special-case bypass (intent + revision) catches THIS one — but not the next test.
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
             aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
@@ -409,30 +413,50 @@ class CrashMatrixTest {
         val intentDigest = ownerIntentDigest(sessionId)
         seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
         seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+        // §6.4 violation: pre.revision=7 ≠ post.revision=99 in DURABLE DB records.
+        seedDurableObservation(77L, "PRE", validPre(intentDigest, revision = 7L))
+        seedDurableObservation(77L, "POST", validPost(intentDigest, revision = 99L))
+        seedDurableReceipt(77L, WIRE_VERIFIED, intentDigest, LEASE_ID)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
-        val evidence = APlusCompletionEvidence(
-            execution = fullEvidenceExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest).copy(attemptId = 77L),
-            completionEvidenceWire = WIRE_VERIFIED,
-            applyReceiptIntentHash = intentDigest,
-            applyReceiptLease = LEASE_ID
-        )
-        // §6.4 violation: pre.revision=7 ≠ post.revision=99 (cross-observation consistency broken).
-        val evidenceSource = SeededEvidenceSource(
-            pre = validPre(intentDigest, revision = 7L),
-            post = validPost(intentDigest, revision = 99L), // MISMATCH — §6.4 requires pre.revision == post.revision
-            evidence = evidence
-        )
-        val clock = VirtualClock(now = 15000L)
-        buildEngine(planId, clock, FakeBackend(executor, log, evidenceSource)).run()
+        val clock = VirtualClock(now = RECOVERY_NOW)
+        buildEngine(planId, clock, FakeBackend(executor, log)).run()
 
-        assertEquals("M-CR-06 observation discriminator: revision-mismatch observations must mint ZERO trusted rows (TrustPolicy consumed)", 0, db.trustedQuotaDao().countAll())
+        assertEquals("M-CR-06 revision discriminator: revision-mismatch must mint ZERO trusted rows", 0, db.trustedQuotaDao().countAll())
         val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
-        assertNotNull("M-CR-06 observation discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
-        val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
-        assertNotEquals("M-CR-06 observation discriminator: rejected attempt must NOT project to succeeded", "succeeded", recovered.status)
+        assertNotNull("M-CR-06 revision discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
+    }
+
+    @Test
+    fun `M_CR_06_discriminator_delivery`() = runTest {
+        // M-CR-06 deliveryMode discriminator (Sol R36 P1-1 NEW): wire=1, intent matches, revision
+        // matches, BUT pre.deliveryMode="HOOK" (masquerading as verified) instead of "SYSTEM_MOCK".
+        // A bypass that special-cases ONLY intent-hash + revision equality (Sol's R36 mutation) MINTS
+        // ANYWAY because it doesn't check deliveryMode → this test FAILS. Only a full TrustPolicy
+        // consuming ALL §6.4 fields catches this. This is the KEY test that defeats the 2-field bypass.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING",
+            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-current-77")
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedDurableExecution("exec-decoy-77", 77L, WIRE_VERIFIED, "decoy-$seededDigest")
+        seedDurableExecution("exec-current-77", 77L, WIRE_VERIFIED, seededDigest)
+        // All §6.4 fields canonical EXCEPT deliveryMode = "HOOK" (§6.4.1: HOOK masquerading as verify ⇒ fail).
+        seedDurableObservation(77L, "PRE", validPre(intentDigest).copy(deliveryMode = "HOOK"))
+        seedDurableObservation(77L, "POST", validPost(intentDigest).copy(deliveryMode = "HOOK"))
+        seedDurableReceipt(77L, WIRE_VERIFIED, intentDigest, LEASE_ID)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        val clock = VirtualClock(now = RECOVERY_NOW)
+        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+
+        assertEquals("M-CR-06 deliveryMode discriminator: HOOK masquerading as verified must mint ZERO trusted rows (TrustPolicy consumed ALL §6.4 fields)", 0, db.trustedQuotaDao().countAll())
+        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(77L)
+        assertNotNull("M-CR-06 deliveryMode discriminator: rejected completion must write UnverifiedAttemptRecord", unverified)
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----

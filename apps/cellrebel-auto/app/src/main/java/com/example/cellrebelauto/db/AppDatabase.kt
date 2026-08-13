@@ -17,6 +17,8 @@ import com.example.cellrebelauto.model.plan.LegacyCompletionSnapshot
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
+import com.example.cellrebelauto.model.ledger.DurableObservationRecord
+import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
 
 /**
  * Room database singleton, version 5 (Issue #5: trusted ledger + A+ execution tables).
@@ -43,7 +45,9 @@ import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
         AutoAuditEvent::class,
         LegacyCompletionSnapshot::class,
         ProviderPairingRecord::class,
-        UnverifiedAttemptRecord::class
+        UnverifiedAttemptRecord::class,
+        DurableObservationRecord::class,
+        DurableCompletionReceipt::class
     ],
     version = 5,
     exportSchema = true
@@ -63,6 +67,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun legacyCompletionDao(): LegacyCompletionDao
     abstract fun providerPairingDao(): ProviderPairingDao
     abstract fun unverifiedAttemptRecordDao(): UnverifiedAttemptRecordDao
+    abstract fun durableObservationDao(): DurableObservationDao
+    abstract fun durableCompletionReceiptDao(): DurableCompletionReceiptDao
 
     companion object {
         @Volatile

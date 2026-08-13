@@ -344,8 +344,14 @@ class AutomationEngine(
                     }
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.PRE_OBSERVATION_OK) ?: aplusState
                     planRepository.markAplusState(attemptId, "PRE_OBSERVED")
+                    // R37 (Sol R36 P1-1): persist pre-observation to durable storage BEFORE CellRebel start
+                    // so crash recovery re-decides from durable data, not a stale live source.
+                    planRepository.persistObservation(attemptId, "PRE", preObservation)
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.START_CELLREBEL) ?: aplusState
                     planRepository.markAplusState(attemptId, "CELLREBEL_START_PENDING")
+                    // R37 (Sol R36 P1-2): persist current executionId BEFORE external start (§8.1 START).
+                    val currentExecId = "exec-${attemptId}-${nowMs()}"
+                    planRepository.markCurrentExecutionId(attemptId, currentExecId)
                     updateState(AutomationState.LAUNCHING_CELLREBEL)
                     val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
                         planRepository.markAttemptRunning(attemptId, runningAt)
@@ -383,6 +389,8 @@ class AutomationEngine(
                                 return@coroutineScope
                             }
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.POST_OBSERVATION_OK) ?: aplusState
+                            // R37 (Sol R36 P1-1): persist post-observation to durable storage BEFORE DECIDING.
+                            planRepository.persistObservation(attemptId, "POST", postObservation)
                             // §8.1: POST_OBSERVATION_OK → DECIDING is persisted right after the observation succeeds
                             // (Sol round-23 P1-1).
                             planRepository.markAplusState(attemptId, "DECIDING")
@@ -396,6 +404,11 @@ class AutomationEngine(
                                 aplusPause("completion evidence unavailable for attempt $attemptId")
                                 return@coroutineScope
                             }
+                            // R37 (Sol R36 P1-1): persist completion receipt to durable storage BEFORE trust decision.
+                            planRepository.persistCompletionReceipt(
+                                attemptId, evidence.completionEvidenceWire,
+                                evidence.applyReceiptIntentHash, evidence.applyReceiptLease
+                            )
                             val trustCtx = CompletionTrustContext(
                                 execution = evidence.execution.copy(attemptId = attemptId),
                                 completionEvidenceWire = evidence.completionEvidenceWire,
