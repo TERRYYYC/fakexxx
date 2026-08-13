@@ -248,6 +248,52 @@ object ProviderRuntime {
     }
 
     /**
+     * Callers that reached the provider, were resolved, and were refused for not
+     * being paired (§6.5). Reading this is how an operator learns that anything
+     * is waiting at all.
+     *
+     * [CallerAuthorizer] records the candidate BEFORE it throws NOT_PAIRED, so a
+     * refusal is not a dead end — it leaves behind exactly the identity an
+     * operator needs to judge. Without a way to read that list, the fail-closed
+     * default is permanent: nothing can ever be approved, and every handshake
+     * ends the same way forever.
+     */
+    fun pendingCallers(context: Context): List<PendingPairingCandidate> {
+        handler(context) // boot if this is the first touch of the provider
+        val kv = kvRef ?: return emptyList()
+        // DurablePairingStore is a stateless view over the kv, so building one
+        // here shares the single writer rather than forking a second one — a
+        // second FileDurableKv over the same directory is the split-brain §6.6 L3
+        // forbids, and it would not be visible until the two disagreed.
+        return DurablePairingStore(kv).pendingCandidates()
+    }
+
+    /**
+     * Operator approval of ONE named caller identity (§6.5 / §8.5).
+     *
+     * Both halves of the principal must be supplied and must match a recorded
+     * candidate exactly. That is the whole point, not defensive coding: §6.5
+     * forbids silent or automatic TOFU, and an "approve whatever is waiting"
+     * entry point IS TOFU — it just moves the trust decision from the code to
+     * whoever happens to call first. Requiring the signer digest means the
+     * operator had to look at the identity being approved.
+     *
+     * Returns false when nothing matches, so approving a stale or mistyped
+     * identity fails loudly instead of silently creating a pairing for a caller
+     * that never appeared.
+     */
+    fun approveCaller(context: Context, applicationId: String, signerDigest: String): Boolean {
+        handler(context)
+        val kv = kvRef ?: return false
+        val store = DurablePairingStore(kv)
+        val candidate = store.pendingCandidates().firstOrNull {
+            it.callerApplicationId == applicationId && it.currentSignerDigest == signerDigest
+        } ?: return false
+        store.approve(candidate, SystemClock.elapsedRealtime())
+        return true
+    }
+
+    /**
      * Called on orderly teardown of the provider service. Without this, [consume]
      * below can only ever answer false.
      *
