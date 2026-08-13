@@ -528,4 +528,19 @@ class RecoveryIdempotencyRedTest {
         assertNull("a lease-only (partial) index must fail closed, never a success replay", receipt)
         assertTrue("zero provider call", executor.releaseCallsFor(1L).isEmpty())
     }
+
+    @Test
+    fun `release with divergent key and lease indexes fails closed`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceiptKeyOnly(idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-key", outcome = "RELEASED", createdAt = 1000L)
+        log.seedReleaseReceiptLeaseOnly(idempotencyKey = "r-other", leaseId = "lease-1", releaseDigest = "rd-lease", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-key", now = 2000L)
+
+        assertNull("divergent key/lease indexes must fail closed (never a success replay)", receipt)
+        assertTrue("zero provider call", executor.releaseCallsFor(1L).isEmpty())
+        assertEquals("zero release effect", 0, executor.releaseEffectCount(1L))
+    }
 }

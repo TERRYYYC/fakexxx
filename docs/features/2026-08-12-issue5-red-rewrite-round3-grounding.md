@@ -1063,3 +1063,26 @@ owner), CLOSED→generic-terminal single-transaction window, M-CR-03..05 re-preo
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.21 Round-20 — foreign-carrier decoy + divergent-index + preservation oracle (Sol round-19 advisory answered)
+
+**Status.** Sol's round-19 advisory (`8dcdc4c`). R20 adds the three oracle fixtures that make the R19
+carrier/release fixes actually observable. **Baseline: `217 tests / 45 failed / 0 errors`, lintDebug +
+assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repairs.**
+- **foreign-attempt decoy** — a decoy `TrustedQuotaEntry(attemptId=99)` is seeded alongside the recovered
+  attempt 77 (no carrier): the recovery must NOT let the foreign carrier fake-green 77 (assert not succeeded).
+- **divergent dual-index** — a key-index and lease-index holding DIFFERENT receipts (both non-null, divergent)
+  is fail-closed with zero provider call/effect.
+- **preservation/count/legacy-zero** — the M-CR-07 test now asserts the trusted ledger count stays 1 (no
+  re-mint), the carrier is preserved unchanged, and the legacy counter stays 0.
+
+**Remaining owner-red (next SHA):** gate-held second-restart custody (durable `ADVANCE_PENDING`/checkpoint),
+CLOSED→generic-terminal single-transaction window, `CrashMatrixTest::M_CR_03..08` frozen entry, and the
+Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]
