@@ -836,58 +836,73 @@ import re, sys
 spec, kt = open(sys.argv[1], encoding="utf-8").read(), open(sys.argv[2], encoding="utf-8").read()
 
 consts = dict(re.findall(r'const val (DOMAIN_[A-Z_]+): String = "([^"]+)"', kt))
-if len(consts) != 3:
-    print("  FAIL  7b: expected 3 DOMAIN_* constants in the module, found %d" % len(consts))
-    sys.exit(1)
 
-# Each fenced block that defines a preimage must carry a domain line.
-# Fences carry an optional language tag (```text) and blocks open with either
-# `canonical = ` or `domain = `. Accepting only a bare fence missed the intent
-# block entirely -- the third time in this file that a guard's pattern was
-# narrower than the notation the document actually uses. Each time the symptom
-# was the same: it reported absence where there was presence.
-blocks = re.findall(r"```(?:[a-z]*)\n((?:canonical|domain)\s*[:=].*?)```", spec, re.S)
-if len(blocks) < 3:
-    print("  FAIL  7b: found %d preimage block(s); the module defines 3 domains, so the"
-          " block matcher is not seeing them all" % len(blocks))
-    sys.exit(1)
-found = []
-for b in blocks:
-    # BOTH notations are in use: `domain = "..."` (receipt) and
-    # `domain : ASCII "..."` (intent). The first version of this check accepted
-    # only `=` and therefore reported the intent block as declaring no domain --
-    # a guard whose pattern is narrower than the document's real notation
-    # reports absence where there is presence. That is the §5b failure repeated
-    # by the person who had just fixed §5b.
-    m = re.search(r'domain\s*[:=]\s*(?:ASCII\s+)?"([^"]+)"', b)
-    first = next((l.strip() for l in b.splitlines() if l.strip() and not l.strip().startswith("canonical")), "")
-    found.append((m.group(1) if m else None, first[:60]))
+# A preimage block is any fenced block that defines a digest over framed fields.
+# Anchoring on how the block OPENS was the mistake: §6.7.3 opens `canonical =`,
+# §6.3.1 opens `canonical = uint32be(...)`, and §6.3.4 opens `canonicalRequest =`
+# with its domains written as an `op -> "..."` mapping. Three notations, and the
+# first version of this guard recognised one of them while printing
+# "3 canonical preimage block(s)" as a PASS -- a count measured in the units of
+# its own blind spot, which reads exactly like coverage.
+# A block qualifies if it either builds a canonical* preimage OR states a
+# <name>Digest = lowercase hex line. Requiring BOTH silently dropped the
+# advance-receipt block, which opens straight at `domain = ` with no
+# `canonical =` line -- the fifth time in one sitting that tightening this
+# matcher lost a block it was supposed to cover. Two alternatives, not a
+# conjunction.
+blocks = [b for b in re.findall(r"```(?:[a-z]*)\n(.*?)```", spec, re.S)
+          if re.search(r"^\s*canonical\w*\s*=", b, re.M)
+          or re.search(r"Digest = lowercase hex", b)]
 
-missing = [f for d, f in found if d is None]
-declared = {d for d, _ in found if d}
+DOMAIN_DECL = re.compile(r'domain[^\n]*?[:=][^\n]*?"([^"]+)"|→\s*"([^"]+)"')
 
 bad = 0
-if missing:
+inventory = set()
+for b in blocks:
+    found = {m.group(1) or m.group(2) for m in DOMAIN_DECL.finditer(b)}
+    if not found:
+        first = next((l.strip() for l in b.splitlines() if l.strip()), "")
+        print("  FAIL  7b: a canonical preimage block declares no domain; it opens %r" % first[:60])
+        bad += 1
+    inventory |= found
+
+if not blocks:
+    print("  FAIL  7b: no canonical preimage block was recognised at all")
     bad += 1
-    for f in missing:
-        print("  FAIL  7b: a canonical preimage block declares no domain; first field is %r" % f)
-        print("            §6.3.1 freezes the domain as the FIRST framed field, and the module")
-        print("            frames one. A provider implementing from this block computes a")
-        print("            different digest than the module for identical field values.")
 
-for d in declared:
-    if d not in consts.values():
-        bad += 1
-        print("  FAIL  7b: canonical declares domain %r, which no module constant defines" % d)
-
+# Module constants must be a SUBSET of what canonical declares. apply/release
+# are canonical-only (provider-side, no module constant), so the reverse
+# containment is deliberately not asserted -- but every module constant must be
+# backed by canonical text, or the module froze a domain the contract never did.
 for name, val in sorted(consts.items()):
-    if val not in declared:
+    if val not in inventory:
+        print("  FAIL  7b: module %s = %r is declared by no canonical preimage block" % (name, val))
         bad += 1
-        print("  FAIL  7b: module %s = %r is never declared by any canonical preimage block" % (name, val))
+
+# FROZEN INVENTORY. "every block declares at least one domain" is not enough:
+# §6.3.4 declares two, so deleting `apply` leaves `release` behind and the
+# per-block check stays green while a frozen wire-level identity vanishes. The
+# set is pinned here so removing OR renaming any single domain goes red, and so
+# that adding one is a deliberate edit to this list rather than a silent widening.
+EXPECTED = {
+    "fakexxx:contract:v1:intent",
+    "fakexxx:contract:v1:advance-request",
+    "fakexxx:contract:v1:advance-receipt",
+    "fakexxx.contract.v1.apply",
+    "fakexxx.contract.v1.release",
+}
+for gone in sorted(EXPECTED - inventory):
+    print("  FAIL  7b: frozen domain %r is no longer declared by any canonical block" % gone)
+    bad += 1
+for extra in sorted(inventory - EXPECTED):
+    print("  FAIL  7b: canonical declares %r, which is not in the frozen inventory;"
+          " adding a domain must be an explicit edit to 7b" % extra)
+    bad += 1
 
 if not bad:
-    print("  PASS  %d canonical preimage block(s) declare domains matching all 3 module constants"
-          % len(found))
+    print("  PASS  %d preimage block(s), %d domain(s) frozen in canonical: %s"
+          % (len(blocks), len(inventory), ", ".join(sorted(inventory))))
+    print("  PASS  all %d module DOMAIN_* constants are backed by canonical text" % len(consts))
 sys.exit(1 if bad else 0)
 PY
 then

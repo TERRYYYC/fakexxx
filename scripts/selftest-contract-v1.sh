@@ -252,6 +252,16 @@ neg "N-13 a canonical preimage block declares no domain" "$SPEC" \
 '  （本用例移除了 domain 行）' \
   "declares no domain"
 
+# N-14 is the case Terra required: tamper with a canonical-only domain
+# (apply/release have no module constant, so nothing else in the suite covers
+# them) and 7b must go red. Its predecessor could not: the per-block check only
+# asked for at least ONE domain, and §6.3.4 declares two, so deleting `apply`
+# left `release` behind and the guard stayed green over a vanished wire identity.
+neg "N-14 a frozen canonical-only domain is renamed" "$SPEC" \
+'apply   → "fakexxx.contract.v1.apply"' \
+'apply   → "fakexxx.contract.v1.APPLY"' \
+  "is no longer declared by any canonical block"
+
 printf '\n== mutation (disable one guard; its case must stop reporting) ==\n'
 
 # Each case above proves the gate is red while the drift is present. None of them
@@ -382,11 +392,18 @@ mut "M-9 5 strict table parse catches N-12" \
   "duplicate row for LEASE_CONFLICT"
 
 mut "M-10 7b domain presence check catches N-13" \
-  's/missing = \[f for d, f in found if d is None\]/missing = []/' \
+  's/if not found:/if False and not found:/' \
   "$SPEC" \
 'domain = "fakexxx:contract:v1:advance-request"（**首个 framed 字段**，§6.3.1）' \
 '  （本用例移除了 domain 行）' \
   "declares no domain"
+
+mut "M-11 7b frozen inventory catches N-14" \
+  's/for gone in sorted(EXPECTED - inventory):/for gone in sorted(set()):/' \
+  "$SPEC" \
+'apply   → "fakexxx.contract.v1.apply"' \
+'apply   → "fakexxx.contract.v1.APPLY"' \
+  "is no longer declared by any canonical block"
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
