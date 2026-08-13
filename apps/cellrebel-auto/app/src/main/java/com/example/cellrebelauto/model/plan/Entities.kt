@@ -98,7 +98,14 @@ data class TestAttempt(
     val latitude: Double,
     val longitude: Double,
     // # F003：阶段跳过审计标记（gps_skipped / test_skipped / null=无跳过）
-    val stageNotes: String? = null
+    val stageNotes: String? = null,
+    // # R9（Sol round-8 P1-3）：当前 §8.1 操作阶段（CREATED/APPLY_PENDING/…/RELEASE_PENDING/CLOSED）。
+    // # null = 尚未进入 A+ 生命周期（legacy / pre-BEGIN_APPLY）。§7.1：Attempt 拥有"当前 operation"，
+    // # 恢复据此区分 apply 在飞 vs release 在飞 vs 从未派发 apply（绝不从 append-only audit 反推）。
+    val aplusState: String? = null,
+    // # R9（Sol round-8 P1-4）：apply 返回的 lease id（provider 单调值，不可派生，必须持久）。release
+    // # 收敛与 §8.4 lease 冲突谓词都绑定它。null = 尚未取得 lease。
+    val aplusLeaseId: String? = null
 )
 
 /**

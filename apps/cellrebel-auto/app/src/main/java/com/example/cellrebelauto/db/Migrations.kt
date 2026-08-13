@@ -143,3 +143,41 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         )
     }
 }
+
+/**
+ * v5 → v6 (Issue #5 R9, Sol round-8 P1-3/P2): persists the Attempt's authoritative "当前 operation"
+ * and adds the independent unverified-completion carrier.
+ *
+ *  - `test_attempts.aplusState` = the current §8.1 phase (null = pre-BEGIN_APPLY / legacy). Recovery
+ *    now distinguishes apply-in-flight vs release-in-flight vs never-dispatched from OWNER state
+ *    (§7.1), never from the append-only audit stream.
+ *  - `test_attempts.aplusLeaseId` = the provider-returned lease id (NOT derivable — must be durable).
+ *  - `unverified_attempt_records` = the §7.1 UnverifiedAttemptRecord table (separate from the trusted
+ *    ledger), UNIQUE(attemptId), insert-only.
+ *
+ * Non-destructive: ALTER ADD COLUMN (nullable) leaves existing rows intact; the new table starts empty
+ * (INV-24 — no synthetic trusted/unverified rows are minted by a migration).
+ *
+ * # v5→v6 迁移：test_attempts 增加 aplusState/aplusLeaseId；新增 unverified_attempt_records（只插不改）
+ */
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusState TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusLeaseId TEXT")
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `unverified_attempt_records` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `attemptId` INTEGER NOT NULL,
+                `reason` TEXT NOT NULL,
+                `evidenceDigest` TEXT NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_unverified_attempt_records_attemptId` " +
+                "ON `unverified_attempt_records`(`attemptId`)"
+        )
+    }
+}

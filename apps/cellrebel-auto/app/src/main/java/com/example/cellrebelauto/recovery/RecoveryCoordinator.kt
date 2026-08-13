@@ -96,26 +96,28 @@ class RecoveryCoordinator(
 
     /**
      * Lease-release convergence (§8.1 BEGIN_RELEASE→RELEASE_RECEIPT; §8.2: no fresh apply until
-     * RELEASED): drive the external release for [idempotencyKey] (the release key is derived separately
-     * from the apply key via
-     * [com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey]) and
-     * record the durable release receipt. Returns true iff the release receipt is durable.
+     * RELEASED): drive the external release for [leaseId] and record the DURABLE release receipt.
+     * Returns the typed [RecordedReleaseReceipt], or null when the release is not durable (fail-closed).
      *
-     * Sol round-7 P1-4: the R7 recovery returned ADVANCED and immediately marked the attempt interrupted
-     * and resumed — NO release convergence — leaving the lease unresolved before a fresh apply (§8.2: no
-     * fresh apply until RELEASED). The engine must call this after ADVANCED_TO_RELEASE/REPLAYED_APPLY and
-     * only continue when the release receipt is durable.
+     * LEASE-BOUND + DURABLE (Sol round-8 P1-4): a Boolean "released" is not a proof — an impl that does
+     * `executor.release(...); return true` with no durable receipt must not green. The engine asserts the
+     * returned receipt's lease/digest binding, not a boolean.
      *
-     * PRE-FREEZE SKELETON (RED): returns false and touches nothing (fail-closed).
+     * Sol round-7 P1-4 (history): the R7 recovery returned ADVANCED and immediately marked the attempt
+     * interrupted and resumed — NO release convergence — leaving the lease unresolved before a fresh
+     * apply (§8.2: no fresh apply until RELEASED).
      *
-     * # lease 释放收敛骨架（RED）：恒 false、无副作用；GREEN 驱动释放并落 release receipt
+     * PRE-FREEZE SKELETON (RED): returns null and touches nothing (fail-closed).
+     *
+     * # lease 释放收敛骨架（RED）：恒 null、无副作用；GREEN 驱动释放并落 lease-bound release receipt
      */
     fun releaseLease(
         attemptId: Long,
         idempotencyKey: String,
-        requestDigest: String,
+        leaseId: String,
+        releaseDigest: String,
         now: Long
-    ): Boolean = false
+    ): RecordedReleaseReceipt? = null
 }
 
 enum class ReconcileOutcome {

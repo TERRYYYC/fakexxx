@@ -140,8 +140,8 @@ class Migration4to5Test {
 
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            // 本测试聚焦 4→5 的数据语义（当前 DB 版本即 v5）。
-            .addMigrations(MIGRATION_4_5)
+            // 本测试聚焦 4→5 的数据语义；当前 DB 版本 v6，故补 5→6（R9 aplusState/lease + unverified 表）。
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
             .allowMainThreadQueries()
             .build()
 

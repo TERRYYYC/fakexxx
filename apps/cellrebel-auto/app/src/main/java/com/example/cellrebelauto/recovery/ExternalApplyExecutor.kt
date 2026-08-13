@@ -37,15 +37,25 @@ interface ExternalApplyExecutor {
     fun apply(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome
 
     /**
-     * Drive the external lease RELEASE for [idempotencyKey] (§8.1 BEGIN_RELEASE → RELEASE_RECEIPT;
-     * §8.2: no fresh apply until RELEASED). Same provider idempotency contract as [apply] — a repeat
-     * call with the same key is an idempotent no-op EFFECT — but a DISTINCT operation domain (the
-     * release key is derived separately, see
+     * Drive the external lease RELEASE for [leaseId] (§8.1 BEGIN_RELEASE → RELEASE_RECEIPT; §8.2: no
+     * fresh apply until RELEASED). Same provider idempotency contract as [apply] — a repeat call with
+     * the same key is an idempotent no-op EFFECT — but a DISTINCT operation domain (the release key is
+     * derived separately, see
      * [com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey]).
      *
-     * # 外部 lease 释放调用：与 apply 同幂等契约、不同操作域
+     * LEASE-BOUND (Sol round-8 P1-4): release names the [leaseId] it releases, and [releaseDigest] is
+     * the §6.3.4 canonical digest OVER THE LEASE — never the apply intent digest. Releasing "someone
+     * else's lease" or releasing by a digest unrelated to the lease must be structurally unrepresentable.
+     *
+     * # 外部 lease 释放调用：lease-bound（releaseDigest 覆盖 leaseId）；与 apply 同幂等契约、不同操作域
      */
-    fun release(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome
+    fun release(
+        attemptId: Long,
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        now: Long
+    ): ApplyOutcome
 }
 
 /**

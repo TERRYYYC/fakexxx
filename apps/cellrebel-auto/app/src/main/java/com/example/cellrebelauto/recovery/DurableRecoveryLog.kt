@@ -56,6 +56,26 @@ interface DurableRecoveryLog {
 
     /** Record a recovery checkpoint (terminal-state projection or reconcile progress). */
     fun recordCheckpoint(attemptId: Long, lastDurableStage: String, receiptKey: String?, now: Long)
+
+    /**
+     * The durable RELEASE receipt for [leaseId], or null if none (§8.1 RELEASE_RECEIPT; §8.2: no fresh
+     * apply until a release receipt is durable — Sol round-8 P1-4). A Boolean "released" is NOT a
+     * durable proof; this typed readback is what the recovery RED asserts.
+     */
+    fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt?
+
+    /**
+     * Record (or replay) a release receipt for [idempotencyKey] + [leaseId] + [releaseDigest] (§6.3.4
+     * digest over the lease). Same idempotency contract as [recordReceipt]: same key+digest replays the
+     * existing receipt; same key + different digest returns null (conflict), prior receipt preserved.
+     */
+    fun recordReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        now: Long
+    ): RecordedReleaseReceipt?
 }
 
 /** A durable apply receipt (§7.1 OperationReceipt projection). */
@@ -72,4 +92,13 @@ data class RecoveryCheckpoint(
     val lastDurableStage: String,
     val receiptKey: String?,
     val recordedAt: Long
+)
+
+/** A durable release receipt (§8.1 RELEASE_RECEIPT projection, lease-bound). */
+data class RecordedReleaseReceipt(
+    val idempotencyKey: String,
+    val leaseId: String,
+    val releaseDigest: String,
+    val resultOutcome: String,
+    val createdAt: Long
 )

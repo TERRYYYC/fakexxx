@@ -120,4 +120,29 @@ interface TestAttemptDao {
             "WHERE id = :attemptId AND status IN ('starting', 'running')"
     )
     suspend fun markInterruptedIfNonTerminal(attemptId: Long, nowMs: Long)
+
+    // ---- A+ current-operation owner state (R9, Sol round-8 P1-3/P1-4) ----
+
+    /** Persist the current §8.1 phase on the attempt (§7.1: the Attempt owns its 当前 operation). */
+    @Query("UPDATE test_attempts SET aplusState = :aplusState WHERE id = :attemptId")
+    suspend fun markAplusState(attemptId: Long, aplusState: String)
+
+    /** Persist the provider-returned lease id (NOT derivable — must be durable, Sol round-8 P1-4). */
+    @Query("UPDATE test_attempts SET aplusLeaseId = :leaseId WHERE id = :attemptId")
+    suspend fun markAplusLease(attemptId: Long, leaseId: String)
+
+    /** The persisted lease id for an attempt (the release is bound to it, Sol round-8 P1-4). */
+    @Query("SELECT aplusLeaseId FROM test_attempts WHERE id = :attemptId")
+    suspend fun getAplusLeaseId(attemptId: Long): String?
+
+    /**
+     * A+ recoverable attempts: non-terminal rows that entered the A+ lifecycle (aplusState non-null) —
+     * recovery branches on their persisted phase, never on a generic `starting|running` status
+     * (Sol round-8 P1-3).
+     */
+    @Query(
+        "SELECT a.* FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
+            "WHERE t.planId = :planId AND a.aplusState IS NOT NULL AND a.status IN ('starting','running')"
+    )
+    suspend fun findAplusRecoverableAttempts(planId: Long): List<TestAttempt>
 }

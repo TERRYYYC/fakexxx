@@ -93,10 +93,10 @@ class MigrationTest {
         helper.close()
     }
 
-    // # 迁移链必须完整到当前 DB 版本(v5)：v2/v3 文件经 2→3→4→5 全链打开 + schema 校验。
+    // # 迁移链必须完整到当前 DB 版本(v6)：v2/v3 文件经 2→3→4→5→6 全链打开 + schema 校验。
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .build()
 
     /**

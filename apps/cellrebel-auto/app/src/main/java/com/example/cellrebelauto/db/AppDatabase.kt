@@ -16,6 +16,7 @@ import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.LegacyCompletionSnapshot
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 
 /**
  * Room database singleton, version 5 (Issue #5: trusted ledger + A+ execution tables).
@@ -41,9 +42,10 @@ import com.example.cellrebelauto.model.plan.TestAttempt
         CellRebelExecution::class,
         AutoAuditEvent::class,
         LegacyCompletionSnapshot::class,
-        ProviderPairingRecord::class
+        ProviderPairingRecord::class,
+        UnverifiedAttemptRecord::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -60,6 +62,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun auditEventDao(): AuditEventDao
     abstract fun legacyCompletionDao(): LegacyCompletionDao
     abstract fun providerPairingDao(): ProviderPairingDao
+    abstract fun unverifiedAttemptRecordDao(): UnverifiedAttemptRecordDao
 
     companion object {
         @Volatile
@@ -141,7 +144,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "cellrebel_auto.db"
                 )
                     // # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }

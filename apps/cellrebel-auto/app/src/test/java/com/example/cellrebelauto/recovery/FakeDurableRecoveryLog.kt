@@ -60,4 +60,38 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
     ) {
         checkpoints[attemptId] = RecoveryCheckpoint(attemptId, lastDurableStage, receiptKey, now)
     }
+
+    // ---- release receipts (Sol round-8 P1-4: lease-bound durable proof) ----
+
+    val releaseReceipts = mutableMapOf<String, RecordedReleaseReceipt>()
+
+    /** Pre-populate a durable release receipt (to seed a release-replay scenario). */
+    fun seedReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        createdAt: Long
+    ) {
+        releaseReceipts[leaseId] = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+    }
+
+    override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = releaseReceipts[leaseId]
+
+    override fun recordReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        now: Long
+    ): RecordedReleaseReceipt? {
+        val existing = releaseReceipts[leaseId]
+        if (existing != null) {
+            if (existing.releaseDigest == releaseDigest) return existing
+            return null
+        }
+        val receipt = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, now)
+        releaseReceipts[leaseId] = receipt
+        return receipt
+    }
 }

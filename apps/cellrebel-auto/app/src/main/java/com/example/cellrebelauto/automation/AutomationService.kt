@@ -280,12 +280,12 @@ class AutomationService : AccessibilityService() {
                 return@launch
             }
 
-            // # R8-F1/F2（Sol round-7 P1-1）：A+ 组合根。pre-freeze backend = null（纯 legacy 引擎行为）；
-            // # #3 冻结 + GREEN 落地后，同样的 APlusComposition 两函数用真实 backend（frozen Room
-            // # receipt schema + contract RPC）构造 coordinator + evidence。生产与测试走同一组合点。
-            val aplusBackend: APlusBackend? = null // GREEN: 由 frozen schema + contract RPC 构造
-            val aplusCoordinator = aplusBackend?.let { APlusComposition.recoveryCoordinator(it) }
-            val aplusEvidence = aplusBackend?.let { APlusComposition.completionEvidenceSource(it) }
+            // # R8-F1/F2（Sol round-7 P1-1 / round-8 P1-1）：A+ 组合根。生产经 productionBackend() 取得
+            // # 非 null 的 fail-closed 骨架束（adapter 骨架恒 fail-closed），使引擎走 A+ 路径而非 legacy。
+            // # 测试经同样的 recoveryCoordinator/completionEvidenceSource 两函数接线（同一组合点）。
+            val aplusBackend: APlusBackend = APlusComposition.productionBackend()
+            val aplusCoordinator = APlusComposition.recoveryCoordinator(aplusBackend)
+            val aplusEvidence = APlusComposition.completionEvidenceSource(aplusBackend)
             val newEngine = AutomationEngine(
                 planId = planId,
                 planRepository = planRepository,
