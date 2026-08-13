@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "ddfa588d26cb76d5ae57ff14c999e737",
+    "identityHash": "aab51c0ddcd4bf2b3909996b374787f8",
     "entities": [
       {
         "tableName": "test_results",
@@ -612,12 +612,12 @@
           },
           {
             "name": "index_cellrebel_executions_executionId",
-            "unique": false,
+            "unique": true,
             "columnNames": [
               "executionId"
             ],
             "orders": [],
-            "createSql": "CREATE INDEX IF NOT EXISTS `index_cellrebel_executions_executionId` ON `${TABLE_NAME}` (`executionId`)"
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_cellrebel_executions_executionId` ON `${TABLE_NAME}` (`executionId`)"
           }
         ]
       },
@@ -839,11 +839,201 @@
             "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_unverified_attempt_records_attemptId` ON `${TABLE_NAME}` (`attemptId`)"
           }
         ]
+      },
+      {
+        "tableName": "durable_observation_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `attemptId` INTEGER NOT NULL, `phase` TEXT NOT NULL, `leaseId` TEXT NOT NULL, `acceptedIntentHash` TEXT NOT NULL, `coverage` TEXT NOT NULL, `verificationLevel` TEXT NOT NULL, `deliveryMode` TEXT NOT NULL, `isMock` INTEGER, `scheduleDecision` TEXT NOT NULL, `effectiveLat` REAL, `effectiveLng` REAL, `environmentRevision` INTEGER NOT NULL, `environmentFingerprint` TEXT NOT NULL, `observedAtElapsedRealtimeMs` INTEGER NOT NULL, `observedAtEpochMs` INTEGER NOT NULL, `continuitySinceElapsedRealtimeMs` INTEGER, `evidenceRefs` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptId",
+            "columnName": "attemptId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseId",
+            "columnName": "leaseId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "acceptedIntentHash",
+            "columnName": "acceptedIntentHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "coverage",
+            "columnName": "coverage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verificationLevel",
+            "columnName": "verificationLevel",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deliveryMode",
+            "columnName": "deliveryMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isMock",
+            "columnName": "isMock",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "scheduleDecision",
+            "columnName": "scheduleDecision",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "effectiveLat",
+            "columnName": "effectiveLat",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "effectiveLng",
+            "columnName": "effectiveLng",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "environmentRevision",
+            "columnName": "environmentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "environmentFingerprint",
+            "columnName": "environmentFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observedAtElapsedRealtimeMs",
+            "columnName": "observedAtElapsedRealtimeMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observedAtEpochMs",
+            "columnName": "observedAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "continuitySinceElapsedRealtimeMs",
+            "columnName": "continuitySinceElapsedRealtimeMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "evidenceRefs",
+            "columnName": "evidenceRefs",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_durable_observation_records_attemptId_phase",
+            "unique": true,
+            "columnNames": [
+              "attemptId",
+              "phase"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_durable_observation_records_attemptId_phase` ON `${TABLE_NAME}` (`attemptId`, `phase`)"
+          },
+          {
+            "name": "index_durable_observation_records_attemptId",
+            "unique": false,
+            "columnNames": [
+              "attemptId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_durable_observation_records_attemptId` ON `${TABLE_NAME}` (`attemptId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "durable_completion_receipts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `attemptId` INTEGER NOT NULL, `completionEvidenceWire` INTEGER NOT NULL, `acceptedIntentHash` TEXT NOT NULL, `leaseId` TEXT NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attemptId",
+            "columnName": "attemptId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completionEvidenceWire",
+            "columnName": "completionEvidenceWire",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "acceptedIntentHash",
+            "columnName": "acceptedIntentHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "leaseId",
+            "columnName": "leaseId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_durable_completion_receipts_attemptId",
+            "unique": true,
+            "columnNames": [
+              "attemptId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_durable_completion_receipts_attemptId` ON `${TABLE_NAME}` (`attemptId`)"
+          }
+        ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ddfa588d26cb76d5ae57ff14c999e737')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'aab51c0ddcd4bf2b3909996b374787f8')"
     ]
   }
 }

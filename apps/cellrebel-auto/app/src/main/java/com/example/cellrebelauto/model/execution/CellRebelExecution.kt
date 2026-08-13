@@ -17,7 +17,7 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "cellrebel_executions",
-    indices = [Index("attemptId"), Index("executionId")]
+    indices = [Index("attemptId"), Index(value = ["executionId"], unique = true)]
 )
 data class CellRebelExecution(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

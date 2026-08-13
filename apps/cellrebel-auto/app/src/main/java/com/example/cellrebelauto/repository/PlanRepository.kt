@@ -228,6 +228,50 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getAplusLeaseId(attemptId: Long): String? =
         db.testAttemptDao().getAplusLeaseId(attemptId)
 
+    // # R37 (Sol R36 P1-2): current execution owner persist/read
+    suspend fun markCurrentExecutionId(attemptId: Long, executionId: String) =
+        db.testAttemptDao().markCurrentExecutionId(attemptId, executionId)
+
+    suspend fun getCurrentExecutionId(attemptId: Long): String? =
+        db.testAttemptDao().getCurrentExecutionId(attemptId)
+
+    // # R37 (Sol R36 P1-1): durable observation + receipt persist/read
+    suspend fun persistObservation(attemptId: Long, phase: String, snapshot: com.example.cellrebelauto.environment.ObservationSnapshot) =
+        db.durableObservationDao().insert(
+            com.example.cellrebelauto.model.ledger.DurableObservationRecord(
+                attemptId = attemptId, phase = phase,
+                leaseId = snapshot.leaseId,
+                acceptedIntentHash = snapshot.acceptedIntentHash,
+                coverage = snapshot.coverage,
+                verificationLevel = snapshot.verificationLevel,
+                deliveryMode = snapshot.deliveryMode,
+                isMock = snapshot.isMock,
+                scheduleDecision = snapshot.scheduleDecision,
+                effectiveLat = snapshot.effectiveLat,
+                effectiveLng = snapshot.effectiveLng,
+                environmentRevision = snapshot.environmentRevision,
+                environmentFingerprint = snapshot.environmentFingerprint,
+                observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
+                observedAtEpochMs = snapshot.observedAtEpochMs,
+                continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
+                evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+            )
+        )
+
+    suspend fun getObservation(attemptId: Long, phase: String): com.example.cellrebelauto.model.ledger.DurableObservationRecord? =
+        db.durableObservationDao().forAttemptPhase(attemptId, phase)
+
+    suspend fun persistCompletionReceipt(attemptId: Long, wire: Int, acceptedIntentHash: String, leaseId: String) =
+        db.durableCompletionReceiptDao().insert(
+            com.example.cellrebelauto.model.ledger.DurableCompletionReceipt(
+                attemptId = attemptId, completionEvidenceWire = wire,
+                acceptedIntentHash = acceptedIntentHash, leaseId = leaseId
+            )
+        )
+
+    suspend fun getCompletionReceipt(attemptId: Long): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt? =
+        db.durableCompletionReceiptDao().forAttempt(attemptId)
+
     // # 恢复真相载体（Sol round-16 P1-1 / round-18 P1-1）：可信账本 / 未验证记录是 append-only 权威，
     // # 返回 typed entry 以绑定 attempt+task 并检测跨表矛盾，绝不信裸 phase 字符串
     suspend fun getTrustedEntry(attemptId: Long): TrustedQuotaEntry? =
