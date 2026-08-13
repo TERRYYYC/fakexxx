@@ -626,4 +626,43 @@ class EngineTrustedPathRedTest {
         assertEquals("an unverified record must project to failed (not interrupted)", "failed", recovered.status)
         assertEquals("UNTRUSTED", recovered.failureReason)
     }
+
+    @Test
+    fun `R18 a wrong-task trusted carrier fails closed`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = 999L, evidenceDigest = "d", committedAt = 1000L))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertNotEquals("a wrong-task carrier must NOT project to succeeded", "succeeded", recovered.status)
+        assertEquals("a wrong-task carrier must persist RECOVERY_REQUIRED", "RECOVERY_REQUIRED", recovered.aplusState)
+    }
+
+    @Test
+    fun `R18 a conflicting trusted + unverified carrier fails closed`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertNotEquals("conflicting append-only truths must NOT be promoted to trusted", "succeeded", recovered.status)
+        assertEquals("conflicting truths must persist RECOVERY_REQUIRED", "RECOVERY_REQUIRED", recovered.aplusState)
+    }
 }

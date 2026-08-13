@@ -79,6 +79,28 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         releaseReceiptsByLease[leaseId] = receipt
     }
 
+    /** Seed ONLY the key index (a partial index — the coordinator must fail closed, Sol round-18 P1-5). */
+    fun seedReleaseReceiptKeyOnly(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        createdAt: Long
+    ) {
+        releaseReceiptsByKey[idempotencyKey] = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+    }
+
+    /** Seed ONLY the lease index (a partial index — the coordinator must fail closed, Sol round-18 P1-5). */
+    fun seedReleaseReceiptLeaseOnly(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        createdAt: Long
+    ) {
+        releaseReceiptsByLease[leaseId] = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+    }
+
     override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = releaseReceiptsByLease[leaseId]
 
     override fun releaseReceiptForKey(idempotencyKey: String): RecordedReleaseReceipt? = releaseReceiptsByKey[idempotencyKey]
