@@ -38,6 +38,9 @@ class QwyScheduleStore(context: Context) {
         private const val KEY_ITEM_IDS = "itemIds"
         private const val KEY_EXHAUSTED = "exhausted"
         private const val KEY_ADVANCE_COUNT = "advanceCount"
+        private const val KEY_LAST_APPLIED_LAT = "lastAppliedLat"
+        private const val KEY_LAST_APPLIED_LNG = "lastAppliedLng"
+        private const val KEY_LAST_APPLIED_AT = "lastAppliedAtMs"
 
         const val DEFAULT_SCHEDULE_ID = "qwy-default-schedule"
     }
@@ -116,6 +119,33 @@ class QwyScheduleStore(context: Context) {
                 .commit()
             AdvancePointerOutcome.Advanced(toItemId = toItemId, versionAfter = newVersion)
         }
+    }
+
+    /**
+     * Persist the last-applied intent coordinates (dsf P2 fix).
+     *
+     * The mock provider publishes intent coords, but ConfigPrefsSync publishes
+     * DB active-profile coords. observeEffective must return what the mock
+     * provider actually has (intent coords), so we persist them here.
+     */
+    fun recordLastApplied(latitude: Double, longitude: Double, elapsedRealtimeMs: Long) {
+        prefs.edit()
+            .putFloat(KEY_LAST_APPLIED_LAT, latitude.toFloat())
+            .putFloat(KEY_LAST_APPLIED_LNG, longitude.toFloat())
+            .putLong(KEY_LAST_APPLIED_AT, elapsedRealtimeMs)
+            .commit()
+    }
+
+    data class LastApplied(val latitude: Double, val longitude: Double, val atMs: Long)
+
+    fun getLastApplied(): LastApplied? {
+        val atMs = prefs.getLong(KEY_LAST_APPLIED_AT, 0L)
+        if (atMs == 0L) return null
+        return LastApplied(
+            latitude = prefs.getFloat(KEY_LAST_APPLIED_LAT, 0f).toDouble(),
+            longitude = prefs.getFloat(KEY_LAST_APPLIED_LNG, 0f).toDouble(),
+            atMs = atMs,
+        )
     }
 
     private fun encodeItemIds(ids: List<String>): String {

@@ -175,6 +175,14 @@ class QwyEnvironmentController(
             ),
         )
 
+        // P2 fix (dsf round-3): persist intent coords so observeEffective
+        // returns what the mock provider actually has, not DB profile coords.
+        // ConfigPrefsSync.sync(profileId=null) reads DB active profile which
+        // may carry different coordinates.
+        scheduleStore.recordLastApplied(
+            intent.latitude, intent.longitude, android.os.SystemClock.elapsedRealtime(),
+        )
+
         val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
 
         // P1-2 fix: verification level reflects actual publish outcome.
@@ -207,41 +215,49 @@ class QwyEnvironmentController(
     }
 
     override fun observeEffective(): EffectiveEnvironment {
-        // P1-3 fix (dsf round-2): read from persistent source (ConfigPrefsSync)
-        // and parse with the correct parser. ConfigPrefsSync publishes a flat
-        // field-map payload, NOT a typed SpoofConfig — ConfigCodec.fromJson()
-        // throws on unknown keys. PublishedConfig.parse() is the read-side
-        // counterpart designed for this format (ignoreUnknownKeys=true).
+        // P2 fix (dsf round-3): prefer the last-applied intent coordinates
+        // (what the mock provider is actually publishing) over ConfigPrefsSync
+        // (which reads DB active-profile coords that may differ).
+        // Fall back to ConfigPrefsSync only when no intent was applied (cold
+        // start with a pre-existing hook config).
+        val lastApplied = scheduleStore.getLastApplied()
         val payload = ConfigPrefsSync.readPublished(appContext)
-        val published = when (payload) {
-            is PayloadRead.Raw -> PublishedConfig.parse(payload.text)
-            else -> null
-        }
 
-        // Resolve effective location from the published field map.
-        val resolution = EffectiveMockLocationResolver.resolve(published)
         val lat: Double?
         val lng: Double?
         val isMock: Boolean
-        when (resolution) {
-            is EffectiveMockLocationResolution.Ready -> {
-                lat = resolution.config.latitude
-                lng = resolution.config.longitude
-                isMock = true
-            }
-            is EffectiveMockLocationResolution.Invalid -> {
-                lat = null
-                lng = null
-                isMock = false
-            }
-        }
+        val fingerprint: String
 
-        // P3-2 fix: fingerprint from PublishedConfig (byte-identical to
-        // ConfigPrefsSync's write-side fingerprint).
-        val fingerprint = when (payload) {
-            is PayloadRead.Raw -> PublishedConfig.fingerprint(payload.text)
-            is PayloadRead.ReadError -> "read-error:${payload.cause}"
-            PayloadRead.Absent -> "passthrough"
+        if (lastApplied != null) {
+            // Intent coordinates are what the mock provider has right now.
+            lat = lastApplied.latitude
+            lng = lastApplied.longitude
+            isMock = true
+            fingerprint = "intent:${lastApplied.latitude},${lastApplied.longitude}@${lastApplied.atMs}"
+        } else {
+            // No intent applied yet — read what the hook transport says.
+            val published = when (payload) {
+                is PayloadRead.Raw -> PublishedConfig.parse(payload.text)
+                else -> null
+            }
+            val resolution = EffectiveMockLocationResolver.resolve(published)
+            when (resolution) {
+                is EffectiveMockLocationResolution.Ready -> {
+                    lat = resolution.config.latitude
+                    lng = resolution.config.longitude
+                    isMock = true
+                }
+                is EffectiveMockLocationResolution.Invalid -> {
+                    lat = null
+                    lng = null
+                    isMock = false
+                }
+            }
+            fingerprint = when (payload) {
+                is PayloadRead.Raw -> PublishedConfig.fingerprint(payload.text)
+                is PayloadRead.ReadError -> "read-error:${payload.cause}"
+                PayloadRead.Absent -> "passthrough"
+            }
         }
 
         val verificationLevel = if (isMock)
