@@ -203,13 +203,16 @@ class QwyEnvironmentController(
         // P3-1 fix: report honestly whether removal actually happened.
         // P2-2 fix (dsf round-4): clear lastApplied so observe no longer
         // reports stale mock coordinates after cleanup.
+        // P3-2 fix (dsf round-5): clear lastApplied in all branches, including
+        // when removeGpsProvider throws.
         return if (mockGateway != null) {
             try {
                 mockGateway!!.removeGpsProvider()
-                scheduleStore.clearLastApplied()
                 CleanupOutcome.Complete
             } catch (e: Throwable) {
                 CleanupOutcome.Incomplete(emptyList())
+            } finally {
+                scheduleStore.clearLastApplied()
             }
         } else {
             scheduleStore.clearLastApplied()
