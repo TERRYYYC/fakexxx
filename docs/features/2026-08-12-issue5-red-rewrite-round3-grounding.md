@@ -1086,3 +1086,27 @@ Service-owned factory / production call-site disconnect attack.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.22 Round-21 — foreign-unverified decoy + non-terminal custody + full-row preservation (Sol round-20 advisory answered)
+
+**Status.** Sol's round-20 advisory (`227bbdd`). R21 closes the two P1 mutations + the preservation gap.
+**Baseline: `218 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.**
+Schema exact v5.
+
+**Repairs.**
+- **P1-1 foreign-unverified decoy** — a foreign `UnverifiedAttemptRecord(attemptId=99)` decoy must NOT
+  fake-green the recovered attempt 77 (assert 77 → interrupted, never failed from the decoy).
+- **P1-2 non-terminal custody** — the wrong-task / dual-truth tests now assert the attempt stays
+  `starting` (non-terminal, recoverable), so a "terminalize-first" bad impl (finalizeAttemptFailure before
+  RECOVERY_REQUIRED) adds a recognizable RED and cannot lose recovery custody.
+- **P2 preservation** — the M-CR-07 test now compares the FULL `TrustedQuotaEntry` row (taskId, committedAt,
+  per-task count), not just countAll + digest.
+
+**Remaining owner-red (next SHA):** `CrashMatrixTest::M_CR_03..08` frozen entry, gate-held second-restart
+custody, CLOSED→generic-terminal single-transaction window, Service-owned factory / production call-site
+disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

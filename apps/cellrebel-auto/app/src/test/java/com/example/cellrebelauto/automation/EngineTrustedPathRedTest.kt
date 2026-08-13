@@ -608,7 +608,11 @@ class EngineTrustedPathRedTest {
         assertEquals("a committed trusted entry must project to succeeded (not interrupted)", "succeeded", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }.status)
         // P1-6 preservation/count/legacy-zero: the carrier is append-only and must NOT be changed.
         assertEquals("the trusted ledger count must stay 1 (no re-mint)", 1, db.trustedQuotaDao().countAll())
-        assertEquals("the trusted carrier must be preserved unchanged", "d", db.trustedQuotaDao().getByAttempt(77L)!!.evidenceDigest)
+        val entry = db.trustedQuotaDao().getByAttempt(77L)!!
+        assertEquals("carrier evidenceDigest preserved", "d", entry.evidenceDigest)
+        assertEquals("carrier taskId preserved", taskId, entry.taskId)
+        assertEquals("carrier committedAt preserved", 1000L, entry.committedAt)
+        assertEquals("per-task trusted count preserved", 1, db.trustedQuotaDao().trustedCountForTask(taskId))
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
     }
 
@@ -629,6 +633,24 @@ class EngineTrustedPathRedTest {
 
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertNotEquals("a foreign-attempt carrier must NOT project 77 to succeeded", "succeeded", recovered.status)
+    }
+
+    @Test
+    fun `R21 a foreign-attempt unverified record must not fake-green the recovery`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 99L, reason = "UNTRUSTED", evidenceDigest = "decoy"))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertEquals("a foreign unverified record must NOT project 77 to failed (no own carrier → interrupted)", "interrupted", recovered.status)
     }
 
     @Test
@@ -667,6 +689,7 @@ class EngineTrustedPathRedTest {
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertNotEquals("a wrong-task carrier must NOT project to succeeded", "succeeded", recovered.status)
         assertEquals("a wrong-task carrier must persist RECOVERY_REQUIRED", "RECOVERY_REQUIRED", recovered.aplusState)
+        assertEquals("a wrong-task carrier must leave the attempt NON-terminal (recoverable, not terminalized)", "starting", recovered.status)
     }
 
     @Test
@@ -687,5 +710,6 @@ class EngineTrustedPathRedTest {
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertNotEquals("conflicting append-only truths must NOT be promoted to trusted", "succeeded", recovered.status)
         assertEquals("conflicting truths must persist RECOVERY_REQUIRED", "RECOVERY_REQUIRED", recovered.aplusState)
+        assertEquals("conflicting truths must leave the attempt NON-terminal (recoverable, not terminalized)", "starting", recovered.status)
     }
 }
