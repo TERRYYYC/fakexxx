@@ -64,7 +64,7 @@ class EngineTrustedPathRedTest {
 
     private lateinit var db: AppDatabase
     private lateinit var repo: PlanRepository
-    private var lastCoordinator: RecoveryCoordinator? = null
+    private val coordinators = mutableListOf<RecoveryCoordinator>()
 
     @Before
     fun setUp() {
@@ -221,7 +221,7 @@ class EngineTrustedPathRedTest {
         // Service-used composition oracle (Sol round-11 P1-1): the SAME engineAplusParams the Service
         // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
         val params = backend?.let { APlusComposition.engineAplusParams(it) }
-        lastCoordinator = params?.first
+        params?.first?.let { coordinators += it }
         return AutomationEngine(
             planId = planId,
             planRepository = repo,
@@ -734,7 +734,7 @@ class EngineTrustedPathRedTest {
         assertEquals("the owner session must be reused (never duplicated)", seedSessionId, db.runSessionDao().getLatest()!!.id)
         assertEquals("apply must NOT be re-invoked for a non-APPLY_PENDING crash", 1, executor.invocationCount(applyKey(77L)))
         assertEquals("apply effect must NOT increase", 1, executor.effectCount(77L))
-        assertEquals("no illegal reconcile for a DECIDING/RECOVERY_REQUIRED crash", 0, lastCoordinator!!.reconcileInvocationCount)
+        assertTrue("no illegal reconcile across BOTH restarts (cross-instance)", coordinators.all { it.reconcileInvocationCount == 0 })
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertEquals("RECOVERY_REQUIRED must still be selected by recovery", "RECOVERY_REQUIRED", recovered.aplusState)
         assertEquals("the attempt must stay non-terminal (recoverable)", "starting", recovered.status)
@@ -761,7 +761,7 @@ class EngineTrustedPathRedTest {
         assertEquals("the owner session must be reused (never duplicated)", seedSessionId, db.runSessionDao().getLatest()!!.id)
         assertEquals("apply must NOT be re-invoked for a non-APPLY_PENDING crash", 1, executor.invocationCount(applyKey(77L)))
         assertEquals("apply effect must NOT increase", 1, executor.effectCount(77L))
-        assertEquals("no illegal reconcile for a DECIDING/RECOVERY_REQUIRED crash", 0, lastCoordinator!!.reconcileInvocationCount)
+        assertTrue("no illegal reconcile across BOTH restarts (cross-instance)", coordinators.all { it.reconcileInvocationCount == 0 })
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
         assertEquals("RECOVERY_REQUIRED must still be selected by recovery", "RECOVERY_REQUIRED", recovered.aplusState)
         assertEquals("the attempt must stay non-terminal (recoverable)", "starting", recovered.status)
