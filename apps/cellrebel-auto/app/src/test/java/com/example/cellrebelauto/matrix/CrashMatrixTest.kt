@@ -98,26 +98,101 @@ class CrashMatrixTest {
         override fun hasCapacity(attemptId: Long): Boolean = facts[attemptId] ?: false
     }
 
-    private class FakeEvidenceSource : APlusEvidenceSource {
-        var preCalls = 0
-        var postCalls = 0
-        var completionCalls = 0
+    // ---- canonical §6.4-positive evidence (mirrors EngineTrustedPathRedTest / TrustedLedgerRedTest) ----
+
+    private companion object {
+        val WIRE_VERIFIED = com.example.cellrebelauto.model.execution.CellRebelCompletionEvidenceV1.VERIFIED_NEW_COMPLETION.wire // 1
+        const val LEVEL_SYSTEM_MOCK_VERIFIED = "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED"
+        const val DELIVERY_SYSTEM_MOCK = "SYSTEM_MOCK"
+        const val COVERAGE_FULL = "FULL"
+        const val SCHEDULE_ALLOWED_NOW = "ALLOWED_NOW"
+        const val REVISION = 7L
+        const val FINGERPRINT = "fp-1"
+        const val TARGET_LAT = 39.9
+        const val TARGET_LNG = 116.4
+        const val EXEC_STARTED_AT_ELAPSED = 2000L
+        const val EXEC_RUNNING_CONFIRMED_AT_ELAPSED = 2100L
+        const val EXEC_COMPLETED_AT_ELAPSED = 13000L
+        const val PRE_OBSERVED_AT_ELAPSED = 1000L
+        const val POST_OBSERVED_AT_ELAPSED = 14000L
+        const val CONTINUITY_SINCE_ELAPSED = 500L
+
+        // The canonical execution row: the SOURCE's attemptId is 0 (the owner overwrites it with the crashed
+        // attempt id via `copy(attemptId = …)`, matching the normal path AutomationEngine.kt:400), and it
+        // carries the FULL §7.1 evidence detail + legal monotonic window (Sol R32 P1).
+        fun fullEvidenceExecution(attemptId: Long, wire: Int, digest: String): CellRebelExecution = CellRebelExecution(
+            executionId = "exec-$attemptId",
+            attemptId = 0L,
+            completionEvidenceWire = wire,
+            evidencePayloadDigest = digest,
+            startedAt = 1000L,
+            classifiedAt = 1100L,
+            startedAtElapsed = EXEC_STARTED_AT_ELAPSED,
+            runningConfirmedAtElapsed = EXEC_RUNNING_CONFIRMED_AT_ELAPSED,
+            completedAtElapsed = EXEC_COMPLETED_AT_ELAPSED,
+            baselineRunningState = "IDLE",
+            runningMarkerText = "RUNNING",
+            runningDurationMs = EXEC_COMPLETED_AT_ELAPSED - EXEC_RUNNING_CONFIRMED_AT_ELAPSED,
+            webBrowsingScore = 8.0,
+            videoStreamingScore = 7.0,
+            roundTimestampsElapsed = "$EXEC_STARTED_AT_ELAPSED;$EXEC_COMPLETED_AT_ELAPSED"
+        )
+    }
+
+    private class FakeEvidenceSource(
+        private val sessionId: Long,
+        private val digest: String,
+        private val wire: Int = 1,
+        private val present: Boolean = true
+    ) : APlusEvidenceSource {
         var completionRequests = mutableListOf<Long>()
-        var completionEvidence: APlusCompletionEvidence? = null
-        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? { preCalls++; return null }
-        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? { postCalls++; return null }
+        // The intent hash MUST match the owner-state recomputation (INV-23 three-way): the recovery re-decides
+        // from the crashed attempt's durable coords + id + runSessionId, never a divergent literal.
+        private fun intentHash(attemptId: Long) = APlusOperationIdentity.requestDigest(TARGET_LAT, TARGET_LNG, attemptId, sessionId)
+        private fun providerLease(attemptId: Long) = "lease-$attemptId"
+
+        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? =
+            if (!present) null else ObservationSnapshot(
+                leaseId = providerLease(attemptId),
+                acceptedIntentHash = intentHash(attemptId),
+                coverage = COVERAGE_FULL,
+                verificationLevel = LEVEL_SYSTEM_MOCK_VERIFIED,
+                deliveryMode = DELIVERY_SYSTEM_MOCK,
+                isMock = true,
+                scheduleDecision = SCHEDULE_ALLOWED_NOW,
+                effectiveLat = TARGET_LAT,
+                effectiveLng = TARGET_LNG,
+                environmentRevision = REVISION,
+                environmentFingerprint = FINGERPRINT,
+                observedAtElapsedRealtimeMs = PRE_OBSERVED_AT_ELAPSED,
+                observedAtEpochMs = 900L,
+                continuitySinceElapsedRealtimeMs = CONTINUITY_SINCE_ELAPSED,
+                evidenceRefs = listOf("qwy:store:abc")
+            )
+
+        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? =
+            if (!present) null else acquirePreObservation(attemptId)!!.copy(
+                observedAtElapsedRealtimeMs = POST_OBSERVED_AT_ELAPSED,
+                observedAtEpochMs = 6500L
+            )
+
         override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? {
-            completionCalls++
             completionRequests.add(attemptId)
-            return completionEvidence
+            if (!present) return null
+            return APlusCompletionEvidence(
+                execution = fullEvidenceExecution(attemptId, wire, digest),
+                completionEvidenceWire = wire,
+                applyReceiptIntentHash = intentHash(attemptId),
+                applyReceiptLease = providerLease(attemptId)
+            )
         }
     }
 
     private class FakeBackend(
         private val exec: RecordingExternalApplyExecutor,
-        private val log: FakeDurableRecoveryLog
+        private val log: FakeDurableRecoveryLog,
+        val evidence: FakeEvidenceSource = FakeEvidenceSource(sessionId = 0L, digest = "d", present = false)
     ) : APlusBackend {
-        val evidence = FakeEvidenceSource()
         override val executor: ExternalApplyExecutor = exec
         override val recoveryLog: DurableRecoveryLog = log
         override val observeIntent: ObserveIntentAcquirer = SeededObserve(emptyMap())
@@ -205,29 +280,23 @@ class CrashMatrixTest {
         // FROZEN SEMANTIC (Sol R30 re-review): the GREEN writes execution + ledger in the SAME Room
         // transaction (PlanRepository.recordTrustedCompletion), so "execution durable / ledger absent" is
         // UNREACHABLE. The reachable pre-transaction crash is: DECIDING persisted, NEITHER execution NOR
-        // ledger row present. Recovery must RE-DECIDE: re-acquire a non-null, complete, dynamically-unique
-        // PASS bundle from the source, run TrustPolicy, then write execution + ledger atomically.
+        // ledger row present. Recovery must RE-DECIDE: re-acquire a non-null CANONICAL §6.4-PASS bundle
+        // (valid pre/post, matching lease/hash/coords, legal monotonic window, complete §7.1 detail), run
+        // TrustPolicy, then write execution + ledger atomically.
         //
-        // The digest is a NON-LITERAL (random per-test) value so a call-and-discard / constant-digest mint
-        // cannot fake a re-decision; the commit clock is the INJECTED virtual-clock value (exact), not a
-        // non-zero constant.
+        // The digest is NON-LITERAL (random per-test); the commit clock is the INJECTED virtual-clock value
+        // (exact). The source execution is read back by executionId and asserted FULL-FIELD EXACT — only the
+        // DB-generated id may differ, and the owner overwrites the source attemptId (0 → 77) per the normal
+        // path (AutomationEngine.kt:400). A forged execution row (wrong executionId/digest/epoch/null detail)
+        // or a bypass-TrustPolicy mint fails this readback.
         val planId = seedPlan(taskId = 42L)
-        seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
-        // NO pre-seeded execution row — the crash happened BEFORE the atomic execution+ledger write.
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
-        val execution = CellRebelExecution(
-            executionId = "exec-77", attemptId = 77L, completionEvidenceWire = 1,
-            evidencePayloadDigest = seededDigest, startedAt = 1L, classifiedAt = 2L
-        )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock(now = 4242L)
-        val backend = FakeBackend(executor, log)
-        backend.evidence.completionEvidence = APlusCompletionEvidence(
-            execution = execution, completionEvidenceWire = 1,
-            applyReceiptIntentHash = "h", applyReceiptLease = "lease-77"
-        )
+        val backend = FakeBackend(executor, log, FakeEvidenceSource(sessionId = sessionId, digest = seededDigest, wire = WIRE_VERIFIED, present = true))
         buildEngine(planId, clock, backend).run()
 
         val entry = db.trustedQuotaDao().getByAttempt(77L)
@@ -237,9 +306,21 @@ class CrashMatrixTest {
         assertEquals("M-CR-06: the mint must commit with the INJECTED virtual-clock value (exact), never a non-zero constant", 4242L, entry.committedAt)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row (no unrelated rows)", 1, db.trustedQuotaDao().countAll())
         assertEquals("M-CR-06: the recovery must RE-OBSERVE the EXACT crashed attempt (not some other attempt, never forge from nothing)", listOf(77L), lastEvidence!!.completionRequests)
-        // The re-decide writes execution + ledger atomically, so the durable evidence the mint is bound to
-        // must ALSO be persisted (the §7.1 read-back source), not just a bare ledger row.
-        assertEquals("M-CR-06: the re-decide must persist the execution evidence it read (same atomic write)", 1, db.attemptExecutionDao().forAttempt(77L).size)
+        // Full-field readback of the source execution row (only DB id may differ; attemptId overwritten to 77).
+        val persisted = db.attemptExecutionDao().byExecutionId("exec-77")
+        assertNotNull("M-CR-06: the re-decide must persist the source execution row (same atomic write)", persisted)
+        assertEquals("M-CR-06 readback: the owner must overwrite the source attemptId to the crashed attempt", 77L, persisted!!.attemptId)
+        assertEquals("M-CR-06 readback: the wire must be the verified value", WIRE_VERIFIED, persisted.completionEvidenceWire)
+        assertEquals("M-CR-06 readback: the digest must be the source's exact digest", seededDigest, persisted.evidencePayloadDigest)
+        assertEquals("M-CR-06 readback: startedAtElapsed must survive", EXEC_STARTED_AT_ELAPSED, persisted.startedAtElapsed)
+        assertEquals("M-CR-06 readback: runningConfirmedAtElapsed must survive", EXEC_RUNNING_CONFIRMED_AT_ELAPSED, persisted.runningConfirmedAtElapsed)
+        assertEquals("M-CR-06 readback: completedAtElapsed must survive", EXEC_COMPLETED_AT_ELAPSED, persisted.completedAtElapsed)
+        assertEquals("M-CR-06 readback: §7.1 baseline must survive", "IDLE", persisted.baselineRunningState)
+        assertEquals("M-CR-06 readback: §7.1 marker must survive", "RUNNING", persisted.runningMarkerText)
+        assertEquals("M-CR-06 readback: §7.1 duration must survive", EXEC_COMPLETED_AT_ELAPSED - EXEC_RUNNING_CONFIRMED_AT_ELAPSED, persisted.runningDurationMs)
+        assertEquals("M-CR-06 readback: §7.1 web score must survive", 8.0, persisted.webBrowsingScore!!, 0.001)
+        assertEquals("M-CR-06 readback: §7.1 video score must survive", 7.0, persisted.videoStreamingScore!!, 0.001)
+        assertEquals("M-CR-06 readback: §7.1 round timestamps must survive", "$EXEC_STARTED_AT_ELAPSED;$EXEC_COMPLETED_AT_ELAPSED", persisted.roundTimestampsElapsed)
     }
 
     @Test
@@ -252,8 +333,7 @@ class CrashMatrixTest {
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock(now = 4242L)
-        val backend = FakeBackend(executor, log)
-        // backend.evidence.completionEvidence stays null → acquireCompletionEvidence returns null.
+        val backend = FakeBackend(executor, log, FakeEvidenceSource(sessionId = 0L, digest = "d", present = false))
         buildEngine(planId, clock, backend).run()
 
         assertEquals("M-CR-06 null polarity: null evidence must mint ZERO ledger rows (fail-closed)", 0, db.trustedQuotaDao().countAll())
@@ -263,26 +343,22 @@ class CrashMatrixTest {
     }
 
     @Test
-    fun `M_CR_06_wrong_attempt`() = runTest {
-        // M-CR-06 negative polarity: the source returns evidence for a DIFFERENT attempt (caller-inconsistent
-        // context, INV-23) → the recovery must NOT mint for the crashed attempt (zero mint for attempt 77).
+    fun `M_CR_06_discriminator_invalid`() = runTest {
+        // M-CR-06 negative polarity (Sol R32 P1): the SAME attempt, but one TrustPolicy discriminator is
+        // invalid (wire=2 PRE_EXISTING_RUN, not VERIFIED) → the recovery must consume TrustPolicy and mint
+        // ZERO rows. This proves the re-decide actually evaluates TrustPolicy, not merely that the source
+        // entity's attempt matches the crashed attempt (the attemptId is owner-overwritten anyway).
         val planId = seedPlan(taskId = 42L)
-        seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock(now = 4242L)
-        val backend = FakeBackend(executor, log)
-        backend.evidence.completionEvidence = APlusCompletionEvidence(
-            execution = CellRebelExecution(
-                executionId = "exec-other", attemptId = 999L, completionEvidenceWire = 1,
-                evidencePayloadDigest = "ev-" + java.util.UUID.randomUUID().toString(), startedAt = 1L, classifiedAt = 2L
-            ),
-            completionEvidenceWire = 1, applyReceiptIntentHash = "h", applyReceiptLease = "lease-77"
-        )
+        val backend = FakeBackend(executor, log, FakeEvidenceSource(sessionId = sessionId, digest = "ev-"+java.util.UUID.randomUUID(), wire = 2, present = true))
         buildEngine(planId, clock, backend).run()
 
-        assertEquals("M-CR-06 wrong-attempt polarity: wrong-attempt evidence must mint ZERO rows for the crashed attempt", 0, db.trustedQuotaDao().countAll())
+        assertEquals("M-CR-06 discriminator polarity: a wire=2 same-attempt completion must mint ZERO ledger rows (TrustPolicy consumed)", 0, db.trustedQuotaDao().countAll())
+        assertEquals("M-CR-06 discriminator polarity: a wire=2 completion must persist NO trusted-mint execution row", 0, db.attemptExecutionDao().forAttempt(77L).size)
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
