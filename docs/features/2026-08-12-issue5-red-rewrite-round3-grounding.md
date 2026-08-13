@@ -1422,3 +1422,35 @@ assembleDebug green, `git diff --check` clean.** Schema exact v5.
 opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.36 Round-35 — M-CR-06 reachable durable fixture + committedAt SSOT (Sol R33 BLOCKED re-review answered)
+
+**Status.** Sol's R33 BLOCKED re-review (`0001786617205433`) — 4×P1 + 1×P2, two of which R34 did not touch:
+the crash fixture was UNREACHABLE per §8.1 (COMPLETION_OBSERVED already persists the execution evidence, so
+seeding DECIDING with ZERO carrier + a live source returning stale pre/post tested the wrong crash window),
+and the committedAt authority conflicted with `TrustedLedgerRedTest` (which pins `committedAt ==
+completedAtElapsed`; `recordTrustedCompletion(ctx)` has no clock param, so the recovery clock can never be the
+authority). R35 rebuilds the durable fixture and unifies the clock. **Baseline: `228 tests / 50 failed /
+0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **Reachable durable fixture** — M-CR-06 now seeds the DURABLE execution evidence (`seedDurableExecution`,
+  the §8.1 COMPLETION_OBSERVED carrier, full §7.1 detail + wire=1 + monotonic window) + a durable apply
+  receipt with the SAME owner intent digest the executor applied (provider world consistent, no divergent
+  literal "d"); only the ledger + close decision are missing. Recovery re-decides from the durable owner —
+  never a live source.
+- **committedAt SSOT** — asserts `committedAt == EXEC_COMPLETED_AT_ELAPSED` (the evidence completion clock),
+  matching `TrustedLedgerRedTest`; the recovery `now` is AFTER the post observation (15000 > 14000).
+- **Exactly-one execution** — asserts the durable execution evidence remains EXACTLY ONE row (never
+  re-written nor duplicated), closing the `byExecutionId LIMIT 1` duplicate-row blind spot.
+- **Null polarity re-scoped** — `M_CR_06_null` now models the ABSENT durable execution evidence (no
+  COMPLETION_OBSERVED carrier), not a live source returning null.
+- **Discriminator via durable receipt** — `M_CR_06_discriminator_invalid` keeps `wire=1` and seeds a durable
+  receipt whose intent hash DIVERGES from the owner recomputation (`mismatched-receipt-intent`), the INV-23
+  three-way discriminator a wire-only bypass cannot see; FAIL preserves the durable execution + writes the
+  exact `UnverifiedAttemptRecord`.
+
+**Remaining #3/GREEN-blocked (unchanged, declared):** M-CR-03..05 re-observe/classify/post-observe GREEN body;
+opaque lease carrier; 9-field digest vectors; releaseComplete shape — all #3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]
