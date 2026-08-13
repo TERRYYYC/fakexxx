@@ -405,7 +405,7 @@ class RecoveryIdempotencyRedTest {
         val outcome = rc.dispatchApply(attemptId = 1L, idempotencyKey = "k-1", requestDigest = "digest-v1", now = 2000L)
 
         assertNull("a rejected/conflicting receipt must not leak the lease", outcome.leaseId)
-        assertEquals("RECEIPT_NOT_DURABLE", outcome.outcome)
+        assertEquals("a same-key/different-digest conflict must be IDEMPOTENCY_CONFLICT", "IDEMPOTENCY_CONFLICT", outcome.outcome)
     }
 
     @Test
@@ -420,6 +420,7 @@ class RecoveryIdempotencyRedTest {
         val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
 
         assertNotNull("the re-invoked release must record a durable receipt", receipt)
+        assertEquals("the returned receipt must be the durable readback (never a forged non-durable one)", receipt, log.releaseReceiptFor("lease-1"))
         assertEquals("release re-invoked (1 → 2)", 2, executor.releaseInvocationCount("r-1"))
         assertEquals("release effect stays at one (at-most-once)", 1, executor.releaseEffectCount(1L))
     }
@@ -476,6 +477,19 @@ class RecoveryIdempotencyRedTest {
         val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
 
         assertNull("same key / different lease must fail closed", receipt)
+        assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
+    }
+
+    @Test
+    fun `release with the exact key and lease but a different digest fails closed with zero provider call`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-other", outcome = "RELEASED", createdAt = 1000L)
+        val rc = RecoveryCoordinator(executor, log)
+
+        val receipt = rc.releaseLease(attemptId = 1L, idempotencyKey = "r-1", leaseId = "lease-1", releaseDigest = "rd-1", now = 2000L)
+
+        assertNull("exact key+lease but wrong digest must fail closed", receipt)
         assertEquals("zero provider call", 0, executor.releaseInvocationCount("r-1"))
     }
 }

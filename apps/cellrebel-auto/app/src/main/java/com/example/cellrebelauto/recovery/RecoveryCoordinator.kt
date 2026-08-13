@@ -119,11 +119,12 @@ class RecoveryCoordinator(
         requestDigest: String,
         now: Long
     ): ApplyOutcome {
-        // INV-13 conflict preflight (Sol round-14 P1-1): a known conflicting receipt (same key + different
-        // digest) MUST fail-closed BEFORE the provider call — zero external effect, no lease.
+        // INV-13 conflict preflight (Sol round-14 P1-1 / round-15 P2-3): a known conflicting receipt
+        // (same key + different digest) MUST fail-closed BEFORE the provider call with the canonical
+        // IDEMPOTENCY_CONFLICT outcome — zero external effect, no lease.
         val prior = log.receiptFor(idempotencyKey)
         if (prior != null && prior.requestDigest != requestDigest) {
-            return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)
+            return ApplyOutcome(outcome = "IDEMPOTENCY_CONFLICT", providerHadAlreadyApplied = false, leaseId = null)
         }
         val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
         if (outcome.leaseId != null) {
@@ -161,6 +162,11 @@ class RecoveryCoordinator(
         // ZERO provider call and the prior receipt preserved.
         val byKey = log.releaseReceiptForKey(idempotencyKey)
         val byLease = log.releaseReceiptFor(leaseId)
+        // Dual-index consistency (Sol round-15 P1-2): if both indexes resolve but to DIFFERENT receipts,
+        // the store is inconsistent → conflict, never a success replay.
+        if (byKey != null && byLease != null && byKey != byLease) {
+            return null
+        }
         if (byKey != null && byKey.leaseId == leaseId && byKey.releaseDigest == releaseDigest && byKey.resultOutcome == "RELEASED") {
             return byKey
         }

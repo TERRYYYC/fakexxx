@@ -406,11 +406,15 @@ class AutomationEngine(
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_PASS) ?: aplusState
                                 // # §7.3：完成 = 可信计数投影（trusted-only SQL 是 F3 GREEN）；legacy 计数绝不动（P1-3）
                                 planRepository.completeTaskIfQuotaReached(task.id)
+                                // # P1-1 (Sol round-15): persist the authoritative phase — M-CR-07 crash
+                                // # (after the ledger commit) must recover as QUOTA_COMMITTED, not DECIDING.
+                                planRepository.markAplusState(attemptId, "QUOTA_COMMITTED")
                                 updateState(AutomationState.SUCCEEDED)
                             } else {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_FAIL) ?: aplusState
                                 // # UNVERIFIED_RECORDED：未验证记录由 recordTrustedCompletion 的 GREEN 写（P2），
-                                // # skeleton 不写（RED）；legacy 计数绝不动。
+                                // # skeleton 不写（RED）；legacy 计数绝不动。持久化 phase 供恢复投影（Sol round-15 P1-1）。
+                                planRepository.markAplusState(attemptId, "UNVERIFIED_RECORDED")
                                 updateState(AutomationState.FAILED)
                                 _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
                             }
@@ -762,30 +766,25 @@ class AutomationEngine(
         return advanceAfterRelease(crashed, coordinator)
     }
 
-    /** After a durable release receipt, the schedule gate must ADVANCE before terminalizing + resuming. */
+    /** After a durable release receipt, project the terminal truth, then gate the resume. */
     private suspend fun advanceAfterRelease(crashed: TestAttempt, coordinator: RecoveryCoordinator): Boolean {
+        // Terminal truth projection FIRST (Sol round-15 P1-1): it must NOT be blocked by the schedule gate —
+        // a committed trusted truth (quota reached ⇒ hasCapacity=false ⇒ gate holds) must still project to
+        // succeeded, and an unverified truth to failed/UNTRUSTED. The gate only decides RESUME, not truth.
+        when (crashed.aplusState) {
+            "QUOTA_COMMITTED" -> planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
+            "UNVERIFIED_RECORDED" -> planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
+            "CLOSED" -> {} // already terminal — no-op
+            else -> planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
+        }
+        planRepository.markAplusState(crashed.id, "CLOSED")
+        // The schedule gate decides whether to resume (take the next address) — never the terminal truth.
         val advance = coordinator.scheduleAdvanced(
             crashed.id, APlusOperationIdentity.applyIdempotencyKey(crashed.id), nowMs()
         )
         if (advance != ScheduleAdvanceState.ADVANCED) {
             aplusPause("schedule-advance gate held for recovered attempt ${crashed.id}")
             return false
-        }
-        // Phase-specific terminal projection (§10 owner-red matrix; Sol round-14 P1-4): the durable truth
-        // that already exists must NOT be collapsed to a single "interrupted".
-        when (crashed.aplusState) {
-            "QUOTA_COMMITTED" -> {
-                // The trusted mint already happened → terminalize succeeded (legacy counter untouched).
-                planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
-            }
-            "UNVERIFIED_RECORDED" -> {
-                // The unverified record already happened → terminalize failed/UNTRUSTED.
-                planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
-            }
-            "CLOSED" -> {
-                // Already terminal — no-op (a CLOSED attempt must not be revived nor clobbered).
-            }
-            else -> planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
         }
         log("A+ recovery: attempt ${crashed.id} released + gate advanced — resuming plan")
         return true
