@@ -189,6 +189,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markStaleSessionsInterrupted(nowMs: Long): Int =
         db.runSessionDao().markStaleRunningSessionsInterrupted(nowMs)
 
+    // # A+ 恢复后全局 sweep 排除当前 owner session（Sol round-9 P1-4）
+    suspend fun markStaleSessionsInterruptedExcept(nowMs: Long, excludeId: Long): Int =
+        db.runSessionDao().markStaleSessionsInterruptedExcept(nowMs, excludeId)
+
     // ---- A+ recovery (R9, §8.2 RECOVERING) ----
 
     /**
@@ -222,11 +226,12 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getAplusLeaseId(attemptId: Long): String? =
         db.testAttemptDao().getAplusLeaseId(attemptId)
 
-    // # A+ PASS 终态化（P1-5）：标记 attempt succeeded，但绝不动 legacy completedSuccesses（Sol round-8 P1-3）
-    suspend fun finalizeAplusSuccess(attemptId: Long, endedAt: Long, webScore: Double?, videoScore: Double?) =
+    // # A+ PASS 终态化（P1-5）：标记 attempt succeeded，successOrdinal 由可信计数投影 1-based（Sol round-9
+    // # P1-6：绝不动 legacy completedSuccesses、绝不写 successOrdinal=0）。
+    suspend fun finalizeAplusSuccess(attemptId: Long, taskId: Long, endedAt: Long, webScore: Double?, videoScore: Double?) =
         db.testAttemptDao().markSucceeded(
             attemptId = attemptId,
-            successOrdinal = 0, // GREEN 由可信计数投影计算真实 ordinal
+            successOrdinal = db.trustedQuotaDao().trustedCountForTask(taskId),
             runningObservedAt = null,
             endedAt = endedAt,
             webScore = webScore,

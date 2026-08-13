@@ -13,7 +13,8 @@ import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.model.plan.TestAttempt
-import com.example.cellrebelauto.recovery.ReconcileOutcome
+import com.example.cellrebelauto.recovery.ApplyOutcome
+import com.example.cellrebelauto.recovery.ReconcileResult
 import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.ScheduleAdvanceState
 import com.example.cellrebelauto.repository.PlanRepository
@@ -178,7 +179,13 @@ class AutomationEngine(
             // # 清扫永远最先跑：即使随后 both-OFF guard 拒绝启动，
             // # 崩溃残留也必须被终态化
             val sweptAttempts = planRepository.markNonTerminalInterrupted(nowMs())
-            val sweptSessions = planRepository.markStaleSessionsInterrupted(nowMs())
+            // # P1-4（Sol round-9）：全局 sweep 排除当前 owner session（A+ 恢复刚把它标回 running），
+            // # 不得把刚恢复的 owner 也打断。
+            val sweptSessions = if (runSessionId != 0L) {
+                planRepository.markStaleSessionsInterruptedExcept(nowMs(), runSessionId)
+            } else {
+                planRepository.markStaleSessionsInterrupted(nowMs())
+            }
             if (sweptAttempts > 0 || sweptSessions > 0) {
                 log("Recovery sweep: $sweptAttempts attempt(s) + $sweptSessions session(s) marked interrupted")
             }
@@ -310,13 +317,24 @@ class AutomationEngine(
                     // # P1-3：持久化当前操作（§7.1 Attempt 拥有当前 operation）。
                     planRepository.markAplusState(attemptId, "APPLY_PENDING")
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.BEGIN_APPLY) ?: aplusState
+                    // # P1-2（Sol round-9）：正路径 apply 是 provider 驱动——dispatchApply → ApplyOutcome.leaseId
+                    // # 持久化 lease（绝不凭空发明）；fail-closed executor 无 lease → PAUSED。
+                    val applyOutcome = aplusCoord.dispatchApply(
+                        attemptId, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest, nowMs()
+                    )
+                    val leaseId = applyOutcome.leaseId
+                    if (leaseId == null) {
+                        aplusPause("apply did not acquire a lease for attempt $attemptId")
+                        return@coroutineScope
+                    }
+                    planRepository.markAplusLease(attemptId, leaseId)
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.APPLY_RECEIPT) ?: aplusState
                     planRepository.markAplusState(attemptId, "ENV_APPLIED")
                     // # OBSERVE_PRE（§8.1 禁止：没 observe 就启动 CellRebel）
                     val preObservation = aplusEvidenceSrc.acquirePreObservation(attemptId)
                     if (preObservation == null) {
                         aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
-                        if (!aplusReleaseAndFinalize(attemptId, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = nowMs(), webScore = null, videoScore = null)) {
+                        if (!aplusReleaseAndFinalize(attemptId, task.id, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = nowMs(), webScore = null, videoScore = null)) {
                             return@coroutineScope
                         }
                         aplusPause("pre-observation unavailable for attempt $attemptId")
@@ -335,7 +353,7 @@ class AutomationEngine(
                         is AttemptOutcome.Failure -> {
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TIMEOUT_INTERRUPTED) ?: aplusState
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.RECONCILE) ?: aplusState
-                            if (!aplusReleaseAndFinalize(attemptId, success = false, reason = outcome.reason.name, endedAt = outcome.endedAt, webScore = null, videoScore = null)) {
+                            if (!aplusReleaseAndFinalize(attemptId, task.id, success = false, reason = outcome.reason.name, endedAt = outcome.endedAt, webScore = null, videoScore = null)) {
                                 return@coroutineScope
                             }
                             updateState(AutomationState.FAILED)
@@ -350,7 +368,7 @@ class AutomationEngine(
                             val postObservation = aplusEvidenceSrc.acquirePostObservation(attemptId)
                             if (postObservation == null) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
-                                if (!aplusReleaseAndFinalize(attemptId, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = null, videoScore = null)) {
+                                if (!aplusReleaseAndFinalize(attemptId, task.id, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = null, videoScore = null)) {
                                     return@coroutineScope
                                 }
                                 aplusPause("post-observation unavailable for attempt $attemptId")
@@ -361,7 +379,7 @@ class AutomationEngine(
                             val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId)
                             if (evidence == null) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
-                                if (!aplusReleaseAndFinalize(attemptId, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = null, videoScore = null)) {
+                                if (!aplusReleaseAndFinalize(attemptId, task.id, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = null, videoScore = null)) {
                                     return@coroutineScope
                                 }
                                 aplusPause("completion evidence unavailable for attempt $attemptId")
@@ -395,7 +413,7 @@ class AutomationEngine(
                                 _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
                             }
                             // # P1-5：release BEFORE terminalize（lease-bound + durable，P1-4），然后终态化 attempt。
-                            if (!aplusReleaseAndFinalize(attemptId, success = trusted, reason = if (trusted) null else FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = outcome.webScore, videoScore = outcome.videoScore)) {
+                            if (!aplusReleaseAndFinalize(attemptId, task.id, success = trusted, reason = if (trusted) null else FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = outcome.webScore, videoScore = outcome.videoScore)) {
                                 return@coroutineScope
                             }
                             log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
@@ -537,28 +555,36 @@ class AutomationEngine(
             }
 
         } catch (e: CancellationException) {
-            // # 停止/取消：在途尝试标记 interrupted，会话 stopped
+            // # 停止/取消：legacy 在途尝试标记 interrupted；A+ 模式绝不盲目标记 terminal——cancel 后可能
+            // # 仍持有未收敛 lease，必须保持 recoverable 由下次恢复 reconcile（Sol round-9 addendum）。
             _cooldown.value = null
-            currentAttemptId?.let { planRepository.markAttemptInterruptedIfNonTerminal(it, nowMs()) }
-            updateState(AutomationState.IDLE)
-            if (runSessionId != 0L) {
-                planRepository.finishSession(runSessionId, "stopped", nowMs(), _cycleCount.value)
+            if (recoveryCoordinator != null) {
+                aplusPause("cancelled with an unresolved A+ lease — recoverable, not terminalized")
+            } else {
+                currentAttemptId?.let { planRepository.markAttemptInterruptedIfNonTerminal(it, nowMs()) }
+                updateState(AutomationState.IDLE)
+                if (runSessionId != 0L) {
+                    planRepository.finishSession(runSessionId, "stopped", nowMs(), _cycleCount.value)
+                }
             }
             log("=== Automation stopped by user ===")
             throw e // # 重新抛出以正确传播取消
 
         } catch (e: Exception) {
-            // # 不可恢复的错误：在飞 attempt 也要终态化（typed，不留孤儿，F7）；
-            // # 终态化本身的失败不掩盖原异常
-            currentAttemptId?.let { attemptId ->
-                runCatching {
-                    planRepository.markAttemptInterruptedIfNonTerminal(attemptId, nowMs())
-                }.onFailure { Log.w(TAG, "failed to terminalize in-flight attempt $attemptId", it) }
-            }
-            currentAttemptId = null
-            updateState(AutomationState.ERROR)
-            if (runSessionId != 0L) {
-                planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)
+            // # 不可恢复的错误：legacy 在飞 attempt 终态化（F7 不留孤儿）；A+ 模式保持 recoverable。
+            if (recoveryCoordinator != null) {
+                aplusPause("exception with an unresolved A+ lease: ${e.message}")
+            } else {
+                currentAttemptId?.let { attemptId ->
+                    runCatching {
+                        planRepository.markAttemptInterruptedIfNonTerminal(attemptId, nowMs())
+                    }.onFailure { Log.w(TAG, "failed to terminalize in-flight attempt $attemptId", it) }
+                }
+                currentAttemptId = null
+                updateState(AutomationState.ERROR)
+                if (runSessionId != 0L) {
+                    planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)
+                }
             }
             log("=== Automation ERROR: ${e.message} ===")
             Log.e(TAG, "Automation failed", e)
@@ -677,60 +703,52 @@ class AutomationEngine(
     }
 
     /**
-     * Recover ONE crashed A+ attempt, branching on its PERSISTED current operation (Sol round-8 P1-3).
-     * The apply/release identity is recomputed from the durable attempt (P1-2); the release is
-     * lease-bound and must return a durable typed receipt (P1-4).
+     * Recover ONE crashed A+ attempt, branching on its PERSISTED current operation (Sol round-8 P1-3 /
+     * round-9 P1-4 full phase). Only `APPLY_PENDING` re-reconciles the apply (its receipt may not be
+     * durable yet); every LATER state (ENV_APPLIED … DECIDING / QUOTA_COMMITTED / UNVERIFIED_RECORDED /
+     * RELEASE_PENDING) has a durable lease and is release-converged, NEVER re-applied — so a crash after
+     * a trusted mint (DECIDING) is not re-applied and its minted attempt is not clobbered as interrupted.
      *
      * @return true to continue the plan; false = fail-closed PAUSED (caller returns).
      */
     private suspend fun recoverCrashedAttempt(crashed: TestAttempt, coordinator: RecoveryCoordinator): Boolean {
-        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(crashed.id)
-        return when (crashed.aplusState) {
-            // Release was in flight → reconcile RELEASE (lease-bound), never re-apply.
-            "RELEASE_PENDING" -> {
-                val leaseId = crashed.aplusLeaseId
-                if (leaseId == null) {
-                    aplusPause("RELEASE_PENDING attempt ${crashed.id} has no durable leaseId")
-                    return false
-                }
-                val receipt = coordinator.releaseLease(
-                    crashed.id, releaseKey, leaseId, APlusOperationIdentity.releaseDigest(leaseId), nowMs()
-                )
-                if (receipt == null) {
-                    aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
-                    return false
-                }
-                attemptDriver?.driveTransition(crashed.id, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_RECEIPT)
-                advanceAfterRelease(crashed, coordinator)
+        // APPLY_PENDING = apply dispatched, receipt/lease not yet durable → reconcile the apply (idempotent
+        // replay) to obtain the lease, which comes BACK from the apply — never pre-seeded (Sol round-9 P1-3).
+        if (crashed.aplusState == "APPLY_PENDING") {
+            val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
+            val intentDigest = APlusOperationIdentity.requestDigest(crashed.latitude, crashed.longitude, crashed.id)
+            val result = coordinator.reconcile(crashed.id, applyKey, intentDigest, nowMs())
+            val leaseId = when (result) {
+                is ReconcileResult.AdvancedToRelease -> result.leaseId
+                is ReconcileResult.ReplayedApply -> result.leaseId
+                else -> null
             }
-            // Apply (or later) was in flight → reconcile APPLY (same-key replay), then release + gate.
-            else -> {
-                val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
-                val intentDigest = APlusOperationIdentity.requestDigest(crashed.latitude, crashed.longitude, crashed.id)
-                when (val outcome = coordinator.reconcile(crashed.id, applyKey, intentDigest, nowMs())) {
-                    ReconcileOutcome.ADVANCED_TO_RELEASE, ReconcileOutcome.REPLAYED_APPLY -> {
-                        attemptDriver?.driveTransition(crashed.id, AttemptState.APPLY_PENDING, AttemptEvent.CRASH_RECOVER)
-                        val leaseId = crashed.aplusLeaseId
-                        if (leaseId == null) {
-                            aplusPause("apply-recovered attempt ${crashed.id} has no durable leaseId")
-                            return false
-                        }
-                        val receipt = coordinator.releaseLease(
-                            crashed.id, releaseKey, leaseId, APlusOperationIdentity.releaseDigest(leaseId), nowMs()
-                        )
-                        if (receipt == null) {
-                            aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
-                            return false
-                        }
-                        advanceAfterRelease(crashed, coordinator)
-                    }
-                    ReconcileOutcome.IDEMPOTENCY_CONFLICT, ReconcileOutcome.INSUFFICIENT_EVIDENCE -> {
-                        aplusPause("reconcile of attempt ${crashed.id} = $outcome (§8.2: 证据不足走 PAUSED)")
-                        false
-                    }
-                }
+            if (leaseId == null) {
+                aplusPause("reconcile of attempt ${crashed.id} = $result (§8.2: 证据不足走 PAUSED)")
+                return false
             }
+            attemptDriver?.driveTransition(crashed.id, AttemptState.APPLY_PENDING, AttemptEvent.CRASH_RECOVER)
+            planRepository.markAplusLease(crashed.id, leaseId)
         }
+        // Every in-flight state: converge the release (lease-bound + durable), then the schedule gate.
+        val leaseId = planRepository.getAplusLeaseId(crashed.id)
+        if (leaseId == null) {
+            aplusPause("no durable leaseId to release for recovered attempt ${crashed.id}")
+            return false
+        }
+        val receipt = coordinator.releaseLease(
+            crashed.id,
+            APlusOperationIdentity.releaseIdempotencyKey(crashed.id),
+            leaseId,
+            APlusOperationIdentity.releaseDigest(leaseId),
+            nowMs()
+        )
+        if (receipt == null) {
+            aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
+            return false
+        }
+        attemptDriver?.driveTransition(crashed.id, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_RECEIPT)
+        return advanceAfterRelease(crashed, coordinator)
     }
 
     /** After a durable release receipt, the schedule gate must ADVANCE before terminalizing + resuming. */
@@ -760,6 +778,7 @@ class AutomationEngine(
      */
     private suspend fun aplusReleaseAndFinalize(
         attemptId: Long,
+        taskId: Long,
         success: Boolean,
         reason: String?,
         endedAt: Long,
@@ -768,24 +787,28 @@ class AutomationEngine(
     ): Boolean {
         attemptDriver?.driveTransition(attemptId, AttemptState.DECIDING, AttemptEvent.BEGIN_RELEASE)
         planRepository.markAplusState(attemptId, "RELEASE_PENDING")
+        // # P1-2/P1-4: release is provider-driven + lease-bound. The lease is always present (dispatchApply
+        // # acquired + persisted it); a missing lease is a structural defect → fail-closed.
         val leaseId = planRepository.getAplusLeaseId(attemptId)
-        if (leaseId != null) {
-            val receipt = recoveryCoordinator?.releaseLease(
-                attemptId,
-                APlusOperationIdentity.releaseIdempotencyKey(attemptId),
-                leaseId,
-                APlusOperationIdentity.releaseDigest(leaseId),
-                nowMs()
-            )
-            if (receipt == null) {
-                aplusPause("release receipt not durable for attempt $attemptId")
-                return false
-            }
+        if (leaseId == null) {
+            aplusPause("no durable leaseId to release for attempt $attemptId")
+            return false
+        }
+        val receipt = recoveryCoordinator?.releaseLease(
+            attemptId,
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+            leaseId,
+            APlusOperationIdentity.releaseDigest(leaseId),
+            nowMs()
+        )
+        if (receipt == null) {
+            aplusPause("release receipt not durable for attempt $attemptId")
+            return false
         }
         attemptDriver?.driveTransition(attemptId, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_RECEIPT)
         planRepository.markAplusState(attemptId, "CLOSED")
         if (success) {
-            planRepository.finalizeAplusSuccess(attemptId, endedAt, webScore, videoScore)
+            planRepository.finalizeAplusSuccess(attemptId, taskId, endedAt, webScore, videoScore)
         } else {
             planRepository.finalizeAttemptFailure(attemptId, reason ?: FailureReason.UNTRUSTED.name, endedAt)
         }

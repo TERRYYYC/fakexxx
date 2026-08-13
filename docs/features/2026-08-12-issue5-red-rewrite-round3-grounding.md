@@ -756,3 +756,46 @@ GREEN, never reached pre-freeze. (3) The A+ mode pauses fail-closed on ANY non-P
 / trust-fail / missing evidence), which terminates the loop the skeleton would otherwise spin.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.11 Round-10 — exact-v5 boundary + provider-driven apply→lease→release + full-phase recovery (Sol round-9 advisory answered)
+
+**Status.** Sol's round-9 advisory (`4eb03eb`) left 6 P1 + 1 P2 + 1 addendum. R10 closes them. **Baseline: `199 tests / 45 failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema restored to exact v5 (6.json deleted, shapes folded into MIGRATION_4_5).
+
+**Repairs (map to Sol's findings).**
+- **P1-1 schema boundary** — reverted v6→v5: `aplusState`/`aplusLeaseId` ALTER + `unverified_attempt_records`
+  CREATE folded into MIGRATION_4_5 (the frozen v5 end-state); `AppDatabase.version = 5`, `MIGRATION_5_6`/
+  `6.json` removed. The owner-state + unverified shapes are §7.1 v5 shapes, not a later bump.
+- **P1-2 normal chain forges receipts** — `ApplyOutcome` gains `leaseId`; `RecoveryCoordinator.dispatchApply`
+  drives `executor.apply` + records the receipt + returns the lease; `releaseLease` drives `executor.release`
+  + records the lease-bound release receipt. The normal path now: `dispatchApply → leaseId → markAplusLease
+  → … → releaseLease → typed receipt` — no forged APPLY_RECEIPT/RELEASE_RECEIPT/CLOSED without the provider
+  effect. The RED asserts provider effect + lease readback + release effect.
+- **P1-3 M-CR-02 pre-seeded lease** — `reconcile` returns a typed `ReconcileResult` (AdvancedToRelease /
+  ReplayedApply carry the apply receipt + lease); the engine persists the lease from the RESULT, never from a
+  pre-seeded fixture. The M-CR-02 seed carries NO lease.
+- **P1-4 full phase + session** — recovery re-applies ONLY `APPLY_PENDING`; every later state
+  (ENV_APPLIED … DECIDING / QUOTA_COMMITTED / UNVERIFIED_RECORDED / RELEASE_PENDING) release-converges from
+  the persisted lease, never re-applies (a DECIDING crash is not re-applied + not clobbered interrupted). The
+  global sweep now excludes the recovered owner session (`markStaleSessionsInterruptedExcept`), and
+  `findActiveRunningSession` recognizes `recovering` (second-restart polarity).
+- **P1-5 release durability** — exact receipt field assertions (idempotencyKey/leaseId/releaseDigest/outcome)
+  + release effect=1; the releaseLease readback is the gate (self-gate below).
+- **P1-6/P2 carrier value domain** — `finalizeAplusSuccess` writes `successOrdinal = trustedCount(taskId)`
+  (1-based); the negative asserts the unverified record (and the GREEN writes exact attemptId/reason/digest);
+  the positive re-adds the non-constant attempt identity (dummy attempt + explicit taskId 42L).
+- **addendum cancel/throw** — the A+ cancel/exception paths leave the in-flight attempt recoverable + mark the
+  session `paused`, never blindly terminalize (a lease owner is never converted into an unrecoverable one).
+
+**§11.7 self-gate (BUILT and RUN, then reverted).** Greened `releaseLease` to drive `executor.release` but
+return a receipt WITHOUT recording it: R10-F2 release + DECIDING both shifted RED to "the release must
+converge a durable receipt bound to the lease" — the durable readback is the gate, not a Boolean. Reverted;
+baseline re-verified 199/45/0.
+
+**Honest disclosures.** (1) The executor + log production bindings (RPC + Room) remain GREEN (the
+`dispatchApply`/`releaseLease` orchestration is over those two seams); the production `productionBackend()` is
+a fail-closed skeleton executor/log. (2) `reconcile`/`scheduleAdvanced` remain SKELETON (their idempotency +
+3-acquirer orchestration is GREEN). (3) `completeTaskIfQuotaReached` is still legacy-counter SQL (trusted-only
+completion is F3 GREEN, never reached pre-freeze). (4) The normal-path terminal-success (PASS) is GREEN-deferred
+behind the skeleton decision, but the apply→lease→release chain is now provider-driven and RED-asserted.
+
+[深深/deepseek-v4-pro🐾]
