@@ -1110,3 +1110,26 @@ disconnect attack.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.23 Round-22 — second-restart custody + full-row equality + frozen CrashMatrixTest entry (Sol round-21 advisory answered)
+
+**Status.** Sol's round-21 advisory (`c9df98d`). R22 closes the recoverable-selector custody mutation + adds
+the frozen crash-matrix entry. **Baseline: `223 tests / 45 failed / 0 errors`, lintDebug + assembleDebug
+green, `git diff --check` clean.** Schema exact v5.
+
+**Repairs.**
+- **second-restart custody** — wrong-task / dual-truth now run a SECOND engine start and assert the attempt
+  count stays 1 (no new attempt), `RECOVERY_REQUIRED` is still selected by the recovery, and the attempt
+  stays `starting` — a recoverable-selector mutation that excludes `RECOVERY_REQUIRED` adds a recognizable RED.
+- **full-row equality** — M-CR-07 captures the inserted `TrustedQuotaEntry.id` and asserts full data-class
+  equality (id/attemptId/taskId/digest/committedAt) + per-task/legacy-zero, so a ledger-row tamper is caught.
+- **frozen `matrix/CrashMatrixTest.kt`** — M-CR-07 (ledger truth → succeeded) + M-CR-08 (release replay 1→2,
+  effect 1) + unverified-carrier authority entries are banked; M-CR-03..06 are documented GREEN-bound.
+
+**Remaining owner-red (next SHA):** gate-held second-restart custody, CLOSED→generic-terminal single-
+transaction window, Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]
