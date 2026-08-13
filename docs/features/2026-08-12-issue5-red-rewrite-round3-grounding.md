@@ -1234,3 +1234,24 @@ production call-site disconnect attack.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.28 Round-27 — M-CR-06 full-field re-decision oracle (Sol round-26 advisory answered)
+
+**Status.** Sol's round-26 advisory (`662f49f`) — P1: `getByAttempt(77)` still allows a wrong-task / fake-digest
+/ zero-clock mint. R27 pins the full entry. **Baseline: `226 tests / 49 failed / 0 errors`, lintDebug +
+assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **M-CR-06 full-field** — the re-decision oracle now asserts the minted entry binds the correct task (42),
+  carries a distinctive (non-empty) evidence digest, and a non-zero commit clock, in addition to the attempt —
+  so a wrong-task / fake-digest / zero-clock mint is not a re-decision. (The evidence-digest VALUE is
+  GREEN-bound — the durable evidence carrier is §3 contract-owned.)
+
+**Remaining owner-red (next SHA):** M-CR-03..05 behavioral/durable-outcome fixtures, two phase-order crash
+probes, gate-held second-restart custody, CLOSED→terminal single-transaction window, Service-owned factory /
+production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

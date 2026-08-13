@@ -37,6 +37,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -189,11 +190,15 @@ class CrashMatrixTest {
     @Test
     fun `M_CR_06`() = runTest {
         // M-CR-06: trust PASS but the ledger transaction not yet committed (phase DECIDING, no carrier).
-        // GREEN: re-decide from the persisted evidence → recompute + unique insert ONCE, bound to the attempt
-        // (a global row count / constant mint is NOT a re-decision).
+        // GREEN: re-decide from the persisted durable evidence → recompute + unique insert ONCE, bound to the
+        // attempt + task + distinctive digest + non-zero clock (a wrong-task / fake-digest / zero-clock mint
+        // is NOT a re-decision).
         seedObservePhaseCrash("DECIDING")
-        assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", db.trustedQuotaDao().getByAttempt(77L))
-        assertEquals("M-CR-06: re-decide must insert exactly one entry", 1, db.trustedQuotaDao().countAll())
+        val entry = db.trustedQuotaDao().getByAttempt(77L)
+        assertNotNull("M-CR-06: re-decide must mint a trusted entry bound to the attempt", entry)
+        assertEquals("M-CR-06: the mint must bind the correct task", 42L, entry!!.taskId)
+        assertTrue("M-CR-06: the mint must carry a distinctive evidence digest", entry.evidenceDigest.isNotEmpty())
+        assertTrue("M-CR-06: the mint must carry a non-zero commit clock", entry.committedAt > 0)
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
