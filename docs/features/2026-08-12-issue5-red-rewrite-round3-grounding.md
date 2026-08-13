@@ -659,3 +659,54 @@ effect + in-step ordering, not the call-site text. (4) F3 (OR-branch discriminat
 re-opened by Sol round-6 and stays as R5/R6 banked it.
 
 [墨墨/kimi-k3🐾]
+
+### 11.9 Round-8 — single composition root + owner-state identity + release convergence (Sol round-7 advisory answered; author handoff 墨墨 → 深深)
+
+**Status.** Sol's round-7 advisory (`ea347f7`) left five P1s. R8 (uncommitted skeleton was mid-flight;
+completed + corrected by 深深/@deepseek-pro) closes them: ① single composition root; ② identity from
+durable attempt (not audit); ③ release convergence; ④ trust-fail → unverified + legacy-zero; ⑤ clock
+fixture. **Baseline: `197 tests / 44 failed / 0 errors`, lintDebug SUCCESSFUL.**
+
+**Repairs (map to Sol's five findings).**
+- **P1-1 composition** — new `APlusComposition` object is the ONE point that turns an `APlusBackend`
+  (executor + durable log + three schedule-gate acquirers + evidence source) into the engine's
+  `recoveryCoordinator` + `completionEvidenceSource`. `AutomationService` and the tests both go through
+  it; pre-freeze `AutomationService` ships `backend = null` (pure legacy), and GREEN wires the same two
+  functions with a real backend — the production/test disconnect is structurally impossible.
+- **P1-2 state-owner identity** — `findAPlusRecoverableAttempts` returns the durable `TestAttempt` (no
+  audit read); apply/release key + intent digest are recomputed by `APlusOperationIdentity` from the
+  attempt's coords/id/runId (§7.1: the Attempt owns its 当前 operation; `AutoAuditEvent` is never a
+  state owner). The crash seed writes NO audit row, so identity can only come from owner state.
+- **P1-3 legacy-zero / unverified** — the A+ happy path decides via `recordTrustedCompletion`; a FAIL is
+  finalized `UNTRUSTED` (new `FailureReason`), never `finalizeAttemptSuccess`; the legacy
+  `completedSuccesses` counter is untouched in A+ mode. Trust-fail is fail-closed (`aplusPause` →
+  durable `PAUSED`) rather than silently retrying (§8.2 安全失败 → STOPPED), which also terminates the
+  loop the skeleton would otherwise spin (recordTrustedCompletion can never PASS pre-freeze).
+- **P1-4 release convergence** — `RecoveryCoordinator.releaseLease` + `ExternalApplyExecutor.release`
+  added; after `ADVANCED_TO_RELEASE`/`REPLAYED_APPLY` the engine must release the lease before the
+  schedule gate and only then terminalize + resume (§8.2: no fresh apply until RELEASED).
+- **P1-5 clock** — the virtual clock starts at 1000 (after the seeded session 500 / dummy 470), so
+  `getLatest()` resolves the engine's own session.
+
+**Design correction (of the in-flight skeleton).** The in-flight happy path gated on `dispatchApply` /
+`releaseLease` (both skeleton-false) at the START of the lifecycle, which would have made
+`recordTrustedCompletion` (F1) and the full §8.1 audit trail (F4) unreachable — every happy-path RED
+would stall at APPLY_PENDING. R8 removed those gates from the happy path: apply/release are GREEN
+external calls (§8.1 `BEGIN_APPLY→APPLY_RECEIPT` / `BEGIN_RELEASE→RELEASE_RECEIPT`), pre-freeze the
+happy path only DRIVES the §8.1 transitions through the driver and reaches the decision, while
+`releaseLease` convergence stays on the recovery path (finding ③).
+
+**§11.7 self-gate (BUILT and RUN, then `git restore`d).** Greened `reconcile` (executor + receipt +
+checkpoint → ADVANCED) while keeping `releaseLease` skeleton-false: R8-F2 window-(b) shifted its RED
+from "re-invoke the executor" to **"the engine must converge release exactly once (expected 1, was 0)"**
+— proving the release-convergence gate is real, not a dormant assertion. Restored; baseline re-verified
+197/44/0.
+
+**Honest disclosures.** (1) `recordTrustedCompletion` reachability is now proven by the engine A+ mode
+reaching the decision (execution row persisted) — the mint itself stays RED at the repo level
+(`TrustedLedgerRedTest`), because pre-freeze no GREEN can mint. (2) The PASS branch's
+`completeTaskIfQuotaReached` is still the legacy-counter SQL; trusted-only completion is F3's GREEN and
+is never reached pre-freeze (recordTrustedCompletion never PASSes). (3) The engine's A+ mode is entered
+only when BOTH `recoveryCoordinator` and `completionEvidenceSource` are non-null (a full backend).
+
+[深深/deepseek-v4-pro🐾]

@@ -93,6 +93,29 @@ class RecoveryCoordinator(
         idempotencyKey: String,
         now: Long
     ): ScheduleAdvanceState = ScheduleAdvanceState.NOT_ADVANCED
+
+    /**
+     * Lease-release convergence (§8.1 BEGIN_RELEASE→RELEASE_RECEIPT; §8.2: no fresh apply until
+     * RELEASED): drive the external release for [idempotencyKey] (the release key is derived separately
+     * from the apply key via
+     * [com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey]) and
+     * record the durable release receipt. Returns true iff the release receipt is durable.
+     *
+     * Sol round-7 P1-4: the R7 recovery returned ADVANCED and immediately marked the attempt interrupted
+     * and resumed — NO release convergence — leaving the lease unresolved before a fresh apply (§8.2: no
+     * fresh apply until RELEASED). The engine must call this after ADVANCED_TO_RELEASE/REPLAYED_APPLY and
+     * only continue when the release receipt is durable.
+     *
+     * PRE-FREEZE SKELETON (RED): returns false and touches nothing (fail-closed).
+     *
+     * # lease 释放收敛骨架（RED）：恒 false、无副作用；GREEN 驱动释放并落 release receipt
+     */
+    fun releaseLease(
+        attemptId: Long,
+        idempotencyKey: String,
+        requestDigest: String,
+        now: Long
+    ): Boolean = false
 }
 
 enum class ReconcileOutcome {

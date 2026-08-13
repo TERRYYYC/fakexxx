@@ -2,11 +2,14 @@ package com.example.cellrebelauto.automation
 
 import android.util.Log
 import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
+import com.example.cellrebelauto.automation.aplus.APlusEvidenceSource
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptState
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.environment.CompletionTrustContext
+import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.model.plan.TestAttempt
@@ -97,19 +100,15 @@ class AutomationEngine(
     private val delayMs: suspend (Long) -> Unit = { delay(it) },
     // # R6-F4（§11.7）：§8.1 状态机的生产驱动入口。GREEN 在 attempt 生命周期各 §8.1 步驱动它，
     // # 使状态机迁移都落到持久审计流。RED seam：默认 null（既有行为不变）；测试传真实 driver。
-    // # 不可为 val 默认非空——engine 不持有 db，driver 由构造方（AutomationService / 测试）注入。
+    // # 不可为 val 默认非空——engine 不持有 db，driver 由构造方（APlusComposition / 测试）注入。
     private val attemptDriver: APlusAttemptDriver? = null,
-    // # R7-F2（§11.7）：A+ 崩溃恢复协调器的生产组合 seam。恢复清扫阶段经它对带 BEGIN_APPLY 审计的
-    // # 非终态 attempt 做同键 reconcile + schedule-advance 门（§8.2 RECOVERING：优先 reconcile，
-    // # 不取下一任务）。RED seam：默认 null（既有行为不变——无协调器时走 legacy 盲扫）；测试注入
-    // # 组合好的协调器。AutomationService 暂不传：executor/log 的生产绑定是 GREEN（Room/RPC 依赖
-    // # 冻结的 schema 与 contract），seam 先行使测试可经生产构造路径组合。
+    // # R8-F2（Sol round-7）：A+ 崩溃恢复协调器。生产经组合根 APlusComposition 由 backend 构造注入；
+    // # 默认 null = 纯 legacy（pre-freeze 生产现状）。非 null 且 completionEvidenceSource 非 null 时
+    // # engine 进入 A+ 模式：恢复段同键 reconcile + release 收敛 + schedule 门；正路径走 §3.1 生命周期。
     private val recoveryCoordinator: RecoveryCoordinator? = null,
-    // # R7-F1（§11.7）：可信完成证据的生产获取 seam。成功收尾时 engine 经它取得绑定真实 attempt 的
-    // # §6.4 完成信任上下文，并调用 PlanRepository.recordTrustedCompletion（当前为骨架：persist
-    // # digest-only、恒 FAIL、绝不铸币）。默认 null = legacy 路径（既有行为不变）；真实的
-    // # observe/classify 获取是 GREEN（contract 冻结）。
-    private val completionTrustContextProvider: (suspend (attemptId: Long, outcome: AttemptOutcome.Success) -> CompletionTrustContext?)? = null
+    // # R8-F1（Sol round-7 P1-2）：A+ 证据获取 seam（观察/分类/回执 artifact）。目标坐标与本地重算
+    // # hash 不由它提供——ctx 由持久 attempt intent 组装（INV-23）。默认 null = legacy。
+    private val completionEvidenceSource: APlusEvidenceSource? = null
 ) {
     companion object {
         private const val TAG = "AutoEngine"
@@ -154,40 +153,57 @@ class AutomationEngine(
     suspend fun run() = coroutineScope {
         try {
             // ==================== Step 0a: A+ reconcile BEFORE the blind sweep (§8.2 RECOVERING) ====
-            // # R7-F2（§11.7）：带 BEGIN_APPLY 审计的非终态 attempt = 崩溃时 apply 已发出、lease 可能
-            // # 仍被持有。§8.2：进程恢复发现非终态 attempt → RECOVERING，优先 reconcile，不取下一任务。
-            // # 同键 reconcile 收敛 lease 后，还必须过 schedule-advance 消费门（§5 边界：无持久 receipt
-            // # + 三项事实，Auto 绝不假定千网游 schedule 已前进）。证据不足/冲突/门未开 → fail-closed
-            // # 停跑（保留现场证据，绝不满眼推进）。无协调器（生产现状）时整段跳过，走 legacy 盲扫。
-            val coordinator = recoveryCoordinator
-            if (coordinator != null) {
-                for (ref in planRepository.findAPlusPendingReconcileRefs(planId)) {
-                    when (val outcome = coordinator.reconcile(
-                        ref.attemptId, ref.idempotencyKey, ref.requestDigest, nowMs()
-                    )) {
+            // # R8-F2（Sol round-7 P1-4/6）：A+ 模式恢复——apply/release 身份由持久 attempt 身份重算
+            // #（APlusOperationIdentity，绝不从审计流反推）；同键 reconcile 收敛后，先 release 收敛
+            // #（无未收敛 lease 才前进）再过 schedule-advance 门（§5 边界），全部成立才终态化崩溃
+            // # attempt 并续跑；证据不足/冲突/释放未落库/门未开 → 持久 PAUSED（保留现场，不盲扫、
+            // # 不取下一任务）。新 session 先建并标 recovering，使恢复状态持久可见。
+            // # 无协调器/证据源（生产现状 = null）时整段跳过，走 legacy 盲扫。
+            val aplusCoordinator = recoveryCoordinator
+            val aplusEvidence = completionEvidenceSource
+            if (aplusCoordinator != null && aplusEvidence != null) {
+                runSessionId = planRepository.createSession(planId, nowMs())
+                planRepository.markSessionStatus(runSessionId, "recovering")
+                updateState(AutomationState.RECOVERING)
+                for (crashed in planRepository.findAPlusRecoverableAttempts(planId)) {
+                    val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
+                    val intentDigest = APlusOperationIdentity.requestDigest(
+                        crashed.latitude, crashed.longitude, crashed.id, crashed.runSessionId
+                    )
+                    when (val outcome = aplusCoordinator.reconcile(crashed.id, applyKey, intentDigest, nowMs())) {
                         ReconcileOutcome.ADVANCED_TO_RELEASE, ReconcileOutcome.REPLAYED_APPLY -> {
-                            val advance = coordinator.scheduleAdvanced(
-                                ref.attemptId, ref.idempotencyKey, nowMs()
+                            // # 同键重放审计（§8.1 APPLY_PENDING + CRASH_RECOVER 自环）
+                            attemptDriver?.driveTransition(
+                                crashed.id, AttemptState.APPLY_PENDING, AttemptEvent.CRASH_RECOVER
                             )
-                            if (advance == ScheduleAdvanceState.ADVANCED) {
-                                // # lease 已收敛且 schedule 前进已证实：崩溃 attempt 终态化，计划继续
-                                planRepository.markAttemptInterruptedIfNonTerminal(ref.attemptId, nowMs())
-                                log("A+ recovery: attempt ${ref.attemptId} reconciled ($outcome), gate ADVANCED — resuming plan")
-                            } else {
-                                log("ERROR: A+ recovery gate held for attempt ${ref.attemptId} — " +
-                                    "NOT advancing (§5 boundary); fail closed")
-                                updateState(AutomationState.ERROR)
+                            // # lease 释放收敛必须先于任何续跑/新 apply（§8.2：无未收敛 lease 才前进）
+                            val released = aplusCoordinator.releaseLease(
+                                crashed.id,
+                                APlusOperationIdentity.releaseIdempotencyKey(crashed.id),
+                                intentDigest,
+                                nowMs()
+                            )
+                            if (!released) {
+                                aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
                                 return@coroutineScope
                             }
+                            // # §5 边界：release 后仍须过 schedule 门，不假定千网游 schedule 已前进
+                            val advance = aplusCoordinator.scheduleAdvanced(crashed.id, applyKey, nowMs())
+                            if (advance != ScheduleAdvanceState.ADVANCED) {
+                                aplusPause("schedule-advance gate held for recovered attempt ${crashed.id}")
+                                return@coroutineScope
+                            }
+                            // # 释放 receipt 落库后才终态化崩溃 attempt（证据保留在 receipt/审计侧）
+                            planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
+                            log("A+ recovery: attempt ${crashed.id} reconciled ($outcome) + released — resuming plan")
                         }
                         ReconcileOutcome.IDEMPOTENCY_CONFLICT, ReconcileOutcome.INSUFFICIENT_EVIDENCE -> {
-                            log("ERROR: A+ reconcile of attempt ${ref.attemptId} = $outcome — " +
-                                "fail closed, evidence preserved (§8.2: 证据不足走 PAUSED)")
-                            updateState(AutomationState.ERROR)
+                            aplusPause("reconcile of attempt ${crashed.id} = $outcome (§8.2: 证据不足走 PAUSED)")
                             return@coroutineScope
                         }
                     }
                 }
+                planRepository.markSessionStatus(runSessionId, "running")
             }
 
             // ==================== Step 0: recovery sweep FIRST (INV-9, F3R1-3) ====================
@@ -220,7 +236,10 @@ class AutomationEngine(
                 return@coroutineScope
             }
 
-            runSessionId = planRepository.createSession(planId, nowMs())
+            // # A+ 模式下 session 已在恢复段创建（recovering→running）；legacy 在此创建
+            if (runSessionId == 0L) {
+                runSessionId = planRepository.createSession(planId, nowMs())
+            }
             _cycleCount.value = 0
             log("=== Plan run started (plan #$planId, session #$runSessionId) ===")
 
@@ -298,10 +317,6 @@ class AutomationEngine(
                     )
                 )
                 currentAttemptId = attemptId
-                // # R6-F4（§11.7）：经生产驱动入口驱动 §8.1 首步迁移——GREEN 在此把 attempt 生命周期
-                // # 接入持久审计流。RED seam：driver 为 no-op 骨架时这里无任何持久副作用，但调用关系
-                // # 已建立（engine→driver→audit），使"driver 正确但 engine 不调用"的攻击无法 green。
-                attemptDriver?.driveTransition(attemptId, AttemptState.CREATED, AttemptEvent.BEGIN_APPLY)
                 _cycleCount.value = _cycleCount.value + 1
                 _currentTask.value = EngineTaskSnapshot(
                     csvRow = task.csvRow,
@@ -312,6 +327,117 @@ class AutomationEngine(
                     requiredSuccesses = task.requiredSuccesses,
                     attemptOrdinal = attemptOrdinal
                 )
+
+                // ==================== A+ lifecycle（R8；§3.1 typed steps / §8.1 表） ====================
+                // # R8（Sol round-7）：A+ 模式全程经生产 driver 落持久审计；apply/release 身份由持久
+                // # attempt 身份重算（APlusOperationIdentity）；完成信任上下文由持久 intent 组装
+                // #（目标坐标 = 任务派发坐标、本地重算 hash，绝不取自后端 artifact）。任何 durable
+                // # 步骤未落库（骨架恒失败）→ 持久 PAUSED（fail-closed，保留现场证据）。
+                val aplusCoord = recoveryCoordinator
+                val aplusEvidenceSrc = completionEvidenceSource
+                if (aplusCoord != null && aplusEvidenceSrc != null) {
+                    var aplusState = AttemptState.CREATED
+                    // # R8（Sol round-7 P1-2）：intent 身份由持久 attempt intent 重算（目标坐标 = 任务
+                    // # 派发坐标、run/attempt id），绝不取自后端 artifact（INV-23）。
+                    val intentDigest = APlusOperationIdentity.requestDigest(
+                        task.latitude, task.longitude, attemptId, runSessionId
+                    )
+                    // # §8.1 全程经生产 driver 落持久审计（F4）；apply/release 的**外部调用**是 GREEN
+                    // #（§8.1 BEGIN_APPLY→APPLY_RECEIPT / BEGIN_RELEASE→RELEASE_RECEIPT），pre-freeze
+                    // # 只驱动迁移，不在正路径设恒 false 门（那会把可信判定路径挡死、使 F1/F4 不可测）。
+                    aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.BEGIN_APPLY) ?: aplusState
+                    aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.APPLY_RECEIPT) ?: aplusState
+                    // # OBSERVE_PRE（§8.1 禁止：没 observe 就启动 CellRebel）
+                    val preObservation = aplusEvidenceSrc.acquirePreObservation(attemptId)
+                    if (preObservation == null) {
+                        aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
+                        planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
+                        aplusPause("pre-observation unavailable for attempt $attemptId")
+                        return@coroutineScope
+                    }
+                    aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.PRE_OBSERVATION_OK) ?: aplusState
+                    aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.START_CELLREBEL) ?: aplusState
+                    updateState(AutomationState.LAUNCHING_CELLREBEL)
+                    val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
+                        // # C2 + §8.1 NEW_RUN_OBSERVED：观察到 RUNNING 的瞬间持久化并落审计
+                        planRepository.markAttemptRunning(attemptId, runningAt)
+                        aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
+                    }
+                    ensureActive()
+                    when (outcome) {
+                        is AttemptOutcome.Failure -> {
+                            // # CELLREBEL_RUNNING + TIMEOUT_INTERRUPTED → RECOVERY_REQUIRED → RECONCILE
+                            // # → RELEASE_PENDING → 释放收敛 → CLOSED；类型化失败，绝不计配额。
+                            // # release 外部调用是 GREEN（§8.1 BEGIN_RELEASE→RELEASE_RECEIPT），pre-freeze 只驱动迁移。
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TIMEOUT_INTERRUPTED) ?: aplusState
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.RECONCILE) ?: aplusState
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.RELEASE_RECEIPT) ?: aplusState
+                            planRepository.finalizeAttemptFailure(attemptId, outcome.reason.name, outcome.endedAt)
+                            updateState(AutomationState.FAILED)
+                            _lastFailure.value = LastFailureInfo(attemptOrdinal, outcome.reason.name)
+                            log("A+ attempt $attemptOrdinal failed: ${outcome.reason} — typed failure, no quota")
+                        }
+                        is AttemptOutcome.Success -> {
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.COMPLETION_OBSERVED) ?: aplusState
+                            val postObservation = aplusEvidenceSrc.acquirePostObservation(attemptId)
+                            if (postObservation == null) {
+                                aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
+                                planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, outcome.endedAt)
+                                aplusPause("post-observation unavailable for attempt $attemptId")
+                                return@coroutineScope
+                            }
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.POST_OBSERVATION_OK) ?: aplusState
+                            // # DECIDE：ctx 由持久 intent（目标坐标 = 任务派发坐标、本地重算 hash）+
+                            // # 后端 artifact（回执 hash/lease、观察、分类证据）组装（INV-23）
+                            val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId)
+                            if (evidence == null) {
+                                planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, outcome.endedAt)
+                                aplusPause("completion evidence unavailable for attempt $attemptId")
+                                return@coroutineScope
+                            }
+                            val trustCtx = CompletionTrustContext(
+                                execution = evidence.execution.copy(attemptId = attemptId),
+                                completionEvidenceWire = evidence.completionEvidenceWire,
+                                applyReceiptIntentHash = evidence.applyReceiptIntentHash,
+                                locallyRecomputedIntentHash = intentDigest,
+                                applyReceiptLease = evidence.applyReceiptLease,
+                                targetLat = task.latitude,
+                                targetLng = task.longitude,
+                                locationToleranceMeters = 1.0,
+                                preObservation = preObservation,
+                                postObservation = postObservation
+                            )
+                            val decision = planRepository.recordTrustedCompletion(trustCtx)
+                            if (decision == TrustDecision.PASS) {
+                                aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_PASS) ?: aplusState
+                                // # §7.3：完成 = 可信计数投影（trusted-only SQL 是 F3 GREEN）；
+                                // # legacy completedSuccesses 计数列在 A+ 模式绝不动（Sol round-7 P1-3）
+                                planRepository.completeTaskIfQuotaReached(task.id)
+                                updateState(AutomationState.SUCCEEDED)
+                            } else {
+                                aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_FAIL) ?: aplusState
+                                // # UNVERIFIED_RECORDED：类型化未验证记录，绝不计配额、绝不动 legacy 计数
+                                planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, outcome.endedAt)
+                                updateState(AutomationState.FAILED)
+                                _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
+                            }
+                            // # RELEASE：两种判定都释放 lease（§8.1 QUOTA_COMMITTED/UNVERIFIED_RECORDED → BEGIN_RELEASE）；
+                            // # 外部调用是 GREEN，pre-freeze 只驱动迁移（F4 完整审计）。
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.BEGIN_RELEASE) ?: aplusState
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.RELEASE_RECEIPT) ?: aplusState
+                            log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
+                            if (decision != TrustDecision.PASS) {
+                                // # fail-closed（Sol round-7 P1-3）：trust-fail = 安全失败（§8.2 STOPPED 明确原因），
+                                // # 持久 PAUSED 停跑，绝不静默重试、绝不动 legacy 计数；也避免骨架恒 FAIL 时无限重试。
+                                aplusPause("trust decision FAIL for attempt $attemptId — UNVERIFIED_RECORDED, no quota, no legacy counter")
+                                return@coroutineScope
+                            }
+                        }
+                    }
+                    currentAttemptId = null
+                    tasks = planRepository.getTasks(planId)
+                    continue
+                }
 
                 // ==================== Location stage（AC-F3-2：OFF 则整段跳过） ====================
                 if (toggles.locationStageEnabled) {
@@ -398,14 +524,6 @@ class AutomationEngine(
                         )
                         if (!finalized) {
                             log("WARNING: finalize skipped (stale expected count) — idempotent guard held")
-                        }
-                        // # R7-F1（§11.7）：A+ 可信完成——经生产完成入口把分类执行证据持久化，并在
-                        // # §6.4 PASS 时铸币（§8.1 DECIDING→QUOTA_COMMITTED）。provider seam 默认 null
-                        // # ⇒ 不取证据、不落账本（既有行为不变）。recordTrustedCompletion 当前为骨架
-                        // #（persist digest-only、恒 FAIL、绝不铸币）⇒ R7-F1 的铸币/证据断言保持 RED。
-                        val trustCtx = completionTrustContextProvider?.invoke(attemptId, outcome)
-                        if (trustCtx != null) {
-                            planRepository.recordTrustedCompletion(trustCtx)
                         }
                         val updated = planRepository.getTask(task.id)
                         if (updated != null) {
@@ -570,6 +688,19 @@ class AutomationEngine(
             log("WARNING: returnToSelf timed out (foreground=${bridge.getCurrentPackage()})")
         }
         delay(500)
+    }
+
+    /**
+     * Durable A+ PAUSED（§8.2）：恢复/正路径任一 durable 步骤 fail-closed 时，持久停跑并保留现场
+     * 证据，绝不盲扫、绝不取下一任务（Sol round-7）。标记 session 为 paused，返回后调用方退出 run。
+     * # A+ 持久 PAUSED：fail-closed 停跑，标记 session paused，保留现场证据
+     */
+    private suspend fun aplusPause(message: String) {
+        updateState(AutomationState.PAUSED)
+        if (runSessionId != 0L) {
+            planRepository.markSessionStatus(runSessionId, "paused")
+        }
+        log("ERROR: $message")
     }
 
     private fun updateState(newState: AutomationState) {
