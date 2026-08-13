@@ -241,6 +241,17 @@ neg "N-12 duplicate 6.3.3 row for the same code" "$SPEC" \
 | 7 | `LEASE_CONFLICT` |' \
   "duplicate row for LEASE_CONFLICT"
 
+# N-13 covers 7b, which was added one commit earlier to close Terra's P1-2 and
+# arrived with no negative case of its own -- the same "the guard that closed a
+# P1 was never asked to fail" shape this suite had just fixed for §5 and §6b,
+# except this time the unmeasured guard was an hour old. 7b also went red in the
+# wrong place three times while being written, so pinning its behaviour matters
+# more here than usual, not less.
+neg "N-13 a canonical preimage block declares no domain" "$SPEC" \
+'domain = "fakexxx:contract:v1:advance-request"（**首个 framed 字段**，§6.3.1）' \
+'  （本用例移除了 domain 行）' \
+  "declares no domain"
+
 printf '\n== mutation (disable one guard; its case must stop reporting) ==\n'
 
 # Each case above proves the gate is red while the drift is present. None of them
@@ -369,6 +380,13 @@ mut "M-9 5 strict table parse catches N-12" \
 '| 17 | `LEASE_CONFLICT` | planted duplicate | - |
 | 7 | `LEASE_CONFLICT` |' \
   "duplicate row for LEASE_CONFLICT"
+
+mut "M-10 7b domain presence check catches N-13" \
+  's/missing = \[f for d, f in found if d is None\]/missing = []/' \
+  "$SPEC" \
+'domain = "fakexxx:contract:v1:advance-request"（**首个 framed 字段**，§6.3.1）' \
+'  （本用例移除了 domain 行）' \
+  "declares no domain"
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
