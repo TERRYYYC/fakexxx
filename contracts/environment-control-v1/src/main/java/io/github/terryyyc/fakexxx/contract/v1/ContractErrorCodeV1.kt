@@ -68,9 +68,11 @@ enum class ContractErrorCodeV1(val wire: Int) {
      * The `leaseId` is unusable **for this particular operation**. The scope is
      * per method, not a property of the lease state alone (§6.3.3):
      *
-     *  - `apply` / `observe`: every non-`ACTIVE` state (`EXPIRED`, `REVOKED`,
+     *  - `apply`: every non-`ACTIVE` state (`EXPIRED`, `REVOKED`,
      *    `RELEASE_INCOMPLETE`), plus not-owned-by-this-caller and already
      *    `RELEASED`.
+     *  - `observe`: the same, **except inside the post-advance verification
+     *    window** -- see the third bullet below.
      *  - `release`: **must be accepted** in `ACTIVE`, `EXPIRED` and
      *    `RELEASE_INCOMPLETE` when the owning caller asks, and must drive the
      *    state machine. Returning 8 for `EXPIRED` would make §8.4's
@@ -83,6 +85,30 @@ enum class ContractErrorCodeV1(val wire: Int) {
      *    order as release-then-advance — so "already `RELEASED`" is this
      *    request's *normal* shape. Rejecting it would fail the only legal call
      *    form and make the method unconditionally unusable.
+     *  - `observe`, post-advance verification window: the already-`RELEASED`
+     *    branch **does not apply** when the `leaseId` is the historical
+     *    reference carried by this caller's most recent successful
+     *    [IEnvironmentControlV1.completeAndAdvance] and no new lease has since
+     *    been granted to this caller. §6.7.5 freezes post-advance `observe` as
+     *    **mandatory** ("the receipt is the peer's own account, not proof of
+     *    effect"), but that call sits between `completeAndAdvance` and the next
+     *    `apply`, and §6.7.4b step 5's lease gate is device-global -- so no
+     *    ACTIVE lease can exist at that instant, and `ObserveRequestV1.leaseId`
+     *    is non-null. Returning 8 there makes a step frozen as *mandatory*
+     *    unconditionally unreachable, leaving Auto with only the receipt to
+     *    trust -- the exact wrong-environment attribution §6.7.5 exists to
+     *    block. Outside the window (a new lease was granted, or the `leaseId`
+     *    is not that reference) it is still 8, and the
+     *    not-owned-by-this-caller branch is untouched. A forged `leaseId`
+     *    cannot use this exception: the match is against the receipt the
+     *    provider itself retained for §6.7.5 idempotent re-fetch.
+     *
+     *    This does not swallow concurrent drift. If a foreign caller applies
+     *    first, `observe` is still accepted and §6.7.5's
+     *    `effectiveIntentHash` / `effectiveEnvironmentRevision` comparison
+     *    reports the mismatch. **Accepting and diagnosing beats returning 8**,
+     *    which is indistinguishable from "your lease expired" and tells Auto
+     *    nothing about whether to retry or recover.
      *
      * **Not frozen** (§20.1 `KB-5`): what `completeAndAdvance` does with a
      * `leaseId` owned by a *different* caller. §6.7.4b's precedence order has no
