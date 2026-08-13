@@ -51,7 +51,49 @@ object CanonicalDigestV1 {
     fun digest(domain: String, fields: List<ByteArray>): String =
         sha256Hex(canonicalBytes(domain, fields))
 
-    fun utf8(value: String): ByteArray = value.toByteArray(Charsets.UTF_8)
+    /**
+     * UTF-8 bytes, **fail-closed on malformed input**.
+     *
+     * `String.toByteArray(UTF_8)` silently replaces an unpaired surrogate with
+     * `?` (0x3F). That makes the framing non-injective for inputs it accepts:
+     * an id of `"\uD800"` and an id of `"?"` produce identical bytes and
+     * therefore identical digests, so a replay could be answered with the other
+     * request's receipt. Item ids cross Binder as Java strings and `Parcel`
+     * carries UTF-16, so an unpaired surrogate reaches this function -- it is
+     * not a theoretical input.
+     *
+     * This is the same defect class the presence discriminator above was
+     * introduced to remove: an encoding that is injective only while nothing
+     * hands it the value that breaks it. Substituting a replacement character
+     * is exactly "correctness rests on a runtime accident", so this rejects
+     * rather than substitutes. A digest that cannot be computed is a failure a
+     * caller can see; a digest that quietly collides is not.
+     */
+    fun utf8(value: String): ByteArray {
+        require(!hasUnpairedSurrogate(value)) {
+            "value is not well-formed Unicode: an unpaired surrogate cannot be " +
+                "encoded injectively (§6.3.1)"
+        }
+        return value.toByteArray(Charsets.UTF_8)
+    }
+
+    /** True when [value] contains a surrogate that is not part of a valid pair. */
+    private fun hasUnpairedSurrogate(value: String): Boolean {
+        var i = 0
+        while (i < value.length) {
+            val c = value[i]
+            when {
+                c.isHighSurrogate() -> {
+                    if (i + 1 >= value.length || !value[i + 1].isLowSurrogate()) return true
+                    i += 2
+                }
+                c.isLowSurrogate() -> return true
+                else -> i++
+            }
+        }
+        return false
+    }
+
     fun decimal(value: Long): ByteArray = value.toString().toByteArray(Charsets.US_ASCII)
     fun decimal(value: Int): ByteArray = value.toString().toByteArray(Charsets.US_ASCII)
 

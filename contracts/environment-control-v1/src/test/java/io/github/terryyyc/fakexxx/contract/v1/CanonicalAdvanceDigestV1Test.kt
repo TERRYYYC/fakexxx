@@ -3,6 +3,7 @@ package io.github.terryyyc.fakexxx.contract.v1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.fail
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -283,5 +284,49 @@ class CanonicalAdvanceDigestV1Test {
         assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(trusted = 13))))
         assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(quota = 13))))
         assertNotEquals(base, CanonicalAdvanceDigestV1.compute(request(proof = proof(ledger = "ledger-z"))))
+    }
+
+    /**
+     * The last hole in the presence encoding's injectivity, and it was not in
+     * the discriminator -- it was one layer down in the byte conversion.
+     *
+     * `String.toByteArray(UTF_8)` maps an unpaired surrogate to `?`, so an id of
+     * "\uD800" and an id of "?" produced the SAME bytes and the same digest.
+     * Every hostile-id case above passed while that was true, because they all
+     * compare ids against ABSENCE -- none compared two ids that collide with
+     * each other. Item ids cross Binder as Java strings and Parcel carries
+     * UTF-16, so this input is reachable, not theoretical.
+     */
+    @Test
+    fun `an unpaired surrogate is rejected, not silently replaced`() {
+        val highOnly = "\uD800"
+        val lowOnly = "\uDC00"
+        for (bad in listOf(highOnly, lowOnly, "item-" + highOnly, highOnly + "-8")) {
+            try {
+                CanonicalAdvanceReceiptDigestV1.compute(
+                    receipt(outcome = AdvanceOutcomeV1.ADVANCED.wire, to = bad), "req-a", "k1",
+                )
+                fail("malformed id must be rejected, not encoded: " + bad.length)
+            } catch (expected: IllegalArgumentException) {
+                assertTrue(
+                    "rejection must name the reason",
+                    (expected.message ?: "").contains("unpaired surrogate"),
+                )
+            }
+        }
+    }
+
+    /** A valid surrogate PAIR is well-formed and must still encode normally. */
+    @Test
+    fun `a valid surrogate pair is not rejected`() {
+        val paw = "\uD83D\uDC3E"
+        assertNotEquals(
+            CanonicalAdvanceReceiptDigestV1.compute(
+                receipt(outcome = AdvanceOutcomeV1.ADVANCED.wire, to = paw), "req-a", "k1",
+            ),
+            CanonicalAdvanceReceiptDigestV1.compute(
+                receipt(outcome = AdvanceOutcomeV1.ADVANCED.wire, to = "?"), "req-a", "k1",
+            ),
+        )
     }
 }
