@@ -65,6 +65,13 @@ interface DurableRecoveryLog {
     fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt?
 
     /**
+     * The durable RELEASE receipt for the OPERATION key [idempotencyKey] (INV-13 idempotency is keyed by
+     * the operation key, NOT the lease — Sol round-14 P1-2). Lets the coordinator detect a same-key /
+     * different-lease-or-digest conflict BEFORE calling the provider.
+     */
+    fun releaseReceiptForKey(idempotencyKey: String): RecordedReleaseReceipt?
+
+    /**
      * Record (or replay) a release receipt for [idempotencyKey] + [leaseId] + [releaseDigest] (§6.3.4
      * digest over the lease). Same idempotency contract as [recordReceipt]: same key+digest replays the
      * existing receipt; same key + different digest returns null (conflict), prior receipt preserved.

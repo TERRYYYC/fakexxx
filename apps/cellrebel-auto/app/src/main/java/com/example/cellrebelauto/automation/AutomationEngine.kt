@@ -771,7 +771,22 @@ class AutomationEngine(
             aplusPause("schedule-advance gate held for recovered attempt ${crashed.id}")
             return false
         }
-        planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
+        // Phase-specific terminal projection (§10 owner-red matrix; Sol round-14 P1-4): the durable truth
+        // that already exists must NOT be collapsed to a single "interrupted".
+        when (crashed.aplusState) {
+            "QUOTA_COMMITTED" -> {
+                // The trusted mint already happened → terminalize succeeded (legacy counter untouched).
+                planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
+            }
+            "UNVERIFIED_RECORDED" -> {
+                // The unverified record already happened → terminalize failed/UNTRUSTED.
+                planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
+            }
+            "CLOSED" -> {
+                // Already terminal — no-op (a CLOSED attempt must not be revived nor clobbered).
+            }
+            else -> planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
+        }
         log("A+ recovery: attempt ${crashed.id} released + gate advanced — resuming plan")
         return true
     }

@@ -112,6 +112,7 @@ object APlusComposition {
         override fun checkpointFor(attemptId: Long): RecoveryCheckpoint? = null
         override fun recordCheckpoint(attemptId: Long, lastDurableStage: String, receiptKey: String?, now: Long) {}
         override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = null
+        override fun releaseReceiptForKey(idempotencyKey: String): RecordedReleaseReceipt? = null
         override fun recordReleaseReceipt(
             idempotencyKey: String,
             leaseId: String,

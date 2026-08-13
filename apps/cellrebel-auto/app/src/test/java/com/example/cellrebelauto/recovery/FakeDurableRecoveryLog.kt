@@ -81,6 +81,8 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
 
     override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = releaseReceiptsByLease[leaseId]
 
+    override fun releaseReceiptForKey(idempotencyKey: String): RecordedReleaseReceipt? = releaseReceiptsByKey[idempotencyKey]
+
     override fun recordReleaseReceipt(
         idempotencyKey: String,
         leaseId: String,
