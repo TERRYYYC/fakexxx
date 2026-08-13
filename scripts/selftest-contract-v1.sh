@@ -32,6 +32,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROD="$REPO_ROOT/scripts/check-contract-v1.sh"
 SPEC="feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md"
+AIDL_I="contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl"
 MODULE="contracts/environment-control-v1"
 
 POS=0; NEG=0; MUT=0; FAILURES=0
@@ -215,6 +216,31 @@ neg "N-10 bold inline wire citation contradicts the enum" "$SPEC" \
   'REQUEST_INVALID`(**4**)' \
   "cites REQUEST_INVALID(4); authoritative is REQUEST_INVALID(13)"
 
+# N-11/N-12 exist because §6b and §5 -- the two guards that closed Sol's P1-1(b)
+# and P1-1(a) -- had zero selftest coverage. Guards that close a P1 and are
+# themselves unmeasured are the same shape as the P1 they closed: the reason 5b's
+# blind spot survived is that nothing ever asked 5b to fail.
+
+# N-11: transposing two AIDL declarations leaves the method NAME SET identical,
+# so §6 stays green by design. Only §6b's positional comparison can see it --
+# and Binder transaction numbers follow declaration order, so this transposition
+# silently renumbers the wire.
+neg "N-11 transposed AIDL declaration order (names unchanged)" "$AIDL_I" \
+'    ApplyReceiptV1 apply(in ApplyRequestV1 request);
+    EnvironmentObservationV1 observe(in ObserveRequestV1 request);' \
+'    EnvironmentObservationV1 observe(in ObserveRequestV1 request);
+    ApplyReceiptV1 apply(in ApplyRequestV1 request);' \
+  "position"
+
+# N-12: a duplicate §6.3.3 row. The old dict-based parser let the second row
+# overwrite the first and reported PASS; strict parsing must refuse to compare a
+# table it could not read unambiguously.
+neg "N-12 duplicate 6.3.3 row for the same code" "$SPEC" \
+'| 7 | `LEASE_CONFLICT` |' \
+'| 17 | `LEASE_CONFLICT` | planted duplicate | - |
+| 7 | `LEASE_CONFLICT` |' \
+  "duplicate row for LEASE_CONFLICT"
+
 printf '\n== mutation (disable one guard; its case must stop reporting) ==\n'
 
 # Each case above proves the gate is red while the drift is present. None of them
@@ -326,6 +352,23 @@ mut "M-7 5b bold tolerance catches N-10" \
   'REQUEST_INVALID`(**13**)' \
   'REQUEST_INVALID`(**4**)' \
   "cites REQUEST_INVALID(4)"
+
+mut "M-8 6b ordered signature catches N-11" \
+  's/if a != s:/if False and a != s:/' \
+  "$AIDL_I" \
+'    ApplyReceiptV1 apply(in ApplyRequestV1 request);
+    EnvironmentObservationV1 observe(in ObserveRequestV1 request);' \
+'    EnvironmentObservationV1 observe(in ObserveRequestV1 request);
+    ApplyReceiptV1 apply(in ApplyRequestV1 request);' \
+  "position"
+
+mut "M-9 5 strict table parse catches N-12" \
+  's/if name in table:/if False and name in table:/' \
+  "$SPEC" \
+'| 7 | `LEASE_CONFLICT` |' \
+'| 17 | `LEASE_CONFLICT` | planted duplicate | - |
+| 7 | `LEASE_CONFLICT` |' \
+  "duplicate row for LEASE_CONFLICT"
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
