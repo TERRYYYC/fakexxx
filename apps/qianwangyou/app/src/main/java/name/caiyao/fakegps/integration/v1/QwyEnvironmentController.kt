@@ -10,13 +10,15 @@ import name.caiyao.fakegps.config.ConfigCodec
 import name.caiyao.fakegps.config.ConfigHolder
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PayloadRead
+import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.SpoofConfig
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
+import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolution
+import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolver
 import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
-import java.security.MessageDigest
 
 /**
  * Seam between the v1 provider and qianwangyou's existing capabilities.
@@ -205,23 +207,39 @@ class QwyEnvironmentController(
     }
 
     override fun observeEffective(): EffectiveEnvironment {
-        // P1-3 fix: read from persistent source (ConfigPrefsSync), not
-        // in-memory ConfigHolder. After restart, ConfigHolder is a fresh
-        // empty instance that would falsely report passthrough while the
-        // system test provider may still be registered.
+        // P1-3 fix (dsf round-2): read from persistent source (ConfigPrefsSync)
+        // and parse with the correct parser. ConfigPrefsSync publishes a flat
+        // field-map payload, NOT a typed SpoofConfig — ConfigCodec.fromJson()
+        // throws on unknown keys. PublishedConfig.parse() is the read-side
+        // counterpart designed for this format (ignoreUnknownKeys=true).
         val payload = ConfigPrefsSync.readPublished(appContext)
-        val config = when (payload) {
-            is PayloadRead.Raw -> runCatching { ConfigCodec.fromJson(payload.text) }.getOrNull()
+        val published = when (payload) {
+            is PayloadRead.Raw -> PublishedConfig.parse(payload.text)
             else -> null
         }
 
-        val lat = config?.location?.latitude
-        val lng = config?.location?.longitude
-        val isMock = config != null
+        // Resolve effective location from the published field map.
+        val resolution = EffectiveMockLocationResolver.resolve(published)
+        val lat: Double?
+        val lng: Double?
+        val isMock: Boolean
+        when (resolution) {
+            is EffectiveMockLocationResolution.Ready -> {
+                lat = resolution.config.latitude
+                lng = resolution.config.longitude
+                isMock = true
+            }
+            is EffectiveMockLocationResolution.Invalid -> {
+                lat = null
+                lng = null
+                isMock = false
+            }
+        }
 
-        // P3-2 fix: fingerprint from persistent payload content, not hashCode.
+        // P3-2 fix: fingerprint from PublishedConfig (byte-identical to
+        // ConfigPrefsSync's write-side fingerprint).
         val fingerprint = when (payload) {
-            is PayloadRead.Raw -> "spoof:${sha256(payload.text)}"
+            is PayloadRead.Raw -> PublishedConfig.fingerprint(payload.text)
             is PayloadRead.ReadError -> "read-error:${payload.cause}"
             PayloadRead.Absent -> "passthrough"
         }
@@ -256,10 +274,6 @@ class QwyEnvironmentController(
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
         changeListener = listener
     }
-
-    private fun sha256(input: String): String =
-        MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
-            .joinToString("") { "%02x".format(it) }
 }
 
 private object NoopFusedGateway : FusedMockProviderGateway {
