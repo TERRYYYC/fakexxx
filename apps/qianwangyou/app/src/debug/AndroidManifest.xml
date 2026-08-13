@@ -1,26 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only operator pairing surface (§6.5).
+  exported=true so adb can drive it; src/debug so it cannot ship.
+-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <permission
-        android:name="${applicationId}.permission.RUN_HOOK_ACCEPTANCE"
-        android:protectionLevel="signature" />
-
-    <application android:name=".probe.HookAcceptanceApplication">
+    <application>
         <activity
-            android:name=".probe.HookAcceptanceActivity"
-            android:excludeFromRecents="true"
+            android:name="name.caiyao.fakegps.integration.v1.PairingApprovalActivity"
             android:exported="true"
-            android:noHistory="true"
-            android:permission="${applicationId}.permission.RUN_HOOK_ACCEPTANCE"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
-        <!-- Shell-only debug seam: seeds isolated .bench data and guarantees trap cleanup. -->
-        <activity
-            android:name=".mockprovider.MockProviderAcceptanceActivity"
-            android:excludeFromRecents="true"
-            android:exported="true"
-            android:noHistory="true"
-            android:permission="android.permission.DUMP"
-            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+            android:label="EC v1 pairing approval" />
     </application>
-
 </manifest>
