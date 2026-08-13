@@ -900,3 +900,38 @@ into one placeholder; the frozen domain-separated framing (profile/schedule/veri
 is contract-owned (#3). (4) The negative's distinctive evidenceDigest is produced by the GREEN carrier.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.15 Round-14 — release receipt outcome gate + RELEASE_INCOMPLETE state + true M-CR-08 (Sol round-13 advisory answered, partially)
+
+**Status.** Sol's round-13 advisory (`38abd0e`) left 7 P1 + P2. R14 closes the tractable custody gates; the
+remaining items are **dependency-blocked on #3** (contract/schema owner), NOT "GREEN-bound" — corrected
+per Sol's explicit reclassification. **Baseline: `205 tests / 45 failed / 0 errors`, lintDebug + assembleDebug
+green, `git diff --check` clean.** Schema exact v5.
+
+**Repairs (tractable).**
+- **P1-3 receipt outcome gate** — `releaseLease`'s fast path now returns an existing receipt ONLY for the
+  exact tuple (key + digest) with a `RELEASED` outcome; a FAILED receipt or any key/digest mismatch is
+  fail-closed with zero provider call (prior preserved). Three new guardrail tests pin: conflicting apply
+  receipt does not leak the lease; true M-CR-08 (provider released, no receipt → re-invoke 1→2, effect 1);
+  a FAILED release receipt is not returned as a successful replay.
+- **P1-4 RELEASE_INCOMPLETE state** — on a null release receipt the engine now drives
+  `RELEASE_INCOMPLETE` and persists `RECOVERY_REQUIRED` (not just a bare pause) — both in the normal path
+  and the recovery path.
+
+**Dependency-blocked on #3 (NOT closable by #5 pre-freeze; would be a false "GREEN-bound" label):**
+1. `RecordedReceipt`/`ApplyReceiptV1` immutable lease + `acceptedIntentHash` carrier — the opaque lease is
+   contract-owned; a derivable fake lease masks forgery, and the RED cannot invent the frozen carrier.
+2. §6.3.1 `acceptedIntentHash` vs §6.3.4 domain-separated `requestDigest` (9 frozen fields, length-prefix
+   framing) — the frozen preimage + fixed vectors are contract-owned.
+3. M-CR-03..07 phase-specific terminalization (QUOTA_COMMITTED→succeeded, UNVERIFIED_RECORDED→failed/UNTRUSTED,
+   CLOSED no-op, RECOVERY_REQUIRED) — §10 owner-red matrix; depends on the #3/Opus5 RED artifact.
+4. `RecordedReleaseReceipt` releaseComplete/residualReasonWires typed carrier for incomplete-release evidence.
+5. Service-owned engine factory consumed by `startWithPlan` (production call-site guard) — an Android
+   AccessibilityService call site that a Robolectric harness must observe; not a pure-unit RED.
+
+**Why the reclassification matters.** These are not "GREEN body not yet written" — they are RED-quality
+carriers/vectors whose authority lives in #3's frozen contract/schema. Marking them GREEN-bound would let #5
+declare closure on items it cannot close; the correct state is **#5 RED blocked on #3 freeze** for exactly
+these five seams, and #5's own bankable RED surface is otherwise complete.
+
+[深深/deepseek-v4-pro🐾]
