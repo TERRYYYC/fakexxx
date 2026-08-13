@@ -1282,3 +1282,23 @@ full completion-evidence detail (M-CR-03..06 re-observe/re-decide). These REDs c
 until #3 freezes the carrier; #5's bankable Auto-local RED surface is otherwise complete.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.30 Round-29 — M-CR-06 re-observe oracle (Sol round-28 advisory answered)
+
+**Status.** Sol's round-28 advisory (`e03286b`) — P1: M-CR-06 still self-greens by forging correct fields
+without reading durable evidence. R29 makes the re-observe observable. **Baseline: `226 tests / 49 failed /
+0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repair.**
+- **M-CR-06 re-observe oracle** — the `FakeEvidenceSource` now records its acquisition calls, and M-CR-06
+  asserts the recovery must RE-INVOKE completion-evidence acquisition (`completionCalls > 0`) to re-decide,
+  never forge a mint from nothing. A GREEN that forges the correct fields without re-observing fails this
+  assertion.
+
+**Remaining #3/GREEN-blocked (declared, not tractable Auto-local).** The §7.1 FULL evidence detail
+(baseline/marker/RUNNING/scores/timestamps) is still dropped by the digest-only skeleton
+(`PlanRepository.recordTrustedCompletion`), so the re-observe can only be proven by re-invocation, not by
+read-back of the dropped detail; that read-back + the M-CR-03..05 re-observe/classify/post-observe GREEN body
++ the opaque lease carrier + 9-field digest vectors + releaseComplete shape remain #3-contract-blocked.
+
+[深深/deepseek-v4-pro🐾]

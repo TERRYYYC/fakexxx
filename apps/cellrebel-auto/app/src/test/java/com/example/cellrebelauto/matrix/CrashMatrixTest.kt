@@ -57,6 +57,7 @@ class CrashMatrixTest {
     private lateinit var db: AppDatabase
     private lateinit var repo: PlanRepository
     private lateinit var lastCoordinator: RecoveryCoordinator
+    private var lastEvidence: FakeEvidenceSource? = null
 
     @Before
     fun setUp() {
@@ -98,26 +99,31 @@ class CrashMatrixTest {
     }
 
     private class FakeEvidenceSource : APlusEvidenceSource {
-        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? = null
-        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? = null
-        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? = null
+        var preCalls = 0
+        var postCalls = 0
+        var completionCalls = 0
+        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? { preCalls++; return null }
+        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? { postCalls++; return null }
+        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? { completionCalls++; return null }
     }
 
     private class FakeBackend(
         private val exec: RecordingExternalApplyExecutor,
         private val log: FakeDurableRecoveryLog
     ) : APlusBackend {
+        val evidence = FakeEvidenceSource()
         override val executor: ExternalApplyExecutor = exec
         override val recoveryLog: DurableRecoveryLog = log
         override val observeIntent: ObserveIntentAcquirer = SeededObserve(emptyMap())
         override val receiptRevision: ReceiptRevisionAcquirer = SeededRevision(emptyMap())
         override val trustedQuota: TrustedQuotaAcquirer = SeededQuota(emptyMap())
-        override val evidenceSource: APlusEvidenceSource = FakeEvidenceSource()
+        override val evidenceSource: APlusEvidenceSource = evidence
     }
 
     private fun buildEngine(planId: Long, clock: VirtualClock, backend: APlusBackend): AutomationEngine {
         val params = APlusComposition.engineAplusParams(backend)
         lastCoordinator = params.first
+        lastEvidence = (backend as FakeBackend).evidence
         return AutomationEngine(
             planId = planId, planRepository = repo,
             cellRebelRunner = FakeCellRebelRunner(AttemptOutcome.Success(8.0, 7.0, 0L, 0L, 0L)),
@@ -200,6 +206,7 @@ class CrashMatrixTest {
         assertTrue("M-CR-06: the mint must carry a distinctive evidence digest", entry.evidenceDigest.isNotEmpty())
         assertTrue("M-CR-06: the mint must carry a non-zero commit clock", entry.committedAt > 0)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row (no unrelated rows)", 1, db.trustedQuotaDao().countAll())
+        assertTrue("M-CR-06: the recovery must RE-OBSERVE (re-invoke completion evidence) to re-decide, never forge from nothing", lastEvidence!!.completionCalls > 0)
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
