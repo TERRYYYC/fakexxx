@@ -1015,3 +1015,27 @@ RED, and the Service-owned factory / production call-site disconnect attack.
 §6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
 
 [深深/deepseek-v4-pro🐾]
+
+### 11.19 Round-18 — crash-matrix carrier-truth REDs + release shadow-key oracle (Sol round-16 re-delivery answered)
+
+**Status.** R18 adds the crash-matrix REDs that prove the terminal truth is sourced from the append-only
+carrier, and strengthens the release guard against a shadow-key provider call. **Baseline: `211 tests / 45
+failed / 0 errors`, lintDebug + assembleDebug green, `git diff --check` clean.** Schema exact v5.
+
+**Repairs.**
+- **M-CR-07 / unverified carrier-truth REDs** — two new crash tests pre-seed a `TrustedQuotaEntry` /
+  `UnverifiedAttemptRecord` with a `DECIDING` phase string, then recover: the ledger/unverified carrier
+  projects to `succeeded` / `failed(UNTRUSTED)`, proving the phase string cannot degrade a committed truth
+  to interrupted (Sol round-16 P1-1 / P1-2).
+- **release shadow-key oracle** — the mismatch/FAILED "zero call" guardrails now also assert
+  `releaseCallsFor(attemptId).isEmpty()` and `releaseEffectCount == 0`, so a shadow-key provider call that
+  returns null can no longer pass (Sol round-16 P2-4).
+
+**Remaining owner-red (next SHA):** M-CR-03..05 re-preobserve/classify/postobserve (GREEN body), the
+CLOSED→terminal single-transaction window, the durable `ADVANCE_PENDING`/gate-custody owner + second-restart
+RED, and the Service-owned factory / production call-site disconnect attack.
+
+**Dependency-blocked on #3 (genuinely):** `ApplyReceiptV1` opaque lease + `acceptedIntentHash` carrier;
+§6.3.1/§6.3.4 frozen 9-field digest vectors; typed `releaseComplete`/`residualReasonWires` shape.
+
+[深深/deepseek-v4-pro🐾]

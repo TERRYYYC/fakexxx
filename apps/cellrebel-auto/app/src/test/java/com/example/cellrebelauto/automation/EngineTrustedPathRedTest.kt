@@ -14,6 +14,8 @@ import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.execution.CellRebelCompletionEvidenceV1
 import com.example.cellrebelauto.model.execution.CellRebelExecution
+import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
+import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
@@ -581,5 +583,47 @@ class EngineTrustedPathRedTest {
         assertEquals("no trusted mint through the shipped skeleton", 0, db.trustedQuotaDao().countAll())
         assertEquals("legacy-zero through the shipped skeleton", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
         assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    // ---- R17 crash-matrix: recover terminal truth from the append-only carrier (Sol round-16 P1-1) ----
+
+    private fun crashBackend(executor: RecordingExternalApplyExecutor, log: FakeDurableRecoveryLog): FakeBackend =
+        FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
+
+    @Test
+    fun `R17 M-CR-07 a committed trusted entry projects to succeeded regardless of the phase string`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
+
+        // The ledger is the authority: the phase string "DECIDING" must NOT degrade a committed truth to interrupted.
+        assertEquals("a committed trusted entry must project to succeeded (not interrupted)", "succeeded", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }.status)
+    }
+
+    @Test
+    fun `R17 unverified record projects to failed UNTRUSTED regardless of the phase string`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
+        db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val clock = VirtualClock()
+        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
+        buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
+        assertEquals("an unverified record must project to failed (not interrupted)", "failed", recovered.status)
+        assertEquals("UNTRUSTED", recovered.failureReason)
     }
 }
