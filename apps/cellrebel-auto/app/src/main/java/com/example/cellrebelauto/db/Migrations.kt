@@ -149,6 +149,7 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         //      ALTER + a fresh empty table (no synthetic trusted/unverified rows minted by a migration). ----
         db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusState TEXT")
         db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusLeaseId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN currentExecutionId TEXT")
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS `unverified_attempt_records` (

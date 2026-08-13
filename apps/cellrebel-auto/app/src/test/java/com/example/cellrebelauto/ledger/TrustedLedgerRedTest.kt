@@ -597,10 +597,12 @@ class TrustedLedgerRedTest {
             "minted evidenceDigest must bind the execution evidence, not a constant",
             DISTINCTIVE_DIGEST, entry.evidenceDigest
         )
-        // committedAt must bind the execution's §6.4.2 completion clock — not a constant.
-        assertEquals(
-            "minted committedAt must bind the completion clock, not a constant",
-            EXEC_COMPLETED_AT_ELAPSED, entry.committedAt
+        // committedAt must be the COMMIT time (>= completion clock), not a constant and not < completion.
+        // Sol R35 P2-3: TrustedQuotaEntry.committedAt docs say "commit timestamp"; binding it == to the
+        // evidence completion clock is reverse-defined. The commit happens at or after completion.
+        assertTrue(
+            "minted committedAt must be the commit time (>= completedAtElapsed $EXEC_COMPLETED_AT_ELAPSED), not a constant",
+            entry.committedAt >= EXEC_COMPLETED_AT_ELAPSED
         )
         assertEquals(
             "exactly one TrustedQuotaEntry through the entrypoint",

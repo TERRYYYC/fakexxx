@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "e5f89d41dc07adf4df5b0312970c14ce",
+    "identityHash": "ddfa588d26cb76d5ae57ff14c999e737",
     "entities": [
       {
         "tableName": "test_results",
@@ -286,7 +286,7 @@
       },
       {
         "tableName": "test_attempts",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `taskId` INTEGER NOT NULL, `runSessionId` INTEGER NOT NULL, `attemptOrdinal` INTEGER NOT NULL, `successOrdinal` INTEGER, `startedAt` INTEGER NOT NULL, `runningObservedAt` INTEGER, `endedAt` INTEGER, `status` TEXT NOT NULL, `failureReason` TEXT, `webBrowsingScore` REAL, `videoStreamingScore` REAL, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `stageNotes` TEXT, `aplusState` TEXT, `aplusLeaseId` TEXT, FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`runSessionId`) REFERENCES `run_sessions`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `taskId` INTEGER NOT NULL, `runSessionId` INTEGER NOT NULL, `attemptOrdinal` INTEGER NOT NULL, `successOrdinal` INTEGER, `startedAt` INTEGER NOT NULL, `runningObservedAt` INTEGER, `endedAt` INTEGER, `status` TEXT NOT NULL, `failureReason` TEXT, `webBrowsingScore` REAL, `videoStreamingScore` REAL, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `stageNotes` TEXT, `aplusState` TEXT, `aplusLeaseId` TEXT, `currentExecutionId` TEXT, FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`runSessionId`) REFERENCES `run_sessions`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "id",
@@ -379,6 +379,11 @@
           {
             "fieldPath": "aplusLeaseId",
             "columnName": "aplusLeaseId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "currentExecutionId",
+            "columnName": "currentExecutionId",
             "affinity": "TEXT"
           }
         ],
@@ -838,7 +843,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'e5f89d41dc07adf4df5b0312970c14ce')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'ddfa588d26cb76d5ae57ff14c999e737')"
     ]
   }
 }
