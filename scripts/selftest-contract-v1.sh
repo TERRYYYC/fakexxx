@@ -225,11 +225,19 @@ neg "N-10 bold inline wire citation contradicts the enum" "$SPEC" \
 # so §6 stays green by design. Only §6b's positional comparison can see it --
 # and Binder transaction numbers follow declaration order, so this transposition
 # silently renumbers the wire.
+#
+# KB-7 made all six return types identical (EnvironmentControlResultV1), which
+# REMOVED the return-type signal this mutation used to also carry. That makes the
+# case strictly stronger, not weaker: what remains is a pure position/name swap,
+# which is exactly the defect §6b exists for. It is also why the mutation text had
+# to be updated with the contract -- a negative case whose planted text no longer
+# occurs does not fail, it silently stops running, and 'the case never ran' reads
+# nothing like 'the guard is load-bearing'.
 neg "N-11 transposed AIDL declaration order (names unchanged)" "$AIDL_I" \
-'    ApplyReceiptV1 apply(in ApplyRequestV1 request);
-    EnvironmentObservationV1 observe(in ObserveRequestV1 request);' \
-'    EnvironmentObservationV1 observe(in ObserveRequestV1 request);
-    ApplyReceiptV1 apply(in ApplyRequestV1 request);' \
+'    EnvironmentControlResultV1 apply(in ApplyRequestV1 request);
+    EnvironmentControlResultV1 observe(in ObserveRequestV1 request);' \
+'    EnvironmentControlResultV1 observe(in ObserveRequestV1 request);
+    EnvironmentControlResultV1 apply(in ApplyRequestV1 request);' \
   "position"
 
 # N-12: a duplicate §6.3.3 row. The old dict-based parser let the second row
@@ -377,10 +385,10 @@ mut "M-7 5b bold tolerance catches N-10" \
 mut "M-8 6b ordered signature catches N-11" \
   's/if a != s:/if False and a != s:/' \
   "$AIDL_I" \
-'    ApplyReceiptV1 apply(in ApplyRequestV1 request);
-    EnvironmentObservationV1 observe(in ObserveRequestV1 request);' \
-'    EnvironmentObservationV1 observe(in ObserveRequestV1 request);
-    ApplyReceiptV1 apply(in ApplyRequestV1 request);' \
+'    EnvironmentControlResultV1 apply(in ApplyRequestV1 request);
+    EnvironmentControlResultV1 observe(in ObserveRequestV1 request);' \
+'    EnvironmentControlResultV1 observe(in ObserveRequestV1 request);
+    EnvironmentControlResultV1 apply(in ApplyRequestV1 request);' \
   "position"
 
 mut "M-9 5 strict table parse catches N-12" \

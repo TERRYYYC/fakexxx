@@ -61,7 +61,7 @@ source_threads:
 > 不意味着它们消失。
 >
 > **这三条不是已知边界的全集。** 连同 `INV-29`（`deferred`）、`KB-5`（契约留白）、
-> `KB-6`（provider 侧 advance 的覆盖缺口）、`KB-7`（错误传输通道不在 public SDK）
+> `KB-6`（provider 侧 advance 的覆盖缺口）、`KB-7`（契约的 `android.*` 引用无门禁）
 > 与 `KB-8`（坐标所有权未冻结）的完整**八条**见 **§20.1**——那里是"还有哪些没被
 > 证明／没被冻结"的唯一入口。
 > 本告示只做提醒，**不做全集**：此前它与 §19 各列两条、§20 写作"无"，三个入口
@@ -143,6 +143,7 @@ source_threads:
 | **v1.56** | PR-2 第十二轮（版本语义 + KB-8） | **终末项推进返回 V 还是 V+1 没人说过，而 v1.54 的清零触发能把自己写的位在同一事务内抹掉。** ①Sol 的 exact-HEAD review 抓到：M-AD-21 非末项写了「`scheduleVersion` 递增」但 M-AD-10（末项完成）**零字**提及版本行为；v1.54 写「schedule (re)init / version 变更清零」，若终末项也递增版本，同一 committed advance 事务既置 exhausted=true 又因版本变更清零——**自己写的位在同一提交内被自己清除**。provider 证据不一致：production `QwyScheduleStore` 返回 V+1，fake 返回 V，handler 用 pre-advance version 构造 receipt。②**冻结统一规则**：每次 committed advance（含末项）在其 CAS 事务内将 `scheduleVersion` 恰递增 1，receipt 的 `scheduleVersionAfter = expectedScheduleVersion + 1`——终末项与非末项同规则，无特殊分支。§6.7.1 同步扩展定义域：`scheduleVersion` 不只跟踪计划配置变化，也跟踪 committed advance。③**消歧 v1.54 清零触发**：置 exhausted、保持指针、递增版本是同一 CAS 事务的三个组成部分。「version 变更清零」现收窄为**外部** schedule (re)initialization（operator 发起、不经 advance 协议），advance 自身的原子版本递增不是清零触发——否则 exhausted 在写入它的同一事务即被清除而不可能存活。④M-AD-10 补 `scheduleVersionAfter = expectedScheduleVersion + 1` + 原子三态；M-AD-21 末项 case 补版本递增。⑤**KB-8 登记坐标所有权**（Sol P1-2）：§2.2 与 `EnvironmentIntentV1` 的坐标归属矛盾此前只活在 Decision Packet v2 消息里，§20.1 零条——与 KB-7 同病。现登记为 `unfrozen`，operator 裁定后冻结 wire 行为。顶部告示七条→**八条**，§19 同步。见 §6.7.1 / §6.7.4 / §10 / §20.1 |
 | **v1.57** | PR-2 第十三轮（终末验证 + reinit 版本） | **终末推进后 observe 的三条腿永远不可能命中，而 reinit 可以不碰版本就清 exhausted。** ①Sol 的 exact-HEAD review 抓到两个 P1：(a) `ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 边跳过 `ADVANCE_OBSERVING`，但 §6.7.5 的散文写「推进后必须独立验证」——**状态机与散文互相矛盾**；且 `AdvanceReceiptV1.advancedToItemId = null`（终末 outcome 编码）而 `EnvironmentObservationV1.scheduleItemId: String`（非空），三条腿中 `scheduleItemId == advancedToItemId` 恒 false，observe **结构上不可能** 命中 `OBSERVED_TUPLE_MATCHES`。(b) §6.7.1 只要求顺序/成员/优先级变化或 committed advance 自增 `scheduleVersion`，而 bit 生命周期允许外部 (re)init 清 `exhausted`——**同拓扑 reset 可以把 `exhausted true→false` 而 version 不变**，消费者持有的 `(currentItemId, scheduleVersion)` 对无法区分旧世代与新世代。②**冻结终末推进免除 observe**（三条独立理由各自充分）：环境不变（末项保持）、结构上不可能（null vs non-null 恒 false）、receipt digest 已充分（耗尽 receipt 与非终末 receipt 同样可验证）。§6.7.5 散文改「非终末推进后必须独立验证」；observe 谓词表 `scheduleItemId` 行加「仅适用于非终末推进」；§8.1 路径不变（`ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 已正确）。③**冻结 (re)initialization 必须递增 `scheduleVersion`**：§6.7.1 版本触发域扩展加 `schedule (re)initialization`；bit 生命周期散文同步。④补测试案例：`CapabilitySnapshotV1 exhausted=true` 终末快照、`PreflightReportV1` 全 null schedule group。见 §6.7.1 / §6.7.5 / §8.1 |
 | **v1.58** | PR-2 第十四轮（Sol exact-HEAD P1 回扫） | **豁免被写成了「只信 receipt」，而 receipt 正是要被验证的那个对象。** ①v1.57 冻结「终末推进免除 observe」，三条理由中的第③条是「receipt digest 已充分」——但 §6.7.5 立身的原句理由正是「**receipt 是对方的自述，不是生效证据**」。digest 重算只证明 provider 为**它自己填写的字段**做了 canonical framing 并绑定本请求，**不证明** `exhausted = true`、末项指针与 `V+1` 已持久化。可构造反例：provider 未落 `exhausted`（或回绕／错写 version）却返回一份内部自洽、digest 重算通过的 EXHAUSTED receipt，Auto 据此 CLOSED，而下一次 `discover()` 仍把末项当可执行——**终态保护迟到整整一轮**。用「receipt 可验证」豁免「不能只信 receipt」，是拿这条规则明确拒绝的东西当它的替代品。②现收窄：**豁免的只是「环境比对」这一步，不是「独立验证」本身**。①②两条理由（环境不变、结构上 `advancedToItemId=null` vs 非空 `scheduleItemId` 恒 false）继续成立，仅说明 `observe()` 这个**载体**不适用；第③条改为**强制独立状态回读**：终末推进后必须 fresh `discover()`／`preflight()` 回读，三条腿合取 `currentItemId == advancedFromItemId` ∧ `scheduleVersion == scheduleVersionAfter` ∧ `exhausted == true`，任一不成立 → `RECOVERY_REQUIRED` 且 typed reason 指明哪条腿。载体走 v1.55 已冻结的公开投影，**不新增 wire、不新增字段**。③§8.1 由一条 `ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 拆为三条：`→ ADVANCE_STATE_READBACK`、`EXHAUSTED_STATE_CONFIRMED → CLOSED`、`EXHAUSTED_STATE_MISMATCH → RECOVERY_REQUIRED`，与既有 `OBSERVED_TUPLE_MATCHES`／`MISMATCH` 同形。④**同类一次扫净**（v1.57 只改了 §6.7.5 一处，其余载体仍写「推进后必须 observe」，两种 conforming 读法并存）：§6.3.3 lease 窗口、§6.7.4a 序列图、`M-AD-09/17/18` 限定为**非终末**、`M-AD-20` 标注终末不走该序列且回读载体不受 lease 窗口约束、`AdvanceReceiptV1` 与 `EnvironmentObservationV1` 的公开 KDoc 同步。⑤补两行证据：**`M-AD-23`**（终末只拿到可验证 receipt 但 provider 未落 `exhausted` → 必须回读并进 `RECOVERY_REQUIRED`）与 **`M-AD-24`**（同拓扑外部 reinit 清 `exhausted` 必须同时递增 `scheduleVersion`，否则旧 `(item, version)` 与 proof 跨世代复用）——v1.57 冻结了 reinit 规则却没留台账行。§10／§10.1 112→**114**，`owner-red` 86→**88**（GLM 49 / Fable5 39），散文缓存计数同 commit 重算——**本轮又是 `check-derived-counts.sh` 判红后才发现，且同一行里三处计数我只改了两处，仍由守卫抓出**。见 §6.3.3 / §6.7.4a / §6.7.5 / §8.1 / §10 |
+| **v1.59** | PR-2 第十五轮（`KB-7` 裁定落地） | **登记不是传输：CI 编译的只是 DTO 与方法签名，不是被要求的失败通道本身。** ①`KB-7` 经 operator 裁定为 **A**——业务错误必须经 app-public、版本化的 typed-result 载体返回，不依赖 hidden wire。§6.1 六个方法统一返回新增的 `EnvironmentControlResultV1`（AIDL import 表同步改为镜像真实文件，此前它既漏 advance 两型又列着已不再直接上线的 payload 型）；§6.2 新增 `ContractResultKindV1` 与 kind↔payload 绑定表；§6.3.2 新增其 exact schema（**10 字段有序元组**，过 §7 门）与六条不变量；§6.3.3 尾段的 `ServiceSpecificException` 陈述改写为载体，**并顺带更正该句把属性名写成 `wireCode` 的错误（实际是 `wire`）**。②**`ContractResultKindV1` 全域 1-based，`wire 0` 永久非法**（operator option B）。曾评估的 `ERROR = 0` 能让成功 kind `1..6` 与 §6.1 方法位序精确对齐，且**两案 fail-closed 安全性等价**；取 1-based 的理由不是安全性而是**冻结卫生**——「0 永远非法」是这个 wire 家族唯一可执行的跨域不变量，破例一次就把它降级成只写在散文里的约定。③**`KB-7` 不注销，降级**：裁定闭合的是**实例**（`ServiceSpecificException` 不可实现），没有闭合 v1.44 ④ 自己挂起的那道门禁——「契约引用的每个 `android.*` 类型必须存在于 public compile SDK」。该规则本轮在 §6.1 冻结为通用条款，但**零守卫**，故 §20.1 `KB-7` 由 `unfrozen` 改记为 `gap`，顶部告示与 §19 同步（§19 的 `gap` 出口补上「门禁」，此前只写 ledger row）。**把「实例已修」读成「同类已防」，正是本表 `gap`／`limit` 不可互写要挡的那一步**；而 v1.44 挂起门禁的理由（「断言形状取决于所选通道」）**已随裁定失效**，不能继续沿用。④§12 目录树的 `contracts/` 分支此前漏 4 个 `.aidl` 与 5 个 `.kt`（advance 三件套、`CanonicalDigestV1`、本轮新增载体）；本轮由**文件系统重新生成**该分支，并就地声明其余分支为示意——**部分更新的清单会被当成完整清单读**。⑤本机静态门禁全绿（§7 现为 **14 DTO / 104 字段**）；§4 需 JDK，本机无 Java Runtime，由 CI 判。见 §6.1 / §6.2 / §6.3.2 / §6.3.3 / §12 / §19 / §20.1 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1224,27 +1225,30 @@ operator 在运行页直接看到：当前地址、可信完成数、未验证�
 
 该文件此前不在任何 task 的 Files 清单内，现已纳入 §12 目录与 §12.1 owner matrix（Opus5）。千网游侧同一集成路径此前已被该机制影响过一次（其 Manifest 注释记录 ContentProvider 传输被 Android 11+ 包可见性完全阻断），因此这条不是理论风险。
 
+**返回通道（冻结，v1.59 · `KB-7`）**：六个方法**统一返回** `EnvironmentControlResultV1`——一个 app-public、显式版本化的 Parcelable 载体：成功时携带恰好一个 typed payload，预期业务失败时携带稳定的 `ContractErrorCodeV1.wire`（exact schema 见 §6.3.2）。Binder death 与 `RemoteException` 仍是 transport failure，走各自的恢复路径，不进本载体。
+
+**由此冻结一条通用规则**：**契约引用的每个 `android.*` 类型都必须存在于编译 SDK 的 public 面。** 反例就是 v1.44 登记的 `KB-7`：旧 §6.3.2 冻结「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」，而 `android.os.ServiceSpecificException` 是 `@hide`、不在 public SDK 里——**按字面实现不出来**，于是 CI 编译的只是 DTO 与方法签名，不是被要求的失败传输通道本身，任何只用 public SDK 的独立实现方照契约都做不出来。该判据与本文修过的最重一个 bug（canonical preimage 缺 domain）同源：**对任何第三方实现无条件不可用**。
+
+该规则目前**零守卫**：实例已修，同类未防，故 §20.1 `KB-7` 由 `unfrozen` 改记为 `gap`（规则已冻结、无执行面证明）。**没有守卫就不得声称这条规则已被证明。**
+
 ```aidl
 // contracts/environment-control-v1/src/main/aidl/io/github/terryyyc/fakexxx/contract/v1/IEnvironmentControlV1.aidl
 package io.github.terryyyc.fakexxx.contract.v1;
 
-import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1;
+import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1;
 import io.github.terryyyc.fakexxx.contract.v1.PreflightRequestV1;
-import io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1;
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1;
-import io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1;
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1;
-import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1;
 import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1;
-import io.github.terryyyc.fakexxx.contract.v1.ReleaseReceiptV1;
+import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1;
 
 interface IEnvironmentControlV1 {
-    CapabilitySnapshotV1 discover();
-    PreflightReportV1 preflight(in PreflightRequestV1 request);
-    ApplyReceiptV1 apply(in ApplyRequestV1 request);
-    EnvironmentObservationV1 observe(in ObserveRequestV1 request);
-    ReleaseReceiptV1 release(in ReleaseRequestV1 request);
-    AdvanceReceiptV1 completeAndAdvance(in CompleteAndAdvanceRequestV1 request);
+    EnvironmentControlResultV1 discover();
+    EnvironmentControlResultV1 preflight(in PreflightRequestV1 request);
+    EnvironmentControlResultV1 apply(in ApplyRequestV1 request);
+    EnvironmentControlResultV1 observe(in ObserveRequestV1 request);
+    EnvironmentControlResultV1 release(in ReleaseRequestV1 request);
+    EnvironmentControlResultV1 completeAndAdvance(in CompleteAndAdvanceRequestV1 request);
 }
 ```
 
@@ -1268,6 +1272,7 @@ enum class ContinuityCoverageV1(val wire: Int) { FULL(1), PARTIAL(2), NONE(3) }
 enum class DeliveryModeV1(val wire: Int) { SYSTEM_MOCK(1), HOOK(2) }
 enum class AdvanceOutcomeV1(val wire: Int) { ADVANCED(1), EXHAUSTED(2) }
 enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DENIED(3) }
+enum class ContractResultKindV1(val wire: Int) { ERROR(1), DISCOVER(2), PREFLIGHT(3), APPLY(4), OBSERVE(5), RELEASE(6), COMPLETE_AND_ADVANCE(7) }
 ```
 
 规则：
@@ -1276,6 +1281,8 @@ enum class ScheduleDecisionV1(val wire: Int) { ALLOWED_NOW(1), WAIT_UNTIL(2), DE
 - **禁止把枚举本体交给 `@Parcelize` 自动编解码。** kotlin-parcelize 的 `IrEnumParcelSerializer` 写入 `Parcel.writeString(value.name)`、读出 `EnumClass.valueOf(readString())`。后果：重排常量顺序是 wire-safe 的（ordinal 不上线），但**改名是破坏性变更，新增常量会让旧读者抛 `IllegalArgumentException`**——异常从生成的 `createFromParcel` 抛出，表现为 unparcel 崩溃，而不是 INV-03 要求的 typed fail-closed。两个 App 独立发布、版本必然 skew（§10 version 行），所以自动编解码在本方案里不可用。承载 `Int` + 显式 `fromWire()` 把 skew 变成可判定的业务错误。
 - `fromWire()` 返回 `null` 时一律 fail-closed：可信路径直接判不可信，握手路径返回 `INCOMPATIBLE_PROTOCOL`。
 - v1 已分配的 wire code 永久不可回收、不可改语义；新增常量只能追加新 code，且必须先通过 §6.8 兼容矩阵。
+- **`ContractResultKindV1` 的定义域全部 1-based，`wire 0` 是永久非法值**（operator option B）。它与其余六个域同规：`fromWire(0)` 返回 `null`，读者 fail-closed。曾评估过的 `ERROR = 0` 能让成功 kind `1..6` 与 §6.1 的方法声明位序精确对齐，且**两案 fail-closed 安全性等价**（`kind 0` + `errorCodeWire == null` 是非法元组，未知 kind 也是非法元组，殊途同归）；取 1-based 的理由不是安全性，而是**冻结卫生**——「0 永远非法」是这个家族唯一可执行的跨域不变量，为一个域破例会把它降级成一条只写在散文里的约定。
+- **kind ↔ payload 字段绑定（冻结）**：`ERROR` → `errorCodeWire`；`DISCOVER` → `capabilitySnapshot`；`PREFLIGHT` → `preflightReport`；`APPLY` → `applyReceipt`；`OBSERVE` → `environmentObservation`；`RELEASE` → `releaseReceipt`；`COMPLETE_AND_ADVANCE` → `advanceReceipt`。
 
 ### 6.3 核心 DTO
 
@@ -1420,7 +1427,26 @@ advance-receipt  "fakexxx:contract:v1:advance-receipt"
 
 #### 6.3.2 其余 DTO exact schema
 
+**统一返回载体在最前**（v1.59 · `KB-7`）：§6.1 的六个方法全部返回 `EnvironmentControlResultV1`；其下的 payload 类型不再作为方法返回类型直接出现在 wire 上，而是作为该载体的字段。
+
 ```kotlin
+@Parcelize
+data class EnvironmentControlResultV1(
+    val resultSchemaVersion: Int,
+    /** ContractResultKindV1 wire code。 */
+    val resultKindWire: Int,
+    /** ContractErrorCodeV1 wire code；仅当 resultKindWire 为 ERROR 时非 null。 */
+    val errorCodeWire: Int?,
+    /** 仅供人读的诊断串；任何机器判定都不得读它。 */
+    val diagnosticMessage: String?,
+    val capabilitySnapshot: CapabilitySnapshotV1?,
+    val preflightReport: PreflightReportV1?,
+    val applyReceipt: ApplyReceiptV1?,
+    val environmentObservation: EnvironmentObservationV1?,
+    val releaseReceipt: ReleaseReceiptV1?,
+    val advanceReceipt: AdvanceReceiptV1?,
+) : Parcelable
+
 @Parcelize
 data class PreflightRequestV1(
     val intent: EnvironmentIntentV1,
@@ -1485,6 +1511,15 @@ data class ReleaseReceiptV1(
 ) : Parcelable
 ```
 
+`EnvironmentControlResultV1` 的**不变量**（冻结）：
+
+- `resultSchemaVersion` 恒为 `1`。载体 schema 由**类名 + 字段声明顺序**冻结；不兼容的演进走**新载体／新接口版本**，不是往本类尾部追加字段——公开 DTO 冻结后追加字段是破坏性变更。
+- `resultKindWire == ERROR`：`errorCodeWire` 非 null，六个 payload 字段**全部** null。
+- 其余六个 kind：`errorCodeWire` 为 null，且**恰好**其绑定的那一个 payload 字段非 null（绑定表见 §6.2）。
+- 不满足上述任一条的元组——含未知 `resultKindWire`、`null` 载体本身——一律按 **response anomaly** fail-closed 处理，**不得**猜测意图。未知 `errorCodeWire` 按 §6.3.3 映射为 `INTERNAL_FAILURE`。
+- **解码失败不得从 `createFromParcel` 抛出**：unparcel 期崩溃会把业务失败重新推回 transport 路径，而那正是本载体要消除的形态（与 §6.2 禁止 enum 自动编解码同一条理由）。因此本类 `init` 不做校验，校验发生在消费点。
+- `diagnosticMessage` 只供人读；任何机器判定读它即为缺陷（与 §6.3.3 对 error message 的规定同源）。
+
 `EnvironmentIntentV1` 与上述全部类型都必须有对应 `.aidl` parcelable 声明与 `.kt` 实现，并纳入 §12 文件所有权。**实现者不得自行发明字段**：任何需要新增字段的发现都回本 spec 修订，不在 consumer branch 私改。
 
 所有 request 另含 `idempotencyKey` 或稳定 operation id。
@@ -1543,7 +1578,7 @@ data class ReleaseReceiptV1(
 
 `IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 不可互相替代：前者是"你用同一把钥匙提交了不同的内容"（调用方错误，重试无用，必须换 key 或修正 payload），后者是"环境仍被某个未收敛的 lease 占用"（时序冲突，释放后可重试）——占用者可能是别的 caller/意图（`apply` 场景），**也可能是 caller 自己那个尚未 release 的 lease**（`completeAndAdvance` 场景，§6.7.4a）。两种占用的恢复动作是同一条：先让 lease 收敛，再重试。把 `IDEMPOTENCY_CONFLICT` 与 `LEASE_CONFLICT` 合并则会让 Auto 的恢复策略无法区分"该放弃"与"该等待"。
 
-预期业务失败通过 `ServiceSpecificException` 返回稳定的 `ContractErrorCodeV1.wireCode`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
+预期业务失败通过 `EnvironmentControlResultV1.errorCodeWire`（§6.1／§6.3.2）返回稳定的 `ContractErrorCodeV1.wire`；Auto 将 wire code 映射为上述 sealed error。未知 code 只能映射为 `INTERNAL_FAILURE` 并 fail-closed，不能猜成兼容。Binder death/`RemoteException` 属于 transport failure，单独进入 recovery；错误 message 只用于安全诊断，不承担机器判定。
 
 #### 6.3.4 `requestDigest` canonical preimage（冻结算法）
 
@@ -2805,38 +2840,47 @@ fakexxx/
 │   ├── architecture/ownership/README.md
 │   ├── acceptance/a-plus-device-matrix.md
 │   └── provenance/upstream-imports.md
-├── contracts/environment-control-v1/
+├── contracts/environment-control-v1/          # 本分支与实际文件系统逐项一致（v1.59 重新生成）
 │   ├── README.md
 │   ├── compatibility.yaml
 │   ├── build.gradle.kts
 │   ├── consumer-rules.pro
 │   └── src/main/
 │       ├── aidl/io/github/terryyyc/fakexxx/contract/v1/
-│       │   ├── IEnvironmentControlV1.aidl
-│       │   ├── CapabilitySnapshotV1.aidl
-│       │   ├── EnvironmentIntentV1.aidl
-│       │   ├── PreflightRequestV1.aidl
-│       │   ├── PreflightReportV1.aidl
-│       │   ├── ApplyRequestV1.aidl
+│       │   ├── AdvanceReceiptV1.aidl
 │       │   ├── ApplyReceiptV1.aidl
-│       │   ├── ObserveRequestV1.aidl
+│       │   ├── ApplyRequestV1.aidl
+│       │   ├── CapabilitySnapshotV1.aidl
+│       │   ├── CompleteAndAdvanceRequestV1.aidl
+│       │   ├── CompletionProofV1.aidl
+│       │   ├── EnvironmentControlResultV1.aidl
+│       │   ├── EnvironmentIntentV1.aidl
 │       │   ├── EnvironmentObservationV1.aidl
-│       │   ├── ReleaseRequestV1.aidl
-│       │   └── ReleaseReceiptV1.aidl
+│       │   ├── IEnvironmentControlV1.aidl
+│       │   ├── ObserveRequestV1.aidl
+│       │   ├── PreflightReportV1.aidl
+│       │   ├── PreflightRequestV1.aidl
+│       │   ├── ReleaseReceiptV1.aidl
+│       │   └── ReleaseRequestV1.aidl
 │       └── java/io/github/terryyyc/fakexxx/contract/v1/
-│           ├── CapabilitySnapshotV1.kt
-│           ├── EnvironmentIntentV1.kt
-│           ├── CanonicalIntentDigestV1.kt
-│           ├── PreflightRequestV1.kt
-│           ├── PreflightReportV1.kt
-│           ├── ApplyRequestV1.kt
+│           ├── AdvanceReceiptV1.kt
 │           ├── ApplyReceiptV1.kt
-│           ├── ObserveRequestV1.kt
-│           ├── EnvironmentObservationV1.kt
-│           ├── ReleaseRequestV1.kt
-│           ├── ReleaseReceiptV1.kt
+│           ├── ApplyRequestV1.kt
+│           ├── CanonicalDigestV1.kt
+│           ├── CanonicalIntentDigestV1.kt
+│           ├── CapabilitySnapshotV1.kt
+│           ├── CompleteAndAdvanceRequestV1.kt
+│           ├── CompletionProofV1.kt
 │           ├── ContractEnumsV1.kt
-│           └── ContractErrorCodeV1.kt
+│           ├── ContractErrorCodeV1.kt
+│           ├── EnvironmentControlResultV1.kt
+│           ├── EnvironmentIntentV1.kt
+│           ├── EnvironmentObservationV1.kt
+│           ├── ObserveRequestV1.kt
+│           ├── PreflightReportV1.kt
+│           ├── PreflightRequestV1.kt
+│           ├── ReleaseReceiptV1.kt
+│           └── ReleaseRequestV1.kt
 ├── apps/
 │   ├── cellrebel-auto/                 # subtree from Faketest@48d8ec9
 │   │   └── app/src/{main,test,androidTest}/...
@@ -2854,6 +2898,8 @@ fakexxx/
 │   └── verify-a-plus.sh                # 聚合器：调用上面两条 + acceptance/scripts/**
 └── .github/workflows/android-a-plus.yml
 ```
+
+**本树的边界（v1.59）**：`contracts/**` 分支与实际文件系统**逐项一致**，由本轮重新生成；其余分支（`apps/`、`acceptance/`、`scripts/`、`docs/`）是**示意**，不是真相源——例如 `scripts/` 实际已多于所列三条。**一份部分更新的清单会被当成完整清单读**，所以这条边界必须写下来而不是靠读者推断；文件所有权以 §12.1 为准，DTO 的 `.kt`／`.aidl` 齐备性以 `check-contract-v1.sh` 第 3 节的**派生**结果为准（它不读本树）。
 
 ### 12.1 Owner matrix
 
@@ -3642,7 +3688,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 - **`I3.5` 已闭合**：`(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**（raw-green 终态门；ratchet 仅为中间证据）；
 - **`#13` 已闭合**：`M-AC-01..05` 全绿，设备层 cutover 与旧 App 移除完成 —— **Epic #1 不得在 #13 未闭合时 close**；
 - §20.1 表中**全部** `limit` 条目已在验收报告中显式记录、未被写成全绿：`KB-1`（§8.6.5 completion 跨 attempt 去重）、`KB-2`（§18.1 的 `FULL` 依赖）、`KB-3`（§6.5.3 的 TOFU 上限）。**以 §20.1 为准，不以本行的枚举为准**——本行此前只列前两条、漏掉 `KB-3`，正是 §20.1 要消除的"多入口各列子集"；
-- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`／`KB-8`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row 并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"；
+- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`／`KB-8`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row **／门禁**并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"。**`KB-7` 是本轮由 `unfrozen` 转入 `gap` 的实例：裁定闭合的是实例，不是同类**；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
@@ -3678,7 +3724,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | `KB-3` | operator 对首次见到、未经独立比对的 signer 做显式批准，密码学上**仍是一次 TOFU**；本方案**不证明** publisher identity | `limit` 永久上限 | §6.5.3 | 带外分发的 signer 指纹或受控 release key（§21 DP-1）——**不在 A+ 范围内** | **不得**把本机制描述为"已解决身份伪造"；能声称的只有"禁止并防住了自动／静默 TOFU" |
 | `KB-4` | `applicationId` cutover 不得孤儿化用户可见状态 | `deferred` 可触达、待闭合 | `INV-29`（§9）／§21 DP-2 | [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 闭合 | 未闭合前**不得**声称 `INV-29` 已覆盖，且**不得**执行任何 `applicationId` mutation |
 | `KB-5` | `completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时如何处置 | `unfrozen` 契约留白 | §6.3.3 wire 8 例外段／§6.7.4a | `M-AD-12`／`M-AD-13` 的 owner 裁定后冻结（属 provider 侧行为，非本 PR 可单方决定） | 冻结前两侧**都不得**擅自选一种读法并依赖它——一侧用 8 拒绝、另一侧放行，Auto 的恢复策略即不可移植（§6.7.4b 冻结判定次序所要消除的正是这一形态） |
-| `KB-7` | §6.3.2 冻结「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」，但 **`android.os.ServiceSpecificException` 不在 public SDK 里**：对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举，`android/os/ServiceSpecificException` **零命中**（对照项 `android/os/Parcel.class` 命中，证明扫描方法有效而非空转）。它是 `@hide`，app 代码无法直接引用 | `unfrozen` 契约留白 | §6.3.2 散文（全文**仅一处**）／`ContractErrorCodeV1` 文件级 KDoc | **operator 裁定错误传输通道**（Decision Packet 已投；本表只登记，不代为选定）。裁定后应补一道门禁，断言契约引用的每个 `android.*` 类型都存在于编译 SDK——本轮不加，因为该断言的形状取决于所选通道 | 冻结前**不得**声称错误传输已可实现。它此前**只存在于聊天里**：本文档零处记录，而 §20.1 自己冻结的规则是"新增边界必须同时进两处"——违反者正是本条。两处载体都是散文，所以编译器与现有九节门禁**都**看不见它 |
+| `KB-7` | **契约引用的每个 `android.*` 类型必须存在于 public compile SDK**（§6.1 v1.59 冻结的通用规则）——**这条规则零门禁**。它的第一个实例已闭合：v1.44 登记的「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」按字面不可实现（`android.os.ServiceSpecificException` 是 `@hide`；对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举**零命中**，对照项 `android/os/Parcel.class` 命中，证明扫描有效而非空转），operator 裁定 **A** 后改由 `EnvironmentControlResultV1` 承载（§6.3.2） | `gap` 覆盖缺口 | §6.1（规则本体）／§6.3.2（承载它的载体） | 在 `scripts/check-contract-v1.sh` 增一节：枚举契约源码引用的全部 `android.*` 类型，断言每个都存在于 compileSdk 的 `android.jar`，带对照项证明扫描非空转，并配 `selftest-contract-v1.sh` 负例证明该节承重 | **不得**把「`ServiceSpecificException` 已换掉」读作「同类已防」——换掉的是**唯一已知实例**，规则本身仍只活在散文里，**而散文正是它当初能藏到 v1.44 才被发现的原因**。v1.44 ④ 当时挂起这道门禁的理由是「断言形状取决于所选通道」；通道已定，该理由已失效，故本条不随实例一起注销，改记为 `gap` |
 | `KB-8` | §2.2 声称 Auto 不再导入地址/经纬度、只持有 `scheduleItemId + scheduleVersion`，但 `EnvironmentIntentV1` 仍要求 Auto 发送 `latitude/longitude` 且进入 `acceptedIntentHash` 的 preimage；`discover()` 不暴露 schedule-item 坐标。provider 可以信 Auto 坐标、信自己 schedule 坐标、或拒绝不匹配——**契约未冻结选择，也无 wire 表达它**。Decision Packet v2 已投 | `unfrozen` 契约留白 | §2.2 / §6.3（`EnvironmentIntentV1`）/ §6.3.1（digest preimage） | **operator 裁定坐标所有权**（Decision Packet v2 已投）。裁定后冻结 wire 级行为（provider 用谁的坐标、不匹配时返回什么 code、discover 是否投影 item 坐标） | 冻结前**不得**声称坐标归属已解决。两侧实现各自选一种读法即不可移植——与 `KB-5` 同形，层不同（`KB-5` 在 lease 层，本条在 intent 层） |
 | `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为**五行**，但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
 
