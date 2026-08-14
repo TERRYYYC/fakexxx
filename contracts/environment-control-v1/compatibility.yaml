@@ -51,6 +51,14 @@ enums:
   AdvanceOutcomeV1:
     ADVANCED: 1
     EXHAUSTED: 2
+  ContractResultKindV1:
+    ERROR: 1
+    DISCOVER: 2
+    PREFLIGHT: 3
+    APPLY: 4
+    OBSERVE: 5
+    RELEASE: 6
+    COMPLETE_AND_ADVANCE: 7
   ContractErrorCodeV1:
     NOT_PAIRED: 1
     CALLER_NOT_ALLOWED: 2

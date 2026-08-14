@@ -82,6 +82,21 @@ class ContractWireCompatibilityTest {
         )
     }
 
+    @Test
+    fun `ContractResultKindV1 wire values are frozen, and no kind is added silently`() {
+        val frozen = mapOf(
+            ContractResultKindV1.ERROR to 1,
+            ContractResultKindV1.DISCOVER to 2,
+            ContractResultKindV1.PREFLIGHT to 3,
+            ContractResultKindV1.APPLY to 4,
+            ContractResultKindV1.OBSERVE to 5,
+            ContractResultKindV1.RELEASE to 6,
+            ContractResultKindV1.COMPLETE_AND_ADVANCE to 7,
+        )
+        frozen.forEach { (kind, wire) -> assertEquals("$kind", wire, kind.wire) }
+        assertEquals(frozen.keys, ContractResultKindV1.entries.toSet())
+    }
+
     /**
      * An unknown advance outcome must never be optimistically read as ADVANCED.
      *
@@ -113,6 +128,7 @@ class ContractWireCompatibilityTest {
         assertUnique<ScheduleDecisionV1>("ScheduleDecisionV1", ScheduleDecisionV1.entries.map { it.wire })
         assertUnique<ContractErrorCodeV1>("ContractErrorCodeV1", ContractErrorCodeV1.entries.map { it.wire })
         assertUnique<AdvanceOutcomeV1>("AdvanceOutcomeV1", AdvanceOutcomeV1.entries.map { it.wire })
+        assertUnique<ContractResultKindV1>("ContractResultKindV1", ContractResultKindV1.entries.map { it.wire })
     }
 
     // -------------------------------------------------------------- fail-closed
@@ -132,25 +148,34 @@ class ContractWireCompatibilityTest {
         // A hardcoded "this number is unknown" is a claim about the FUTURE of the
         // enum, which a literal cannot keep. Deriving it from entries keeps the
         // assertion true by construction however many codes get appended.
-        fun probes(topWire: Int) = listOf(0, -1, topWire + 1, Int.MAX_VALUE, Int.MIN_VALUE)
+        fun probes(knownWires: Set<Int>): List<Int> {
+            val lowest = requireNotNull(knownWires.minOrNull())
+            val highest = requireNotNull(knownWires.maxOrNull())
+            return listOf(lowest - 1, highest + 1, Int.MAX_VALUE, Int.MIN_VALUE)
+                .filterNot(knownWires::contains)
+                .distinct()
+        }
 
-        probes(VerificationLevelV1.entries.maxOf { it.wire }).forEach {
+        probes(VerificationLevelV1.entries.map { it.wire }.toSet()).forEach {
             assertNull("VerificationLevelV1.fromWire($it)", VerificationLevelV1.fromWire(it))
         }
-        probes(ContinuityCoverageV1.entries.maxOf { it.wire }).forEach {
+        probes(ContinuityCoverageV1.entries.map { it.wire }.toSet()).forEach {
             assertNull("ContinuityCoverageV1.fromWire($it)", ContinuityCoverageV1.fromWire(it))
         }
-        probes(DeliveryModeV1.entries.maxOf { it.wire }).forEach {
+        probes(DeliveryModeV1.entries.map { it.wire }.toSet()).forEach {
             assertNull("DeliveryModeV1.fromWire($it)", DeliveryModeV1.fromWire(it))
         }
-        probes(ScheduleDecisionV1.entries.maxOf { it.wire }).forEach {
+        probes(ScheduleDecisionV1.entries.map { it.wire }.toSet()).forEach {
             assertNull("ScheduleDecisionV1.fromWire($it)", ScheduleDecisionV1.fromWire(it))
         }
-        probes(ContractErrorCodeV1.entries.maxOf { it.wire }).forEach {
+        probes(ContractErrorCodeV1.entries.map { it.wire }.toSet()).forEach {
             assertNull("ContractErrorCodeV1.fromWire($it)", ContractErrorCodeV1.fromWire(it))
         }
-        probes(AdvanceOutcomeV1.entries.maxOf { it.wire }).forEach {
+        probes(AdvanceOutcomeV1.entries.map { it.wire }.toSet()).forEach {
             assertNull("AdvanceOutcomeV1.fromWire($it)", AdvanceOutcomeV1.fromWire(it))
+        }
+        probes(ContractResultKindV1.entries.map { it.wire }.toSet()).forEach {
+            assertNull("ContractResultKindV1.fromWire($it)", ContractResultKindV1.fromWire(it))
         }
     }
 
@@ -162,6 +187,7 @@ class ContractWireCompatibilityTest {
         ScheduleDecisionV1.entries.forEach { assertEquals(it, ScheduleDecisionV1.fromWire(it.wire)) }
         ContractErrorCodeV1.entries.forEach { assertEquals(it, ContractErrorCodeV1.fromWire(it.wire)) }
         AdvanceOutcomeV1.entries.forEach { assertEquals(it, AdvanceOutcomeV1.fromWire(it.wire)) }
+        ContractResultKindV1.entries.forEach { assertEquals(it, ContractResultKindV1.fromWire(it.wire)) }
     }
 
     /**

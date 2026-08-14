@@ -5,10 +5,10 @@ package io.github.terryyyc.fakexxx.contract.v1
  *
  * Spec: `feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md` §6.3.2.
  *
- * Expected business failures travel as `ServiceSpecificException(wire)`. The
- * consumer maps the wire code back to one of these constants. **An unknown code
- * maps to [INTERNAL_FAILURE] and fails closed** — it is never optimistically
- * treated as compatible.
+ * Expected business failures travel in [EnvironmentControlResultV1.errorCodeWire].
+ * The consumer maps the wire code back to one of these constants. **An unknown
+ * code maps to [INTERNAL_FAILURE] and fails closed** — it is never
+ * optimistically treated as compatible.
  *
  * Binder death and `RemoteException` are transport failures, not entries in this
  * enum; they enter recovery on their own path.

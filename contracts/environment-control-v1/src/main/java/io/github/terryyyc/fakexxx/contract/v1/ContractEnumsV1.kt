@@ -138,6 +138,40 @@ enum class AdvanceOutcomeV1(val wire: Int) {
     }
 }
 
+/**
+ * Discriminator for [EnvironmentControlResultV1].
+ *
+ * This is an Int wire code in the carrier, never a Kotlin enum field. A newer
+ * peer adding a result kind must not make an older reader throw while
+ * unparcelling; older readers decode explicitly and fail closed.
+ *
+ * The v1 domain is fully 1-based. Wire 0 is intentionally unknown and must fail
+ * closed like any other unassigned wire code.
+ *
+ * Payload binding:
+ * ERROR -> [EnvironmentControlResultV1.errorCodeWire],
+ * DISCOVER -> [EnvironmentControlResultV1.capabilitySnapshot],
+ * PREFLIGHT -> [EnvironmentControlResultV1.preflightReport],
+ * APPLY -> [EnvironmentControlResultV1.applyReceipt],
+ * OBSERVE -> [EnvironmentControlResultV1.environmentObservation],
+ * RELEASE -> [EnvironmentControlResultV1.releaseReceipt],
+ * COMPLETE_AND_ADVANCE -> [EnvironmentControlResultV1.advanceReceipt].
+ */
+enum class ContractResultKindV1(val wire: Int) {
+    ERROR(1),
+    DISCOVER(2),
+    PREFLIGHT(3),
+    APPLY(4),
+    OBSERVE(5),
+    RELEASE(6),
+    COMPLETE_AND_ADVANCE(7),
+    ;
+
+    companion object {
+        fun fromWire(code: Int): ContractResultKindV1? = entries.firstOrNull { it.wire == code }
+    }
+}
+
 object ContractV1 {
     /** Protocol version carried by every request and snapshot. */
     const val PROTOCOL_VERSION: Int = 1
