@@ -41,7 +41,20 @@ POS=0; NEG=0; MUT=0; FAILURES=0
 
 ok()  { printf '  PASS  %s\n' "$1"; }
 bad() { printf '  FAIL  %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
-detail() { printf '%s\n' "$1" | grep -E 'FAIL|=>|check-derived-counts:' | sed 's/^/          /'; }
+# The provenance banner is part of the diagnosis, not noise: when P-4 fails, the
+# one thing worth reading is which file the guard actually opened.
+detail() { printf '%s\n' "$1" | grep -E 'FAIL|=>|check-derived-counts:|^  spec:|^  git HEAD|not a git' | sed 's/^/          /'; }
+
+# healthy() proves the run FINISHED. verdict() says what it CONCLUDED, and the
+# two are different questions -- conflating them is what let the suite stay green
+# while the production guard could no longer block anything: every negative case
+# asserted that the finding was PRINTED, none asserted that the gate came out
+# FAIL. A guard that sees every stale site and exits 0 satisfied all ten.
+verdict() { # $1=gate output -> PASS | FAIL | NONE
+  if printf '%s' "$1" | grep -qE '^check-derived-counts: PASS'; then printf 'PASS'
+  elif printf '%s' "$1" | grep -qE '^check-derived-counts: FAIL'; then printf 'FAIL'
+  else printf 'NONE'; fi
+}
 
 command -v python3 >/dev/null 2>&1 || { printf 'selftest-derived-counts: python3 required\n' >&2; exit 1; }
 
@@ -145,15 +158,27 @@ rm -rf "$D"
 # real cache sites in THAT file, and the reader verified their line numbers
 # against the CURRENT spec -- the output carried nothing that could break the
 # tie. So: rewrite the throwaway copy's own latest revision row to a version
-# that exists nowhere else (v1.99), and require the banner to follow the
+# that exists nowhere else, and require the banner to follow the
 # scanned file. A banner that reads the repo's pristine spec instead, or a
 # banner deleted outright, fails here -- and so does a guard that stops
 # completing a scan, because the verdict line must still be PASS.
+#
+# The sentinel is DERIVED, not hardcoded. It used to be a literal v1.99, which
+# borrowed a version number the document will legitimately reach: the guard takes
+# the MAXIMUM marker, so the day the spec passes v1.99 the sentinel stops being
+# the maximum and this case reds for a reason that has nothing to do with
+# provenance. Verified by bumping the live spec to v1.100 -- every real gate
+# stayed green and P-4 alone went red. max+1 cannot already exist in the file by
+# the definition of max, so it is collision-proof for every future revision.
+P4_MAX="$(grep -oE '^\| \*\*v1\.[0-9]+\*\* \|' "$REPO_ROOT/$SPEC" | grep -oE 'v1\.[0-9]+' | sort -t. -k2,2n | tail -1)"
+P4_SENTINEL="v1.$(( ${P4_MAX#v1.} + 1 ))"
 D="$(mk)"
-if apply "$D" "$SPEC" '| **v1.63** |' '| **v1.99** |'; then
+if [ -z "$P4_MAX" ]; then
+  bad "P-4 INCONCLUSIVE: no revision marker found in the spec, so no sentinel can be derived"
+elif apply "$D" "$SPEC" "| **$P4_MAX** |" "| **$P4_SENTINEL** |"; then
   OUT="$(run_gate "$D")"
   p4_ok=1
-  if ! printf '%s' "$OUT" | grep -qF 'revision marker v1.99'; then
+  if ! printf '%s' "$OUT" | grep -qF "revision marker $P4_SENTINEL"; then
     bad "P-4 provenance banner does not name the scanned file's own revision"
     detail "$OUT"
     p4_ok=0
@@ -163,7 +188,7 @@ if apply "$D" "$SPEC" '| **v1.63** |' '| **v1.99** |'; then
     detail "$OUT"
     p4_ok=0
   fi
-  if printf '%s' "$OUT" | grep -qF 'revision marker v1.63'; then
+  if printf '%s' "$OUT" | grep -qF "revision marker $P4_MAX"; then
     bad "P-4 banner reported the pristine spec's marker -- it read the wrong file"
     detail "$OUT"
     p4_ok=0
@@ -203,6 +228,9 @@ neg() { # $1=label $2=old $3=new $4=expected finding substring
   fi
   if ! printf '%s' "$out" | grep -qF -- "$4"; then
     bad "$1 - guard never reported the planted finding: '$4'"
+    detail "$out"
+  elif [ "$(verdict "$out")" != FAIL ]; then
+    bad "$1 - the guard SAW the planted drift and did not BLOCK on it (verdict is not FAIL)"
     detail "$out"
   else
     ok "$1"
@@ -340,6 +368,11 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
     detail "$out"
     return
   fi
+  if [ "$(verdict "$out")" != FAIL ]; then
+    bad "$1 - INCONCLUSIVE: the intact gate printed '$5' but still came out PASS, so it was never blocking"
+    detail "$out"
+    return
+  fi
 
   d="$(mk)"
   # sed reports success even when its pattern matched nothing; the file having
@@ -362,6 +395,12 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
   fi
   if printf '%s' "$out" | grep -qF -- "$5"; then
     bad "$1 - finding survived with the arm disabled, so that arm is not what catches it"
+    detail "$out"
+  elif [ "$(verdict "$out")" != PASS ]; then
+    # The plant is the only stale value in a pristine-green copy, so with its arm
+    # disabled the gate must come out PASS. Anything else means the mutation
+    # perturbed something beyond the arm and the case no longer isolates it.
+    bad "$1 - the finding vanished but the gate still fails, so the mutation did not isolate that arm"
     detail "$out"
   else
     ok "$1 - disabling it makes the finding disappear, so the arm is load-bearing"
@@ -507,6 +546,9 @@ else
       detail "$mout"
     elif ! printf '%s' "$mout" | grep -qF -- ' curval 83 '; then
       bad "M-ENUM-CENSUS - the scanner finding vanished too, so this collapsed both paths into one"
+      detail "$mout"
+    elif [ "$(verdict "$mout")" != FAIL ]; then
+      bad "M-ENUM-CENSUS - the scanner kept its finding but the gate came out PASS, so it is not blocking on it"
       detail "$mout"
     elif printf '%s' "$mout" | grep -qF -- '    curval:'; then
       bad "M-ENUM-CENSUS - the inventory still lists curval with ENUM_ARMS collapsed, so it reads some other list"
