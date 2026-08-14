@@ -70,7 +70,8 @@ data class EnvironmentObservationV1(
      *
      * Terminal (EXHAUSTED) advances do NOT use this carrier: advancedToItemId is
      * null there, so the comparison can never hold. Those verify through an
-     * independent discover()/preflight() schedule-state readback (§6.7.5, v1.58).
+     * independent discover() schedule-state readback (§6.7.5, v1.68) -- discover only,
+     * because preflight carries no currentScheduleId and cannot prove schedule identity.
      */
     val scheduleItemId: String,
     val scheduleVersion: Long,

@@ -25,8 +25,11 @@ import kotlinx.parcelize.Parcelize
  * Terminal (EXHAUSTED) advance: observe() is structurally inapplicable, because
  * [advancedToItemId] is null while EnvironmentObservationV1.scheduleItemId is
  * non-null, so that leg can never hold. Auto must instead read schedule state
- * back independently via a fresh discover()/preflight() and require all three
- * legs (§6.7.5, v1.58): currentItemId == [advancedFromItemId], scheduleVersion
+ * back independently via a fresh discover() -- NOT preflight(), which carries no
+ * currentScheduleId and names its field scheduleItemId, so it cannot establish
+ * schedule identity at all. Validate the projection group is all-non-null first,
+ * then require all FOUR legs (§6.7.5, v1.68): currentScheduleId == the schedule
+ * this advance targeted, currentItemId == [advancedFromItemId], scheduleVersion
  * == [scheduleVersionAfter], exhausted == true; otherwise RECOVERY_REQUIRED.
  *
  * Trusting the receipt alone -- on either path -- is the entry point for
