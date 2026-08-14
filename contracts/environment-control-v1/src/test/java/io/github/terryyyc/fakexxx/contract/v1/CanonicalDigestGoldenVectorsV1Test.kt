@@ -38,18 +38,17 @@ class CanonicalDigestGoldenVectorsV1Test {
     private val receiptDomain = "fakexxx:contract:v1:advance-receipt"
 
     // ------------------------------------------------------------------ fixtures
-    // Coordinates are exactly representable in binary floating point (37.5 and
-    // -122.25), so fixedPoint7's BigDecimal(double) expansion is unambiguous and
-    // these vectors pin framing rather than doubling as a rounding stress test.
-    // Rounding has its own coverage elsewhere.
+    // KB-8: coordinates left the intent and its preimage (the provider is the
+    // sole coordinate authority), so the intent vector below changed at that
+    // removal — that is the one deliberate vector move this file is allowed to
+    // have, and it was re-derived from the spec by the independent
+    // implementation, not copied out of the production code.
 
     private val intent = EnvironmentIntentV1(
         runId = "run-1",
         attemptId = "attempt-1",
         profileRef = "profile-1",
         scheduleRef = "schedule-1",
-        latitude = 37.5,
-        longitude = -122.25,
         requiredVerificationWire = 2,
         notBeforeEpochMs = 1_000L,
         deadlineEpochMs = 2_000L,
@@ -144,7 +143,7 @@ class CanonicalDigestGoldenVectorsV1Test {
     @Test
     fun `intent digest matches its golden vector`() {
         assertEquals(
-            "3799a99f0832df4a56cad8d458fccbfed5654b6cb04c10a1a8905007d821059e",
+            "6b0e33f0b21856715172b2a03c887095a63159d0fa8bc177722785f6f2bea8de",
             CanonicalIntentDigestV1.compute(intent),
         )
     }

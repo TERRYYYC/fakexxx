@@ -9,8 +9,16 @@ import org.junit.Test
  * Canonical intent digest, spec §6.3.1.
  *
  * The digest is the load-bearing half of INV-23: it is what proves a trusted
- * completion belongs to *this* attempt's address. Both apps compute it
+ * completion belongs to *this* attempt's schedule identity. Both apps compute it
  * independently, so its encoding has to be injective and stable.
+ *
+ * ## KB-8: coordinates removed
+ *
+ * `latitude` / `longitude` were removed from the preimage. The provider is the
+ * sole coordinate authority; the intent binds only schedule identity, not a
+ * coordinate the consumer has no authority to assert. All coordinate-specific
+ * tests (fixedPoint7, negative zero, rounding) are removed because the digest
+ * no longer covers coordinates.
  */
 class CanonicalIntentDigestV1Test {
 
@@ -19,8 +27,6 @@ class CanonicalIntentDigestV1Test {
         attemptId: String = "attempt-1",
         profileRef: String = "profile-1",
         scheduleRef: String = "schedule-1",
-        latitude: Double = -33.8688197,
-        longitude: Double = 151.2092955,
         requiredVerificationWire: Int = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
         notBeforeEpochMs: Long = 1_786_000_000_000L,
         deadlineEpochMs: Long = 1_786_000_600_000L,
@@ -29,8 +35,6 @@ class CanonicalIntentDigestV1Test {
         attemptId = attemptId,
         profileRef = profileRef,
         scheduleRef = scheduleRef,
-        latitude = latitude,
-        longitude = longitude,
         requiredVerificationWire = requiredVerificationWire,
         notBeforeEpochMs = notBeforeEpochMs,
         deadlineEpochMs = deadlineEpochMs,
@@ -93,8 +97,6 @@ class CanonicalIntentDigestV1Test {
             "attemptId" to intent(attemptId = "attempt-2"),
             "profileRef" to intent(profileRef = "profile-2"),
             "scheduleRef" to intent(scheduleRef = "schedule-2"),
-            "latitude" to intent(latitude = -33.8688198),
-            "longitude" to intent(longitude = 151.2092956),
             "requiredVerificationWire" to intent(
                 requiredVerificationWire = VerificationLevelV1.HOOK_UNVERIFIED.wire,
             ),
@@ -108,51 +110,6 @@ class CanonicalIntentDigestV1Test {
                 CanonicalIntentDigestV1.compute(variant),
             )
         }
-    }
-
-    /**
-     * Negative zero must normalise. Otherwise the same location produces two
-     * digests depending on which side of zero the arithmetic landed on.
-     */
-    @Test
-    fun `positive and negative zero produce the same digest`() {
-        assertEquals(
-            CanonicalIntentDigestV1.compute(intent(latitude = 0.0, longitude = 0.0)),
-            CanonicalIntentDigestV1.compute(intent(latitude = -0.0, longitude = -0.0)),
-        )
-    }
-
-    @Test
-    fun `coordinates render as plain fixed point with exactly seven decimals`() {
-        assertEquals("0.0000000", CanonicalIntentDigestV1.fixedPoint7(0.0))
-        assertEquals("0.0000000", CanonicalIntentDigestV1.fixedPoint7(-0.0))
-        assertEquals("-33.8688197", CanonicalIntentDigestV1.fixedPoint7(-33.8688197))
-        assertEquals("151.2092955", CanonicalIntentDigestV1.fixedPoint7(151.2092955))
-        assertEquals("1.0000000", CanonicalIntentDigestV1.fixedPoint7(1.0))
-        assertEquals("-1.0000000", CanonicalIntentDigestV1.fixedPoint7(-1.0))
-    }
-
-    /**
-     * Pins the rounding interpretation.
-     *
-     * Rounding is applied to the double's **exact** binary value, not to its
-     * shortest decimal representation. `0.12345675` looks like a half-way case in
-     * decimal, but no double is ever exactly half-way at scale 7 (that would
-     * require a non-dyadic rational), so the exact value decides and the result is
-     * fully determined by the bits. Fixing this here means an independent
-     * implementation cannot silently choose the other reading.
-     */
-    @Test
-    fun `rounding uses the exact binary value of the double`() {
-        assertEquals("0.1234568", CanonicalIntentDigestV1.fixedPoint7(0.12345675))
-        assertEquals("0.1234567", CanonicalIntentDigestV1.fixedPoint7(0.12345674))
-    }
-
-    @Test
-    fun `no scientific notation for very small coordinates`() {
-        val rendered = CanonicalIntentDigestV1.fixedPoint7(0.0000001)
-        assertEquals("0.0000001", rendered)
-        assertTrue("must not use exponent form", !rendered.contains("E") && !rendered.contains("e"))
     }
 
     /** Multi-byte and control characters must survive UTF-8 encoding identically. */

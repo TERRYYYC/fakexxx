@@ -8,7 +8,14 @@ import kotlinx.parcelize.Parcelize
  *
  * Spec §6.3. This is the object the canonical digest in [CanonicalIntentDigestV1]
  * is computed over; `runId` and `attemptId` are part of it, which is what makes
- * `acceptedIntentHash` an attribution proof and not merely a coordinate check.
+ * `acceptedIntentHash` an attribution proof and not merely a schedule-item check.
+ *
+ * ## KB-8: coordinate ownership belongs to the provider
+ *
+ * `latitude` / `longitude` were removed. The provider (Qianwangyou) is the sole
+ * coordinate authority: it resolves the effective location from its own schedule
+ * item data. Auto passes `profileRef` and `scheduleRef` as item references;
+ * it never sends, holds, or asserts coordinates over the contract boundary.
  *
  * `requiredVerificationWire` carries a [VerificationLevelV1] wire code. It is an
  * `Int` and not the enum for the reason documented on [VerificationLevelV1].
@@ -19,8 +26,6 @@ data class EnvironmentIntentV1(
     val attemptId: String,
     val profileRef: String,
     val scheduleRef: String,
-    val latitude: Double,
-    val longitude: Double,
     /** [VerificationLevelV1] wire code. */
     val requiredVerificationWire: Int,
     val notBeforeEpochMs: Long,

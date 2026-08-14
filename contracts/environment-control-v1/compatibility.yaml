@@ -30,7 +30,6 @@ service:
 
 constants:
   trustedLocationToleranceMeters: 1.0
-  canonicalCoordinateScale: 7
 
 enums:
   VerificationLevelV1:
