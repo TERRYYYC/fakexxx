@@ -61,6 +61,48 @@ if [ ! -f "$SPEC" ]; then
   exit 2
 fi
 
+# -------------------------------------------------------------- input identity
+# WHY: a verdict that does not name its input is a verdict about nothing.
+# The spec is selected by a RELATIVE default path, so the same command run
+# from a different checkout scans that checkout's copy without a word of
+# warning. That is not hypothetical: a copy ~30 revisions stale (its ledger
+# still partitioned owner-red=64 / pr-3=33 / pr-4=0, the era before the lane
+# re-projection, when the pr-4 owner column read Opus5) was scanned and
+# reported five real cache sites valued 31 -- and the reader then verified
+# those LINE NUMBERS against the current spec, where L2908 is a directory
+# tree line and L3018 is blank. Every individual fact was true; nothing in
+# the output said WHICH FILE produced it, so a stale copy's FAIL was read as
+# a current target's regression and blocked a merge gate on a green line.
+# The banner names the file actually scanned: absolute path, line count, a
+# sha256 prefix, the file's own latest revision marker (the §0.1 changelog
+# is the highest-numbered `| vN.NN |` table row by construction), and the
+# git coordinates when the spec lives in a repository. Informational only:
+# no verdict logic reads it, and a marker-less spec prints `none`, never a
+# guess.
+SPEC_DIR="$(cd -- "$(dirname -- "$SPEC")" && pwd)"
+SPEC_ABS="$SPEC_DIR/$(basename -- "$SPEC")"
+SPEC_LINES=$(wc -l < "$SPEC" | tr -d ' ')
+if command -v sha256sum >/dev/null 2>&1; then
+  SPEC_SHA=$(sha256sum "$SPEC" | cut -c1-12)
+elif command -v shasum >/dev/null 2>&1; then
+  SPEC_SHA=$(shasum -a 256 "$SPEC" | cut -c1-12)
+else
+  SPEC_SHA=unavailable
+fi
+SPEC_VER=$(grep -oE '^\| \*{0,2}v1\.[0-9]+' "$SPEC" \
+  | grep -oE 'v1\.[0-9]+' | sort -V | tail -1)
+[ -n "$SPEC_VER" ] || SPEC_VER=none
+if GIT_HEAD=$(git -C "$SPEC_DIR" rev-parse --short=12 HEAD 2>/dev/null); then
+  GIT_BRANCH=$(git -C "$SPEC_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
+  GIT_WHERE="git HEAD $GIT_HEAD ($GIT_BRANCH)"
+else
+  GIT_WHERE="outside a git repository"
+fi
+printf '\n== input provenance ==\n'
+printf '  spec: %s (%s lines, sha256 %s, revision marker %s)\n' \
+  "$SPEC_ABS" "$SPEC_LINES" "$SPEC_SHA" "$SPEC_VER"
+printf '  %s\n' "$GIT_WHERE"
+
 # ---------------------------------------------------------------- ledger truth
 # A §10.1 ledger row is: | `M-XX-NN` | category | `class` | owner | `entry` |
 # A §10 matrix row is the same ID with NO evidence class -- that is what

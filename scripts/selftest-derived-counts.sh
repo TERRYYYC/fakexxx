@@ -110,6 +110,12 @@ P1_REQUIRED=(
   '    pair :'  '    curval:'
   '=> section 3: 0 stale cache site(s)'
   'check-derived-counts: PASS'
+  # The provenance banner is pinned here for the same reason the arm
+  # enumeration is: a verdict that stops naming its input is exactly as
+  # readable as one that never did, and the verdict line cannot tell them
+  # apart. Its content-fidelity is pinned by P-4 below.
+  '== input provenance =='
+  'revision marker'
 )
 p1_ok=1
 for needle in "${P1_REQUIRED[@]}"; do
@@ -133,6 +139,44 @@ if [ "$p1_ok" -eq 1 ]; then
 fi
 rm -rf "$D"
 
+# P-4: the provenance banner must describe the file that was SCANNED, not the
+# checkout the reader assumed. This is the incident that blocked a merge gate:
+# the guard was run against a spec ~30 revisions stale, its five findings were
+# real cache sites in THAT file, and the reader verified their line numbers
+# against the CURRENT spec -- the output carried nothing that could break the
+# tie. So: rewrite the throwaway copy's own latest revision row to a version
+# that exists nowhere else (v1.99), and require the banner to follow the
+# scanned file. A banner that reads the repo's pristine spec instead, or a
+# banner deleted outright, fails here -- and so does a guard that stops
+# completing a scan, because the verdict line must still be PASS.
+D="$(mk)"
+if apply "$D" "$SPEC" '| **v1.63** |' '| **v1.99** |'; then
+  OUT="$(run_gate "$D")"
+  p4_ok=1
+  if ! printf '%s' "$OUT" | grep -qF 'revision marker v1.99'; then
+    bad "P-4 provenance banner does not name the scanned file's own revision"
+    detail "$OUT"
+    p4_ok=0
+  fi
+  if ! printf '%s' "$OUT" | grep -qF 'check-derived-counts: PASS'; then
+    bad "P-4 the planted marker must not disturb the verdict (still PASS)"
+    detail "$OUT"
+    p4_ok=0
+  fi
+  if printf '%s' "$OUT" | grep -qF 'revision marker v1.63'; then
+    bad "P-4 banner reported the pristine spec's marker -- it read the wrong file"
+    detail "$OUT"
+    p4_ok=0
+  fi
+  if [ "$p4_ok" -eq 1 ]; then
+    ok "P-4 provenance banner names the scanned file (marker follows the copy, verdict undisturbed)"
+    POS=$((POS + 1))
+  fi
+else
+  bad "P-4 - INCONCLUSIVE: plant did not apply; the case never ran"
+fi
+rm -rf "$D"
+
 # ---------------------------------------------------------------------------
 printf '\n== negative (a planted notation drift; the guard must name it) ==\n'
 
@@ -146,7 +190,7 @@ neg() { # $1=label $2=old $3=new $4=expected finding substring
   out="$(run_gate "$d")"
   if ! printf '%s' "$out" | grep -qF -- "$4"; then
     bad "$1 - guard never reported the planted finding: '$4'"
-    detail "$out"
+    detail "$OUT"
   else
     ok "$1"
     NEG=$((NEG + 1))
@@ -215,11 +259,11 @@ legal() { # $1=label $2=old $3=new $4=substring that must NOT appear
   out="$(run_gate "$d")"
   if ! healthy "$out"; then
     bad "$1 - INCONCLUSIVE: the guard did not complete a scan"
-    detail "$out"; rm -rf "$d"; return
+    detail "$OUT"; rm -rf "$d"; return
   fi
   if printf '%s' "$out" | grep -qF -- "$4"; then
     bad "$1 - FALSE RED: the guard flagged legal text as a stale cache ('$4')"
-    detail "$out"
+    detail "$OUT"
   else
     ok "$1 - legal text stays green"
     POS=$((POS + 1))
@@ -266,7 +310,7 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
   rm -rf "$base"
   if ! printf '%s' "$out" | grep -qF -- "$5"; then
     bad "$1 - INCONCLUSIVE: the intact gate never produced '$5', so its disappearance proves nothing"
-    detail "$out"
+    detail "$OUT"
     return
   fi
 
@@ -286,12 +330,12 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
   out="$(run_gate "$d")"
   if ! healthy "$out"; then
     bad "$1 - INCONCLUSIVE: the mutated guard did not complete a scan (crash?), so a missing finding proves nothing"
-    detail "$out"
+    detail "$OUT"
     rm -rf "$d"; return
   fi
   if printf '%s' "$out" | grep -qF -- "$5"; then
     bad "$1 - finding survived with the arm disabled, so that arm is not what catches it"
-    detail "$out"
+    detail "$OUT"
   else
     ok "$1 - disabling it makes the finding disappear, so the arm is load-bearing"
     MUT=$((MUT + 1))
