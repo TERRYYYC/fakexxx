@@ -454,6 +454,21 @@ class EnvironmentControlHandler(
                     "proof.scheduleItemId=${proof.scheduleItemId} does not match expectedCurrentItemId=${request.expectedCurrentItemId}")
             }
 
+            // --- step 3 (cont.): the referenced lease must be THIS caller's own
+            // historical reference (KB-5 ruling). Matching is on applicationId
+            // ONLY — never signerDigest. A missing record or a foreign owner
+            // makes the request structurally invalid (13), not a lease conflict:
+            // wire 7 is the device-global BLOCKING gate at step 5 and says
+            // nothing about who the referenced history belongs to. Pre-fix this
+            // fell through to step 6a's `?.acceptedIntentHash ?: ""` and the
+            // advance COMMITTED with an empty intentHash — an attribution proof
+            // binding nothing.
+            val advanceLease = leaseStore.get(request.leaseId)
+            if (advanceLease == null || advanceLease.callerApplicationId != caller.applicationId) {
+                throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
+                    "leaseId ${request.leaseId} is not this caller's historical reference")
+            }
+
             // --- step 4: schedule gates (16→14→15, spec v1.54 §6.7.4b intra-step ordering) ---
             val schedule = environment.scheduleSnapshot()
                 ?: throw ContractException(ContractErrorCodeV1.REQUEST_INVALID, "no active schedule")
@@ -505,7 +520,10 @@ class EnvironmentControlHandler(
                 if (toItemId == null) AdvanceOutcomeV1.EXHAUSTED.wire else AdvanceOutcomeV1.ADVANCED.wire
 
             val snap = tracker.snapshot()
-            val intentHash = leaseStore.get(request.leaseId)?.acceptedIntentHash ?: ""
+            // Non-null and caller-owned by the step-3 gate above; the former
+            // `?: ""` tolerance let a missing/foreign leaseId produce a receipt
+            // whose intentHash bound nothing (KB-5).
+            val intentHash = advanceLease.acceptedIntentHash
 
             val receipt = AdvanceReceiptV1(
                 outcomeWire = outcomeWire,

@@ -558,6 +558,59 @@ class AdvanceProviderRedTest {
         assertEquals("no advance under a foreign active lease", 0, h.env.advanceCount)
     }
 
+    // ----------------------------- KB-5: request.leaseId must be the caller's
+    // OWN historical reference (placeholder labels (a)/(b) — canonical row IDs
+    // are allocated by the main lane in one batch; do NOT self-assign, do NOT
+    // count toward the ledger, same discipline as this file's header).
+    //
+    // Ruling (operator, via main lane): foreign OR missing leaseId →
+    // REQUEST_INVALID(13), decision point folded into step 3; ownership matched
+    // on applicationId ONLY, never signerDigest. This is not LEASE_CONFLICT(7):
+    // 7 is the device-global BLOCKING gate at step 5 and says nothing about who
+    // the referenced history belongs to — a RELEASED foreign lease does not
+    // block, it mis-attributes.
+
+    /**
+     * Placeholder (a): a leaseId with NO record at all → 13, no advance.
+     * Pre-fix the handler tolerated the miss at step 6a
+     * (`leaseStore.get(leaseId)?.acceptedIntentHash ?: ""`) and COMMITTED an
+     * advance whose receipt carried an empty intentHash — an attribution proof
+     * binding nothing.
+     */
+    @Test
+    fun advance_missingLeaseId_requestInvalid() {
+        val h = harness()
+        // No apply ever happened: the referenced lease simply does not exist.
+        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, "lease-never-existed", "adv-nolease"))
+        }
+        assertEquals("no advance on a missing leaseId", 0, h.env.advanceCount)
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+    }
+
+    /**
+     * Placeholder (b): a well-formed historical reference owned by ANOTHER
+     * caller (applicationId differs) → 13, no advance. The pre-fix handler
+     * committed the advance with the FOREIGN lease's intentHash, so my attempt
+     * would ride on another caller's accepted intent.
+     */
+    @Test
+    fun advance_foreignLeaseId_requestInvalid() {
+        val h = harness()
+        h.pair(OTHER_PKG, OTHER_SIGNER)
+
+        // OTHER earns and releases a lease: a legal historical reference, but
+        // not AUTO's.
+        val otherReceipt = h.apply(uid = OTHER_UID, key = "other-apply", intent = h.intent(attemptId = "o1"))
+        h.release(otherReceipt.leaseId, uid = OTHER_UID, key = "other-rel")
+
+        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, otherReceipt.leaseId, "adv-foreign-lease"))
+        }
+        assertEquals("no advance on a foreign leaseId", 0, h.env.advanceCount)
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+    }
+
     // ----------------------------- §6.7.4b step 5+6: gate and mutation are atomic
     // (Terra PR#22 P1-3)
 
