@@ -1353,8 +1353,10 @@ data class EnvironmentObservationV1(
     /** 本观察是**为哪个 schedule item** 作证（§6.7.1 / §6.7.5）。
      *  一个 profile 可被多个 schedule item 复用，所以匹配 profile、坐标、
      *  甚至 environmentFingerprint 都**不能**证明观察属于 receipt 声称推进到的那一项。
-     *  Auto 用它与 `AdvanceReceiptV1.advancedToItemId` 比对；没有它，唯一可做的检查
-     *  就只剩「环境看起来对」——那正是错环境归因。 */
+     *  **非终末**推进时，Auto 用它与 `AdvanceReceiptV1.advancedToItemId` 比对；没有它，
+     *  唯一可做的检查就只剩「环境看起来对」——那正是错环境归因。
+     *  **终末（EXHAUSTED）推进不走本载体**：那时 `advancedToItemId` 为 null 而本字段非空，
+     *  该腿恒为 false，改由 §6.7.5（v1.58）的独立 schedule 状态回读验证。 */
     val scheduleItemId: String,
     val scheduleVersion: Long,
 ) : Parcelable
