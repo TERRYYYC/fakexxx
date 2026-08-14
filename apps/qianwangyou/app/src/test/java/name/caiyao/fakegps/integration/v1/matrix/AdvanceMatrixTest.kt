@@ -123,4 +123,39 @@ class AdvanceMatrixTest {
         assertEquals("no advance under any violated gate", 0, h.env.advanceCount)
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
     }
+
+    /**
+     * M-AD-21 (spec v1.54 §6.7.4b intra-step ordering 16→14→15):
+     * When the schedule is EXHAUSTED and the caller carries a stale expectedCurrentItemId
+     * (e.g. pointing at an earlier item after the pointer retained on the last item),
+     * the answer must be SCHEDULE_EXHAUSTED(16), not SCHEDULE_ITEM_MISMATCH(14).
+     *
+     * The frozen intra-step ordering is 16→14→15: exhausted is checked BEFORE item
+     * mismatch. Before this reorder the code checked 14→15→16, so a stale item on
+     * an exhausted schedule would incorrectly return 14 instead of the terminal 16.
+     *
+     * Rationale: "already exhausted" is a terminal state — telling the caller "item
+     * mismatch" invites a useless resync+retry cycle when retry is structurally
+     * impossible. The frozen order gives the terminal answer first.
+     */
+    @Test
+    fun M_AD_21_exhaustedWithStaleItem_returnsSixteenNotFourteen() {
+        val h = harness()
+        val leaseId = h.apply(key = "ad21-apply").leaseId
+        h.release(leaseId, key = "ad21-rel")
+
+        // Advance through all items to exhaust the schedule.
+        h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad21-a1", "item-1"))
+        h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad21-a2", "item-2"))
+        h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad21-a3", "item-3"))
+
+        // Schedule is now exhausted; pointer retained on item-3 (M-AD-10).
+        // Caller sends expectedCurrentItemId = "item-2" (stale — they think item-2 is current).
+        expectContractFailure(ContractErrorCodeV1.SCHEDULE_EXHAUSTED) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, "ad21-stale", expectedItemId = "item-2"),
+            )
+        }
+    }
 }
