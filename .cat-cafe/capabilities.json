@@ -1,0 +1,831 @@
+{
+  "version": 2,
+  "capabilities": [
+    {
+      "id": "anime-forge",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "bootcamp-guide",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "browser-automation",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "browser-preview",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "co-creation-docs",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "code-as-harness",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "collaborative-thinking",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "concept-demo-design",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "console-dev",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "context-self-management",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "convention-graph-discovery",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "cross-cat-handoff",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "cross-thread-sync",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "debugging",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "deep-research",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "enterprise-workflow",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "eval-design",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "expert-panel",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "feat-lifecycle",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "fresh-context-review",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "guide-authoring",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "guide-interaction",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "hyperfocus-brake",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "image-generation",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "incident-response",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "knowledge-engineering",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "memory-navigation",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "memory-search-best-practices",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "merge-gate",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "open-source-teardown",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "organize-threads",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "pencil-design",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "ppt-forge",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "proactive-memory-judgment",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "quality-gate",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "receive-handoff-grounding",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "receive-review",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "request-review",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "rich-messaging",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "schedule-tasks",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "self-evolution",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "source-audit",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "sprite-forge",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "tdd",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "tech-writing",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "thread-orchestration",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "ttfund-skills",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "video-forge",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "vision-rescue",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "workspace-navigator",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "worktree",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "writing-plans",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "writing-skills",
+      "type": "skill",
+      "source": "cat-cafe",
+      "enabled": true,
+      "globalEnabled": true,
+      "mountPaths": [
+        "claude",
+        "codex",
+        "gemini",
+        "kimi"
+      ]
+    },
+    {
+      "id": "cat-cafe-collab",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "cat-cafe",
+      "mcpServer": {
+        "command": "node",
+        "args": [
+          "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/collab.js"
+        ]
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "cat-cafe-memory",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "cat-cafe",
+      "mcpServer": {
+        "command": "node",
+        "args": [
+          "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/memory.js"
+        ]
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "cat-cafe-signals",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "cat-cafe",
+      "mcpServer": {
+        "command": "node",
+        "args": [
+          "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/signals.js"
+        ]
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "cat-cafe-limb",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "cat-cafe",
+      "mcpServer": {
+        "command": "node",
+        "args": [
+          "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/limb.js"
+        ]
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "cat-cafe-audio",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "cat-cafe",
+      "mcpServer": {
+        "command": "node",
+        "args": [
+          "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/audio.js"
+        ]
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "cat-cafe-finance",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "cat-cafe",
+      "mcpServer": {
+        "command": "node",
+        "args": [
+          "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/finance.js"
+        ]
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "node_repl",
+      "type": "mcp",
+      "enabled": true,
+      "globalEnabled": true,
+      "source": "external",
+      "mcpServer": {
+        "command": "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+        "args": [],
+        "env": {
+          "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS": "1000",
+          "NODE_REPL_NODE_MODULE_DIRS": "/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules",
+          "NODE_REPL_NODE_PATH": "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+          "NODE_REPL_TRUSTED_CODE_PATHS": "/Users/terry/.codex",
+          "CODEX_HOME": "/Users/terry/.codex",
+          "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "028a14b6eaa6d98dac2aae00764345ab9f244801ed8493d42b9af3be5575006e,8785b5437d98636c3002d3d7e64b98db79c3b66870b1bd3d18dea953a99b1562",
+          "BROWSER_USE_AVAILABLE_BACKENDS": "chrome,iab",
+          "NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER": "Control the in-app browser in conjunction with the Browser Plugin.",
+          "NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME": "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative.",
+          "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE": "Control desktop apps on macOS through Computer Use.",
+          "BROWSER_USE_CODEX_APP_BUILD_FLAVOR": "prod",
+          "BROWSER_USE_CODEX_APP_VERSION": "26.727.40816",
+          "SKY_CUA_SERVICE_PATH": "/Users/terry/.codex/computer-use/Codex Computer Use.app",
+          "CODEX_CLI_PATH": "/Applications/ChatGPT.app/Contents/Resources/codex"
+        }
+      },
+      "blockedCats": []
+    },
+    {
+      "id": "computer-use",
+      "type": "mcp",
+      "enabled": false,
+      "globalEnabled": true,
+      "source": "external",
+      "mcpServer": {
+        "command": "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+        "args": [
+          "mcp"
+        ],
+        "workingDir": "."
+      },
+      "blockedCats": []
+    }
+  ],
+  "skillsSync": {
+    "sourceRoot": "../../../tools/cat-cafe-runtime/cat-cafe-skills",
+    "sourceManifestHash": "sha256:31508030db47f97a",
+    "lastSyncedAt": "2026-08-11T14:55:03.509Z"
+  },
+  "mcpSync": {
+    "sourceConfigHash": "5415ddf384ae2eae",
+    "lastSyncedAt": "2026-08-09T20:35:11.136Z"
+  },
+  "discoveryVersion": 1
+}

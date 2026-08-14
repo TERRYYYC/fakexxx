@@ -1,0 +1,1123 @@
+{
+  "projectPath": "/Users/terry/Desktop/coding/fakexxx",
+  "timestamp": 1786285056187,
+  "packVersion": "1.4.1",
+  "actions": [
+    {
+      "file": "CLAUDE.md",
+      "action": "created",
+      "reason": "file created with managed block"
+    },
+    {
+      "file": "AGENTS.md",
+      "action": "created",
+      "reason": "file created with managed block"
+    },
+    {
+      "file": "GEMINI.md",
+      "action": "created",
+      "reason": "file created with managed block"
+    },
+    {
+      "file": "KIMI.md",
+      "action": "created",
+      "reason": "file created with managed block"
+    },
+    {
+      "file": ".claude/skills/anime-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/anime-forge"
+    },
+    {
+      "file": ".claude/skills/bootcamp-guide",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/bootcamp-guide"
+    },
+    {
+      "file": ".claude/skills/browser-automation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-automation"
+    },
+    {
+      "file": ".claude/skills/browser-preview",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-preview"
+    },
+    {
+      "file": ".claude/skills/co-creation-docs",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/co-creation-docs"
+    },
+    {
+      "file": ".claude/skills/code-as-harness",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/code-as-harness"
+    },
+    {
+      "file": ".claude/skills/collaborative-thinking",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/collaborative-thinking"
+    },
+    {
+      "file": ".claude/skills/concept-demo-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/concept-demo-design"
+    },
+    {
+      "file": ".claude/skills/console-dev",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/console-dev"
+    },
+    {
+      "file": ".claude/skills/context-self-management",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/context-self-management"
+    },
+    {
+      "file": ".claude/skills/convention-graph-discovery",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/convention-graph-discovery"
+    },
+    {
+      "file": ".claude/skills/cross-cat-handoff",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-cat-handoff"
+    },
+    {
+      "file": ".claude/skills/cross-thread-sync",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-thread-sync"
+    },
+    {
+      "file": ".claude/skills/debugging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/debugging"
+    },
+    {
+      "file": ".claude/skills/deep-research",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/deep-research"
+    },
+    {
+      "file": ".claude/skills/enterprise-workflow",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/enterprise-workflow"
+    },
+    {
+      "file": ".claude/skills/eval-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/eval-design"
+    },
+    {
+      "file": ".claude/skills/expert-panel",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/expert-panel"
+    },
+    {
+      "file": ".claude/skills/feat-lifecycle",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/feat-lifecycle"
+    },
+    {
+      "file": ".claude/skills/fresh-context-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/fresh-context-review"
+    },
+    {
+      "file": ".claude/skills/guide-authoring",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-authoring"
+    },
+    {
+      "file": ".claude/skills/guide-interaction",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-interaction"
+    },
+    {
+      "file": ".claude/skills/hyperfocus-brake",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/hyperfocus-brake"
+    },
+    {
+      "file": ".claude/skills/image-generation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/image-generation"
+    },
+    {
+      "file": ".claude/skills/incident-response",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/incident-response"
+    },
+    {
+      "file": ".claude/skills/knowledge-engineering",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/knowledge-engineering"
+    },
+    {
+      "file": ".claude/skills/memory-navigation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-navigation"
+    },
+    {
+      "file": ".claude/skills/memory-search-best-practices",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-search-best-practices"
+    },
+    {
+      "file": ".claude/skills/merge-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/merge-gate"
+    },
+    {
+      "file": ".claude/skills/open-source-teardown",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/open-source-teardown"
+    },
+    {
+      "file": ".claude/skills/organize-threads",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/organize-threads"
+    },
+    {
+      "file": ".claude/skills/pencil-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/pencil-design"
+    },
+    {
+      "file": ".claude/skills/ppt-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ppt-forge"
+    },
+    {
+      "file": ".claude/skills/proactive-memory-judgment",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/proactive-memory-judgment"
+    },
+    {
+      "file": ".claude/skills/quality-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/quality-gate"
+    },
+    {
+      "file": ".claude/skills/receive-handoff-grounding",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-handoff-grounding"
+    },
+    {
+      "file": ".claude/skills/receive-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-review"
+    },
+    {
+      "file": ".claude/skills/request-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/request-review"
+    },
+    {
+      "file": ".claude/skills/rich-messaging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/rich-messaging"
+    },
+    {
+      "file": ".claude/skills/schedule-tasks",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/schedule-tasks"
+    },
+    {
+      "file": ".claude/skills/self-evolution",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/self-evolution"
+    },
+    {
+      "file": ".claude/skills/source-audit",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/source-audit"
+    },
+    {
+      "file": ".claude/skills/sprite-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/sprite-forge"
+    },
+    {
+      "file": ".claude/skills/tdd",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tdd"
+    },
+    {
+      "file": ".claude/skills/tech-writing",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tech-writing"
+    },
+    {
+      "file": ".claude/skills/thread-orchestration",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/thread-orchestration"
+    },
+    {
+      "file": ".claude/skills/ttfund-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ttfund-skills"
+    },
+    {
+      "file": ".claude/skills/video-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/video-forge"
+    },
+    {
+      "file": ".claude/skills/vision-rescue",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/vision-rescue"
+    },
+    {
+      "file": ".claude/skills/workspace-navigator",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/workspace-navigator"
+    },
+    {
+      "file": ".claude/skills/worktree",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/worktree"
+    },
+    {
+      "file": ".claude/skills/writing-plans",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-plans"
+    },
+    {
+      "file": ".claude/skills/writing-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-skills"
+    },
+    {
+      "file": ".codex/skills/anime-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/anime-forge"
+    },
+    {
+      "file": ".codex/skills/bootcamp-guide",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/bootcamp-guide"
+    },
+    {
+      "file": ".codex/skills/browser-automation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-automation"
+    },
+    {
+      "file": ".codex/skills/browser-preview",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-preview"
+    },
+    {
+      "file": ".codex/skills/co-creation-docs",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/co-creation-docs"
+    },
+    {
+      "file": ".codex/skills/code-as-harness",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/code-as-harness"
+    },
+    {
+      "file": ".codex/skills/collaborative-thinking",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/collaborative-thinking"
+    },
+    {
+      "file": ".codex/skills/concept-demo-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/concept-demo-design"
+    },
+    {
+      "file": ".codex/skills/console-dev",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/console-dev"
+    },
+    {
+      "file": ".codex/skills/context-self-management",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/context-self-management"
+    },
+    {
+      "file": ".codex/skills/convention-graph-discovery",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/convention-graph-discovery"
+    },
+    {
+      "file": ".codex/skills/cross-cat-handoff",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-cat-handoff"
+    },
+    {
+      "file": ".codex/skills/cross-thread-sync",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-thread-sync"
+    },
+    {
+      "file": ".codex/skills/debugging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/debugging"
+    },
+    {
+      "file": ".codex/skills/deep-research",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/deep-research"
+    },
+    {
+      "file": ".codex/skills/enterprise-workflow",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/enterprise-workflow"
+    },
+    {
+      "file": ".codex/skills/eval-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/eval-design"
+    },
+    {
+      "file": ".codex/skills/expert-panel",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/expert-panel"
+    },
+    {
+      "file": ".codex/skills/feat-lifecycle",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/feat-lifecycle"
+    },
+    {
+      "file": ".codex/skills/fresh-context-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/fresh-context-review"
+    },
+    {
+      "file": ".codex/skills/guide-authoring",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-authoring"
+    },
+    {
+      "file": ".codex/skills/guide-interaction",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-interaction"
+    },
+    {
+      "file": ".codex/skills/hyperfocus-brake",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/hyperfocus-brake"
+    },
+    {
+      "file": ".codex/skills/image-generation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/image-generation"
+    },
+    {
+      "file": ".codex/skills/incident-response",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/incident-response"
+    },
+    {
+      "file": ".codex/skills/knowledge-engineering",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/knowledge-engineering"
+    },
+    {
+      "file": ".codex/skills/memory-navigation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-navigation"
+    },
+    {
+      "file": ".codex/skills/memory-search-best-practices",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-search-best-practices"
+    },
+    {
+      "file": ".codex/skills/merge-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/merge-gate"
+    },
+    {
+      "file": ".codex/skills/open-source-teardown",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/open-source-teardown"
+    },
+    {
+      "file": ".codex/skills/organize-threads",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/organize-threads"
+    },
+    {
+      "file": ".codex/skills/pencil-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/pencil-design"
+    },
+    {
+      "file": ".codex/skills/ppt-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ppt-forge"
+    },
+    {
+      "file": ".codex/skills/proactive-memory-judgment",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/proactive-memory-judgment"
+    },
+    {
+      "file": ".codex/skills/quality-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/quality-gate"
+    },
+    {
+      "file": ".codex/skills/receive-handoff-grounding",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-handoff-grounding"
+    },
+    {
+      "file": ".codex/skills/receive-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-review"
+    },
+    {
+      "file": ".codex/skills/request-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/request-review"
+    },
+    {
+      "file": ".codex/skills/rich-messaging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/rich-messaging"
+    },
+    {
+      "file": ".codex/skills/schedule-tasks",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/schedule-tasks"
+    },
+    {
+      "file": ".codex/skills/self-evolution",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/self-evolution"
+    },
+    {
+      "file": ".codex/skills/source-audit",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/source-audit"
+    },
+    {
+      "file": ".codex/skills/sprite-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/sprite-forge"
+    },
+    {
+      "file": ".codex/skills/tdd",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tdd"
+    },
+    {
+      "file": ".codex/skills/tech-writing",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tech-writing"
+    },
+    {
+      "file": ".codex/skills/thread-orchestration",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/thread-orchestration"
+    },
+    {
+      "file": ".codex/skills/ttfund-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ttfund-skills"
+    },
+    {
+      "file": ".codex/skills/video-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/video-forge"
+    },
+    {
+      "file": ".codex/skills/vision-rescue",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/vision-rescue"
+    },
+    {
+      "file": ".codex/skills/workspace-navigator",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/workspace-navigator"
+    },
+    {
+      "file": ".codex/skills/worktree",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/worktree"
+    },
+    {
+      "file": ".codex/skills/writing-plans",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-plans"
+    },
+    {
+      "file": ".codex/skills/writing-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-skills"
+    },
+    {
+      "file": ".gemini/skills/anime-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/anime-forge"
+    },
+    {
+      "file": ".gemini/skills/bootcamp-guide",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/bootcamp-guide"
+    },
+    {
+      "file": ".gemini/skills/browser-automation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-automation"
+    },
+    {
+      "file": ".gemini/skills/browser-preview",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-preview"
+    },
+    {
+      "file": ".gemini/skills/co-creation-docs",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/co-creation-docs"
+    },
+    {
+      "file": ".gemini/skills/code-as-harness",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/code-as-harness"
+    },
+    {
+      "file": ".gemini/skills/collaborative-thinking",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/collaborative-thinking"
+    },
+    {
+      "file": ".gemini/skills/concept-demo-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/concept-demo-design"
+    },
+    {
+      "file": ".gemini/skills/console-dev",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/console-dev"
+    },
+    {
+      "file": ".gemini/skills/context-self-management",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/context-self-management"
+    },
+    {
+      "file": ".gemini/skills/convention-graph-discovery",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/convention-graph-discovery"
+    },
+    {
+      "file": ".gemini/skills/cross-cat-handoff",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-cat-handoff"
+    },
+    {
+      "file": ".gemini/skills/cross-thread-sync",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-thread-sync"
+    },
+    {
+      "file": ".gemini/skills/debugging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/debugging"
+    },
+    {
+      "file": ".gemini/skills/deep-research",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/deep-research"
+    },
+    {
+      "file": ".gemini/skills/enterprise-workflow",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/enterprise-workflow"
+    },
+    {
+      "file": ".gemini/skills/eval-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/eval-design"
+    },
+    {
+      "file": ".gemini/skills/expert-panel",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/expert-panel"
+    },
+    {
+      "file": ".gemini/skills/feat-lifecycle",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/feat-lifecycle"
+    },
+    {
+      "file": ".gemini/skills/fresh-context-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/fresh-context-review"
+    },
+    {
+      "file": ".gemini/skills/guide-authoring",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-authoring"
+    },
+    {
+      "file": ".gemini/skills/guide-interaction",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-interaction"
+    },
+    {
+      "file": ".gemini/skills/hyperfocus-brake",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/hyperfocus-brake"
+    },
+    {
+      "file": ".gemini/skills/image-generation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/image-generation"
+    },
+    {
+      "file": ".gemini/skills/incident-response",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/incident-response"
+    },
+    {
+      "file": ".gemini/skills/knowledge-engineering",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/knowledge-engineering"
+    },
+    {
+      "file": ".gemini/skills/memory-navigation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-navigation"
+    },
+    {
+      "file": ".gemini/skills/memory-search-best-practices",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-search-best-practices"
+    },
+    {
+      "file": ".gemini/skills/merge-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/merge-gate"
+    },
+    {
+      "file": ".gemini/skills/open-source-teardown",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/open-source-teardown"
+    },
+    {
+      "file": ".gemini/skills/organize-threads",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/organize-threads"
+    },
+    {
+      "file": ".gemini/skills/pencil-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/pencil-design"
+    },
+    {
+      "file": ".gemini/skills/ppt-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ppt-forge"
+    },
+    {
+      "file": ".gemini/skills/proactive-memory-judgment",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/proactive-memory-judgment"
+    },
+    {
+      "file": ".gemini/skills/quality-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/quality-gate"
+    },
+    {
+      "file": ".gemini/skills/receive-handoff-grounding",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-handoff-grounding"
+    },
+    {
+      "file": ".gemini/skills/receive-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-review"
+    },
+    {
+      "file": ".gemini/skills/request-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/request-review"
+    },
+    {
+      "file": ".gemini/skills/rich-messaging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/rich-messaging"
+    },
+    {
+      "file": ".gemini/skills/schedule-tasks",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/schedule-tasks"
+    },
+    {
+      "file": ".gemini/skills/self-evolution",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/self-evolution"
+    },
+    {
+      "file": ".gemini/skills/source-audit",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/source-audit"
+    },
+    {
+      "file": ".gemini/skills/sprite-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/sprite-forge"
+    },
+    {
+      "file": ".gemini/skills/tdd",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tdd"
+    },
+    {
+      "file": ".gemini/skills/tech-writing",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tech-writing"
+    },
+    {
+      "file": ".gemini/skills/thread-orchestration",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/thread-orchestration"
+    },
+    {
+      "file": ".gemini/skills/ttfund-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ttfund-skills"
+    },
+    {
+      "file": ".gemini/skills/video-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/video-forge"
+    },
+    {
+      "file": ".gemini/skills/vision-rescue",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/vision-rescue"
+    },
+    {
+      "file": ".gemini/skills/workspace-navigator",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/workspace-navigator"
+    },
+    {
+      "file": ".gemini/skills/worktree",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/worktree"
+    },
+    {
+      "file": ".gemini/skills/writing-plans",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-plans"
+    },
+    {
+      "file": ".gemini/skills/writing-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-skills"
+    },
+    {
+      "file": ".kimi/skills/anime-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/anime-forge"
+    },
+    {
+      "file": ".kimi/skills/bootcamp-guide",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/bootcamp-guide"
+    },
+    {
+      "file": ".kimi/skills/browser-automation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-automation"
+    },
+    {
+      "file": ".kimi/skills/browser-preview",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/browser-preview"
+    },
+    {
+      "file": ".kimi/skills/co-creation-docs",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/co-creation-docs"
+    },
+    {
+      "file": ".kimi/skills/code-as-harness",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/code-as-harness"
+    },
+    {
+      "file": ".kimi/skills/collaborative-thinking",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/collaborative-thinking"
+    },
+    {
+      "file": ".kimi/skills/concept-demo-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/concept-demo-design"
+    },
+    {
+      "file": ".kimi/skills/console-dev",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/console-dev"
+    },
+    {
+      "file": ".kimi/skills/context-self-management",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/context-self-management"
+    },
+    {
+      "file": ".kimi/skills/convention-graph-discovery",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/convention-graph-discovery"
+    },
+    {
+      "file": ".kimi/skills/cross-cat-handoff",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-cat-handoff"
+    },
+    {
+      "file": ".kimi/skills/cross-thread-sync",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/cross-thread-sync"
+    },
+    {
+      "file": ".kimi/skills/debugging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/debugging"
+    },
+    {
+      "file": ".kimi/skills/deep-research",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/deep-research"
+    },
+    {
+      "file": ".kimi/skills/enterprise-workflow",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/enterprise-workflow"
+    },
+    {
+      "file": ".kimi/skills/eval-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/eval-design"
+    },
+    {
+      "file": ".kimi/skills/expert-panel",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/expert-panel"
+    },
+    {
+      "file": ".kimi/skills/feat-lifecycle",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/feat-lifecycle"
+    },
+    {
+      "file": ".kimi/skills/fresh-context-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/fresh-context-review"
+    },
+    {
+      "file": ".kimi/skills/guide-authoring",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-authoring"
+    },
+    {
+      "file": ".kimi/skills/guide-interaction",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/guide-interaction"
+    },
+    {
+      "file": ".kimi/skills/hyperfocus-brake",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/hyperfocus-brake"
+    },
+    {
+      "file": ".kimi/skills/image-generation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/image-generation"
+    },
+    {
+      "file": ".kimi/skills/incident-response",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/incident-response"
+    },
+    {
+      "file": ".kimi/skills/knowledge-engineering",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/knowledge-engineering"
+    },
+    {
+      "file": ".kimi/skills/memory-navigation",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-navigation"
+    },
+    {
+      "file": ".kimi/skills/memory-search-best-practices",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/memory-search-best-practices"
+    },
+    {
+      "file": ".kimi/skills/merge-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/merge-gate"
+    },
+    {
+      "file": ".kimi/skills/open-source-teardown",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/open-source-teardown"
+    },
+    {
+      "file": ".kimi/skills/organize-threads",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/organize-threads"
+    },
+    {
+      "file": ".kimi/skills/pencil-design",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/pencil-design"
+    },
+    {
+      "file": ".kimi/skills/ppt-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ppt-forge"
+    },
+    {
+      "file": ".kimi/skills/proactive-memory-judgment",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/proactive-memory-judgment"
+    },
+    {
+      "file": ".kimi/skills/quality-gate",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/quality-gate"
+    },
+    {
+      "file": ".kimi/skills/receive-handoff-grounding",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-handoff-grounding"
+    },
+    {
+      "file": ".kimi/skills/receive-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/receive-review"
+    },
+    {
+      "file": ".kimi/skills/request-review",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/request-review"
+    },
+    {
+      "file": ".kimi/skills/rich-messaging",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/rich-messaging"
+    },
+    {
+      "file": ".kimi/skills/schedule-tasks",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/schedule-tasks"
+    },
+    {
+      "file": ".kimi/skills/self-evolution",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/self-evolution"
+    },
+    {
+      "file": ".kimi/skills/source-audit",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/source-audit"
+    },
+    {
+      "file": ".kimi/skills/sprite-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/sprite-forge"
+    },
+    {
+      "file": ".kimi/skills/tdd",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tdd"
+    },
+    {
+      "file": ".kimi/skills/tech-writing",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/tech-writing"
+    },
+    {
+      "file": ".kimi/skills/thread-orchestration",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/thread-orchestration"
+    },
+    {
+      "file": ".kimi/skills/ttfund-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/ttfund-skills"
+    },
+    {
+      "file": ".kimi/skills/video-forge",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/video-forge"
+    },
+    {
+      "file": ".kimi/skills/vision-rescue",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/vision-rescue"
+    },
+    {
+      "file": ".kimi/skills/workspace-navigator",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/workspace-navigator"
+    },
+    {
+      "file": ".kimi/skills/worktree",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/worktree"
+    },
+    {
+      "file": ".kimi/skills/writing-plans",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-plans"
+    },
+    {
+      "file": ".kimi/skills/writing-skills",
+      "action": "symlinked",
+      "reason": "linked to /Users/terry/tools/clowder-ai/cat-cafe-skills/writing-skills"
+    },
+    {
+      "file": ".claude/hooks",
+      "action": "symlinked",
+      "reason": "hooks linked to /Users/terry/tools/clowder-ai/.claude/hooks"
+    },
+    {
+      "file": "BACKLOG.md",
+      "action": "created",
+      "reason": "template generated"
+    },
+    {
+      "file": "docs/SOP.md",
+      "action": "created",
+      "reason": "template generated"
+    },
+    {
+      "file": "docs/features/.gitkeep",
+      "action": "created",
+      "reason": "template generated"
+    },
+    {
+      "file": "docs/decisions/.gitkeep",
+      "action": "created",
+      "reason": "template generated"
+    },
+    {
+      "file": "docs/discussions/.gitkeep",
+      "action": "created",
+      "reason": "template generated"
+    },
+    {
+      "file": "docs/features/TEMPLATE.md",
+      "action": "created",
+      "reason": "template generated"
+    }
+  ],
+  "dryRun": false
+}

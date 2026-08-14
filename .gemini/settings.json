@@ -1,0 +1,133 @@
+{
+  "mcpServers": {
+    "cat-cafe-collab": {
+      "command": "node",
+      "args": [
+        "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/collab.js"
+      ],
+      "env": {
+        "CAT_CAFE_API_URL": "${CAT_CAFE_API_URL}",
+        "CAT_CAFE_INVOCATION_ID": "${CAT_CAFE_INVOCATION_ID}",
+        "CAT_CAFE_CALLBACK_TOKEN": "${CAT_CAFE_CALLBACK_TOKEN}",
+        "CAT_CAFE_USER_ID": "${CAT_CAFE_USER_ID}",
+        "CAT_CAFE_CAT_ID": "${CAT_CAFE_CAT_ID}",
+        "CAT_CAFE_THREAD_ID": "${CAT_CAFE_THREAD_ID}",
+        "CAT_CAFE_SIGNAL_USER": "${CAT_CAFE_SIGNAL_USER}",
+        "CAT_CAFE_RUN_TYPE": "${CAT_CAFE_RUN_TYPE}",
+        "CAT_CAFE_AUDIT_TOPIC": "${CAT_CAFE_AUDIT_TOPIC}"
+      }
+    },
+    "cat-cafe-memory": {
+      "command": "node",
+      "args": [
+        "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/memory.js"
+      ],
+      "env": {
+        "CAT_CAFE_API_URL": "${CAT_CAFE_API_URL}",
+        "CAT_CAFE_INVOCATION_ID": "${CAT_CAFE_INVOCATION_ID}",
+        "CAT_CAFE_CALLBACK_TOKEN": "${CAT_CAFE_CALLBACK_TOKEN}",
+        "CAT_CAFE_USER_ID": "${CAT_CAFE_USER_ID}",
+        "CAT_CAFE_CAT_ID": "${CAT_CAFE_CAT_ID}",
+        "CAT_CAFE_THREAD_ID": "${CAT_CAFE_THREAD_ID}",
+        "CAT_CAFE_SIGNAL_USER": "${CAT_CAFE_SIGNAL_USER}",
+        "CAT_CAFE_RUN_TYPE": "${CAT_CAFE_RUN_TYPE}",
+        "CAT_CAFE_AUDIT_TOPIC": "${CAT_CAFE_AUDIT_TOPIC}"
+      }
+    },
+    "cat-cafe-signals": {
+      "command": "node",
+      "args": [
+        "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/signals.js"
+      ],
+      "env": {
+        "CAT_CAFE_API_URL": "${CAT_CAFE_API_URL}",
+        "CAT_CAFE_INVOCATION_ID": "${CAT_CAFE_INVOCATION_ID}",
+        "CAT_CAFE_CALLBACK_TOKEN": "${CAT_CAFE_CALLBACK_TOKEN}",
+        "CAT_CAFE_USER_ID": "${CAT_CAFE_USER_ID}",
+        "CAT_CAFE_CAT_ID": "${CAT_CAFE_CAT_ID}",
+        "CAT_CAFE_THREAD_ID": "${CAT_CAFE_THREAD_ID}",
+        "CAT_CAFE_SIGNAL_USER": "${CAT_CAFE_SIGNAL_USER}",
+        "CAT_CAFE_RUN_TYPE": "${CAT_CAFE_RUN_TYPE}",
+        "CAT_CAFE_AUDIT_TOPIC": "${CAT_CAFE_AUDIT_TOPIC}"
+      }
+    },
+    "cat-cafe-limb": {
+      "command": "node",
+      "args": [
+        "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/limb.js"
+      ],
+      "env": {
+        "CAT_CAFE_API_URL": "${CAT_CAFE_API_URL}",
+        "CAT_CAFE_INVOCATION_ID": "${CAT_CAFE_INVOCATION_ID}",
+        "CAT_CAFE_CALLBACK_TOKEN": "${CAT_CAFE_CALLBACK_TOKEN}",
+        "CAT_CAFE_USER_ID": "${CAT_CAFE_USER_ID}",
+        "CAT_CAFE_CAT_ID": "${CAT_CAFE_CAT_ID}",
+        "CAT_CAFE_THREAD_ID": "${CAT_CAFE_THREAD_ID}",
+        "CAT_CAFE_SIGNAL_USER": "${CAT_CAFE_SIGNAL_USER}",
+        "CAT_CAFE_RUN_TYPE": "${CAT_CAFE_RUN_TYPE}",
+        "CAT_CAFE_AUDIT_TOPIC": "${CAT_CAFE_AUDIT_TOPIC}"
+      }
+    },
+    "cat-cafe-audio": {
+      "command": "node",
+      "args": [
+        "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/audio.js"
+      ],
+      "env": {
+        "CAT_CAFE_API_URL": "${CAT_CAFE_API_URL}",
+        "CAT_CAFE_INVOCATION_ID": "${CAT_CAFE_INVOCATION_ID}",
+        "CAT_CAFE_CALLBACK_TOKEN": "${CAT_CAFE_CALLBACK_TOKEN}",
+        "CAT_CAFE_USER_ID": "${CAT_CAFE_USER_ID}",
+        "CAT_CAFE_CAT_ID": "${CAT_CAFE_CAT_ID}",
+        "CAT_CAFE_THREAD_ID": "${CAT_CAFE_THREAD_ID}",
+        "CAT_CAFE_SIGNAL_USER": "${CAT_CAFE_SIGNAL_USER}",
+        "CAT_CAFE_RUN_TYPE": "${CAT_CAFE_RUN_TYPE}",
+        "CAT_CAFE_AUDIT_TOPIC": "${CAT_CAFE_AUDIT_TOPIC}"
+      }
+    },
+    "cat-cafe-finance": {
+      "command": "node",
+      "args": [
+        "/Users/terry/tools/cat-cafe-runtime/packages/mcp-server/dist/finance.js"
+      ],
+      "env": {
+        "CAT_CAFE_API_URL": "${CAT_CAFE_API_URL}",
+        "CAT_CAFE_INVOCATION_ID": "${CAT_CAFE_INVOCATION_ID}",
+        "CAT_CAFE_CALLBACK_TOKEN": "${CAT_CAFE_CALLBACK_TOKEN}",
+        "CAT_CAFE_USER_ID": "${CAT_CAFE_USER_ID}",
+        "CAT_CAFE_CAT_ID": "${CAT_CAFE_CAT_ID}",
+        "CAT_CAFE_THREAD_ID": "${CAT_CAFE_THREAD_ID}",
+        "CAT_CAFE_SIGNAL_USER": "${CAT_CAFE_SIGNAL_USER}",
+        "CAT_CAFE_RUN_TYPE": "${CAT_CAFE_RUN_TYPE}",
+        "CAT_CAFE_AUDIT_TOPIC": "${CAT_CAFE_AUDIT_TOPIC}"
+      }
+    },
+    "node_repl": {
+      "command": "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+      "args": [],
+      "env": {
+        "NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS": "1000",
+        "NODE_REPL_NODE_MODULE_DIRS": "/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules",
+        "NODE_REPL_NODE_PATH": "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node",
+        "NODE_REPL_TRUSTED_CODE_PATHS": "/Users/terry/.codex",
+        "CODEX_HOME": "/Users/terry/.codex",
+        "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "028a14b6eaa6d98dac2aae00764345ab9f244801ed8493d42b9af3be5575006e,8785b5437d98636c3002d3d7e64b98db79c3b66870b1bd3d18dea953a99b1562",
+        "BROWSER_USE_AVAILABLE_BACKENDS": "chrome,iab",
+        "NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER": "Control the in-app browser in conjunction with the Browser Plugin.",
+        "NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME": "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative.",
+        "NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE": "Control desktop apps on macOS through Computer Use.",
+        "BROWSER_USE_CODEX_APP_BUILD_FLAVOR": "prod",
+        "BROWSER_USE_CODEX_APP_VERSION": "26.727.40816",
+        "SKY_CUA_SERVICE_PATH": "/Users/terry/.codex/computer-use/Codex Computer Use.app",
+        "CODEX_CLI_PATH": "/Applications/ChatGPT.app/Contents/Resources/codex"
+      }
+    },
+    "computer-use": {
+      "command": "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+      "args": [
+        "mcp"
+      ],
+      "cwd": "."
+    }
+  }
+}
