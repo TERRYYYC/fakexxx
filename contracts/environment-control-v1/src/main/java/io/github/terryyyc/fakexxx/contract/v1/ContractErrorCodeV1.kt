@@ -133,8 +133,9 @@ enum class ContractErrorCodeV1(val wire: Int) {
     /** Same `idempotencyKey` replayed with a different payload digest (§6.3.3, INV-13). */
     IDEMPOTENCY_CONFLICT(12),
 
-    /** Structurally invalid request: empty required ref, out-of-range coordinate,
-     *  `deadline <= notBefore` (§6.3.3, INV-04). */
+    /** Structurally invalid request: empty required ref,
+     *  `deadline <= notBefore` (§6.3.3, INV-04). No coordinate case exists here:
+     *  KB-8 removed coordinates from every request payload. */
     REQUEST_INVALID(13),
 
     /**

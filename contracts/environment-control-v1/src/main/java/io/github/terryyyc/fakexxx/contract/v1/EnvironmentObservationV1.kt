@@ -18,10 +18,11 @@ data class EnvironmentObservationV1(
      *
      * Binds the observation to an intent. Coverage, revision, fingerprint, lease
      * and verification level together only prove "nothing relevant changed during
-     * the test" — they do not prove the environment was at **this attempt's**
-     * address. Without this field a partially applied `apply`, leftover state from
-     * the previous address, or a lease reused after the intent changed can satisfy
-     * every other predicate while the trusted count lands on the wrong address.
+     * the test" — they do not prove the environment is the one **this attempt's**
+     * schedule references resolve to. Without this field a partially applied
+     * `apply`, leftover state from the previous schedule item, or a lease reused
+     * after the intent changed can satisfy every other predicate while the
+     * trusted count lands on the wrong schedule item.
      */
     val acceptedIntentHash: String,
     val observedAtEpochMs: Long,

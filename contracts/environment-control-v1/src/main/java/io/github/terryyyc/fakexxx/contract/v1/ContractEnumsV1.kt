@@ -179,13 +179,15 @@ object ContractV1 {
 
     /**
      * Maximum distance between an observation's effective coordinates and the
-     * intent's target coordinates for the observation to support trusted quota
-     * (INV-23).
+     * target location the provider resolves from its own schedule item data,
+     * for the observation to support trusted quota (INV-23).
      *
-     * 1.0 m is far above the ~1.1 cm quantisation of the 7-decimal canonical
-     * digest (§6.3.1) and above double round-trip error, so it cannot cause a
-     * false negative. It does **not** decide attribution — attribution comes
-     * from `acceptedIntentHash`, which already contains `runId` and `attemptId`.
+     * KB-8: the intent no longer carries coordinates — the provider is the
+     * sole coordinate authority — so this tolerance bounds the provider's own
+     * resolved target, never an Auto-asserted value. 1.0 m is far above double
+     * round-trip error, so it cannot cause a false negative. It does **not**
+     * decide attribution — attribution comes from `acceptedIntentHash`, which
+     * binds `runId` and `attemptId`.
      */
     const val TRUSTED_LOCATION_TOLERANCE_METERS: Double = 1.0
 
