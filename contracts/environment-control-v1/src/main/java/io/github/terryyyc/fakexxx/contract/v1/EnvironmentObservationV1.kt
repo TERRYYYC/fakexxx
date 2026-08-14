@@ -62,9 +62,14 @@ data class EnvironmentObservationV1(
      * may be reused by several schedule items, so matching the profile, the
      * coordinates or even the environmentFingerprint does NOT prove the
      * observation belongs to the item the receipt claims to have advanced to.
-     * Auto compares this against AdvanceReceiptV1.advancedToItemId; without it
-     * the only available check is "the environment looks right", which is
-     * precisely wrong-environment attribution.
+     * For NON-TERMINAL advances Auto compares this against
+     * AdvanceReceiptV1.advancedToItemId; without it the only available check is
+     * "the environment looks right", which is precisely wrong-environment
+     * attribution.
+     *
+     * Terminal (EXHAUSTED) advances do NOT use this carrier: advancedToItemId is
+     * null there, so the comparison can never hold. Those verify through an
+     * independent discover()/preflight() schedule-state readback (§6.7.5, v1.58).
      */
     val scheduleItemId: String,
     val scheduleVersion: Long,

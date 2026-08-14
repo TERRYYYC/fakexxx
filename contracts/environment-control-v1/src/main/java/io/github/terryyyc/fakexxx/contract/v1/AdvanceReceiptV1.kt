@@ -15,10 +15,22 @@ import kotlinx.parcelize.Parcelize
  * not a failure: the current item is retained and the schedule does not wrap.
  *
  * A receipt is the provider's own account of what it did. It is NOT evidence that
- * the environment actually changed: after advancing, Auto must independently
- * observe() and compare against [effectiveIntentHash] /
- * [effectiveEnvironmentRevision] (§6.7.5). Trusting the receipt alone is the
- * entry point for wrong-environment attribution.
+ * the environment actually changed, and recomputing [receiptDigest] does not
+ * upgrade it: the digest proves the provider framed its own fields and bound
+ * them to this request, not that any state was persisted.
+ *
+ * Non-terminal advance: Auto must independently observe() and compare against
+ * [effectiveIntentHash] / [effectiveEnvironmentRevision] (§6.7.5).
+ *
+ * Terminal (EXHAUSTED) advance: observe() is structurally inapplicable, because
+ * [advancedToItemId] is null while EnvironmentObservationV1.scheduleItemId is
+ * non-null, so that leg can never hold. Auto must instead read schedule state
+ * back independently via a fresh discover()/preflight() and require all three
+ * legs (§6.7.5, v1.58): currentItemId == [advancedFromItemId], scheduleVersion
+ * == [scheduleVersionAfter], exhausted == true; otherwise RECOVERY_REQUIRED.
+ *
+ * Trusting the receipt alone -- on either path -- is the entry point for
+ * wrong-environment attribution.
  */
 @Parcelize
 data class AdvanceReceiptV1(
