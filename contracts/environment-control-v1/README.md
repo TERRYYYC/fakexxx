@@ -71,14 +71,15 @@ business failures, and the consumer decodes unknown error codes to
 SHA-256 over the intent fields. Length prefixes, not separators: with any fixed
 separator, `runId="a\nb", attemptId="c"` and `runId="a", attemptId="b\nc"` encode
 to identical bytes, so two different intents would share one hash and INV-23's
-binding could be bypassed. Coordinates render as plain fixed point with exactly
-7 decimals (~1.1 cm, far below the 1.0 m tolerance), half-even on the double's
-exact binary value, with `-0.0` normalising to `0.0000000`.
+binding could be bypassed.
 
-This is what proves a trusted completion belongs to *this* attempt's address.
-Coverage, revision, fingerprint, lease and verification level together only prove
-the environment did not change during the test — they do not prove it was at the
-right place.
+This is what proves a trusted completion belongs to *this* attempt's schedule
+identity. Coordinates are not part of the intent or its digest — Qianwangyou is
+the sole coordinate authority and resolves the effective location from its own
+schedule item data (KB-8). Coverage, revision, fingerprint, lease and
+verification level together only prove the environment did not change during the
+test — they do not prove it was at the right place; that is now the provider's
+exclusive responsibility.
 
 ## Versioning
 

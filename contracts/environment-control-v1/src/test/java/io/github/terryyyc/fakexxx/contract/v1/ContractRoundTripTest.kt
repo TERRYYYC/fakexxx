@@ -37,8 +37,6 @@ class ContractRoundTripTest {
         attemptId = "attempt-1",
         profileRef = "profile-1",
         scheduleRef = "schedule-1",
-        latitude = -33.8688197,
-        longitude = 151.2092955,
         requiredVerificationWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
         notBeforeEpochMs = 1_786_000_000_000L,
         deadlineEpochMs = 1_786_000_600_000L,

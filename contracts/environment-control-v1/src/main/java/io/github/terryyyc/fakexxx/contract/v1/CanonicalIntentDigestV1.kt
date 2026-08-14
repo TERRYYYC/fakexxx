@@ -1,8 +1,5 @@
 package io.github.terryyyc.fakexxx.contract.v1
 
-import java.math.BigDecimal
-import java.math.RoundingMode
-
 /**
  * Canonical digest of an [EnvironmentIntentV1]. Frozen algorithm, spec §6.3.1.
  *
@@ -10,23 +7,39 @@ import java.math.RoundingMode
  * is part of the contract exactly like the field list is.
  *
  * ```text
- * canonical = for each field, in this order:
+ * canonical = uint32be(byteLength(domain)) || domain,
+ *             then for each field, in this order:
  *               uint32be(byteLength(fieldBytes)) || fieldBytes
  *             no separators, no trailing bytes.
  *
+ *   domain                   : ASCII "fakexxx:contract:v1:intent"
+ *                              (the FIRST framed field — §6.3.1 freezes the tag
+ *                              and its position; an implementation that omits it
+ *                              computes a different digest, not a different
+ *                              reading)
  *   runId                    : UTF-8 bytes, verbatim
  *   attemptId                : UTF-8 bytes, verbatim
  *   profileRef               : UTF-8 bytes, verbatim
  *   scheduleRef              : UTF-8 bytes, verbatim
- *   latitude                 : ASCII fixed point, exactly 7 decimals, half-even,
- *                              minus sign kept, no '+', no exponent, no grouping
- *   longitude                : same
  *   requiredVerificationWire : ASCII decimal
  *   notBeforeEpochMs         : ASCII decimal
  *   deadlineEpochMs          : ASCII decimal
  *
  * acceptedIntentHash = lowercase hex of SHA-256(canonical)
  * ```
+ *
+ * "UTF-8 bytes, verbatim" is fail-closed: an unpaired surrogate rejects the
+ * whole computation rather than being silently replaced (see
+ * [CanonicalDigestV1.utf8]; §6.3.1 freezes this, or two malformed ids could
+ * collapse onto one digest).
+ *
+ * ## KB-8: coordinates removed from the preimage
+ *
+ * `latitude` and `longitude` were removed from both [EnvironmentIntentV1] and
+ * this preimage. The provider (Qianwangyou) is the sole coordinate authority;
+ * Auto passes only item references (`profileRef`, `scheduleRef`), never
+ * coordinates. The `acceptedIntentHash` binds the attempt to its schedule
+ * identity, not to a coordinate the consumer has no authority to assert.
  *
  * ## Why length prefixes and not a separator
  *
@@ -47,24 +60,8 @@ import java.math.RoundingMode
  * `toString()`, `hashCode()`, `Objects.hash()`, any JSON serialisation, and the
  * raw Parcel bytes are all forbidden: none of them is stable across versions or
  * processes.
- *
- * ## Coordinate rendering
- *
- * 7 decimals is ~1.1 cm, far below [ContractV1.TRUSTED_LOCATION_TOLERANCE_METERS],
- * so quantisation can never cause a false negative while it does remove drift
- * from float-to-text differences.
- *
- * Rounding applies to the double's **exact** binary value. `BigDecimal(double)`
- * takes the exact value; `BigDecimal.valueOf(double)` would first go through the
- * shortest decimal representation, which is a second, language-specific rule. The
- * exact value is decided purely by the bits, which are what actually crossed the
- * Binder boundary. `BigDecimal` has no negative zero, so `-0.0` normalises to
- * `0.0000000` on its own.
  */
 object CanonicalIntentDigestV1 {
-
-    /** Decimal places used to render coordinates. Frozen. */
-    const val COORDINATE_SCALE: Int = 7
 
     /** @return lowercase hex SHA-256 of the canonical encoding of [intent]. */
     fun compute(intent: EnvironmentIntentV1): String =
@@ -82,22 +79,9 @@ object CanonicalIntentDigestV1 {
         CanonicalDigestV1.utf8(intent.attemptId),
         CanonicalDigestV1.utf8(intent.profileRef),
         CanonicalDigestV1.utf8(intent.scheduleRef),
-        fixedPoint7(intent.latitude).toByteArray(Charsets.US_ASCII),
-        fixedPoint7(intent.longitude).toByteArray(Charsets.US_ASCII),
         CanonicalDigestV1.decimal(intent.requiredVerificationWire),
         CanonicalDigestV1.decimal(intent.notBeforeEpochMs),
         CanonicalDigestV1.decimal(intent.deadlineEpochMs),
     )
-
-    /**
-     * Fixed point with exactly [COORDINATE_SCALE] decimals, half-even, plain
-     * notation. `-0.0` renders as `0.0000000`.
-     */
-    internal fun fixedPoint7(value: Double): String {
-        require(value.isFinite()) { "coordinate must be finite, got $value" }
-        return BigDecimal(value)
-            .setScale(COORDINATE_SCALE, RoundingMode.HALF_EVEN)
-            .toPlainString()
-    }
 
 }
