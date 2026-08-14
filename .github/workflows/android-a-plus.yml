@@ -120,6 +120,27 @@ jobs:
         # active prose states a count the ledger cannot produce.
         run: ./scripts/check-derived-counts.sh
 
+      - name: selftest-derived-counts
+        # The same argument the selftest-contract-v1 step above makes, applied to
+        # the guard directly beneath it -- with one extra reason it could not be
+        # wired until now.
+        #
+        # check-derived-counts.sh shipped green for rounds while four notations
+        # of real cache sites sat in its blind spot, which is a PASS measured in
+        # the units of its own recognition. 6cfea07 widened it into five named
+        # arms and built this harness to prove each arm is load-bearing, but did
+        # not wire it: the harness's positive case was deliberately inverted to
+        # assert RED while the 15 newly-visible stale caches were still awaiting
+        # the mainline recompute, so wiring it then would have pinned CI to a
+        # defect. v1.60 landed that recompute and flipped the positive case to
+        # assert green, which is what makes this step meaningful rather than a
+        # second way to report the same red.
+        #
+        # A selftest that exists but never runs is not a guard. That is the same
+        # shape as KB-7's "registration is not transport": the artifact was
+        # present, the property it claimed was never actually carried.
+        run: ./scripts/selftest-derived-counts.sh
+
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.
     name: cellrebel-auto (unit + lint + assemble)

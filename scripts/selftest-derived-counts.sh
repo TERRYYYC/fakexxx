@@ -23,12 +23,14 @@
 # DISAPPEAR. Disabling two arms at once would prove neither -- the rule the
 # v1.49 revision recorded when it extracted the BOLD tolerance into a knob.
 #
-# P-1 is deliberately inverted from the usual "pristine is green": the guard
-# is EXPECTED to be red on this tree, because the caches it can now see are
-# genuinely stale and the recompute belongs to the mainline (F4b), not to
-# this branch. P-1 pins that the red lands on the KNOWN true defects; when
-# the mainline recompute lands, P-1 must flip to asserting green in the same
-# commit -- the same lifecycle N-13 pinned for §7b.
+# P-1 WAS deliberately inverted while the recompute was still outstanding: the
+# guard was EXPECTED red, because the caches it could newly see were genuinely
+# stale and the recompute belonged to the mainline (F4b), not to that branch.
+# That inversion carried an explicit expiry -- "when the mainline recompute
+# lands, P-1 must flip to asserting green in the same commit". The recompute
+# landed at v1.60 and P-1 is flipped. Recorded rather than deleted because a
+# lifecycle instruction that vanishes on completion leaves no way to tell a
+# discharged plan from one nobody ever executed.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,24 +79,27 @@ run_gate() { ( cd "$1" && ./scripts/check-derived-counts.sh 2>&1 ); }
 # ---------------------------------------------------------------------------
 printf '\n== positive ==\n'
 
-# P-1: the guard must be red ON THE KNOWN TRUE DEFECTS of this tree. These are
-# pinned by arm+value (not line number) so a pure line shift does not break the
-# case; a value change that removes one of these findings MUST break it.
-# While the pristine tree is expected-red, every N-case below plants a value
-# DISTINCT from all of these, so "finding appeared" stays meaningful.
+# P-1: FLIPPED at v1.60, exactly as this file's header required -- the mainline
+# recompute landed, so the pristine tree must now be GREEN. What is pinned is no
+# longer a list of surviving defects but two properties that outlive any recount:
+#   - zero stale sites, and
+#   - the per-arm ENUMERATION still printed.
+# The enumeration is the load-bearing half. "0 stale sites" is also what a guard
+# that stopped looking would print, and those two states are indistinguishable
+# from the verdict line alone; the arm enumeration is the only thing that shows
+# the guard still SEES the sites it is calling clean. Same reason the guard's own
+# author widened it: enumerate, never count.
 D="$(mk)"
 OUT="$(run_gate "$D")"
 P1_REQUIRED=(
-  ' bare 36 '   ' bare 48 '   ' bare 112 '
-  ' cell 38 '   ' cell 48 '   ' cell 86 '   ' cell 110 '   ' cell 112 '
-  ' cn 5 '
   '    bare :'  '    cn   :'  '    cell :'  '    redct:'
-  'check-derived-counts: FAIL'
+  '=> section 3: 0 stale cache site(s)'
+  'check-derived-counts: PASS'
 )
 p1_ok=1
 for needle in "${P1_REQUIRED[@]}"; do
   if ! printf '%s' "$OUT" | grep -qF -- "$needle"; then
-    bad "P-1 the guard no longer reports the known stale cache: '$needle'"
+    bad "P-1 pristine tree lost a required property: '$needle'"
     p1_ok=0
   fi
 done
@@ -108,7 +113,7 @@ if ! printf '%s' "$OUT" | grep -qF 'bold : (no site'; then
   p1_ok=0
 fi
 if [ "$p1_ok" -eq 1 ]; then
-  ok "P-1 pristine tree: guard red on the known stale caches, arms enumerated"
+  ok "P-1 pristine tree: guard green with zero stale sites, all arms still enumerated"
   POS=$((POS + 1))
 fi
 rm -rf "$D"
@@ -136,8 +141,8 @@ neg() { # $1=label $2=old $3=new $4=expected finding substring
 
 # N-A: class 3 + class 1 combined -- a plain-text owner-red verify-comment,
 # invisible to the old backticked selector, carrying a bare "<n> 行".
-neg "N-A plain-text owner-red + bare count (36 -> planted 35)" \
-  '# 36 行 owner-red' \
+neg "N-A plain-text owner-red + bare count (39 -> planted 35)" \
+  '# 39 行 owner-red' \
   '# 35 行 owner-red' \
   ' bare 35 '
 
@@ -152,8 +157,8 @@ neg "N-B bold-wrapped count (**86** 行)" \
 # N-C: class 4 -- Chinese numerals. 90 appears nowhere else as a live claim
 # (the 90 on correction blockquotes is exempt), so the plant is unambiguous.
 neg "N-C Chinese-numeral count (九十行)" \
-  '现为**五行**，但仍' \
-  '现为**五行**、峰值曾达九十行，但仍' \
+  '，但仍**零覆盖** proof/CAS provider 侧判定' \
+  '、峰值曾达九十行，但仍**零覆盖** proof/CAS provider 侧判定' \
   ' cn 90 '
 
 # N-D: class 1 -- a bare digit cell in the class-responsibility table.
@@ -172,8 +177,8 @@ neg "N-E plain '个 owner-red' count (85)" \
 
 # N-F: bold-wrapped CELL (**37**) -- cell arm must tolerate bold inside the
 # cell, which is how the real aggregation table spells its counts.
-neg "N-F bold digit cell (**38** -> planted **37**)" \
-  '| **38** |' \
+neg "N-F bold digit cell (**39** -> planted **37**)" \
+  '| **39** |' \
   '| **37** |' \
   ' cell 37 '
 
@@ -225,7 +230,7 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
 
 mut "M-BARE bare-count arm catches N-A" \
   's/^ARM_BARE = .*/ARM_BARE = None/' \
-  '# 36 行 owner-red' \
+  '# 39 行 owner-red' \
   '# 35 行 owner-red' \
   ' bare 35 '
 
@@ -237,8 +242,8 @@ mut "M-BOLD bold arm catches N-B" \
 
 mut "M-CN chinese-numeral arm catches N-C" \
   's/^ARM_CN = .*/ARM_CN = None/' \
-  '现为**五行**，但仍' \
-  '现为**五行**、峰值曾达九十一行，但仍' \
+  '，但仍**零覆盖** proof/CAS provider 侧判定' \
+  '、峰值曾达九十一行，但仍**零覆盖** proof/CAS provider 侧判定' \
   ' cn 91 '
 
 # NOTE: M-CN plants 91 (N-C planted 90) so each case's finding substring is
@@ -260,7 +265,7 @@ mut "M-REDCT owner-red-count arm catches N-E" \
 # its counts (planted 35 and pristine 36/112) become invisible.
 mut "M-PLAIN-SCOPE plain-owner-red scoping catches N-A" \
   's/^SCOPE_PLAIN_OWNER_RED = .*/SCOPE_PLAIN_OWNER_RED = ""/' \
-  '# 36 行 owner-red' \
+  '# 39 行 owner-red' \
   '# 35 行 owner-red' \
   ' bare 35 '
 

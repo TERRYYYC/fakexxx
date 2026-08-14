@@ -144,6 +144,7 @@ source_threads:
 | **v1.57** | PR-2 第十三轮（终末验证 + reinit 版本） | **终末推进后 observe 的三条腿永远不可能命中，而 reinit 可以不碰版本就清 exhausted。** ①Sol 的 exact-HEAD review 抓到两个 P1：(a) `ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 边跳过 `ADVANCE_OBSERVING`，但 §6.7.5 的散文写「推进后必须独立验证」——**状态机与散文互相矛盾**；且 `AdvanceReceiptV1.advancedToItemId = null`（终末 outcome 编码）而 `EnvironmentObservationV1.scheduleItemId: String`（非空），三条腿中 `scheduleItemId == advancedToItemId` 恒 false，observe **结构上不可能** 命中 `OBSERVED_TUPLE_MATCHES`。(b) §6.7.1 只要求顺序/成员/优先级变化或 committed advance 自增 `scheduleVersion`，而 bit 生命周期允许外部 (re)init 清 `exhausted`——**同拓扑 reset 可以把 `exhausted true→false` 而 version 不变**，消费者持有的 `(currentItemId, scheduleVersion)` 对无法区分旧世代与新世代。②**冻结终末推进免除 observe**（三条独立理由各自充分）：环境不变（末项保持）、结构上不可能（null vs non-null 恒 false）、receipt digest 已充分（耗尽 receipt 与非终末 receipt 同样可验证）。§6.7.5 散文改「非终末推进后必须独立验证」；observe 谓词表 `scheduleItemId` 行加「仅适用于非终末推进」；§8.1 路径不变（`ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 已正确）。③**冻结 (re)initialization 必须递增 `scheduleVersion`**：§6.7.1 版本触发域扩展加 `schedule (re)initialization`；bit 生命周期散文同步。④补测试案例：`CapabilitySnapshotV1 exhausted=true` 终末快照、`PreflightReportV1` 全 null schedule group。见 §6.7.1 / §6.7.5 / §8.1 |
 | **v1.58** | PR-2 第十四轮（Sol exact-HEAD P1 回扫） | **豁免被写成了「只信 receipt」，而 receipt 正是要被验证的那个对象。** ①v1.57 冻结「终末推进免除 observe」，三条理由中的第③条是「receipt digest 已充分」——但 §6.7.5 立身的原句理由正是「**receipt 是对方的自述，不是生效证据**」。digest 重算只证明 provider 为**它自己填写的字段**做了 canonical framing 并绑定本请求，**不证明** `exhausted = true`、末项指针与 `V+1` 已持久化。可构造反例：provider 未落 `exhausted`（或回绕／错写 version）却返回一份内部自洽、digest 重算通过的 EXHAUSTED receipt，Auto 据此 CLOSED，而下一次 `discover()` 仍把末项当可执行——**终态保护迟到整整一轮**。用「receipt 可验证」豁免「不能只信 receipt」，是拿这条规则明确拒绝的东西当它的替代品。②现收窄：**豁免的只是「环境比对」这一步，不是「独立验证」本身**。①②两条理由（环境不变、结构上 `advancedToItemId=null` vs 非空 `scheduleItemId` 恒 false）继续成立，仅说明 `observe()` 这个**载体**不适用；第③条改为**强制独立状态回读**：终末推进后必须 fresh `discover()`／`preflight()` 回读，三条腿合取 `currentItemId == advancedFromItemId` ∧ `scheduleVersion == scheduleVersionAfter` ∧ `exhausted == true`，任一不成立 → `RECOVERY_REQUIRED` 且 typed reason 指明哪条腿。载体走 v1.55 已冻结的公开投影，**不新增 wire、不新增字段**。③§8.1 由一条 `ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 拆为三条：`→ ADVANCE_STATE_READBACK`、`EXHAUSTED_STATE_CONFIRMED → CLOSED`、`EXHAUSTED_STATE_MISMATCH → RECOVERY_REQUIRED`，与既有 `OBSERVED_TUPLE_MATCHES`／`MISMATCH` 同形。④**同类一次扫净**（v1.57 只改了 §6.7.5 一处，其余载体仍写「推进后必须 observe」，两种 conforming 读法并存）：§6.3.3 lease 窗口、§6.7.4a 序列图、`M-AD-09/17/18` 限定为**非终末**、`M-AD-20` 标注终末不走该序列且回读载体不受 lease 窗口约束、`AdvanceReceiptV1` 与 `EnvironmentObservationV1` 的公开 KDoc 同步。⑤补两行证据：**`M-AD-23`**（终末只拿到可验证 receipt 但 provider 未落 `exhausted` → 必须回读并进 `RECOVERY_REQUIRED`）与 **`M-AD-24`**（同拓扑外部 reinit 清 `exhausted` 必须同时递增 `scheduleVersion`，否则旧 `(item, version)` 与 proof 跨世代复用）——v1.57 冻结了 reinit 规则却没留台账行。§10／§10.1 112→**114**，`owner-red` 86→**88**（GLM 49 / Fable5 39），散文缓存计数同 commit 重算——**本轮又是 `check-derived-counts.sh` 判红后才发现，且同一行里三处计数我只改了两处，仍由守卫抓出**。见 §6.3.3 / §6.7.4a / §6.7.5 / §8.1 / §10 |
 | **v1.59** | PR-2 第十五轮（`KB-7` 裁定落地） | **登记不是传输：CI 编译的只是 DTO 与方法签名，不是被要求的失败通道本身。** ①`KB-7` 经 operator 裁定为 **A**——业务错误必须经 app-public、版本化的 typed-result 载体返回，不依赖 hidden wire。§6.1 六个方法统一返回新增的 `EnvironmentControlResultV1`（AIDL import 表同步改为镜像真实文件，此前它既漏 advance 两型又列着已不再直接上线的 payload 型）；§6.2 新增 `ContractResultKindV1` 与 kind↔payload 绑定表；§6.3.2 新增其 exact schema（**10 字段有序元组**，过 §7 门）与六条不变量；§6.3.3 尾段的 `ServiceSpecificException` 陈述改写为载体，**并顺带更正该句把属性名写成 `wireCode` 的错误（实际是 `wire`）**。②**`ContractResultKindV1` 全域 1-based，`wire 0` 永久非法**（operator option B）。曾评估的 `ERROR = 0` 能让成功 kind `1..6` 与 §6.1 方法位序精确对齐，且**两案 fail-closed 安全性等价**；取 1-based 的理由不是安全性而是**冻结卫生**——「0 永远非法」是这个 wire 家族唯一可执行的跨域不变量，破例一次就把它降级成只写在散文里的约定。③**`KB-7` 不注销，降级**：裁定闭合的是**实例**（`ServiceSpecificException` 不可实现），没有闭合 v1.44 ④ 自己挂起的那道门禁——「契约引用的每个 `android.*` 类型必须存在于 public compile SDK」。该规则本轮在 §6.1 冻结为通用条款，但**零守卫**，故 §20.1 `KB-7` 由 `unfrozen` 改记为 `gap`，顶部告示与 §19 同步（§19 的 `gap` 出口补上「门禁」，此前只写 ledger row）。**把「实例已修」读成「同类已防」，正是本表 `gap`／`limit` 不可互写要挡的那一步**；而 v1.44 挂起门禁的理由（「断言形状取决于所选通道」）**已随裁定失效**，不能继续沿用。④§12 目录树的 `contracts/` 分支此前漏 4 个 `.aidl` 与 5 个 `.kt`（advance 三件套、`CanonicalDigestV1`、本轮新增载体）；本轮由**文件系统重新生成**该分支，并就地声明其余分支为示意——**部分更新的清单会被当成完整清单读**。⑤本机静态门禁全绿（§7 现为 **14 DTO / 104 字段**）；§4 需 JDK，本机无 Java Runtime，由 CI 判。见 §6.1 / §6.2 / §6.3.2 / §6.3.3 / §12 / §19 / §20.1 |
+| **v1.60** | PR-2 第十五轮（派生计数回补） | **一道刚被加固的守卫，在它加固的那一刻就是红的，而没人看见——因为它前面那一步先红了。** ①`6cfea07` 把 `check-derived-counts.sh` 的扫描面从「带反引号的 `owner-red` 行 + 两种数字写法」扩到五条具名 arm，于是**四种此前不可见的写法**（纯文本 owner-red 行、裸数字单元格、加粗数字、中文数字）第一次进入扫描——一次就照出 **15 处**陈旧缓存。②**但它落在 `feat/pr-2-contract-v1` 上就是红的，且这个红被 CI 步骤顺序藏住了**：`check-contract-v1` 排在前面，KB-7 期间它一直红，GitHub Actions 前一步失败后面就不跑，所以 `check-derived-counts` 的红**一次都没有出现在任何人的判读里**——上一轮「contract-v1 仅因 canonical sync 而红」的结论是真的，但少读了一层：canonical 修好之后，第二处独立的红才会露出来。③15 处的真身：`110 → 112 → 114` 与 `84 → 86 → 88` 两轮台账增长中，**行内文字被改了、加粗单元格没被改**（`| **110** |` 经 blame 确认是 110 时代的原值，从未随文字一起 bump），外加 `pr-3` 的 `36`／`38`（两个不同时代的残留）与 `pr-4` 的 `48`。现全部按台账当前真相重算：总数 **114**、`owner-red` **88**、`pr-3` **39**、`pr-4` **49**。④`KB-6` 的「现为**五行**」不是过期，而是**结构上不该是数字**：它数的是台账 selector 表达不了的子族（provider 侧 advance 产生逻辑），守卫因此只能判它非法。现改为**直接枚举那五个 row ID**——这不是绕开守卫，正是 `6cfea07` 作者自己在 commit message 里写下的解药「**enumerate, never count**」：一个过期的数字没有任何东西能发现，一个缺失的 ID 有。⑤本轮**不改守卫**：15 处全部是本文的缓存问题，守卫一处也没冤枉（`KB-6` 那处判的是「这不该是个数字」，也成立）。⑥`selftest-derived-counts.sh` 的 P-1 **按 `6cfea07` 自己在文件头写下的生命周期翻绿**：该正例当时被**故意**倒置为断言红（「重算属于主线，不属于本分支；重算落地时 P-1 必须在同一 commit 翻成断言绿」），本轮重算落地即执行之。翻绿后钉的不再是一串幸存缺陷，而是两条经得起任何重算的性质：**零陈旧点 + 逐 arm 枚举仍在打印**——后者才承重，因为「0 处陈旧」也是一个**停止查看**的守卫会打印的东西，两者仅凭结论行不可分辨。同时 N-A／N-C／N-F 的 plant 锚点随本轮改动重挂（`36→39`、`**38**→**39**`、`KB-6` 单元格已无数字）：**锚点失效的负例不会变红，它会静默不跑**，而「the case never ran」和「guard is load-bearing」长得毫不相像。⑦把 `selftest-derived-counts.sh` **接进 CI**（此前只存在、从不运行）。`6cfea07` 没接线是对的——P-1 当时故意红，接了等于把 CI 钉在一个缺陷上；P-1 翻绿后接线才成立。**一个存在但从不运行的 selftest 不是守卫**，这与 `KB-7`「登记不是传输」是同一形状：载体在，它声称承载的性质从未真的被承载。见 §14 / §15 / §20.1 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -3064,7 +3065,7 @@ cd apps/qianwangyou
 ../../scripts/check-inherited-lint-debt.sh qianwangyou
 
 cd ../..
-./scripts/verify-a-plus.sh --lane pr-3      # 36 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 112 行判红
+./scripts/verify-a-plus.sh --lane pr-3      # 39 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 114 行判红
 ```
 
 **lint 门在本 task 是 ratchet，不是 raw-green（v1.21 消环）**：上一版让 Task 3 直接要求 `lintDebug` exit 0，而基线自带 23 个 inherited error、清债又被冻结在 **PR-3 合入之后**的 Task 3.5——两者互锁，谁都过不去。本 task 只需证明**没有新增** lint error；raw-green 由 Task 3.5 达成。
@@ -3337,7 +3338,7 @@ cd apps/cellrebel-auto
 ./gradlew lintDebug assembleDebug
 
 cd ../..
-./scripts/verify-a-plus.sh --lane pr-4      # 48 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 112 行判红
+./scripts/verify-a-plus.sh --lane pr-4      # 49 行 owner-red，绑本 PR HEAD；裸调用会按 pr-6 全 114 行判红
 ```
 
 ### Task 5 — Auto A+ 执行内核
@@ -3446,12 +3447,12 @@ cd apps/cellrebel-auto
 
 | PR | 必须证明 | 行数 |
 |---|---|---|
-| **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **38** |
-| **PR-4**（GLM） | 自有 `owner-red` 行，绑 PR-4 HEAD | **48** |
+| **PR-3**（Fable5） | 自有 `owner-red` 行，绑 PR-3 HEAD | **39** |
+| **PR-4**（GLM） | 自有 `owner-red` 行，绑 PR-4 HEAD | **49** |
 | **PR-5**（Fable5 开发 / DeepSeek Flash 审查） | **不验任何矩阵行**；只验 acceptance **harness 自身**：fake provider 的 negative controls、fixture 装载、`static-guard` 扫描器对**构造违规样本**能判红（self-test） | **0 矩阵行** |
-| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 112 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **110** |
+| **PR-6**（integration exact HEAD） | 在同一 HEAD 上重跑并聚合**全部 114 行**（含 PR-5 交付的 22 `sol-blackbox` + 2 `static-guard` + 2 `device`） | **114** |
 
-**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——112 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
+**为什么 PR-5 不再证 26 行（v1.21 冻结，采纳 Sol 的推荐模型）**：PR-3/4/5 是 sibling。`M-BP-04`、`M-RS-01`、`M-VS-01` 与两条 `device` 行断言的是**真实 Auto / 真实 provider 的行为**，它们的产品代码在 PR-3/PR-4 上；PR-5 的 HEAD 上根本没有那些实现，`exactHead` 物理上不可能相符。**要求 PR-5 证 26 行 = 要求它证明一件在它 HEAD 上不存在的事。** 因此 PR-5 只交付并自证 harness，真实 26 行的产品通过与 device evidence 一律在 **PR-6 的汇合 HEAD** 上产生。这不降低覆盖——114 行仍然全验，只是**都在唯一一个能同时满足所有 `exactHead` 的点上验**。
 
 **verifier 必须支持 lane 子集（否则本分工不可执行）**：`scripts/verify-a-plus.sh` 增 `--lane <pr-3|pr-3.5|pr-4|pr-5|pr-6>`。
 
@@ -3459,11 +3460,11 @@ cd apps/cellrebel-auto
 
 | lane | 校验集合（机器判定式） | 行数 | 谁的 exactHead |
 |---|---|---|---|
-| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 38 | PR-3 HEAD |
-| `pr-4` | `class=owner-red` ∧ `evidenceOwner=GLM` ∧ 入口前缀 `apps/cellrebel-auto/` | 48 | PR-4 HEAD |
+| `pr-3` | `class=owner-red` ∧ `evidenceOwner=Fable5` ∧ 入口前缀 `apps/qianwangyou/` | 39 | PR-3 HEAD |
+| `pr-4` | `class=owner-red` ∧ `evidenceOwner=GLM` ∧ 入口前缀 `apps/cellrebel-auto/` | 49 | PR-4 HEAD |
 | `pr-3.5` | **空集**；不验矩阵行，仅 `lintDebug` exit 0 + qwy unit + assemble | 0 | PR-3.5 HEAD |
 | `pr-5` | **空集**；仅 harness self-test（见上表 PR-5 行），**不消费 evidence manifest** | 0 | PR-5 HEAD |
-| `pr-6` | **全部 112 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 112 | PR-6 HEAD |
+| `pr-6` | **全部 114 行**，且每行 `exactHead` 必须等于 PR-6 的 HEAD | 114 | PR-6 HEAD |
 
 三元组两两不相交且并集 = 88 个 `owner-red`；26 个非 `owner-red` 行（`sol-blackbox` 22 + `static-guard` 2 + `device` 2）**只出现在 `pr-6`**。**verifier 必须自检这个划分**：若 `pr-3 ∪ pr-4` ≠ 88 或与 `pr-6` 的 114 行不自洽，直接 fail-closed——lane 定义漂移必须比矩阵失败更早被发现。
 
@@ -3480,7 +3481,7 @@ cd apps/cellrebel-auto
 | `sol-blackbox` | 22 | 编写并执行；只消费 public v1 contract + `acceptance/fake-qwy` |
 | `static-guard` | 2 | 编写并执行静态扫描 |
 | `device` | 2 | 在授权 device lease 内执行并留存证据 |
-| `owner-red` | 86 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
+| `owner-red` | 88 | **不编写**；做 evidence audit——核对 evidence manifest 中该 ID 的 `passed` 记录、`exactHead` 相符、断言与该行预期终态一致 |
 
 **已知性质（显式记录，不隐藏）**：`owner-red` 88 行中有 39 行的 code owner 本身就是 Fable5，因此该 evidence audit 包含**对自有 39 行的自审**。
 
@@ -3726,7 +3727,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | `KB-5` | `completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时如何处置 | `unfrozen` 契约留白 | §6.3.3 wire 8 例外段／§6.7.4a | `M-AD-12`／`M-AD-13` 的 owner 裁定后冻结（属 provider 侧行为，非本 PR 可单方决定） | 冻结前两侧**都不得**擅自选一种读法并依赖它——一侧用 8 拒绝、另一侧放行，Auto 的恢复策略即不可移植（§6.7.4b 冻结判定次序所要消除的正是这一形态） |
 | `KB-7` | **契约引用的每个 `android.*` 类型必须存在于 public compile SDK**（§6.1 v1.59 冻结的通用规则）——**这条规则零门禁**。它的第一个实例已闭合：v1.44 登记的「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」按字面不可实现（`android.os.ServiceSpecificException` 是 `@hide`；对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举**零命中**，对照项 `android/os/Parcel.class` 命中，证明扫描有效而非空转），operator 裁定 **A** 后改由 `EnvironmentControlResultV1` 承载（§6.3.2） | `gap` 覆盖缺口 | §6.1（规则本体）／§6.3.2（承载它的载体） | 在 `scripts/check-contract-v1.sh` 增一节：枚举契约源码引用的全部 `android.*` 类型，断言每个都存在于 compileSdk 的 `android.jar`，带对照项证明扫描非空转，并配 `selftest-contract-v1.sh` 负例证明该节承重 | **不得**把「`ServiceSpecificException` 已换掉」读作「同类已防」——换掉的是**唯一已知实例**，规则本身仍只活在散文里，**而散文正是它当初能藏到 v1.44 才被发现的原因**。v1.44 ④ 当时挂起这道门禁的理由是「断言形状取决于所选通道」；通道已定，该理由已失效，故本条不随实例一起注销，改记为 `gap` |
 | `KB-8` | §2.2 声称 Auto 不再导入地址/经纬度、只持有 `scheduleItemId + scheduleVersion`，但 `EnvironmentIntentV1` 仍要求 Auto 发送 `latitude/longitude` 且进入 `acceptedIntentHash` 的 preimage；`discover()` 不暴露 schedule-item 坐标。provider 可以信 Auto 坐标、信自己 schedule 坐标、或拒绝不匹配——**契约未冻结选择，也无 wire 表达它**。Decision Packet v2 已投 | `unfrozen` 契约留白 | §2.2 / §6.3（`EnvironmentIntentV1`）/ §6.3.1（digest preimage） | **operator 裁定坐标所有权**（Decision Packet v2 已投）。裁定后冻结 wire 级行为（provider 用谁的坐标、不匹配时返回什么 code、discover 是否投影 item 坐标） | 冻结前**不得**声称坐标归属已解决。两侧实现各自选一种读法即不可移植——与 `KB-5` 同形，层不同（`KB-5` 在 lease 层，本条在 intent 层） |
-| `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为**五行**，但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
+| `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为 `M-AD-12`／`M-AD-13`／`M-AD-20`／`M-AD-21`／`M-AD-22`（**此处刻意枚举、不计数**：本条的存货数已经过期过一次，而一个过期的数字没有任何东西能发现，一个缺失的 ID 有——这正是 `check-derived-counts` 作者为同一种病写下的解药「enumerate, never count」），但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
 
 **四个类别不可互相改写**，因为每一类要求的下一步动作完全不同：`limit` 是**已经知道证明不了**（只能接受并披露）；`unfrozen` 是**还没决定**（需要 owner 裁定）；`deferred` 是**可触达、有确定载体、尚未闭合**（等载体，与 §10.1 对 `deferred:<DP-x>` 的规定同源）；`gap` 是**契约已冻结、但没有稳定 ledger row 证明实现符合它**（需要补行并执行）。把留白写成上限，等于宣布它永远不修；把上限写成留白，等于承诺一件交付不出来的东西；把任一者写成 `deferred`，等于给它一个并不存在的闭合路径。而把 `gap` 写成 `limit`——**把"还没测"说成"测不了"**——是其中最该防的一种：它让一件待办永久退出待办清单，且伪装成物理限制之后没有人会再去挑战它。
 
