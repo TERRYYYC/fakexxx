@@ -556,6 +556,15 @@ class CrashMatrixTest {
             receiptWire = 2)
     }
 
+    // ---- Reverse wire disagreement (Sol R40 P1-1): execution.wire=2 / receipt.wire=1 ----
+    //   A mutant using receipt.wire as sole authority passes the forward case (receipt.wire=2 → reject)
+    //   but MINTS in the reverse case (receipt.wire=1 → accept). This probe kills that mutant.
+
+    @Test fun `M_CR_06_discriminator_wire_reverse_disagreement`() = runTest {
+        assertDiscriminatorReject("M-CR-06 wire reverse discriminator", "execution.wire=2 but receipt.wire=1 (reverse disagreement)",
+            execWire = 2)
+    }
+
     // ---- Asymmetric PRE-only inversions (R40: Sol R39 P1-1) ----
     // PRE is violated, POST stays canonical. A bypass checking only POST passes this but the
     // symmetric version catches it. A bypass checking only PRE fails here.
@@ -664,6 +673,37 @@ class CrashMatrixTest {
     @Test fun `M_CR_06_discriminator_post_only_continuity_null`() = runTest {
         assertDiscriminatorReject("M-CR-06 POST-only continuity null", "POST continuitySince=null (§6.4.1 requires non-null)",
             postOverride = { copy(continuitySinceElapsedRealtimeMs = null) })
+    }
+
+    // ---- Asymmetric observation acceptedIntentHash (Sol R40 P1-2): ----
+    //   A mutant that discards durable PRE/POST acceptedIntentHash and copies receipt.acceptedIntentHash
+    //   passes the receipt-only intent test (M_CR_06_discriminator_invalid) but MINTS when the observation
+    //   hash diverges in only one phase. These two probes kill that mutant in both polarities.
+
+    @Test fun `M_CR_06_discriminator_pre_only_intent_hash`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only intent hash", "PRE acceptedIntentHash ≠ receipt, POST canonical",
+            preOverride = { copy(acceptedIntentHash = "DIVERGENT-pre-hash") })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_intent_hash`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only intent hash", "POST acceptedIntentHash ≠ receipt, PRE canonical",
+            postOverride = { copy(acceptedIntentHash = "DIVERGENT-post-hash") })
+    }
+
+    // ---- Production commit clock domain (Sol R40 P2) ----
+    //   TrustedQuotaEntry.committedAt is documented as "Monotonic commit timestamp (elapsed-realtime-style)".
+    //   The production composition root (AutomationService) MUST inject SystemClock.elapsedRealtime(),
+    //   not the AutomationEngine default (System.currentTimeMillis()). This test verifies the domain
+    //   mismatch: elapsedRealtime (ms since boot) << currentTimeMillis (epoch ms since 1970).
+    //   A regression that reverts to wall clock would fail this assertion.
+
+    @Test fun `production_commit_clock_domain_is_monotonic`() = runTest {
+        val monotonicMs = android.os.SystemClock.elapsedRealtime()
+        val wallMs = System.currentTimeMillis()
+        assertTrue(
+            "committedAt clock domain must be elapsedRealtime ($monotonicMs), not wall time ($wallMs)",
+            monotonicMs < wallMs
+        )
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----
