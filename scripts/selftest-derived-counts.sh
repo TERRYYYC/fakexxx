@@ -188,9 +188,22 @@ neg() { # $1=label $2=old $3=new $4=expected finding substring
     rm -rf "$d"; return
   fi
   out="$(run_gate "$d")"
+  # Family sweep (v1.64): all three helpers assert on substrings, and a crashed
+  # guard prints no substrings at all. mut() and legal() were corrected because
+  # a crash made them GREEN; neg() fails safe by comparison, but it fails for the
+  # WRONG REASON -- "guard never reported the planted finding" reads like a
+  # missing recogniser when the guard actually died. A red whose stated cause is
+  # wrong is the mirror of a false green and just as unusable on a board, which
+  # is this repo's own standing rule. So every helper now proves the run finished
+  # before it interprets the run.
+  if ! healthy "$out"; then
+    bad "$1 - INCONCLUSIVE: the guard did not complete a scan (crash?), so a missing finding proves nothing"
+    detail "$out"
+    rm -rf "$d"; return
+  fi
   if ! printf '%s' "$out" | grep -qF -- "$4"; then
     bad "$1 - guard never reported the planted finding: '$4'"
-    detail "$OUT"
+    detail "$out"
   else
     ok "$1"
     NEG=$((NEG + 1))
@@ -259,13 +272,27 @@ legal() { # $1=label $2=old $3=new $4=substring that must NOT appear
   out="$(run_gate "$d")"
   if ! healthy "$out"; then
     bad "$1 - INCONCLUSIVE: the guard did not complete a scan"
-    detail "$OUT"; rm -rf "$d"; return
+    detail "$out"; rm -rf "$d"; return
   fi
+  # The named substring is reported FIRST because it is the specific claim this
+  # case makes, and a generic "not PASS" would bury it.
   if printf '%s' "$out" | grep -qF -- "$4"; then
     bad "$1 - FALSE RED: the guard flagged legal text as a stale cache ('$4')"
-    detail "$OUT"
+    detail "$out"
+    rm -rf "$d"; return
+  fi
+  # But absence of ONE substring is not greenness, and this helper's whole
+  # promise is greenness. healthy() deliberately accepts PASS *or* FAIL -- it
+  # proves the process finished, nothing more -- so a guard that goes red for any
+  # OTHER reason inside the planted text used to satisfy this case: the expected
+  # finding was missing, so the case declared "legal text stays green" about a
+  # run that was red. Same defect one level down as a guard whose verdict claims
+  # more than it measured.
+  if ! printf '%s' "$out" | grep -qE '^check-derived-counts: PASS'; then
+    bad "$1 - FALSE RED: the guard did not end green on legal text (a different diagnostic fired)"
+    detail "$out"
   else
-    ok "$1 - legal text stays green"
+    ok "$1 - legal text stays green (verdict is PASS, not merely missing one finding)"
     POS=$((POS + 1))
   fi
   rm -rf "$d"
@@ -310,7 +337,7 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
   rm -rf "$base"
   if ! printf '%s' "$out" | grep -qF -- "$5"; then
     bad "$1 - INCONCLUSIVE: the intact gate never produced '$5', so its disappearance proves nothing"
-    detail "$OUT"
+    detail "$out"
     return
   fi
 
@@ -330,12 +357,12 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
   out="$(run_gate "$d")"
   if ! healthy "$out"; then
     bad "$1 - INCONCLUSIVE: the mutated guard did not complete a scan (crash?), so a missing finding proves nothing"
-    detail "$OUT"
+    detail "$out"
     rm -rf "$d"; return
   fi
   if printf '%s' "$out" | grep -qF -- "$5"; then
     bad "$1 - finding survived with the arm disabled, so that arm is not what catches it"
-    detail "$OUT"
+    detail "$out"
   else
     ok "$1 - disabling it makes the finding disappear, so the arm is load-bearing"
     MUT=$((MUT + 1))
@@ -410,13 +437,16 @@ neg "N-H current-value notation (现行为 **88** -> planted 83)" \
   ' curval 83 '
 
 # N-I: a line whose ONLY scope token is lane discourse (`lane selector`). It
-# carries no owner-red / 台账 / 矩阵行 and no 全|这 + N + 行.
+# carries no owner-red / 台账 / 矩阵行 and no 全|全部 + N + 行.
 neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
   'Fable5 同时拥有 PR-3 的 39 行' \
   'Fable5 同时拥有 PR-3 的 41 行' \
   ' bare 41 '
 
-# N-J: a line whose ONLY scope token is the row-count phrase itself (这 N 行).
+# N-J: a line whose ONLY scope token is the row-count phrase itself (全 N 行).
+# NOT 这 N 行: v1.63 removed that form from the scope after it collected
+# "§6.4.1 的 8 行独立负例", which is not a cache of this ledger. Anchoring this
+# case on 这 would re-teach the shape the L-2 control exists to forbid.
 neg "N-J row-count-phrase scope (全 114 行 -> planted 43)" \
   '**本 task 是唯一验证全 114 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \

@@ -204,8 +204,16 @@ SCOPE_PLAIN_OWNER_RED = r'owner-red'
 #
 # Scoped by phrase shape, not by bare 行: the guard's own note records that a bare
 # 矩阵 pulled in "§6.4.1 矛盾 tuple 矩阵（8 行独立负例）", whose rows are not caches
-# of THIS ledger. 全/这/全部 + N + 行 is a count OF A KNOWN WHOLE, which that
-# counterexample is not.
+# of THIS ledger. 全/全部 + N + 行 is a count OF A KNOWN WHOLE.
+#
+# 这 N 行 was in this scope until v1.63 and is NOT, because it does not carry that
+# meaning: "这 8 行是 §6.4.1 的独立负例" is the same counterexample family, one
+# demonstrative away. The reasoning that grouped 这 with 全 was tested and false,
+# so it is corrected here rather than deleted -- a disproved rationale left in a
+# comment is an instruction to re-add the defect. Lines that legitimately count
+# ledger rows with 这 are handled by naming the class ("这 39 行 `owner-red`"),
+# which is more precise prose and reaches scope through a token that already
+# exists.
 SCOPE_LANE_DISCOURSE = r'--lane|lane selector|exactHead|evidenceOwner'
 SCOPE_ROW_COUNT = r'全\s*[0-9]+\s*行|全部\s*[0-9]+\s*行'
 SCOPE_PARTS = [r'`owner-red`', r'`sol-blackbox`', r'`static-guard`',
