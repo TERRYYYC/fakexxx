@@ -302,7 +302,10 @@ class AutomationService : AccessibilityService() {
                 // # 杜绝"driver 仅测试构造、生产零调用点"。driver 当前为 no-op 骨架，注入无运行时副作用。
                 attemptDriver = APlusAttemptDriver(db.auditEventDao()),
                 recoveryCoordinator = aplusCoordinator,
-                completionEvidenceSource = aplusEvidence
+                completionEvidenceSource = aplusEvidence,
+                // R41 (Sol R40 P2): TrustedQuotaEntry.committedAt contract is monotonic (elapsed-realtime-style).
+                // The engine default is System.currentTimeMillis() (wall clock) which can go backwards on NTP.
+                nowMs = { android.os.SystemClock.elapsedRealtime() }
             )
             engine = newEngine
 
