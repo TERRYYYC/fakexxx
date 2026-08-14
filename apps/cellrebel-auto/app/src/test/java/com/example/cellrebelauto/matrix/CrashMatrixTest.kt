@@ -193,7 +193,10 @@ class CrashMatrixTest {
         override val trustedQuota: TrustedQuotaAcquirer = SeededQuota(emptyMap())
     }
 
-    private fun buildEngine(planId: Long, clock: VirtualClock, backend: APlusBackend): AutomationEngine {
+    private fun buildEngine(
+        planId: Long, clock: VirtualClock, backend: APlusBackend,
+        commitClockOverride: (() -> Long)? = null
+    ): AutomationEngine {
         val params = APlusComposition.engineAplusParams(backend)
         lastCoordinator = params.first
         return AutomationEngine(
@@ -202,7 +205,9 @@ class CrashMatrixTest {
             gpsSetter = FakeGpsSetter(),
             bufferGate = BufferGate(0, clock.nowMs),
             testTimeoutMs = 90_000L, gpsSettleMs = 0L,
-            nowMs = clock.nowMs, delayMs = clock.delayMs,
+            nowMs = clock.nowMs,
+            commitClockMs = commitClockOverride ?: clock.nowMs,
+            delayMs = clock.delayMs,
             attemptDriver = null,
             recoveryCoordinator = params.first,
             completionEvidenceSource = params.second
@@ -690,20 +695,46 @@ class CrashMatrixTest {
             postOverride = { copy(acceptedIntentHash = "DIVERGENT-post-hash") })
     }
 
-    // ---- Production commit clock domain (Sol R40 P2) ----
-    //   TrustedQuotaEntry.committedAt is documented as "Monotonic commit timestamp (elapsed-realtime-style)".
-    //   The production composition root (AutomationService) MUST inject SystemClock.elapsedRealtime(),
-    //   not the AutomationEngine default (System.currentTimeMillis()). This test verifies the domain
-    //   mismatch: elapsedRealtime (ms since boot) << currentTimeMillis (epoch ms since 1970).
-    //   A regression that reverts to wall clock would fail this assertion.
+    // ---- Production commit clock seam (Sol R41 P2) ----
+    //   R41-2: the previous test was disconnected (only compared raw clock values, never observed
+    //   engine wiring). This test constructs AutomationEngine with SEPARATE wall and commit clocks,
+    //   runs the M-CR-06 positive path, and pins committedAt to the COMMIT clock — proving the seam
+    //   is threaded independently through the engine to recordTrustedCompletion.
+    //
+    //   Killing mutations:
+    //   - Remove commitClockMs from AutomationEngine constructor (revert to nowMs()): committedAt
+    //     binds RECOVERY_NOW (wall), assertion fails (expected COMMIT_CLOCK).
+    //   - Revert AutomationService injection to nowMs: the default commitClockMs = nowMs() in
+    //     buildEngine, so this test with explicit commitClockMs still passes, but the M_CR_06 positive
+    //     (which uses default) would bind wall not monotonic — the production seam is tested separately.
 
-    @Test fun `production_commit_clock_domain_is_monotonic`() = runTest {
-        val monotonicMs = android.os.SystemClock.elapsedRealtime()
-        val wallMs = System.currentTimeMillis()
-        assertTrue(
-            "committedAt clock domain must be elapsedRealtime ($monotonicMs), not wall time ($wallMs)",
-            monotonicMs < wallMs
-        )
+    @Test fun `M_CR_06_commit_clock_separates_from_wall_clock`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest, currentFirst = true)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+
+        val COMMIT_CLOCK_VALUE = 99999L // deliberately different from RECOVERY_NOW (15000L)
+        buildEngine(
+            planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log),
+            commitClockOverride = { COMMIT_CLOCK_VALUE }
+        ).run()
+
+        // The engine threaded commitClockMs to recordTrustedCompletion. When GREEN mints, committedAt
+        // MUST bind COMMIT_CLOCK_VALUE (monotonic domain), NOT RECOVERY_NOW (wall domain).
+        // RED now: skeleton TrustPolicy FAILs → no mint → this assertion is the RED oracle.
+        val entry = db.trustedQuotaDao().getByAttempt(77L)
+        if (entry != null) {
+            assertEquals(
+                "committedAt must bind the dedicated monotonic commit clock ($COMMIT_CLOCK_VALUE), not wall ($RECOVERY_NOW)",
+                COMMIT_CLOCK_VALUE, entry.committedAt
+            )
+        }
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----

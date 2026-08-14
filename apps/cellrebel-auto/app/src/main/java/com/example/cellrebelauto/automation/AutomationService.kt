@@ -303,9 +303,10 @@ class AutomationService : AccessibilityService() {
                 attemptDriver = APlusAttemptDriver(db.auditEventDao()),
                 recoveryCoordinator = aplusCoordinator,
                 completionEvidenceSource = aplusEvidence,
-                // R41 (Sol R40 P2): TrustedQuotaEntry.committedAt contract is monotonic (elapsed-realtime-style).
-                // The engine default is System.currentTimeMillis() (wall clock) which can go backwards on NTP.
-                nowMs = { android.os.SystemClock.elapsedRealtime() }
+                // R42 (Sol R41 P2): separate monotonic commit clock for TrustedQuotaEntry.committedAt.
+                // The engine's nowMs stays wall/epoch (used by session/attempt/cooldown UI); only the
+                // ledger commit binds elapsedRealtime (can't go backwards on NTP).
+                commitClockMs = { android.os.SystemClock.elapsedRealtime() }
             )
             engine = newEngine
 

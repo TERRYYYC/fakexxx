@@ -100,6 +100,10 @@ class AutomationEngine(
     // # 仅用于 returnToSelf（MIUI 中转）；测试不传
     private val bridge: AccessibilityBridge? = null,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
+    // R42 (Sol R41 P2): dedicated monotonic commit clock for TrustedQuotaEntry.committedAt only.
+    // nowMs stays wall/epoch (session/attempt/cooldown UI depend on it); this seam binds the ledger
+    // commit timestamp to a monotonic domain (elapsedRealtime-style) per the TrustedQuotaEntry contract.
+    private val commitClockMs: () -> Long = { nowMs() },
     private val delayMs: suspend (Long) -> Unit = { delay(it) },
     // # R6-F4（§11.7）：§8.1 状态机的生产驱动入口。GREEN 在 attempt 生命周期各 §8.1 步驱动它，
     // # 使状态机迁移都落到持久审计流。RED seam：默认 null（既有行为不变）；测试传真实 driver。
@@ -421,7 +425,7 @@ class AutomationEngine(
                                 preObservation = preObservation,
                                 postObservation = postObservation
                             )
-                            val decision = planRepository.recordTrustedCompletion(trustCtx, nowMs())
+                            val decision = planRepository.recordTrustedCompletion(trustCtx, commitClockMs())
                             val trusted = decision == TrustDecision.PASS
                             if (trusted) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_PASS) ?: aplusState
