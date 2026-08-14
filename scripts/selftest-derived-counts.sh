@@ -170,32 +170,59 @@ rm -rf "$D"
 # provenance. Verified by bumping the live spec to v1.100 -- every real gate
 # stayed green and P-4 alone went red. max+1 cannot already exist in the file by
 # the definition of max, so it is collision-proof for every future revision.
-P4_MAX="$(grep -oE '^\| \*\*v1\.[0-9]+\*\* \|' "$REPO_ROOT/$SPEC" | grep -oE 'v1\.[0-9]+' | sort -t. -k2,2n | tail -1)"
-P4_SENTINEL="v1.$(( ${P4_MAX#v1.} + 1 ))"
+# The marker domain is READ WITH THE PRODUCTION EXPRESSION, not a lookalike.
+# v1.65 derived the sentinel from bold rows only (`| **v1.N** |`) while the guard
+# accepts `\*{0,2}` -- bold OR plain -- and sorts with `sort -V`. On a document
+# whose newest row is legitimately plain, P-4 computed max = the second-newest and
+# a "max+1" that ALREADY EXISTED, so a guard hardcoding that version passed. The
+# proof "max+1 cannot exist" was true over P-4's narrower syntax and was written
+# as a claim about the file: the same over-wide conclusion this family keeps
+# producing, one level further in.
+# NOT a second copy of the production regex. v1.65 mirrored it and the mirror
+# drifted within one round -- bold-only here, `\*{0,2}` there -- so P-4 derived a
+# sentinel that already existed. A mirror can always drift again; asking the
+# guard is the only version that cannot. The banner already publishes the maximum
+# marker the PRODUCTION code computed, so read that.
+#
+# This also supplies the non-existence proof for free: the guard reports the
+# MAXIMUM, so any version strictly greater than it is absent from the file by the
+# guard's own computation -- no independent scan of the document is needed, and
+# therefore no second syntax exists to disagree with the first.
+p4_reported_marker() { # $1=dir -> the marker the production banner names
+  run_gate "$1" | grep -oE 'revision marker v1\.[0-9]+' | grep -oE 'v1\.[0-9]+' | head -1
+}
+
+# Three assertions, factored so the negative regression below reuses the exact
+# predicate P-4 passes on -- a regression case that re-implements the check it is
+# guarding proves only that two copies agree.
+p4_assert() { # $1=gate output $2=expected sentinel $3=pristine max -> 0 = provenance correct
+  printf '%s' "$1" | grep -qF "revision marker $2" || return 1
+  printf '%s' "$1" | grep -qE '^check-derived-counts: PASS' || return 1
+  if printf '%s' "$1" | grep -qF "revision marker $3"; then return 1; fi
+  return 0
+}
+
 D="$(mk)"
+P4_MAX="$(p4_reported_marker "$D")"
+P4_SENTINEL="v1.$(( ${P4_MAX#v1.} + 1 ))"
+# APPEND the sentinel row instead of rewriting an existing one. Rewriting needs to
+# know the row's exact form (bold or plain) and re-derives it from the document --
+# reintroducing the divergence this case exists to catch. Appending needs to know
+# nothing about the existing rows at all.
+P4_ANCHOR='## 21. operator Decision Packets'
+P4_PLANT="| **$P4_SENTINEL** | P-4 provenance probe | probe row |
+
+$P4_ANCHOR"
 if [ -z "$P4_MAX" ]; then
-  bad "P-4 INCONCLUSIVE: no revision marker found in the spec, so no sentinel can be derived"
-elif apply "$D" "$SPEC" "| **$P4_MAX** |" "| **$P4_SENTINEL** |"; then
+  bad "P-4 INCONCLUSIVE: the guard reported no revision marker, so no sentinel can be derived"
+elif apply "$D" "$SPEC" "$P4_ANCHOR" "$P4_PLANT"; then
   OUT="$(run_gate "$D")"
-  p4_ok=1
-  if ! printf '%s' "$OUT" | grep -qF "revision marker $P4_SENTINEL"; then
-    bad "P-4 provenance banner does not name the scanned file's own revision"
-    detail "$OUT"
-    p4_ok=0
-  fi
-  if ! printf '%s' "$OUT" | grep -qF 'check-derived-counts: PASS'; then
-    bad "P-4 the planted marker must not disturb the verdict (still PASS)"
-    detail "$OUT"
-    p4_ok=0
-  fi
-  if printf '%s' "$OUT" | grep -qF "revision marker $P4_MAX"; then
-    bad "P-4 banner reported the pristine spec's marker -- it read the wrong file"
-    detail "$OUT"
-    p4_ok=0
-  fi
-  if [ "$p4_ok" -eq 1 ]; then
+  if p4_assert "$OUT" "$P4_SENTINEL" "$P4_MAX"; then
     ok "P-4 provenance banner names the scanned file (marker follows the copy, verdict undisturbed)"
     POS=$((POS + 1))
+  else
+    bad "P-4 provenance banner did not follow the scanned copy (expected $P4_SENTINEL, not $P4_MAX, verdict still PASS)"
+    detail "$OUT"
   fi
 else
   bad "P-4 - INCONCLUSIVE: plant did not apply; the case never ran"
@@ -281,6 +308,63 @@ neg "N-F bold digit cell (**39** -> planted **37**)" \
   '| **39** |' \
   '| **37** |' \
   ' cell 37 '
+
+# M-P4-SYNTAX: the regression for the defect P-4 itself shipped, kept after the
+# rewrite because it guards a property the rewrite does not make impossible --
+# FORM independence. The production banner accepts `| v1.N |` exactly as it
+# accepts `| **v1.N** |`. v1.65 read only the bold form, so on a document whose
+# newest row is plain it computed a "max+1" that already existed and a guard
+# hardcoded to that version passed every assertion.
+#
+# Scenario: newest row written plain, guard reporting a FIXED version instead of
+# reading the file it scanned. P-4 must catch it.
+d="$(mk)"
+p4r_max="$(p4_reported_marker "$d")"
+if [ -z "$p4r_max" ]; then
+  bad "M-P4-SYNTAX - INCONCLUSIVE: the guard reported no marker on a pristine copy"
+  rm -rf "$d"
+else
+  # Force the plain form. If the newest row is already plain this is a no-op and
+  # the scenario still holds, so a missing bold row is not a setup failure.
+  sed -i.bak "s|^| \*\*${p4r_max}\*\* ||| ${p4r_max} ||" "$d/$SPEC" 2>/dev/null || true
+  rm -f "$d/$SPEC.bak"
+  p4r_after="$(p4_reported_marker "$d")"
+  p4r_sent="v1.$(( ${p4r_max#v1.} + 1 ))"
+  if [ "$p4r_after" != "$p4r_max" ]; then
+    bad "M-P4-SYNTAX - INCONCLUSIVE: rewriting the newest row to plain form changed the reported marker ($p4r_max -> $p4r_after)"
+    rm -rf "$d"
+  elif ! apply "$d" "$SPEC" '## 21. operator Decision Packets' \
+        "| **$p4r_sent** | P-4 provenance probe | probe row |
+
+## 21. operator Decision Packets" 2>/dev/null; then
+    bad "M-P4-SYNTAX - INCONCLUSIVE: sentinel plant did not apply"
+    rm -rf "$d"
+  else
+    # A guard that reports a fixed version rather than the file it opened. The
+    # single-line fallback is the target on purpose: rewriting the two-line
+    # SPEC_VER assignment would orphan its continuation and kill the guard, and
+    # healthy() would correctly call that INCONCLUSIVE rather than a catch.
+    sed -i.bak "s|^\[ -n \"\$SPEC_VER\" \].*|SPEC_VER=$p4r_max|" "$d/scripts/check-derived-counts.sh"
+    if cmp -s "$d/scripts/check-derived-counts.sh" "$d/scripts/check-derived-counts.sh.bak"; then
+      bad "M-P4-SYNTAX - INCONCLUSIVE: the fixed-version edit did not change the guard"
+      rm -rf "$d"
+    else
+      rm -f "$d/scripts/check-derived-counts.sh.bak"
+      p4rout="$(run_gate "$d")"
+      if ! healthy "$p4rout"; then
+        bad "M-P4-SYNTAX - INCONCLUSIVE: the mutated guard did not complete a scan"
+        detail "$p4rout"
+      elif p4_assert "$p4rout" "$p4r_sent" "$p4r_max"; then
+        bad "M-P4-SYNTAX - a guard reporting a FIXED version still satisfied P-4 on a plain newest row"
+        detail "$p4rout"
+      else
+        ok "M-P4-SYNTAX plain newest row + fixed-version guard is caught (P-4 is form-independent)"
+        MUT=$((MUT + 1))
+      fi
+      rm -rf "$d"
+    fi
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n== false-red control (legal text the guard must NOT flag) ==\n'
