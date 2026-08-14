@@ -157,8 +157,10 @@ rm -rf "$D"
 # the guard was run against a spec ~30 revisions stale, its five findings were
 # real cache sites in THAT file, and the reader verified their line numbers
 # against the CURRENT spec -- the output carried nothing that could break the
-# tie. So: rewrite the throwaway copy's own latest revision row to a version
-# that exists nowhere else, and require the banner to follow the
+# tie. So: APPEND a revision row to the throwaway copy carrying a version that
+# exists nowhere else (v1.66 replaced the older rewrite-the-latest-row design,
+# because rewriting has to know whether that row is bold or plain and that
+# knowledge is exactly what diverged), and require the banner to follow the
 # scanned file. A banner that reads the repo's pristine spec instead, or a
 # banner deleted outright, fails here -- and so does a guard that stops
 # completing a scan, because the verdict line must still be PASS.
@@ -324,10 +326,32 @@ if [ -z "$p4r_max" ]; then
   bad "M-P4-SYNTAX - INCONCLUSIVE: the guard reported no marker on a pristine copy"
   rm -rf "$d"
 else
-  # Force the plain form. If the newest row is already plain this is a no-op and
-  # the scenario still holds, so a missing bold row is not a setup failure.
-  sed -i.bak "s|^| \*\*${p4r_max}\*\* ||| ${p4r_max} ||" "$d/$SPEC" 2>/dev/null || true
-  rm -f "$d/$SPEC.bak"
+  # Force the plain form through apply(), which is an exact-count-1 literal
+  # replacement and FAILS LOUDLY. The first version of this used sed with `|` as
+  # both the delimiter and a Markdown cell character: it exited 1, the error went
+  # to /dev/null, `|| true` swallowed the status, the row stayed bold -- and the
+  # case still announced "form-independent". That is the fourth appearance in
+  # this file of one shape: a plant that did not happen, counted as an experiment
+  # that did. This time I wrote the swallow myself, one round after fixing the
+  # same shape in mut().
+  p4r_bold="| **${p4r_max}** |"
+  p4r_plain="| ${p4r_max} |"
+  p4r_converted=0
+  if grep -qF -- "$p4r_bold" "$d/$SPEC"; then
+    # apply() already fails loudly on anything other than exactly one match; its
+    # status is USED, never swallowed.
+    if apply "$d" "$SPEC" "$p4r_bold" "$p4r_plain"; then p4r_converted=1; fi
+  elif grep -qF -- "$p4r_plain" "$d/$SPEC"; then
+    p4r_converted=1   # already plain; the scenario holds as-is
+  fi
+  # The conversion must be OBSERVABLE, not assumed: plain present, bold absent.
+  if [ "$p4r_converted" -ne 1 ]; then
+    bad "M-P4-SYNTAX - INCONCLUSIVE: could not put the newest revision row into plain form"
+  elif ! grep -qF -- "$p4r_plain" "$d/$SPEC"; then
+    bad "M-P4-SYNTAX - INCONCLUSIVE: plain form of $p4r_max is absent after conversion"
+  elif grep -qF -- "$p4r_bold" "$d/$SPEC"; then
+    bad "M-P4-SYNTAX - INCONCLUSIVE: bold form of $p4r_max survived the conversion"
+  else
   p4r_after="$(p4_reported_marker "$d")"
   p4r_sent="v1.$(( ${p4r_max#v1.} + 1 ))"
   if [ "$p4r_after" != "$p4r_max" ]; then
@@ -363,6 +387,7 @@ else
       fi
       rm -rf "$d"
     fi
+  fi
   fi
 fi
 
