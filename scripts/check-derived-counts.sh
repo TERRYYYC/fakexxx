@@ -165,7 +165,7 @@ SCOPE_PLAIN_OWNER_RED = r'owner-red'
 # of THIS ledger. 全/这/全部 + N + 行 is a count OF A KNOWN WHOLE, which that
 # counterexample is not.
 SCOPE_LANE_DISCOURSE = r'--lane|lane selector|exactHead|evidenceOwner'
-SCOPE_ROW_COUNT = r'[全这]\s*[0-9]+\s*行|全部\s*[0-9]+\s*行'
+SCOPE_ROW_COUNT = r'全\s*[0-9]+\s*行|全部\s*[0-9]+\s*行'
 SCOPE_PARTS = [r'`owner-red`', r'`sol-blackbox`', r'`static-guard`',
                r'`device`', r'台账', r'矩阵行']
 if SCOPE_PLAIN_OWNER_RED:
@@ -209,22 +209,34 @@ ARM_CURVAL = re.compile(r'现行为\s*\*{0,2}([0-9]+)\*{0,2}')
 # never enumerated -- invisible in the one output that exists to expose blind
 # spots. 'cell' is appended by the enumeration because it is applied separately
 # (keyed rows), not by a regex in this table.
-ARMS = (('bare', ARM_BARE), ('bold', ARM_BOLD), ('redct', ARM_REDCT),
-        ('cn', ARM_CN), ('pair', ARM_OWNER_PAIR), ('curval', ARM_CURVAL))
+ARMS = (('bare', ARM_BARE), ('bold', ARM_BOLD), ('redct', ARM_REDCT), ('cn', ARM_CN), ('pair', ARM_OWNER_PAIR), ('curval', ARM_CURVAL))
+# ENUM_ARMS is a SEPARATE knob from ARMS on purpose. Collapsing ARMS disables the
+# scanner, so the finding disappears and a mutation proves only that the scanner
+# reads ARMS -- it says nothing about whether the enumeration reads the same
+# table, which is the property that actually failed before. Mutating this knob
+# alone leaves the finding alive and removes only the inventory line, so the two
+# paths can be measured as two dimensions instead of one.
+ENUM_ARMS = [a for a, _ in ARMS] + ['cell']
 
-# The marker-word exemption protects QUOTED superseded text. "现行为 N" asserts
-# the present value, so it is the one notation that can never be the quotation
-# it sits next to -- and it routinely does sit next to one, which is why it needs
-# saying: L2801 quotes Issue #6's original 64 and states the current value in the
-# same sentence, inside one bracket span.
-NEVER_EXEMPT_ARMS = {'curval'}
+# "现行为 N" asserts the PRESENT value, so a loose bracket span must not exempt
+# it -- L2801 quotes Issue #6's superseded 64 and states the current value in one
+# sentence, inside one （…） span that would hide both. But it is NOT immune to
+# exemption outright: a correction line may legitimately quote the old sentence
+# verbatim ("上一版逐字写作「现行为 **84**」"), and a guard that reports that as
+# stale is a false red -- which gets guards disabled. So curval exempts only on
+# the explicit forms: a whole correction blockquote, or a 「…」 quotation.
+QUOTE_ONLY_ARMS = {'curval'}
 
 # CELL arm: keyed table rows (first cell names a lane or class). pr-3.5 / pr-5
 # are frozen empty-set policy lanes, included so their expected 0 stays pinned
 # (allowed per-line only where the row itself says 空集 -- the same per-line
 # scoping the appid-cutover 5 uses).
-CELL_KEYS = ('pr-3', 'pr-3.5', 'pr-4', 'pr-5', 'pr-6',
-             'owner-red', 'sol-blackbox', 'static-guard', 'device')
+# Single line, like every other knob: `s/^KNOB = .*/KNOB = .../` is the mutation
+# contract, and a knob wrapped onto a second line turns that contract into an
+# orphaned continuation -- a SyntaxError, whose silence the mutation helper used
+# to read as "the arm is load-bearing". M-CELL passed that way from 6cfea07 until
+# the run-health check exposed it.
+CELL_KEYS = ('pr-3', 'pr-3.5', 'pr-4', 'pr-5', 'pr-6', 'owner-red', 'sol-blackbox', 'static-guard', 'device')
 
 # Frozen: the appid-cutover rows moved to Issue #13 and are not ledger rows.
 APPID_CUTOVER_ROWS = 5
@@ -270,34 +282,39 @@ def keyed_row(s):
     return False
 
 
-def quoted_spans(s):
+def quoted_spans(s, corner_only=False):
     # 「…」 and （…） spans; an unclosed opener extends to end of line.
+    #
+    # corner_only drops （…）. A full-width paren span routinely wraps a whole
+    # explanatory clause -- L2801's opens 210 chars before the live claim it then
+    # swallowed -- whereas 「…」 is an explicit quotation of superseded text. For
+    # a present-tense claim only the explicit form can mean "this is a quote".
+    openers = '「' if corner_only else '「（'
+    closers = '」' if corner_only else '」）'
     spans, depth_open = [], None
     for i, ch in enumerate(s):
-        if ch in '「（':
+        if ch in openers:
             if depth_open is None:
                 depth_open = i
-        elif ch in '」）' and depth_open is not None:
+        elif ch in closers and depth_open is not None:
             spans.append((depth_open, i))
             depth_open = None
     if depth_open is not None:
         spans.append((depth_open, len(s)))
     return spans
 
-def exempt(start, stripped_line, work_line, arm_never_exempt=False):
+def exempt(start, stripped_line, work_line, quote_only=False):
     # Per-match history exemption -- the line-level exemption this guard shipped
     # with let KB-6's LIVE claim (现为五行) hide behind its own 此前写作.
     #   - a correction BLOCKQUOTE ("> ... v1.NN 更正 ...") is wholesale
     #     history: exempt the whole line, as before;
     #   - an in-flow marker word exempts only what it actually quotes: matches
     #     inside 「」/（） spans. Matches outside the brackets are live claims.
-    if arm_never_exempt:
-        return False
     if not HISTORY_MARKER.search(stripped_line):
         return False
     if stripped_line.startswith('>'):
         return True
-    return any(a <= start <= b for a, b in quoted_spans(work_line))
+    return any(a <= start <= b for a, b in quoted_spans(work_line, corner_only=quote_only))
 
 sites = []     # (absno, arm, value)  -- every number the guard can see
 findings = []  # (absno, arm, value)  -- the ones the ledger cannot produce
@@ -321,7 +338,7 @@ for idx in range(active_from - 1, len(lines)):
     def consider(arm, value, pos):
         sites.append((absno, arm, value))
         if value not in legal and not exempt(pos, stripped, work,
-                                            arm_never_exempt=(arm in NEVER_EXEMPT_ARMS)):
+                                            quote_only=(arm in QUOTE_ONLY_ARMS)):
             findings.append((absno, arm, value))
 
     for arm, rx in ARMS:
@@ -354,7 +371,7 @@ legal_repr = ' '.join(str(v) for v in sorted(BASE_LEGAL, reverse=True))
 print('  ledger can produce: %s (plus %d on appid-cutover lines, %d on 空集 lanes)'
       % (legal_repr, APPID_CUTOVER_ROWS, EMPTY_SET_ROWS))
 stale = {(a, ar, v) for (a, ar, v) in findings}
-for arm in [a for a, _ in ARMS] + ['cell']:
+for arm in ENUM_ARMS:
     entries = ['L%d=%s%s' % (a, v, '*' if (a, arm, v) in stale else '')
                for (a, ar, v) in sites if ar == arm]
     if entries:

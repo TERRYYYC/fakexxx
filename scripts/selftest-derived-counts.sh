@@ -76,6 +76,17 @@ PY
 
 run_gate() { ( cd "$1" && ./scripts/check-derived-counts.sh 2>&1 ); }
 
+# A mutated guard that CRASHES also stops printing findings, and "the finding is
+# gone" is the whole assertion every mutation case makes. Without this the
+# arm-census mutation passed while the guard was dying on an IndentationError:
+# the case reported a load-bearing arm on the strength of a traceback. So a
+# mutated run must still look like a run -- it must reach the section-3
+# enumeration AND print a verdict line -- before its silence means anything.
+healthy() { # $1=gate output
+  printf '%s' "$1" | grep -qF '=> section 3:' && \
+  printf '%s' "$1" | grep -qE '^check-derived-counts: (PASS|FAIL)'
+}
+
 # ---------------------------------------------------------------------------
 printf '\n== positive ==\n'
 
@@ -93,6 +104,10 @@ D="$(mk)"
 OUT="$(run_gate "$D")"
 P1_REQUIRED=(
   '    bare :'  '    cn   :'  '    cell :'  '    redct:'
+  # pair/curval pinned too: an enumeration that quietly stops listing an arm is
+  # invisible in the verdict line, and "0 stale sites" reads identical either
+  # way. Leaving them unpinned let the census regress while P-1 stayed green.
+  '    pair :'  '    curval:'
   '=> section 3: 0 stale cache site(s)'
   'check-derived-counts: PASS'
 )
@@ -183,6 +198,57 @@ neg "N-F bold digit cell (**39** -> planted **37**)" \
   ' cell 37 '
 
 # ---------------------------------------------------------------------------
+printf '\n== false-red control (legal text the guard must NOT flag) ==\n'
+
+# Every case above asks "does it go red when it should". Nothing asked "does it
+# stay green when it should", and that half is not cosmetic: a guard that cries
+# wolf on legitimate prose gets disabled, which costs more coverage than the
+# blind spot it was widened to close. Both controls below are the exact shapes
+# the v1.61 widening put at risk.
+legal() { # $1=label $2=old $3=new $4=substring that must NOT appear
+  local d out
+  d="$(mk)"
+  if ! apply "$d" "$SPEC" "$2" "$3" 2>/dev/null; then
+    bad "$1 - INCONCLUSIVE: plant did not apply; the case never ran"
+    rm -rf "$d"; return
+  fi
+  out="$(run_gate "$d")"
+  if ! healthy "$out"; then
+    bad "$1 - INCONCLUSIVE: the guard did not complete a scan"
+    detail "$out"; rm -rf "$d"; return
+  fi
+  if printf '%s' "$out" | grep -qF -- "$4"; then
+    bad "$1 - FALSE RED: the guard flagged legal text as a stale cache ('$4')"
+    detail "$out"
+  else
+    ok "$1 - legal text stays green"
+    POS=$((POS + 1))
+  fi
+  rm -rf "$d"
+}
+
+# L-1: a correction line quoting the superseded sentence VERBATIM. curval reads
+# present-tense claims and must not exempt on a loose （…） span, but 「…」 is an
+# explicit quotation and a whole correction blockquote is wholesale history.
+# Without this control, "现行为 never exempts" reported legal history as stale.
+legal "L-1 verbatim quotation of a superseded 现行为 claim" \
+  '## 21. operator Decision Packets' \
+  '> v1.62 更正：上一版台账逐字写作「现行为 **84**」；该句描述的是旧文。
+
+## 21. operator Decision Packets' \
+  ' curval 84 '
+
+# L-2: a row count that is NOT a cache of this ledger. The guard already records
+# why 矩阵行 is scoped and bare 矩阵 is not; the row-count widening re-opened the
+# same door via 这 N 行 until it was narrowed to 全/全部.
+legal "L-2 non-ledger row count (§6.4.1 negative cases)" \
+  '## 21. operator Decision Packets' \
+  '这 8 行是 §6.4.1 的独立负例。
+
+## 21. operator Decision Packets' \
+  ' bare 8 '
+
+# ---------------------------------------------------------------------------
 printf '\n== mutation (disable one named arm; its finding must vanish) ==\n'
 
 mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that must disappear
@@ -218,6 +284,11 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
     rm -rf "$d"; return
   fi
   out="$(run_gate "$d")"
+  if ! healthy "$out"; then
+    bad "$1 - INCONCLUSIVE: the mutated guard did not complete a scan (crash?), so a missing finding proves nothing"
+    detail "$out"
+    rm -rf "$d"; return
+  fi
   if printf '%s' "$out" | grep -qF -- "$5"; then
     bad "$1 - finding survived with the arm disabled, so that arm is not what catches it"
     detail "$out"
@@ -302,9 +373,9 @@ neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
   ' bare 41 '
 
 # N-J: a line whose ONLY scope token is the row-count phrase itself (这 N 行).
-neg "N-J row-count-phrase scope (这 39 行自审 -> planted 43)" \
-  '**这 39 行自审真正可接受的理由（冻结）**' \
-  '**这 43 行自审真正可接受的理由（冻结）**' \
+neg "N-J row-count-phrase scope (全 114 行 -> planted 43)" \
+  '**本 task 是唯一验证全 114 行的地方**' \
+  '**本 task 是唯一验证全 43 行的地方**' \
   ' bare 43 '
 
 mut "M-PAIR owner-pair arm catches N-G" \
@@ -327,19 +398,52 @@ mut "M-LANE-SCOPE lane-discourse scoping catches N-I" \
 
 mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
   's/^SCOPE_ROW_COUNT = .*/SCOPE_ROW_COUNT = ""/' \
-  '**这 39 行自审真正可接受的理由（冻结）**' \
-  '**这 43 行自审真正可接受的理由（冻结）**' \
+  '**本 task 是唯一验证全 114 行的地方**' \
+  '**本 task 是唯一验证全 43 行的地方**' \
   ' bare 43 '
 
 # M-ARMS-CENSUS: the enumeration used to hardcode its own copy of the arm list,
 # so an arm could be scanned and never enumerated -- invisible in the one output
 # whose job is to expose blind spots. Collapsing ARMS must make the finding go
 # away; if it does not, the scan is reading some other list again.
-mut "M-ARMS-CENSUS scan and enumeration read one arm table" \
+mut "M-ARMS-CENSUS scanner reads the ARMS table" \
   's/^ARMS = .*/ARMS = ()/' \
   '现行为 **88**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
+
+# M-ENUM-CENSUS is the OTHER half, and it cannot be folded into the one above:
+# collapsing ARMS kills the scanner, so the finding vanishes and the case says
+# nothing about whether the INVENTORY reads the same table. Here the scanner is
+# left intact -- the finding must SURVIVE -- while the enumeration's own knob is
+# collapsed, and the arm's inventory line must disappear. Two paths, two
+# assertions, in opposite directions.
+d="$(mk)"
+if ! apply "$d" "$SPEC" '现行为 **88**（§10.1 现算）' '现行为 **83**（§10.1 现算）' 2>/dev/null; then
+  bad "M-ENUM-CENSUS - INCONCLUSIVE: plant did not apply; the case never ran"
+else
+  sed -i.bak 's/^ENUM_ARMS = .*/ENUM_ARMS = ["cell"]/' "$d/scripts/check-derived-counts.sh"
+  if cmp -s "$d/scripts/check-derived-counts.sh" "$d/scripts/check-derived-counts.sh.bak"; then
+    bad "M-ENUM-CENSUS - INCONCLUSIVE: the enumeration-knob edit did not change the guard"
+  else
+    rm -f "$d/scripts/check-derived-counts.sh.bak"
+    mout="$(run_gate "$d")"
+    if ! healthy "$mout"; then
+      bad "M-ENUM-CENSUS - INCONCLUSIVE: the mutated guard did not complete a scan"
+      detail "$mout"
+    elif ! printf '%s' "$mout" | grep -qF -- ' curval 83 '; then
+      bad "M-ENUM-CENSUS - the scanner finding vanished too, so this collapsed both paths into one"
+      detail "$mout"
+    elif printf '%s' "$mout" | grep -qF -- '    curval:'; then
+      bad "M-ENUM-CENSUS - the inventory still lists curval with ENUM_ARMS collapsed, so it reads some other list"
+      detail "$mout"
+    else
+      ok "M-ENUM-CENSUS inventory reads ENUM_ARMS while the scanner keeps finding — two dimensions, not one"
+      MUT=$((MUT + 1))
+    fi
+  fi
+fi
+rm -rf "$d"
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
