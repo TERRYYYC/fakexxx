@@ -454,9 +454,17 @@ class EnvironmentControlHandler(
                     "proof.scheduleItemId=${proof.scheduleItemId} does not match expectedCurrentItemId=${request.expectedCurrentItemId}")
             }
 
-            // --- step 4: schedule gates (14/15/16) ---
+            // --- step 4: schedule gates (16→14→15, spec v1.54 §6.7.4b intra-step ordering) ---
             val schedule = environment.scheduleSnapshot()
                 ?: throw ContractException(ContractErrorCodeV1.REQUEST_INVALID, "no active schedule")
+
+            // M-AD-11: already exhausted → wire 16 (checked FIRST per v1.54:
+            // terminal state must be reported before item/version mismatch,
+            // so a stale item on an exhausted schedule gets 16 not 14)
+            if (schedule.exhausted) {
+                throw ContractException(ContractErrorCodeV1.SCHEDULE_EXHAUSTED,
+                    "schedule already exhausted")
+            }
 
             // M-AD-04/05: item mismatch → wire 14
             if (request.expectedCurrentItemId != schedule.currentItemId) {
@@ -468,12 +476,6 @@ class EnvironmentControlHandler(
             if (request.expectedScheduleVersion != schedule.scheduleVersion) {
                 throw ContractException(ContractErrorCodeV1.SCHEDULE_VERSION_STALE,
                     "expected=${request.expectedScheduleVersion} current=${schedule.scheduleVersion}")
-            }
-
-            // M-AD-11: already exhausted → wire 16
-            if (schedule.exhausted) {
-                throw ContractException(ContractErrorCodeV1.SCHEDULE_EXHAUSTED,
-                    "schedule already exhausted")
             }
 
             // --- step 5: lease gate — DEVICE-GLOBAL (§6.7.4a/b, M-AD-12) ---
@@ -509,7 +511,7 @@ class EnvironmentControlHandler(
                 outcomeWire = outcomeWire,
                 advancedFromItemId = request.expectedCurrentItemId,
                 advancedToItemId = toItemId,
-                scheduleVersionAfter = schedule.scheduleVersion,
+                scheduleVersionAfter = schedule.scheduleVersion + 1, // spec v1.56: terminal/non-terminal both V+1
                 effectiveIntentHash = intentHash,
                 effectiveEnvironmentRevision = snap.revision,
                 receiptDigest = "", // Placeholder, computed below
