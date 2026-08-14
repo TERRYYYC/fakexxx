@@ -23,20 +23,21 @@ Machine-checked by [`scripts/check-contract-v1.sh`](../../scripts/check-contract
 
 ```
 IEnvironmentControlV1
-  discover()  -> CapabilitySnapshotV1
-  preflight() -> PreflightReportV1
-  apply()     -> ApplyReceiptV1
-  observe()   -> EnvironmentObservationV1
-  release()   -> ReleaseReceiptV1
-  completeAndAdvance() -> AdvanceReceiptV1
+  discover()  -> EnvironmentControlResultV1
+  preflight() -> EnvironmentControlResultV1
+  apply()     -> EnvironmentControlResultV1
+  observe()   -> EnvironmentControlResultV1
+  release()   -> EnvironmentControlResultV1
+  completeAndAdvance() -> EnvironmentControlResultV1
 ```
 
-Expected business failures come back as `ServiceSpecificException` carrying a
-`ContractErrorCodeV1.wire`. Binder death and `RemoteException` are transport
-failures on a separate path. Error message strings are for humans only; no
-machine decision may read them.
+Every `EnvironmentControlResultV1` is schema-versioned (`resultSchemaVersion =
+1`) and carries either exactly one typed success payload or a stable
+`ContractErrorCodeV1.wire` in `errorCodeWire`. Binder death and
+`RemoteException` are transport failures on a separate path. Diagnostic strings
+are for humans only; no machine decision may read them.
 
-## Three rules that are easy to break by accident
+## Four rules that are easy to break by accident
 
 **1. No Kotlin enum ever crosses the Binder boundary.** Every enum-valued field
 is an `Int` wire code (`...Wire` / `...Wires`) decoded by an explicit
@@ -57,6 +58,12 @@ unknown code is never optimistically read as compatible.
 `>=` and "anything but `NONE`" are forbidden — note that trusted is ordinal 0 and
 `NONE` is ordinal 2, so comparison-based policies read backwards and would start
 trusting new constants silently.
+
+**4. Business failures are values, not hidden framework exceptions.** App code
+cannot rely on hidden Android classes for the contract wire path. A provider
+returns `EnvironmentControlResultV1.failure(errorCodeWire)` for expected
+business failures, and the consumer decodes unknown error codes to
+`INTERNAL_FAILURE` fail-closed.
 
 ## `acceptedIntentHash`
 
