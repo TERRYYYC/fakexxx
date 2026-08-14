@@ -1089,6 +1089,76 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "7c. no v1 wire enum defines 0 -- 0 is permanently illegal on the wire"
+# WHY THIS EXISTS.
+# KB-7=A introduced ContractResultKindV1. The question "ERROR=0, or 1..7?" was
+# settled as 1-based with wire 0 permanently illegal, and §6.2 says so. But that
+# ruling closed ONE enum while the property it depends on is family-wide: an
+# AIDL/Parcel int defaults to 0, so if any v1 enum ever assigns 0 a meaning, a
+# defaulted or uninitialised field silently decodes as that meaning instead of
+# failing closed.
+#
+# §6.2 froze the rule in PROSE and nothing measured it. This project has watched
+# a prose-only carve-out drift five separate times, and §5c already proved a
+# KDoc rule cannot be mechanically read: it can force a sentence to NAME a
+# method, never to put it on the admitting or the rejecting side. A rule with no
+# arm is a hope with a citation.
+#
+# Scope is every enum in the module, discovered by scanning -- NOT a hardcoded
+# file list. A guard that names its inputs cannot see the file added after it
+# was written, which is the same blind spot as a matcher narrower than the
+# document. The arm also fails when it discovers NOTHING: a checker that reports
+# success over an empty scan is reporting the size of its own blind spot.
+if python3 - "$KT_DIR" <<'PY'
+import re, sys, glob, os, io
+
+ARM_ZERO = True
+
+files = sorted(glob.glob(os.path.join(sys.argv[1], "*.kt")))
+found = []
+for f in files:
+    s = io.open(f, encoding="utf-8").read()
+    for m in re.finditer(r"enum class (\w+)\s*\(\s*val wire: Int\s*\)\s*\{(.*?)\n\}", s, re.S):
+        name, body = m.group(1), m.group(2)
+        vals = [(c, int(v)) for c, v in
+                re.findall(r"^\s+([A-Z][A-Z_0-9]*)\((-?\d+)\)", body, re.M)]
+        found.append((name, os.path.basename(f), vals))
+
+if not found:
+    print("  FAIL  7c: scanned %d file(s) and found no `enum class X(val wire: Int)` at all"
+          % len(files))
+    print("        an empty scan is not a clean bill of health -- the matcher is the suspect")
+    sys.exit(1)
+
+bad = []
+for name, fn, vals in found:
+    for const, v in vals:
+        if ARM_ZERO and v == 0:
+            bad.append("%s.%s = 0 (%s)" % (name, const, fn))
+
+for name, fn, vals in found:
+    lo = min(v for _, v in vals) if vals else None
+    print("  ....  7c: %-24s %2d constant(s), min wire = %s  [%s]" % (name, len(vals), lo, fn))
+
+if bad:
+    print("  FAIL  7c: wire 0 is defined by:")
+    for b in bad:
+        print("            " + b)
+    print("        an AIDL/Parcel int defaults to 0; a defaulted field would decode")
+    print("        as this meaning instead of failing closed (§6.2)")
+    sys.exit(1)
+
+print("  ....  7c: %d wire enum(s) enumerated above, %d constant(s) total"
+      % (len(found), sum(len(v) for _, _, v in found)))
+sys.exit(0)
+PY
+then
+  pass "every v1 wire enum starts at 1; 0 is defined by none of them"
+else
+  fail "7c: a v1 wire enum defines 0, or the scan found no enum to check"
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n'
 if [ "$FAILURES" -eq 0 ] && [ "$SKIP_GRADLE" -eq 0 ] && [ "$INCONCLUSIVE" -eq 0 ]; then
   printf 'check-contract-v1: PASS (all checks)\n'

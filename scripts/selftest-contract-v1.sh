@@ -188,6 +188,7 @@ neg "N-7 field dropped from canonical (name-set layer)" "$SPEC" \
 # the KDoc an implementer reads is the stale half. Both cases restore the exact
 # wording that shipped before 5c existed.
 KT_ERR="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1/ContractErrorCodeV1.kt"
+KT_ENUMS="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1/ContractEnumsV1.kt"
 
 # N-8 Rule A: drop ONE of the two methods canonical scopes wire 7 to. Removing
 # both would also be caught, but the interesting case is a KDoc that looks scoped
@@ -414,6 +415,42 @@ mut "M-11 7b frozen inventory catches N-14" \
   "is no longer declared by any canonical block"
 
 printf '\n'
+# ---------------------------------------------------------------------------
+# 7c -- wire 0 is permanently illegal across the whole v1 enum family.
+#
+# The KB-7=A ruling settled ContractResultKindV1 as 1-based and §6.2 froze
+# "wire 0 permanently illegal", but the rule was PROSE ONLY when it landed. This
+# is what M-12 measures: with a 0 planted, disabling ARM_ZERO makes 7c's finding
+# disappear, so 7c -- not an older check -- is what caught it.
+#
+# There is deliberately NO isolating negative, and that is a property of the
+# design rather than an omission. The enum surface is mirrored three ways
+# (canonical / Kotlin / compatibility.yaml), so ANY single-file plant trips the
+# three-way sync before 7c ever speaks. Both shapes were measured: changing an
+# existing constant reports `HOOK_UNVERIFIED wire differs: canonical=2 kotlin=0`;
+# adding a self-consistent new enum reports `enum in kotlin but NOT in canonical`.
+# neg() requires exactly one failing section, so it cannot express this case.
+#
+# That also says what 7c is FOR: it is the second line behind the sync, and its
+# own scenario is a 0 introduced CONSISTENTLY in all three sources -- where the
+# sync is green and only 7c objects. Proving THAT needs a multi-source plant
+# helper. KNOWN GAP, named here rather than papered over.
+#
+# The plant is a value change, not a new constant: adding one would also move
+# the enum's constant SET and could trip a second section, and a negative that
+# fails two checks cannot show which one is load-bearing.
+#
+# The anchor is HOOK_UNVERIFIED, not NONE: `    NONE(3),` occurs TWICE in this
+# file (VerificationLevelV1 and ContinuityCoverageV1 both end on it), and an
+# ambiguous anchor makes the plant silently no-op -- the case then reports
+# INCONCLUSIVE rather than passing, which is how this was caught.
+mut "M-12 7c zero-arm catches N-15" \
+  's/^ARM_ZERO = .*/ARM_ZERO = False/' \
+  "$KT_ENUMS" \
+'    HOOK_UNVERIFIED(2),' \
+'    HOOK_UNVERIFIED(0),' \
+  "wire 0 is defined by"
+
 if [ "$FAILURES" -eq 0 ]; then
   printf 'selftest-contract-v1: PASS (%d positive, %d negative, %d mutation self-check(s) — every case ran against the production gate)\n' \
     "$POS" "$NEG" "$MUT"
