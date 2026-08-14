@@ -62,7 +62,8 @@ source_threads:
 >
 > **这三条不是已知边界的全集。** 连同 `INV-29`（`deferred`）、`KB-5`（契约留白）、
 > `KB-6`（provider 侧 advance 的覆盖缺口）、`KB-7`（契约的 `android.*` 引用无门禁）
-> 与 `KB-8`（坐标所有权未冻结）的完整**八条**见 **§20.1**——那里是"还有哪些没被
+> 与 `KB-8`（Auto 无独立位置验证面——所有权已裁定，验证面是裁定**暴露**出来的上限）
+> 的完整**八条**见 **§20.1**——那里是"还有哪些没被
 > 证明／没被冻结"的唯一入口。
 > 本告示只做提醒，**不做全集**：此前它与 §19 各列两条、§20 写作"无"，三个入口
 > 给出三个不同的子集，读者无从分辨"我没读到"与"它不存在"。
@@ -146,6 +147,7 @@ source_threads:
 | **v1.59** | PR-2 第十五轮（`KB-7` 裁定落地） | **登记不是传输：CI 编译的只是 DTO 与方法签名，不是被要求的失败通道本身。** ①`KB-7` 经 operator 裁定为 **A**——业务错误必须经 app-public、版本化的 typed-result 载体返回，不依赖 hidden wire。§6.1 六个方法统一返回新增的 `EnvironmentControlResultV1`（AIDL import 表同步改为镜像真实文件，此前它既漏 advance 两型又列着已不再直接上线的 payload 型）；§6.2 新增 `ContractResultKindV1` 与 kind↔payload 绑定表；§6.3.2 新增其 exact schema（**10 字段有序元组**，过 §7 门）与六条不变量；§6.3.3 尾段的 `ServiceSpecificException` 陈述改写为载体，**并顺带更正该句把属性名写成 `wireCode` 的错误（实际是 `wire`）**。②**`ContractResultKindV1` 全域 1-based，`wire 0` 永久非法**（operator option B）。曾评估的 `ERROR = 0` 能让成功 kind `1..6` 与 §6.1 方法位序精确对齐，且**两案 fail-closed 安全性等价**；取 1-based 的理由不是安全性而是**冻结卫生**——「0 永远非法」是这个 wire 家族唯一可执行的跨域不变量，破例一次就把它降级成只写在散文里的约定。③**`KB-7` 不注销，降级**：裁定闭合的是**实例**（`ServiceSpecificException` 不可实现），没有闭合 v1.44 ④ 自己挂起的那道门禁——「契约引用的每个 `android.*` 类型必须存在于 public compile SDK」。该规则本轮在 §6.1 冻结为通用条款，但**零守卫**，故 §20.1 `KB-7` 由 `unfrozen` 改记为 `gap`，顶部告示与 §19 同步（§19 的 `gap` 出口补上「门禁」，此前只写 ledger row）。**把「实例已修」读成「同类已防」，正是本表 `gap`／`limit` 不可互写要挡的那一步**；而 v1.44 挂起门禁的理由（「断言形状取决于所选通道」）**已随裁定失效**，不能继续沿用。④§12 目录树的 `contracts/` 分支此前漏 4 个 `.aidl` 与 5 个 `.kt`（advance 三件套、`CanonicalDigestV1`、本轮新增载体）；本轮由**文件系统重新生成**该分支，并就地声明其余分支为示意——**部分更新的清单会被当成完整清单读**。⑤本机静态门禁全绿（§7 现为 **14 DTO / 104 字段**）；§4 需 JDK，本机无 Java Runtime，由 CI 判。见 §6.1 / §6.2 / §6.3.2 / §6.3.3 / §12 / §19 / §20.1 |
 | **v1.60** | PR-2 第十五轮（派生计数回补） | **一道刚被加固的守卫，在它加固的那一刻就是红的，而没人看见——因为它前面那一步先红了。** ①`6cfea07` 把 `check-derived-counts.sh` 的扫描面从「带反引号的 `owner-red` 行 + 两种数字写法」扩到五条具名 arm，于是**四种此前不可见的写法**（纯文本 owner-red 行、裸数字单元格、加粗数字、中文数字）第一次进入扫描——一次就照出 **15 处**陈旧缓存。②**但它落在 `feat/pr-2-contract-v1` 上就是红的，且这个红被 CI 步骤顺序藏住了**：`check-contract-v1` 排在前面，KB-7 期间它一直红，GitHub Actions 前一步失败后面就不跑，所以 `check-derived-counts` 的红**一次都没有出现在任何人的判读里**——上一轮「contract-v1 仅因 canonical sync 而红」的结论是真的，但少读了一层：canonical 修好之后，第二处独立的红才会露出来。③15 处的真身：`110 → 112 → 114` 与 `84 → 86 → 88` 两轮台账增长中，**行内文字被改了、加粗单元格没被改**（`| **110** |` 经 blame 确认是 110 时代的原值，从未随文字一起 bump），外加 `pr-3` 的 `36`／`38`（两个不同时代的残留）与 `pr-4` 的 `48`。现全部按台账当前真相重算：总数 **114**、`owner-red` **88**、`pr-3` **39**、`pr-4` **49**。④`KB-6` 的「现为**五行**」不是过期，而是**结构上不该是数字**：它数的是台账 selector 表达不了的子族（provider 侧 advance 产生逻辑），守卫因此只能判它非法。现改为**直接枚举那五个 row ID**——这不是绕开守卫，正是 `6cfea07` 作者自己在 commit message 里写下的解药「**enumerate, never count**」：一个过期的数字没有任何东西能发现，一个缺失的 ID 有。⑤本轮**不改守卫**：15 处全部是本文的缓存问题，守卫一处也没冤枉（`KB-6` 那处判的是「这不该是个数字」，也成立）。⑥`selftest-derived-counts.sh` 的 P-1 **按 `6cfea07` 自己在文件头写下的生命周期翻绿**：该正例当时被**故意**倒置为断言红（「重算属于主线，不属于本分支；重算落地时 P-1 必须在同一 commit 翻成断言绿」），本轮重算落地即执行之。翻绿后钉的不再是一串幸存缺陷，而是两条经得起任何重算的性质：**零陈旧点 + 逐 arm 枚举仍在打印**——后者才承重，因为「0 处陈旧」也是一个**停止查看**的守卫会打印的东西，两者仅凭结论行不可分辨。同时 N-A／N-C／N-F 的 plant 锚点随本轮改动重挂（`36→39`、`**38**→**39**`、`KB-6` 单元格已无数字）：**锚点失效的负例不会变红，它会静默不跑**，而「the case never ran」和「guard is load-bearing」长得毫不相像。⑦把 `selftest-derived-counts.sh` **接进 CI**（此前只存在、从不运行）。`6cfea07` 没接线是对的——P-1 当时故意红，接了等于把 CI 钉在一个缺陷上；P-1 翻绿后接线才成立。**一个存在但从不运行的 selftest 不是守卫**，这与 `KB-7`「登记不是传输」是同一形状：载体在，它声称承载的性质从未真的被承载。见 §14 / §15 / §20.1 |
 | **v1.61** | PR-2 第十六轮（Sol exact-HEAD 退回） | **我把守卫的「全部枚举完毕」当成了覆盖率，而它的枚举被自己的 scope 圈死——上一轮我刚用整段话批评过这个病。** ①Sol 在 `d579c02` 抓到 P1：v1.60 声称 15 处全量回补且 guard green，但 active 区还有**第二组整整 15 个**陈旧值，守卫一个都没报——因为它们所在的行不带任何 scope token（`--lane` 注释、`lane selector` 叙述、「这 38 行自审」），或者行在 scope 内但**没有任何 arm 读得懂那种写法**（`GLM 48 / Fable5 38` 不挨着 `行`；`现行为 **84**` 不挨着 `行`）。我独立穷举复核后与 Sol 逐条吻合：`84→88`、`38→39`×5、`48→49`×2、`112→114`×5。②**根因不是漏改数字，是我读错了守卫说的话**：它输出 `every cache site enumerated`，实际语义是 `every IN-SCOPE cache site`。这两句在看板上长得一样，而差别正是本轮 P1 的全部内容。现已改口径：结论行明写 `WITHIN SCOPE`，并在枚举下方常驻一句「scope 是过滤器不是普查——落在无 arm、无 token 之行上的缓存不会被计入，也永远不会显示为缺口」。**守卫不该替读者做它没做的保证。**③加宽两处 scope（`--lane`／`lane selector`／`exactHead`／`evidenceOwner`；`全|这|全部 + N + 行`）与两条 arm（`pair` 读 owner 分列、`curval` 读「现行为 N」）。按 shape 而非按裸 `行` 加宽——守卫自己记过，裸 `矩阵` 会把「§6.4.1 矛盾 tuple 矩阵（8 行独立负例）」误判，而那不是本台账的缓存。④**枚举器此前硬编码了自己那份 arm 列表**，于是新增 arm 会被扫描却不被枚举——在唯一用来暴露盲区的输出里隐身。现由单一 `ARMS` 表派生，扫描与枚举不可能再分叉；这正是 `check-contract-v1.sh` 第 3 节记过的「a list you must remember to update is not a gate, it is a note」。⑤`现行为 N` 对历史豁免**免疫**：L2801 同一句里既逐字引用 Issue #6 的旧值 `64`、又断言现值，而一个从 210 字符外就打开的全角括号跨度把两者一起豁免了。那处活断言此前是**双重隐形**的——没有 arm 读它，读了也会被豁免。「现行为」是显式现在时，定义上不可能是它旁边那句引用。⑥补 4 条负例（`N-G` pair／`N-H` curval／`N-I` lane-scope／`N-J` rowcount-scope）与 5 条变异（含 `M-ARMS-CENSUS` 钉扫描与枚举同表）。每条负例都种进**只被本轮加宽覆盖**的行——旧的六条做不到这件事，因为它们全都种在旧 scope 已经够得着的行里，**一条负例只能测量它种进去的那个识别器**。`M-PLAIN-SCOPE` 因加宽后三路可达而失去隔离性，改为自己种一行隔离行（冗余是守卫的好事，但会让变异证明失效）。⑦Sol 的两条 P2：§12 v1.59 只生成了 `src/main` 却把声明写成整个 `contracts/**` 逐项一致，漏 6 个测试文件——**一句比自己覆盖面更宽的声明与一份过期清单同类**，只是它骗人的方式是措辞；现补 `src/test` 子树。§20 的「技术项：`KB-5` 一条」既漏 `KB-6` 也没跟上 `KB-7` 转 `gap`，改为三条并明写以 §20.1 为准；§20.1 的 `gap` 定义由「补 ledger row」扩为「补 ledger row **或门禁**」，与 `KB-7` 的处置一致（`KB-6` 缺行、`KB-7` 缺门禁，同类）。见 §12 / §14 / §15 / §20 / §20.1 |
+| **v1.62** | PR-2 第十七轮（`KB-8` = A · 坐标所有权冻结） | **§2.2 早就写了「经纬度不再由 Auto 导入」，而 `EnvironmentIntentV1` 一直要求 Auto 发经纬度——两条各自自洽的规则并排活了十几轮，谁都不是笔误，合起来才是缺陷。** ①operator 裁定 **A**：坐标生命周期只有一个权威，**千网游独占**，Auto 只递交 profile / schedule item 引用。②wire 面按裁定一次冻结完：`EnvironmentIntentV1` 删 `latitude`/`longitude`（§6.3 exact schema 少两字段）；§6.3.1 preimage 同步删两行**并删掉定点渲染规则整段**——7 位小数、半值向偶数、`-0.0` 归一是**支持坐标留在 preimage 的理由**，留着它等于留着一个已被裁定不存在的输入；`acceptedIntentHash` 自此绑定 **schedule 身份**而非坐标；golden vector 因 preimage 变更整组重算。③`discover()` 的 `CapabilitySnapshotV1` **不投影 item 坐标**（§6.7.1 冻结）——投影出去就是重新制造第二个持有者，即本条登记的缺陷本体；`REQUEST_INVALID`(13) 与 `M-RQ-01` 删「坐标越界」分支：**不存在能与之不匹配的对端断言，该分支不可达**。④§6.4 可信谓词删两条 `haversine(..., intent)` 腿，§6.4.1 表 2 的 `effectiveLat/Lng` 由「容差内匹配 intent」降为「结构性非空 + 审计」，§6.4.2 容差常量保留但**只有 provider 能求值**、取值理由删去已作废的量化误差论证，INV-23 与 `M-IN-01` 同步。⑤**`KB-8` 由 `unfrozen` 转入 `limit`**：裁定关掉的是双所有者，关不掉「Auto 没有第二个信息源反驳 provider 报回的位置」——与 `KB-2` 同形。**这不是本轮新增的损失，是本轮停止假装**：旧文让 Auto 拿 `intent.latitude/longitude` 做 haversine，而那两个字段在 Auto 侧从来没有合法来源，所谓「独立位置校验」一直是把 provider 的数据转一手再和 provider 自己比。顶部告示与 §19 两条枚举同轮更新（`limit` 列补 `KB-8`、`unfrozen`/`gap` 列去 `KB-8`）——**转类当轮就补两处，不留给下一轮**，§20.1 第 128 行的「新增边界必须同时进本表与权威节」对**转类**同样成立。见 §2.2 / §6.3 / §6.3.1 / §6.3.3 / §6.4 / §6.4.1 / §6.4.2 / §6.7.1 / §10 / §19 / §20.1 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1316,10 +1318,10 @@ data class CapabilitySnapshotV1(
 data class EnvironmentIntentV1(
     val runId: String,
     val attemptId: String,
+    /** profile / schedule item 的**稳定引用**。坐标不在本类中，且**永不加入**：
+     *  千网游是坐标的唯一权威，Auto 只递交引用（v1.62 `KB-8` = A，见 §20.1）。 */
     val profileRef: String,
     val scheduleRef: String,
-    val latitude: Double,
-    val longitude: Double,
     val requiredVerificationWire: Int,
     val notBeforeEpochMs: Long,
     val deadlineEpochMs: Long,
@@ -1390,9 +1392,6 @@ canonical = uint32be(byteLength(domain)) || domain
   attemptId                 : UTF-8 bytes，原样
   profileRef                : UTF-8 bytes，原样
   scheduleRef               : UTF-8 bytes，原样
-  latitude                  : ASCII 定点十进制，恰好 7 位小数，半值向偶数舍入，
-                              负号保留，无 '+'，无指数，无千分位
-  longitude                 : 同上
   requiredVerificationWire  : ASCII 十进制
   notBeforeEpochMs          : ASCII 十进制
   deadlineEpochMs           : ASCII 十进制
@@ -1418,12 +1417,13 @@ advance-receipt  "fakexxx:contract:v1:advance-receipt"
 
 只写「加个 domain」而不冻结逐字节值，两侧独立实现会各取各的字符串，digest 永不相等——而那读起来会像「对端不同意」，不像「我们的 domain 拼写不同」。
 
-禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。7 位小数（约 1.1 cm）在冻结容差之下，确保 digest 不会因浮点文本化差异漂移。
+禁止用 `toString()`、`hashCode()`、`Objects.hash()`、任何 JSON 序列化或 Parcel 字节作为 digest 来源——它们都不保证跨版本/跨进程稳定。
+
+**v1.62（`KB-8` = A）：坐标离开 preimage。** `latitude`/`longitude` 连同它们的定点渲染规则（7 位小数、半值向偶数、`-0.0` 归一）**整体删除**，不是改写。理由不是"浮点难编码"——那条老理由（7 位小数在容差之下）恰恰是**把坐标留在 preimage 里的**理由，留着它就等于留着一个已被裁定不存在的输入。裁定的内容是：**坐标只有一个所有者（千网游）**，Auto 不导入、不持有、不断言坐标，因此它没有任何东西可以喂进这个 digest。`acceptedIntentHash` 自本轮起绑定的是**这次 attempt 的 schedule 身份**（`runId`/`attemptId`/`profileRef`/`scheduleRef`），不是一个消费方无权断言的坐标。删除同时使 `EnvironmentIntentV1` 的 exact schema 少两个字段——两者是**同一次冻结的两个面**，任何一侧单独改都会让两个实现算出不同的 digest 而互相读作"对端不同意"。
 
 必测（both sides，逐条独立断言）：
 
 - 上述**分隔符碰撞对**必须产生**不同** digest；
-- 负坐标、`0.0`/`-0.0`（必须归一为同一表示）、需要半值向偶数舍入的边界值；
 - 四个 ref 含换行、制表符、emoji、以及多字节字符时两侧 digest 一致；
 - 空 ref 在业务上非法，导入/预检阶段即拒绝（这是产品校验，不是 digest 的正确性来源）。
 
@@ -1544,7 +1544,7 @@ data class ReleaseReceiptV1(
 | 10 | `RELEASE_INCOMPLETE` | release 无法证明清理完成 | INV-21；release/recovery 行 |
 | 11 | `INTERNAL_FAILURE` | 服务端内部错误；**以及未知 `ContractErrorCodeV1` wire 的唯一 fallback** | INV-03 |
 | **12** | **`IDEMPOTENCY_CONFLICT`** | **同 `idempotencyKey` 但 payload digest 不同** | **INV-13；`apply 同键异 payload` 行** |
-| **13** | **`REQUEST_INVALID`** | **请求结构性非法：必填 ref 为空、坐标越界、`deadline ≤ notBefore`** | **INV-04；contract round-trip 负例** |
+| **13** | **`REQUEST_INVALID`** | **请求结构性非法：必填 ref 为空、`deadline ≤ notBefore`。v1.62（`KB-8` = A）起没有坐标分支——任何请求载体都不再携带坐标，"坐标越界"在 v1 里不是一个可达的请求形态** | **INV-04；contract round-trip 负例** |
 | **14** | **`SCHEDULE_ITEM_MISMATCH`** | **`expectedCurrentItemId` ≠ 实际 `currentItemId`；挡住错项推进与重复推进** | **§6.7.4；advance 负例** |
 | **15** | **`SCHEDULE_VERSION_STALE`** | **`expectedScheduleVersion` ≠ 实际 `scheduleVersion`：判定配额期间计划被改** | **§6.7.4；advance 负例** |
 | **16** | **`SCHEDULE_EXHAUSTED`** | **计划已经耗尽时又请求推进——没有可完成的当前项，是真正的调用方错误**。〔v1.39 更正：本行旧文写「终态而非失败」，与 §6.7.4 冲突。**完成末项**是成功，走 receipt `outcomeWire = EXHAUSTED` + null target；本 wire 只用于**已耗尽之后再请求**〕 | **§6.7.4；advance 负例** |
@@ -1660,8 +1660,12 @@ post.acceptedIntentHash == apply.acceptedIntentHash
 apply.acceptedIntentHash == localDigest(attempt.intent)      # Auto 独立重算，不信任对端回传
 pre.effectiveLatitude != null && pre.effectiveLongitude != null
 post.effectiveLatitude != null && post.effectiveLongitude != null
-haversine(pre.effective,  intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
-haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
+
+# 距离比对不在本表里，v1.62 (KB-8 = A) 起也不可能在：intent 不含坐标，Auto 手里
+# 没有可比的目标。「生效坐标 vs 目标坐标 <= TRUSTED_LOCATION_TOLERANCE_METERS」
+# 由千网游独占执行——它同时持有 schedule item 的目标与生效坐标，是唯一能做这次
+# 比较的一方。Auto 侧剩下的是上面两行结构性非空 + scheduleItemId/scheduleVersion
+# 身份腿，见 §6.4.1 与 §20.1 KB-8。
 ```
 
 任一不成立：不得写可信配额。
@@ -1685,7 +1689,7 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 | `continuitySinceElapsedRealtimeMs` | **谓词（pre 与 post 两侧）** | 两侧均非空、**彼此相等**、且 `<= pre.observedAtElapsed` |
 | `deliveryModeWire` | **谓词** | 非空且 `== SYSTEM_MOCK` |
 | `verificationLevelWire` | 谓词 | `== SYSTEM_MOCK_INDEPENDENTLY_VERIFIED` |
-| `effectiveLatitude/Longitude` | 谓词 | 非空且在容差内匹配 intent |
+| `effectiveLatitude/Longitude` | 谓词（仅结构性）+ 审计 | 非空——provider 必须给出它解析到的生效位置，`null` 是"环境未知"，不得放行（`M-IN-03`）。**距离比对不在 Auto 侧**：v1.62（`KB-8` = A）起 intent 不含坐标，目标坐标只有千网游持有，因此 Auto **不得**声称"位置已被独立验证"——与 `evidenceRefs` 同形（结构性可查、语义不可查），残余上限见 §20.1 `KB-8` |
 | `isMock` | **谓词** | 非空且 `== true` |
 | `scheduleDecisionWire` | **谓词** | `== ALLOWED_NOW` |
 | `evidenceRefs` | **谓词（仅结构性）+ 审计** | 非空；格式 `qwy:<store>:<id>`。Auto 无法跨 App 解析，故不得声称"证据已独立验证"（§6.4.2） |
@@ -1730,9 +1734,11 @@ haversine(post.effective, intent) <= TRUSTED_LOCATION_TOLERANCE_METERS
 
 **为什么意图绑定是独立的一条**：`coverage/revision/fingerprint/lease/verificationLevel` 全部只证明"环境在测试全程没有相关变化"，不证明"环境处在**这个 attempt 要求的**位置"。若 apply 静默部分生效、被上一地址的残留状态覆盖、或 lease 复用时意图已切换，上面前七条可以整体成立，而可信配额被记到**错误地址**。本产品的全部价值就是"每地址的可信次数"，因此错记地址是最贵的失败模式，必须由独立不变量排除，而不是依赖其他条件的副作用。
 
-`TRUSTED_LOCATION_TOLERANCE_METERS = 1.0`，冻结为 contract 常量，两侧共用。取值理由：远大于 §6.3.1 的 7 位小数量化误差（约 1.1 cm）与 double 往返误差，因此不会造成假阴性。
+**v1.62 必须同时说清这条不变量在 Auto 侧还剩什么。** `KB-8` = A 之后，意图绑定的两条腿分开了：**身份腿**（`acceptedIntentHash` 三方相等 + `scheduleItemId` 对齐 `advancedToItemId` + `scheduleVersion` 对齐 `scheduleVersionAfter`）仍然由 Auto **独立重算**、不信任对端回传；**位置腿**（生效坐标是否落在目标容差内）只能由千网游求值，Auto 没有第二个信息源可以反驳它。**这不是本轮新增的损失，是本轮把一个一直是假的东西停止假装。** 旧文让 Auto 拿 `intent.latitude/longitude` 去做 haversine，可 §2.2 早已冻结"地址与经纬度不再由 Auto 导入"——那两个字段在 Auto 侧**没有合法来源**，所谓"独立位置校验"从来只是把 provider 的数据经 Auto 转一手再和 provider 自己比。裁定消除的是**双所有者**，暴露的是**本就不存在的独立验证面**。因此它登记为 §20.1 `KB-8` 的 `limit`（与 `KB-2` 同形：qwy 是环境唯一权威，Auto 无反驳面），验收时**不得**呈现为全绿，也**不得**用"坐标所有权已裁定"读作"位置归属已被证明"。
 
-**容差不承担归属判定。** 归属由 `acceptedIntentHash`（其中已含 `attemptId`/`runId`）与 task identity 负责；容差只回答"环境是否真的落在这个意图要求的坐标上"。因此**不对计划内地址的最小间距做任何硬性限制**——同一栋楼两点、密集门店都是合法输入，A+ 不因模型便利去缩小可用输入集。若产品希望提示用户，只能是导入时的**非阻断 warning**，且不得据此拒绝计划。
+`TRUSTED_LOCATION_TOLERANCE_METERS = 1.0`，仍冻结为 contract 常量、两侧共用**符号**，但 v1.62（`KB-8` = A）起**只有千网游能求值**：它比较的是自己 schedule item 解析出的目标与自己报出的生效坐标，两个操作数都在 provider 侧。取值理由随之收窄为：远大于 double 往返误差，因此不会造成假阴性。**旧理由「远大于 §6.3.1 的 7 位小数量化误差（约 1.1 cm）」已随坐标离开 preimage 一并作废**——它论证的是一个不再存在的量化步骤，留着会让读者以为 digest 仍在为这次比较提供精度保证。常量留在契约里而不是退回 provider 私有，是因为两侧仍需对"多近算同一个位置"有同一个可引用的冻结值（`M-CF-01` 的运行中改值语义不变）。
+
+**容差不承担归属判定。** 归属由 `acceptedIntentHash`（其中已含 `attemptId`/`runId`）与 task identity 负责；容差只回答"生效位置是否真的落在千网游为当前 schedule item 解析出的目标上"。因此**不对计划内地址的最小间距做任何硬性限制**——同一栋楼两点、密集门店都是合法输入，A+ 不因模型便利去缩小可用输入集。若产品希望提示用户，只能是导入时的**非阻断 warning**，且不得据此拒绝计划。
 
 ### 6.5 配对与调用授权
 
@@ -1872,6 +1878,8 @@ ProviderPairingRecord(
 **禁止**：按行序、首行、或 profile 表的隐式顺序推断当前项。千网游现存的「隐式首行 + 遗留行序回退」必须迁移到显式 `currentItemId`；那条未标注的全 profile 折线是**投影**，不得被任何一方当作顺序真相。
 
 **profile 是一个完整环境**：位置与蜂窝/网络/Wi-Fi Hook 字段属于同一 `scheduleItem`，不得被拆成两个可独立排序的维度——这正是双排序会让位置与网络状态漂移的地方。优先级属于**计划项**，不属于可复用的 profile 行。
+
+**坐标不跨边界投影（v1.62 `KB-8` = A 冻结）**：`discover()` 的 `CapabilitySnapshotV1` 只投影 ref、指针与版本（`profileRefs` / `scheduleRefs` / `currentScheduleId` / `currentItemId` / `scheduleVersion` / `exhausted`），**不投影 item 的经纬度**；`EnvironmentIntentV1` 也不回传坐标。这两条是同一个裁定的一进一出：**投影出去就制造了第二个持有者**，而第二个持有者正是 `KB-8` 登记的那个缺陷本体——它必然漂移，且漂移时没有任何 wire 表达"我们不同意"。"provider 用谁的坐标"（自己的）、"不匹配返回什么 code"（无此分支——不存在能与之不匹配的对端断言）、"discover 是否投影 item 坐标"（否）三问就此全部冻结。
 
 #### 6.7.2 完成证明（Auto 拥有，千网游不重算）
 
@@ -2434,7 +2442,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-20 | Auto 不写千网游存储，不以 UI 自动化调用千网游 | forbidden-dependency/static tests |
 | INV-21 | release 无法证明完成时暂停并暴露人工恢复，不静默继续 | release failure recovery test |
 | INV-22 | 终态 attempt/run 不可被 generic restore/list/delete 旁路复活 | DAO/repository bypass tests |
-| INV-23 | 可信配额要求 pre/post observation 的 `acceptedIntentHash` 等于 apply receipt 且等于 Auto 本地重算值，且 `effectiveLat/Lng` 非空并在 `TRUSTED_LOCATION_TOLERANCE_METERS` 内匹配目标坐标 | intent-binding matrix：错误地址、意图漂移、apply 部分生效、lease 复用后意图切换、坐标为 null 五类负例 |
+| INV-23 | 可信配额要求 pre/post observation 的 `acceptedIntentHash` 等于 apply receipt 且等于 Auto 本地重算值，且 `effectiveLat/Lng` **非空**；容差内的距离比对自 v1.62（`KB-8` = A）起由千网游独占求值，Auto 无独立位置验证面（§6.4.2 / §20.1 `KB-8`） | intent-binding matrix：错误地址、意图漂移、apply 部分生效、lease 复用后意图切换、坐标为 null 五类负例 |
 | INV-24 | 用户可见持久数据的 schema 变更必须有显式 migration + 真实旧版本 fixture 测试；禁止 destructive fallback | Auto v4→v5 真实 fixture migration test；`fallbackToDestructiveMigration` 静态禁用扫描 |
 | INV-25 | `environmentRevision`/coverage 跨进程单写者、持久、原子、单调；有损观察器与进程代际不明必须 bump + 降级 | 多进程并发 bump 测试；owner 进程重启代际测试；observer 丢事件注入测试 |
 | INV-26 | 禁止任何基于分数值的跨 attempt 去重（upstream INV-7：两次有效运行可产生相同结果）；改为对每次可信计数持久化完整 completion evidence，并向 operator 暴露可疑相邻计数的**去重审计报告**（低 RUNNING 时长、异常紧邻时间戳等），报告不自动否决计数 | evidence 持久化 schema 测试；审计报告触发条件测试；"分数相同的两次合法运行都被计入"正例 |
@@ -2505,7 +2513,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-VS-02` | version | 对端返回未知枚举 wire code | `fromWire` 返回 null → fail-closed，不得崩在 Binder transaction 内 | 3,4 |
 | `M-PA-01` | pairing | operator 隔较长时间/重启后才批准 pending candidate | 用调用内落下的身份快照批准；不得因反向可见性授权已失效而失败或降级 | 2 |
 | `M-PA-02` | pairing | Auto 卸载重装后 UID 被另一 App 复用 | 按 applicationId+signer 快照比对判为新调用方，不得凭 UID 直通 | 2 |
-| `M-IN-01` | intent | apply 部分生效，有效坐标停在上一地址 | 意图绑定失败 → 未验证，不计数 | 23 |
+| `M-IN-01` | intent | apply 部分生效，有效坐标停在上一地址 | **千网游侧**检出并拒绝把该 observation 报成可信证据（v1.62 `KB-8` = A 后它是唯一同时持有目标与生效坐标的一方）；Auto 侧的检出面只剩身份腿（`acceptedIntentHash` / `scheduleItemId` / `scheduleVersion`）→ 未验证，不计数。**不得**把本行读作 Auto 侧的距离校验 | 23 |
 | `M-IN-02` | intent | lease 复用但意图已切换，observation 仍返回旧 intent hash | `ENVIRONMENT_DRIFT`，不计数 | 23 |
 | `M-IN-03` | intent | observation 的 `effectiveLat/Lng` 为 null | 不计数（不得因"其他条件都过"放行） | 23 |
 | `M-IN-04` | intent | 计划内两地址距离极近（同楼/密集门店） | 正常受理并各自独立归属；不得拒绝导入 | 23 |
@@ -2555,7 +2563,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-ID-01` | idempotency | 同 `idempotencyKey` 异 payload | `IDEMPOTENCY_CONFLICT`（不得复用 `LEASE_CONFLICT`） | 13 |
 | `M-ID-02` | idempotency | 同一请求换 `operationId` 重试 | **不得**冲突——`operationId` 不在 §6.3.4 preimage 内 | 13 |
 | `M-ID-03` | idempotency | 构造使 `apply` 与 `release` 字段字节序列相同的输入 | domain separation 使两者 digest 不同 | 13 |
-| `M-RQ-01` | request | **请求**结构性非法：必填 ref 为空 / 坐标越界 / `deadline ≤ notBefore` | qwy 返回 `REQUEST_INVALID`，不得落到 `INTERNAL_FAILURE` | 4 |
+| `M-RQ-01` | request | **请求**结构性非法：必填 ref 为空 / `deadline ≤ notBefore`（v1.62 起无坐标分支） | qwy 返回 `REQUEST_INVALID`，不得落到 `INTERNAL_FAILURE` | 4 |
 | `M-RS-01` | response | **应答**结构性非法：`PreflightReportV1` 的 `scheduleDecision == WAIT_UNTIL` 却缺 `waitUntilEpochMs` | Auto consumer **fail-closed**：不进入可信判定、不启动 CellRebel、写未验证并记 typed reason。**不得**映射为 `REQUEST_INVALID`——那会把 provider 缺陷伪装成调用方错误 | 3,4,27 |
 | `M-CF-01` | config | 运行中改 `TRUSTED_LOCATION_TOLERANCE_METERS` 或 `requiredVerification` | 在飞 attempt continue 使用 `PlanSnapshot` 冻结值；新值只对新 plan version/地址边界生效 | 17 |
 | `M-CF-02` | config | 运行中改容差后 in-flight attempt 恰好越过新阈值 | 仍按冻结快照判定，结果不因中途改配置而翻转 | 17 |
@@ -3696,8 +3704,8 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 - INV-01..28 全部被自动测试或明确的真机证据覆盖；**INV-29 是 deferred gate**（§20.1 `KB-4`）——其证据载体在 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)，未闭合前不得声称覆盖，也不得执行任何 `applicationId` mutation；
 - **`I3.5` 已闭合**：`(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**（raw-green 终态门；ratchet 仅为中间证据）；
 - **`#13` 已闭合**：`M-AC-01..05` 全绿，设备层 cutover 与旧 App 移除完成 —— **Epic #1 不得在 #13 未闭合时 close**；
-- §20.1 表中**全部** `limit` 条目已在验收报告中显式记录、未被写成全绿：`KB-1`（§8.6.5 completion 跨 attempt 去重）、`KB-2`（§18.1 的 `FULL` 依赖）、`KB-3`（§6.5.3 的 TOFU 上限）。**以 §20.1 为准，不以本行的枚举为准**——本行此前只列前两条、漏掉 `KB-3`，正是 §20.1 要消除的"多入口各列子集"；
-- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`／`KB-8`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row **／门禁**并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"。**`KB-7` 是本轮由 `unfrozen` 转入 `gap` 的实例：裁定闭合的是实例，不是同类**；
+- §20.1 表中**全部** `limit` 条目已在验收报告中显式记录、未被写成全绿：`KB-1`（§8.6.5 completion 跨 attempt 去重）、`KB-2`（§18.1 的 `FULL` 依赖）、`KB-3`（§6.5.3 的 TOFU 上限）、`KB-8`（§6.4.2 的位置腿：Auto 无独立验证面）。**以 §20.1 为准，不以本行的枚举为准**——本行此前只列前两条、漏掉 `KB-3`，正是 §20.1 要消除的"多入口各列子集"；`KB-8` 是 v1.62 由 `unfrozen` 转入 `limit` 后补进本行的，**转类当轮就补，不留给下一轮**；
+- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row **／门禁**并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"。**`KB-7` 是 v1.59 由 `unfrozen` 转入 `gap` 的实例：裁定闭合的是实例，不是同类**；**`KB-8` 是 v1.62 由 `unfrozen` 转出的第二例**——operator 裁定 A 冻结了坐标所有权，本条因此离开本行，但它转入的是 `limit` 而不是"已消失"：裁定关掉的是双所有者，关不掉 Auto 侧没有第二个信息源这件事（见上一行与 §20.1）；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
@@ -3734,7 +3742,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | `KB-4` | `applicationId` cutover 不得孤儿化用户可见状态 | `deferred` 可触达、待闭合 | `INV-29`（§9）／§21 DP-2 | [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 闭合 | 未闭合前**不得**声称 `INV-29` 已覆盖，且**不得**执行任何 `applicationId` mutation |
 | `KB-5` | `completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时如何处置 | `unfrozen` 契约留白 | §6.3.3 wire 8 例外段／§6.7.4a | `M-AD-12`／`M-AD-13` 的 owner 裁定后冻结（属 provider 侧行为，非本 PR 可单方决定） | 冻结前两侧**都不得**擅自选一种读法并依赖它——一侧用 8 拒绝、另一侧放行，Auto 的恢复策略即不可移植（§6.7.4b 冻结判定次序所要消除的正是这一形态） |
 | `KB-7` | **契约引用的每个 `android.*` 类型必须存在于 public compile SDK**（§6.1 v1.59 冻结的通用规则）——**这条规则零门禁**。它的第一个实例已闭合：v1.44 登记的「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」按字面不可实现（`android.os.ServiceSpecificException` 是 `@hide`；对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举**零命中**，对照项 `android/os/Parcel.class` 命中，证明扫描有效而非空转），operator 裁定 **A** 后改由 `EnvironmentControlResultV1` 承载（§6.3.2） | `gap` 覆盖缺口 | §6.1（规则本体）／§6.3.2（承载它的载体） | 在 `scripts/check-contract-v1.sh` 增一节：枚举契约源码引用的全部 `android.*` 类型，断言每个都存在于 compileSdk 的 `android.jar`，带对照项证明扫描非空转，并配 `selftest-contract-v1.sh` 负例证明该节承重 | **不得**把「`ServiceSpecificException` 已换掉」读作「同类已防」——换掉的是**唯一已知实例**，规则本身仍只活在散文里，**而散文正是它当初能藏到 v1.44 才被发现的原因**。v1.44 ④ 当时挂起这道门禁的理由是「断言形状取决于所选通道」；通道已定，该理由已失效，故本条不随实例一起注销，改记为 `gap` |
-| `KB-8` | §2.2 声称 Auto 不再导入地址/经纬度、只持有 `scheduleItemId + scheduleVersion`，但 `EnvironmentIntentV1` 仍要求 Auto 发送 `latitude/longitude` 且进入 `acceptedIntentHash` 的 preimage；`discover()` 不暴露 schedule-item 坐标。provider 可以信 Auto 坐标、信自己 schedule 坐标、或拒绝不匹配——**契约未冻结选择，也无 wire 表达它**。Decision Packet v2 已投 | `unfrozen` 契约留白 | §2.2 / §6.3（`EnvironmentIntentV1`）/ §6.3.1（digest preimage） | **operator 裁定坐标所有权**（Decision Packet v2 已投）。裁定后冻结 wire 级行为（provider 用谁的坐标、不匹配时返回什么 code、discover 是否投影 item 坐标） | 冻结前**不得**声称坐标归属已解决。两侧实现各自选一种读法即不可移植——与 `KB-5` 同形，层不同（`KB-5` 在 lease 层，本条在 intent 层） |
+| `KB-8` | **INV-23 的位置腿在 Auto 侧没有独立验证面**：可信谓词要求"环境处在这个 attempt 要求的位置"，但目标坐标只有千网游持有（v1.62 裁定），Auto 只能读它报回的生效坐标，没有第二个信息源可以反驳它。**原登记的"坐标所有权未冻结"已由 operator 裁定 A 关闭**（千网游独占坐标所有权，Auto 只递交 profile / schedule item 引用），v1.62 已把 wire 面冻结完毕：intent 与 digest preimage 去坐标、`discover()` 不投影 item 坐标、无"坐标不匹配"错误码分支（不存在能与之不匹配的对端断言）。**剩下的不是没决定，是决定之后看清的东西** | `limit` 永久上限（v1.62 由 `unfrozen` 转入） | §6.4.2（意图绑定两条腿）／§6.4.1（表 2 `effectiveLat/Lng` 角色）／§6.3.1（preimage）／§2.2（所有权） | **架构上不可消除**：§5 冻结千网游为环境唯一权威，把目标坐标投影给 Auto 就是重新制造第二个持有者，即 A 裁定要消灭的那个缺陷本体。能减少的只有"位置错了却没人发现"的**漏报**（provider 侧 `M-IN-01` 覆盖），不能建立独立验证面——与 `KB-2` 同形 | 验收报告**不得**呈现为全绿；**不得**把"坐标所有权已裁定"读作"位置归属已被证明"。Auto 侧文案与 UI 只能声称身份腿（`acceptedIntentHash`／`scheduleItemId`／`scheduleVersion`）已独立重算，位置腿写明依赖 provider 自报。**并注意本条不是 v1.62 新造的损失**：旧文让 Auto 用 `intent.latitude/longitude` 做 haversine，而 §2.2 早已禁止 Auto 导入坐标——那两个字段在 Auto 侧从来没有合法来源，"独立位置校验"一直是把 provider 的数据转一手再和 provider 自己比。裁定只是把这件一直为假的事**停止假装** |
 | `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为 `M-AD-12`／`M-AD-13`／`M-AD-20`／`M-AD-21`／`M-AD-22`（**此处刻意枚举、不计数**：本条的存货数已经过期过一次，而一个过期的数字没有任何东西能发现，一个缺失的 ID 有——这正是 `check-derived-counts` 作者为同一种病写下的解药「enumerate, never count」），但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
 
 **四个类别不可互相改写**，因为每一类要求的下一步动作完全不同：`limit` 是**已经知道证明不了**（只能接受并披露）；`unfrozen` 是**还没决定**（需要 owner 裁定）；`deferred` 是**可触达、有确定载体、尚未闭合**（等载体，与 §10.1 对 `deferred:<DP-x>` 的规定同源）；`gap` 是**契约已冻结、但没有稳定的执行面证明实现符合它**（需要补 ledger row **或门禁**并执行——`KB-6` 缺的是行，`KB-7` 缺的是门禁，两者同类）。把留白写成上限，等于宣布它永远不修；把上限写成留白，等于承诺一件交付不出来的东西；把任一者写成 `deferred`，等于给它一个并不存在的闭合路径。而把 `gap` 写成 `limit`——**把"还没测"说成"测不了"**——是其中最该防的一种：它让一件待办永久退出待办清单，且伪装成物理限制之后没有人会再去挑战它。
