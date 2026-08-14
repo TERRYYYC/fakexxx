@@ -263,11 +263,83 @@ mut "M-REDCT owner-red-count arm catches N-E" \
 # M-PLAIN-SCOPE pins the class-3 widening itself: without plain-text owner-red
 # in the scope selector, the whole verify-comment line leaves scope and BOTH of
 # its counts (planted 35 and pristine 36/112) become invisible.
-mut "M-PLAIN-SCOPE plain-owner-red scoping catches N-A" \
+mut "M-PLAIN-SCOPE plain-owner-red scoping catches its own isolated line" \
   's/^SCOPE_PLAIN_OWNER_RED = .*/SCOPE_PLAIN_OWNER_RED = ""/' \
-  '# 39 行 owner-red' \
-  '# 35 行 owner-red' \
+  '## 21. operator Decision Packets' \
+  '其中 35 行 owner-red 待审。
+
+## 21. operator Decision Packets' \
   ' bare 35 '
+
+# ---------------------------------------------------------------------------
+# v1.61 additions. The v1.60 recompute was reported complete while a SECOND
+# group of 15 active stale values sat outside this guard's scope, and the six
+# cases above could not have found them: every one of them plants inside a line
+# the OLD scope already reached. A negative case can only measure the recogniser
+# it plants into. So each case below plants into a line that is in scope ONLY
+# through the widening it is testing, and each planted value (41/43/47/83) is
+# distinct from every legal value and from every other plant.
+
+# N-G: an owner-split of owner-red that never touches 行. The line was already
+# in scope; being in scope is not being readable, and no 行-anchored arm saw it.
+neg "N-G owner-pair notation (GLM 49 / Fable5 39 -> planted 47)" \
+  '已归各自 code owner（GLM 49 / Fable5 39）' \
+  '已归各自 code owner（GLM 47 / Fable5 39）' \
+  ' pair 47 '
+
+# N-H: "现行为 **N**" -- a claim whose whole purpose is to state the CURRENT
+# ledger value. ARM_BOLD requires a trailing 行 and walked past it.
+neg "N-H current-value notation (现行为 **88** -> planted 83)" \
+  '现行为 **88**（§10.1 现算）' \
+  '现行为 **83**（§10.1 现算）' \
+  ' curval 83 '
+
+# N-I: a line whose ONLY scope token is lane discourse (`lane selector`). It
+# carries no owner-red / 台账 / 矩阵行 and no 全|这 + N + 行.
+neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
+  'Fable5 同时拥有 PR-3 的 39 行' \
+  'Fable5 同时拥有 PR-3 的 41 行' \
+  ' bare 41 '
+
+# N-J: a line whose ONLY scope token is the row-count phrase itself (这 N 行).
+neg "N-J row-count-phrase scope (这 39 行自审 -> planted 43)" \
+  '**这 39 行自审真正可接受的理由（冻结）**' \
+  '**这 43 行自审真正可接受的理由（冻结）**' \
+  ' bare 43 '
+
+mut "M-PAIR owner-pair arm catches N-G" \
+  's/^ARM_OWNER_PAIR = .*/ARM_OWNER_PAIR = None/' \
+  '已归各自 code owner（GLM 49 / Fable5 39）' \
+  '已归各自 code owner（GLM 47 / Fable5 39）' \
+  ' pair 47 '
+
+mut "M-CURVAL current-value arm catches N-H" \
+  's/^ARM_CURVAL = .*/ARM_CURVAL = None/' \
+  '现行为 **88**（§10.1 现算）' \
+  '现行为 **83**（§10.1 现算）' \
+  ' curval 83 '
+
+mut "M-LANE-SCOPE lane-discourse scoping catches N-I" \
+  's/^SCOPE_LANE_DISCOURSE = .*/SCOPE_LANE_DISCOURSE = ""/' \
+  'Fable5 同时拥有 PR-3 的 39 行' \
+  'Fable5 同时拥有 PR-3 的 41 行' \
+  ' bare 41 '
+
+mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
+  's/^SCOPE_ROW_COUNT = .*/SCOPE_ROW_COUNT = ""/' \
+  '**这 39 行自审真正可接受的理由（冻结）**' \
+  '**这 43 行自审真正可接受的理由（冻结）**' \
+  ' bare 43 '
+
+# M-ARMS-CENSUS: the enumeration used to hardcode its own copy of the arm list,
+# so an arm could be scanned and never enumerated -- invisible in the one output
+# whose job is to expose blind spots. Collapsing ARMS must make the finding go
+# away; if it does not, the scan is reading some other list again.
+mut "M-ARMS-CENSUS scan and enumeration read one arm table" \
+  's/^ARMS = .*/ARMS = ()/' \
+  '现行为 **88**（§10.1 现算）' \
+  '现行为 **83**（§10.1 现算）' \
+  ' curval 83 '
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then

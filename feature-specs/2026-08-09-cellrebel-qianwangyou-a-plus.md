@@ -145,6 +145,7 @@ source_threads:
 | **v1.58** | PR-2 第十四轮（Sol exact-HEAD P1 回扫） | **豁免被写成了「只信 receipt」，而 receipt 正是要被验证的那个对象。** ①v1.57 冻结「终末推进免除 observe」，三条理由中的第③条是「receipt digest 已充分」——但 §6.7.5 立身的原句理由正是「**receipt 是对方的自述，不是生效证据**」。digest 重算只证明 provider 为**它自己填写的字段**做了 canonical framing 并绑定本请求，**不证明** `exhausted = true`、末项指针与 `V+1` 已持久化。可构造反例：provider 未落 `exhausted`（或回绕／错写 version）却返回一份内部自洽、digest 重算通过的 EXHAUSTED receipt，Auto 据此 CLOSED，而下一次 `discover()` 仍把末项当可执行——**终态保护迟到整整一轮**。用「receipt 可验证」豁免「不能只信 receipt」，是拿这条规则明确拒绝的东西当它的替代品。②现收窄：**豁免的只是「环境比对」这一步，不是「独立验证」本身**。①②两条理由（环境不变、结构上 `advancedToItemId=null` vs 非空 `scheduleItemId` 恒 false）继续成立，仅说明 `observe()` 这个**载体**不适用；第③条改为**强制独立状态回读**：终末推进后必须 fresh `discover()`／`preflight()` 回读，三条腿合取 `currentItemId == advancedFromItemId` ∧ `scheduleVersion == scheduleVersionAfter` ∧ `exhausted == true`，任一不成立 → `RECOVERY_REQUIRED` 且 typed reason 指明哪条腿。载体走 v1.55 已冻结的公开投影，**不新增 wire、不新增字段**。③§8.1 由一条 `ADVANCE_EXHAUSTED_VERIFIED → CLOSED` 拆为三条：`→ ADVANCE_STATE_READBACK`、`EXHAUSTED_STATE_CONFIRMED → CLOSED`、`EXHAUSTED_STATE_MISMATCH → RECOVERY_REQUIRED`，与既有 `OBSERVED_TUPLE_MATCHES`／`MISMATCH` 同形。④**同类一次扫净**（v1.57 只改了 §6.7.5 一处，其余载体仍写「推进后必须 observe」，两种 conforming 读法并存）：§6.3.3 lease 窗口、§6.7.4a 序列图、`M-AD-09/17/18` 限定为**非终末**、`M-AD-20` 标注终末不走该序列且回读载体不受 lease 窗口约束、`AdvanceReceiptV1` 与 `EnvironmentObservationV1` 的公开 KDoc 同步。⑤补两行证据：**`M-AD-23`**（终末只拿到可验证 receipt 但 provider 未落 `exhausted` → 必须回读并进 `RECOVERY_REQUIRED`）与 **`M-AD-24`**（同拓扑外部 reinit 清 `exhausted` 必须同时递增 `scheduleVersion`，否则旧 `(item, version)` 与 proof 跨世代复用）——v1.57 冻结了 reinit 规则却没留台账行。§10／§10.1 112→**114**，`owner-red` 86→**88**（GLM 49 / Fable5 39），散文缓存计数同 commit 重算——**本轮又是 `check-derived-counts.sh` 判红后才发现，且同一行里三处计数我只改了两处，仍由守卫抓出**。见 §6.3.3 / §6.7.4a / §6.7.5 / §8.1 / §10 |
 | **v1.59** | PR-2 第十五轮（`KB-7` 裁定落地） | **登记不是传输：CI 编译的只是 DTO 与方法签名，不是被要求的失败通道本身。** ①`KB-7` 经 operator 裁定为 **A**——业务错误必须经 app-public、版本化的 typed-result 载体返回，不依赖 hidden wire。§6.1 六个方法统一返回新增的 `EnvironmentControlResultV1`（AIDL import 表同步改为镜像真实文件，此前它既漏 advance 两型又列着已不再直接上线的 payload 型）；§6.2 新增 `ContractResultKindV1` 与 kind↔payload 绑定表；§6.3.2 新增其 exact schema（**10 字段有序元组**，过 §7 门）与六条不变量；§6.3.3 尾段的 `ServiceSpecificException` 陈述改写为载体，**并顺带更正该句把属性名写成 `wireCode` 的错误（实际是 `wire`）**。②**`ContractResultKindV1` 全域 1-based，`wire 0` 永久非法**（operator option B）。曾评估的 `ERROR = 0` 能让成功 kind `1..6` 与 §6.1 方法位序精确对齐，且**两案 fail-closed 安全性等价**；取 1-based 的理由不是安全性而是**冻结卫生**——「0 永远非法」是这个 wire 家族唯一可执行的跨域不变量，破例一次就把它降级成只写在散文里的约定。③**`KB-7` 不注销，降级**：裁定闭合的是**实例**（`ServiceSpecificException` 不可实现），没有闭合 v1.44 ④ 自己挂起的那道门禁——「契约引用的每个 `android.*` 类型必须存在于 public compile SDK」。该规则本轮在 §6.1 冻结为通用条款，但**零守卫**，故 §20.1 `KB-7` 由 `unfrozen` 改记为 `gap`，顶部告示与 §19 同步（§19 的 `gap` 出口补上「门禁」，此前只写 ledger row）。**把「实例已修」读成「同类已防」，正是本表 `gap`／`limit` 不可互写要挡的那一步**；而 v1.44 挂起门禁的理由（「断言形状取决于所选通道」）**已随裁定失效**，不能继续沿用。④§12 目录树的 `contracts/` 分支此前漏 4 个 `.aidl` 与 5 个 `.kt`（advance 三件套、`CanonicalDigestV1`、本轮新增载体）；本轮由**文件系统重新生成**该分支，并就地声明其余分支为示意——**部分更新的清单会被当成完整清单读**。⑤本机静态门禁全绿（§7 现为 **14 DTO / 104 字段**）；§4 需 JDK，本机无 Java Runtime，由 CI 判。见 §6.1 / §6.2 / §6.3.2 / §6.3.3 / §12 / §19 / §20.1 |
 | **v1.60** | PR-2 第十五轮（派生计数回补） | **一道刚被加固的守卫，在它加固的那一刻就是红的，而没人看见——因为它前面那一步先红了。** ①`6cfea07` 把 `check-derived-counts.sh` 的扫描面从「带反引号的 `owner-red` 行 + 两种数字写法」扩到五条具名 arm，于是**四种此前不可见的写法**（纯文本 owner-red 行、裸数字单元格、加粗数字、中文数字）第一次进入扫描——一次就照出 **15 处**陈旧缓存。②**但它落在 `feat/pr-2-contract-v1` 上就是红的，且这个红被 CI 步骤顺序藏住了**：`check-contract-v1` 排在前面，KB-7 期间它一直红，GitHub Actions 前一步失败后面就不跑，所以 `check-derived-counts` 的红**一次都没有出现在任何人的判读里**——上一轮「contract-v1 仅因 canonical sync 而红」的结论是真的，但少读了一层：canonical 修好之后，第二处独立的红才会露出来。③15 处的真身：`110 → 112 → 114` 与 `84 → 86 → 88` 两轮台账增长中，**行内文字被改了、加粗单元格没被改**（`| **110** |` 经 blame 确认是 110 时代的原值，从未随文字一起 bump），外加 `pr-3` 的 `36`／`38`（两个不同时代的残留）与 `pr-4` 的 `48`。现全部按台账当前真相重算：总数 **114**、`owner-red` **88**、`pr-3` **39**、`pr-4` **49**。④`KB-6` 的「现为**五行**」不是过期，而是**结构上不该是数字**：它数的是台账 selector 表达不了的子族（provider 侧 advance 产生逻辑），守卫因此只能判它非法。现改为**直接枚举那五个 row ID**——这不是绕开守卫，正是 `6cfea07` 作者自己在 commit message 里写下的解药「**enumerate, never count**」：一个过期的数字没有任何东西能发现，一个缺失的 ID 有。⑤本轮**不改守卫**：15 处全部是本文的缓存问题，守卫一处也没冤枉（`KB-6` 那处判的是「这不该是个数字」，也成立）。⑥`selftest-derived-counts.sh` 的 P-1 **按 `6cfea07` 自己在文件头写下的生命周期翻绿**：该正例当时被**故意**倒置为断言红（「重算属于主线，不属于本分支；重算落地时 P-1 必须在同一 commit 翻成断言绿」），本轮重算落地即执行之。翻绿后钉的不再是一串幸存缺陷，而是两条经得起任何重算的性质：**零陈旧点 + 逐 arm 枚举仍在打印**——后者才承重，因为「0 处陈旧」也是一个**停止查看**的守卫会打印的东西，两者仅凭结论行不可分辨。同时 N-A／N-C／N-F 的 plant 锚点随本轮改动重挂（`36→39`、`**38**→**39**`、`KB-6` 单元格已无数字）：**锚点失效的负例不会变红，它会静默不跑**，而「the case never ran」和「guard is load-bearing」长得毫不相像。⑦把 `selftest-derived-counts.sh` **接进 CI**（此前只存在、从不运行）。`6cfea07` 没接线是对的——P-1 当时故意红，接了等于把 CI 钉在一个缺陷上；P-1 翻绿后接线才成立。**一个存在但从不运行的 selftest 不是守卫**，这与 `KB-7`「登记不是传输」是同一形状：载体在，它声称承载的性质从未真的被承载。见 §14 / §15 / §20.1 |
+| **v1.61** | PR-2 第十六轮（Sol exact-HEAD 退回） | **我把守卫的「全部枚举完毕」当成了覆盖率，而它的枚举被自己的 scope 圈死——上一轮我刚用整段话批评过这个病。** ①Sol 在 `d579c02` 抓到 P1：v1.60 声称 15 处全量回补且 guard green，但 active 区还有**第二组整整 15 个**陈旧值，守卫一个都没报——因为它们所在的行不带任何 scope token（`--lane` 注释、`lane selector` 叙述、「这 38 行自审」），或者行在 scope 内但**没有任何 arm 读得懂那种写法**（`GLM 48 / Fable5 38` 不挨着 `行`；`现行为 **84**` 不挨着 `行`）。我独立穷举复核后与 Sol 逐条吻合：`84→88`、`38→39`×5、`48→49`×2、`112→114`×5。②**根因不是漏改数字，是我读错了守卫说的话**：它输出 `every cache site enumerated`，实际语义是 `every IN-SCOPE cache site`。这两句在看板上长得一样，而差别正是本轮 P1 的全部内容。现已改口径：结论行明写 `WITHIN SCOPE`，并在枚举下方常驻一句「scope 是过滤器不是普查——落在无 arm、无 token 之行上的缓存不会被计入，也永远不会显示为缺口」。**守卫不该替读者做它没做的保证。**③加宽两处 scope（`--lane`／`lane selector`／`exactHead`／`evidenceOwner`；`全|这|全部 + N + 行`）与两条 arm（`pair` 读 owner 分列、`curval` 读「现行为 N」）。按 shape 而非按裸 `行` 加宽——守卫自己记过，裸 `矩阵` 会把「§6.4.1 矛盾 tuple 矩阵（8 行独立负例）」误判，而那不是本台账的缓存。④**枚举器此前硬编码了自己那份 arm 列表**，于是新增 arm 会被扫描却不被枚举——在唯一用来暴露盲区的输出里隐身。现由单一 `ARMS` 表派生，扫描与枚举不可能再分叉；这正是 `check-contract-v1.sh` 第 3 节记过的「a list you must remember to update is not a gate, it is a note」。⑤`现行为 N` 对历史豁免**免疫**：L2801 同一句里既逐字引用 Issue #6 的旧值 `64`、又断言现值，而一个从 210 字符外就打开的全角括号跨度把两者一起豁免了。那处活断言此前是**双重隐形**的——没有 arm 读它，读了也会被豁免。「现行为」是显式现在时，定义上不可能是它旁边那句引用。⑥补 4 条负例（`N-G` pair／`N-H` curval／`N-I` lane-scope／`N-J` rowcount-scope）与 5 条变异（含 `M-ARMS-CENSUS` 钉扫描与枚举同表）。每条负例都种进**只被本轮加宽覆盖**的行——旧的六条做不到这件事，因为它们全都种在旧 scope 已经够得着的行里，**一条负例只能测量它种进去的那个识别器**。`M-PLAIN-SCOPE` 因加宽后三路可达而失去隔离性，改为自己种一行隔离行（冗余是守卫的好事，但会让变异证明失效）。⑦Sol 的两条 P2：§12 v1.59 只生成了 `src/main` 却把声明写成整个 `contracts/**` 逐项一致，漏 6 个测试文件——**一句比自己覆盖面更宽的声明与一份过期清单同类**，只是它骗人的方式是措辞；现补 `src/test` 子树。§20 的「技术项：`KB-5` 一条」既漏 `KB-6` 也没跟上 `KB-7` 转 `gap`，改为三条并明写以 §20.1 为准；§20.1 的 `gap` 定义由「补 ledger row」扩为「补 ledger row **或门禁**」，与 `KB-7` 的处置一致（`KB-6` 缺行、`KB-7` 缺门禁，同类）。见 §12 / §14 / §15 / §20 / §20.1 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -2798,7 +2799,7 @@ Task 7 此前同时承诺三件事：验收方覆盖 §10 全部行、测试只�
 - **同报告内的绑定**：记录里的 `testId` 必须在该原始报告中出现，且其 outcome 与本记录的 `status` **一致**。缺这一条时，清单可以声称 `passed` 而报告里写着 failed——那样 manifest 又退回成自说自话，正是引入它要消除的东西。
 - 清单本身进 PR evidence，**Fable5** 的矩阵报告消费它，而不是逐行手工声明。
 
-Task 7 的表述同步改为：**Fable5** 负责 `sol-blackbox`/`static-guard`/`device` 三类的编写与执行，并对 `owner-red` 行做 **evidence audit**（核对报告中存在该 ID 的通过用例、绑定 exact HEAD、断言与该行预期终态一致）。**Fable5** 不写 `owner-red` 测试，也不再声称"为每一行提供失败场景"。**Sol 不编写、不执行本文任何一类矩阵行**——它对 Fable5 的 26 行与该 evidence audit 本身做独立 review（[#6](https://github.com/TERRYYYC/fakexxx/issues/6) T0：*Fable5 implements the 26 acceptance-lane rows and audits the remaining 64 owner rows*〔**逐字引用 Issue #6 的 T0，刻意不改**：该 `64` 是立 issue 当轮的值，现行为 **84**（§10.1 现算）。静默改写他人 issue 的原文会让引用与被引用方永久对不上——要么由 #6 的 owner 改 T0，要么保留原文并在此注明，二者都不是本文单方能做的**改数**〕；reviewers Sol + GLM）。
+Task 7 的表述同步改为：**Fable5** 负责 `sol-blackbox`/`static-guard`/`device` 三类的编写与执行，并对 `owner-red` 行做 **evidence audit**（核对报告中存在该 ID 的通过用例、绑定 exact HEAD、断言与该行预期终态一致）。**Fable5** 不写 `owner-red` 测试，也不再声称"为每一行提供失败场景"。**Sol 不编写、不执行本文任何一类矩阵行**——它对 Fable5 的 26 行与该 evidence audit 本身做独立 review（[#6](https://github.com/TERRYYYC/fakexxx/issues/6) T0：*Fable5 implements the 26 acceptance-lane rows and audits the remaining 64 owner rows*〔**逐字引用 Issue #6 的 T0，刻意不改**：该 `64` 是立 issue 当轮的值，现行为 **88**（§10.1 现算）。静默改写他人 issue 的原文会让引用与被引用方永久对不上——要么由 #6 的 owner 改 T0，要么保留原文并在此注明，二者都不是本文单方能做的**改数**〕；reviewers Sol + GLM）。
 
 ## 11. 日志与证据契约
 
@@ -2841,7 +2842,7 @@ fakexxx/
 │   ├── architecture/ownership/README.md
 │   ├── acceptance/a-plus-device-matrix.md
 │   └── provenance/upstream-imports.md
-├── contracts/environment-control-v1/          # 本分支与实际文件系统逐项一致（v1.59 重新生成）
+├── contracts/environment-control-v1/          # 本分支与实际文件系统逐项一致（v1.61 重新生成，含 src/test）
 │   ├── README.md
 │   ├── compatibility.yaml
 │   ├── build.gradle.kts
@@ -2863,7 +2864,7 @@ fakexxx/
 │       │   ├── PreflightRequestV1.aidl
 │       │   ├── ReleaseReceiptV1.aidl
 │       │   └── ReleaseRequestV1.aidl
-│       └── java/io/github/terryyyc/fakexxx/contract/v1/
+│       ├── java/io/github/terryyyc/fakexxx/contract/v1/
 │           ├── AdvanceReceiptV1.kt
 │           ├── ApplyReceiptV1.kt
 │           ├── ApplyRequestV1.kt
@@ -2882,6 +2883,13 @@ fakexxx/
 │           ├── PreflightRequestV1.kt
 │           ├── ReleaseReceiptV1.kt
 │           └── ReleaseRequestV1.kt
+│       └── test/java/io/github/terryyyc/fakexxx/contract/v1/
+│           ├── CanonicalAdvanceDigestV1Test.kt
+│           ├── CanonicalDigestGoldenVectorsV1Test.kt
+│           ├── CanonicalIntentDigestV1Test.kt
+│           ├── ContractResultCarrierTest.kt
+│           ├── ContractRoundTripTest.kt
+│           └── ContractWireCompatibilityTest.kt
 ├── apps/
 │   ├── cellrebel-auto/                 # subtree from Faketest@48d8ec9
 │   │   └── app/src/{main,test,androidTest}/...
@@ -2900,7 +2908,7 @@ fakexxx/
 └── .github/workflows/android-a-plus.yml
 ```
 
-**本树的边界（v1.59）**：`contracts/**` 分支与实际文件系统**逐项一致**，由本轮重新生成；其余分支（`apps/`、`acceptance/`、`scripts/`、`docs/`）是**示意**，不是真相源——例如 `scripts/` 实际已多于所列三条。**一份部分更新的清单会被当成完整清单读**，所以这条边界必须写下来而不是靠读者推断；文件所有权以 §12.1 为准，DTO 的 `.kt`／`.aidl` 齐备性以 `check-contract-v1.sh` 第 3 节的**派生**结果为准（它不读本树）。
+**本树的边界（v1.61）**：`contracts/**` 分支与实际文件系统**逐项一致**——`src/main` 与 `src/test` 都在内。v1.59 首次生成时**只取了 `src/main`，却把声明写成整个 `contracts/**` 逐项一致**，漏掉 6 个真实测试文件；**一句比自己覆盖面更宽的声明，和一份过期清单是同一种缺陷**，只是它骗人的方式是措辞而不是内容。其余分支（`apps/`、`acceptance/`、`scripts/`、`docs/`）是**示意**，不是真相源——例如 `scripts/` 实际已多于所列三条。**一份部分更新的清单会被当成完整清单读**，所以这条边界必须写下来而不是靠读者推断；文件所有权以 §12.1 为准，DTO 的 `.kt`／`.aidl` 齐备性以 `check-contract-v1.sh` 第 3 节的**派生**结果为准（它不读本树）。
 
 ### 12.1 Owner matrix
 
@@ -3456,7 +3464,7 @@ cd apps/cellrebel-auto
 
 **verifier 必须支持 lane 子集（否则本分工不可执行）**：`scripts/verify-a-plus.sh` 增 `--lane <pr-3|pr-3.5|pr-4|pr-5|pr-6>`。
 
-**lane selector 必须是机器可判定的行集合，不能写「该 lane 自有行」**——Fable5 同时拥有 PR-3 的 38 行与 PR-5 交付的 26 行，仅凭 owner 无法区分。冻结为 `(class, evidenceOwner, 入口路径前缀)` 三元组：
+**lane selector 必须是机器可判定的行集合，不能写「该 lane 自有行」**——Fable5 同时拥有 PR-3 的 39 行与 PR-5 交付的 26 行，仅凭 owner 无法区分。冻结为 `(class, evidenceOwner, 入口路径前缀)` 三元组：
 
 | lane | 校验集合（机器判定式） | 行数 | 谁的 exactHead |
 |---|---|---|---|
@@ -3472,7 +3480,7 @@ cd apps/cellrebel-auto
 >
 > **v1.46 再更正——上面这条自述本身也过度声称了。** 它写「这张表的四个计数此前全部过时……本轮一并校正」，但本轮实测：v1.39 只改了紧邻的 **lane selector 表**（`pr-3`/`pr-4`/`pr-6`/并集自检），**没有**碰 20 行外的聚合表（`PR-3` 33 / `PR-6` 90）与 class 责任表（`owner-red` 64）——那两处一直停在 v1.38 之前的值，直到 v1.46 才随 `M-AD-14..20` 一并重算。**一条声称「我已经扫了同类」的更正note，本身没有扫同类**，于是后来的读者读到它会认为该问题已闭合而不再复查——这比不写更糟：它把一个未完成的清扫伪装成已完成的。故本轮除改数外，另立规则：**派生计数只能从 §10.1 台账现算，任何散文里的计数都是缓存**，新增或删除台账行必须在**同一个 commit** 内重算全部缓存点（本轮共 22 行 29 处），且更正note只能声称自己**实际验证过**的范围。
 
-**没有 `--lane` 时默认 `pr-6` 语义（全 112 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 112 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
+**没有 `--lane` 时默认 `pr-6` 语义（全 114 行同 HEAD）** —— 保持最严，避免"忘了传参就悄悄放宽"。**因此每个 Task 的 Verify 必须显式传 `--lane`**：裸调用等于要求全 114 行同 HEAD，在 PR-3/4/5 上必然红。该实现落 PR-1 分支的 `scripts/verify-a-plus.sh`；本文只冻结契约，不改脚本。
 
 **Scope（按 §10.1 台账，不再是"全部行"）：** §10 共 **114 行 / 18 类**（`appid-cutover` 5 行随 `INV-29` 的证据载体拆出到 [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13)）。
 
@@ -3487,26 +3495,26 @@ cd apps/cellrebel-auto
 
 > **v1.22 更正——上一版给的理由是错的，由 GLM 证伪。** 上一版写「可接受的唯一理由是它不是终门，终门是 `verify-a-plus.sh` 的 owner-independent 机械校验」。**这条论证不成立**：本 Task 的 Verify ①②③ 校验的是「ID 集合相等」「覆盖绑 `status=passed` 且 `exactHead` 相符」「未覆盖行分类 `not-testable` / `deferred`」——**没有任何一条校验「断言语义是否真对应该行的预期终态」**。而「断言与预期终态一致」恰恰是 evidence audit 在做的事。**机械门覆盖不到自审所校验的东西，因此它不能充当自审的兜底。**
 
-**这 38 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
+**这 39 行自审真正可接受的理由（冻结）**，是另外两件与机械门无关的事：
 
 1. **测试代码本身经过独立 review**：那 39 行的 `owner-red` 测试随 PR-3 交付，`I3` 的 reviewer 是 **DeepSeek Flash**（§16）。断言写错会在代码 review 阶段被非作者看到。
 2. **audit 产物本身经过独立复核**：Fable5 产出的 evidence audit 由 **DeepSeek Flash** 复核——具体义务写在 **Task 8 第 3 条**（逐条核 `passed` 记录存在性、`exactHead` 相符、**断言语义是否真对应台账「预期终态」列**），并明写机械门 ①②③ 不覆盖最后一项。**v1.23 更正**：上一版此处引用的是「Task 8 第 2 条」，而第 2 条只审 fake 是否迎合自家 provider，**并不包含 owner-red audit 复核**——那是一条当时并不存在的传播。现已把该义务真正写入 Task 8 并把引用指向它。
 
-**因此这 38 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 38 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
+**因此这 39 行的独立性完全来自 PR 阶段的跨个体 review，而不是来自任何自动门。** 由此产生一条硬约束：**不得因为「CI 全绿」而放松 PR-3 的代码 review 强度**——那是这 39 行**唯一**的独立检查。**不得**把自审当作独立证据；**也不得**用机械校验替代它，因为二者根本不检查同一件事。
 
 **RED（三处，各自绑不同 HEAD——上一版把它们混成一句，与「PR-5 = 0 矩阵行」冲突）：**
 
 | 在哪 | 什么先红 | 涉及行 |
 |---|---|---|
 | **PR-5** | **只有 harness self-test 先红**：negative-control 断言、fixture loader 对损坏 fixture、guard 对构造违规样本。**不是任何一条矩阵行** | **0 矩阵行** |
-| PR-3 / PR-4 | 各自 `owner-red` 行先红 | Fable5 38 / GLM 48 |
+| PR-3 / PR-4 | 各自 `owner-red` 行先红 | Fable5 39 / GLM 49 |
 | **PR-6** | 22 `sol-blackbox` + 2 `static-guard` 对**真实 Auto/provider** 的 RED→GREEN；2 `device` 行在授权 lease 内产生首份真机证据 | 26 |
 
 上一版写「26 行的测试代码在 PR-5 上写就、各自失败场景先红」有两处不成立：**①** 与本 Task 已冻结的「PR-5 = 0 矩阵行」直接冲突；**②** 26 行里有 **2 条是 `device` 类**，它们的载体是 `docs/acceptance/**` 的**证据登记，根本没有可以"先红"的测试代码**。**在 PR-5 的 HEAD 上，被断言的实现尚不存在，任何「矩阵行先红」都不是有效 RED，只是编译不过或断言恒假。**
 
-**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **88 行 `owner-red`** 已归各自 code owner（GLM 48 / Fable5 38），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
+**GREEN:** fake provider 能返回重复 receipt、重启/丢 coverage、revision 漂移、stale/foreign lease、矛盾 tuple、binder death；**acceptance lane 的测试只消费公开 v1 contract**——**这一约束现在与覆盖范围自洽**，因为那 **88 行 `owner-red`** 已归各自 code owner（GLM 49 / Fable5 39），由他们在自己的 lane 内证明。它们不是"无法测试"，只是**不该由 acceptance lane 跨 owner 去测**；acceptance lane（Fable5）对它们的职责是 evidence audit。**注意**：黑盒约束在此处始终指**依赖边界**（只能进 public v1 contract + fake provider），不指执行者身份——Fable5 写 qwy provider 与写 acceptance 用的是两个互不可见的入口，`check-forbidden-boundaries.sh` 对二者一视同仁地静态阻断。
 
-**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 112 行同 HEAD，在本 PR 上必红）：**
+**Verify（必须显式传 `--lane`，裸调用 = `pr-6` 全 114 行同 HEAD，在本 PR 上必红）：**
 
 ```bash
 # PR-5 自身：只自证 harness，不消费 evidence manifest、不验矩阵行
@@ -3565,10 +3573,10 @@ cd apps/cellrebel-auto
 (cd apps/qianwangyou && ./gradlew lintDebug assembleDebug)
 
 ./acceptance/scripts/check-forbidden-boundaries.sh
-./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 112 行、每行 exactHead == PR-6 HEAD
+./scripts/verify-a-plus.sh --lane pr-6      # 本 task 是汇合点：全 114 行、每行 exactHead == PR-6 HEAD
 ```
 
-预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 112 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
+预期：全部 exit 0；测试报告归档到 PR evidence。**本 task 是唯一验证全 114 行的地方**——26 个 acceptance 行的真实产品通过与 device evidence 都在此产生（见 Task 7）。设备验收命令不写成无串号的通用 `adb` 脚本，必须在独立 device lease 中绑定 exact serial、APK SHA、安装方式和恢复边界。
 
 ## 15. PR 顺序与 merge gates
 
@@ -3710,7 +3718,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 **因此本文现在是可开工的冻结实施基线**（与顶部告示一致）。
 
-仍然开放、但**不属于 operator 价值取舍**的技术项：**`KB-5` 一条**，见下表。本行此前写作"无"——那在 `KB-5` 被显式化之前只是**看起来**成立：该留白当时并没有不存在，而是以 §6.3.3 与 §6.7.4a 互斥的形式藏着，读者读到的是两条各自自洽的规则，而不是一处待裁定的空白。**矛盾是留白的伪装态**，v1.42 只是把它还原成留白。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置仍是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+仍然开放、但**不属于 operator 价值取舍**的技术项：`KB-5`（契约留白）、`KB-6`（覆盖缺口）与 `KB-7`（规则已冻结但零门禁），见下表。**以 §20.1 为准，不以本行的枚举为准**——本行此前只写 `KB-5` 一条，既漏掉 `KB-6`、也没跟上 `KB-7` 由 `unfrozen` 转入 `gap`；「一个入口列一个子集」正是 §20.1 建表要消灭的东西，而本行是它最后一个残存实例。本行此前写作"无"——那在 `KB-5` 被显式化之前只是**看起来**成立：该留白当时并没有不存在，而是以 §6.3.3 与 §6.7.4a 互斥的形式藏着，读者读到的是两条各自自洽的规则，而不是一处待裁定的空白。**矛盾是留白的伪装态**，v1.42 只是把它还原成留白。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置仍是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
 
 ### 20.1 已知边界总表（完整性投影）
 
@@ -3729,7 +3737,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | `KB-8` | §2.2 声称 Auto 不再导入地址/经纬度、只持有 `scheduleItemId + scheduleVersion`，但 `EnvironmentIntentV1` 仍要求 Auto 发送 `latitude/longitude` 且进入 `acceptedIntentHash` 的 preimage；`discover()` 不暴露 schedule-item 坐标。provider 可以信 Auto 坐标、信自己 schedule 坐标、或拒绝不匹配——**契约未冻结选择，也无 wire 表达它**。Decision Packet v2 已投 | `unfrozen` 契约留白 | §2.2 / §6.3（`EnvironmentIntentV1`）/ §6.3.1（digest preimage） | **operator 裁定坐标所有权**（Decision Packet v2 已投）。裁定后冻结 wire 级行为（provider 用谁的坐标、不匹配时返回什么 code、discover 是否投影 item 坐标） | 冻结前**不得**声称坐标归属已解决。两侧实现各自选一种读法即不可移植——与 `KB-5` 同形，层不同（`KB-5` 在 lease 层，本条在 intent 层） |
 | `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为 `M-AD-12`／`M-AD-13`／`M-AD-20`／`M-AD-21`／`M-AD-22`（**此处刻意枚举、不计数**：本条的存货数已经过期过一次，而一个过期的数字没有任何东西能发现，一个缺失的 ID 有——这正是 `check-derived-counts` 作者为同一种病写下的解药「enumerate, never count」），但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
 
-**四个类别不可互相改写**，因为每一类要求的下一步动作完全不同：`limit` 是**已经知道证明不了**（只能接受并披露）；`unfrozen` 是**还没决定**（需要 owner 裁定）；`deferred` 是**可触达、有确定载体、尚未闭合**（等载体，与 §10.1 对 `deferred:<DP-x>` 的规定同源）；`gap` 是**契约已冻结、但没有稳定 ledger row 证明实现符合它**（需要补行并执行）。把留白写成上限，等于宣布它永远不修；把上限写成留白，等于承诺一件交付不出来的东西；把任一者写成 `deferred`，等于给它一个并不存在的闭合路径。而把 `gap` 写成 `limit`——**把"还没测"说成"测不了"**——是其中最该防的一种：它让一件待办永久退出待办清单，且伪装成物理限制之后没有人会再去挑战它。
+**四个类别不可互相改写**，因为每一类要求的下一步动作完全不同：`limit` 是**已经知道证明不了**（只能接受并披露）；`unfrozen` 是**还没决定**（需要 owner 裁定）；`deferred` 是**可触达、有确定载体、尚未闭合**（等载体，与 §10.1 对 `deferred:<DP-x>` 的规定同源）；`gap` 是**契约已冻结、但没有稳定的执行面证明实现符合它**（需要补 ledger row **或门禁**并执行——`KB-6` 缺的是行，`KB-7` 缺的是门禁，两者同类）。把留白写成上限，等于宣布它永远不修；把上限写成留白，等于承诺一件交付不出来的东西；把任一者写成 `deferred`，等于给它一个并不存在的闭合路径。而把 `gap` 写成 `limit`——**把"还没测"说成"测不了"**——是其中最该防的一种：它让一件待办永久退出待办清单，且伪装成物理限制之后没有人会再去挑战它。
 
 ## 21. operator Decision Packets
 

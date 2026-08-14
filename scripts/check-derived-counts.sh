@@ -153,10 +153,27 @@ SCOPE_PLAIN_OWNER_RED = r'owner-red'
 # last branch leaves a trailing '|' whose empty alternative matches EVERY
 # line -- the mutation test caught exactly that, scope silently becoming the
 # whole document (52 -> 73 sites, both false positives resurrected).
+# SCOPE_LANE_DISCOURSE / SCOPE_ROW_COUNT are the v1.61 widening, and they exist
+# because the v1.60 recompute was reported as complete while a SECOND group of 15
+# active stale values sat outside this scope. Topic tokens (`owner-red`, 台账,
+# 矩阵行) only reach lines that NAME the ledger; they never reached the lines that
+# merely COUNT it -- `--lane pr-6  # 全 112 行`, "lane selector ... PR-3 的 38 行",
+# "这 38 行自审". Those are caches by every definition this guard uses.
+#
+# Scoped by phrase shape, not by bare 行: the guard's own note records that a bare
+# 矩阵 pulled in "§6.4.1 矛盾 tuple 矩阵（8 行独立负例）", whose rows are not caches
+# of THIS ledger. 全/这/全部 + N + 行 is a count OF A KNOWN WHOLE, which that
+# counterexample is not.
+SCOPE_LANE_DISCOURSE = r'--lane|lane selector|exactHead|evidenceOwner'
+SCOPE_ROW_COUNT = r'[全这]\s*[0-9]+\s*行|全部\s*[0-9]+\s*行'
 SCOPE_PARTS = [r'`owner-red`', r'`sol-blackbox`', r'`static-guard`',
                r'`device`', r'台账', r'矩阵行']
 if SCOPE_PLAIN_OWNER_RED:
     SCOPE_PARTS.append(SCOPE_PLAIN_OWNER_RED)
+if SCOPE_LANE_DISCOURSE:
+    SCOPE_PARTS.append(SCOPE_LANE_DISCOURSE)
+if SCOPE_ROW_COUNT:
+    SCOPE_PARTS.append(SCOPE_ROW_COUNT)
 SCOPE_RE = re.compile('|'.join(SCOPE_PARTS))
 if SCOPE_RE.search(''):
     # A pattern that matches the empty string matches every line. Refuse to
@@ -176,6 +193,31 @@ ARM_BARE = re.compile(r'(?<![\d.\-*_])([0-9]+)(?![\d*])\s*行')
 ARM_BOLD = re.compile(r'\*\*([0-9]+)\*\*\s*行')
 ARM_REDCT = re.compile(r'(?<![\d])([0-9]+)\s*个\s*`?owner-red`?')
 ARM_CN = re.compile(r'(?<!第)([零一两二三四五六七八九十百]+)\s*行')
+# ARM_OWNER_PAIR: "GLM 48 / Fable5 38" -- a per-owner split of owner-red that
+# never touches 行, so every 行-anchored arm above walked straight past it while
+# the line itself was already in scope. Being in scope is not being readable.
+# The trailing class blocks version-like tails (GLM 5.2) and percentages.
+ARM_OWNER_PAIR = re.compile(r'(?<![\w-])(?:GLM|Fable5|Opus5|DeepSeek Flash)\s*[：:／/]?\s*([0-9]+)(?![\d.*%])')
+# ARM_CURVAL: "现行为 **84**" -- a claim whose entire purpose is to state the
+# CURRENT ledger value, and the one notation where being wrong is most direct.
+# Deliberately narrow: dropping the 行 requirement from ARM_BOLD instead would
+# swallow every bold wire code (`STALE_LEASE`(**8**)) on an in-scope line.
+ARM_CURVAL = re.compile(r'现行为\s*\*{0,2}([0-9]+)\*{0,2}')
+
+# SINGLE source for the arm list: the scan loop and the enumeration below both
+# read it. They used to carry separate copies, so an arm could be scanned and
+# never enumerated -- invisible in the one output that exists to expose blind
+# spots. 'cell' is appended by the enumeration because it is applied separately
+# (keyed rows), not by a regex in this table.
+ARMS = (('bare', ARM_BARE), ('bold', ARM_BOLD), ('redct', ARM_REDCT),
+        ('cn', ARM_CN), ('pair', ARM_OWNER_PAIR), ('curval', ARM_CURVAL))
+
+# The marker-word exemption protects QUOTED superseded text. "现行为 N" asserts
+# the present value, so it is the one notation that can never be the quotation
+# it sits next to -- and it routinely does sit next to one, which is why it needs
+# saying: L2801 quotes Issue #6's original 64 and states the current value in the
+# same sentence, inside one bracket span.
+NEVER_EXEMPT_ARMS = {'curval'}
 
 # CELL arm: keyed table rows (first cell names a lane or class). pr-3.5 / pr-5
 # are frozen empty-set policy lanes, included so their expected 0 stays pinned
@@ -242,13 +284,15 @@ def quoted_spans(s):
         spans.append((depth_open, len(s)))
     return spans
 
-def exempt(start, stripped_line, work_line):
+def exempt(start, stripped_line, work_line, arm_never_exempt=False):
     # Per-match history exemption -- the line-level exemption this guard shipped
     # with let KB-6's LIVE claim (现为五行) hide behind its own 此前写作.
     #   - a correction BLOCKQUOTE ("> ... v1.NN 更正 ...") is wholesale
     #     history: exempt the whole line, as before;
     #   - an in-flow marker word exempts only what it actually quotes: matches
     #     inside 「」/（） spans. Matches outside the brackets are live claims.
+    if arm_never_exempt:
+        return False
     if not HISTORY_MARKER.search(stripped_line):
         return False
     if stripped_line.startswith('>'):
@@ -276,11 +320,11 @@ for idx in range(active_from - 1, len(lines)):
 
     def consider(arm, value, pos):
         sites.append((absno, arm, value))
-        if value not in legal and not exempt(pos, stripped, work):
+        if value not in legal and not exempt(pos, stripped, work,
+                                            arm_never_exempt=(arm in NEVER_EXEMPT_ARMS)):
             findings.append((absno, arm, value))
 
-    for arm, rx in (('bare', ARM_BARE), ('bold', ARM_BOLD),
-                    ('redct', ARM_REDCT), ('cn', ARM_CN)):
+    for arm, rx in ARMS:
         # `if rx` keeps a mutation test able to disable exactly one arm
         # (ARM_X = None) and have the scan SKIP it cleanly instead of dying
         # mid-gate -- a crash also removes findings, for the wrong reason.
@@ -310,7 +354,7 @@ legal_repr = ' '.join(str(v) for v in sorted(BASE_LEGAL, reverse=True))
 print('  ledger can produce: %s (plus %d on appid-cutover lines, %d on 空集 lanes)'
       % (legal_repr, APPID_CUTOVER_ROWS, EMPTY_SET_ROWS))
 stale = {(a, ar, v) for (a, ar, v) in findings}
-for arm in ('bare', 'bold', 'redct', 'cn', 'cell'):
+for arm in [a for a, _ in ARMS] + ['cell']:
     entries = ['L%d=%s%s' % (a, v, '*' if (a, arm, v) in stale else '')
                for (a, ar, v) in sites if ar == arm]
     if entries:
@@ -329,19 +373,20 @@ for (a, ar, v) in findings:
           % (a, ar, v, v, legal_repr,
              ', 5' if 'appid-cutover' in lines[a - 1] else ''))
 
-print('  => section 3: %d stale cache site(s) of %d enumerated' % (len(seen), len(sites)))
+print('  => section 3: %d stale cache site(s) of %d enumerated WITHIN SCOPE' % (len(seen), len(sites)))
+print('  ----  scope is a filter, not a census: a cache on a line no arm and no\n        scope token reaches is not counted above and never appears as a gap.')
 sys.exit(min(len(seen), 100))
 PY
 STALE=$?
 if [ "$STALE" -eq 0 ]; then
-  pass "every active cache site is a value the ledger can produce"
+  pass "every IN-SCOPE cache site is a value the ledger can produce"
 else
   fail "active prose states counts the ledger cannot produce (see enumeration)"
 fi
 
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
-  printf 'check-derived-counts: PASS (ledger is the single source; %s rows; every cache site enumerated above)\n' "$TOTAL"
+  printf 'check-derived-counts: PASS (ledger is the single source; %s rows; every IN-SCOPE cache site enumerated above)\n' "$TOTAL"
   exit 0
 fi
 printf 'check-derived-counts: FAIL (%d check(s) failed; %s stale cache site(s), enumerated above by arm and line)\n' \
