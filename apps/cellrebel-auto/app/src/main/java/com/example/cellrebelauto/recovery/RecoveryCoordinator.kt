@@ -90,7 +90,7 @@ class RecoveryCoordinator(
             // A fail-closed executor yields no lease — the apply is not proven; fail closed.
             return ReconcileResult.InsufficientEvidence
         }
-        val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
+        val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now, outcome.leaseId)
             ?: return ReconcileResult.InsufficientEvidence // receipt not durable ⇒ apply unproven
         log.recordCheckpoint(attemptId, "ADVANCED_TO_RELEASE", receipt.idempotencyKey, now)
         return ReconcileResult.AdvancedToRelease(receipt, outcome.leaseId!!)
@@ -180,7 +180,10 @@ class RecoveryCoordinator(
         }
         val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
         if (outcome.leaseId != null) {
-            val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
+            // R43 (Sol GREEN-review P1-5): the provider lease persists ATOMICALLY with the receipt —
+            // a crash between this line and the attempt-owner markAplusLease still recovers the lease
+            // from the receipt replay (ApplyReceiptV1.leaseId is part of the durable proof).
+            val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now, outcome.leaseId)
             if (receipt == null) {
                 // Receipt not durable (storage failed) → fail-closed: the apply is NOT proven, no lease.
                 return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)

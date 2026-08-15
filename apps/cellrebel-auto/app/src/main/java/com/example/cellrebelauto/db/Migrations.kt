@@ -216,5 +216,40 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
             "CREATE UNIQUE INDEX IF NOT EXISTS `index_durable_completion_receipts_attemptId` " +
                 "ON `durable_completion_receipts`(`attemptId`)"
         )
+
+        // ---- Room-backed operation/recovery/release receipts (R43, Sol GREEN-review P1-1):
+        //      the production DurableRecoveryLog binding. Folded INTO v5 (pre-release schema). ----
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `operation_receipts` (
+                `idempotencyKey` TEXT PRIMARY KEY NOT NULL,
+                `requestDigest` TEXT NOT NULL,
+                `resultOutcome` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                `leaseId` TEXT
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `recovery_checkpoints` (
+                `attemptId` INTEGER PRIMARY KEY NOT NULL,
+                `lastDurableStage` TEXT NOT NULL,
+                `receiptKey` TEXT,
+                `recordedAt` INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `release_receipts` (
+                `idempotencyKey` TEXT PRIMARY KEY NOT NULL,
+                `leaseId` TEXT NOT NULL,
+                `releaseDigest` TEXT NOT NULL,
+                `resultOutcome` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
     }
 }

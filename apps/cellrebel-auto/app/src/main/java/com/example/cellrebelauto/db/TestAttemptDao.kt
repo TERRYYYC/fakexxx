@@ -69,11 +69,18 @@ interface TestAttemptDao {
 
     /**
      * Recovery sweep (INV-9): mark leftover starting/running rows interrupted.
-     * # 恢复清扫（INV-9）：把残留的 starting/running 行标记为 interrupted
+     *
+     * R43 (Sol GREEN-review P1-2): rows that entered the A+ lifecycle (aplusState non-null) are
+     * EXCLUDED — they are §8.1 owner-state machines whose non-terminal phases are RECONCILED by the
+     * A+ recovery path (re-observe / classify / re-decide), never blind-swept to interrupted. A
+     * just-advanced recovery phase (e.g. CELLREBEL_START_PENDING with status still `starting`) must
+     * survive this sweep.
+     *
+     * # 恢复清扫（INV-9）：A+ 生命周期内的行绝不盲扫——由 §8.1 恢复路径协调
      */
     @Query(
         "UPDATE test_attempts SET status = 'interrupted', failureReason = 'INTERRUPTED', endedAt = :nowMs " +
-            "WHERE status IN ('starting', 'running')"
+            "WHERE status IN ('starting', 'running') AND aplusState IS NULL"
     )
     suspend fun markNonTerminalInterrupted(nowMs: Long): Int
 

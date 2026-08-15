@@ -282,7 +282,9 @@ class AutomationService : AccessibilityService() {
 
             // # R8-F1/F2（Sol round-7 P1-1 / round-11 P1-1）：A+ 组合根。生产经 engineAplusParams 从
             // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
-            val aplusBackend: APlusBackend = APlusComposition.productionBackend()
+            // R43 GREEN: the REAL production backend over the frozen contract (binder executor +
+            // Room receipt store); unbound provider fail-closes inside the adapters, not by stubs.
+            val aplusBackend: APlusBackend = APlusComposition.productionBackend(applicationContext, db)
             val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
             // R43 (Sol R42 P1-2): the ENTIRE production engine construction delegates to the pure
             // factory — the monotonic commit-clock default lives there (production wiring, observable

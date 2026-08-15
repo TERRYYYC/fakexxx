@@ -31,10 +31,12 @@ import org.robolectric.RobolectricTestRunner
  * elapsedRealtime). A full §6.4-positive DECIDING recovery mints through it; the minted
  * `committedAt` must bind the MONOTONIC domain, never the wall value.
  *
- * Killing mutations (both verified to FAIL this test):
+ * Killing mutations (all verified to FAIL this test):
  *  1. reverting the ledger-commit call to `nowMs()` — committedAt == WALL ⇒ the assertNotEquals fails;
- *  2. removing the monotonic injection (factory default falls back to the wall/nowMs domain) —
- *     committedAt == WALL ⇒ the assertNotEquals fails.
+ *  2. changing the FACTORY DEFAULT parameter to a wall clock (the exact mutation that previously
+ *     survived: the clock-source property stays monotonic but the default wiring is corrupted) —
+ *     the engine now binds wall, committedAt == WALL ⇒ fails. The default is observed because the
+ *     test OMITS commitClockMs.
  *
  * # 生产组合根 monotonic commit-clock oracle（Sol R42 P1-2）：经 factory 同路径铸币，committedAt 必须落在 monotonic 域
  */
@@ -153,8 +155,10 @@ class ProductionCommitClockFactoryTest {
             aplusEvidence = evidence,
             bridge = null,
             nowMs = { WALL_VALUE },          // wall domain, distinctive
-            delayMs = { },                    // no-op delays
-            commitClockMs = AutomationEngineFactory.productionCommitClockMs // production default, explicit for clarity
+            delayMs = { }                     // no-op delays
+            // R43 (Sol GREEN-review P1-4): commitClockMs is DELIBERATELY OMITTED — the test observes
+            // the FACTORY DEFAULT that AutomationService actually relies on. A mutation changing the
+            // default parameter (e.g. to a wall clock) is what this oracle must kill.
         )
         engine.run()
 

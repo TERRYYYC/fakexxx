@@ -68,6 +68,10 @@ class TrustPolicy {
         // a sub-10s run is NOT a trusted completion (Sol round-3 Finding 1).
         if (exec.completedAtElapsed - exec.runningConfirmedAtElapsed < MIN_RUNNING_EVIDENCE_MS) return TrustDecision.FAIL
 
+        // R43 (Sol GREEN-review P1-3): the TARGET coordinates must also be finite/in-range — a NaN
+        // target makes the haversine distance NaN, and `NaN > tolerance` is false ⇒ a false PASS.
+        if (!isFiniteGeo(context.targetLat, context.targetLng)) return TrustDecision.FAIL
+
         return TrustDecision.PASS
     }
 
@@ -89,6 +93,13 @@ class TrustPolicy {
         // INV-23: each observation's intent hash matches the receipt (both sides, R6-F1 POST residual).
         if (obs.acceptedIntentHash != context.applyReceiptIntentHash) return false
 
+        // R43 (Sol GREEN-review P1-3): non-finite coordinates are a fail-closed contradiction tuple.
+        // NaN haversine is NaN, and `NaN > tolerance` is false — a NaN lat/lng would otherwise PASS.
+        // ±Infinity and out-of-range values are equally untrustworthy (a coordinate that cannot
+        // exist on Earth cannot bracket an attempt). Validated BEFORE any distance math, for BOTH
+        // the observation's effective coords AND the caller's target coords.
+        if (!isFiniteGeo(obs.effectiveLat!!, obs.effectiveLng!!)) return false
+
         // INV-23: coordinates within the FROZEN tolerance — NEVER the caller-supplied field
         // (R6-F1 caller-tolerance false-oracle; context.locationToleranceMeters is audit-only).
         val distanceM = haversineMeters(obs.effectiveLat!!, obs.effectiveLng!!, context.targetLat, context.targetLng)
@@ -96,6 +107,10 @@ class TrustPolicy {
 
         return true
     }
+
+    /** Finite AND within valid geographic ranges (lat ∈ [-90,90], lng ∈ [-180,180]) — Sol GREEN-review P1-3. */
+    private fun isFiniteGeo(lat: Double, lng: Double): Boolean =
+        lat.isFinite() && lng.isFinite() && lat in -90.0..90.0 && lng in -180.0..180.0
 
     /** Great-circle distance in meters (Haversine, R = 6371000 m). */
     private fun haversineMeters(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {

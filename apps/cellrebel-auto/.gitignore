@@ -9,3 +9,5 @@
 .externalNativeBuild
 .cxx
 截图/
+hs_err_pid*.log
+replay_pid*.log

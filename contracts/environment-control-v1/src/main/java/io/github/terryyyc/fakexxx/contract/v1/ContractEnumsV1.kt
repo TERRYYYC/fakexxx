@@ -1,0 +1,202 @@
+package io.github.terryyyc.fakexxx.contract.v1
+
+/**
+ * Environment Control contract v1 enumerations.
+ *
+ * Spec: `feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md` §6.2.
+ *
+ * ## Why these never cross Binder as Kotlin enums
+ *
+ * kotlin-parcelize's `IrEnumParcelSerializer` writes `Parcel.writeString(value.name)`
+ * and reads back `EnumClass.valueOf(readString())`. Reordering constants is
+ * therefore wire-safe (the ordinal never goes on the wire), but **renaming is a
+ * breaking change, and a constant added by a newer peer makes an older reader
+ * throw `IllegalArgumentException` from the generated `createFromParcel`**.
+ *
+ * That surfaces as an unparcel crash inside a Binder transaction rather than the
+ * typed fail-closed outcome INV-03 requires. The two apps ship independently, so
+ * version skew is not an edge case — it is the normal state (§10 `version` rows).
+ *
+ * Every DTO field therefore carries the stable `Int` wire code and each side
+ * decodes explicitly via `fromWire`, which turns skew into a decidable business
+ * error instead of a crash.
+ *
+ * ## Wire code stability
+ *
+ * A wire code assigned in v1 is permanent: it is never reused and its meaning is
+ * never changed. New constants may only append a new code, and only after
+ * passing the §6.7 compatibility matrix.
+ */
+
+/**
+ * Level of verification the environment provider claims for an observation.
+ *
+ * Trust policy must match [SYSTEM_MOCK_INDEPENDENTLY_VERIFIED] **explicitly**.
+ * Ordinal comparison, `>=`, and "anything but NONE is trustworthy" are forbidden
+ * (INV-05). Adding a constant below must never make a comparison-based policy
+ * silently start trusting it.
+ */
+enum class VerificationLevelV1(val wire: Int) {
+    SYSTEM_MOCK_INDEPENDENTLY_VERIFIED(1),
+    HOOK_UNVERIFIED(2),
+    NONE(3),
+    ;
+
+    companion object {
+        /**
+         * @return null when [code] is unknown, which means the peer is newer and
+         *   incompatible. Callers must fail closed: never guess a trusted level.
+         */
+        fun fromWire(code: Int): VerificationLevelV1? = entries.firstOrNull { it.wire == code }
+    }
+}
+
+/**
+ * How completely the provider was able to observe the environment for the whole
+ * observation window.
+ *
+ * [FULL] may only be reported when a complete event source covered the entire
+ * window. Polling or heartbeats can never raise coverage to [FULL] (INV-09).
+ */
+enum class ContinuityCoverageV1(val wire: Int) {
+    FULL(1),
+    PARTIAL(2),
+    NONE(3),
+    ;
+
+    companion object {
+        fun fromWire(code: Int): ContinuityCoverageV1? = entries.firstOrNull { it.wire == code }
+    }
+}
+
+/** Mechanism the provider used to deliver the environment. */
+enum class DeliveryModeV1(val wire: Int) {
+    SYSTEM_MOCK(1),
+    HOOK(2),
+    ;
+
+    companion object {
+        fun fromWire(code: Int): DeliveryModeV1? = entries.firstOrNull { it.wire == code }
+    }
+}
+
+/** Provider's schedule verdict for the requested intent. */
+enum class ScheduleDecisionV1(val wire: Int) {
+    ALLOWED_NOW(1),
+    WAIT_UNTIL(2),
+    DENIED(3),
+    ;
+
+    companion object {
+        fun fromWire(code: Int): ScheduleDecisionV1? = entries.firstOrNull { it.wire == code }
+    }
+}
+
+/**
+ * Frozen contract constants.
+ */
+/**
+ * Frozen domain of [AdvanceReceiptV1.outcomeWire] (§6.7.4).
+ *
+ * Modelled as an enum with an Int wire exactly like the other contract enums, so
+ * it inherits the carrier bindings that already exist: compatibility.yaml <->
+ * Kotlin agreement is checked by check-contract-v1.sh section 2, and the derived
+ * unknown-probe tests cover it automatically. The first version of this domain
+ * was a pair of `const val`s, which no carrier and no gate could see -- changing
+ * one side left every gate green.
+ *
+ * §6.7.4 previously described exhaustion twice and mutually exclusively: once as
+ * a typed SCHEDULE_EXHAUSTED failure, once as "terminal, not a failure" with a
+ * null-target receipt. One call cannot be both. The two conflated situations are
+ * now split:
+ *
+ *  - completing the LAST item SUCCEEDS -> [EXHAUSTED] with advancedToItemId=null.
+ *    Throwing there would make a caller treat a successful completion as an
+ *    error and, worse, retry it.
+ *  - asking to advance when the schedule is ALREADY exhausted is a real caller
+ *    error and remains ContractErrorCodeV1.SCHEDULE_EXHAUSTED(16).
+ *
+ * The error code means "there was nothing to advance"; this outcome means "the
+ * advance happened and landed at the end".
+ */
+enum class AdvanceOutcomeV1(val wire: Int) {
+    ADVANCED(1),
+    EXHAUSTED(2),
+    ;
+
+    companion object {
+        /** Strict decode; null for an unknown code so the caller can fail closed. */
+        fun fromWire(code: Int): AdvanceOutcomeV1? = entries.firstOrNull { it.wire == code }
+
+        /**
+         * Fail-closed decode. An unknown outcome from a newer peer must NEVER be
+         * optimistically read as [ADVANCED]: that would let Auto believe the
+         * schedule moved when it has no idea what happened, and then attribute
+         * results to the wrong item. Unknown is treated as "not advanced".
+         */
+        fun advancedOrFailClosed(code: Int): Boolean = fromWire(code) == ADVANCED
+    }
+}
+
+/**
+ * Discriminator for [EnvironmentControlResultV1].
+ *
+ * This is an Int wire code in the carrier, never a Kotlin enum field. A newer
+ * peer adding a result kind must not make an older reader throw while
+ * unparcelling; older readers decode explicitly and fail closed.
+ *
+ * The v1 domain is fully 1-based. Wire 0 is intentionally unknown and must fail
+ * closed like any other unassigned wire code.
+ *
+ * Payload binding:
+ * ERROR -> [EnvironmentControlResultV1.errorCodeWire],
+ * DISCOVER -> [EnvironmentControlResultV1.capabilitySnapshot],
+ * PREFLIGHT -> [EnvironmentControlResultV1.preflightReport],
+ * APPLY -> [EnvironmentControlResultV1.applyReceipt],
+ * OBSERVE -> [EnvironmentControlResultV1.environmentObservation],
+ * RELEASE -> [EnvironmentControlResultV1.releaseReceipt],
+ * COMPLETE_AND_ADVANCE -> [EnvironmentControlResultV1.advanceReceipt].
+ */
+enum class ContractResultKindV1(val wire: Int) {
+    ERROR(1),
+    DISCOVER(2),
+    PREFLIGHT(3),
+    APPLY(4),
+    OBSERVE(5),
+    RELEASE(6),
+    COMPLETE_AND_ADVANCE(7),
+    ;
+
+    companion object {
+        fun fromWire(code: Int): ContractResultKindV1? = entries.firstOrNull { it.wire == code }
+    }
+}
+
+object ContractV1 {
+    /** Protocol version carried by every request and snapshot. */
+    const val PROTOCOL_VERSION: Int = 1
+
+
+    /**
+     * Maximum distance between an observation's effective coordinates and the
+     * target location the provider resolves from its own schedule item data,
+     * for the observation to support trusted quota (INV-23).
+     *
+     * KB-8: the intent no longer carries coordinates — the provider is the
+     * sole coordinate authority — so this tolerance bounds the provider's own
+     * resolved target, never an Auto-asserted value. 1.0 m is far above double
+     * round-trip error, so it cannot cause a false negative. It does **not**
+     * decide attribution — attribution comes from `acceptedIntentHash`, which
+     * binds `runId` and `attemptId`.
+     */
+    const val TRUSTED_LOCATION_TOLERANCE_METERS: Double = 1.0
+
+    /** Class name of the provider service. The package half is the runtime applicationId. */
+    const val SERVICE_CLASS_NAME: String = "name.caiyao.fakegps.integration.v1.EnvironmentControlService"
+
+    /** Production Qianwangyou applicationId. */
+    const val PROVIDER_APPLICATION_ID_PRODUCTION: String = "name.caiyao.fakegps"
+
+    /** Bench Qianwangyou applicationId (`applicationIdSuffix ".bench"`). Pairs independently. */
+    const val PROVIDER_APPLICATION_ID_BENCH: String = "name.caiyao.fakegps.bench"
+}

@@ -328,36 +328,105 @@ class CrashMatrixTest {
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
     }
 
-    // ---- M-CR-03..06: GREEN-body recovery projections (genuinely RED pre-freeze) ----
+    // ---- M-CR-03..06: recovery projections ----
+    //
+    // R43 (Sol GREEN-review P1-2): each mid-observation phase has BOTH polarities:
+    //  - POSITIVE: the live source CAN re-acquire the phase evidence ⇒ the evidence is PERSISTED to
+    //    the durable carrier AND the phase ADVANCES (never interrupted, never discarded).
+    //  - NEGATIVE: the source cannot ⇒ UNTRUSTED typed failure, the release converges durably
+    //    (a non-durable release = PAUSE, never silent advance), still never interrupted.
 
-    private suspend fun seedObservePhaseCrash(phase: String): TestAttempt {
+    private suspend fun seedPhaseCrash(
+        phase: String,
+        reacquirable: Boolean
+    ): TestAttempt {
         val planId = seedPlan(taskId = 42L)
         seedAttempt(planId, 42L, attemptId = 77L, aplusState = phase, aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
-        val clock = VirtualClock()
-        buildEngine(planId, clock, FakeBackend(executor, log)).run()
+        // Reacquirable source: returns a valid §6.4 observation/evidence; null source: cannot.
+        val evidence = if (!reacquirable) SeededEvidenceSource() else SeededEvidenceSource(
+            pre = validPre(), post = validPost(),
+            evidence = APlusCompletionEvidence(
+                execution = fullEvidenceExecution("exec-reacq-77", 77L, WIRE_VERIFIED, "reacq-digest"),
+                completionEvidenceWire = WIRE_VERIFIED,
+                applyReceiptIntentHash = "d",
+                applyReceiptLease = "lease-77"
+            )
+        )
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence)).run()
         return db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
     }
 
     @Test
     fun `M_CR_03`() = runTest {
-        val recovered = seedObservePhaseCrash("PRE_OBSERVED")
-        // GREEN: re-preobserve the environment, never collapse an observed crash to interrupted.
+        val recovered = seedPhaseCrash("PRE_OBSERVED", reacquirable = false)
+        // NEGATIVE: re-preobserve unavailable ⇒ UNTRUSTED typed failure — never interrupted.
         assertNotEquals("M-CR-03: a PRE_OBSERVED crash must re-preobserve, not be interrupted", "interrupted", recovered.status)
+        assertEquals("M-CR-03 negative: re-preobserve failure is a typed UNTRUSTED failure", "failed", recovered.status)
+        assertEquals("M-CR-03 negative: the reason is typed UNTRUSTED", "UNTRUSTED", recovered.failureReason)
+    }
+
+    @Test
+    fun `M_CR_03_positive_continuation`() = runTest {
+        val recovered = seedPhaseCrash("PRE_OBSERVED", reacquirable = true)
+        // POSITIVE (Sol GREEN-review P1-2): the re-acquired pre-observation is PERSISTED durably and
+        // the phase ADVANCES to CELLREBEL_START_PENDING — the continuation is observable, not discarded.
+        assertNotEquals("M-CR-03 positive: the crash is never interrupted", "interrupted", recovered.status)
+        assertEquals(
+            "M-CR-03 positive: the phase must ADVANCE to CELLREBEL_START_PENDING (re-acquired evidence consumed)",
+            "CELLREBEL_START_PENDING",
+            recovered.aplusState
+        )
+        assertNotNull(
+            "M-CR-03 positive: the re-acquired PRE observation must be persisted to the durable carrier",
+            db.durableObservationDao().forAttemptPhase(77L, "PRE")
+        )
     }
 
     @Test
     fun `M_CR_04`() = runTest {
-        val recovered = seedObservePhaseCrash("CELLREBEL_START_PENDING")
+        val recovered = seedPhaseCrash("CELLREBEL_START_PENDING", reacquirable = false)
         assertNotEquals("M-CR-04: a CELLREBEL_START_PENDING crash must classify, not be interrupted", "interrupted", recovered.status)
+        assertEquals("M-CR-04 negative: classification failure is a typed UNTRUSTED failure", "failed", recovered.status)
+    }
+
+    @Test
+    fun `M_CR_04_positive_continuation`() = runTest {
+        val recovered = seedPhaseCrash("CELLREBEL_START_PENDING", reacquirable = true)
+        // POSITIVE: re-classification persists the completion receipt durably; the attempt continues.
+        assertNotEquals("M-CR-04 positive: the crash is never interrupted", "interrupted", recovered.status)
+        assertNotNull(
+            "M-CR-04 positive: the re-classified completion receipt must be persisted durably",
+            db.durableCompletionReceiptDao().forAttempt(77L)
+        )
     }
 
     @Test
     fun `M_CR_05`() = runTest {
-        val recovered = seedObservePhaseCrash("POST_OBSERVE_PENDING")
+        val recovered = seedPhaseCrash("POST_OBSERVE_PENDING", reacquirable = false)
         assertNotEquals("M-CR-05: a POST_OBSERVE_PENDING crash must post-observe, not be interrupted", "interrupted", recovered.status)
+        assertEquals("M-CR-05 negative: post-observe failure is a typed UNTRUSTED failure", "failed", recovered.status)
+    }
+
+    @Test
+    fun `M_CR_05_positive_continuation`() = runTest {
+        val recovered = seedPhaseCrash("POST_OBSERVE_PENDING", reacquirable = true)
+        // POSITIVE: the re-acquired post-observation is persisted AND the phase advances into DECIDING
+        // (the trust decision then runs over the durable bundle — here it lacks the full §8.6 carrier,
+        // so the re-decide fail-closes to UNVERIFIED, which is the correct §8.1 outcome — the point
+        // is the phase ADVANCED and the evidence was CONSUMED, not discarded).
+        assertNotEquals("M-CR-05 positive: the crash is never interrupted", "interrupted", recovered.status)
+        assertNotNull(
+            "M-CR-05 positive: the re-acquired POST observation must be persisted to the durable carrier",
+            db.durableObservationDao().forAttemptPhase(77L, "POST")
+        )
+        val finalRow = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
+        assertTrue(
+            "M-CR-05 positive: the phase must leave POST_OBSERVE_PENDING (advanced into DECIDING → decided)",
+            finalRow.aplusState == "DECIDING" || finalRow.aplusState == "UNVERIFIED_RECORDED" || finalRow.aplusState == "QUOTA_COMMITTED" || finalRow.aplusState == "CLOSED"
+        )
     }
 
     @Test

@@ -37,8 +37,11 @@ interface DurableRecoveryLog {
     /**
      * Record (or replay) a receipt for [idempotencyKey] + [requestDigest] (§6.3.4 canonical digest).
      * PURE STORAGE — does NOT count effects (the effect counter lives on the executor's test fake).
+     * R43 (Sol GREEN-review P1-5): the provider LEASE from the apply receipt (`ApplyReceiptV1.leaseId`)
+     * is persisted ATOMICALLY with the receipt — a crash between receipt durability and the attempt
+     * owner's `markAplusLease` must still recover the lease from the receipt replay.
      * Contract:
-     *  - no prior receipt for [idempotencyKey] ⇒ writes a new receipt and returns it;
+     *  - no prior receipt for [idempotencyKey] ⇒ writes a new receipt (carrying [leaseId]) and returns it;
      *  - prior receipt with the SAME [requestDigest] ⇒ returns the existing receipt, does NOT
      *    re-write (idempotent replay);
      *  - prior receipt with a DIFFERENT [requestDigest] ⇒ returns null (INV-13 conflict), prior
@@ -48,7 +51,8 @@ interface DurableRecoveryLog {
         idempotencyKey: String,
         requestDigest: String,
         outcome: String,
-        now: Long
+        now: Long,
+        leaseId: String? = null
     ): RecordedReceipt?
 
     /** Durable recovery checkpoint for an attempt (§7.1 RecoveryCheckpoint), or null. */

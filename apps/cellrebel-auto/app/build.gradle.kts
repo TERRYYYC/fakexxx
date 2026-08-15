@@ -48,6 +48,9 @@ ksp {
 }
 
 dependencies {
+    // R43: the frozen environment-control contract v1 (interface freeze 635a73a8).
+    implementation(project(":environment-control-v1"))
+
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
     implementation(composeBom)

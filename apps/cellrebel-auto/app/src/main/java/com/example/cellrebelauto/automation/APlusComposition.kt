@@ -65,16 +65,99 @@ object APlusComposition {
         recoveryCoordinator(backend) to completionEvidenceSource(backend)
 
     /**
-     * The production backend — a NON-NULL, fail-closed A+ bundle (Sol round-8 P1-1). Every adapter is
-     * a RED skeleton that fails closed (null evidence / null receipts / a no-op fail-closed executor);
-     * the GREEN bodies land with the frozen contract (#3) + schema. Because it is non-null, the engine
-     * enters the A+ path and PAUSES fail-closed instead of walking the legacy counter path — the
-     * production/test disconnect is structurally impossible, and the legacy hold-out is dead in
-     * production wiring.
+     * The production backend (R43 GREEN, Sol GREEN-review P1-1): REAL adapters over the frozen
+     * contract v1 —
+     *  - executor: [com.example.cellrebelauto.recovery.BinderExternalApplyExecutor] over the
+     *    IEnvironmentControlV1 Binder (fail-closed on transport/non-APPLY/unknown-wire);
+     *  - recoveryLog: [com.example.cellrebelauto.recovery.RoomDurableRecoveryLog] over the real
+     *    Room operation/recovery/release receipt tables (lease persisted atomically with the apply
+     *    receipt, P1-5);
+     *  - schedule readers: Room-backed trusted-count / receipt-revision / observe projections.
+     * BEFORE binding, the binder executor fail-closes every call (`PROVIDER_NOT_BOUND`, no lease),
+     * so constructing the backend without a provider present still pauses safely — the fail-closed
+     * property of the old skeleton is preserved by construction, not by stubbing.
      *
-     * # 生产 backend（非 null fail-closed 骨架束）：所有 adapter 骨架 fail-closed；生产引擎走 A+ 路径而非 legacy
+     * # 生产 backend（GREEN）：冻结契约 Binder executor + Room receipt store；未绑定自然 fail-closed
      */
-    fun productionBackend(): APlusBackend = SkeletonBackend
+    fun productionBackend(
+        context: android.content.Context,
+        db: com.example.cellrebelauto.db.AppDatabase
+    ): APlusBackend {
+        val binderExecutor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(context)
+        val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
+            db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
+        )
+        return object : APlusBackend {
+            override val executor: ExternalApplyExecutor = binderExecutor
+            override val recoveryLog: DurableRecoveryLog = roomLog
+            // Schedule-gate readers (§5 boundary): Room-backed projections. The observe/revision
+            // readers consult the durable observation/receipt carriers; the quota reader counts
+            // trusted entries per task. Each is identity-keyed (R5-F2).
+            override val observeIntent: ObserveIntentAcquirer = ObserveIntentAcquirer { attemptId ->
+                kotlinx.coroutines.runBlocking {
+                    db.durableObservationDao().forAttemptPhase(attemptId, "PRE") != null
+                }
+            }
+            override val receiptRevision: ReceiptRevisionAcquirer = ReceiptRevisionAcquirer { idempotencyKey, _ ->
+                kotlinx.coroutines.runBlocking { db.operationReceiptDao().byKey(idempotencyKey) != null }
+            }
+            override val trustedQuota: TrustedQuotaAcquirer = TrustedQuotaAcquirer { attemptId ->
+                kotlinx.coroutines.runBlocking {
+                    val attempt = db.testAttemptDao().getAttemptById(attemptId)
+                    attempt != null && attempt.endedAt == null &&
+                        db.trustedQuotaDao().trustedCountForTask(attempt.taskId) < attempt.let {
+                            db.locationTaskDao().getTaskById(it.taskId)?.requiredSuccesses ?: 0
+                        }
+                }
+            }
+            override val evidenceSource: APlusEvidenceSource = object : APlusEvidenceSource {
+                // The production evidence source reconstructs §6.4 observations from the DURABLE
+                // carriers (the live Binder observation is Phase-D wiring exercised against a real
+                // provider; recovery reads durability either way).
+                override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) =
+                    kotlinx.coroutines.runBlocking {
+                        db.durableObservationDao().forAttemptPhase(attemptId, "PRE")?.let { r ->
+                            com.example.cellrebelauto.environment.ObservationSnapshot(
+                                leaseId = r.leaseId, acceptedIntentHash = r.acceptedIntentHash,
+                                coverage = r.coverage, verificationLevel = r.verificationLevel,
+                                deliveryMode = r.deliveryMode, isMock = r.isMock,
+                                scheduleDecision = r.scheduleDecision,
+                                effectiveLat = r.effectiveLat, effectiveLng = r.effectiveLng,
+                                environmentRevision = r.environmentRevision,
+                                environmentFingerprint = r.environmentFingerprint,
+                                observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
+                                observedAtEpochMs = r.observedAtEpochMs,
+                                continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
+                                evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
+                            )
+                        }
+                    }
+                override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) =
+                    kotlinx.coroutines.runBlocking {
+                        db.durableObservationDao().forAttemptPhase(attemptId, "POST")?.let { r ->
+                            com.example.cellrebelauto.environment.ObservationSnapshot(
+                                leaseId = r.leaseId, acceptedIntentHash = r.acceptedIntentHash,
+                                coverage = r.coverage, verificationLevel = r.verificationLevel,
+                                deliveryMode = r.deliveryMode, isMock = r.isMock,
+                                scheduleDecision = r.scheduleDecision,
+                                effectiveLat = r.effectiveLat, effectiveLng = r.effectiveLng,
+                                environmentRevision = r.environmentRevision,
+                                environmentFingerprint = r.environmentFingerprint,
+                                observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
+                                observedAtEpochMs = r.observedAtEpochMs,
+                                continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
+                                evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
+                            )
+                        }
+                    }
+                override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? {
+                    // Completion evidence for a live attempt is provider-observed (§8.6) — pre-bind
+                    // this is unavailable, fail-closed null (the normal path records UNTRUSTED).
+                    return null
+                }
+            }
+        }
+    }
 
     private object SkeletonBackend : APlusBackend {
         override val executor: ExternalApplyExecutor = SkeletonExecutor
@@ -106,7 +189,8 @@ object APlusComposition {
             idempotencyKey: String,
             requestDigest: String,
             outcome: String,
-            now: Long
+            now: Long,
+            leaseId: String?
         ): RecordedReceipt? = null
 
         override fun checkpointFor(attemptId: Long): RecoveryCheckpoint? = null

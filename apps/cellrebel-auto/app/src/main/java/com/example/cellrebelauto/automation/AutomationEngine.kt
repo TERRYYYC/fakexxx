@@ -774,26 +774,86 @@ class AutomationEngine(
         // ==================== Mid-observation phases: re-acquire the missing phase evidence ====================
         // M-CR-03/04/05 (GREEN): a PRE_OBSERVED / CELLREBEL_START_PENDING / POST_OBSERVE_PENDING crash
         // re-preobserves / classifies / post-observes from the live evidence source; it is NEVER
-        // collapsed to interrupted. When re-acquisition fails (source returns null), the attempt is
-        // finalized UNTRUSTED (typed failure) — still never interrupted.
+        // collapsed to interrupted.
+        //  - SUCCESS: the re-acquired evidence is PERSISTED to the durable carrier and the phase
+        //    ADVANCES (PRE_OBSERVED → CELLREBEL_START_PENDING; POST_OBSERVE_PENDING → DECIDING via
+        //    the re-decide below; classification re-persists the execution evidence). The recovered
+        //    attempt continues its lifecycle — the re-acquisition result is never discarded
+        //    (Sol GREEN-review P1-2).
+        //  - FAILURE (source null): the attempt is finalized UNTRUSTED (typed failure) — still never
+        //    interrupted — AND the release MUST converge durably before continuing; a non-durable
+        //    release is a fail-closed PAUSE (the lease is unresolved — §8.1 RELEASE_INCOMPLETE).
         when (crashed.aplusState) {
             "PRE_OBSERVED", "CELLREBEL_START_PENDING", "CELLREBEL_RUNNING", "POST_OBSERVE_PENDING" -> {
-                val reAcquired = when (crashed.aplusState) {
-                    "PRE_OBSERVED" -> completionEvidenceSource?.acquirePreObservation(crashed.id, crashed.runSessionId) != null
-                    "POST_OBSERVE_PENDING" -> completionEvidenceSource?.acquirePostObservation(crashed.id, crashed.runSessionId) != null
-                    else -> completionEvidenceSource?.acquireCompletionEvidence(crashed.id, crashed.runSessionId) != null
+                val src = completionEvidenceSource
+                if (src == null) {
+                    aplusPause("no evidence source to re-acquire ${crashed.aplusState} attempt ${crashed.id}")
+                    return false
                 }
-                if (!reAcquired) {
+                val acquired: Boolean = when (crashed.aplusState) {
+                    "PRE_OBSERVED" -> {
+                        val pre = src.acquirePreObservation(crashed.id, crashed.runSessionId)
+                        if (pre != null) {
+                            // Persist the re-acquired pre-observation durably, then advance the phase
+                            // (the next phase START_CELLREBEL re-runs the external start).
+                            planRepository.persistObservation(crashed.id, "PRE", pre)
+                            attemptDriver?.driveTransition(crashed.id, AttemptState.PRE_OBSERVED, AttemptEvent.START_CELLREBEL)
+                            planRepository.markAplusState(crashed.id, "CELLREBEL_START_PENDING")
+                            log("A+ recovery: PRE_OBSERVED attempt ${crashed.id} re-preobserved + advanced to CELLREBEL_START_PENDING")
+                            return true
+                        } else false
+                    }
+                    "POST_OBSERVE_PENDING" -> {
+                        val post = src.acquirePostObservation(crashed.id, crashed.runSessionId)
+                        if (post != null) {
+                            // Persist the re-acquired post-observation durably, then advance into
+                            // DECIDING and run the trust decision over the durable bundle.
+                            planRepository.persistObservation(crashed.id, "POST", post)
+                            attemptDriver?.driveTransition(crashed.id, AttemptState.POST_OBSERVE_PENDING, AttemptEvent.POST_OBSERVATION_OK)
+                            planRepository.markAplusState(crashed.id, "DECIDING")
+                            redecideDecidingAttempt(crashed)
+                            log("A+ recovery: POST_OBSERVE_PENDING attempt ${crashed.id} re-observed + advanced into DECIDING")
+                            return true
+                        } else false
+                    }
+                    else -> {
+                        // CELLREBEL_START_PENDING / CELLREBEL_RUNNING: re-classify the completion
+                        // evidence, persist the receipt durably, and advance to POST_OBSERVE_PENDING
+                        // (the owner pointer already exists from START; the next phase re-observes).
+                        val evidence = src.acquireCompletionEvidence(crashed.id, crashed.runSessionId)
+                        if (evidence != null) {
+                            planRepository.persistCompletionReceipt(
+                                crashed.id, evidence.completionEvidenceWire,
+                                evidence.applyReceiptIntentHash, evidence.applyReceiptLease
+                            )
+                            attemptDriver?.driveTransition(crashed.id, AttemptState.CELLREBEL_RUNNING, AttemptEvent.COMPLETION_OBSERVED)
+                            planRepository.markAplusState(crashed.id, "POST_OBSERVE_PENDING")
+                            log("A+ recovery: ${crashed.aplusState} attempt ${crashed.id} re-classified + advanced to POST_OBSERVE_PENDING")
+                            return true
+                        } else false
+                    }
+                }
+                if (!acquired) {
                     // Fail-closed: the phase evidence cannot be re-acquired ⇒ UNTRUSTED typed failure.
+                    // The release MUST be durable before the plan continues (Sol GREEN-review P1-2:
+                    // a non-durable release is an unresolved lease — PAUSE, never silent advance).
                     val leaseForUntrusted = planRepository.getAplusLeaseId(crashed.id)
                     if (leaseForUntrusted != null) {
-                        coordinator.releaseLease(
+                        val releaseReceipt = coordinator.releaseLease(
                             crashed.id,
                             APlusOperationIdentity.releaseIdempotencyKey(crashed.id),
                             leaseForUntrusted,
                             APlusOperationIdentity.releaseDigest(leaseForUntrusted),
                             nowMs()
                         )
+                        if (releaseReceipt == null) {
+                            // RELEASE_INCOMPLETE (§8.1): the lease is unresolved — persist the phase
+                            // and PAUSE; never finalize-continue on a dangling lease.
+                            attemptDriver?.driveTransition(crashed.id, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_INCOMPLETE)
+                            planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                            aplusPause("release not durable for UNTRUSTED attempt ${crashed.id} — lease unresolved (§8.1 RELEASE_INCOMPLETE)")
+                            return false
+                        }
                     }
                     planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
                     planRepository.markAplusState(crashed.id, "UNVERIFIED_RECORDED")

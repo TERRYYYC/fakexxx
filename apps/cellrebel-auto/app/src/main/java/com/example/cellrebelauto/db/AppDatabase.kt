@@ -19,6 +19,12 @@ import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.ledger.DurableObservationRecord
 import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
+import com.example.cellrebelauto.recovery.OperationReceiptRow
+import com.example.cellrebelauto.recovery.RecoveryCheckpointRow
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
+import com.example.cellrebelauto.recovery.OperationReceiptDao
+import com.example.cellrebelauto.recovery.RecoveryCheckpointRoomDao
+import com.example.cellrebelauto.recovery.ReleaseReceiptDao
 
 /**
  * Room database singleton, version 5 (Issue #5: trusted ledger + A+ execution tables).
@@ -47,7 +53,10 @@ import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
         ProviderPairingRecord::class,
         UnverifiedAttemptRecord::class,
         DurableObservationRecord::class,
-        DurableCompletionReceipt::class
+        DurableCompletionReceipt::class,
+        OperationReceiptRow::class,
+        RecoveryCheckpointRow::class,
+        ReleaseReceiptRow::class
     ],
     version = 5,
     exportSchema = true
@@ -69,6 +78,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun unverifiedAttemptRecordDao(): UnverifiedAttemptRecordDao
     abstract fun durableObservationDao(): DurableObservationDao
     abstract fun durableCompletionReceiptDao(): DurableCompletionReceiptDao
+    abstract fun operationReceiptDao(): OperationReceiptDao
+    abstract fun recoveryCheckpointRoomDao(): RecoveryCheckpointRoomDao
+    abstract fun releaseReceiptDao(): ReleaseReceiptDao
 
     companion object {
         @Volatile
