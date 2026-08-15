@@ -122,7 +122,10 @@ object CanonicalDigestV1 {
 /**
  * `requestDigest` for [CompleteAndAdvanceRequestV1]. Spec §6.7.3.
  *
- * The preimage MUST bind both preconditions. Idempotent replay decides "this is
+ * The preimage MUST bind all THREE preconditions -- identity, version, item.
+ * (It read "both preconditions" until v1.72: `expectedScheduleId` was added to
+ * the preimage in v1.71 and this sentence was not updated with it.)
+ * Idempotent replay decides "this is
  * the same request" from key + digest; if `expectedCurrentItemId` were absent,
  * two requests aimed at DIFFERENT current items would produce the SAME digest,
  * replay would treat them as one, and that is exactly wrong-item and double

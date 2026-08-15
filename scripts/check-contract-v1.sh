@@ -318,9 +318,17 @@ PARSE_ERRORS = []
 
 def strict_members(body, where):
     """Every member of an enum body must parse, or the gate fails loudly."""
-    body = body.split(";", 1)[0]                       # members end at first ';'
+    # ORDER MATTERS, and it was wrong until v1.72: comments must be lexed away
+    # BEFORE the member terminator is located. Splitting on the first ';' first
+    # means any ';' written inside a KDoc truncates the body mid-comment; the
+    # surviving '/**' then has no '*/' to match, the block-comment strip cannot
+    # remove it, and its prose is split on ',' into garbage "members". A legal
+    # Kotlin file thus failed the gate, and the message blamed the enum rather
+    # than the parser. This is the same shape this document records elsewhere --
+    # the matcher was narrower than the construct it claimed to read.
     body = re.sub(r"/\*.*?\*/", " ", body, flags=re.S)  # block comments
     body = re.sub(r"//[^\n]*", " ", body)               # line comments
+    body = body.split(";", 1)[0]                       # members end at first ';'
     out, seen_wire = {}, {}
     for frag in body.split(","):
         if not frag.strip():

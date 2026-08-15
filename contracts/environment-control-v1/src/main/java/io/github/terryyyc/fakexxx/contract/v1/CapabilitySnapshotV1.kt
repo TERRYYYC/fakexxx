@@ -29,11 +29,18 @@ data class CapabilitySnapshotV1(
      * effective, its version, and whether the schedule is exhausted (§6.7.1,
      * v1.54 state model).
      *
-     * Without these, Auto cannot construct the expectedCurrentItemId /
-     * expectedScheduleVersion preconditions that §6.7.4 requires, so
-     * SCHEDULE_ITEM_MISMATCH and SCHEDULE_VERSION_STALE would exist as wire codes
-     * that nothing can ever legitimately trigger -- guards that are present and
-     * unreachable.
+     * Without these, Auto cannot construct the expectedScheduleId /
+     * expectedCurrentItemId / expectedScheduleVersion preconditions that §6.7.4
+     * requires, so SCHEDULE_IDENTITY_MISMATCH, SCHEDULE_ITEM_MISMATCH and
+     * SCHEDULE_VERSION_STALE would exist as wire codes that nothing can ever
+     * legitimately trigger -- guards that are present and unreachable.
+     *
+     * **WHEN this group is read is part of the contract (§6.7.3, v1.72).** The
+     * advance preconditions must come from the projection group captured when the
+     * attempt was OPENED, persisted, and replayed verbatim. Reading this group
+     * again just before `completeAndAdvance` and using THAT is the defect the
+     * identity leg exists to stop: it answers "which schedule is effective now",
+     * not "which schedule did this completion belong to".
      *
      * **Group invariant**: all four fields are null together when the provider has
      * no active schedule (a legal state at discover() time), and all four are

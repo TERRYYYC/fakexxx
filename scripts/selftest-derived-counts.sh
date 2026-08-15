@@ -533,13 +533,18 @@ mut "M-BOLD bold arm catches N-B" \
 mut "M-CN chinese-numeral arm catches N-C" \
   's/^ARM_CN = .*/ARM_CN = None/' \
   '，但仍**零覆盖** proof/CAS provider 侧判定' \
-  '、峰值曾达九十二行，但仍**零覆盖** proof/CAS provider 侧判定' \
-  ' cn 92 '
+  '、峰值曾达九十三行，但仍**零覆盖** proof/CAS provider 侧判定' \
+  ' cn 93 '
 
-# NOTE: M-CN plants 92 (N-C planted 90) so each case's finding substring is
-# distinct. 91 was used until v1.68 made it the live owner-red count -- a planted
-# bad value that silently BECAME legal, disarming this mutation; the selftest
-# refused to pass on the absence and reported INCONCLUSIVE instead.
+# NOTE: M-CN plants 93 (N-C planted 90) so each case's finding substring is
+# distinct. The planted value must be one the ledger CANNOT produce, or the
+# mutation disarms itself. This has now happened TWICE for the same reason:
+# 91 was used until v1.68 made it the live owner-red count, and 92 until v1.72
+# did the same (M-AD-28 moved owner-red 91 -> 92). Both times the planted "bad"
+# value silently became legal. Both times the selftest refused to pass on the
+# absence and reported INCONCLUSIVE rather than green -- which is the only reason
+# the disarm was visible at all. When picking this value, check it against the
+# ledger's producible set (check-derived-counts prints it), not against intuition.
 # distinct and one case's output can never satisfy another's assertion.
 mut "M-CELL keyed-cell arm catches N-D" \
   's/^CELL_KEYS = .*/CELL_KEYS = ()/' \
@@ -576,14 +581,14 @@ mut "M-PLAIN-SCOPE plain-owner-red scoping catches its own isolated line" \
 # N-G: an owner-split of owner-red that never touches 行. The line was already
 # in scope; being in scope is not being readable, and no 行-anchored arm saw it.
 neg "N-G owner-pair notation (GLM 52 / Fable5 39 -> planted 47)" \
-  '已归各自 code owner（GLM 52 / Fable5 39）' \
+  '已归各自 code owner（GLM 53 / Fable5 39）' \
   '已归各自 code owner（GLM 47 / Fable5 39）' \
   ' pair 47 '
 
 # N-H: "现行为 **N**" -- a claim whose whole purpose is to state the CURRENT
 # ledger value. ARM_BOLD requires a trailing 行 and walked past it.
 neg "N-H current-value notation (现行为 **91** -> planted 83)" \
-  '现行为 **91**（§10.1 现算）' \
+  '现行为 **92**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
 
@@ -599,19 +604,19 @@ neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
 # "§6.4.1 的 8 行独立负例", which is not a cache of this ledger. Anchoring this
 # case on 这 would re-teach the shape the L-2 control exists to forbid.
 neg "N-J row-count-phrase scope (全 117 行 -> planted 43)" \
-  '**本 task 是唯一验证全 117 行的地方**' \
+  '**本 task 是唯一验证全 118 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \
   ' bare 43 '
 
 mut "M-PAIR owner-pair arm catches N-G" \
   's/^ARM_OWNER_PAIR = .*/ARM_OWNER_PAIR = None/' \
-  '已归各自 code owner（GLM 52 / Fable5 39）' \
+  '已归各自 code owner（GLM 53 / Fable5 39）' \
   '已归各自 code owner（GLM 47 / Fable5 39）' \
   ' pair 47 '
 
 mut "M-CURVAL current-value arm catches N-H" \
   's/^ARM_CURVAL = .*/ARM_CURVAL = None/' \
-  '现行为 **91**（§10.1 现算）' \
+  '现行为 **92**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
 
@@ -623,7 +628,7 @@ mut "M-LANE-SCOPE lane-discourse scoping catches N-I" \
 
 mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
   's/^SCOPE_ROW_COUNT = .*/SCOPE_ROW_COUNT = ""/' \
-  '**本 task 是唯一验证全 117 行的地方**' \
+  '**本 task 是唯一验证全 118 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \
   ' bare 43 '
 
@@ -633,7 +638,7 @@ mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
 # away; if it does not, the scan is reading some other list again.
 mut "M-ARMS-CENSUS scanner reads the ARMS table" \
   's/^ARMS = .*/ARMS = ()/' \
-  '现行为 **91**（§10.1 现算）' \
+  '现行为 **92**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
 
@@ -644,7 +649,7 @@ mut "M-ARMS-CENSUS scanner reads the ARMS table" \
 # collapsed, and the arm's inventory line must disappear. Two paths, two
 # assertions, in opposite directions.
 d="$(mk)"
-if ! apply "$d" "$SPEC" '现行为 **91**（§10.1 现算）' '现行为 **83**（§10.1 现算）' 2>/dev/null; then
+if ! apply "$d" "$SPEC" '现行为 **92**（§10.1 现算）' '现行为 **83**（§10.1 现算）' 2>/dev/null; then
   bad "M-ENUM-CENSUS - INCONCLUSIVE: plant did not apply; the case never ran"
 else
   sed -i.bak 's/^ENUM_ARMS = .*/ENUM_ARMS = ["cell"]/' "$d/scripts/check-derived-counts.sh"

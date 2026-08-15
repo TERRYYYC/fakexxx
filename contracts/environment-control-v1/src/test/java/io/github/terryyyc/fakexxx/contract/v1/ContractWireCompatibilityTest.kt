@@ -72,6 +72,7 @@ class ContractWireCompatibilityTest {
             ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH to 14,
             ContractErrorCodeV1.SCHEDULE_VERSION_STALE to 15,
             ContractErrorCodeV1.SCHEDULE_EXHAUSTED to 16,
+            ContractErrorCodeV1.SCHEDULE_IDENTITY_MISMATCH to 17,
         )
         frozen.forEach { (code, wire) -> assertEquals("$code", wire, code.wire) }
         assertEquals(

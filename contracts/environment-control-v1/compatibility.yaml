@@ -75,6 +75,7 @@ enums:
     SCHEDULE_ITEM_MISMATCH: 14
     SCHEDULE_VERSION_STALE: 15
     SCHEDULE_EXHAUSTED: 16
+    SCHEDULE_IDENTITY_MISMATCH: 17
 
 # Skew cases. Every row is covered by ContractWireCompatibilityTest.
 skew:

@@ -133,9 +133,22 @@ enum class ContractErrorCodeV1(val wire: Int) {
     /** Same `idempotencyKey` replayed with a different payload digest (§6.3.3, INV-13). */
     IDEMPOTENCY_CONFLICT(12),
 
-    /** Structurally invalid request: empty required ref,
-     *  `deadline <= notBefore` (§6.3.3, INV-04). No coordinate case exists here:
-     *  KB-8 removed coordinates from every request payload. */
+    /**
+     * Structurally invalid request: empty required ref, `deadline <= notBefore`
+     * (§6.3.3, INV-04).
+     *
+     * **Corrected in spec v1.62.** No coordinate case exists here: KB-8 removed
+     * coordinates from every request payload, so "coordinate out of range" is not
+     * a reachable request shape in v1.
+     *
+     * **Corrected in spec v1.72.** v1.71 also routed "structurally complete, but
+     * `expectedScheduleId` disagrees with the effective schedule" to this code.
+     * That reading is retired: such a request IS structurally valid, and the case
+     * now has its own code, [SCHEDULE_IDENTITY_MISMATCH] (17). This constant
+     * covers NO compare-and-advance precondition mismatch — those are 14, 15, 16
+     * and 17. The distinction is not cosmetic: a caller recovers from 13 by
+     * fixing the request, and from 17 by re-discovering and reconciling.
+     */
     REQUEST_INVALID(13),
 
     /**
@@ -170,6 +183,32 @@ enum class ContractErrorCodeV1(val wire: Int) {
      * KDocs in this module stated opposite things about the same wire number.
      */
     SCHEDULE_EXHAUSTED(16),
+
+    /**
+     * `completeAndAdvance`'s `expectedScheduleId` does not match the schedule that
+     * is currently effective on the device (§6.3.3, §6.7.4b step 4). The request is
+     * structurally well-formed and its proof is self-consistent; it simply targets
+     * a DIFFERENT schedule than the one in force.
+     *
+     * **Added in spec v1.72.** v1.71 reused [REQUEST_INVALID] (13) for this case.
+     * That broke §6.3.3's own rule — the table is the complete set of v1 typed
+     * failures and forbids reusing a near-synonym code — and it contradicted 13's
+     * own definition, which is scoped to *structurally* invalid requests. Two
+     * coexisting definitions make the caller's recovery branch non-portable: "fix
+     * the request and retry" and "re-discover / reconcile" are different actions.
+     *
+     * 14/15/16 do not fit either, and for a reason worth stating: they describe the
+     * item, version and exhaustion state of the CURRENT schedule. When the identity
+     * leg fails, that state does not describe the schedule the request is about, so
+     * reporting any of them would answer a question about the wrong object.
+     *
+     * This is checked FIRST inside step 4 — identity before state — because
+     * §6.7.1 and `M-AD-26` permit two schedules to reuse the same
+     * `(itemId, scheduleVersion)` pair. Without the identity leg the CAS passes on
+     * the wrong schedule and the advance is genuinely committed there; the
+     * post-advance readback can then observe the damage but cannot prevent it.
+     */
+    SCHEDULE_IDENTITY_MISMATCH(17),
     ;
 
     companion object {
