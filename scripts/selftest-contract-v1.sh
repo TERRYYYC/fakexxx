@@ -189,6 +189,7 @@ neg "N-7 field dropped from canonical (name-set layer)" "$SPEC" \
 # wording that shipped before 5c existed.
 KT_ERR="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1/ContractErrorCodeV1.kt"
 KT_ENUMS="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1/ContractEnumsV1.kt"
+YAML_COMPAT="$MODULE/compatibility.yaml"
 
 # N-8 Rule A: drop ONE of the two methods canonical scopes wire 7 to. Removing
 # both would also be caught, but the interesting case is a KDoc that looks scoped
@@ -423,18 +424,21 @@ printf '\n'
 # is what M-12 measures: with a 0 planted, disabling ARM_ZERO makes 7c's finding
 # disappear, so 7c -- not an older check -- is what caught it.
 #
-# There is deliberately NO isolating negative, and that is a property of the
-# design rather than an omission. The enum surface is mirrored three ways
-# (canonical / Kotlin / compatibility.yaml), so ANY single-file plant trips the
-# three-way sync before 7c ever speaks. Both shapes were measured: changing an
-# existing constant reports `HOOK_UNVERIFIED wire differs: canonical=2 kotlin=0`;
-# adding a self-consistent new enum reports `enum in kotlin but NOT in canonical`.
-# neg() requires exactly one failing section, so it cannot express this case.
+# There is deliberately NO SINGLE-FILE isolating negative, and that is a
+# property of the design rather than an omission. The enum surface is mirrored
+# three ways (canonical / Kotlin / compatibility.yaml), so ANY single-file
+# plant trips the three-way sync before 7c ever speaks. Both shapes were
+# measured: changing an existing constant reports `HOOK_UNVERIFIED wire
+# differs: canonical=2 kotlin=0`; adding a self-consistent new enum reports
+# `enum in kotlin but NOT in canonical`. neg() requires exactly one failing
+# section, so it cannot express this case with one file.
 #
 # That also says what 7c is FOR: it is the second line behind the sync, and its
 # own scenario is a 0 introduced CONSISTENTLY in all three sources -- where the
-# sync is green and only 7c objects. Proving THAT needs a multi-source plant
-# helper. KNOWN GAP, named here rather than papered over.
+# sync is green and only 7c objects. mplant() below expresses exactly that
+# (coordinated exact-count-1 edits across the three mirrors), and N-16/M-13
+# measure it: the gap recorded here when 7c landed is closed by them, not
+# papered over.
 #
 # The plant is a value change, not a new constant: adding one would also move
 # the enum's constant SET and could trip a second section, and a negative that
@@ -447,9 +451,93 @@ printf '\n'
 mut "M-12 7c zero-arm catches N-15" \
   's/^ARM_ZERO = .*/ARM_ZERO = False/' \
   "$KT_ENUMS" \
-'    HOOK_UNVERIFIED(2),' \
-'    HOOK_UNVERIFIED(0),' \
+  '    HOOK_UNVERIFIED(2),' \
+  '    HOOK_UNVERIFIED(0),' \
   "wire 0 is defined by"
+
+# ---------------------------------------------------------------------------
+# 7c's OWN scenario, which no single-file case can express: a 0 introduced
+# CONSISTENTLY into all three mirrors, so every sync check stays green and
+# ONLY 7c objects. mplant() applies coordinated exact-count-1 edits across
+# several files of one throwaway copy; each argument is relpath|old|new and
+# NONE of these anchors may contain a literal '|' (asserted by the plant
+# failing loudly if a split ever comes out malformed). The isolation is the
+# assertion: ONE_FAILED below proves the sync layers did not trip.
+printf '\n== negative (multi-source: consistent across all three mirrors) ==\n'
+
+mplant() { # $1=dir, then "relpath|old|new" triples
+  local d="$1"; shift
+  local arg rel rest old new
+  for arg in "$@"; do
+    rel="${arg%%|*}"; rest="${arg#*|}"; old="${rest%%|*}"; new="${rest#*|}"
+    if [ -z "$rel" ] || [ -z "$old" ] || [ "$old" = "$new" ] || [ "$rel" = "$arg" ]; then
+      printf 'mplant: malformed triple (missing separator): %s\n' "$arg" >&2
+      return 1
+    fi
+    if ! apply "$d" "$rel" "$old" "$new" 2>/dev/null; then
+      printf 'mplant: plant did not apply cleanly: %s\n' "$arg" >&2
+      return 1
+    fi
+  done
+}
+
+N16_FINDING='wire 0 is defined by'
+N16_PLANTS=(
+  "$SPEC|    HOOK_UNVERIFIED(2),|    HOOK_UNVERIFIED(0),"
+  "$KT_ENUMS|    HOOK_UNVERIFIED(2),|    HOOK_UNVERIFIED(0),"
+  "$YAML_COMPAT|    HOOK_UNVERIFIED: 2|    HOOK_UNVERIFIED: 0"
+)
+
+D="$(mk)"
+if ! mplant "$D" "${N16_PLANTS[@]}"; then
+  bad "N-16 - INCONCLUSIVE: multi-source plant did not apply; the case never ran"
+  rm -rf "$D"
+else
+  OUT="$(run_gate "$D")"
+  if ! printf '%s' "$OUT" | grep -qF -- "$N16_FINDING"; then
+    bad "N-16 - gate never reported the planted wire 0"
+    detail "$OUT"
+  elif ! printf '%s' "$OUT" | grep -qF "$ONE_FAILED"; then
+    bad "N-16 - went red beyond 7c alone; the plant is no longer consistent across the mirrors"
+    detail "$OUT"
+  else
+    ok "N-16 a 0 planted consistently in all three mirrors: sync green, 7c alone objects"
+    NEG=$((NEG + 1))
+  fi
+  rm -rf "$D"
+fi
+
+# M-13 is the load-bearing half of N-16: with the zero-arm disabled the same
+# three-mirror plant loses its only objector, and the static gate goes green
+# outright -- nothing else was wrong with the copy. Preconditions mirror mut().
+D="$(mk)"
+if ! mplant "$D" "${N16_PLANTS[@]}"; then
+  bad "M-13 - INCONCLUSIVE: plant did not apply to the intact gate; the case never ran"
+  rm -rf "$D"
+else
+  OUT="$(run_gate "$D")"
+  rm -rf "$D"
+  if ! printf '%s' "$OUT" | grep -qF -- "$N16_FINDING"; then
+    bad "M-13 - INCONCLUSIVE: the intact gate never produced the finding, so its disappearance proves nothing"
+    detail "$OUT"
+  else
+    D="$(mk)"
+    sed -i.bak 's/^ARM_ZERO = .*/ARM_ZERO = False/' "$D/scripts/check-contract-v1.sh"
+    rm -f "$D/scripts/check-contract-v1.sh.bak"
+    mplant "$D" "${N16_PLANTS[@]}" || { bad "M-13 - INCONCLUSIVE: plant did not apply; the case never ran"; rm -rf "$D"; }
+    if [ -d "$D" ]; then
+      OUT="$(run_gate "$D")"
+      rm -rf "$D"
+      if printf '%s' "$OUT" | grep -qF -- "$N16_FINDING"; then
+        bad "M-13 - finding survived with the zero-arm disabled, so that arm is not what catches it"
+        detail "$OUT"
+      else
+        ok "M-13 7c zero-arm catches N-16 - disabling it makes the three-mirror finding disappear, so the arm is load-bearing"
+        MUT=$((MUT + 1))
+      fi
+    fi
+  fi
+fi
 
 if [ "$FAILURES" -eq 0 ]; then
   printf 'selftest-contract-v1: PASS (%d positive, %d negative, %d mutation self-check(s) — every case ran against the production gate)\n' \
