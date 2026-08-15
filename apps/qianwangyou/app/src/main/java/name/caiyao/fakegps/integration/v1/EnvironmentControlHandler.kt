@@ -42,9 +42,12 @@ import java.util.UUID
  *  - completeAndAdvance (§6.7): REQUEST_INVALID when proof missing/mismatched
  *    (M-AD-01) → idempotent replay same key+digest returns the SAME receipt
  *    without a second advance (M-AD-02) / same key+different digest →
- *    IDEMPOTENCY_CONFLICT (M-AD-03) → preconditions: item mismatch wire 14
- *    (M-AD-04/05), version stale wire 15 (M-AD-06), exhausted-again wire 16
- *    (M-AD-11) → §6.7.4a: the caller must hold NO active lease (release comes
+ *    IDEMPOTENCY_CONFLICT (M-AD-03) → lease attribution: request.leaseId must
+ *    resolve to a lease OWNED by this caller, unknown and foreign refs alike
+ *    rejected wire 13 (KB-5) → preconditions in the frozen intra-step order
+ *    exhausted-again wire 16 (M-AD-11) FIRST, then item mismatch wire 14
+ *    (M-AD-04/05), then version stale wire 15 (M-AD-06) → §6.7.4a: the caller
+ *    must hold NO active lease (release comes
  *    first; leaseId in the request is a historical attribution ref, not a hold)
  *    → pointer advance + receipt persist in ONE transaction (§6.7.5) → receipt
  *    carries the frozen §6.7.3 receiptDigest (bound to requestDigest + key +
@@ -377,9 +380,15 @@ class EnvironmentControlHandler(
     }
 
     fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
-        // §6.7.4b frozen judgment order (v1.42):
-        //   safety(+recompute digest) → idempotency → proof → schedule(14/15/16)
-        //   → lease(7) → mutation
+        // §6.7.4b frozen judgment order (v1.42, + KB-5 attribution, + the
+        // v1.54 intra-step resequence of the schedule gates):
+        //   safety(+recompute digest) → idempotency → proof → attribution(13)
+        //   → schedule(16→14→15) → lease(7) → mutation
+        // Attribution sits between proof and the schedule gates: a
+        // fix-the-request 13 outranks the fix-your-expectation 14/15, so a
+        // foreign ref against an exhausted schedule deterministically answers
+        // 13. It sits AFTER idempotency so a legal same-key replay still
+        // refetches its receipt first.
         // Steps 2–6 run inside ONE serialized transaction, exactly like apply():
         // the step-5 lease gate is DEVICE-GLOBAL and must serialize against a
         // concurrent apply, so no new lease can slip in between the gate and the

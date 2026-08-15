@@ -306,6 +306,81 @@ class AdvanceProviderRedTest {
     }
 
     /**
+     * KB-6 row 17, first leg (§6.7.4 three-state model, state 1): with NO
+     * schedule at all the answer is exactly REQUEST_INVALID(13) "no active
+     * schedule" — distinct from a working CAS (state 2, covered by every
+     * successful advance above) and from exhaustion (state 3, wire 16, the
+     * rows directly above). The message is pinned too: 13 has several sources
+     * on this path (proof, attribution, no-schedule) and an unnamed 13 cannot
+     * tell which predicate actually fired.
+     *
+     * The provider interface has always returned `ScheduleSnapshot?`; only the
+     * FAKE could not express the null, so this state was untestable rather
+     * than unimplemented. The durable presence bit closes that fidelity gap.
+     */
+    @Test
+    fun advance_noSchedule_requestInvalid() {
+        val h = harness()
+        val leaseId = earnAndRelease(h, key = "adv-nosched-apply")
+        h.env.hasSchedule = false // qwy DB genuinely empty — durable presence bit
+
+        val failure = expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-no-schedule"))
+        }
+        assertTrue(
+            "the 13 is the no-schedule one, not a proof/attribution one",
+            failure.message?.contains("no active schedule") == true,
+        )
+        assertEquals("no schedule, no advance", 0, h.env.advanceCount)
+    }
+
+    /**
+     * KB-6 row 15 (recorded shape, NO self-assigned ledger id): the FULL
+     * intra-step ordering pin for step 4. An exhausted schedule addressed with
+     * BOTH a stale item AND a stale version is the only request that can
+     * distinguish all three step-4 gates at once. v1.54 froze the intra-step
+     * order as 16→14→15, so the first hit must be EXACTLY
+     * SCHEDULE_EXHAUSTED(16): with the terminal bit set there is nothing
+     * recoverable to point the caller at, so 14/15's "fix your expectation and
+     * retry" promise would be a lie.
+     *
+     * Ledger row M-AD-21 already pins exhausted + stale ITEM (16 not 14). This
+     * row adds the stale VERSION leg: a reorder to 15→16→14 would still
+     * satisfy M-AD-21 while answering 15 here, so the two rows are not
+     * redundant — M-AD-21 pins one edge of the order, this pins the other.
+     */
+    @Test
+    fun advance_exhaustedWithStaleItemAndStaleVersion_firstHitIsExactlySixteen() {
+        val h = harness()
+        h.env.currentItemId = "item-3"
+        val leaseId = earnAndRelease(h, key = "adv-r15-apply")
+        h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, leaseId, "adv-r15-exhaust", expectedItemId = "item-3", completionProof = proof(h, "item-3")),
+        )
+        assertTrue("precondition: the schedule is now exhausted", h.env.exhausted)
+
+        // A FRESH key (not a replay) carrying a stale item AND a stale version.
+        // Order 14-first would answer 14; 15-first would answer 15. Only the
+        // frozen 16-first answers 16.
+        expectContractFailure(ContractErrorCodeV1.SCHEDULE_EXHAUSTED) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(
+                    h,
+                    leaseId,
+                    "adv-r15-tri-stale",
+                    expectedItemId = "item-1",
+                    expectedVersion = h.env.scheduleVersion - 1,
+                    completionProof = proof(h, "item-1"),
+                ),
+            )
+        }
+        assertEquals("terminal answer, no further advance", 1, h.env.advanceCount)
+        assertEquals("pointer retained at the last item", "item-3", h.env.currentItemId)
+    }
+
+    /**
      * §6.7.5 crash convergence (dsf F-2 item 3): a write fault between the
      * pointer write and the receipt write crashes the operation mid-flight.
      * Because both writes are REQUIRED to share one durable transaction, the
@@ -611,6 +686,28 @@ class AdvanceProviderRedTest {
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
     }
 
+    /**
+     * KB-5 boundary, the PASS side: the caller's OWN still-ACTIVE lease is a
+     * legal attribution (it IS his), so the step-3 gate must let it through —
+     * the failure then comes from the step-5 device-global lease gate as
+     * exactly LEASE_CONFLICT(7), consistent with ledger row M-AD-12 ("release,
+     * then the same bytes succeed"). An attribution gate that also rejected
+     * own ACTIVE leases with 13 would pass both rows above while making
+     * advance unusable in the one shape §6.7.4a freezes as the caller's own
+     * fault to sequence — the over-rejection this row exists to catch.
+     */
+    @Test
+    fun advance_ownActiveLease_passesAttribution_leaseGateAnswers7() {
+        val h = harness()
+        val activeLeaseId = h.apply(key = "adv-kb5-own-apply").leaseId // AUTO holds it, ACTIVE.
+
+        expectContractFailure(ContractErrorCodeV1.LEASE_CONFLICT) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, activeLeaseId, "adv-kb5-own-active"))
+        }
+        assertEquals("attribution passed, the lease gate stopped it", 0, h.env.advanceCount)
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+    }
+
     // ----------------------------- §6.7.4b step 5+6: gate and mutation are atomic
     // (Terra PR#22 P1-3)
 
@@ -663,6 +760,71 @@ class AdvanceProviderRedTest {
             assertEquals(
                 "loser saw the already-moved pointer",
                 ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH,
+                failures.single().code,
+            )
+        }
+    }
+
+    /**
+     * KB-6 row 16 (recorded shape, NO self-assigned ledger id): the SAME race
+     * on the LAST item. The winner commits a terminal EXHAUSTED receipt (null
+     * target, pointer retained — M-AD-10 shape); the loser re-enters against
+     * `exhausted = true` and must fail with EXACTLY SCHEDULE_EXHAUSTED(16),
+     * and the pointer still moves exactly once. The 16-exactness is the v1.54
+     * frozen behaviour: with the terminal bit set there is nothing recoverable
+     * to point the caller at. The row above is the same race on a MIDDLE item,
+     * where the loser correctly gets 14 — together they pin that the loser's
+     * answer tracks the schedule's terminal state, not the race itself.
+     */
+    @Test
+    fun advance_concurrentLastItem_winnerExhausted_loserExactScheduleExhausted() {
+        repeat(40) {
+            val h = harness()
+            h.env.currentItemId = "item-3"
+            val leaseId = earnAndRelease(h, key = "adv-lastrace-apply")
+            // Two DISTINCT keys, both a legal completion of the LAST item.
+            val reqA = request(
+                h, leaseId, "adv-lastrace-a",
+                expectedItemId = "item-3", completionProof = proof(h, "item-3"),
+            )
+            val reqB = request(
+                h, leaseId, "adv-lastrace-b",
+                expectedItemId = "item-3", completionProof = proof(h, "item-3"),
+            )
+
+            val outcomes = Collections.synchronizedList(mutableListOf<Any>())
+            val start = CountDownLatch(1)
+            val done = CountDownLatch(2)
+            listOf(reqA, reqB).forEach { req ->
+                Thread {
+                    start.await()
+                    try {
+                        outcomes.add(h.handler.completeAndAdvance(AUTO_UID, req))
+                    } catch (t: Throwable) {
+                        outcomes.add(t)
+                    } finally {
+                        done.countDown()
+                    }
+                }.start()
+            }
+            start.countDown()
+            assertTrue("race finished", done.await(30, TimeUnit.SECONDS))
+
+            assertEquals("pointer advanced exactly once, never twice", 1, h.env.advanceCount)
+            assertEquals("last item retained, no wrap-around", "item-3", h.env.currentItemId)
+            assertTrue("exhausted discriminator set", h.env.exhausted)
+            val receipts = outcomes.filterIsInstance<AdvanceReceiptV1>()
+            assertEquals("exactly one winner", 1, receipts.size)
+            assertEquals(
+                "terminal completion is a SUCCESS receipt",
+                AdvanceOutcomeV1.EXHAUSTED.wire, receipts.single().outcomeWire,
+            )
+            assertNull("terminal outcome carries a null target", receipts.single().advancedToItemId)
+            val failures = outcomes.filterIsInstance<ContractException>()
+            assertEquals("exactly one loser", 1, failures.size)
+            assertEquals(
+                "loser of the last-item race sees exactly the terminal answer",
+                ContractErrorCodeV1.SCHEDULE_EXHAUSTED,
                 failures.single().code,
             )
         }
