@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="matrix.IntentMatrixTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-15T22:19:43.782Z" hostname="TERRYdeMacBook-Pro.local" time="0.014">
+  <properties/>
+  <testcase name="M_IN_01" classname="matrix.IntentMatrixTest" time="0.011"/>
+  <testcase name="M_IN_02" classname="matrix.IntentMatrixTest" time="0.001"/>
+  <testcase name="M_IN_03" classname="matrix.IntentMatrixTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>
