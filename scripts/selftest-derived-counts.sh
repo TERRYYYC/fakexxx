@@ -599,7 +599,15 @@ mut "M-PLAIN-SCOPE plain-owner-red scoping catches its own isolated line" \
 # Sol found the first at d3dd440; the census that produced this case found the
 # second. Sixth time in this document that a guard's matcher was narrower than
 # the notation it claimed to cover -- so this case plants the SHAPE, not the value.
-neg "N-P bold-phrase notation (**92 行 `owner-red`** -> planted 47)" \
+# Label is SINGLE-quoted: it contains Markdown backticks, and inside a
+# double-quoted bash string those are command substitution. This label used to be
+# double-quoted, so running the selftest executed `owner-red` as a command:
+# stderr carried "owner-red: command not found", the printed label was silently
+# truncated to "(**92 行 ** -> planted 47)", and the suite still exited 0 / PASS.
+# The mangled label was visible in the output twice and read straight past.
+# A self-test that executes its own prose, errors, and still reports green is the
+# same defect class this suite exists to catch -- one layer further out.
+neg 'N-P bold-phrase notation (**92 行 `owner-red`** -> planted 47)' \
   '那 **92 行 `owner-red`**' \
   '那 **47 行 `owner-red`**' \
   ' bold-phrase 47 '

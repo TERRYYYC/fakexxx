@@ -381,7 +381,8 @@ def exempt(start, stripped_line, work_line, quote_only=False):
         return True
     return any(a <= start <= b for a, b in quoted_spans(work_line, corner_only=quote_only))
 
-sites = []     # (absno, arm, value)  -- every number the guard can see
+sites = []     # (absno, arm, value)  -- one entry PER ARM MATCH, not per site
+spans = set()  # (absno, pos, value)   -- one entry per PHYSICAL number occurrence
 findings = []  # (absno, arm, value)  -- the ones the ledger cannot produce
 skipped_cn_one = 0
 
@@ -402,6 +403,13 @@ for idx in range(active_from - 1, len(lines)):
 
     def consider(arm, value, pos):
         sites.append((absno, arm, value))
+        # A physical number read by N arms is ONE site and N matches. Reporting
+        # len(sites) as "sites" overstates coverage: spec L2638's single "26 行"
+        # is matched by both bare and bold-phrase, so it was counted twice while
+        # being described as newly visible. Dedup key is the captured group's
+        # start offset, which is the same coordinate for every arm that reads
+        # the same number.
+        spans.add((absno, pos, value))
         if value not in legal and not exempt(pos, stripped, work,
                                             quote_only=(arm in QUOTE_ONLY_ARMS)):
             findings.append((absno, arm, value))
@@ -455,7 +463,12 @@ for (a, ar, v) in findings:
           % (a, ar, v, v, legal_repr,
              ', 5' if 'appid-cutover' in lines[a - 1] else ''))
 
-print('  => section 3: %d stale cache site(s) of %d enumerated WITHIN SCOPE' % (len(seen), len(sites)))
+print('  => section 3: %d stale cache site(s) of %d unique cache site(s) WITHIN SCOPE'
+      % (len(seen), len(spans)))
+print('  ----  %d raw arm match(es) produced those %d unique site(s): one physical\n'
+      '        number read by N arms is ONE site and N matches. The two are not\n'
+      '        interchangeable and a coverage claim must cite the former.'
+      % (len(sites), len(spans)))
 print('  ----  scope is a filter, not a census: a cache on a line no arm and no\n        scope token reaches is not counted above and never appears as a gap.')
 sys.exit(min(len(seen), 100))
 PY
