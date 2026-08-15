@@ -44,15 +44,43 @@ class PlanRepository(private val db: AppDatabase) {
      * no A+ evidence chain and must not decide selection/completion (INV-05/06, M-MG-02). GREEN wires
      * `AutomationEngine.run()` to this instead of [PlanScheduler.selectNext].
      *
-     * PRE-FREEZE SKELETON (RED): aliases the legacy counter path — exactly the forbidden behaviour —
-     * so a real-DB fixture asserting the trusted projection FAILS until GREEN reads the trusted count
-     * from [com.example.cellrebelauto.db.TrustedQuotaDao.trustedCountForTask] per task. The trusted
-     * count is read from the REAL projection inside this method (not a test-supplied map), so a bad
-     * impl cannot green it by painting an isolated scheduler helper.
+     * GREEN semantics:
+     *  1. NORMALIZE: any task whose trusted count has reached required (regardless of status) is
+     *     flipped to completed via the trusted SQL — idempotent, the F5-equivalent projection.
+     *  2. SELECT: the first ACTIVE task in execution order that is trusted-INCOMPLETE **and**
+     *     (counter-incomplete OR not yet attempted by THIS run). The second clause reconciles M-MG-02
+     *     with legacy retry semantics: a counter-full/trusted-empty task MUST be re-attempted at least
+     *     once per run (never silently skipped on the counter), but a legacy run that already produced
+     *     its own attempts stops instead of looping forever — only a trusted mint can complete a task,
+     *     and legacy attempts mint nothing (§7.3). In A+ mode the counter never advances, so A+ retry
+     *     semantics (INV-2) are unchanged.
+     *  3. Fall back to the first PENDING task (a pending counter-full/trusted-empty task is likewise
+     *     never skipped — M-MG-01/M-MG-02 migration semantics).
+     *
+     * The trusted count is read from the REAL projection ([TrustedQuotaDao.trustedCountForTask]) —
+     * never a test-supplied map — so a bad impl cannot green it by painting an isolated helper.
      */
-    suspend fun selectNextTrustedTask(planId: Long): LocationTask? {
+    suspend fun selectNextTrustedTask(planId: Long, attemptedTaskIds: Set<Long> = emptySet()): LocationTask? {
         val tasks = db.locationTaskDao().getTasksForPlan(planId)
-        return PlanScheduler.selectNext(tasks)
+        // 1. Normalize trusted-complete statuses (idempotent projection flip).
+        for (t in tasks) {
+            if (t.status != "completed" &&
+                db.trustedQuotaDao().trustedCountForTask(t.id) >= t.requiredSuccesses
+            ) {
+                db.locationTaskDao().completeTaskIfQuotaReached(t.id)
+            }
+        }
+        val refreshed = db.locationTaskDao().getTasksForPlan(planId)
+        val ordered = PlanScheduler.executionOrder(refreshed)
+        // 2. Active + trusted-incomplete, reconciled with legacy retry semantics.
+        val active = ordered.firstOrNull { task ->
+            task.status == "active" &&
+                db.trustedQuotaDao().trustedCountForTask(task.id) < task.requiredSuccesses &&
+                (task.completedSuccesses < task.requiredSuccesses || task.id !in attemptedTaskIds)
+        }
+        if (active != null) return active
+        // 3. Pending fallback.
+        return ordered.firstOrNull { it.status == "pending" }
     }
 
     suspend fun countAttemptsForTask(taskId: Long): Int = db.testAttemptDao().countAttemptsForTask(taskId)
@@ -263,6 +291,39 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getObservation(attemptId: Long, phase: String): com.example.cellrebelauto.model.ledger.DurableObservationRecord? =
         db.durableObservationDao().forAttemptPhase(attemptId, phase)
 
+    /**
+     * R43 GREEN (M-CR-06): reconstruct the §6.4 [ObservationSnapshot] from the durable record —
+     * the crash-recovery re-decide reads observations from HERE, never from a live source.
+     * `evidenceRefs` is parsed back from the JSON array column (round-trippable).
+     */
+    suspend fun getObservationSnapshot(attemptId: Long, phase: String): com.example.cellrebelauto.environment.ObservationSnapshot? {
+        val r = db.durableObservationDao().forAttemptPhase(attemptId, phase) ?: return null
+        val refs = try {
+            val arr = org.json.JSONArray(r.evidenceRefsJson)
+            (0 until arr.length()).map { arr.getString(it) }
+        } catch (e: Exception) {
+            // Legacy semicolon column fallback (pre-JSON rows).
+            if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
+        }
+        return com.example.cellrebelauto.environment.ObservationSnapshot(
+            leaseId = r.leaseId,
+            acceptedIntentHash = r.acceptedIntentHash,
+            coverage = r.coverage,
+            verificationLevel = r.verificationLevel,
+            deliveryMode = r.deliveryMode,
+            isMock = r.isMock,
+            scheduleDecision = r.scheduleDecision,
+            effectiveLat = r.effectiveLat,
+            effectiveLng = r.effectiveLng,
+            environmentRevision = r.environmentRevision,
+            environmentFingerprint = r.environmentFingerprint,
+            observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
+            observedAtEpochMs = r.observedAtEpochMs,
+            continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
+            evidenceRefs = refs
+        )
+    }
+
     suspend fun persistCompletionReceipt(attemptId: Long, wire: Int, acceptedIntentHash: String, leaseId: String) =
         db.durableCompletionReceiptDao().insert(
             com.example.cellrebelauto.model.ledger.DurableCompletionReceipt(
@@ -273,6 +334,10 @@ class PlanRepository(private val db: AppDatabase) {
 
     suspend fun getCompletionReceipt(attemptId: Long): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt? =
         db.durableCompletionReceiptDao().forAttempt(attemptId)
+
+    /** R43 GREEN (M-CR-06): owner lookup of the current execution row by executionId (never positional). */
+    suspend fun getExecutionByExecutionId(executionId: String): com.example.cellrebelauto.model.execution.CellRebelExecution? =
+        db.attemptExecutionDao().byExecutionId(executionId)
 
     // # 恢复真相载体（Sol round-16 P1-1 / round-18 P1-1）：可信账本 / 未验证记录是 append-only 权威，
     // # 返回 typed entry 以绑定 attempt+task 并检测跨表矛盾，绝不信裸 phase 字符串
@@ -395,8 +460,10 @@ class PlanRepository(private val db: AppDatabase) {
      * never a default constant or execution.completedAtElapsed.
      */
     suspend fun recordTrustedCompletion(ctx: CompletionTrustContext, commitClockMs: Long): TrustDecision = db.withTransaction {
-        // (1) Persist the FULL §7.1 evidence detail — copied verbatim from ctx.execution.
-        db.attemptExecutionDao().insert(ctx.execution)
+        // (1) Persist the FULL §7.1 evidence detail — copied verbatim from ctx.execution. The insert
+        // is CONFLICT-IGNORING: the M-CR-06 recovery re-decide runs over an ALREADY-DURABLE execution
+        // row; re-persisting it must be a no-op, never a UNIQUE rollback that unwinds the mint.
+        db.attemptExecutionDao().insertIfAbsent(ctx.execution)
         // (2) Evaluate the §6.4 predicate.
         val decision = TrustPolicy().evaluate(ctx)
         // Attribution: resolve attemptId → taskId by REAL DB lookup (never a constant, R5-F1).

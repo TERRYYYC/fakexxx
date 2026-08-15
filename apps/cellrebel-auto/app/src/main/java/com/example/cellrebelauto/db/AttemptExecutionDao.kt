@@ -2,6 +2,7 @@ package com.example.cellrebelauto.db
 
 import androidx.room.Dao
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 
@@ -14,6 +15,15 @@ interface AttemptExecutionDao {
 
     @Insert
     suspend fun insert(execution: CellRebelExecution): Long
+
+    /**
+     * Append-only insert that IGNORES a UNIQUE(executionId) conflict. The crash-recovery re-decide
+     * (M-CR-06) calls [com.example.cellrebelauto.repository.PlanRepository.recordTrustedCompletion]
+     * over a DURABLE execution row that already exists — re-persisting must be a no-op, never a
+     * constraint rollback that would unwind the mint.
+     */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(execution: CellRebelExecution): Long
 
     @Query("SELECT * FROM cellrebel_executions WHERE attemptId = :attemptId ORDER BY id ASC")
     suspend fun forAttempt(attemptId: Long): List<CellRebelExecution>

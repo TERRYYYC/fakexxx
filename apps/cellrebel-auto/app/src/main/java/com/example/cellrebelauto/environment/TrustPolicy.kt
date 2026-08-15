@@ -28,8 +28,11 @@ import kotlin.math.sqrt
 class TrustPolicy {
 
     fun evaluate(context: CompletionTrustContext): TrustDecision {
-        // §8.6.2: only wire 1 (VERIFIED_NEW_COMPLETION) may ever mint (INV-11).
+        // §8.6.2: only wire 1 (VERIFIED_NEW_COMPLETION) may ever mint (INV-11). The classified
+        // EXECUTION row must agree — a receipt claiming wire 1 while the execution carries 2-5
+        // (or vice versa) is a disagreement and fails closed (Sol R39 wire-disagreement closure).
         if (context.completionEvidenceWire != WIRE_VERIFIED_NEW_COMPLETION) return TrustDecision.FAIL
+        if (context.execution.completionEvidenceWire != WIRE_VERIFIED_NEW_COMPLETION) return TrustDecision.FAIL
 
         // INV-23 three-way intent: receipt hash == locally recomputed hash (each observation's
         // acceptedIntentHash == receipt is checked per-observation below).
