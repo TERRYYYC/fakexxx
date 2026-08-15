@@ -51,10 +51,16 @@ class RecoveryCoordinator(
      * NOT invented by the caller; it comes back from the (idempotent) apply (Sol round-9 P1-3: the
      * M-CR-02 window has no pre-existing lease, the replay yields it).
      *
-     * PRE-FREEZE SKELETON (RED): always returns [ReconcileResult.InsufficientEvidence], ignoring
-     * [executor] and [log]. GREEN: same-key/same-digest → [ReconcileResult.ReplayedApply] (no executor
-     * call) with the prior receipt + lease; same-key/different-digest → IdempotencyConflict; no receipt →
-     * executor.apply + recordReceipt + recordCheckpoint → AdvancedToRelease with the fresh receipt + lease.
+     * GREEN orchestration (contract v1 frozen):
+     *  1. `receiptFor(key)` with the SAME digest ⇒ **REPLAYED_APPLY** — do NOT call the executor
+     *     (at-most-once; the receipt already proves the apply); repair the window-c checkpoint if
+     *     missing (R5-F2: bind it to the receipt key).
+     *  2. `receiptFor(key)` with a DIFFERENT digest ⇒ **IDEMPOTENCY_CONFLICT** — do NOT call the
+     *     executor, prior receipt preserved (INV-13).
+     *  3. no receipt ⇒ `executor.apply(...)` (the external call) → `recordReceipt(...)` →
+     *     `recordCheckpoint(...)` ⇒ **ADVANCED_TO_RELEASE** with the fresh receipt + lease.
+     *  Across a crash the executor MAY be called twice; the PROVIDER's idempotency keeps the EFFECT at
+     *  one (M-CR-02 window (b) recovery).
      *
      * @param idempotencyKey the frozen idempotency key for this attempt's apply (INV-13).
      * @param requestDigest the §6.3.4 canonical digest of the apply request (NOT the result digest).
@@ -66,7 +72,28 @@ class RecoveryCoordinator(
         now: Long
     ): ReconcileResult {
         reconcileInvocationCount++
-        return ReconcileResult.InsufficientEvidence
+        val prior = log.receiptFor(idempotencyKey)
+        if (prior != null) {
+            if (prior.requestDigest != requestDigest) {
+                // Same key + different canonical digest ⇒ INV-13 conflict; NO executor call, prior preserved.
+                return ReconcileResult.IdempotencyConflict
+            }
+            // Same key + same digest ⇒ idempotent replay: NO executor call (at-most-once). Repair the
+            // window-c checkpoint if the prior process crashed after the receipt but before it (R5-F2).
+            log.recordCheckpoint(attemptId, "RECONCILED_REPLAY", prior.idempotencyKey, now)
+            return ReconcileResult.ReplayedApply(prior, prior.leaseId)
+        }
+        // No durable receipt ⇒ M-CR-02 window (b): re-invoke the executor (the provider idempotently
+        // no-ops if it already applied), record the receipt + checkpoint, advance with the fresh lease.
+        val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
+        if (outcome.leaseId == null) {
+            // A fail-closed executor yields no lease — the apply is not proven; fail closed.
+            return ReconcileResult.InsufficientEvidence
+        }
+        val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now)
+            ?: return ReconcileResult.InsufficientEvidence // receipt not durable ⇒ apply unproven
+        log.recordCheckpoint(attemptId, "ADVANCED_TO_RELEASE", receipt.idempotencyKey, now)
+        return ReconcileResult.AdvancedToRelease(receipt, outcome.leaseId!!)
     }
 
     /**
@@ -107,7 +134,24 @@ class RecoveryCoordinator(
         attemptId: Long,
         idempotencyKey: String,
         now: Long
-    ): ScheduleAdvanceState = ScheduleAdvanceState.NOT_ADVANCED
+    ): ScheduleAdvanceState {
+        // Receipt FIRST (§5 boundary): without a durable receipt Auto never assumes the schedule
+        // advanced — regardless of any acquired fact.
+        val receipt = log.receiptFor(idempotencyKey) ?: return ScheduleAdvanceState.NOT_ADVANCED
+        // Acquire each fact INSIDE the gate from the coordinator-owned readers, forwarding the REAL
+        // owned identity — never caller-supplied booleans (R6-F2). All three are acquired unconditionally
+        // (no short-circuit): each reader call is itself part of the observable contract.
+        val observeMatch = observe.matches(attemptId)
+        val revisionFresh = receiptRevision.isFresh(idempotencyKey, now)
+        val quotaHasCapacity = trustedQuota.hasCapacity(attemptId)
+        return if (observeMatch && revisionFresh && quotaHasCapacity) {
+            // Window-c checkpoint bound to the advanced receipt (R5-F2 durable half).
+            log.recordCheckpoint(attemptId, "SCHEDULE_ADVANCED", receipt.idempotencyKey, now)
+            ScheduleAdvanceState.ADVANCED
+        } else {
+            ScheduleAdvanceState.NOT_ADVANCED
+        }
+    }
 
     /**
      * Normal-path apply dispatch (§8.1 BEGIN_APPLY→APPLY_RECEIPT): drive the external apply for
@@ -199,8 +243,12 @@ sealed class ReconcileResult {
     /** A fresh apply recovered: the executor applied + receipt recorded; [leaseId] is the acquired lease. */
     data class AdvancedToRelease(val applyReceipt: RecordedReceipt, val leaseId: String) : ReconcileResult()
 
-    /** A prior apply replayed (same key + digest): no executor call; [leaseId] is the prior lease. */
-    data class ReplayedApply(val applyReceipt: RecordedReceipt, val leaseId: String) : ReconcileResult()
+    /**
+     * A prior apply replayed (same key + digest): no executor call; [leaseId] is the lease recorded on
+     * the durable receipt (null for legacy receipts that predate the lease column — the caller fails
+     * closed on null rather than inventing a lease).
+     */
+    data class ReplayedApply(val applyReceipt: RecordedReceipt, val leaseId: String?) : ReconcileResult()
 
     /** Same idempotency key, different canonical request digest (INV-13). */
     object IdempotencyConflict : ReconcileResult()
