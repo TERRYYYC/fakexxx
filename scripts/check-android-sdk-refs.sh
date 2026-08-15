@@ -142,13 +142,16 @@ ARM_EMPTY = True   # a scan that found nothing is a RED, not a pass
 # mentioned ServiceSpecificException produced a NOT-IN-PUBLIC-SDK FAIL about
 # prose (review R1 P1-1). Knob exists so the selftest can prove the span of
 # the lexer that skips them is load-bearing.
-# ARM_QSKIP: ORDINARY quoted strings are not references either. R1 fixed only
-# the triple-quoted shape (its named instance) while the audit's own invariant
-# said "string content is not code" -- review R2 caught the ungeneralised arm:
-# a plain "android.os.ServiceSpecificException" literal still produced a
-# NOT-IN-PUBLIC-SDK FAIL about prose. Both string arms blank content and keep
-# newlines, so line numbers never drift.
+# ARM_QSKIP / ARM_TEMPLATE: string LITERAL content is not code, but a
+# ${...} template expression inside a string IS real Kotlin code. R2 blanked
+# everything (killing a false positive) and thereby also blanked template
+# class literals -- a false NEGATIVE over a genuine reference, which is worse
+# for a gate whose §6.1 mandate is EVERY reference (review R3). The lexer now
+# blanks literal text and keeps template expression code, recursively:
+# strings nest inside templates inside strings, and brace counting alone
+# mis-pairs on that shape.
 ARM_QSKIP = True
+ARM_TEMPLATE = True
 ARM_TQSKIP = True
 # ARM_NESTED: nested public types are stored with '$' (android-35 keeps
 # Build.VERSION as android/os/Build$VERSION.class), but a source reference
@@ -163,6 +166,50 @@ ARM_NESTED = True
 # which is what makes that exclusion part of the measured predicate.
 TOKEN = re.compile(r'(?<![\w.])(android\.[A-Za-z]\w*(?:\.[A-Za-z]\w*)*)')
 
+def _expr_span(text, i):
+    # Scan a template expression from just after '${' to its matching '}'.
+    # Returns (kept_code, next_index). Nested strings recurse into the string
+    # handler (they may themselves carry templates); braces inside those
+    # strings must not count toward the depth.
+    out, depth, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            kept, i = _string_span(text, i, '"', False)
+            out.append(kept)
+        elif c == '{':
+            depth += 1; out.append(c); i += 1
+        elif c == '}':
+            if depth == 0:
+                return ''.join(out), i + 1
+            depth -= 1; out.append(c); i += 1
+        else:
+            out.append(c); i += 1
+    return ''.join(out), n
+
+def _string_span(text, i, q, raw):
+    # Scan a string literal from its OPENING quote. Returns (kept, next_index):
+    # literal content blanked (newlines preserved), ${...} template code kept
+    # verbatim (delimiters dropped). raw=True is the triple-quoted form.
+    delim = q * 3 if raw else q
+    j = i + len(delim)
+    out, n = [], len(text)
+    while j < n:
+        if not raw and text[j] == '\\' and j + 1 < n:
+            j += 2  # escape pair: blank both
+        elif ARM_TEMPLATE and text[j] == '$' and text[j:j+2] == '${':
+            expr, j = _expr_span(text, j + 2)
+            out.append(' ' + expr)
+        elif text[j:j+len(delim)] == delim and (raw or q == "'"):
+            if raw:
+                # closing """ -- but in non-raw this arm is unreachable ('x'
+                # has no multi-char delim); keep the guard explicit anyway
+                return ''.join(out), j + len(delim)
+            return ''.join(out), j + len(delim)
+        else:
+            out.append('\n' if text[j] == '\n' else ' ')
+            j += 1
+    return ''.join(out), n
 def strip_comments(text, is_aidl):
     out, i, n = [], 0, len(text)
     while i < n:
@@ -172,35 +219,39 @@ def strip_comments(text, is_aidl):
             j = n if j == -1 else j + 2
             out.append('\n' * text.count('\n', i, j))  # keep line numbers
             i = j
-        elif two == '//' and not (ARM_TQSKIP and text[i:i+3] == '///'):
+        elif two == '//':
             j = text.find('\n', i)
             j = n if j == -1 else j
             i = j
-        elif ARM_TQSKIP and text[i:i+3] == '"""':
-            # Triple-quoted string: skip to the closing """. Checked BEFORE
-            # the single-quote arm, or the inner quotes desynchronise it.
-            # The placeholder keeps newlines (line numbers must not drift)
-            # and blanks everything else: string CONTENT is not code.
-            j = text.find('"""', i + 3)
-            j = n if j == -1 else j + 3
-            out.append(re.sub(r'[^\n]', ' ', text[i:j]))
-            i = j
-        elif text[i] == '"' or text[i] == "'":
-            q, i2 = text[i], i + 1
-            while i2 < n and text[i2] != q:
-                i2 += 2 if text[i2] == '\\' else 1
-            if ARM_QSKIP:
-                # Keep the quote chars, blank the content (newlines survive;
-                # single-line strings keep their span). String CONTENT is not
-                # code -- with one deliberate boundary: a ${...} template
-                # expression inside a string is ALSO blanked, so a genuine
-                # reference spelled there is out of the measurement. That is
-                # the conservative side: this gate's history is false
-                # POSITIVES on prose, and the module spells its references as
-                # statements, not templates. Noted here rather than hidden.
-                out.append(q + re.sub(r'[^\n]', ' ', text[i+1:i2]) + q)
+        elif text[i:i+3] == '"""':
+            # Triple-quoted string. Literal blanked / template code kept
+            # (newlines preserved so line numbers do not drift). Checked
+            # BEFORE the single-quote arm, or the inner quotes desynchronise.
+            if ARM_TQSKIP:
+                kept, j = _string_span(text, i, '"', True)
+                out.append(kept)
+                i = j
             else:
-                out.append(text[i:i2+1])
+                j = text.find('"""', i + 3)
+                j = n if j == -1 else j + 3
+                out.append(text[i:j])
+                i = j
+        elif text[i] == '"':
+            if ARM_QSKIP:
+                kept, j = _string_span(text, i, '"', False)
+                out.append(kept)
+                i = j
+            else:
+                i2 = i + 1
+                while i2 < n and text[i2] != '"':
+                    i2 += 2 if text[i2] == '\\' else 1
+                out.append(text[i:i2+1]); i = i2 + 1
+        elif text[i] == "'":
+            # char literal: no templates, content is never code
+            i2 = i + 1
+            while i2 < n and text[i2] != "'":
+                i2 += 2 if text[i2] == '\\' else 1
+            out.append("'" + re.sub(r'[^\n]', ' ', text[i+1:i2]) + "'")
             i = i2 + 1
         else:
             out.append(text[i]); i += 1

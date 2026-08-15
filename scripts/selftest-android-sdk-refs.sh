@@ -280,6 +280,47 @@ else
 fi
 rm -rf "$D"
 
+# N-J (review R3 P1-5): a ${...} template expression is REAL CODE. A class
+# literal inside a string template is a genuine type reference, and blanking
+# it wholesale (the R2 "conservative side") turned the guard's false positive
+# into a false NEGATIVE -- worse for a gate whose §6.1 mandate is every
+# reference.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val TEMPLATE = "${android.os.ServiceSpecificException::class.java.name}"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -q 'ServiceSpecificException.*NOT IN PUBLIC SDK'; then
+  ok "N-J a type reference inside a \${...} template is caught (template code is code)"
+  NEG=$((NEG + 1))
+else
+  bad "N-J the template class literal was blanked with the string -- false green over a real reference"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# N-K pins the RECURSION: a template containing a nested string which itself
+# contains a template. Simple brace-counting breaks on this shape; the lexer
+# must handle strings-in-templates-in-strings. android.os.Binder is absent
+# from the fixture jar, so the reference must fire.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val NESTED = "pre${"inner${android.os.Binder}post"}suffix"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -q 'android.os.Binder.*NOT IN PUBLIC SDK'; then
+  ok "N-K a reference in a nested template (string-in-template-in-string) is caught"
+  NEG=$((NEG + 1))
+else
+  bad "N-K nested template broke the lexer -- the reference vanished from measurement"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
 # N-H (review R1 P1-3): the provenance banner must carry EVERY scanned input
 # (relpath, line count, sha prefix), or a stale/mutated copy among many files
 # cannot be told apart -- the exact diagnostic this lane's banner exists for.
@@ -471,6 +512,27 @@ if printf '%s' "$OUT" | grep -qF 'NOT IN PUBLIC SDK'; then
   MUT=$((MUT + 1))
 else
   bad "M-6 disabling ARM_QSKIP changed nothing -- the ordinary-string arm is decorative"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# M-7 (review R3 P1-5 load-bearing): with template preservation disabled,
+# string spans blank template code too (the R2 behaviour) and N-J's FAIL
+# must vanish -- the false negative the template arm exists to prevent.
+D="$(mk)"
+sed -i.bak 's/^ARM_TEMPLATE = .*/ARM_TEMPLATE = False/' "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val TEMPLATE = "${android.os.ServiceSpecificException::class.java.name}"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "M-7 template arm - disabling it restores the R2 false green, so the arm is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-7 disabling ARM_TEMPLATE did not restore the false green -- the arm is not the one keeping template code in measurement"
   detail "$OUT"
 fi
 rm -rf "$D"
