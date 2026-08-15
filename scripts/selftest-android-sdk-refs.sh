@@ -260,6 +260,26 @@ else
 fi
 rm -rf "$D"
 
+# N-I (review R2 P1-4): a NORMAL single/double-quoted string is not a type
+# reference either. The R1 fix blanked only triple-quoted spans; the ordinary
+# quote branch appended its content verbatim, so a string literal mentioning
+# the type still produced a NOT-IN-PUBLIC-SDK FAIL about prose.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal const val NORMAL_STRING = "android.os.ServiceSpecificException"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "N-I a normal string mentioning the type stays green (string content is not code)"
+  NEG=$((NEG + 1))
+else
+  bad "N-I a normal string leaked into the token matcher -- the R1 fix only blanked triple quotes"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
 # N-H (review R1 P1-3): the provenance banner must carry EVERY scanned input
 # (relpath, line count, sha prefix), or a stale/mutated copy among many files
 # cannot be told apart -- the exact diagnostic this lane's banner exists for.
@@ -389,11 +409,15 @@ PY
   fi
 fi
 
-# M-4 (review R1 P1-1 load-bearing): with the triple-quote handling disabled,
-# N-E's PASS must flip to a false FAIL -- that span of the lexer is what keeps
-# string literals out of the token matcher.
+# M-4 (review R1 P1-1, reworked R2): the string-blanking invariant is carried
+# JOINTLY by the two string arms. After P1-4's fix an ordinary-quote arm also
+# blanks content, so disabling the triple-quote arm ALONE no longer reddens
+# N-E (any quote pairing blanks the span) -- the TQ arm is now defence-in-depth
+# against mis-pairing, not the sole guard. Disabling BOTH must flip N-E into a
+# false red; that is the load-bearing proof for the invariant as it stands.
 D="$(mk)"
-sed -i.bak "s/^ARM_TQSKIP = .*/ARM_TQSKIP = False/" "$D/scripts/check-android-sdk-refs.sh"
+sed -i.bak 's/^ARM_TQSKIP = .*/ARM_TQSKIP = False/; s/^ARM_QSKIP = .*/ARM_QSKIP = False/' \
+  "$D/scripts/check-android-sdk-refs.sh"
 rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
 apply "$D" "$KT/ContractEnumsV1.kt" \
   'package io.github.terryyyc.fakexxx.contract.v1' \
@@ -402,10 +426,10 @@ apply "$D" "$KT/ContractEnumsV1.kt" \
 internal const val KB7_NOTE = """android.os.ServiceSpecificException"""' >/dev/null 2>&1
 OUT="$(run_gate "$D")"
 if printf '%s' "$OUT" | grep -qF 'NOT IN PUBLIC SDK'; then
-  ok "M-4 triple-quote skip arm - disabling it turns N-E into a false red, so the arm is load-bearing"
+  ok "M-4 string-blanking arms jointly - disabling both turns N-E into a false red, so the invariant is load-bearing"
   MUT=$((MUT + 1))
 else
-  bad "M-4 disabling ARM_TQSKIP changed nothing -- the triple-quote arm is decorative"
+  bad "M-4 with both string arms disabled nothing leaks -- one of the arms is dead code"
   detail "$OUT"
 fi
 rm -rf "$D"
@@ -426,6 +450,27 @@ if printf '%s' "$OUT" | grep -qF 'NOT IN PUBLIC SDK'; then
   MUT=$((MUT + 1))
 else
   bad "M-5 disabling ARM_NESTED changed nothing -- the \$-form arm is decorative"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# M-6 (review R2 P1-4 load-bearing): with the ordinary-string blanking
+# disabled, N-I's PASS must flip to a false FAIL -- the same proof shape as
+# M-4, on the arm the R1 fix forgot to measure.
+D="$(mk)"
+sed -i.bak "s/^ARM_QSKIP = .*/ARM_QSKIP = False/" "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal const val NORMAL_STRING = "android.os.ServiceSpecificException"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'NOT IN PUBLIC SDK'; then
+  ok "M-6 ordinary-string blank arm - disabling it turns N-I into a false red, so the arm is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-6 disabling ARM_QSKIP changed nothing -- the ordinary-string arm is decorative"
   detail "$OUT"
 fi
 rm -rf "$D"
