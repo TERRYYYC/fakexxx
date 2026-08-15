@@ -90,7 +90,13 @@ data class RecordedReceipt(
     val idempotencyKey: String,
     val requestDigest: String,
     val resultOutcome: String,
-    val createdAt: Long
+    val createdAt: Long,
+    /**
+     * The provider lease issued by the applied operation (contract `ApplyReceiptV1.leaseId`). Nullable:
+     * legacy/test-seeded receipts predate the field; the GREEN Room binding always persists it from
+     * the apply receipt, so a replay can hand the lease back without re-invoking the provider.
+     */
+    val leaseId: String? = null
 )
 
 /** A recovery checkpoint (§7.1 RecoveryCheckpoint projection). */
