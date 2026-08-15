@@ -25,9 +25,10 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         idempotencyKey: String,
         requestDigest: String,
         outcome: String,
-        createdAt: Long
+        createdAt: Long,
+        leaseId: String? = null
     ) {
-        receipts[idempotencyKey] = RecordedReceipt(idempotencyKey, requestDigest, outcome, createdAt)
+        receipts[idempotencyKey] = RecordedReceipt(idempotencyKey, requestDigest, outcome, createdAt, leaseId)
     }
 
     override fun receiptFor(idempotencyKey: String): RecordedReceipt? = receipts[idempotencyKey]
@@ -36,7 +37,8 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         idempotencyKey: String,
         requestDigest: String,
         outcome: String,
-        now: Long
+        now: Long,
+        leaseId: String?
     ): RecordedReceipt? {
         val existing = receipts[idempotencyKey]
         if (existing != null) {
@@ -45,7 +47,8 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
             // Same key, different canonical digest → conflict; prior receipt preserved, no re-write.
             return null
         }
-        val receipt = RecordedReceipt(idempotencyKey, requestDigest, outcome, now)
+        // R43 (Sol GREEN-review P1-5): the provider lease persists ATOMICALLY with the receipt.
+        val receipt = RecordedReceipt(idempotencyKey, requestDigest, outcome, now, leaseId)
         receipts[idempotencyKey] = receipt
         return receipt
     }

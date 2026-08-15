@@ -572,12 +572,15 @@ class EngineTrustedPathRedTest {
 
     @Test
     fun `R10-P1-1 the shipped production backend is non-null and fails closed - no lease, no mint, PAUSED`() = runTest {
-        // The shipped skeleton (APlusComposition.productionBackend()) must be exercised: it yields NO lease
-        // (fail-closed executor) → the A+ path PAUSES at apply, never reaches decide, never mints, never
-        // touches the legacy counter. A green-but-disconnected helper cannot satisfy this.
+        // R43 GREEN: the REAL production backend (binder executor + Room receipt store) exercised in
+        // its unbound state: the binder executor fail-closes every apply (`PROVIDER_NOT_BOUND`, no
+        // lease) → the A+ path PAUSES at apply, never reaches decide, never mints, never touches the
+        // legacy counter. Fail-closed by construction (no stubs), not by skeleton accident.
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        val backend = APlusComposition.productionBackend()
+        val backend = APlusComposition.productionBackend(
+            androidx.test.core.app.ApplicationProvider.getApplicationContext(), db
+        )
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))

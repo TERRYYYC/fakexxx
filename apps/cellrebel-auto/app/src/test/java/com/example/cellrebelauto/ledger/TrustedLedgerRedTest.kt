@@ -517,6 +517,43 @@ class TrustedLedgerRedTest {
         // PRE against the receipt, closing the symmetric direction of the binding).
         fail(validContext().copy(preObservation = validPre().copy(leaseId = "L-pre-other")))
 
+    // === Non-finite / out-of-range coordinates (Sol GREEN-review P1-3) ===
+    // NaN haversine is NaN and `NaN > 1.0` is false — without an isFinite gate a NaN coordinate
+    // silently PASSes. ±Infinity and out-of-range values are equally untrustworthy.
+
+    @Test
+    fun `a NaN latitude fails closed`() =
+        fail(validContext().copy(preObservation = validPre().copy(effectiveLat = Double.NaN)))
+
+    @Test
+    fun `a NaN longitude fails closed`() =
+        fail(validContext().copy(preObservation = validPre().copy(effectiveLng = Double.NaN)))
+
+    @Test
+    fun `an infinite latitude fails closed`() =
+        fail(validContext().copy(preObservation = validPre().copy(effectiveLat = Double.POSITIVE_INFINITY)))
+
+    @Test
+    fun `an infinite longitude fails closed`() =
+        fail(validContext().copy(preObservation = validPre().copy(effectiveLng = Double.NEGATIVE_INFINITY)))
+
+    @Test
+    fun `an out-of-range latitude above 90 fails closed`() =
+        fail(validContext().copy(preObservation = validPre().copy(effectiveLat = 91.0)))
+
+    @Test
+    fun `an out-of-range longitude beyond 180 fails closed`() =
+        fail(validContext().copy(preObservation = validPre().copy(effectiveLng = 181.0)))
+
+    @Test
+    fun `a POST NaN coordinate fails closed (symmetric polarity)`() =
+        fail(validContext().copy(postObservation = validPost().copy(effectiveLng = Double.NaN)))
+
+    @Test
+    fun `a NaN TARGET coordinate fails closed even with valid observations`() =
+        // The target itself being non-finite makes the distance NaN ⇒ must fail closed, not pass.
+        fail(validContext().copy(targetLat = Double.NaN))
+
     // ---- AREA 5: production persist+mint entrypoint via PlanRepository (RED — §11.2 F1 / §11.4) ----
     //
     // Drives the REAL production entrypoint [PlanRepository.recordTrustedCompletion] against the

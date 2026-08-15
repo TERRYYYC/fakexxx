@@ -48,7 +48,7 @@ ksp {
 }
 
 dependencies {
-    // Environment Control contract v1 (shared, frozen).
+    // R43: the frozen environment-control contract v1 (interface freeze 635a73a8).
     implementation(project(":environment-control-v1"))
 
     // Compose BOM

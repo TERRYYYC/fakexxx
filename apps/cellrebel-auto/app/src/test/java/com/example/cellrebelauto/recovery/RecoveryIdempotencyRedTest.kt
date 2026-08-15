@@ -176,6 +176,56 @@ class RecoveryIdempotencyRedTest {
         )
     }
 
+    @Test
+    fun `receipt-durable-but-owner-lease-missing crash window recovers the lease from the receipt replay`() {
+        // R43 (Sol GREEN-review P1-5): the crash window BETWEEN receipt durability and the attempt
+        // owner's markAplusLease. The receipt (with its ATOMIC leaseId, ApplyReceiptV1.leaseId) IS
+        // durable; the attempt-owner lease column is NOT. A post-crash reconcile must REPLAY the
+        // receipt and hand back the provider lease — without it, APPLY_PENDING recovery dead-ends.
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        // The prior process: apply happened (effect 1), the receipt WITH the lease was recorded
+        // durably, then the crash hit BEFORE markAplusLease could persist the owner-side lease.
+        executor.apply(attemptId = 9L, idempotencyKey = "k-9", requestDigest = "digest-9", now = 1000L)
+        log.seedReceipt(idempotencyKey = "k-9", requestDigest = "digest-9", outcome = "RELEASED", createdAt = 1000L, leaseId = "lease-9")
+
+        val outcome = RecoveryCoordinator(executor, log)
+            .reconcile(attemptId = 9L, idempotencyKey = "k-9", requestDigest = "digest-9", now = 3000L)
+
+        assertTrue("receipt-present replay must be REPLAYED_APPLY (got $outcome)", outcome is ReconcileResult.ReplayedApply)
+        assertEquals(
+            "the executor MUST NOT be re-invoked (the receipt already proves the apply)",
+            1,
+            executor.invocationCount("k-9")
+        )
+        assertNotNull(
+            "the replay MUST hand back the provider lease persisted atomically with the receipt — a null lease dead-ends APPLY_PENDING recovery (Sol GREEN-review P1-5)",
+            (outcome as ReconcileResult.ReplayedApply).leaseId
+        )
+        assertEquals("the recovered lease is the receipt's lease", "lease-9", outcome.leaseId)
+    }
+
+    @Test
+    fun `dispatchApply persists the lease atomically with the receipt`() {
+        // R43 (Sol GREEN-review P1-5) producer side: the normal-path dispatch MUST record the lease
+        // ON the receipt (not merely return it in the volatile ApplyOutcome) so the crash window
+        // above can always recover it.
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val rc = RecoveryCoordinator(executor, log)
+
+        val outcome = rc.dispatchApply(attemptId = 5L, idempotencyKey = "k-5", requestDigest = "d-5", now = 1000L)
+
+        assertNotNull("the fresh apply must yield a lease", outcome.leaseId)
+        val receipt = log.receiptFor("k-5")
+        assertNotNull("the receipt must be durable", receipt)
+        assertEquals(
+            "the receipt must carry the lease ATOMICALLY (ApplyReceiptV1.leaseId is durable proof, Sol GREEN-review P1-5)",
+            outcome.leaseId,
+            receipt!!.leaseId
+        )
+    }
+
     // ---- Schedule-advance consumer gate (Issue #5 addendum, §5 boundary; Sol round-6 §11.7 F2) ----
     //
     // R6-F2 (§11.7): the three readers are now CONSTRUCTOR-OWNED deps; scheduleAdvanced takes only the
