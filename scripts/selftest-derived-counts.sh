@@ -546,6 +546,17 @@ mut "M-CN chinese-numeral arm catches N-C" \
 # the disarm was visible at all. When picking this value, check it against the
 # ledger's producible set (check-derived-counts prints it), not against intuition.
 # distinct and one case's output can never satisfy another's assertion.
+# M-BOLDPHRASE: proves ARM_BOLD_PHRASE is what catches N-P, not some other arm
+# incidentally overlapping it. Single-line knob on purpose -- a multi-line
+# assignment turns the s/^KNOB = .*/ contract into a syntax error, which this
+# file has already been burned by once (the mutation then proves nothing and
+# reports INCONCLUSIVE rather than passing, which is the only reason it was seen).
+mut "M-BOLDPHRASE bold-phrase arm catches N-P" \
+  's/^ARM_BOLD_PHRASE = .*/ARM_BOLD_PHRASE = None/' \
+  '那 **92 行 `owner-red`**' \
+  '那 **47 行 `owner-red`**' \
+  ' bold-phrase 47 '
+
 mut "M-CELL keyed-cell arm catches N-D" \
   's/^CELL_KEYS = .*/CELL_KEYS = ()/' \
   '| `sol-blackbox` | 22 | 编写并执行' \
@@ -580,6 +591,19 @@ mut "M-PLAIN-SCOPE plain-owner-red scoping catches its own isolated line" \
 
 # N-G: an owner-split of owner-red that never touches 行. The line was already
 # in scope; being in scope is not being readable, and no 行-anchored arm saw it.
+# N-P: "**92 行 `owner-red`**" -- the number and 行 BOTH inside one bold span.
+# This shape sat between two arms and neither could read it: ARM_BARE's lookbehind
+# rejects a leading '*', and ARM_BOLD requires the number bolded ALONE (`**92** 行`).
+# The document had TWO live sites in this exact form (owner-red 88, and §10's
+# "114 行 / 18 类") and the guard reported "0 stale cache site(s)" over both.
+# Sol found the first at d3dd440; the census that produced this case found the
+# second. Sixth time in this document that a guard's matcher was narrower than
+# the notation it claimed to cover -- so this case plants the SHAPE, not the value.
+neg "N-P bold-phrase notation (**92 行 `owner-red`** -> planted 47)" \
+  '那 **92 行 `owner-red`**' \
+  '那 **47 行 `owner-red`**' \
+  ' bold-phrase 47 '
+
 neg "N-G owner-pair notation (GLM 52 / Fable5 39 -> planted 47)" \
   '已归各自 code owner（GLM 53 / Fable5 39）' \
   '已归各自 code owner（GLM 47 / Fable5 39）' \

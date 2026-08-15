@@ -354,16 +354,23 @@ class ContractRoundTripTest {
     }
 
     /**
-     * The two preconditions must cross the boundary intact.
+     * All THREE preconditions must cross the boundary intact.
      *
-     * If either were lost or defaulted in transit, the provider would evaluate
+     * If any were lost or defaulted in transit, the provider would evaluate
      * compare-and-advance against a value the caller never sent, and
-     * SCHEDULE_ITEM_MISMATCH / SCHEDULE_VERSION_STALE would fire (or fail to
-     * fire) on data that is not the caller's (§6.7.4).
+     * SCHEDULE_IDENTITY_MISMATCH / SCHEDULE_ITEM_MISMATCH / SCHEDULE_VERSION_STALE
+     * would fire (or fail to fire) on data that is not the caller's (§6.7.4).
+     *
+     * This test named "the two preconditions" until v1.72. `expectedScheduleId`
+     * was added in v1.71 and only the aggregate assertEquals covered it, which is
+     * indirect: it proves the whole object survived, never that THIS field is
+     * carried and distinguishing. An identity leg that silently defaulted in
+     * transit is exactly the failure the leg exists to stop.
      */
     @Test
     fun `advance preconditions are not lost or defaulted in transit`() {
         val restored = roundTrip(advanceRequest())
+        assertEquals("schedule-1", restored.expectedScheduleId)
         assertEquals("item-7", restored.expectedCurrentItemId)
         assertEquals(3L, restored.expectedScheduleVersion)
 
@@ -373,6 +380,17 @@ class ContractRoundTripTest {
         // after the round trip; if they collapsed, replay could not tell a
         // wrong-item advance from a retry of the same one.
         assertNotEquals(restored, other)
+
+        // Same proof, for the identity leg alone: two requests that differ ONLY in
+        // expectedScheduleId. If these collapsed, a completion earned on schedule A
+        // and one earned on B would be the same request on the wire -- and §6.7.1
+        // explicitly permits both to carry the same (itemId, scheduleVersion), so
+        // no other field would separate them.
+        val otherSchedule = roundTrip(advanceRequest().copy(expectedScheduleId = "schedule-2"))
+        assertEquals("schedule-2", otherSchedule.expectedScheduleId)
+        assertEquals("item-7", otherSchedule.expectedCurrentItemId)
+        assertEquals(3L, otherSchedule.expectedScheduleVersion)
+        assertNotEquals(restored, otherSchedule)
     }
 
     /**

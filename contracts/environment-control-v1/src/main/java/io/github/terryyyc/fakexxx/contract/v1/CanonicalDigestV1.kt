@@ -129,9 +129,12 @@ object CanonicalDigestV1 {
  * the same request" from key + digest; if `expectedCurrentItemId` were absent,
  * two requests aimed at DIFFERENT current items would produce the SAME digest,
  * replay would treat them as one, and that is exactly wrong-item and double
- * advance. `expectedScheduleVersion` does the same for skip.
+ * advance. `expectedScheduleVersion` does the same for skip. `expectedScheduleId`
+ * does the same for the WRONG SCHEDULE: without it, a request targeting schedule
+ * A and one targeting schedule B share a digest, replay cannot separate them, and
+ * step 4 has no trustworthy right-hand side for the identity leg.
  *
- * The failure would be invisible from the wire table: 14/15/16 all still exist
+ * The failure would be invisible from the wire table: 14/15/16/17 all still exist
  * and still run, they simply can no longer distinguish the cases they are named
  * after.
  *

@@ -253,13 +253,28 @@ ARM_OWNER_PAIR = re.compile(r'(?<![\w-])(?:GLM|Fable5|Opus5|DeepSeek Flash)\s*[�
 # Deliberately narrow: dropping the 行 requirement from ARM_BOLD instead would
 # swallow every bold wire code (`STALE_LEASE`(**8**)) on an in-scope line.
 ARM_CURVAL = re.compile(r'现行为\s*\*{0,2}([0-9]+)\*{0,2}')
+# ARM_BOLD_PHRASE: "**92 行 `owner-red`**", "**118 行 / 18 类**" -- the number and
+# 行 BOTH inside ONE bold span. This shape fell between two arms and neither could
+# read it: ARM_BARE's lookbehind rejects the leading '*', and ARM_BOLD requires the
+# number bolded ALONE ("**92** 行"). Two LIVE sites sat in this form while the guard
+# printed "0 stale cache site(s)" -- owner-red written as 88 (true 92) and §10
+# written as "114 行 / 18 类" (true 118). Sol found the first; the notation census
+# that produced this arm found the second, which is the whole argument for doing a
+# census: fixing the reported instance would have left the guard equally blind.
+#
+# This is the sixth time in this document that a matcher was narrower than the
+# notation it claimed to cover, and the standing rule it violates is written in
+# this repo's own gotchas: ENUMERATE the document's actual spellings BEFORE
+# writing the pattern, never afterwards. [^*]*? on both sides keeps the span
+# inside a single ** ... ** run so an unrelated later bold cannot be spliced in.
+ARM_BOLD_PHRASE = re.compile(r'\*\*[^*]*?(?<![\d.\-_])([0-9]+)(?![\d])\s*行[^*]*?\*\*')
 
 # SINGLE source for the arm list: the scan loop and the enumeration below both
 # read it. They used to carry separate copies, so an arm could be scanned and
 # never enumerated -- invisible in the one output that exists to expose blind
 # spots. 'cell' is appended by the enumeration because it is applied separately
 # (keyed rows), not by a regex in this table.
-ARMS = (('bare', ARM_BARE), ('bold', ARM_BOLD), ('redct', ARM_REDCT), ('cn', ARM_CN), ('pair', ARM_OWNER_PAIR), ('curval', ARM_CURVAL))
+ARMS = (('bare', ARM_BARE), ('bold', ARM_BOLD), ('redct', ARM_REDCT), ('cn', ARM_CN), ('pair', ARM_OWNER_PAIR), ('curval', ARM_CURVAL), ('bold-phrase', ARM_BOLD_PHRASE))
 # ENUM_ARMS is a SEPARATE knob from ARMS on purpose. Collapsing ARMS disables the
 # scanner, so the finding disappears and a mutation proves only that the scanner
 # reads ARMS -- it says nothing about whether the enumeration reads the same

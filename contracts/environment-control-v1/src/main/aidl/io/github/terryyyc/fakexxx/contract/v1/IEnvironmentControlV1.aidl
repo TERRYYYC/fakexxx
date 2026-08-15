@@ -31,8 +31,13 @@ interface IEnvironmentControlV1 {
     // The provider is the sole executor of the advance because it owns the
     // schedule order; Auto is the sole judge of quota because it owns the
     // ledger. This method is the single seam between those two ownerships, and
-    // it is a compare-and-advance: the request's expectedCurrentItemId and
-    // expectedScheduleVersion are preconditions, so a caller that lost the race
-    // is rejected rather than silently advancing someone else's item.
+    // it is a compare-and-advance on THREE preconditions: the request's
+    // expectedScheduleId, expectedCurrentItemId and expectedScheduleVersion, so a
+    // caller that lost the race is rejected rather than silently advancing someone
+    // else's item. expectedScheduleId is checked FIRST (spec v1.72, §6.7.4b step
+    // 4): two schedules may reuse the same (itemId, scheduleVersion), so without
+    // the identity leg the compare passes on the WRONG schedule and the advance is
+    // genuinely committed there. Its value must come from the projection group
+    // captured when the attempt was opened -- never re-read just before the call.
     EnvironmentControlResultV1 completeAndAdvance(in CompleteAndAdvanceRequestV1 request);
 }
