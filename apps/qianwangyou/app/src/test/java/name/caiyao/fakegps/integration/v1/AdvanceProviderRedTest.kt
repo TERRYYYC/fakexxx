@@ -465,9 +465,18 @@ class AdvanceProviderRedTest {
     /**
      * §6.7.4b facet — FLIPPED for the v1.42 frozen order (Terra PR#22 P1-2 /
      * dsf F-7.1). The order is now:
-     *   safety(+recompute digest) → idempotency → proof → schedule → lease → mutation
+     *   safety(+recompute digest) → idempotency → {proof, attribution(13)}
+     *   → schedule(16→14→15) → lease(7) → mutation
      * so idempotency is judged BEFORE proof, the reverse of what this row
      * asserted under v1.39.
+     *
+     * This chain previously omitted the KB-5 attribution half of step 3 and
+     * wrote the schedule gates without their v1.54 intra-step order. It
+     * survived a sweep that was run specifically to catch exactly this,
+     * because that sweep grepped three literal phrases and this copy matched
+     * none of them — the predicate was "these three strings are absent", the
+     * claim made from it was "the module is clean". Found by the reviewer on
+     * the sweep commit itself.
      *
      * A reused key carrying a now-BLANK proof is a DIFFERENT payload, so its
      * recomputed digest differs from the stored one. The safety gate (step 1)
