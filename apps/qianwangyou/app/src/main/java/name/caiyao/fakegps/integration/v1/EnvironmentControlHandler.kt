@@ -380,15 +380,30 @@ class EnvironmentControlHandler(
     }
 
     fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
-        // §6.7.4b frozen judgment order (v1.42, + KB-5 attribution, + the
-        // v1.54 intra-step resequence of the schedule gates):
-        //   safety(+recompute digest) → idempotency → proof → attribution(13)
+        // §6.7.4b judgment order. Two DIFFERENT kinds of ordering live in
+        // this chain and the difference is normative — do not flatten them.
+        //
+        // SPEC-FROZEN (v1.42, + KB-5 attribution boundaries, + the v1.54
+        // intra-step resequence of the schedule gates):
+        //   safety(+recompute digest) → idempotency → {proof, attribution}
         //   → schedule(16→14→15) → lease(7) → mutation
-        // Attribution sits between proof and the schedule gates: a
-        // fix-the-request 13 outranks the fix-your-expectation 14/15, so a
-        // foreign ref against an exhausted schedule deterministically answers
-        // 13. It sits AFTER idempotency so a legal same-key replay still
-        // refetches its receipt first.
+        // Attribution's BOUNDARIES are frozen: AFTER idempotency (a legal
+        // same-key replay must still refetch its receipt first) and BEFORE
+        // the schedule gates (a fix-the-request 13 outranks the
+        // fix-your-expectation 14/15, so a foreign ref against an exhausted
+        // schedule deterministically answers 13).
+        //
+        // IMPLEMENTATION-CHOSEN, explicitly NOT frozen: the relative order of
+        // proof vs attribution INSIDE that slot. Semantics owner ruling Am-1
+        // declares this pair free while three conditions hold — both halves
+        // exit on REQUEST_INVALID(13); their only difference lands in
+        // diagnosticMessage, which is non-normative by contract; and both stay
+        // pure reads that abort inside the transaction with no per-gate trace.
+        // The pair is therefore unobservable on the normative wire and no
+        // exact-wire matrix row can pin it. Break any of those three and the
+        // freedom lapses and the pair must be re-pinned in the spec.
+        // This file happens to run proof first. That is a choice, not a rule:
+        // reordering the two blocks is legal today and needs no spec change.
         // Steps 2–6 run inside ONE serialized transaction, exactly like apply():
         // the step-5 lease gate is DEVICE-GLOBAL and must serialize against a
         // concurrent apply, so no new lease can slip in between the gate and the
