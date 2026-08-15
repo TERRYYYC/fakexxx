@@ -412,7 +412,12 @@ for idx in range(active_from - 1, len(lines)):
         spans.add((absno, pos, value))
         if value not in legal and not exempt(pos, stripped, work,
                                             quote_only=(arm in QUOTE_ONLY_ARMS)):
-            findings.append((absno, arm, value))
+            # pos travels with the finding so the NUMERATOR uses the same
+            # physical identity as the denominator. Storing (line, arm, value)
+            # made one physical stale number read by two arms report as TWO
+            # stale sites against a denominator counted in unique sites --
+            # numerator and denominator in incomparable units inside one verdict.
+            findings.append((absno, pos, arm, value))
 
     for arm, rx in ARMS:
         # `if rx` keeps a mutation test able to disable exactly one arm
@@ -443,7 +448,11 @@ for idx in range(active_from - 1, len(lines)):
 legal_repr = ' '.join(str(v) for v in sorted(BASE_LEGAL, reverse=True))
 print('  ledger can produce: %s (plus %d on appid-cutover lines, %d on 空集 lanes)'
       % (legal_repr, APPID_CUTOVER_ROWS, EMPTY_SET_ROWS))
-stale = {(a, ar, v) for (a, ar, v) in findings}
+# Arm-keyed ON PURPOSE and separate from the numerator: this set only marks '*'
+# in the PER-ARM enumeration below, where arm identity is the point. The stale
+# COUNT is keyed (line, pos, value) further down. Two different keys for two
+# different questions is correct; using one for both is what P2-A was.
+stale = {(a, ar, v) for (a, p, ar, v) in findings}
 for arm in ENUM_ARMS:
     entries = ['L%d=%s%s' % (a, v, '*' if (a, arm, v) in stale else '')
                for (a, ar, v) in sites if ar == arm]
@@ -454,20 +463,27 @@ for arm in ENUM_ARMS:
 if skipped_cn_one:
     print('    cn-skip: %d "一行" match(es) treated as grammar, not counts' % skipped_cn_one)
 
-seen = set()
-for (a, ar, v) in findings:
-    if (a, ar, v) in seen:
-        continue
-    seen.add((a, ar, v))
-    print('  FAIL  L%d %s %s -- the ledger cannot produce %s on this line (it can: %s%s)'
-          % (a, ar, v, v, legal_repr,
+# Key is (line, pos, value) -- the SAME physical identity the denominator uses.
+# Arms are collected per site, not used as part of the key: which arms read a
+# number is diagnostics, not identity. Two distinct numbers on one line with the
+# same value are two sites (they differ in pos), and one number read by two arms
+# is one site (same pos) -- both directions matter and (line, value) gets each
+# of them wrong in the opposite direction.
+by_site = {}
+for (a, p, ar, v) in findings:
+    by_site.setdefault((a, p, v), set()).add(ar)
+seen = set(by_site)
+for (a, p, v) in sorted(by_site):
+    print('  FAIL  L%d(+%d) %s %s -- the ledger cannot produce %s on this line (it can: %s%s)'
+          % (a, p, '+'.join(sorted(by_site[(a, p, v)])), v, v, legal_repr,
              ', 5' if 'appid-cutover' in lines[a - 1] else ''))
 
 print('  => section 3: %d stale cache site(s) of %d unique cache site(s) WITHIN SCOPE'
       % (len(seen), len(spans)))
 print('  ----  %d raw arm match(es) produced those %d unique site(s): one physical\n'
-      '        number read by N arms is ONE site and N matches. The two are not\n'
-      '        interchangeable and a coverage claim must cite the former.'
+      '        number read by N arms is ONE site and N matches. Numerator and\n'
+      '        denominator above are BOTH keyed (line, pos, value); a coverage or\n'
+      '        staleness claim must cite unique sites, never arm matches.'
       % (len(sites), len(spans)))
 print('  ----  scope is a filter, not a census: a cache on a line no arm and no\n        scope token reaches is not counted above and never appears as a gap.')
 sys.exit(min(len(seen), 100))

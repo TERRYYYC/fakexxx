@@ -551,6 +551,27 @@ mut "M-CN chinese-numeral arm catches N-C" \
 # assignment turns the s/^KNOB = .*/ contract into a syntax error, which this
 # file has already been burned by once (the mutation then proves nothing and
 # reports INCONCLUSIVE rather than passing, which is the only reason it was seen).
+# N-Q: ONE physical number read by TWO arms is ONE stale site, not two.
+# findings used to be keyed (line, arm, value) while the denominator was keyed
+# (line, pos, value) -- numerator and denominator in incomparable units inside a
+# single verdict. The JOINED arm name is the proof: if the arms were still two
+# separate findings, no one line would name both.
+neg 'N-Q one physical site read by two arms reports 1 stale' \
+  ' `device` 三类共 26 行' \
+  ' `device` 三类共 47 行' \
+  'bare+bold-phrase 47'
+
+# N-R: SAME line, SAME value, DIFFERENT pos are TWO sites and must not merge.
+# L3595 carries two physically distinct '39 行' (pos 73 inside a bold phrase, pos
+# 292 plain). A (line, value) key folds them into one -- and that is exactly the
+# key I measured this arm's delta with, which is why I reported 3 exclusive sites
+# where the production guard reports 4. Both directions of the key matter, so
+# this case pins the direction N-Q does not.
+neg 'N-R same line + same value + different pos stay two sites' \
+  '**39 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 39 行的' \
+  '**47 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 47 行的' \
+  '2 stale cache site(s)'
+
 mut "M-BOLDPHRASE bold-phrase arm catches N-P" \
   's/^ARM_BOLD_PHRASE = .*/ARM_BOLD_PHRASE = None/' \
   '那 **92 行 `owner-red`**' \
@@ -638,7 +659,7 @@ neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
 neg "N-J row-count-phrase scope (全 117 行 -> planted 43)" \
   '**本 task 是唯一验证全 118 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \
-  ' bare 43 '
+  ' bare+bold-phrase 43 '
 
 mut "M-PAIR owner-pair arm catches N-G" \
   's/^ARM_OWNER_PAIR = .*/ARM_OWNER_PAIR = None/' \
@@ -662,7 +683,7 @@ mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
   's/^SCOPE_ROW_COUNT = .*/SCOPE_ROW_COUNT = ""/' \
   '**本 task 是唯一验证全 118 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \
-  ' bare 43 '
+  ' bare+bold-phrase 43 '
 
 # M-ARMS-CENSUS: the enumeration used to hardcode its own copy of the arm list,
 # so an arm could be scanned and never enumerated -- invisible in the one output
