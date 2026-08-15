@@ -158,4 +158,35 @@ class AdvanceMatrixTest {
             )
         }
     }
+
+    /**
+     * Spec v1.56: receipt.scheduleVersionAfter = expectedScheduleVersion + 1 for
+     * BOTH terminal (EXHAUSTED) and non-terminal (ADVANCED) advance. The fake
+     * environment bumps version on every advancePointer (production parity),
+     * and this asserts the committed receipt carries V+1 directly — the
+     * receipt is what Auto re-syncs from, so a pre-advance version there would
+     * make the next advance's version gate (wire 15) reject a legitimate retry.
+     */
+    @Test
+    fun M_AD_22_receiptVersionAfterIsExpectedPlusOne() {
+        val h = harness()
+        val leaseId = h.apply(key = "ad22-apply").leaseId
+        h.release(leaseId, key = "ad22-rel")
+
+        val v0 = h.env.scheduleVersion
+
+        // Non-terminal advance: item-1 → item-2
+        val advanced = h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad22-a1", "item-1"))
+        assertEquals("ADVANCED receipt carries expected version + 1", v0 + 1, advanced.scheduleVersionAfter)
+        assertEquals("environment version actually bumped", v0 + 1, h.env.scheduleVersion)
+
+        // Second non-terminal advance: item-2 → item-3
+        val advanced2 = h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad22-a2", "item-2"))
+        assertEquals("second ADVANCED receipt carries expected version + 1", v0 + 2, advanced2.scheduleVersionAfter)
+
+        // Terminal advance: item-3 = last → EXHAUSTED
+        val terminal = h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad22-a3", "item-3"))
+        assertEquals("EXHAUSTED receipt carries expected version + 1", v0 + 3, terminal.scheduleVersionAfter)
+        assertEquals("environment version bumped again", v0 + 3, h.env.scheduleVersion)
+    }
 }

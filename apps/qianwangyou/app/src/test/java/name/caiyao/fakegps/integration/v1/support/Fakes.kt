@@ -217,6 +217,10 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         advanceCount += 1
         val idx = itemIds.indexOf(fromItemId)
         check(idx >= 0) { "advancePointer from unknown item $fromItemId" }
+        // Spec v1.56: every advance (terminal and non-terminal) bumps the
+        // schedule version by exactly 1. Production QwyScheduleStore does this;
+        // the fake must model it or the fidelity gap hides V+1 evidence.
+        scheduleVersion += 1
         return if (idx == itemIds.lastIndex) {
             exhausted = true
             AdvancePointerOutcome.Exhausted(scheduleVersion)

@@ -823,10 +823,17 @@ class AdvanceProviderRedTest {
         h.pair(AUTO_PKG, AUTO_SIGNER)
         val leaseId = earnAndRelease(h)
 
+        // v0 pinned: a legal replay resends the ORIGINAL bytes (§6.7.4 — the
+        // digest binds expectedScheduleVersion = v0). With the fake now bumping
+        // the version on advancePointer (v1.56 production parity), the env's
+        // live version after settle is v0+1; replaying with that would be a
+        // DIFFERENT request and correctly hit IDEMPOTENCY_CONFLICT (M-AD-03).
+        val v0 = h.env.scheduleVersion
+
         // K1 commits its receipt, then the external apply throws; handler survives.
         h.env.failNextAdvancePointer = true
         try {
-            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k1"))
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k1", expectedVersion = v0))
             fail("pointer-apply fault must surface, not be swallowed")
         } catch (expected: RuntimeException) {
             // crash, not a business answer
@@ -837,13 +844,13 @@ class AdvanceProviderRedTest {
         // settles the pending advance first (pointer → item-2), so this new key
         // now mismatches the schedule instead of minting a second receipt.
         expectContractFailure(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH) {
-            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k2-NEW"))
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k2-NEW", expectedVersion = v0))
         }
         assertEquals("pending settled before serving the new key", "item-2", h.env.currentItemId)
         assertEquals("pointer moved exactly once — no second advance", 1, h.env.advanceCount)
 
-        // The ONE durable receipt is K1's; it replays cleanly with no extra move.
-        val k1Replay = h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k1"))
+        // The ONE durable receipt is K1's; it replays cleanly (original bytes) with no extra move.
+        val k1Replay = h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "adv-nk-k1", expectedVersion = v0))
         assertEquals("item-2", k1Replay.advancedToItemId)
         assertEquals("still exactly one advance across the whole sequence", 1, h.env.advanceCount)
     }
