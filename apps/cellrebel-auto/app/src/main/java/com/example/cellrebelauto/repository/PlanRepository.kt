@@ -372,15 +372,19 @@ class PlanRepository(private val db: AppDatabase) {
      * SKELETON (pre-freeze, §11.4 — GREEN body frozen pending contract-v1 freeze #3):
      *  (1) persists ONLY digest + the three §6.4.2 elapsed clocks, DROPPING the §7.1 evidence detail
      *      (baseline state / marker text / RUNNING duration / both scores / per-round timestamps);
-     *  (2) evaluates [TrustPolicy] for the returned decision but MINTS NOTHING — even on PASS.
-     * Both are the R4-F1 RED: the read-back of a §6.4-positive completion must show the full §7.1
-     * field set populated and exactly one TrustedQuotaEntry. GREEN copies the §7.1 detail into the
-     * row and inserts the entry (same transaction) when PASS.
-     *
-     * Drives the REAL Room `cellrebel_executions` + `trusted_quota_entries` tables — no isolated helper.
-     *
-     * # 生产信任收尾入口（R4-F1 骨架）：持久化 digest+3clocks、丢弃 §7.1 证据、绝不铸币；GREEN 再补全字段并在 PASS 时铸币
-     */
+      *  (2) evaluates [TrustPolicy] for the returned decision but MINTS NOTHING — even on PASS.
+      *
+      * GREEN (contract v1 frozen): (1) persists the FULL §7.1 evidence detail verbatim from
+      * [CompletionTrustContext.execution]; (2) evaluates [TrustPolicy]; on PASS mints EXACTLY ONE
+      * [TrustedQuotaEntry] in the same transaction — with `taskId` resolved by a REAL DB lookup
+      * (attempt → task, never a constant), `evidenceDigest` bound to the execution's payload digest,
+      * and `committedAt` bound to the injected monotonic commit clock; on FAIL writes the exact
+      * [UnverifiedAttemptRecord] carrier (typed reason + digest, never a synthesized discard).
+      *
+      * Drives the REAL Room `cellrebel_executions` + `trusted_quota_entries` tables — no isolated helper.
+      *
+      * # 生产信任收尾入口（GREEN）：全 §7.1 证据持久化；PASS 铸币（taskId 真查库、committedAt=注入时钟）；FAIL 写未验证记录
+      */
     suspend fun recordTrustedCompletion(ctx: CompletionTrustContext): TrustDecision =
         recordTrustedCompletion(ctx, 0L) // deprecated one-arg: test-only fallback; production must use two-arg
 
@@ -391,16 +395,36 @@ class PlanRepository(private val db: AppDatabase) {
      * never a default constant or execution.completedAtElapsed.
      */
     suspend fun recordTrustedCompletion(ctx: CompletionTrustContext, commitClockMs: Long): TrustDecision = db.withTransaction {
-        val skeletonRow = ctx.execution.copy(
-            baselineRunningState = null,
-            runningMarkerText = null,
-            runningDurationMs = null,
-            webBrowsingScore = null,
-            videoStreamingScore = null,
-            roundTimestampsElapsed = null
-        )
-        db.attemptExecutionDao().insert(skeletonRow)
-        TrustPolicy().evaluate(ctx)
+        // (1) Persist the FULL §7.1 evidence detail — copied verbatim from ctx.execution.
+        db.attemptExecutionDao().insert(ctx.execution)
+        // (2) Evaluate the §6.4 predicate.
+        val decision = TrustPolicy().evaluate(ctx)
+        // Attribution: resolve attemptId → taskId by REAL DB lookup (never a constant, R5-F1).
+        // An UNRESOLVABLE attempt cannot be attributed to any task — fail-closed: NO mint, NO
+        // unverified record (neither can be bound to a nonexistent attempt); the persisted
+        // execution row itself is the audit trail. Decision stays FAIL in that case.
+        val attempt = db.testAttemptDao().getAttemptById(ctx.execution.attemptId)
+        if (decision == TrustDecision.PASS && attempt != null) {
+            db.trustedQuotaDao().insert(
+                TrustedQuotaEntry(
+                    attemptId = ctx.execution.attemptId,
+                    taskId = attempt.taskId,
+                    evidenceDigest = ctx.execution.evidencePayloadDigest,
+                    committedAt = commitClockMs
+                )
+            )
+        } else if (decision == TrustDecision.FAIL && attempt != null) {
+            // FAIL for a REAL attempt: the exact unverified carrier (typed reason + evidence digest).
+            db.unverifiedAttemptRecordDao().insert(
+                UnverifiedAttemptRecord(
+                    attemptId = ctx.execution.attemptId,
+                    reason = "UNTRUSTED",
+                    evidenceDigest = ctx.execution.evidencePayloadDigest
+                )
+            )
+        }
+        if (attempt == null) return@withTransaction TrustDecision.FAIL
+        decision
     }
 
     // ---- Session lifecycle ----

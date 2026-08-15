@@ -36,6 +36,10 @@ interface TestAttemptDao {
     @Query("SELECT * FROM test_attempts WHERE taskId = :taskId ORDER BY attemptOrdinal ASC")
     suspend fun getAttemptsForTask(taskId: Long): List<TestAttempt>
 
+    /** The single attempt row by id (GREEN: recordTrustedCompletion resolves attemptId → taskId here, never a constant). */
+    @Query("SELECT * FROM test_attempts WHERE id = :attemptId LIMIT 1")
+    suspend fun getAttemptById(attemptId: Long): TestAttempt?
+
     // # 经任务表联查某计划下的全部尝试
     @Query(
         "SELECT a.* FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
