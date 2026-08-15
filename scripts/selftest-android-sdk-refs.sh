@@ -339,6 +339,30 @@ else
 fi
 rm -rf "$D"
 
+# N-M (review R5 P1-7): an ordinary string that CLOSES, followed by more
+# code. The R4-era closing branch was gated on (raw or q == "'"), which is
+# never true for an ordinary double-quote, so the string never closed and
+# every line after it was blanked with the literal -- a hidden reference on a
+# LATER line fell out of measurement. N-I passed only because its string sat
+# at end of file: end-of-string shape measured, string-then-code shape not.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val ordinaryBeforeHidden = "ordinary"
+
+internal val kb7After = android.os.ServiceSpecificException(1, "x")' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -q 'ServiceSpecificException.*NOT IN PUBLIC SDK'; then
+  ok "N-M a reference on a line AFTER an ordinary string is caught (the string closes)"
+  NEG=$((NEG + 1))
+else
+  bad "N-M the ordinary string never closed -- code after it was blanked with the literal"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
 # N-H (review R1 P1-3): the provenance banner must carry EVERY scanned input
 # (relpath, line count, sha prefix), or a stale/mutated copy among many files
 # cannot be told apart -- the exact diagnostic this lane's banner exists for.
@@ -571,6 +595,31 @@ if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
   MUT=$((MUT + 1))
 else
   bad "M-8 disabling ARM_EXPR_ATOMS did not restore the false green -- the arm is not the one catching N-L"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# M-9 (review R5 P1-7 load-bearing): reintroduce the exact R5 defect (the
+# closing gate that never fires for ordinary quotes) and N-M's FAIL must
+# vanish -- proving the universal-closing fix is what keeps code after an
+# ordinary string in measurement.
+D="$(mk)"
+sed -i.bak "s/elif text\[j:j+len(delim)\] == delim:/elif text[j:j+len(delim)] == delim and (raw or q == chr(39)):/" \
+  "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val ordinaryBeforeHidden = "ordinary"
+
+internal val kb7After = android.os.ServiceSpecificException(1, "x")' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "M-9 universal string closing - restoring the R5 gate makes N-M's finding vanish, so the fix is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-9 re-introducing the dead closing gate did not restore the false green -- check the mutation"
   detail "$OUT"
 fi
 rm -rf "$D"
