@@ -24,7 +24,14 @@ permissions:
 
 jobs:
   provenance:
-    name: provenance (vendored trees == upstream SHAs)
+    # Job id stays `provenance` (no required-check binding moves). The VISIBLE
+    # name changed in v1.74 because it was wider than the predicate: at
+    # --stage contract this job explicitly ALLOWS the vendored trees to diverge
+    # and prints so ("has diverged from upstream (allowed at stage contract)",
+    # "does not bound WHICH paths diverged"). A green check literally named
+    # "trees == upstream SHAs" therefore asserted, to anyone reading the checks
+    # list, something the gate had stopped proving.
+    name: provenance (frozen upstream roots + reachable ancestry)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,11 +56,17 @@ jobs:
         #   --stage contract -> rc=0
         #   --stage full     -> rc=0
         #
-        # So the move is the designed behaviour, not a weakening: the root-tree
-        # anchor in section 1 is still checked at EVERY stage, and it is what
-        # proves the vendored history descends from the recorded upstream SHAs.
-        # Only the "current HEAD is still byte-identical" assertion is retired,
-        # and it is retired because it has become false on purpose. (The import
+        # The move is designed, and it IS a narrowing -- calling it "not a
+        # weakening" (as this comment did until v1.74) overstated what survives.
+        # What this job proves at --stage contract, exactly:
+        #   1. the upstream SHA / root tree frozen in the provenance doc matches
+        #      the real upstream objects;
+        #   2. a REACHABLE ancestor of HEAD carried that pristine root tree;
+        #   3. each working tree equals its current HEAD.
+        # What it no longer proves: that the current tree is byte-identical to
+        # upstream (retired on purpose, it is false now), and -- the part the old
+        # wording hid -- it does NOT bound WHICH paths may diverge. Bounding the
+        # diverged path set is the scope gate's job, not this one. (The import
         # *commit* is not the anchor — a squash/rebase merge legitimately
         # discards it, so it is asserted only while still reachable.)
         run: ./scripts/check-provenance.sh --stage contract
