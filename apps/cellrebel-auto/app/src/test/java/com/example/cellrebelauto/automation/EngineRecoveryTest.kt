@@ -165,10 +165,11 @@ class EngineRecoveryTest {
         // # C2：sweep 不清空已持久化的 runningObservedAt 审计证据
         assertEquals(650L, attempts[0].runningObservedAt)
 
-        // # 计数只来自新尝试；旧残留没有计入
+        // # 计数只来自新尝试；旧残留没有计入（counter 是展示/审计值）
         val task = db.locationTaskDao().getTaskById(taskId)!!
         assertEquals(1, task.completedSuccesses)
-        assertEquals("completed", task.status)
+        // # §7.3 GREEN（M-MG-02）：completion = trusted 投影；legacy 路径无 trusted entry ⇒ 保持 active
+        assertEquals("active", task.status)
 
         // # 残留 running 会话被标记 interrupted；新会话 completed
         assertEquals("interrupted", db.runSessionDao().getById(staleSessionId)!!.status)
@@ -191,7 +192,8 @@ class EngineRecoveryTest {
 
         val task = db.locationTaskDao().getTaskById(taskId)!!
         assertEquals(2, task.completedSuccesses)
-        assertEquals("completed", task.status)
+        // # §7.3 GREEN（M-MG-02）：legacy counter 达标 ≠ 完成；completion = trusted 投影 ⇒ active
+        assertEquals("active", task.status)
         assertEquals(2, runner.calls)
 
         // # INV-3：用过期的期望值重复 finalize → 不再增加（幂等）
@@ -233,7 +235,8 @@ class EngineRecoveryTest {
         assertEquals(2, gps.calls)
         val task = db.locationTaskDao().getTaskById(taskId)!!
         assertEquals(1, task.completedSuccesses)
-        assertEquals("completed", task.status)
+        // # §7.3 GREEN（M-MG-02）：legacy 成功无 trusted entry ⇒ 保持 active
+        assertEquals("active", task.status)
     }
 
     @Test
@@ -256,7 +259,8 @@ class EngineRecoveryTest {
         assertEquals("failed", attempts[0].status)
         assertEquals("FAKE_GPS_NOT_ACTIVE", attempts[0].failureReason)
         assertEquals(1, runner.calls)
-        assertEquals("completed", db.locationTaskDao().getTaskById(taskId)!!.status)
+        // # §7.3 GREEN（M-MG-02）：GPS-only legacy 成功不铸 trusted entry ⇒ 任务保持 active
+        assertEquals("active", db.locationTaskDao().getTaskById(taskId)!!.status)
     }
 
     @Test
@@ -412,8 +416,10 @@ class EngineRecoveryTest {
         assertTrue(finalized)
         val task = db.locationTaskDao().getTaskById(taskId)!!
         assertEquals(1, task.completedSuccesses)
-        // # 关键断言：不需要第二次写，任务在同一事务内已 completed
-        assertEquals("completed", task.status)
+        // # §7.3 GREEN（M-MG-02）：F5 的"满配额必 completed"前提被取代——completion = trusted 投影；
+        // # legacy finalize 只递增 counter（展示），任务保持 pending/active，完成投影由 trusted SQL 承载
+        // # （TrustedOnlyCompletionRedTest 双向 pin；A+ 路径的 F5 等价物是 M-CR-07 ledger 真相投影）
+        assertEquals("pending", task.status)
     }
 
     @Test
