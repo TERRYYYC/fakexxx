@@ -727,14 +727,17 @@ class CrashMatrixTest {
 
         // The engine threaded commitClockMs to recordTrustedCompletion. When GREEN mints, committedAt
         // MUST bind COMMIT_CLOCK_VALUE (monotonic domain), NOT RECOVERY_NOW (wall domain).
-        // RED now: skeleton TrustPolicy FAILs → no mint → this assertion is the RED oracle.
+        // The mint's PRESENCE is asserted unconditionally (Sol R42 P1-1): a regression that silently
+        // stops minting must FAIL here, not pass by skipping the assertion.
         val entry = db.trustedQuotaDao().getByAttempt(77L)
-        if (entry != null) {
-            assertEquals(
-                "committedAt must bind the dedicated monotonic commit clock ($COMMIT_CLOCK_VALUE), not wall ($RECOVERY_NOW)",
-                COMMIT_CLOCK_VALUE, entry.committedAt
-            )
-        }
+        assertNotNull(
+            "the re-decide must mint a trusted entry (absence of the row is a failure, never a pass — Sol R42 P1-1)",
+            entry
+        )
+        assertEquals(
+            "committedAt must bind the dedicated monotonic commit clock ($COMMIT_CLOCK_VALUE), not wall ($RECOVERY_NOW)",
+            COMMIT_CLOCK_VALUE, entry!!.committedAt
+        )
     }
 
     // ---- M-CR-07: ledger truth projects to succeeded through the engine recovery ----

@@ -284,12 +284,15 @@ class AutomationService : AccessibilityService() {
             // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
             val aplusBackend: APlusBackend = APlusComposition.productionBackend()
             val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
-            val newEngine = AutomationEngine(
+            // R43 (Sol R42 P1-2): the ENTIRE production engine construction delegates to the pure
+            // factory — the monotonic commit-clock default lives there (production wiring, observable
+            // by the factory-wiring test), not in an invisible call-site lambda.
+            val newEngine = AutomationEngineFactory.productionEngine(
                 planId = planId,
                 planRepository = planRepository,
                 cellRebelRunner = cellRebelHandler,
                 gpsSetter = fakeGpsHandler,
-                bufferGate = BufferGate(plan.globalBufferSeconds) { System.currentTimeMillis() },
+                globalBufferSeconds = plan.globalBufferSeconds,
                 testTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
                 gpsSettleMs = planConfig.gpsSettleSeconds * 1000L,
                 // # F003：每次 attempt 重新读取开关（AC-F3-5 中途切换下个 attempt 生效）
@@ -297,16 +300,10 @@ class AutomationService : AccessibilityService() {
                     val c = configStore.config.first()
                     StageToggles(c.locationStageEnabled, c.testStageEnabled)
                 },
-                bridge = bridge,
-                // # R6-F4（§11.7）：生产构造真实 driver——使 §8.1 状态机在生产有真实消费者，
-                // # 杜绝"driver 仅测试构造、生产零调用点"。driver 当前为 no-op 骨架，注入无运行时副作用。
-                attemptDriver = APlusAttemptDriver(db.auditEventDao()),
-                recoveryCoordinator = aplusCoordinator,
-                completionEvidenceSource = aplusEvidence,
-                // R42 (Sol R41 P2): separate monotonic commit clock for TrustedQuotaEntry.committedAt.
-                // The engine's nowMs stays wall/epoch (used by session/attempt/cooldown UI); only the
-                // ledger commit binds elapsedRealtime (can't go backwards on NTP).
-                commitClockMs = { android.os.SystemClock.elapsedRealtime() }
+                auditDao = db.auditEventDao(),
+                aplusCoordinator = aplusCoordinator,
+                aplusEvidence = aplusEvidence,
+                bridge = bridge
             )
             engine = newEngine
 
