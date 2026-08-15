@@ -363,6 +363,50 @@ else
 fi
 rm -rf "$D"
 
+# N-N (adversarial plant, deepseek-flash): a .java source escapes the file
+# collection surface. The verdict sentence says "every referenced android.*"
+# while the collector read only .kt/.aidl -- and KB-7's own precedent
+# (ServiceSpecificException) is a Java-context type; AGP library modules
+# compile src/main/java by default. Conclusion wider than measurement.
+JAVA_DIR="$MODULE/src/main/java/io/github/terryyyc/fakexxx/contract/v1"
+D="$(mk)"
+mkdir -p "$D/$JAVA_DIR"
+printf '%s\n' \
+  'package io.github.terryyyc.fakexxx.contract.v1;' \
+  'import android.os.ServiceSpecificException;' \
+  'public final class ProbeJava { static Class<?> REF = ServiceSpecificException.class; }' \
+  > "$D/$JAVA_DIR/ProbeJava.java"
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -q 'ServiceSpecificException.*NOT IN PUBLIC SDK'; then
+  ok "N-N a hidden-type reference in a .java source is caught (the file surface includes .java)"
+  NEG=$((NEG + 1))
+else
+  bad "N-N the .java probe fell outside the collection surface -- conclusion wider than measurement"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# N-O pins the OTHER side of the surface: build outputs are not sources. A
+# generated .java under build/ is derived from measured inputs (or from
+# codegen config); measuring it would double-count and let codegen hide
+# behind generation. The probe must stay invisible.
+D="$(mk)"
+mkdir -p "$D/$MODULE/build/tmp/forreal"
+printf '%s\n' \
+  'package io.github.terryyyc.fakexxx.contract.v1;' \
+  'import android.os.ServiceSpecificException;' \
+  'public final class Generated { static Class<?> REF = ServiceSpecificException.class; }' \
+  > "$D/$MODULE/build/tmp/forreal/Generated.java"
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "N-O a .java under build/ stays out of measurement (generated output is not a source)"
+  NEG=$((NEG + 1))
+else
+  bad "N-O build output leaked into the measurement surface"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
 # N-H (review R1 P1-3): the provenance banner must carry EVERY scanned input
 # (relpath, line count, sha prefix), or a stale/mutated copy among many files
 # cannot be told apart -- the exact diagnostic this lane's banner exists for.
@@ -620,6 +664,28 @@ if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
   MUT=$((MUT + 1))
 else
   bad "M-9 re-introducing the dead closing gate did not restore the false green -- check the mutation"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# M-10 (adversarial plant load-bearing): drop '.java' from the collection
+# surface and N-N's FAIL must vanish -- proving the surface extension is what
+# carries the .java measurement, not some incidental arm.
+D="$(mk)"
+mkdir -p "$D/$JAVA_DIR"
+printf '%s\n' \
+  'package io.github.terryyyc.fakexxx.contract.v1;' \
+  'import android.os.ServiceSpecificException;' \
+  'public final class ProbeJava { static Class<?> REF = ServiceSpecificException.class; }' \
+  > "$D/$JAVA_DIR/ProbeJava.java"
+sed -i.bak "s/^EXTS = .*/EXTS = ('.kt', '.aidl')/" "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "M-10 file-surface arm - dropping .java restores the false green, so the surface extension is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-10 dropping .java from EXTS did not restore the false green -- check the mutation"
   detail "$OUT"
 fi
 rm -rf "$D"
