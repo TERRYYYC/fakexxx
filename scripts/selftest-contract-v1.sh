@@ -467,11 +467,20 @@ printf '\n== negative (multi-source: consistent across all three mirrors) ==\n'
 
 mplant() { # $1=dir, then "relpath|old|new" triples
   local d="$1"; shift
-  local arg rel rest old new
+  local arg rel rest old new np
   for arg in "$@"; do
+    # Exactly two separators, no more and no fewer: a triple carrying a THIRD
+    # '|' used to parse its tail silently as "new|extra" and apply a polluted
+    # plant (review R1 P2). Count first; a malformed triple never reaches
+    # apply().
+    np=$(awk -F'|' '{print NF-1}' <<<"$arg")
+    if [ "$np" -ne 2 ]; then
+      printf 'mplant: malformed triple (expected exactly 2 separators, got %s): %s\n' "$np" "$arg" >&2
+      return 1
+    fi
     rel="${arg%%|*}"; rest="${arg#*|}"; old="${rest%%|*}"; new="${rest#*|}"
     if [ -z "$rel" ] || [ -z "$old" ] || [ "$old" = "$new" ] || [ "$rel" = "$arg" ]; then
-      printf 'mplant: malformed triple (missing separator): %s\n' "$arg" >&2
+      printf 'mplant: malformed triple (empty segment): %s\n' "$arg" >&2
       return 1
     fi
     if ! apply "$d" "$rel" "$old" "$new" 2>/dev/null; then
@@ -480,6 +489,18 @@ mplant() { # $1=dir, then "relpath|old|new" triples
     fi
   done
 }
+
+# The malformed-input negative for the rule above (same commit as the fix):
+# a third separator must be refused loudly BEFORE anything is applied.
+D="$(mk)"
+if mplant "$D" "$SPEC|anchor-old|anchor-new|third-segment" 2>/dev/null; then
+  bad "N-17 a triple with a third '|' must be rejected, not parsed as new=\"...|third\""
+  rm -rf "$D"
+else
+  ok "N-17 mplant rejects a third separator loudly (no silent polluted plant)"
+  NEG=$((NEG + 1))
+  rm -rf "$D"
+fi
 
 N16_FINDING='wire 0 is defined by'
 N16_PLANTS=(

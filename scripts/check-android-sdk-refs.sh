@@ -137,6 +137,17 @@ MODULE, JAR, CS = sys.argv[1], sys.argv[2], sys.argv[3]
 ARM_SCAN = True    # collect android.* tokens from non-comment code
 ARM_JAR = True     # each referenced type must be an entry of the public jar
 ARM_EMPTY = True   # a scan that found nothing is a RED, not a pass
+# ARM_TQSKIP: Kotlin triple-quoted strings ("""...""") are not references.
+# The first lexer only knew single/double quotes, so a string literal that
+# mentioned ServiceSpecificException produced a NOT-IN-PUBLIC-SDK FAIL about
+# prose (review R1 P1-1). Knob exists so the selftest can prove the span of
+# the lexer that skips them is load-bearing.
+ARM_TQSKIP = True
+# ARM_NESTED: nested public types are stored with '$' (android-35 keeps
+# Build.VERSION as android/os/Build$VERSION.class), but a source reference
+# spells it with dots. The first mapping replaced EVERY dot with '/' and read
+# every nested type as missing (review R1 P1-2).
+ARM_NESTED = True
 
 # -- strip comments, then find fully-qualified android.* tokens ---------------
 # Boundary rule: the token must START at `android.` -- no word char or dot
@@ -154,9 +165,18 @@ def strip_comments(text, is_aidl):
             j = n if j == -1 else j + 2
             out.append('\n' * text.count('\n', i, j))  # keep line numbers
             i = j
-        elif two == '//':
+        elif two == '//' and not (ARM_TQSKIP and text[i:i+3] == '///'):
             j = text.find('\n', i)
             j = n if j == -1 else j
+            i = j
+        elif ARM_TQSKIP and text[i:i+3] == '"""':
+            # Triple-quoted string: skip to the closing """. Checked BEFORE
+            # the single-quote arm, or the inner quotes desynchronise it.
+            # The placeholder keeps newlines (line numbers must not drift)
+            # and blanks everything else: string CONTENT is not code.
+            j = text.find('"""', i + 3)
+            j = n if j == -1 else j + 3
+            out.append(re.sub(r'[^\n]', ' ', text[i:j]))
             i = j
         elif text[i] == '"' or text[i] == "'":
             q, i2 = text[i], i + 1
@@ -175,12 +195,17 @@ for root, _, names in os.walk(MODULE):
 files.sort()
 
 refs = {}   # type -> list of (relpath, lineno)
+scanned = []  # (relpath, line count, sha12) -- every input the verdict ran over
+import hashlib
 for f in files:
+    text = io.open(f, encoding='utf-8', errors='replace').read()
     if not ARM_SCAN:
         # The knob is not decorative: a disabled scan arm must yield an EMPTY
         # scan (which the empty-scan clause then reports), not keep scanning.
         break
-    text = io.open(f, encoding='utf-8', errors='replace').read()
+    scanned.append((os.path.relpath(f, MODULE),
+                    text.count('\n') + 1,
+                    hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:12]))
     code = strip_comments(text, f.endswith('.aidl'))
     for ln_no, line in enumerate(code.splitlines(), 1):
         for m in TOKEN.finditer(line):
@@ -188,6 +213,35 @@ for f in files:
                 (os.path.relpath(f, MODULE), ln_no))
 
 entries = set(zipfile.ZipFile(JAR).namelist())
+
+# -- token -> jar entries: every separator is / OR $, member tails stripped ---
+# A source reference spells nested types with dots (android.os.Build.VERSION)
+# while the jar stores them as android/os/Build$VERSION.class; and a static
+# member access (VERSION.SDK_INT) makes the matcher read one segment PAST the
+# type. So a token resolves if ANY dot-assignment of ANY tail-stripped prefix
+# names a jar entry; the full dotted path with all-'/' is checked first so the
+# plain package case stays cheap. Tokens too long to reason about (>8 parts
+# even after stripping) are refused loudly, never silently passed.
+def resolves(typ):
+    parts = typ.split('.')
+    while len(parts) >= 3:
+        n = len(parts) - 1  # separator positions; every one is / or $
+        forms = {'/'.join(parts) + '.class'}
+        if ARM_NESTED:
+            for mask in range(1 << n):
+                segs = [parts[0]]
+                for j in range(1, n + 1):
+                    segs.append(('$' if (mask >> (j - 1)) & 1 else '/') + parts[j])
+                forms.add(''.join(segs) + '.class')
+        if forms & entries:
+            return True
+        parts.pop()  # last segment may be a static member, not a class
+    return False
+
+print('\n== scanned inputs (every file this verdict ran over) ==')
+print('    scanned input(s): %d file(s)' % len(scanned))
+for rel, nlines, sha in scanned:
+    print('    %-72s (%d lines, sha256 %s)' % (rel, nlines, sha))
 
 print('\n== referenced android.* types, each against the public compile SDK ==')
 print('    predicate: fully-qualified android.* tokens in non-comment code'
@@ -206,12 +260,10 @@ if not refs:
 bad = 0
 for typ in sorted(refs):
     sites = refs[typ]
-    entry = typ.replace('.', '/') + '.class'
-    if ARM_JAR and entry not in entries:
-        verdict = 'NOT IN PUBLIC SDK'
+    ok_type = (not ARM_JAR) or resolves(typ)
+    verdict = ('public in android-%s' % CS) if ok_type else ('unchecked (ARM_JAR off)' if not ARM_JAR else 'NOT IN PUBLIC SDK')
+    if ARM_JAR and not ok_type:
         bad += 1
-    else:
-        verdict = 'public in android-%s' % CS if ARM_JAR else 'unchecked (ARM_JAR off)'
     where = ', '.join('%s:%d' % s for s in sites[:4])
     more = '' if len(sites) <= 4 else ' +%d more' % (len(sites) - 4)
     # The verdict text itself is printed, not folded into FAIL/ok: a verdict
@@ -220,7 +272,7 @@ for typ in sorted(refs):
           % ('FAIL' if verdict == 'NOT IN PUBLIC SDK' else 'ok',
              typ, verdict, len(sites), where, more))
     if verdict == 'NOT IN PUBLIC SDK':
-        print('        %s -> expected jar entry %s' % (typ, entry))
+        print('        %s -> no jar entry under any / or $ form of its dots, member tails stripped' % typ)
 
 print('  ....  %d type(s) enumerated, %d site(s) total, %d missing from the public SDK'
       % (len(refs), sum(len(v) for v in refs.values()), bad))

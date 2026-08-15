@@ -47,10 +47,12 @@ mkdir -p "$FIXTURE_SDK/platforms/android-35"
 python3 - "$FIXTURE_SDK/platforms/android-35/android.jar" <<'PY'
 import sys, zipfile
 with zipfile.ZipFile(sys.argv[1], 'w') as z:
-    # Bytecode is irrelevant: the guard enumerates entries. Two public types,
-    # nothing else -- every existence verdict below is measured against this.
+    # Bytecode is irrelevant: the guard enumerates entries. Public types for
+    # the nested-class shape ($ separator, how android-35 actually stores
+    # Build.VERSION) plus the two baseline parcels.
     z.writestr('android/os/Parcel.class', b'')
     z.writestr('android/os/Parcelable.class', b'')
+    z.writestr('android/os/Build$VERSION.class', b'')
 PY
 
 mk() { # throwaway repo copy: guard + module, from the WORKING TREE
@@ -198,6 +200,82 @@ else
 fi
 rm -rf "$D"
 
+# N-E (review R1 P1-1): a Kotlin TRIPLE-QUOTED string is not a type reference
+# either. The first lexer only knew single/double quotes, so
+# """android.os.ServiceSpecificException""" leaked straight through to the
+# token matcher and produced a NOT-IN-PUBLIC-SDK FAIL about a string literal.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal const val KB7_NOTE = """android.os.ServiceSpecificException"""' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "N-E a triple-quoted string mentioning the type stays green (strings are not references)"
+  NEG=$((NEG + 1))
+else
+  bad "N-E a triple-quoted string leaked into the token matcher -- lexer must skip \"\"\"...\"\"\" spans"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# N-F (review R1 P1-2): a nested public type must resolve through the $ jar
+# convention. android-35 stores Build.VERSION as android/os/Build$VERSION.class;
+# the first mapping replaced every dot with '/' and read the type as missing.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val kb7BuildProbe: Any get() = android.os.Build.VERSION' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS' \
+  && printf '%s' "$OUT" | grep -qF 'android.os.Build.VERSION'; then
+  ok "N-F nested type (Build.VERSION, jar entry Build\$VERSION) resolves public"
+  NEG=$((NEG + 1))
+else
+  bad "N-F a nested class resolved as missing -- entry mapping must try the \$ form"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# N-G (review R1 P1-2, member-path boundary): a static MEMBER access off a
+# nested type. The token matcher reads the whole qualified chain
+# (Build.VERSION.SDK_INT); SDK_INT is a field, not a class, so the resolver
+# must strip the member tail and check the TYPE it hangs off.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val kb7SdkIntProbe: Int get() = android.os.Build.VERSION.SDK_INT' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "N-G static member path (VERSION.SDK_INT) checks the type, not the field"
+  NEG=$((NEG + 1))
+else
+  bad "N-G a member access off a nested type was read as a missing class"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# N-H (review R1 P1-3): the provenance banner must carry EVERY scanned input
+# (relpath, line count, sha prefix), or a stale/mutated copy among many files
+# cannot be told apart -- the exact diagnostic this lane's banner exists for.
+D="$(mk)"
+OUT="$(run_gate "$D")"
+HIT="$(printf '%s' "$OUT" | grep -cE 'src/main/java/.*ContractEnumsV1\.kt +\([0-9]+ lines, sha256 [0-9a-f]{12}\)')"
+if [ "$HIT" -ge 1 ] \
+  && printf '%s' "$OUT" | grep -qE 'scanned input\(s\): [0-9]+ file'; then
+  ok "N-H the banner names each scanned file with lines + sha (per-input provenance)"
+  NEG=$((NEG + 1))
+else
+  bad "N-H banner lacks per-file provenance -- a verdict that does not name every input is about nothing"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
 # ---------------------------------------------------------------------------
 printf '\n== mutation (disable one single-line arm; its finding must vanish) ==\n'
 
@@ -310,6 +388,47 @@ PY
     MUT=$((MUT + 1))
   fi
 fi
+
+# M-4 (review R1 P1-1 load-bearing): with the triple-quote handling disabled,
+# N-E's PASS must flip to a false FAIL -- that span of the lexer is what keeps
+# string literals out of the token matcher.
+D="$(mk)"
+sed -i.bak "s/^ARM_TQSKIP = .*/ARM_TQSKIP = False/" "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal const val KB7_NOTE = """android.os.ServiceSpecificException"""' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'NOT IN PUBLIC SDK'; then
+  ok "M-4 triple-quote skip arm - disabling it turns N-E into a false red, so the arm is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-4 disabling ARM_TQSKIP changed nothing -- the triple-quote arm is decorative"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# M-5 (review R1 P1-2 load-bearing): with nested-class ($-form) resolution
+# disabled, N-F's nested type must read as missing again.
+D="$(mk)"
+sed -i.bak "s/^ARM_NESTED = .*/ARM_NESTED = False/" "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  'package io.github.terryyyc.fakexxx.contract.v1
+
+internal val kb7BuildProbe: Any get() = android.os.Build.VERSION' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'NOT IN PUBLIC SDK'; then
+  ok "M-5 nested-entry arm - disabling it turns N-F into a false red, so the arm is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-5 disabling ARM_NESTED changed nothing -- the \$-form arm is decorative"
+  detail "$OUT"
+fi
+rm -rf "$D"
 
 rm -rf "$FIXTURE_SDK"
 
