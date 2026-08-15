@@ -147,19 +147,19 @@ class EngineTrustedPathRedTest {
         private val deliveryMode: String,
         private val present: Boolean = true
     ) : APlusEvidenceSource {
-        // Placeholder run id — the INV-23 three-way hash is GREEN (skeleton TrustPolicy does not check it);
-        // the frozen digest preimage (§6.3.4) is contract-owned. The fake only proves the shape is
-        // recomputable from owner state, not that the value matches (that is GREEN).
-        private fun intentHash(attemptId: Long) = APlusOperationIdentity.requestDigest(lat, lng, attemptId, 0L)
+        // R43 GREEN: the INV-23 three-way hash is recomputed from the REAL owner session id the
+        // engine passes in — the placeholder run id (0L) could never agree with the engine recompute.
+        private fun intentHash(attemptId: Long, runSessionId: Long) =
+            APlusOperationIdentity.requestDigest(lat, lng, attemptId, runSessionId)
 
         // The observation/evidence lease MUST match the provider's apply lease (INV-07/23) — Sol round-10
         // P1-1: a fixed "L1" would be rejected by a correct lease binding, so it must be the provider lease.
         private fun providerLease(attemptId: Long) = "lease-$attemptId"
 
-        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? =
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
             if (!present) null else ObservationSnapshot(
                 leaseId = providerLease(attemptId),
-                acceptedIntentHash = intentHash(attemptId),
+                acceptedIntentHash = intentHash(attemptId, runSessionId),
                 coverage = "FULL",
                 verificationLevel = "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED",
                 deliveryMode = deliveryMode,
@@ -175,17 +175,17 @@ class EngineTrustedPathRedTest {
                 evidenceRefs = listOf("qwy:store:abc")
             )
 
-        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? =
-            if (!present) null else acquirePreObservation(attemptId)!!.copy(
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
+            if (!present) null else acquirePreObservation(attemptId, runSessionId)!!.copy(
                 observedAtElapsedRealtimeMs = POST_OBSERVED_AT_ELAPSED,
                 observedAtEpochMs = 6500L
             )
 
-        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? =
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? =
             if (!present) null else APlusCompletionEvidence(
                 execution = fullEvidenceExecution(wire),
                 completionEvidenceWire = wire,
-                applyReceiptIntentHash = intentHash(attemptId),
+                applyReceiptIntentHash = intentHash(attemptId, runSessionId),
                 applyReceiptLease = providerLease(attemptId)
             )
     }
@@ -455,7 +455,10 @@ class EngineTrustedPathRedTest {
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
-        val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
+        // R43 GREEN: present=true — the resumed plan's NEXT attempt must be able to actually earn the
+        // trusted completion (gate advanced → resume → mint → completed). A fail-closed source would
+        // pause the resumed plan, contradicting the "resumes → completed" GREEN projection.
+        val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))

@@ -46,14 +46,19 @@ interface APlusBackend {
  * # A+ 证据获取 seam：只供观察/分类/回执字段；目标坐标与本地重算 hash 永远来自持久 intent
  */
 interface APlusEvidenceSource {
-    /** The §6.4 pre-observation for [attemptId], or null when observation is unavailable. */
-    suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot?
+    /**
+     * The §6.4 pre-observation for [attemptId], or null when observation is unavailable.
+     * R43 GREEN: [runSessionId] is the attempt's REAL owner session — the source recomputes the
+     * INV-23 intent hash from the same owner state the engine recompute uses (lat/lng/attemptId/session),
+     * so the three-way digest can actually agree.
+     */
+    suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot?
 
     /** The §6.4 post-observation for [attemptId], or null when observation is unavailable. */
-    suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot?
+    suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot?
 
     /** The classified completion evidence + apply-receipt fields for [attemptId] (§8.6/§6.3). */
-    suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence?
+    suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence?
 }
 
 /**

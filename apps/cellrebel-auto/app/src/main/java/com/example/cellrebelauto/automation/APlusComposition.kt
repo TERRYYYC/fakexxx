@@ -124,8 +124,8 @@ object APlusComposition {
 
     /** Fail-closed skeleton evidence source — no observation, no completion evidence. */
     private object SkeletonEvidenceSource : APlusEvidenceSource {
-        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? = null
-        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? = null
-        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? = null
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? = null
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? = null
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? = null
     }
 }

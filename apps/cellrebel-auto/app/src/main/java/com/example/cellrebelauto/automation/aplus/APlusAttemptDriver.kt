@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.automation.aplus
 
 import com.example.cellrebelauto.db.AuditEventDao
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
 
 /**
  * The production call site that wires the frozen §8.1 state machine ([AttemptTransitions] /
@@ -21,15 +22,6 @@ import com.example.cellrebelauto.db.AuditEventDao
  * per transition bound to the real attempt id (the durable effect). A table with no persisting caller
  * fails (a) under the skeleton and (b) under any table-only attack.
  *
- * Green-wiring boundary: under GREEN the engine/coordinator drives an attempt through this entry at each
- * §8.1 lifecycle step (the GREEN body, frozen pre-freeze). The RED proves the table is reachable ONLY via
- * a persisting entry; the engine-loop wiring itself is GREEN body, complementary to R5-F1/F3 (does the
- * engine drive TRUSTED completion) — not duplicated here.
- *
- * PRE-FREEZE SKELETON (RED): [driveTransition] returns [current] UNCHANGED and appends NO audit event —
- * it neither consults [AttemptTransitions] nor touches the audit stream. GREEN body frozen pending the
- * contract-v1 freeze (no GREEN authorization pre-freeze).
- *
  * # §8.1 状态机的生产调用点（R5-F4）：把冻结状态机接入持久审计流，杜绝"实现完整但无调用点的数据表 oracle"
  */
 class APlusAttemptDriver(
@@ -42,13 +34,31 @@ class APlusAttemptDriver(
      * machine ([AttemptTransitions.next]), append a durable audit event recording the transition bound
      * to [attemptId], and return the resulting state.
      *
-     * RED skeleton: returns [current] and appends nothing (no [AttemptTransitions] consult, no audit).
+     * GREEN (contract v1 frozen): the audit row is appended for EVERY driven transition (including
+     * no-op transitions — the audit stream records that the event was seen; at-most-once per call),
+     * with a monotonic `seq` derived from the stream length + 1 (single-writer per attempt; the
+     * engine serializes transitions per attempt).
      *
-     * @return the resulting [AttemptState]; under the skeleton this is [current] unchanged.
+     * @return the resulting [AttemptState] (unchanged [current] when the (state, event) tuple is a
+     *   no-op per §8.1).
      */
     suspend fun driveTransition(
         attemptId: Long,
         current: AttemptState,
         event: AttemptEvent
-    ): AttemptState = current
+    ): AttemptState {
+        val next = AttemptTransitions.next(current, event)
+        val seq = auditDao.count().toLong() + 1
+        auditDao.insert(
+            AutoAuditEvent(
+                seq = seq,
+                attemptId = attemptId,
+                correlationRef = null,
+                eventType = event.name,
+                payloadDigest = "$current->$next",
+                recordedAt = nowMs()
+            )
+        )
+        return next
+    }
 }

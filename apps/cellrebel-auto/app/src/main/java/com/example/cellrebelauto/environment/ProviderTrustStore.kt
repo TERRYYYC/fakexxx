@@ -9,28 +9,49 @@ import com.example.cellrebelauto.model.plan.ProviderPairingRecord
  * provider (INV-22). No silent TOFU: an unseen signer stops at local NOT_PAIRED until operator
  * approval; revocation is a state transition (sets revokedAt), not a delete.
  *
- * PRE-FREEZE SKELETON (RED): all mutations are no-ops and [findActive] always returns null. Tests
- * asserting an approved provider becomes active will FAIL until GREEN. The 3-method surface is
- * frozen now so GREEN plugs logic in WITHOUT widening the trust boundary.
+ * GREEN (contract v1 frozen): approve inserts a fresh active record and returns it; revoke sets
+ * revokedAt on the active record (row survives, findActive stops returning it); findActive returns
+ * the revokedAt-IS-NULL row only. Re-approval after revocation creates a NEW row (revoked rows are
+ * never resurrected — M-PA-10: re-pairing walks operator approval again).
  *
- * # Provider 信任 store 骨架（RED）：三方法面已冻结，逻辑为空；禁止 silent TOFU
+ * # Provider 信任 store（GREEN）：批准=插入 active 记录；撤销=置 revokedAt 不删行；绝不复活旧记录
  */
 class ProviderTrustStore(private val dao: ProviderPairingDao) {
 
-    /** Active = applicationId present with revokedAt IS NULL. RED: always null. */
-    fun findActive(applicationId: String): ProviderPairingRecord? = null
+    /** Active = applicationId present with revokedAt IS NULL. */
+    suspend fun findActive(applicationId: String): ProviderPairingRecord? =
+        dao.activeFor(applicationId)
 
     /**
-     * Operator-approved pairing. RED: returns null (no persistence, no trust minted).
-     * GREEN will insert via [dao] and return the active record.
+     * Operator-approved pairing: insert a fresh active record and return it. A prior REVOKED row is
+     * never resurrected — the new row is appended (history preserved; M-PA-10 re-approval path).
      */
-    fun approve(
+    suspend fun approve(
         applicationId: String,
         signerDigest: String,
         versionCode: Int,
         approvedAt: Long
-    ): ProviderPairingRecord? = null
+    ): ProviderPairingRecord {
+        val id = dao.insert(
+            ProviderPairingRecord(
+                applicationId = applicationId,
+                currentSignerDigest = signerDigest,
+                approvedAt = approvedAt,
+                revokedAt = null,
+                approvedVersionCode = versionCode
+            )
+        )
+        return ProviderPairingRecord(
+            id = id,
+            applicationId = applicationId,
+            currentSignerDigest = signerDigest,
+            approvedAt = approvedAt,
+            revokedAt = null,
+            approvedVersionCode = versionCode
+        )
+    }
 
-    /** Revoke (state transition). RED: returns false. */
-    fun revoke(applicationId: String, revokedAt: Long): Boolean = false
+    /** Revoke (state transition): set revokedAt on the ACTIVE record — the row is never deleted. */
+    suspend fun revoke(applicationId: String, revokedAt: Long): Boolean =
+        dao.revoke(applicationId, revokedAt) > 0
 }

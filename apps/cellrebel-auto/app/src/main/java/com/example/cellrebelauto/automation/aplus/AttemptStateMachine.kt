@@ -35,6 +35,11 @@ enum class AttemptState {
 class AttemptGuard {
     fun isTerminal(state: AttemptState): Boolean = state == AttemptState.CLOSED
 
-    /** RED: always true — must be false when [state] is terminal OR [leaseReleased] is false. */
-    fun canBeginApply(state: AttemptState, leaseReleased: Boolean): Boolean = true
+    /**
+     * GREEN (INV-22 / INV-28): an apply may begin only from a NON-terminal state AND with the prior
+     * lease fully released. A terminal attempt cannot be revived (a new run creates a new attempt);
+     * a non-released lease blocks a fresh apply.
+     */
+    fun canBeginApply(state: AttemptState, leaseReleased: Boolean): Boolean =
+        !isTerminal(state) && leaseReleased
 }

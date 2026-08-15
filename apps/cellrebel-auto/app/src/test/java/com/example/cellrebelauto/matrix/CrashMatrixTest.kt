@@ -176,9 +176,9 @@ class CrashMatrixTest {
         private val post: ObservationSnapshot? = null,
         private val evidence: APlusCompletionEvidence? = null
     ) : APlusEvidenceSource {
-        override suspend fun acquirePreObservation(attemptId: Long): ObservationSnapshot? = pre
-        override suspend fun acquirePostObservation(attemptId: Long): ObservationSnapshot? = post
-        override suspend fun acquireCompletionEvidence(attemptId: Long): APlusCompletionEvidence? = evidence
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? = pre
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? = post
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? = evidence
     }
 
     private class FakeBackend(
