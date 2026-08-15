@@ -47,24 +47,34 @@ class QwyScheduleStore(context: Context) {
     }
 
     /**
-     * Initialize the schedule from a list of profile DB ids. Idempotent: if
-     * the schedule already exists with the same item set, this is a no-op.
-     * If the item set changed, version increments.
+     * Initialize the schedule from a list of profile DB ids. Decision logic
+     * lives in [ScheduleReinitPolicy] (M-AD-24: a reinit that clears exhausted
+     * must also bump scheduleVersion — the clear and the bump are one atomic
+     * write here). Same item set → no-op; changed item set → version + 1,
+     * pointer reset, exhausted cleared.
      */
     fun initFromProfileIds(profileDbIds: List<Long>) {
         val itemIds = profileDbIds.map { "profile-$it" }
-        val existing = getItemIds()
-        if (existing == itemIds) return
-
-        val version = if (getScheduleId() == null) 1L else getScheduleVersion() + 1
-        prefs.edit()
-            .putString(KEY_SCHEDULE_ID, DEFAULT_SCHEDULE_ID)
-            .putLong(KEY_SCHEDULE_VERSION, version)
-            .putString(KEY_ITEM_IDS, encodeItemIds(itemIds))
-            .putString(KEY_CURRENT_ITEM_ID, itemIds.firstOrNull() ?: "")
-            .putBoolean(KEY_EXHAUSTED, false)
-            .putLong(KEY_ADVANCE_COUNT, 0L)
-            .commit()
+        val plan = ScheduleReinitPolicy.decide(
+            existing = ScheduleReinitPolicy.ExistingState(
+                scheduleId = getScheduleId(),
+                scheduleVersion = getScheduleVersion(),
+                itemIds = getItemIds(),
+                exhausted = isExhausted(),
+            ),
+            newItemIds = itemIds,
+        )
+        when (plan) {
+            is ScheduleReinitPolicy.ReinitPlan.NoOp -> return
+            is ScheduleReinitPolicy.ReinitPlan.Initialize -> prefs.edit()
+                .putString(KEY_SCHEDULE_ID, plan.scheduleId)
+                .putLong(KEY_SCHEDULE_VERSION, plan.scheduleVersion)
+                .putString(KEY_ITEM_IDS, encodeItemIds(plan.itemIds))
+                .putString(KEY_CURRENT_ITEM_ID, plan.currentItemId ?: "")
+                .putBoolean(KEY_EXHAUSTED, plan.exhausted)
+                .putLong(KEY_ADVANCE_COUNT, plan.advanceCount)
+                .commit()
+        }
     }
 
     fun getScheduleId(): String? =
