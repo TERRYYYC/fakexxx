@@ -321,6 +321,24 @@ else
 fi
 rm -rf "$D"
 
+# N-L (review R4 P1-6): a CHAR LITERAL containing '}' inside a template. The
+# expr scanner treated every '}' as structural, so the char's brace closed
+# the template at depth 0 and the REST of the expression -- carrying a real
+# type reference -- was blanked as literal text. False green.
+D="$(mk)"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  $'package io.github.terryyyc.fakexxx.contract.v1\n\ninternal val CHARBRACE = "${\'}\'.toString() + android.os.ServiceSpecificException::class.java.name}"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -q 'ServiceSpecificException.*NOT IN PUBLIC SDK'; then
+  ok "N-L a reference after a char-literal '}' inside a template is caught"
+  NEG=$((NEG + 1))
+else
+  bad "N-L the char literal's brace closed the template early -- false green over a real reference"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
 # N-H (review R1 P1-3): the provenance banner must carry EVERY scanned input
 # (relpath, line count, sha prefix), or a stale/mutated copy among many files
 # cannot be told apart -- the exact diagnostic this lane's banner exists for.
@@ -533,6 +551,26 @@ if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
   MUT=$((MUT + 1))
 else
   bad "M-7 disabling ARM_TEMPLATE did not restore the false green -- the arm is not the one keeping template code in measurement"
+  detail "$OUT"
+fi
+rm -rf "$D"
+
+# M-8 (review R4 P1-6 load-bearing): with the expr-atom branches disabled,
+# the expr scanner regresses to braces+strings only and N-L's false green
+# returns -- proving the atom recognition (char literals, comments) is what
+# keeps template code in measurement.
+D="$(mk)"
+sed -i.bak 's/^ARM_EXPR_ATOMS = .*/ARM_EXPR_ATOMS = False/' "$D/scripts/check-android-sdk-refs.sh"
+rm -f "$D/scripts/check-android-sdk-refs.sh.bak"
+apply "$D" "$KT/ContractEnumsV1.kt" \
+  'package io.github.terryyyc.fakexxx.contract.v1' \
+  $'package io.github.terryyyc.fakexxx.contract.v1\n\ninternal val CHARBRACE = "${\'}\'.toString() + android.os.ServiceSpecificException::class.java.name}"' >/dev/null 2>&1
+OUT="$(run_gate "$D")"
+if printf '%s' "$OUT" | grep -qF 'check-android-sdk-refs: PASS'; then
+  ok "M-8 expr-atom arm - disabling it restores the R4 false green, so the arm is load-bearing"
+  MUT=$((MUT + 1))
+else
+  bad "M-8 disabling ARM_EXPR_ATOMS did not restore the false green -- the arm is not the one catching N-L"
   detail "$OUT"
 fi
 rm -rf "$D"
