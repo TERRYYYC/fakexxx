@@ -16,7 +16,11 @@ import org.junit.Test
  * §10 advance rows owned by the qwy provider lane — the FIRST provider-owned
  * advance ledger rows (assigned at exact HEAD 590ab58, spec v1.39).
  * Spec: §6.7.4a (lease gate, exact wire ruling) / §6.7.4b (frozen judgment
- * order: proof → idempotency → schedule(14/15/16) → lease(7) → mutation).
+ * order: idempotency BEFORE proof (v1.42) → schedule gates in the v1.54
+ * intra-step order 16→14→15 → lease(7) → mutation; attribution gate not yet
+ * on this tree — lands with the KB-5 lane). An earlier revision of this
+ * header read "proof → idempotency → schedule(14/15/16)" — both halves stale
+ * since v1.42/v1.54; corrected rather than silently inherited.
  */
 class AdvanceMatrixTest {
 
@@ -101,7 +105,8 @@ class AdvanceMatrixTest {
      * M-AD-13: multiple preconditions violated at once — the canonical case:
      * the caller BOTH still holds an active lease AND carries an expired
      * `expectedScheduleVersion`. §6.7.4b's frozen order judges
-     * schedule(14/15/16) BEFORE lease(7), so the answer is exactly
+     * schedule gates (16→14→15 since the v1.54 intra-step reorder) BEFORE
+     * lease(7), so the answer is exactly
      * `SCHEDULE_VERSION_STALE` — an implementation that picks gates in an
      * arbitrary order (returning 7 here) fails this row. Rationale frozen in
      * v1.39: with the schedule gone stale there may be nothing to complete, so
