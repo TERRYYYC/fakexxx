@@ -224,11 +224,14 @@ def _string_span(text, i, q, raw):
         elif ARM_TEMPLATE and text[j] == '$' and text[j:j+2] == '${':
             expr, j = _expr_span(text, j + 2)
             out.append(' ' + expr)
-        elif text[j:j+len(delim)] == delim and (raw or q == "'"):
-            if raw:
-                # closing """ -- but in non-raw this arm is unreachable ('x'
-                # has no multi-char delim); keep the guard explicit anyway
-                return ''.join(out), j + len(delim)
+        elif text[j:j+len(delim)] == delim:
+            # The delimiter closes the literal -- for EVERY string kind. The
+            # R4-era gate (raw or q == "'") was never true for an ordinary
+            # double quote, so ordinary strings never closed and every line
+            # after one was blanked with the literal (review R5): a hidden
+            # reference on a later line fell out of measurement entirely.
+            # Escapes are consumed before this branch; raw strings legally
+            # contain " and "" and only """ closes them.
             return ''.join(out), j + len(delim)
         else:
             out.append('\n' if text[j] == '\n' else ' ')
