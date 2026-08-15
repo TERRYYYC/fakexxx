@@ -83,6 +83,9 @@ ksp {
 }
 
 dependencies {
+    // Environment Control contract v1 (shared, frozen).
+    implementation project(':environment-control-v1')
+
     // Compose BOM
     def composeBom = platform('androidx.compose:compose-bom:2025.04.00')
     implementation composeBom

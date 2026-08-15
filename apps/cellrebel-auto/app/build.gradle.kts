@@ -42,6 +42,9 @@ android {
 }
 
 dependencies {
+    // Environment Control contract v1 (shared, frozen).
+    implementation(project(":environment-control-v1"))
+
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
     implementation(composeBom)

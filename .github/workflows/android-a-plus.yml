@@ -24,7 +24,14 @@ permissions:
 
 jobs:
   provenance:
-    name: provenance (vendored trees == upstream SHAs)
+    # Job id stays `provenance` (no required-check binding moves). The VISIBLE
+    # name changed in v1.74 because it was wider than the predicate: at
+    # --stage contract this job explicitly ALLOWS the vendored trees to diverge
+    # and prints so ("has diverged from upstream (allowed at stage contract)",
+    # "does not bound WHICH paths diverged"). A green check literally named
+    # "trees == upstream SHAs" therefore asserted, to anyone reading the checks
+    # list, something the gate had stopped proving.
+    name: provenance (frozen upstream roots + reachable ancestry)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,13 +43,33 @@ jobs:
 
       - name: check-provenance
         # --stage is required and has no default (see the script header). At
-        # PR-1 the vendored apps must still be pristine, so this branch runs
-        # the strict stage. When a later PR legitimately changes an app, this
-        # line is what moves to --stage contract/full; the root-tree anchor in
-        # section 1 is checked at every stage regardless. (The import *commit*
-        # is not the anchor — a squash/rebase merge legitimately discards it,
-        # so it is asserted only while still reachable.)
-        run: ./scripts/check-provenance.sh --stage import
+        # PR-1 the vendored apps must still be pristine, so that branch ran the
+        # strict stage, and its comment said this line is what moves when a
+        # later PR legitimately changes an app.
+        #
+        # THIS IS THAT PR. Wiring the contract module into both app Gradle roots
+        # is the first legitimate divergence: 7 app build files, +34 lines, all
+        # of it `include`/`implementation`/`<queries>` plumbing and no upstream
+        # source touched. Measured on this exact tree:
+        #
+        #   --stage import   -> rc=1  (2 checks failed: HEAD tree != upstream)
+        #   --stage contract -> rc=0
+        #   --stage full     -> rc=0
+        #
+        # The move is designed, and it IS a narrowing -- calling it "not a
+        # weakening" (as this comment did until v1.74) overstated what survives.
+        # What this job proves at --stage contract, exactly:
+        #   1. the upstream SHA / root tree frozen in the provenance doc matches
+        #      the real upstream objects;
+        #   2. a REACHABLE ancestor of HEAD carried that pristine root tree;
+        #   3. each working tree equals its current HEAD.
+        # What it no longer proves: that the current tree is byte-identical to
+        # upstream (retired on purpose, it is false now), and -- the part the old
+        # wording hid -- it does NOT bound WHICH paths may diverge. Bounding the
+        # diverged path set is the scope gate's job, not this one. (The import
+        # *commit* is not the anchor — a squash/rebase merge legitimately
+        # discards it, so it is asserted only while still reachable.)
+        run: ./scripts/check-provenance.sh --stage contract
 
       - name: selftest-provenance
         # The negative matrix is a regression gate, not a table in a document.
@@ -52,6 +79,80 @@ jobs:
         # to find by hand. It also mutation-checks itself: reverting a fix must
         # make the case guarding it fail, otherwise that case proves nothing.
         run: ./scripts/selftest-provenance.sh
+
+  contract-v1:
+    # Verifies the frozen contract from BOTH app Gradle roots, which is the
+    # point: a shared library that only compiles inside one consumer's build is
+    # not shared. Deliberately not a dependency of either app job.
+    name: contract-v1 (static guards + both roots)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: gradle wrappers are executable
+        run: chmod +x apps/cellrebel-auto/gradlew apps/qianwangyou/gradlew
+
+      - name: check-contract-v1
+        run: ./scripts/check-contract-v1.sh
+
+      - name: selftest-contract-v1
+        # check-contract-v1.sh being green says something only while it is still
+        # sensitive to the drift it claims to catch, and nothing measured that:
+        # the mutation proofs behind its guards were one-off scripts run by hand,
+        # so a change that quietly weakened one would land on a green board.
+        #
+        # This runs the PRODUCTION gate against mutated throwaway copies of the
+        # canonical spec and asserts each guard reports its OWN finding and
+        # nothing else's -- a case that goes red for the wrong reason is a false
+        # red, and reads identical here to a true one. The M-* cases then disable
+        # one guard at a time and require the matching finding to disappear,
+        # which is what distinguishes a load-bearing guard from dead code that a
+        # broader older check happens to cover for.
+        run: ./scripts/selftest-contract-v1.sh
+
+      - name: check-derived-counts
+        # Every count in prose (§15 lane selectors, §16 task scopes, the
+        # aggregation and class-responsibility tables) is a CACHE of a number
+        # derived from the §10.1 ledger. Keeping those caches in sync by hand
+        # has now failed four times: v1.38 synced the ledger and left the lane
+        # selector table; v1.39 fixed the lane selector table and left two
+        # others twenty lines away, while claiming it had fixed all four; v1.46
+        # recomputed 29 cache points by hand and still shipped one stale number,
+        # and that miss was a SECOND stale number later in a line already edited
+        # in the same pass -- the exact failure mode that commit's own message
+        # named.
+        #
+        # v1.46 responded by FREEZING the rule "derived counts may only be
+        # computed from the §10.1 ledger" and enforcing it with nothing. This
+        # step is the enforcement. It recomputes the ledger truth and fails when
+        # active prose states a count the ledger cannot produce.
+        run: ./scripts/check-derived-counts.sh
+
+      - name: selftest-derived-counts
+        # The same argument the selftest-contract-v1 step above makes, applied to
+        # the guard directly beneath it -- with one extra reason it could not be
+        # wired until now.
+        #
+        # check-derived-counts.sh shipped green for rounds while four notations
+        # of real cache sites sat in its blind spot, which is a PASS measured in
+        # the units of its own recognition. 6cfea07 widened it into five named
+        # arms and built this harness to prove each arm is load-bearing, but did
+        # not wire it: the harness's positive case was deliberately inverted to
+        # assert RED while the 15 newly-visible stale caches were still awaiting
+        # the mainline recompute, so wiring it then would have pinned CI to a
+        # defect. v1.60 landed that recompute and flipped the positive case to
+        # assert green, which is what makes this step meaningful rather than a
+        # second way to report the same red.
+        #
+        # A selftest that exists but never runs is not a guard. That is the same
+        # shape as KB-7's "registration is not transport": the artifact was
+        # present, the property it claimed was never actually carried.
+        run: ./scripts/selftest-derived-counts.sh
 
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.

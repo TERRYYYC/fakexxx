@@ -71,7 +71,7 @@ the three lanes must not each invent their own compatibility.
 | Gate | Enforces |
 |---|---|
 | `scripts/check-provenance.sh --stage <import\|contract\|full>` | the recorded import commit carries the upstream root tree (checked at **every** stage — immutable), and at `--stage import` only, the **current** HEAD tree is still byte-identical to it. `--stage` is required and has no default: defaulting strict would make the first legitimate app change in PR-2/3/4 fail CI forever, defaulting lenient would silently drop PR-1's strongest check. Callers state the stage; the CI workflow passes `--stage import` while the apps are meant to be pristine, and that line is what moves when they legitimately diverge |
-| `scripts/check-contract-v1.sh` *(PR-2, Opus5)* | contract v1 exact schema and compatibility matrix |
+| `scripts/check-contract-v1.sh` *(PR-2, Opus5)* | contract v1 exact schema, no enum inside `@Parcelize`, `compatibility.yaml` sync, builds from both app roots |
 | `scripts/check-forbidden-boundaries.sh` *(PR-5, Sol)* | Auto never writes Qianwangyou storage and never drives it through UI automation (INV-01/20) |
 | `scripts/verify-a-plus.sh` | runs the gates required at a named stage; a missing required gate fails rather than being skipped |
 
@@ -80,7 +80,7 @@ the three lanes must not each invent their own compatibility.
 | Component | Status | Owner / PR |
 |---|---|---|
 | Vendored baselines + provenance + CI | present at this HEAD | Opus5 / PR-1 |
-| `contracts/environment-control-v1/**` | not yet created | Opus5 / PR-2 |
+| `contracts/environment-control-v1/**` | frozen at PR-2 HEAD | Opus5 / PR-2 |
 | Qianwangyou provider `integration/v1/**` | not yet created | Kimi / PR-3 |
 | Auto trusted ledger, recovery, A+ template | not yet created | Opus5 / PR-4 |
 | `acceptance/**` fake provider and matrices | not yet created | Sol / PR-5 |

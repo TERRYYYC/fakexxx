@@ -13,6 +13,14 @@
     <queries>
         <package android:name="com.cellrebel.mobile" />
         <package android:name="com.hopefactory2021.fakegpslocation" />
+        <!-- Environment Control contract v1 (spec 6.1). targetSdk 35 means an
+             explicit bind to another app's service is subject to package
+             visibility: the activity exemption does not extend to services, so
+             without these entries bindService to Qianwangyou silently fails.
+             Production and bench are separate applicationIds and pair
+             independently, so both must be declared. -->
+        <package android:name="name.caiyao.fakegps" />
+        <package android:name="name.caiyao.fakegps.bench" />
     </queries>
 
     <application
