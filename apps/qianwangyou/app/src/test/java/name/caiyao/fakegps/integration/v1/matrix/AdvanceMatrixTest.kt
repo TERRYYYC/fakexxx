@@ -125,21 +125,25 @@ class AdvanceMatrixTest {
     }
 
     /**
-     * M-AD-21 (spec v1.54 §6.7.4b intra-step ordering 16→14→15):
-     * When the schedule is EXHAUSTED and the caller carries a stale expectedCurrentItemId
-     * (e.g. pointing at an earlier item after the pointer retained on the last item),
-     * the answer must be SCHEDULE_EXHAUSTED(16), not SCHEDULE_ITEM_MISMATCH(14).
+     * M-AD-11(b) (renamed from M_AD_21 per Terra evidence-binding correction
+     * `0001786752664520`): single-threaded exhausted schedule + stale non-null
+     * expectedCurrentItemId → wire 16, per the v1.54 §6.7.4b intra-step
+     * ordering 16→14→15 (exhausted checked before item mismatch).
      *
-     * The frozen intra-step ordering is 16→14→15: exhausted is checked BEFORE item
-     * mismatch. Before this reorder the code checked 14→15→16, so a stale item on
-     * an exhausted schedule would incorrectly return 14 instead of the terminal 16.
+     * Name/reality note: this is NOT M-AD-21's concurrent exactly-once
+     * evidence — M-AD-21 needs two distinct keys racing (winner + loser +
+     * advanceCount==1). The non-final half lives in
+     * AdvanceProviderRedTest::advance_concurrentAdvances_serializedNoDoubleAdvance;
+     * the final-item half (winner EXHAUSTED receipt, loser exactly 16) lives
+     * in Opus's `2c70eea` row-16 test on feat/kb5-kb6-advance-predicates.
+     * This row pins the judgment ORDER that makes those answers reachable.
      *
-     * Rationale: "already exhausted" is a terminal state — telling the caller "item
-     * mismatch" invites a useless resync+retry cycle when retry is structurally
-     * impossible. The frozen order gives the terminal answer first.
+     * Rationale: "already exhausted" is a terminal state — telling the caller
+     * "item mismatch" invites a useless resync+retry cycle when retry is
+     * structurally impossible. The frozen order gives the terminal answer first.
      */
     @Test
-    fun M_AD_21_exhaustedWithStaleItem_returnsSixteenNotFourteen() {
+    fun M_AD_11b_exhaustedWithStaleItem_returnsSixteenNotFourteen() {
         val h = harness()
         val leaseId = h.apply(key = "ad21-apply").leaseId
         h.release(leaseId, key = "ad21-rel")
