@@ -153,6 +153,14 @@ ARM_EMPTY = True   # a scan that found nothing is a RED, not a pass
 ARM_QSKIP = True
 ARM_TEMPLATE = True
 ARM_TQSKIP = True
+# ARM_EXPR_ATOMS: a template expression is scanned with the SAME lexical
+# categories as top-level code -- char literals are opaque ('}' inside one is
+# not a brace), comments are not code, strings recurse. The R3 expr scanner
+# knew only double-quote strings and structural braces, so a char literal
+# containing '}' closed the template at depth 0 and everything after it was
+# blanked as literal text -- a false green over a real reference (review R4).
+# The knob exists so the selftest can prove these atom branches load-bearing.
+ARM_EXPR_ATOMS = True
 # ARM_NESTED: nested public types are stored with '$' (android-35 keeps
 # Build.VERSION as android/os/Build$VERSION.class), but a source reference
 # spells it with dots. The first mapping replaced EVERY dot with '/' and read
@@ -168,21 +176,37 @@ TOKEN = re.compile(r'(?<![\w.])(android\.[A-Za-z]\w*(?:\.[A-Za-z]\w*)*)')
 
 def _expr_span(text, i):
     # Scan a template expression from just after '${' to its matching '}'.
-    # Returns (kept_code, next_index). Nested strings recurse into the string
-    # handler (they may themselves carry templates); braces inside those
-    # strings must not count toward the depth.
+    # Returns (kept_code, next_index). Template code is CODE: it is scanned
+    # with the same lexical categories as top-level code, not a dumber rule --
+    # char literals are opaque, comments are dropped, strings recurse (they
+    # may themselves carry templates); braces inside those atoms never count
+    # toward the depth.
     out, depth, n = [], 0, len(text)
     while i < n:
         c = text[i]
-        if c == '"':
-            kept, i = _string_span(text, i, '"', False)
-            out.append(kept)
-        elif c == '{':
-            depth += 1; out.append(c); i += 1
-        elif c == '}':
+        if c == '}':
             if depth == 0:
                 return ''.join(out), i + 1
             depth -= 1; out.append(c); i += 1
+        elif c == '{':
+            depth += 1; out.append(c); i += 1
+        elif ARM_EXPR_ATOMS and c == "'":
+            i2 = i + 1
+            while i2 < n and text[i2] != "'":
+                i2 += 2 if text[i2] == '\\' else 1
+            out.append(text[i:i2+1]); i = i2 + 1
+        elif ARM_EXPR_ATOMS and text[i:i+2] in ('//', '/*'):
+            if text[i:i+2] == '//':
+                j = text.find('\n', i); j = n if j == -1 else j
+            else:
+                j = text.find('*/', i + 2); j = n if j == -1 else j + 2
+            out.append('\n' * text.count('\n', i, j)); i = j
+        elif text[i:i+3] == '"""':
+            kept, i = _string_span(text, i, '"', True)
+            out.append(kept)
+        elif c == '"':
+            kept, i = _string_span(text, i, '"', False)
+            out.append(kept)
         else:
             out.append(c); i += 1
     return ''.join(out), n
