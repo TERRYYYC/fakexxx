@@ -39,8 +39,25 @@ import java.util.concurrent.atomic.AtomicBoolean
  * one batch — do NOT self-assign IDs (ID drift), and do NOT count this file
  * toward the ledger (deleting it would still leave the verifier green).
  *
- * Judgment order is now FROZEN as §6.7.4b:
- *   proof → idempotency → schedule(14/15/16) → lease(7) → mutation
+ * §6.7.4b judgment order. SPEC-FROZEN:
+ *   safety(+recompute digest) → idempotency → {proof, attribution(13)}
+ *   → schedule(16→14→15) → lease(7) → mutation
+ * The attribution half of step 3 is KB-5; its BOUNDARIES are frozen (after
+ * idempotency, before the schedule gates) while its order against the proof
+ * half is explicitly free — both exit on 13, their only difference lands in
+ * the non-normative diagnosticMessage, so no wire-level row can pin the pair
+ * (semantics ruling Am-1). This file happens to run proof first; that is a
+ * choice, not a rule.
+ *
+ * This header previously read `proof → idempotency → schedule(14/15/16)` and
+ * called it FROZEN. All three were wrong — idempotency precedes proof, the
+ * schedule gates were resequenced to 16→14→15 in v1.54, and the attribution
+ * step was missing entirely — and the tests below contradict it:
+ * advance_replayPrecedesAttribution_evenAfterLeaseBecomesForeign exists to pin
+ * idempotency BEFORE attribution. A stale order labelled FROZEN is the shape a
+ * reader trusts without checking, which is exactly how that chain got quoted
+ * as current truth elsewhere in this lane.
+ *
  * with two pinned rationales: idempotent replay precedes the schedule gate
  * (after a successful advance the replayed expectedCurrentItemId is
  * necessarily expired — schedule-first would collapse M-AD-02 into M-AD-04
