@@ -7,6 +7,7 @@ import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import name.caiyao.fakegps.integration.v1.DurableIdempotencyStore
+import name.caiyao.fakegps.integration.v1.support.FakeQwyEnvironment
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
@@ -332,6 +333,25 @@ class AdvanceProviderRedTest {
             failure.message?.contains("no active schedule") == true,
         )
         assertEquals("no schedule, no advance", 0, h.env.advanceCount)
+    }
+
+    /**
+     * KB-6 row 17, the FIDELITY half: schedule ABSENCE must be durable, not a
+     * memory flag. The row above proves the handler answers 13 when the fake
+     * reports no schedule; it cannot see WHERE that "no schedule" lives. A
+     * memory-only presence flag passes it and still lies about the qwy DB —
+     * exactly the fake-green shape F-2 killed for the pointer, and
+     * HarnessFidelityTest's durability sweep covers pointer/version/exhausted
+     * but not presence.
+     */
+    @Test
+    fun fakeEnv_schedulePresence_isDurableAcrossEnvRebuild() {
+        val h = harness()
+        h.env.hasSchedule = false
+
+        val rebuilt = FakeQwyEnvironment(h.envKv)
+        assertFalse("absence survives an env rebuild", rebuilt.hasSchedule)
+        assertNull("a rebuilt env with no schedule snapshots null", rebuilt.scheduleSnapshot())
     }
 
     /**
@@ -706,6 +726,95 @@ class AdvanceProviderRedTest {
         }
         assertEquals("attribution passed, the lease gate stopped it", 0, h.env.advanceCount)
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+    }
+
+    /**
+     * KB-5, the ROTATION clause: the frozen predicate matches on
+     * `callerApplicationId` ALONE — never `callerSignerDigest`. The app is
+     * re-signed and the operator re-approves the SAME applicationId; a lease
+     * earned under the OLD signer is still this caller's own quota history.
+     * A gate that also compared signerDigest would orphan every legitimate
+     * historical attribution the moment a signing key rotates, and the rows
+     * above cannot see it: they only ever exercise one signer.
+     */
+    @Test
+    fun advance_signerRotation_historicalLeaseStillAttributes() {
+        val h = harness()
+        val historicalLeaseId = earnAndRelease(h, key = "adv-rot-apply")
+        assertEquals(
+            "precondition: the record carries the pre-rotation signer",
+            AUTO_SIGNER, h.leases.get(historicalLeaseId)!!.callerSignerDigest,
+        )
+
+        // Re-signed build, same applicationId, operator re-approves.
+        val rotatedSigner = "signer-auto-2-rotated"
+        h.resolver.register(AUTO_UID, AUTO_PKG, rotatedSigner)
+        h.pair(AUTO_PKG, rotatedSigner)
+
+        val receipt = h.handler.completeAndAdvance(
+            AUTO_UID, request(h, historicalLeaseId, "adv-rot-advance"),
+        )
+        assertEquals(AdvanceOutcomeV1.ADVANCED.wire, receipt.outcomeWire)
+        assertEquals("advance committed under the rotated signer", 1, h.env.advanceCount)
+    }
+
+    /**
+     * KB-5 ordering, the half no single-violation row can see: attribution
+     * (step 3) outranks the schedule gates (step 4). Both are violated at
+     * once — the ref is not this caller's AND the schedule is already
+     * exhausted. The frozen order says the answer is the fix-the-request
+     * REQUEST_INVALID(13), NOT the terminal SCHEDULE_EXHAUSTED(16): telling a
+     * caller "the schedule is done" when his request was never attributable
+     * sends him to reconcile a schedule instead of fixing his own request.
+     * An implementation that reports the terminal state first passes every
+     * other KB-5 row in this file.
+     */
+    @Test
+    fun advance_foreignRefOnExhaustedSchedule_answersThirteenNotSixteen() {
+        val h = harness()
+        h.env.currentItemId = "item-3"
+        val leaseId = earnAndRelease(h, key = "adv-order-apply")
+        h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, leaseId, "adv-order-exhaust",
+                expectedItemId = "item-3", completionProof = proof(h, "item-3")),
+        )
+        assertTrue("precondition: schedule is exhausted", h.env.exhausted)
+
+        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, "lease-never-issued", "adv-order-foreign-on-exhausted",
+                    expectedItemId = "item-3", completionProof = proof(h, "item-3")),
+            )
+        }
+        assertEquals("no further advance", 1, h.env.advanceCount)
+    }
+
+    /**
+     * KB-5 ordering, the other half: step-2 idempotency outranks step-3
+     * attribution. A key that already produced a receipt must hand that
+     * receipt back BEFORE any attribution question is asked — even if the
+     * referenced lease has since stopped being this caller's. Replay priority
+     * is what keeps M-AD-02 from collapsing into a failure the moment the
+     * attribution record moves; an implementation that hoists the attribution
+     * check above idempotency shoots down legal replays and passes every
+     * other row here.
+     */
+    @Test
+    fun advance_replayPrecedesAttribution_evenAfterLeaseBecomesForeign() {
+        val h = harness()
+        val leaseId = earnAndRelease(h, key = "adv-replay-attr-apply")
+        val req = request(h, leaseId, "adv-replay-attr")
+        val first = h.handler.completeAndAdvance(AUTO_UID, req)
+
+        // The attribution record retroactively stops being this caller's.
+        val record = h.leases.get(leaseId)!!
+        h.leases.put(record.copy(callerApplicationId = OTHER_PKG))
+
+        val replay = h.handler.completeAndAdvance(AUTO_UID, req)
+        assertEquals("byte-identical receipt from the replay", first, replay)
+        assertEquals("pointer moved exactly once", 1, h.env.advanceCount)
     }
 
     // ----------------------------- §6.7.4b step 5+6: gate and mutation are atomic
