@@ -39,10 +39,12 @@ import java.util.UUID
  *    RELEASE_INCOMPLETE (§6.3.3 carve-out); REVOKED is caller-unreachable;
  *    cleanup that cannot prove completion → releaseComplete=false + residuals
  *    (INV-21); idempotent by key (M-CR-08 mirror)
- *  - completeAndAdvance (§6.7): REQUEST_INVALID when proof missing/mismatched
- *    (M-AD-01) → idempotent replay same key+digest returns the SAME receipt
- *    without a second advance (M-AD-02) / same key+different digest →
- *    IDEMPOTENCY_CONFLICT (M-AD-03) → lease attribution: request.leaseId must
+ *  - completeAndAdvance (§6.7): idempotent replay FIRST — same key+digest
+ *    returns the SAME receipt without a second advance (M-AD-02) / same key+
+ *    different digest → IDEMPOTENCY_CONFLICT (M-AD-03); replay precedes every
+ *    precondition, otherwise a legal replay is shot down by gates its own
+ *    successful advance made stale → REQUEST_INVALID when proof missing or
+ *    mismatched (M-AD-01) → lease attribution: request.leaseId must
  *    resolve to a lease OWNED by this caller, unknown and foreign refs alike
  *    rejected wire 13 (KB-5) → preconditions in the frozen intra-step order
  *    exhausted-again wire 16 (M-AD-11) FIRST, then item mismatch wire 14
