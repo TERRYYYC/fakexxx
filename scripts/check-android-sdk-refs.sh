@@ -142,6 +142,13 @@ ARM_EMPTY = True   # a scan that found nothing is a RED, not a pass
 # mentioned ServiceSpecificException produced a NOT-IN-PUBLIC-SDK FAIL about
 # prose (review R1 P1-1). Knob exists so the selftest can prove the span of
 # the lexer that skips them is load-bearing.
+# ARM_QSKIP: ORDINARY quoted strings are not references either. R1 fixed only
+# the triple-quoted shape (its named instance) while the audit's own invariant
+# said "string content is not code" -- review R2 caught the ungeneralised arm:
+# a plain "android.os.ServiceSpecificException" literal still produced a
+# NOT-IN-PUBLIC-SDK FAIL about prose. Both string arms blank content and keep
+# newlines, so line numbers never drift.
+ARM_QSKIP = True
 ARM_TQSKIP = True
 # ARM_NESTED: nested public types are stored with '$' (android-35 keeps
 # Build.VERSION as android/os/Build$VERSION.class), but a source reference
@@ -182,7 +189,19 @@ def strip_comments(text, is_aidl):
             q, i2 = text[i], i + 1
             while i2 < n and text[i2] != q:
                 i2 += 2 if text[i2] == '\\' else 1
-            out.append(text[i:i2+1]); i = i2 + 1
+            if ARM_QSKIP:
+                # Keep the quote chars, blank the content (newlines survive;
+                # single-line strings keep their span). String CONTENT is not
+                # code -- with one deliberate boundary: a ${...} template
+                # expression inside a string is ALSO blanked, so a genuine
+                # reference spelled there is out of the measurement. That is
+                # the conservative side: this gate's history is false
+                # POSITIVES on prose, and the module spells its references as
+                # statements, not templates. Noted here rather than hidden.
+                out.append(q + re.sub(r'[^\n]', ' ', text[i+1:i2]) + q)
+            else:
+                out.append(text[i:i2+1])
+            i = i2 + 1
         else:
             out.append(text[i]); i += 1
     return ''.join(out)
