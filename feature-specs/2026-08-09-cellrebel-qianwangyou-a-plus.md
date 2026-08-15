@@ -155,6 +155,8 @@ source_threads:
 | **v1.67** | PR-2 第二十一轮（Sol：我亲手把 plant 失败吞了） | **同族第六次，而这次是我自己写下 `\|\| true` 去吞掉那个失败——在我修完同一形状的下一轮。** ①Sol 在 `d1557b7` 抓到 P1，我复现一字不差：`M-P4-SYNTAX` 里用 `sed` 做「粗体→非粗体」转换时，把 `|` **同时**当作分隔符和 Markdown 单元格字符，实测 `sed: bad flag in substitute command: '|'`、`exit 1`，而 `2>/dev/null || true` 把它整个吞掉——**行根本没被改**，用例却照样宣称 `form-independent`。②决定性反证（Sol 给的，我复现）：把生产 parser 真正从 `\*{0,2}` 收窄为 bold-only，整套 selftest **仍然 27/27 全绿**——这条回归例守的东西是空的。③修法按他给的四条：转换改用 `apply()`（exact-count-1 字面替换、**状态被使用而非吞掉**）；转换后**断言可观察**（plain 行存在 ∧ bold 行不存在），不假设；顺带清掉我这块新代码里残留的顶层 `return` 与最后一个 `\|\| true`——可执行代码中的吞咽现已归零（文件里仅存的一处在注释里，描述的正是本缺陷）。④双向验证：重放「生产 parser → bold-only」，`M-P4-SYNTAX` 精确转红（`reported marker (v1.66 -> v1.65)`）；还原后 27 例全绿。**这次红是先被证明能红，才交的。**⑤Sol 的非阻塞文案债同轮修：P-4 的头注释仍写着「rewrite latest revision row」，与 v1.66 改成的 append 相反。⑥本族六次的形状清单：v1.61 守卫 verdict 措辞 / v1.63 `mut()` 崩溃即通过 / v1.64 `legal()` 一条 finding 不在即算绿 / v1.65 `neg()` 测「看得见」写成「拦得住」 / v1.66 `P-4` 窄域证明全域断言 / 本轮 `M-P4-SYNTAX` **plant 未发生却计为有效实验**。**第六次与第三次是同一个失败模式**（v1.59 我修 N-11/M-8 时就写过「锚点失效的负例不会变红，它会静默不跑」），区别只在于这次的静默是我主动加的一行 `\|\| true`。**「我知道这个坑」和「我不会掉进去」是两件事，而前者容易被误当成后者。** 见 §14 / §15 |
 | **v1.68** | PR-2 第十五轮（Sol F1/F2 回扫） | **回读验的是「一个耗尽的 schedule」，没验「是不是同一个 schedule」；而非终末那条边少了一条腿。** ①**F1**：v1.58 冻结的终末回读只比 item／version／exhausted 三腿，而 §6.7.1 **从未冻结** `scheduleItemId`／`scheduleVersion` 跨不同 schedule 全局唯一。反例：A 的终末 receipt 是 `(item-last, V=7)`，回读时设备已切到 schedule B 且 B 恰为同 item／同 V／`exhausted=true` → **三腿全过**，Auto 把 A 错误 CLOSED。补**第四条身份腿** `readback.currentScheduleId == receipt 所属 schedule id`，把「回读到的是同一个 schedule」从假设变成断言。②同处补**第 0 步组前置**：`discover()` 的 schedule 投影组四字段必须同时全非 null（v1.55 组不变量），partial-null **fail-closed 不得进入腿比对**——否则 `currentScheduleId = null` 的非法投影会带着其余腿命中 confirmed。**先验组、再比腿**。③**载体收窄为只认 `discover()`**：`PreflightReportV1` 既无 `currentScheduleId`、字段名又是 `scheduleItemId` 而非 `currentItemId`，**结构上证明不了身份**；v1.58 把两个载体并列写进冻结条款却没核它们的形状，给 preflight 加字段是迁就一个本不该承担该职责的载体。④**F2**：非终末 `OBSERVED_TUPLE_MATCHES` 只冻 item／hash／revision 三腿，而 §6.7.1 表 2 要求 `observation.scheduleVersion == receipt.scheduleVersionAfter`。可构造：advance 后同拓扑 reinit，version 前移而其余三者不变 → 三腿读法 CLOSED，表 2 要求恢复。**v1.58 新增的 `M-AD-24` 让 version bump 成为证据，消费侧却没消费它。** 现统一为四腿。⑤补三行隔离观测器：`M-AD-25`（version 腿）、`M-AD-26`（身份腿）、`M-AD-27`（partial-null fail-closed）。§10／§10.1 114→**117**，`owner-red` 88→**91**（GLM 52 / Fable5 39）。⑥**本轮重算由加宽后的守卫逐条枚举驱动**：它按 arm+行号点名 22 处陈旧点、给出合法值集，并自陈「scope is a filter, not a census」——与 v1.58 那次「守卫报 PASS 而我据此写下不成立的完成声明」正相反。见 §6.7.5 / §8.1 / §10 |
 | **v1.69** | PR-2 第十六轮（wire-0 家族守卫） | **KB-7=A 冻结了「`ContractResultKindV1` 全域 1-based、wire 0 永久非法」，而这条规则落地时零守卫。** ①该裁定闭合的是**一个枚举**，但它依赖的性质是**家族级**的：AIDL／Parcel 的 int 默认值就是 0，任何 v1 枚举一旦赋予 0 含义，未初始化或默认构造的字段就会静默解码成那个含义而不是 fail-closed。②§6.2 把规则冻在**散文**里而没有任何东西测量它——本文已记过五次散文 carve-out 漂移，且 §5c 早已证明 KDoc 类规则机器读不出（它只能强制句子**点到**方法名，判不出放在准入侧还是拒绝侧）。**没有臂的规则只是一句带引用的希望。**③新增 **§7c**：扫描模块内**全部** `enum class X(val wire: Int)`（**扫描发现而非硬编码文件名**——点名输入的守卫看不见它写完之后新增的文件，与「匹配器比文档窄」同形），逐个**枚举**枚举名／常量数／最小 wire，任一常量为 0 即判红；**扫描结果为空同样判红**——对空扫描报成功等于报告自己盲区的大小。当前 7 个枚举、36 个常量，全部 min=1。④配 **`M-12`** 承重变异（单行 knob `ARM_ZERO`；多行 knob 会把 `s/^KNOB = .*/` 契约变成语法错，本轮前车之鉴）。⑤**刻意没有隔离负例，且这是设计属性不是遗漏**：枚举面被 canonical／Kotlin／`compatibility.yaml` 三方镜像，任何单文件种植都会先踩红三方同步——两种形态均已实测（改既有常量报 `HOOK_UNVERIFIED wire differs: canonical=2 kotlin=0`；新增自洽枚举报 `enum in kotlin but NOT in canonical`），而 `neg()` 要求恰好一段判红。**这恰好说明 7c 是干什么的**：它是三方同步之后的第二道防线，其独有场景是「0 被**前后一致地**引入全部三个源」——那时同步全绿，只有 7c 反对。证明该场景需要多源种植 helper，**记为 KNOWN GAP，写明而非糊过去**。见 §6.2 / §7c |
+| **v1.70** | PR-2 第十六轮补记（Sol T1 P1-2） | **我改了一行的前半，留下它自己的反面说明还写着三条腿。** ①v1.68 自称同族载体已扫净，实际全部活跃载体仍描述旧算法：§6.7.4a 序列（preflight + 三腿）、`M-AD-20`／`M-AD-23`、两处公开 KDoc、以及 §6.7.5 终末条款里对 observe 元组的引用。②最刺眼的是 §8.1 的 `OBSERVED_TUPLE_MATCHES`：**同一行前半是我在 v1.68 改成四条腿的，行尾它自己的反面说明仍写「必须三条腿合取」**——半扫扫进了一行之内。③载体统一收窄为 `discover()`，并把理由写进行内：`PreflightReportV1` 无 `currentScheduleId`、字段名为 `scheduleItemId`，**结构上证明不了 schedule 身份**。④一处**刻意不改**：L2093「本节此前只在散文里要求三条腿」是对 v1.46 缺陷的历史陈述，全量替换会改写历史，而本表明令禁止。⑤本行系补记——`858f7af` 的 commit 标了 v1.70 却没进本表，**读者会看到 v1.69 直接跳 v1.71**。声称的版本必须在文档里存在。见 §6.7.4a / §6.7.5 / §8.1 |
+| **v1.71** | PR-2 第十七轮（Sol T1 P1-1） | **回读能发现推进推错了 schedule，但拦不住它。** ①v1.68 给终末回读加了身份腿，我以为补的是「右值无来源」。Sol 指出那只是**事后探测器**：§6.7.1／`M-AD-26` 允许两个 schedule 复用同一 `(itemId, scheduleVersion)`，而请求只带 item 与 version——**步 4 CAS 在 schedule B 上通过，推进真的提交到 B**，回读发现时损害已成。**我修的是验证层，缺陷在变更层。**②冻结 `CompleteAndAdvanceRequestV1.expectedScheduleId`，进 **requestDigest preimage**（`leaseId` 之后、`expectedScheduleVersion` 之前：身份先于版本先于项）与 **§6.7.4b 步 4 首腿**；身份不符 → `REQUEST_INVALID(13)`，因为 14/15/16 描述的都是**另一个** schedule 的状态。receipt 不加字段——`receiptDigest` 已绑 `requestDigest`。③§6.7.3 自己的理由段早写好了这条推理：**「digest 漏掉哪条前置，§6.7.4 就少哪一条防护」**。④**golden 照 canonical 独立推导**：先用现行七字段重现既有向量 `87e5fddb…` 逐字节吻合以证明推导器可信，再算新值 `7e90dbd9…`，并验证「去掉新字段可重现旧向量」以排除插错位使其余字段偏移。**这正是 v1.51 判定缺失的第二实现**——那轮的 Node 照 Kotlin 写、两读同源；本轮照 canonical 写。⑤补具名负例 `wrong-schedule`，与 `wrong-item`／`stale-version` 同族；`M-AD-26` 改为双段断言，**只满足事后回读不算通过**。⑥§7 由 13 DTO/102 字段增至 **14 DTO/103 字段**。见 §6.3 / §6.7.3 / §6.7.4b / §10 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1934,6 +1936,7 @@ receiptDigest = lowercase hex of SHA-256(canonical)
 canonical = 逐字段 uint32be(byteLength(bytes)) || bytes，无分隔符、无尾字节
 domain = "fakexxx:contract:v1:advance-request"（**首个 framed 字段**，§6.3.1）
   leaseId                  UTF-8 verbatim
+  expectedScheduleId       UTF-8 verbatim
   expectedScheduleVersion  ASCII decimal
   expectedCurrentItemId    UTF-8 verbatim
   completionProof.scheduleItemId        UTF-8 verbatim
@@ -1969,6 +1972,8 @@ data class CompleteAndAdvanceRequestV1(
     val leaseId: String,
     val idempotencyKey: String,
     val requestDigest: String,
+    /** 本次推进所针对的 schedule 身份（§6.7.4b 步 4 CAS 首腿，进 requestDigest preimage）。 */
+    val expectedScheduleId: String,
     val expectedScheduleVersion: Long,
     val expectedCurrentItemId: String,
     val completionProof: CompletionProofV1,
@@ -2035,8 +2040,12 @@ data class AdvanceReceiptV1(
                 同 key + 异「重算所得」digest → IDEMPOTENCY_CONFLICT(12)
 3. proof        缺 CompletionProofV1 / proof **内部**不自洽（含 `proof.scheduleItemId` ≠ `expectedCurrentItemId`）
                 → REQUEST_INVALID(13)。**本步只判请求自身是否自洽，不与设备实际 `currentItemId` 比对**
-4. schedule     **与实际 `currentItemId` 的 CAS 在本步、且只在本步判定**：
-                16 SCHEDULE_EXHAUSTED → 14 SCHEDULE_ITEM_MISMATCH → 15 SCHEDULE_VERSION_STALE
+4. schedule     **与实际 schedule 的 CAS 在本步、且只在本步判定**。**先比身份，再比状态**：
+                `request.expectedScheduleId` ≠ 设备当前 schedule 的 id → REQUEST_INVALID(13)
+                （v1.71：身份不符时 14/15/16 全部无意义——它们描述的是**另一个** schedule 的状态；
+                 且 §6.7.1／M-AD-26 允许两个 schedule 复用同一 (itemId, version)，
+                 故不比身份就会在 B 上通过 CAS 并**真的提交推进**，事后回读只能观察损害、拦不住它）
+                身份相符后：16 SCHEDULE_EXHAUSTED → 14 SCHEDULE_ITEM_MISMATCH → 15 SCHEDULE_VERSION_STALE
 5. lease        设备上存在任一非 RELEASED / 未收敛 lease（**不限本 caller**）→ LEASE_CONFLICT(7)
 6. mutation     指针前移 + receipt 落库（同一事务，§6.7.5）
 
@@ -2511,7 +2520,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | `M-AD-23` | advance | **终末推进后**只拿到一份可验证的 EXHAUSTED receipt，但 provider 实际未落 `exhausted`（或指针回绕／`scheduleVersion` 错写） | Auto **不得**据 receipt 落终态：必须 fresh **`discover()`** 独立回读——**先验**投影组四字段全非 null（partial-null → fail-closed），**再比四条腿合取** `currentScheduleId == 本次推进所针对的 schedule id` **∧** `currentItemId == advancedFromItemId` **∧** `scheduleVersion == scheduleVersionAfter` **∧** `exhausted == true`；任一不成立 → `EXHAUSTED_STATE_MISMATCH` → `RECOVERY_REQUIRED`，typed reason 指明是哪条腿。**digest 重算通过不构成状态证据**——receipt 是被验证对象，不能同时是唯一证据源 | 17 |
 | `M-AD-24` | advance | **同拓扑**外部 schedule (re)initialization（成员/顺序/优先级均未变）清 `exhausted true→false` | 必须**同时**递增 `scheduleVersion`（§6.7.1 v1.57）：reset 后 `(currentItemId, scheduleVersion)` 不得与 reset 前相等。否则消费者持有的旧 `(expectedCurrentItemId, expectedScheduleVersion)` 与 proof 可跨世代复用，把上一世代的完成算进新世代 | 15,17 |
 | `M-AD-25` | advance | **非终末**推进后发生同拓扑 reinit：`scheduleVersion` 前移，而 `scheduleItemId`／`acceptedIntentHash`／`environmentRevision` 三者均不变 | `OBSERVED_TUPLE_MISMATCH` → `RECOVERY_REQUIRED`；typed reason 必须指明是 **`scheduleVersion`** 这条腿。三腿读法会在此 CLOSED，与 §6.7.1 表 2 要求相反——本行是第四条腿的隔离观测器 | 15,17 |
-| `M-AD-26` | advance | **终末**回读时设备已切到**另一个** schedule，且该 schedule 恰为同 `itemId` / 同 `scheduleVersion` / `exhausted = true` | 必须因 **`currentScheduleId` 身份腿**失配进 `RECOVERY_REQUIRED`，**不得** CLOSED。§6.7.1 未冻结 `(itemId, version)` 跨 schedule 全局唯一，故去掉身份腿后其余腿全过——本行是身份腿的隔离观测器 | 17 |
+| `M-AD-26` | advance | 请求针对 schedule **A**，而设备当前是 schedule **B**，且 B 恰为同 `itemId` / 同 `scheduleVersion` | **两段都必须成立**：① **提交前**——步 4 首腿身份比对失配 → `REQUEST_INVALID(13)`，**指针不动、`advanceCount == 0`**（v1.71：这才是防护本体；§6.7.1／本行允许跨 schedule 复用 `(itemId, version)`，不比身份则 CAS 在 B 上通过并**真的提交推进**）；② **提交后**——终末回读的身份腿失配 → `RECOVERY_REQUIRED`。**只满足 ② 不算通过**：事后回读只能观察损害、拦不住它 | 17 |
 | `M-AD-27` | advance | 终末回读拿到 **partial-null** 投影（如 `currentScheduleId = null` 而 `currentItemId`／`scheduleVersion`／`exhausted` 非 null） | 违反 v1.55 组不变量 → **fail-closed 进 `RECOVERY_REQUIRED`**，不得进入四腿比对。只做腿比对而不先验组，非法投影会带着其余腿命中 confirmed | 17 |
 | `M-RC-02` | recovery | schedule 在 CellRebel 运行中跨边界 | revision 变化；未验证、release、暂停/等下窗 | 8,17 |
 | `M-RC-03` | recovery | mock-location owner 被外部 App 抢走再改回 | revision 必须变化；不能因 post 状态相同而可信 | 8 |

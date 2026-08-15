@@ -27,6 +27,7 @@ data class CompleteAndAdvanceRequestV1(
     val leaseId: String,
     val idempotencyKey: String,
     val requestDigest: String,
+    val expectedScheduleId: String,
     val expectedScheduleVersion: Long,
     val expectedCurrentItemId: String,
     val completionProof: CompletionProofV1,

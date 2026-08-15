@@ -153,6 +153,7 @@ object CanonicalAdvanceDigestV1 {
 
     private fun fields(r: CompleteAndAdvanceRequestV1): List<ByteArray> = listOf(
         CanonicalDigestV1.utf8(r.leaseId),
+        CanonicalDigestV1.utf8(r.expectedScheduleId),
         CanonicalDigestV1.decimal(r.expectedScheduleVersion),
         CanonicalDigestV1.utf8(r.expectedCurrentItemId),
         CanonicalDigestV1.utf8(r.completionProof.scheduleItemId),

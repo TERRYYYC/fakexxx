@@ -58,6 +58,7 @@ class CanonicalDigestGoldenVectorsV1Test {
         leaseId = "lease-1",
         idempotencyKey = "idem-1",
         requestDigest = "",
+        expectedScheduleId = "schedule-1",
         expectedScheduleVersion = 4L,
         expectedCurrentItemId = "item-7",
         completionProof = CompletionProofV1(
@@ -151,7 +152,7 @@ class CanonicalDigestGoldenVectorsV1Test {
     @Test
     fun `advance-request digest matches its golden vector`() {
         assertEquals(
-            "87e5fddb058fb36948b8281c6ff5e8de94faffcb1f0fdedb8eaf65fb8ffa6b75",
+            "7e90dbd9a0fc51c8565799451250b74cecf94b7f79b1f0fe0ecb8a5226df170d",
             CanonicalAdvanceDigestV1.compute(request),
         )
     }

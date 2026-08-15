@@ -34,6 +34,7 @@ class CanonicalAdvanceDigestV1Test {
 
     private fun request(
         itemId: String = "item-7",
+        scheduleId: String = "schedule-1",
         version: Long = 3L,
         lease: String = "lease-1",
         key: String = "idem-1",
@@ -43,6 +44,7 @@ class CanonicalAdvanceDigestV1Test {
         leaseId = lease,
         idempotencyKey = key,
         requestDigest = "",
+        expectedScheduleId = scheduleId,
         expectedScheduleVersion = version,
         expectedCurrentItemId = itemId,
         completionProof = proof,
@@ -63,6 +65,24 @@ class CanonicalAdvanceDigestV1Test {
         assertNotEquals(
             CanonicalAdvanceDigestV1.compute(request(itemId = "item-7")),
             CanonicalAdvanceDigestV1.compute(request(itemId = "item-8")),
+        )
+    }
+
+    /**
+     * WRONG SCHEDULE. 6.7.1 and M-AD-26 explicitly allow two different schedules
+     * to reuse the same (itemId, scheduleVersion). Before v1.71 the advance
+     * request carried no schedule identity at all, so a request meant for
+     * schedule A and one meant for schedule B were byte-identical whenever their
+     * item and version agreed -- one digest for two different advances. The step-4
+     * CAS would then pass against whichever schedule happened to be current and
+     * COMMIT the advance on it; a readback afterwards can only observe the damage,
+     * not prevent it.
+     */
+    @Test
+    fun `wrong-schedule - differing expectedScheduleId must change the digest`() {
+        assertNotEquals(
+            CanonicalAdvanceDigestV1.compute(request(scheduleId = "schedule-1")),
+            CanonicalAdvanceDigestV1.compute(request(scheduleId = "schedule-2")),
         )
     }
 

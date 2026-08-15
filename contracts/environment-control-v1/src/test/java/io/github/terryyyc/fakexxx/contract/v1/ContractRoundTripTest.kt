@@ -335,6 +335,7 @@ class ContractRoundTripTest {
         leaseId = "lease-1",
         idempotencyKey = "idem-1",
         requestDigest = "d".repeat(64),
+        expectedScheduleId = "schedule-1",
         expectedScheduleVersion = 3L,
         expectedCurrentItemId = "item-7",
         completionProof = proof(),
