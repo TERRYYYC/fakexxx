@@ -285,9 +285,19 @@ def strip_comments(text, is_aidl):
     return ''.join(out)
 
 files = []
-for root, _, names in os.walk(MODULE):
+# EXTS is the file-collection surface, on its own single line because it is
+# exactly what the adversarial plant measured: every M-* case only proves arms
+# load-bearing OVER FILES ALREADY COLLECTED -- nothing pinned the collection
+# surface itself, and a .java source (AGP library modules compile
+# src/main/java by default; KB-7's precedent type is a Java-context one)
+# sailed past "every referenced android.*" with the guard green. build/ and
+# dot-dirs are pruned: generated output is derived from measured sources,
+# measuring it would double-count and let codegen hide behind generation.
+EXTS = ('.kt', '.aidl', '.java')
+for root, dirs, names in os.walk(MODULE):
+    dirs[:] = [d for d in dirs if d != 'build' and not d.startswith('.')]
     for nm in sorted(names):
-        if nm.endswith(('.kt', '.aidl')):
+        if nm.endswith(EXTS):
             files.append(os.path.join(root, nm))
 files.sort()
 
