@@ -4,12 +4,14 @@ import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
+import name.caiyao.fakegps.integration.v1.ContractOperation
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_UID
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -160,6 +162,35 @@ class AdvanceMatrixTest {
                 request(h, leaseId, "ad21-stale", expectedItemId = "item-2"),
             )
         }
+    }
+
+    /**
+     * M-AD-26 provider half (v1.72): a request whose expectedScheduleId names a
+     * DIFFERENT schedule fails the identity leg FIRST — exact wire 17
+     * SCHEDULE_IDENTITY_MISMATCH, before 16/14/15. The identity leg is the
+     * premise of the other schedule gates: item/version answers about another
+     * schedule would mislead the caller's recovery.
+     *
+     * Pointer untouched, no advance, no receipt minted.
+     */
+    @Test
+    fun M_AD_26_wrongScheduleId_identityMismatch_wire17_pointerUntouched() {
+        val h = harness()
+        val leaseId = h.apply(key = "ad26-apply").leaseId
+        h.release(leaseId, key = "ad26-rel")
+
+        expectContractFailure(ContractErrorCodeV1.SCHEDULE_IDENTITY_MISMATCH) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, "ad26-k1", expectedScheduleId = "wrong-schedule"),
+            )
+        }
+        assertEquals("no advance on identity mismatch", 0, h.env.advanceCount)
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertNull(
+            "no receipt minted for a wrong-schedule request",
+            h.idempotency.find(AUTO_PKG, ContractOperation.ADVANCE, "ad26-k1"),
+        )
     }
 
     /**

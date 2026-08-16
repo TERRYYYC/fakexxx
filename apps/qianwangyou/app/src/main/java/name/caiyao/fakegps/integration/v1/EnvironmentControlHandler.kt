@@ -380,9 +380,11 @@ class EnvironmentControlHandler(
     }
 
     fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
-        // §6.7.4b frozen judgment order (v1.42):
-        //   safety(+recompute digest) → idempotency → proof → schedule(14/15/16)
-        //   → lease(7) → mutation
+        // §6.7.4b frozen judgment order (v1.42, amended v1.54 + v1.72):
+        //   safety(+recompute digest) → idempotency → proof →
+        //   schedule(17→16→14→15) → lease(7) → mutation
+        // (17 = schedule identity, judged first per v1.72; then exhausted(16)
+        // before item(14)/version(15) per the v1.54 intra-step reorder.)
         // Steps 2–6 run inside ONE serialized transaction, exactly like apply():
         // the step-5 lease gate is DEVICE-GLOBAL and must serialize against a
         // concurrent apply, so no new lease can slip in between the gate and the

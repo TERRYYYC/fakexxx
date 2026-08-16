@@ -89,22 +89,29 @@ class EnvironmentControlService : Service() {
      * the handler is an EXPECTED business failure and travels inside the
      * [EnvironmentControlResultV1] carrier as ERROR + the frozen wire code.
      *
-     * History: this seam previously propagated ContractException raw, because
-     * the spec named ServiceSpecificException as the channel and that class is
-     * @hide to app compilation — there was no app-public exception-shaped path
-     * for a wire code at all. The v1.59 carrier resolves that: the error code
-     * now crosses Binder as data, not as an exception. Anything that is NOT a
-     * ContractException (store I/O failure, adapter crash) still propagates as
-     * a transport failure — it is not a business answer and must not be
-     * laundered into one.
+     * The mapping itself lives in [toTypedResult] (top-level, JVM-testable —
+     * this service is Binder glue and cannot be instantiated in a unit lane).
      */
-    private inline fun typedResult(block: () -> EnvironmentControlResultV1): EnvironmentControlResultV1 =
-        try {
-            block()
-        } catch (e: ContractException) {
-            EnvironmentControlResultV1.failure(
-                errorCodeWire = e.code.wire,
-                diagnosticMessage = e.message,
-            )
-        }
+    private inline fun typedResult(crossinline block: () -> EnvironmentControlResultV1): EnvironmentControlResultV1 =
+        toTypedResult { block() }
 }
+
+/**
+ * The KB-7=A exception→carrier mapping, as a pure function so the unit lane
+ * can pin it (the service class is Android-bound; the mapping is the part
+ * that can drift silently).
+ *
+ * ContractException (expected business failure) → ERROR + the frozen wire
+ * code, crossing Binder as DATA. Anything else (store I/O failure, adapter
+ * crash) propagates as a transport failure — it is not a business answer and
+ * must not be laundered into one.
+ */
+fun toTypedResult(block: () -> EnvironmentControlResultV1): EnvironmentControlResultV1 =
+    try {
+        block()
+    } catch (e: ContractException) {
+        EnvironmentControlResultV1.failure(
+            errorCodeWire = e.code.wire,
+            diagnosticMessage = e.message,
+        )
+    }
