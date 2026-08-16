@@ -51,6 +51,21 @@ class AutomationService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AutomationSvc"
+
+        // R43 (Sol GREEN-review-2 F1): lifecycle observability for the provider bind — the oracle
+        // asserts the connect callback ATTEMPTED the bind (count > 0) and recorded its result.
+        @Volatile
+        var providerBindAttempts: Int = 0
+            private set
+        @Volatile
+        var lastProviderBindReturnedTrue: Boolean? = null
+            private set
+
+        fun resetProviderBindObservability() {
+            providerBindAttempts = 0
+            lastProviderBindReturnedTrue = null
+        }
+
         // # MIUI SecurityCenter 包名（后台启动拦截弹窗的来源）
         private const val MIUI_SECURITY_PKG = "com.miui.securitycenter"
 
@@ -124,12 +139,25 @@ class AutomationService : AccessibilityService() {
 
     // ---- Lifecycle ----
 
+    // R43 (Sol GREEN-review-2 F1): the SERVICE-LIFECYCLE binder executor. Binding happens at
+    // service connect and unbinds at destroy — the provider connection outlives individual runs,
+    // and an unbound provider still fail-closes every call (PROVIDER_NOT_BOUND, no lease).
+    @Volatile
+    private var binderExecutor: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         _isServiceConnected.value = true
         Log.d(TAG, "Service connected")
         addLog("Accessibility service connected")
+        // F1: bind the frozen-contract provider service for the accessibility-service lifetime.
+        val executor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(applicationContext)
+        val bound = executor.bind()
+        binderExecutor = executor
+        providerBindAttempts++
+        lastProviderBindReturnedTrue = bound
+        addLog(if (bound) "A+ provider service bind requested" else "A+ provider unavailable — apply will fail closed")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -241,6 +269,8 @@ class AutomationService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         automationJob?.cancel()
+        binderExecutor?.unbind()
+        binderExecutor = null
         serviceScope.cancel()
         instance = null
         _isServiceConnected.value = false
@@ -282,9 +312,13 @@ class AutomationService : AccessibilityService() {
 
             // # R8-F1/F2（Sol round-7 P1-1 / round-11 P1-1）：A+ 组合根。生产经 engineAplusParams 从
             // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
-            // R43 GREEN: the REAL production backend over the frozen contract (binder executor +
-            // Room receipt store); unbound provider fail-closes inside the adapters, not by stubs.
-            val aplusBackend: APlusBackend = APlusComposition.productionBackend(applicationContext, db)
+            // R43 GREEN (F1): the REAL production backend over the frozen contract — reusing the
+            // SERVICE-LIFECYCLE binder executor (bound at onServiceConnected) + the Room receipt
+            // store; an unbound provider fail-closes inside the adapters, not by stubs.
+            val aplusBackend: APlusBackend = APlusComposition.productionBackend(
+                applicationContext, db,
+                serviceLifecycleExecutor = binderExecutor
+            )
             val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
             // R43 (Sol R42 P1-2): the ENTIRE production engine construction delegates to the pure
             // factory — the monotonic commit-clock default lives there (production wiring, observable

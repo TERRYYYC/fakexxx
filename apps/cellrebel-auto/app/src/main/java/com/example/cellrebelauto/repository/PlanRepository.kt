@@ -339,6 +339,47 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getExecutionByExecutionId(executionId: String): com.example.cellrebelauto.model.execution.CellRebelExecution? =
         db.attemptExecutionDao().byExecutionId(executionId)
 
+    /**
+     * R43 (Sol GREEN-review-2 F3): persist the §7.1 execution evidence AT the COMPLETION_OBSERVED
+     * phase boundary — conflict-ignoring (a re-observe or the later trusted-transaction persist
+     * over the same executionId is a no-op, never a UNIQUE rollback).
+     */
+    suspend fun persistExecutionEvidence(
+        executionId: String,
+        attemptId: Long,
+        completionEvidenceWire: Int,
+        evidencePayloadDigest: String,
+        startedAtElapsed: Long,
+        runningConfirmedAtElapsed: Long,
+        completedAtElapsed: Long,
+        baselineRunningState: String?,
+        runningMarkerText: String?,
+        runningDurationMs: Long?,
+        webBrowsingScore: Double?,
+        videoStreamingScore: Double?,
+        roundTimestampsElapsed: String?
+    ) {
+        db.attemptExecutionDao().insertIfAbsent(
+            com.example.cellrebelauto.model.execution.CellRebelExecution(
+                executionId = executionId,
+                attemptId = attemptId,
+                completionEvidenceWire = completionEvidenceWire,
+                evidencePayloadDigest = evidencePayloadDigest,
+                startedAt = startedAtElapsed,
+                classifiedAt = completedAtElapsed,
+                startedAtElapsed = startedAtElapsed,
+                runningConfirmedAtElapsed = runningConfirmedAtElapsed,
+                completedAtElapsed = completedAtElapsed,
+                baselineRunningState = baselineRunningState,
+                runningMarkerText = runningMarkerText,
+                runningDurationMs = runningDurationMs,
+                webBrowsingScore = webBrowsingScore,
+                videoStreamingScore = videoStreamingScore,
+                roundTimestampsElapsed = roundTimestampsElapsed
+            )
+        )
+    }
+
     // # 恢复真相载体（Sol round-16 P1-1 / round-18 P1-1）：可信账本 / 未验证记录是 append-only 权威，
     // # 返回 typed entry 以绑定 attempt+task 并检测跨表矛盾，绝不信裸 phase 字符串
     suspend fun getTrustedEntry(attemptId: Long): TrustedQuotaEntry? =

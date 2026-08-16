@@ -81,9 +81,16 @@ object APlusComposition {
      */
     fun productionBackend(
         context: android.content.Context,
-        db: com.example.cellrebelauto.db.AppDatabase
+        db: com.example.cellrebelauto.db.AppDatabase,
+        // R43 F1: the SERVICE-LIFECYCLE executor (bound at AutomationService.onServiceConnected)
+        // — reused across runs so the provider connection is real, not per-run constructed-and-
+        // never-bound. When null (early construction), a fresh executor is created UNBOUND and
+        // fail-closes every call (PROVIDER_NOT_BOUND) — still safe, and the Service re-composes
+        // with the bound one on the next run.
+        serviceLifecycleExecutor: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor? = null
     ): APlusBackend {
-        val binderExecutor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(context)
+        val binderExecutor = serviceLifecycleExecutor
+            ?: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(context)
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
             db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
         )
@@ -190,7 +197,12 @@ object APlusComposition {
             requestDigest: String,
             outcome: String,
             now: Long,
-            leaseId: String?
+            leaseId: String?,
+            operationId: String?,
+            acceptedIntentHash: String?,
+            appliedAtEpochMs: Long?,
+            environmentRevision: Long?,
+            verificationLevelWire: Int?
         ): RecordedReceipt? = null
 
         override fun checkpointFor(attemptId: Long): RecoveryCheckpoint? = null

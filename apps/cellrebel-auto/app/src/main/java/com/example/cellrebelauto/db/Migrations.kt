@@ -226,7 +226,12 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
                 `requestDigest` TEXT NOT NULL,
                 `resultOutcome` TEXT NOT NULL,
                 `createdAt` INTEGER NOT NULL,
-                `leaseId` TEXT
+                `leaseId` TEXT,
+                `operationId` TEXT,
+                `acceptedIntentHash` TEXT,
+                `appliedAtEpochMs` INTEGER,
+                `environmentRevision` INTEGER,
+                `verificationLevelWire` INTEGER
             )
             """.trimIndent()
         )

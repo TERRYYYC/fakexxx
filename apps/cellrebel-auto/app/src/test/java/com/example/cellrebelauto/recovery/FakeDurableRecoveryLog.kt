@@ -38,7 +38,12 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         requestDigest: String,
         outcome: String,
         now: Long,
-        leaseId: String?
+        leaseId: String?,
+        operationId: String?,
+        acceptedIntentHash: String?,
+        appliedAtEpochMs: Long?,
+        environmentRevision: Long?,
+        verificationLevelWire: Int?
     ): RecordedReceipt? {
         val existing = receipts[idempotencyKey]
         if (existing != null) {

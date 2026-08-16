@@ -183,7 +183,14 @@ class RecoveryCoordinator(
             // R43 (Sol GREEN-review P1-5): the provider lease persists ATOMICALLY with the receipt —
             // a crash between this line and the attempt-owner markAplusLease still recovers the lease
             // from the receipt replay (ApplyReceiptV1.leaseId is part of the durable proof).
-            val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now, outcome.leaseId)
+            val receipt = log.recordReceipt(
+                idempotencyKey, requestDigest, outcome.outcome, now, outcome.leaseId,
+                operationId = outcome.operationId,
+                acceptedIntentHash = outcome.acceptedIntentHash,
+                appliedAtEpochMs = outcome.appliedAtEpochMs,
+                environmentRevision = outcome.environmentRevision,
+                verificationLevelWire = outcome.verificationLevelWire
+            )
             if (receipt == null) {
                 // Receipt not durable (storage failed) → fail-closed: the apply is NOT proven, no lease.
                 return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)

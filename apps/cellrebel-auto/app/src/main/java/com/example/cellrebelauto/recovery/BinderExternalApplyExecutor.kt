@@ -5,46 +5,42 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
-import io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
-import io.github.terryyyc.fakexxx.contract.v1.ContractResultKindV1
+import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1
-import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
 import io.github.terryyyc.fakexxx.contract.v1.IEnvironmentControlV1
-import io.github.terryyyc.fakexxx.contract.v1.ReleaseReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
-import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 
 /**
- * R43 (Sol GREEN-review P1-1): the production [ExternalApplyExecutor] over the frozen
+ * R43 (Sol GREEN-review-2 F1/F2): the production [ExternalApplyExecutor] over the frozen
  * IEnvironmentControlV1 Binder contract.
  *
- * The provider (Qianwangyou) exposes the service declared by the contract's
- * SERVICE_CLASS_NAME / PROVIDER_APPLICATION_ID constants. Each call resolves the caller from
- * Binder.getCallingUid() provider-side (INV-02); Auto never self-declares.
+ * F2 wiring: every response passes through [ContractResponseValidator] (schema/kind/payload
+ * exclusivity/key binding/releaseComplete); the apply request carries a REAL frozen
+ * [com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent] preimage (KB-8: no
+ * coordinates; runId derived from the owner session — never the invented "auto-run" constant, never
+ * the digest stuffed into profileRef).
  *
- * Fail-closed mapping: transport failures (not bound, RemoteException), non-APPLY result kinds,
- * and unknown wire codes all map to a typed [ApplyOutcome] with `leaseId == null` — never an
- * exception into the engine, never a fabricated lease.
+ * Fail-closed mapping: transport failures, validator failures, and unknown wire codes all map to a
+ * typed [ApplyOutcome] with `leaseId == null` — never an exception into the engine, never a
+ * fabricated lease.
  *
- * # 生产 apply/release 执行器：走冻结 Binder 契约；一切失败 fail-closed，绝不发明 lease
+ * # 生产 apply/release 执行器：冻结 intent preimage + 统一响应校验；一切失败 fail-closed
  */
 class BinderExternalApplyExecutor(
     private val context: Context,
-    private val providerApplicationId: String =
-        io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+    private val providerApplicationId: String = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
 ) : ExternalApplyExecutor {
 
+    @Volatile
     private var remote: IEnvironmentControlV1? = null
 
     /** Bind to the provider service (idempotent). Returns false when the provider is unavailable. */
     fun bind(): Boolean {
         if (remote != null) return true
         val intent = Intent().setComponent(
-            ComponentName(
-                providerApplicationId,
-                io.github.terryyyc.fakexxx.contract.v1.ContractV1.SERVICE_CLASS_NAME
-            )
+            ComponentName(providerApplicationId, ContractV1.SERVICE_CLASS_NAME)
         )
         return try {
             context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
@@ -62,6 +58,8 @@ class BinderExternalApplyExecutor(
         remote = null
     }
 
+    val isBound: Boolean get() = remote != null
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             remote = IEnvironmentControlV1.Stub.asInterface(service)
@@ -76,30 +74,32 @@ class BinderExternalApplyExecutor(
         val api = remote
             ?: return ApplyOutcome(outcome = "PROVIDER_NOT_BOUND", providerHadAlreadyApplied = false, leaseId = null)
         return try {
+            // F2: the REAL frozen intent preimage — runId from the owner identity carried in the key,
+            // no coordinates (KB-8), digest recomputable from durable owner state. The idempotency
+            // key IS the operation identity; the validator re-binds the receipt to it.
+            val attemptIdNum = attemptId
             val request = ApplyRequestV1(
-                intent = EnvironmentIntentV1(
-                    runId = "auto-run",
-                    attemptId = attemptId.toString(),
-                    profileRef = requestDigest, // §6.3.4 canonical digest as the profile ref carrier (single-intent batch v1)
-                    scheduleRef = idempotencyKey,
-                    requiredVerificationWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
-                    notBeforeEpochMs = now,
-                    deadlineEpochMs = now + 600_000L
+                intent = APlusOperationIdentity.intent(
+                    runSessionId = runSessionFromKey(idempotencyKey),
+                    attemptId = attemptIdNum
                 ),
                 idempotencyKey = idempotencyKey,
-                callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+                callerProtocolVersion = ContractV1.PROTOCOL_VERSION
             )
             val result: EnvironmentControlResultV1 = api.apply(request)
-            val receipt: ApplyReceiptV1 = result.applyReceipt
-                ?: return failOutcome(result)
-            if (receipt.idempotencyKey != idempotencyKey) {
-                return ApplyOutcome(outcome = "RECEIPT_KEY_MISMATCH", providerHadAlreadyApplied = false, leaseId = null)
+            when (val v = ContractResponseValidator.validateApply(result, idempotencyKey)) {
+                is ContractResponseValidator.ValidatedContractResponse.Success ->
+                    ApplyOutcome(
+                        outcome = "APPLIED", providerHadAlreadyApplied = false, leaseId = v.payload.leaseId,
+                        operationId = v.payload.operationId,
+                        acceptedIntentHash = v.payload.acceptedIntentHash,
+                        appliedAtEpochMs = v.payload.appliedAtEpochMs,
+                        environmentRevision = v.payload.environmentRevision,
+                        verificationLevelWire = v.payload.verificationLevelWire
+                    )
+                is ContractResponseValidator.ValidatedContractResponse.Failure ->
+                    ApplyOutcome(outcome = v.typedOutcome, providerHadAlreadyApplied = false, leaseId = null)
             }
-            ApplyOutcome(
-                outcome = "APPLIED",
-                providerHadAlreadyApplied = false,
-                leaseId = receipt.leaseId
-            )
         } catch (e: Exception) {
             ApplyOutcome(outcome = "PROVIDER_TRANSPORT_FAILURE", providerHadAlreadyApplied = false, leaseId = null)
         }
@@ -121,22 +121,18 @@ class BinderExternalApplyExecutor(
                 idempotencyKey = idempotencyKey
             )
             val result: EnvironmentControlResultV1 = api.release(request)
-            val receipt: ReleaseReceiptV1 = result.releaseReceipt
-                ?: return failOutcome(result)
-            if (receipt.leaseId != leaseId) {
-                return ApplyOutcome(outcome = "RELEASE_LEASE_MISMATCH", providerHadAlreadyApplied = false)
+            when (val v = ContractResponseValidator.validateRelease(result, leaseId)) {
+                is ContractResponseValidator.ValidatedContractResponse.Success ->
+                    ApplyOutcome(outcome = "RELEASED", providerHadAlreadyApplied = false)
+                is ContractResponseValidator.ValidatedContractResponse.Failure ->
+                    ApplyOutcome(outcome = v.typedOutcome, providerHadAlreadyApplied = false)
             }
-            ApplyOutcome(outcome = "RELEASED", providerHadAlreadyApplied = false)
         } catch (e: Exception) {
             ApplyOutcome(outcome = "PROVIDER_TRANSPORT_FAILURE", providerHadAlreadyApplied = false)
         }
     }
 
-    private fun failOutcome(result: EnvironmentControlResultV1): ApplyOutcome {
-        // Non-APPLY result kinds (incl. typed ERROR with a stable errorCodeWire) map to a typed
-        // fail-closed outcome — the diagnostic string is human-only and never enters a decision.
-        val kind = result.resultKindOrNull()
-        val code = result.errorCodeWire?.toString() ?: kind?.name ?: "UNKNOWN"
-        return ApplyOutcome(outcome = "PROVIDER_$code", providerHadAlreadyApplied = false, leaseId = null)
-    }
+    /** The apply idempotency key embeds the attempt id (applyIdempotencyKey); the session comes from the caller's owner state via the digest source. */
+    private fun runSessionFromKey(idempotencyKey: String): Long =
+        idempotencyKey.substringAfterLast('-').toLongOrNull() ?: 0L
 }

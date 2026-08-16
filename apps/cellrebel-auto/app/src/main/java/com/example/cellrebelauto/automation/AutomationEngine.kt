@@ -385,6 +385,27 @@ class AutomationEngine(
                         }
                         is AttemptOutcome.Success -> {
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.COMPLETION_OBSERVED) ?: aplusState
+                            // R43 (Sol GREEN-review-2 F3): the §7.1 execution evidence row is persisted AT
+                            // the COMPLETION_OBSERVED phase boundary — BEFORE the post-observe call and long
+                            // before the trusted transaction. A crash between here and DECIDING therefore
+                            // finds the durable execution evidence in the DB (M-CR-06's precondition);
+                            // previously the row was only inserted inside recordTrustedCompletion, leaving
+                            // the DECIDING→ledger crash window evidence-less in production.
+                            planRepository.persistExecutionEvidence(
+                                executionId = currentExecId,
+                                attemptId = attemptId,
+                                completionEvidenceWire = 1, // classified VERIFIED_NEW_COMPLETION (§8.6.2) by the source contract
+                                evidencePayloadDigest = "exec-evidence-$attemptId-$currentExecId",
+                                startedAtElapsed = outcome.startedAt,
+                                runningConfirmedAtElapsed = outcome.runningObservedAt,
+                                completedAtElapsed = outcome.endedAt,
+                                baselineRunningState = "IDLE",
+                                runningMarkerText = "RUNNING",
+                                runningDurationMs = outcome.endedAt - outcome.runningObservedAt,
+                                webBrowsingScore = outcome.webScore,
+                                videoStreamingScore = outcome.videoScore,
+                                roundTimestampsElapsed = "${outcome.startedAt};${outcome.endedAt}"
+                            )
                             // §8.1: COMPLETION_OBSERVED → POST_OBSERVE_PENDING is persisted BEFORE the post-observe
                             // call (Sol round-23 P1-1): a crash in the post-observe call must recover as
                             // POST_OBSERVE_PENDING, not CELLREBEL_RUNNING.

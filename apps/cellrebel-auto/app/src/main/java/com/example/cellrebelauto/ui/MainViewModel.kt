@@ -78,6 +78,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val planRepository = PlanRepository(AppDatabase.getInstance(application))
     private val planConfigStore = PlanConfigStore(application)
 
+    // R43 (spec Task 6 / Sol GREEN-review-2 F5): the ProviderTrustStore PRODUCTION callers —
+    // the operator approval/revocation surface (§6.5.3). No silent TOFU: approval is explicit.
+    private val trustStore = com.example.cellrebelauto.environment.ProviderTrustStore(
+        AppDatabase.getInstance(application).providerPairingDao()
+    )
+    private val _providerEntries = MutableStateFlow<List<ProviderEntry>>(emptyList())
+    val providerEntries: StateFlow<List<ProviderEntry>> = _providerEntries
+
+    fun refreshProviders() {
+        viewModelScope.launch {
+            val rows = AppDatabase.getInstance(getApplication()).providerPairingDao().all()
+            _providerEntries.value = rows.map {
+                ProviderEntry(
+                    applicationId = it.applicationId,
+                    signerDigest = it.currentSignerDigest,
+                    approvedVersionCode = it.approvedVersionCode,
+                    isApproved = it.revokedAt == null
+                )
+            }
+        }
+    }
+
+    fun approveProvider(entry: ProviderEntry) {
+        viewModelScope.launch {
+            trustStore.approve(
+                entry.applicationId, entry.signerDigest,
+                entry.approvedVersionCode ?: 0, System.currentTimeMillis()
+            )
+            refreshProviders()
+        }
+    }
+
+    fun revokeProvider(entry: ProviderEntry) {
+        viewModelScope.launch {
+            trustStore.revoke(entry.applicationId, System.currentTimeMillis())
+            refreshProviders()
+        }
+    }
+
     // ---- Navigation ----
 
     // # F001：Plan 页为首页（设计稿 v2.1 §1.1）
@@ -378,5 +417,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 enum class Screen {
     PLAN,     // # 位置计划页（F001 首页）
     RUN,      // # 运行仪表盘（由旧 CONTROL 演进）
-    HISTORY   // # 历史记录页面
+    HISTORY,  // # 历史记录页面
+    PROVIDERS // # R43（spec Task 6）：Provider 批准/撤销管理页
 }

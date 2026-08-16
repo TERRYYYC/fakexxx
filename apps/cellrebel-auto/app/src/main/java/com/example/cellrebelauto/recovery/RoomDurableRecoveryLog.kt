@@ -24,7 +24,18 @@ data class OperationReceiptRow(
     val resultOutcome: String,
     val createdAt: Long,
     /** The provider lease issued by the applied operation (ApplyReceiptV1.leaseId); nullable for legacy rows. */
-    val leaseId: String? = null
+    val leaseId: String? = null,
+    // ---- R43 (Sol GREEN-review-2 F3): the VERBATIM ApplyReceiptV1 proof fields (§7.1 OperationReceipt) ----
+    /** ApplyReceiptV1.operationId — the provider-side operation identity. */
+    val operationId: String? = null,
+    /** ApplyReceiptV1.acceptedIntentHash — the INV-23 attribution proof. */
+    val acceptedIntentHash: String? = null,
+    /** ApplyReceiptV1.appliedAtEpochMs. */
+    val appliedAtEpochMs: Long? = null,
+    /** ApplyReceiptV1.environmentRevision. */
+    val environmentRevision: Long? = null,
+    /** ApplyReceiptV1.verificationLevelWire. */
+    val verificationLevelWire: Int? = null
 )
 
 @Entity(tableName = "recovery_checkpoints")
@@ -99,7 +110,12 @@ class RoomDurableRecoveryLog(
         requestDigest: String,
         outcome: String,
         now: Long,
-        leaseId: String?
+        leaseId: String?,
+        operationId: String?,
+        acceptedIntentHash: String?,
+        appliedAtEpochMs: Long?,
+        environmentRevision: Long?,
+        verificationLevelWire: Int?
     ): RecordedReceipt? = kotlinx.coroutines.runBlocking {
         val existing = receipts.byKey(idempotencyKey)
         if (existing != null) {
@@ -107,9 +123,13 @@ class RoomDurableRecoveryLog(
                 RecordedReceipt(existing.idempotencyKey, existing.requestDigest, existing.resultOutcome, existing.createdAt, existing.leaseId)
             } else null // INV-13 conflict, prior preserved
         }
-        receipts.insertIfAbsent(OperationReceiptRow(idempotencyKey, requestDigest, outcome, now, leaseId))
+        receipts.insertIfAbsent(OperationReceiptRow(idempotencyKey, requestDigest, outcome, now, leaseId, operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision, verificationLevelWire))
+        // R43 (Sol GREEN-review-2 F4): after a CONCURRENT INSERT IGNORE race-loss the read-back row
+        // is the WINNER's — re-validate the digest. Two different digests racing on one key must
+        // surface INV-13 conflict for the loser, never the winner's receipt misread as a replay.
         val row = receipts.byKey(idempotencyKey)
             ?: return@runBlocking null // storage failed ⇒ not durable ⇒ fail closed
+        if (row.requestDigest != requestDigest) return@runBlocking null // INV-13 conflict, winner preserved
         RecordedReceipt(row.idempotencyKey, row.requestDigest, row.resultOutcome, row.createdAt, row.leaseId)
     }
 
@@ -154,8 +174,11 @@ class RoomDurableRecoveryLog(
             } else null // conflict, prior preserved
         }
         releases.insertIfAbsent(ReleaseReceiptRow(idempotencyKey, leaseId, releaseDigest, outcome, now))
-        releases.byKey(idempotencyKey)?.let {
-            RecordedReleaseReceipt(it.idempotencyKey, it.leaseId, it.releaseDigest, it.resultOutcome, it.createdAt)
-        }
+        // R43 (Sol GREEN-review-2 F4): race-loss re-validation — the read-back row may be the
+        // winner's; a differing (lease, digest) tuple is a conflict, never a successful replay.
+        val row = releases.byKey(idempotencyKey)
+            ?: return@runBlocking null
+        if (row.leaseId != leaseId || row.releaseDigest != releaseDigest) return@runBlocking null
+        RecordedReleaseReceipt(row.idempotencyKey, row.leaseId, row.releaseDigest, row.resultOutcome, row.createdAt)
     }
 }

@@ -73,5 +73,12 @@ interface ExternalApplyExecutor {
 data class ApplyOutcome(
     val outcome: String,
     val providerHadAlreadyApplied: Boolean,
-    val leaseId: String? = null
+    val leaseId: String? = null,
+    // ---- R43 (Sol GREEN-review-2 F3): verbatim ApplyReceiptV1 proof fields carried back from the
+    //      provider so the coordinator persists them atomically with the receipt (§7.1). ----
+    val operationId: String? = null,
+    val acceptedIntentHash: String? = null,
+    val appliedAtEpochMs: Long? = null,
+    val environmentRevision: Long? = null,
+    val verificationLevelWire: Int? = null
 )

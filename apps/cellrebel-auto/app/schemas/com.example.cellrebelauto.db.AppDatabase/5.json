@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "84f932aa4cdb28c5f392dfc2cd36a2c4",
+    "identityHash": "144ab6b770eb4d6c18ff129d4b880357",
     "entities": [
       {
         "tableName": "test_results",
@@ -1043,7 +1043,7 @@
       },
       {
         "tableName": "operation_receipts",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`idempotencyKey` TEXT NOT NULL, `requestDigest` TEXT NOT NULL, `resultOutcome` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `leaseId` TEXT, PRIMARY KEY(`idempotencyKey`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`idempotencyKey` TEXT NOT NULL, `requestDigest` TEXT NOT NULL, `resultOutcome` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `leaseId` TEXT, `operationId` TEXT, `acceptedIntentHash` TEXT, `appliedAtEpochMs` INTEGER, `environmentRevision` INTEGER, `verificationLevelWire` INTEGER, PRIMARY KEY(`idempotencyKey`))",
         "fields": [
           {
             "fieldPath": "idempotencyKey",
@@ -1073,6 +1073,31 @@
             "fieldPath": "leaseId",
             "columnName": "leaseId",
             "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "acceptedIntentHash",
+            "columnName": "acceptedIntentHash",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "appliedAtEpochMs",
+            "columnName": "appliedAtEpochMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "environmentRevision",
+            "columnName": "environmentRevision",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "verificationLevelWire",
+            "columnName": "verificationLevelWire",
+            "affinity": "INTEGER"
           }
         ],
         "primaryKey": {
@@ -1162,7 +1187,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '84f932aa4cdb28c5f392dfc2cd36a2c4')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '144ab6b770eb4d6c18ff129d4b880357')"
     ]
   }
 }

@@ -105,6 +105,18 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 onBack = { vm.navigateTo(Screen.PLAN) }
             )
         }
+
+        Screen.PROVIDERS -> {
+            // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
+            val entries by vm.providerEntries.collectAsState()
+            ProviderApprovalScreen(
+                pending = entries.filter { !it.isApproved },
+                approved = entries.filter { it.isApproved },
+                onApprove = { vm.approveProvider(it) },
+                onRevoke = { vm.revokeProvider(it) },
+                modifier = Modifier
+            )
+        }
     }
     }
 }

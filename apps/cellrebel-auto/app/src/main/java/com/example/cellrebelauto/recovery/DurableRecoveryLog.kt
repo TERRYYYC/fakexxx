@@ -52,7 +52,14 @@ interface DurableRecoveryLog {
         requestDigest: String,
         outcome: String,
         now: Long,
-        leaseId: String? = null
+        leaseId: String? = null,
+        // R43 (Sol GREEN-review-2 F3): the VERBATIM ApplyReceiptV1 proof fields — persisted
+        // atomically with the receipt so crash recovery re-derives the full §7.1 OperationReceipt.
+        operationId: String? = null,
+        acceptedIntentHash: String? = null,
+        appliedAtEpochMs: Long? = null,
+        environmentRevision: Long? = null,
+        verificationLevelWire: Int? = null
     ): RecordedReceipt?
 
     /** Durable recovery checkpoint for an attempt (§7.1 RecoveryCheckpoint), or null. */
@@ -100,7 +107,13 @@ data class RecordedReceipt(
      * legacy/test-seeded receipts predate the field; the GREEN Room binding always persists it from
      * the apply receipt, so a replay can hand the lease back without re-invoking the provider.
      */
-    val leaseId: String? = null
+    val leaseId: String? = null,
+    /** Verbatim ApplyReceiptV1 proof fields (Sol GREEN-review-2 F3). */
+    val operationId: String? = null,
+    val acceptedIntentHash: String? = null,
+    val appliedAtEpochMs: Long? = null,
+    val environmentRevision: Long? = null,
+    val verificationLevelWire: Int? = null
 )
 
 /** A recovery checkpoint (§7.1 RecoveryCheckpoint projection). */
