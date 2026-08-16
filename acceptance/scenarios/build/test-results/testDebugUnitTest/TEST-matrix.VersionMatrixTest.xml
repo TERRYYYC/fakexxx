@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="matrix.VersionMatrixTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-15T22:19:43.812Z" hostname="TERRYdeMacBook-Pro.local" time="0.0">
-  <properties/>
-  <testcase name="M_VS_02_providerReturnsUnknownWires_noCrash" classname="matrix.VersionMatrixTest" time="0.0"/>
-  <testcase name="M_VS_02_unknownWireInObservation_trustRejects" classname="matrix.VersionMatrixTest" time="0.0"/>
-  <testcase name="M_VS_02_unknownWireCodesReturnNull" classname="matrix.VersionMatrixTest" time="0.0"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>
