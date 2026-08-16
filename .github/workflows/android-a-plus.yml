@@ -1,6 +1,6 @@
 name: android-a-plus
 
-# Three independent lanes.
+# Four independent lanes (three app lanes + acceptance).
 #
 # `cellrebel-auto` and `qianwangyou` have NO dependency edge between them, by
 # design (INV-19): the two apps build, test and release independently, and a
@@ -235,4 +235,45 @@ jobs:
             apps/qianwangyou/app/build/reports/**
             apps/qianwangyou/app/build/test-results/**
             apps/qianwangyou/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+  acceptance:
+    # Independent acceptance harness (#6). Exercises the v1 contract through a
+    # fake-qwy provider that shares ZERO code with the production provider.
+    # No dependency on cellrebel-auto or qianwangyou jobs — by design (§10.1).
+    name: acceptance (matrix tests + static guard)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: acceptance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: gradle wrapper is executable
+        run: chmod +x ./gradlew
+
+      - name: matrix tests (sol-blackbox 22 rows)
+        run: ./gradlew --no-daemon :scenarios:testDebugUnitTest
+
+      - name: static guard (M-BP-01, M-BP-02)
+        working-directory: .
+        run: bash acceptance/scripts/check-forbidden-boundaries.sh
+
+      - name: guard self-test (violating samples)
+        working-directory: .
+        run: bash acceptance/scripts/selftest/run-guard-selftest.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-evidence
+          path: |
+            acceptance/scenarios/build/reports/**
+            acceptance/scenarios/build/test-results/**
+            acceptance/build/matrix-evidence-guard.json
           if-no-files-found: warn
