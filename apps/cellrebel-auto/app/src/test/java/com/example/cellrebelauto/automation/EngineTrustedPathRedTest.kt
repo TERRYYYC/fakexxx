@@ -216,7 +216,8 @@ class EngineTrustedPathRedTest {
         gps: GpsLocationSetter,
         clock: VirtualClock,
         driver: APlusAttemptDriver? = null,
-        backend: APlusBackend? = null
+        backend: APlusBackend? = null,
+        elapsedClockMs: (() -> Long)? = null
     ): AutomationEngine {
         // Service-used composition oracle (Sol round-11 P1-1): the SAME engineAplusParams the Service
         // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
@@ -232,6 +233,7 @@ class EngineTrustedPathRedTest {
             gpsSettleMs = 0L,
             nowMs = clock.nowMs,
             delayMs = clock.delayMs,
+            elapsedClockMs = elapsedClockMs ?: clock.nowMs,
             attemptDriver = driver,
             recoveryCoordinator = params?.first,
             completionEvidenceSource = params?.second
@@ -380,6 +382,41 @@ class EngineTrustedPathRedTest {
         assertEquals("a first trusted success must carry successOrdinal = 1", 1, db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.successOrdinal)
         // legacy-zero
         assertEquals(0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
+    }
+
+    // ---- R44 (Sol GREEN-review-3 F3): the persisted execution evidence binds the ELAPSED domain ----
+
+    @Test
+    fun `R44-F3 elapsed domain - the persisted execution evidence carries the monotonic elapsed seam values, never the wall AttemptOutcome stamps`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val backend = FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
+        val clock = VirtualClock()
+        // The elapsed seam: a distinct value per capture point (attempt start / RUNNING-confirmed /
+        // completion), deliberately NOTHING like the wall stamps the outcome carries — a revert to
+        // AttemptOutcome.startedAt/endedAt (the pre-fix wall-domain bug) fails every assertion below.
+        val elapsedCaptures = ArrayDeque(listOf(2000L, 2100L, 13000L))
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome {
+                onRunningObserved(clock.nowMs())
+                return AttemptOutcome.Success(webScore = 8.0, videoScore = 7.0, runningObservedAt = clock.nowMs(), startedAt = startedAt, endedAt = clock.nowMs())
+            }
+        }
+        buildEngine(
+            planId, runner, FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            backend = backend, elapsedClockMs = { elapsedCaptures.removeFirst() }
+        ).run()
+
+        val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val row = db.attemptExecutionDao().forAttempt(realAttemptId).single()
+        assertEquals("startedAtElapsed binds the elapsed seam, not AttemptOutcome.startedAt (wall)", 2000L, row.startedAtElapsed)
+        assertEquals("runningConfirmedAtElapsed binds the elapsed seam, not runningObservedAt (wall)", 2100L, row.runningConfirmedAtElapsed)
+        assertEquals("completedAtElapsed binds the elapsed seam, not AttemptOutcome.endedAt (wall)", 13000L, row.completedAtElapsed)
+        assertEquals(13000L - 2100L, row.runningDurationMs)
+        assertEquals("2000;13000", row.roundTimestampsElapsed)
+        assertNotNull("the journey still mints (only the persisted row's clock domain moved)", db.trustedQuotaDao().getByAttempt(realAttemptId))
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----

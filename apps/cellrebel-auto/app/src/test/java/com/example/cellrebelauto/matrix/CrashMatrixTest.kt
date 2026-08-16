@@ -398,8 +398,93 @@ class CrashMatrixTest {
         // POSITIVE: re-classification persists the completion receipt durably; the attempt continues.
         assertNotEquals("M-CR-04 positive: the crash is never interrupted", "interrupted", recovered.status)
         assertNotNull(
-            "M-CR-04 positive: the re-classified completion receipt must be persisted durably",
+            "M_CR-04 positive: the re-classified completion receipt must be persisted durably",
             db.durableCompletionReceiptDao().forAttempt(77L)
+        )
+    }
+
+    @Test
+    fun `M_CR_04_positive_execution_evidence - the recovery re-classification persists the owner-bound execution evidence row (production write chain, never hand-seeded)`() = runTest {
+        // R44 (Sol GREEN-review-3 F3): a CELLREBEL_RUNNING crash must persist the §7.1 execution
+        // evidence bound to the OWNER execution pointer — otherwise the later DECIDING re-decide
+        // finds no owner row and the durable bundle can never complete.
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId, 42L, attemptId = 77L, aplusState = "CELLREBEL_RUNNING",
+            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-owner-77"
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        val evidence = SeededEvidenceSource(
+            evidence = APlusCompletionEvidence(
+                execution = fullEvidenceExecution("exec-src-77", 77L, WIRE_VERIFIED, "src-digest"),
+                completionEvidenceWire = WIRE_VERIFIED,
+                applyReceiptIntentHash = "d",
+                applyReceiptLease = LEASE_ID
+            )
+        )
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence)).run()
+
+        assertNotNull(
+            "the re-classified completion receipt must be durable",
+            db.durableCompletionReceiptDao().forAttempt(77L)
+        )
+        // THE oracle: the execution evidence row is persisted BY THE RECOVERY PATH, bound to the
+        // owner pointer (never the evidence source's own executionId). Killing mutations: dropping
+        // the persist (row == null), or binding the source's executionId (owner lookup misses).
+        val row = db.attemptExecutionDao().byExecutionId("exec-owner-77")
+        assertNotNull("recovery must persist the §7.1 execution evidence bound to the owner pointer", row)
+        row!!
+        assertEquals(77L, row.attemptId)
+        assertEquals(EXEC_STARTED_AT_ELAPSED, row.startedAtElapsed)
+        assertEquals(EXEC_RUNNING_CONFIRMED_AT_ELAPSED, row.runningConfirmedAtElapsed)
+        assertEquals(EXEC_COMPLETED_AT_ELAPSED, row.completedAtElapsed)
+        val attempt = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
+        assertEquals("POST_OBSERVE_PENDING", attempt.aplusState)
+        assertNotEquals("interrupted", attempt.status)
+    }
+
+    @Test
+    fun `M_CR_full_chain - a CELLREBEL_RUNNING crash recovers through production-written carriers to a DECIDING re-decide mint`() = runTest {
+        // R44 (Sol GREEN-review-3 F3): the strongest form — the durable bundle the DECIDING re-decide
+        // consumes was WRITTEN BY the recovery production chain (run 1), never hand-seeded. Run 2 is
+        // the process restart: POST re-observation → DECIDING → re-decide must PASS and mint.
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(
+            planId, 42L, attemptId = 77L, aplusState = "CELLREBEL_RUNNING",
+            aplusLeaseId = LEASE_ID, currentExecutionId = "exec-owner-77"
+        )
+        val intentDigest = ownerIntentDigest(sessionId)
+        seedDurableObservation(77L, "PRE", validPre(intentDigest))
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+
+        // Run 1 (successor process): re-classify → persist receipt + execution evidence → advance.
+        val evidence1 = SeededEvidenceSource(
+            evidence = APlusCompletionEvidence(
+                execution = fullEvidenceExecution("exec-src-77", 77L, WIRE_VERIFIED, "src-digest"),
+                completionEvidenceWire = WIRE_VERIFIED,
+                applyReceiptIntentHash = intentDigest,
+                applyReceiptLease = LEASE_ID
+            )
+        )
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence1)).run()
+        assertEquals(
+            "POST_OBSERVE_PENDING",
+            db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }.aplusState
+        )
+
+        // Run 2 (restart): POST_OBSERVE_PENDING re-observes POST, advances to DECIDING, re-decides
+        // from the durable bundle — which now includes the run-1-written execution evidence row.
+        val evidence2 = SeededEvidenceSource(post = validPost(intentDigest))
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence2)).run()
+
+        assertNotNull(
+            "the full recovery chain must mint (re-decide PASS over production-written carriers)",
+            db.trustedQuotaDao().getByAttempt(77L)
         )
     }
 

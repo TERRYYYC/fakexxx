@@ -101,7 +101,13 @@ class RoomDurableRecoveryLog(
     override fun receiptFor(idempotencyKey: String): RecordedReceipt? =
         kotlinx.coroutines.runBlocking {
             receipts.byKey(idempotencyKey)?.let {
-                RecordedReceipt(it.idempotencyKey, it.requestDigest, it.resultOutcome, it.createdAt, it.leaseId)
+                // R44 (Sol GREEN-review-3 F3): the readback carries the VERBATIM ApplyReceiptV1 proof
+                // fields — a receipt that loses them on read is not the §7.1 OperationReceipt.
+                RecordedReceipt(
+                    it.idempotencyKey, it.requestDigest, it.resultOutcome, it.createdAt, it.leaseId,
+                    it.operationId, it.acceptedIntentHash, it.appliedAtEpochMs, it.environmentRevision,
+                    it.verificationLevelWire
+                )
             }
         }
 
@@ -120,7 +126,12 @@ class RoomDurableRecoveryLog(
         val existing = receipts.byKey(idempotencyKey)
         if (existing != null) {
             return@runBlocking if (existing.requestDigest == requestDigest) {
-                RecordedReceipt(existing.idempotencyKey, existing.requestDigest, existing.resultOutcome, existing.createdAt, existing.leaseId)
+                // R44 (Sol GREEN-review-3 F3): replay readback carries the stored verbatim proof fields.
+                RecordedReceipt(
+                    existing.idempotencyKey, existing.requestDigest, existing.resultOutcome, existing.createdAt,
+                    existing.leaseId, existing.operationId, existing.acceptedIntentHash, existing.appliedAtEpochMs,
+                    existing.environmentRevision, existing.verificationLevelWire
+                )
             } else null // INV-13 conflict, prior preserved
         }
         receipts.insertIfAbsent(OperationReceiptRow(idempotencyKey, requestDigest, outcome, now, leaseId, operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision, verificationLevelWire))
@@ -130,7 +141,12 @@ class RoomDurableRecoveryLog(
         val row = receipts.byKey(idempotencyKey)
             ?: return@runBlocking null // storage failed ⇒ not durable ⇒ fail closed
         if (row.requestDigest != requestDigest) return@runBlocking null // INV-13 conflict, winner preserved
-        RecordedReceipt(row.idempotencyKey, row.requestDigest, row.resultOutcome, row.createdAt, row.leaseId)
+        // R44 (Sol GREEN-review-3 F3): the post-insert readback carries the verbatim proof fields.
+        return@runBlocking RecordedReceipt(
+            row.idempotencyKey, row.requestDigest, row.resultOutcome, row.createdAt, row.leaseId,
+            row.operationId, row.acceptedIntentHash, row.appliedAtEpochMs, row.environmentRevision,
+            row.verificationLevelWire
+        )
     }
 
     override fun checkpointFor(attemptId: Long): RecoveryCheckpoint? =

@@ -31,6 +31,14 @@ object AutomationEngineFactory {
     val productionCommitClockMs: () -> Long = { android.os.SystemClock.elapsedRealtime() }
 
     /**
+     * THE production elapsed-domain clock for the §7.1 execution evidence *Elapsed columns — the
+     * SAME physical monotonic source as [productionCommitClockMs] (Sol GREEN-review-3 F3: only this
+     * domain is comparable to the provider's elapsedRealtime-stamped observations; wall-clock values
+     * there make every §6.4.2 bracketing comparison unsatisfiable in production).
+     */
+    val productionElapsedClockMs: () -> Long = productionCommitClockMs
+
+    /**
      * Build the production engine exactly as [AutomationService] does. Callers supply only the
      * Android-bound deps (db, handlers, config, bridge); the clock defaults live HERE, in
      * production code, observable by tests.
@@ -50,7 +58,10 @@ object AutomationEngineFactory {
         bridge: com.example.cellrebelauto.automation.AccessibilityBridge?,
         nowMs: () -> Long = { System.currentTimeMillis() },
         delayMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
-        commitClockMs: () -> Long = productionCommitClockMs
+        commitClockMs: () -> Long = productionCommitClockMs,
+        // R44 (Sol GREEN-review-3 F3): the execution-evidence elapsed clock — same production default
+        // wiring, observable by tests through the same factory path.
+        elapsedClockMs: () -> Long = productionElapsedClockMs
     ): AutomationEngine = AutomationEngine(
         planId = planId,
         planRepository = planRepository,
@@ -66,6 +77,7 @@ object AutomationEngineFactory {
         completionEvidenceSource = aplusEvidence,
         nowMs = nowMs,
         delayMs = delayMs,
-        commitClockMs = commitClockMs
+        commitClockMs = commitClockMs,
+        elapsedClockMs = elapsedClockMs
     )
 }

@@ -104,6 +104,12 @@ class AutomationEngine(
     // nowMs stays wall/epoch (session/attempt/cooldown UI depend on it); this seam binds the ledger
     // commit timestamp to a monotonic domain (elapsedRealtime-style) per the TrustedQuotaEntry contract.
     private val commitClockMs: () -> Long = { nowMs() },
+    // R44 (Sol GREEN-review-3 F3): dedicated monotonic ELAPSED clock sourcing the §7.1 execution
+    // evidence *Elapsed columns. Provider observations are stamped in the elapsedRealtime domain, so
+    // persisting wall-clock values there (AttemptOutcome.startedAt/endedAt are epoch) makes every
+    // §6.4.2 bracketing/RUN-floor comparison wall-vs-uptime — never satisfiable in production. The
+    // spec forbids reusing AttemptOutcome.startedAt for these columns.
+    private val elapsedClockMs: () -> Long = { nowMs() },
     private val delayMs: suspend (Long) -> Unit = { delay(it) },
     // # R6-F4（§11.7）：§8.1 状态机的生产驱动入口。GREEN 在 attempt 生命周期各 §8.1 步驱动它，
     // # 使状态机迁移都落到持久审计流。RED seam：默认 null（既有行为不变）；测试传真实 driver。
@@ -284,6 +290,9 @@ class AutomationEngine(
 
                 // # 创建尝试行（starting），ordinal = 任务内计数 + 1
                 val startedAt = nowMs()
+                // R44 (Sol GREEN-review-3 F3): the §7.1 execution evidence binds the MONOTONIC elapsed
+                // domain — captured from the elapsed seam at the same lifecycle moment as the wall stamp.
+                val attemptStartedAtElapsed = elapsedClockMs()
                 val attemptOrdinal = planRepository.countAttemptsForTask(task.id) + 1
                 val attemptId = planRepository.insertAttempt(
                     TestAttempt(
@@ -363,7 +372,10 @@ class AutomationEngine(
                     val currentExecId = "exec-${attemptId}-${nowMs()}"
                     planRepository.markCurrentExecutionId(attemptId, currentExecId)
                     updateState(AutomationState.LAUNCHING_CELLREBEL)
+                    var runningConfirmedAtElapsed = 0L
                     val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
+                        // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
+                        runningConfirmedAtElapsed = elapsedClockMs()
                         planRepository.markAttemptRunning(attemptId, runningAt)
                         aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
                         planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
@@ -391,20 +403,25 @@ class AutomationEngine(
                             // finds the durable execution evidence in the DB (M-CR-06's precondition);
                             // previously the row was only inserted inside recordTrustedCompletion, leaving
                             // the DECIDING→ledger crash window evidence-less in production.
+                            val completedAtElapsed = elapsedClockMs()
                             planRepository.persistExecutionEvidence(
                                 executionId = currentExecId,
                                 attemptId = attemptId,
                                 completionEvidenceWire = 1, // classified VERIFIED_NEW_COMPLETION (§8.6.2) by the source contract
                                 evidencePayloadDigest = "exec-evidence-$attemptId-$currentExecId",
-                                startedAtElapsed = outcome.startedAt,
-                                runningConfirmedAtElapsed = outcome.runningObservedAt,
-                                completedAtElapsed = outcome.endedAt,
+                                // R44 (Sol GREEN-review-3 F3): elapsed-domain stamps from the monotonic
+                                // seam — NEVER AttemptOutcome.startedAt/endedAt (wall/epoch; the spec
+                                // forbids reusing them, and only the elapsed domain is comparable to
+                                // the provider observations in §6.4.2 bracketing).
+                                startedAtElapsed = attemptStartedAtElapsed,
+                                runningConfirmedAtElapsed = runningConfirmedAtElapsed,
+                                completedAtElapsed = completedAtElapsed,
                                 baselineRunningState = "IDLE",
                                 runningMarkerText = "RUNNING",
-                                runningDurationMs = outcome.endedAt - outcome.runningObservedAt,
+                                runningDurationMs = completedAtElapsed - runningConfirmedAtElapsed,
                                 webBrowsingScore = outcome.webScore,
                                 videoStreamingScore = outcome.videoScore,
-                                roundTimestampsElapsed = "${outcome.startedAt};${outcome.endedAt}"
+                                roundTimestampsElapsed = "$attemptStartedAtElapsed;$completedAtElapsed"
                             )
                             // §8.1: COMPLETION_OBSERVED → POST_OBSERVE_PENDING is persisted BEFORE the post-observe
                             // call (Sol round-23 P1-1): a crash in the post-observe call must recover as
@@ -847,6 +864,30 @@ class AutomationEngine(
                                 crashed.id, evidence.completionEvidenceWire,
                                 evidence.applyReceiptIntentHash, evidence.applyReceiptLease
                             )
+                            // R44 (Sol GREEN-review-3 F3): persist the §7.1 EXECUTION EVIDENCE at the
+                            // same boundary, bound to the persisted OWNER execution pointer. The later
+                            // DECIDING re-decide reads exactly this owner row — a recovery that only
+                            // lands the receipt leaves the durable bundle incomplete and can never
+                            // re-run the trust decision (production write chain, never hand-seeded).
+                            val ownerExecId = planRepository.getCurrentExecutionId(crashed.id)
+                            if (ownerExecId != null) {
+                                val execEvidence = evidence.execution
+                                planRepository.persistExecutionEvidence(
+                                    executionId = ownerExecId,
+                                    attemptId = crashed.id,
+                                    completionEvidenceWire = evidence.completionEvidenceWire,
+                                    evidencePayloadDigest = execEvidence.evidencePayloadDigest,
+                                    startedAtElapsed = execEvidence.startedAtElapsed,
+                                    runningConfirmedAtElapsed = execEvidence.runningConfirmedAtElapsed,
+                                    completedAtElapsed = execEvidence.completedAtElapsed,
+                                    baselineRunningState = execEvidence.baselineRunningState,
+                                    runningMarkerText = execEvidence.runningMarkerText,
+                                    runningDurationMs = execEvidence.runningDurationMs,
+                                    webBrowsingScore = execEvidence.webBrowsingScore,
+                                    videoStreamingScore = execEvidence.videoStreamingScore,
+                                    roundTimestampsElapsed = execEvidence.roundTimestampsElapsed
+                                )
+                            }
                             attemptDriver?.driveTransition(crashed.id, AttemptState.CELLREBEL_RUNNING, AttemptEvent.COMPLETION_OBSERVED)
                             planRepository.markAplusState(crashed.id, "POST_OBSERVE_PENDING")
                             log("A+ recovery: ${crashed.aplusState} attempt ${crashed.id} re-classified + advanced to POST_OBSERVE_PENDING")

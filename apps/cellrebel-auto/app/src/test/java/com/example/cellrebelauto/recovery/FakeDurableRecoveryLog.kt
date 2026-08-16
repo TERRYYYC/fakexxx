@@ -26,9 +26,18 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         requestDigest: String,
         outcome: String,
         createdAt: Long,
-        leaseId: String? = null
+        leaseId: String? = null,
+        // R44 (Sol GREEN-review-3 F3): seeds may carry the verbatim proof fields, matching production writes.
+        operationId: String? = null,
+        acceptedIntentHash: String? = null,
+        appliedAtEpochMs: Long? = null,
+        environmentRevision: Long? = null,
+        verificationLevelWire: Int? = null
     ) {
-        receipts[idempotencyKey] = RecordedReceipt(idempotencyKey, requestDigest, outcome, createdAt, leaseId)
+        receipts[idempotencyKey] = RecordedReceipt(
+            idempotencyKey, requestDigest, outcome, createdAt, leaseId,
+            operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision, verificationLevelWire
+        )
     }
 
     override fun receiptFor(idempotencyKey: String): RecordedReceipt? = receipts[idempotencyKey]
@@ -53,7 +62,11 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
             return null
         }
         // R43 (Sol GREEN-review P1-5): the provider lease persists ATOMICALLY with the receipt.
-        val receipt = RecordedReceipt(idempotencyKey, requestDigest, outcome, now, leaseId)
+        // R44 (Sol GREEN-review-3 F3): the verbatim ApplyReceiptV1 proof fields persist + read back too.
+        val receipt = RecordedReceipt(
+            idempotencyKey, requestDigest, outcome, now, leaseId,
+            operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision, verificationLevelWire
+        )
         receipts[idempotencyKey] = receipt
         return receipt
     }

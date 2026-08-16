@@ -90,8 +90,17 @@ class RecoveryCoordinator(
             // A fail-closed executor yields no lease — the apply is not proven; fail closed.
             return ReconcileResult.InsufficientEvidence
         }
-        val receipt = log.recordReceipt(idempotencyKey, requestDigest, outcome.outcome, now, outcome.leaseId)
-            ?: return ReconcileResult.InsufficientEvidence // receipt not durable ⇒ apply unproven
+        // R44 (Sol GREEN-review-3 F3): the reconcile-path receipt also carries the verbatim
+        // ApplyReceiptV1 proof fields — the M-CR-02 window-(b) idempotent re-apply returns them
+        // from the provider, and the durable §7.1 OperationReceipt must not drop them on write.
+        val receipt = log.recordReceipt(
+            idempotencyKey, requestDigest, outcome.outcome, now, outcome.leaseId,
+            operationId = outcome.operationId,
+            acceptedIntentHash = outcome.acceptedIntentHash,
+            appliedAtEpochMs = outcome.appliedAtEpochMs,
+            environmentRevision = outcome.environmentRevision,
+            verificationLevelWire = outcome.verificationLevelWire
+        ) ?: return ReconcileResult.InsufficientEvidence // receipt not durable ⇒ apply unproven
         log.recordCheckpoint(attemptId, "ADVANCED_TO_RELEASE", receipt.idempotencyKey, now)
         return ReconcileResult.AdvancedToRelease(receipt, outcome.leaseId!!)
     }

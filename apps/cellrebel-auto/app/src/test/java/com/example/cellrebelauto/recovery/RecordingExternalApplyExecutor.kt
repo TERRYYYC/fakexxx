@@ -19,7 +19,14 @@ package com.example.cellrebelauto.recovery
  */
 class RecordingExternalApplyExecutor(
     /** The outcome the fake provider returns for a successful apply (default "RELEASED"). */
-    private val outcome: String = "RELEASED"
+    private val outcome: String = "RELEASED",
+    // R44 (Sol GREEN-review-3 F3): optional verbatim ApplyReceiptV1 proof fields the provider returns
+    // with a successful apply — the durable receipt must persist + read back ALL of them.
+    private val operationId: String? = null,
+    private val acceptedIntentHash: String? = null,
+    private val appliedAtEpochMs: Long? = null,
+    private val environmentRevision: Long? = null,
+    private val verificationLevelWire: Int? = null
 ) : ExternalApplyExecutor {
 
     private val appliedKeys = mutableSetOf<String>()
@@ -40,7 +47,12 @@ class RecordingExternalApplyExecutor(
             appliedDigests[idempotencyKey] = requestDigest
             effectCounts[attemptId] = (effectCounts[attemptId] ?: 0) + 1
         }
-        return ApplyOutcome(outcome = outcome, providerHadAlreadyApplied = alreadyApplied, leaseId = "lease-$attemptId")
+        return ApplyOutcome(
+            outcome = outcome, providerHadAlreadyApplied = alreadyApplied, leaseId = "lease-$attemptId",
+            operationId = operationId, acceptedIntentHash = acceptedIntentHash,
+            appliedAtEpochMs = appliedAtEpochMs, environmentRevision = environmentRevision,
+            verificationLevelWire = verificationLevelWire
+        )
     }
 
     // ---- release: bound to (idempotencyKey, leaseId, releaseDigest) (P1-5) ----
