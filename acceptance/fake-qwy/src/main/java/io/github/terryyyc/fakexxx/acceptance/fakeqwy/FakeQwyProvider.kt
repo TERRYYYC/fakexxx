@@ -373,7 +373,7 @@ class FakeQwyProvider(
             return fail(ContractErrorCodeV1.LEASE_CONFLICT)
         }
 
-        // Step 6: create lease
+        // Step 6: create lease (ACQUIRING → apply environment → ACTIVE)
         val leaseId = "lease-${UUID.randomUUID()}"
         // Deadline clock bridging (§8.4): convert wall clock deadline to monotonic
         val deadlineElapsedMs = if (request.intent.deadlineEpochMs <= clock.epochMs) {
@@ -385,12 +385,13 @@ class FakeQwyProvider(
 
         val verificationWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
 
+        // Create with ACQUIRING (production handler does ACQUIRING → apply → ACTIVE)
         val lease = LeaseRecord(
             leaseId = leaseId,
             callerApplicationId = caller.applicationId,
             intent = request.intent,
             acceptedIntentHash = acceptedIntentHash,
-            state = LeaseState.ACTIVE,
+            state = LeaseState.ACQUIRING,
             deadlineElapsedMs = deadlineElapsedMs,
             appliedAtEpochMs = clock.epochMs,
             environmentRevisionAtApply = environmentRevision,
@@ -399,6 +400,11 @@ class FakeQwyProvider(
             idempotencyKey = request.idempotencyKey,
         )
         currentLease = lease
+
+        // Environment apply succeeds → transition to ACTIVE
+        // (In the fake, the "apply" is instantaneous; in production, this is where
+        // the mock location provider is actually set up.)
+        lease.state = LeaseState.ACTIVE
         environmentRevision++ // apply changes the environment
 
         val receipt = ApplyReceiptV1(
@@ -607,22 +613,34 @@ class FakeQwyProvider(
         val sched = schedule ?: return fail(ContractErrorCodeV1.CAPABILITY_UNAVAILABLE,
             "no schedule configured")
 
-        // Identity FIRST (§6.7.4b step 4, v1.72)
+        // Schedule gate order: 17→16→14→15 (v1.54 16-first, v1.72 identity-first)
+        //
+        // 1. Identity (17) — SCHEDULE_IDENTITY_MISMATCH: wrong schedule entirely
+        // 2. Exhausted (16) — SCHEDULE_EXHAUSTED: schedule is done, no more items
+        // 3. Item (14) — SCHEDULE_ITEM_MISMATCH: wrong current item
+        // 4. Version (15) — SCHEDULE_VERSION_STALE: right item but stale version
+        //
+        // Rationale: exhausted (16) before version (15) per v1.54 frozen ordering;
+        // an exhausted+stale request must report 16, not 15 (M-AD-11, M-AD-13).
+
+        // (17) Identity FIRST (v1.72)
         if (request.expectedScheduleId != sched.scheduleId) {
             return fail(ContractErrorCodeV1.SCHEDULE_IDENTITY_MISMATCH)
         }
 
-        // Version
-        if (request.expectedScheduleVersion != sched.version) {
-            return fail(ContractErrorCodeV1.SCHEDULE_VERSION_STALE)
-        }
-
-        // Current item
+        // (16) Exhausted
         if (sched.exhausted || sched.currentItemId == null) {
             return fail(ContractErrorCodeV1.SCHEDULE_EXHAUSTED)
         }
+
+        // (14) Current item
         if (request.expectedCurrentItemId != sched.currentItemId) {
             return fail(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH)
+        }
+
+        // (15) Version (last in gate sequence)
+        if (request.expectedScheduleVersion != sched.version) {
+            return fail(ContractErrorCodeV1.SCHEDULE_VERSION_STALE)
         }
 
         // Step 7: execute advance
@@ -745,6 +763,12 @@ class FakeQwyProvider(
 
     /**
      * Assemble an observation response.
+     *
+     * Coordinate verification (KB-8, INV-23): The provider is the sole coordinate
+     * authority. When effective coordinates are null or diverge from the schedule
+     * item's target, the provider MUST downgrade verificationLevelWire to NONE —
+     * it cannot claim INDEPENDENTLY_VERIFIED for an environment it knows is wrong.
+     * This is M-IN-01 (partial apply) and M-IN-03 (null coordinates).
      */
     private fun assembleObservation(
         lease: LeaseRecord?,
@@ -773,11 +797,19 @@ class FakeQwyProvider(
         val lat = if (coords != null) coords.first else currentItem?.latitude
         val lng = if (coords != null) coords.second else currentItem?.longitude
 
+        // ── Coordinate verification (KB-8): provider-side honesty gate ──
+        // The provider holds both the target (schedule item) and effective
+        // coordinates. If they disagree — or if effective coords are null —
+        // the provider cannot honestly claim INDEPENDENTLY_VERIFIED.
+        val coordinatesVerified = verifyCoordinates(lat, lng, currentItem)
+
         // Wire codes
         val deliveryModeWire = overrideDeliveryModeWire
             ?: if (injectUnknownWireCodes) 999 else DeliveryModeV1.SYSTEM_MOCK.wire
         val verificationLevelWire = overrideVerificationLevelWire
-            ?: if (injectUnknownWireCodes) 999 else VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+            ?: if (injectUnknownWireCodes) 999
+            else if (!coordinatesVerified) VerificationLevelV1.NONE.wire
+            else VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         val isMock = overrideIsMock ?: true
         val scheduleDecisionWire = forceScheduleDecisionWire
             ?: if (injectUnknownWireCodes) 999 else ScheduleDecisionV1.ALLOWED_NOW.wire
@@ -806,6 +838,34 @@ class FakeQwyProvider(
         return EnvironmentControlResultV1.observe(observation)
     }
 
+    /**
+     * Coordinate verification: can the provider honestly claim INDEPENDENTLY_VERIFIED?
+     *
+     * KB-8 assigns coordinate authority to the provider. The provider holds both
+     * the target (from the schedule item) and the effective coordinates. It must
+     * refuse to claim VERIFIED when:
+     * - effective coordinates are null (cannot confirm delivery)
+     * - effective coordinates diverge from the target (partial apply / stuck)
+     * - no schedule item exists (no target to verify against)
+     *
+     * Tolerance: 0.0001 degrees ≈ 11 meters. Generous enough for mock location
+     * precision, strict enough to catch (0,0) vs (31.23, 121.47).
+     */
+    private fun verifyCoordinates(
+        effectiveLat: Double?,
+        effectiveLng: Double?,
+        targetItem: ScheduleItem?,
+    ): Boolean {
+        // Null coordinates → cannot verify
+        if (effectiveLat == null || effectiveLng == null) return false
+        // No target → cannot verify
+        if (targetItem == null) return false
+        // Compare against target with tolerance
+        val latDelta = kotlin.math.abs(effectiveLat - targetItem.latitude)
+        val lngDelta = kotlin.math.abs(effectiveLng - targetItem.longitude)
+        return latDelta < COORDINATE_TOLERANCE && lngDelta < COORDINATE_TOLERANCE
+    }
+
     private fun fail(code: ContractErrorCodeV1, message: String? = null): EnvironmentControlResultV1 =
         EnvironmentControlResultV1.failure(code.wire, message)
 
@@ -816,5 +876,12 @@ class FakeQwyProvider(
          * structurally invalid response case for M-RS-01).
          */
         private const val UNSET_MARKER: Long = Long.MIN_VALUE
+
+        /**
+         * Coordinate verification tolerance (degrees).
+         * 0.0001° ≈ 11 meters at the equator — generous for mock location precision,
+         * strict enough to catch (0,0) vs (31.23, 121.47).
+         */
+        private const val COORDINATE_TOLERANCE: Double = 0.0001
     }
 }

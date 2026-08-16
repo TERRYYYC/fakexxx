@@ -3,6 +3,7 @@ package matrix
 import io.github.terryyyc.fakexxx.acceptance.fakeqwy.FakeCallerIdentity
 import io.github.terryyyc.fakexxx.acceptance.fakeqwy.FakeProviderClock
 import io.github.terryyyc.fakexxx.acceptance.fakeqwy.FakeQwyProvider
+import io.github.terryyyc.fakexxx.acceptance.scenarios.TrustTupleJudge
 import io.github.terryyyc.fakexxx.contract.v1.*
 import org.junit.Assert.*
 import org.junit.Before
@@ -58,15 +59,20 @@ class IntentMatrixTest {
      * 不计数。不得把本行读作 Auto 侧的距离校验" (INV-23).
      *
      * The provider (fake-qwy) is the sole coordinate authority (KB-8). When the
-     * environment is only partially applied, the observation's coordinates should
-     * reflect the actual state (wrong location), and the consumer must NOT count
-     * the attempt as trusted. The provider-side must detect this and refuse to
-     * report SYSTEM_MOCK_INDEPENDENTLY_VERIFIED for a partially applied environment.
+     * environment is only partially applied, the observation's coordinates reflect
+     * the actual state (wrong location). The provider MUST detect the mismatch
+     * between effective and target coordinates and downgrade verificationLevelWire
+     * — it must NOT report SYSTEM_MOCK_INDEPENDENTLY_VERIFIED for a partially
+     * applied environment.
+     *
+     * End-to-end: provider downgrades → TrustTupleJudge rejects via Leg 2
+     * (VERIFICATION_NOT_INDEPENDENT). Same pattern as M-BP-04.
      */
     @Test
     fun M_IN_01() {
-        // Apply succeeds but coordinates are wrong (simulating partial apply)
-        // The provider returns coordinates that DON'T match the schedule item's target
+        // Apply succeeds but coordinates are wrong (simulating partial apply).
+        // The provider returns coordinates that DON'T match the schedule item's
+        // target (31.2304, 121.4737) — and must detect this mismatch.
         provider.overrideCoordinates = Pair(0.0, 0.0) // wrong coordinates
 
         val applyResult = provider.apply(caller, ApplyRequestV1(
@@ -79,35 +85,58 @@ class IntentMatrixTest {
         val leaseId = applyResult.applyReceipt!!.leaseId
         val intentHash = applyResult.applyReceipt!!.acceptedIntentHash
 
-        // Observe: coordinates should be the wrong ones
-        val observation = provider.observe(caller, ObserveRequestV1(
+        // Pre-observation (coordinates wrong → provider must downgrade verification)
+        clock.advance(1_000L)
+        val preObs = provider.observe(caller, ObserveRequestV1(
             leaseId = leaseId,
-            operationId = "op-observe-in01",
+            operationId = "op-observe-pre-in01",
             expectedIntentHash = intentHash,
         ))
-        assertEquals(ContractResultKindV1.OBSERVE, observation.resultKindOrNull())
+        assertEquals(ContractResultKindV1.OBSERVE, preObs.resultKindOrNull())
+        val preObservation = preObs.environmentObservation!!
 
-        val obs = observation.environmentObservation!!
-        // Coordinates don't match the target (31.2304, 121.4737)
+        // Provider-side assertion: verification level MUST be downgraded
         assertNotEquals(
-            "observation coordinates must reflect partial apply (wrong location)",
-            31.2304,
-            obs.effectiveLatitude ?: 0.0,
-            0.001,
+            "provider must NOT report INDEPENDENTLY_VERIFIED for mismatched coordinates",
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            preObservation.verificationLevelWire,
         )
 
-        // Consumer-side: observation with wrong coordinates must not be counted.
-        // The consumer (Auto) checks the coordinates against its resolved target
-        // via the location tolerance. With coordinates at (0, 0) vs target
-        // (31.2304, 121.4737), the distance is ~thousands of km, far beyond
-        // ContractV1.TRUSTED_LOCATION_TOLERANCE_METERS (1.0m).
-        // This is a consumer-side check, not tested through TrustTupleJudge
-        // (which doesn't have a coordinate leg — KB-8 assigns that to the provider).
-        // The spec says: "Auto 侧的检出面只剩身份腿 → 未验证，不计数"
-        // So the observation is returned but the AUTO consumer must reject it.
+        // Simulate CellRebel completion
+        val cellRebelCompletedAt = clock.elapsedRealtimeMs + 5_000L
+        clock.advance(6_000L)
+
+        // Post-observation
+        val postObs = provider.observe(caller, ObserveRequestV1(
+            leaseId = leaseId,
+            operationId = "op-observe-post-in01",
+            expectedIntentHash = intentHash,
+        ))
+        val postObservation = postObs.environmentObservation!!
+
+        // Consumer-side end-to-end: TrustTupleJudge must reject (same as M-BP-04)
+        val evidence = TrustTupleJudge.AttemptEvidence(
+            deliveryModeWire = postObservation.deliveryModeWire ?: DeliveryModeV1.SYSTEM_MOCK.wire,
+            verificationLevelWire = postObservation.verificationLevelWire,
+            isMock = postObservation.isMock,
+            scheduleDecisionWire = postObservation.scheduleDecisionWire,
+            continuityCoverageWire = postObservation.continuityCoverageWire,
+            continuitySinceElapsedMs = postObservation.continuitySinceElapsedRealtimeMs,
+            preObservedAtElapsedMs = preObservation.observedAtElapsedRealtimeMs,
+            postObservedAtElapsedMs = postObservation.observedAtElapsedRealtimeMs,
+            cellRebelCompletedAtElapsedMs = cellRebelCompletedAt,
+            evidenceRefs = postObservation.evidenceRefs,
+        )
+
+        val verdict = TrustTupleJudge.judge(evidence)
         assertTrue(
-            "observation must be returned (provider doesn't crash)",
-            obs.effectiveLatitude != null && obs.effectiveLongitude != null,
+            "partially applied coordinates must be rejected by trust policy",
+            verdict is TrustTupleJudge.Verdict.NotCounted,
+        )
+        assertEquals(
+            "rejection reason must be VERIFICATION_NOT_INDEPENDENT (provider downgraded)",
+            TrustTupleJudge.Refusal.VERIFICATION_NOT_INDEPENDENT,
+            (verdict as TrustTupleJudge.Verdict.NotCounted).reason,
         )
     }
 
@@ -151,16 +180,20 @@ class IntentMatrixTest {
     /**
      * M-IN-03: observation with null effective coordinates → not counted.
      *
-     * "observation 的 effectiveLat/Lng 为 null → 不计数（不得因"其他条件都过"放行）"
+     * "observation 的 effectiveLat/Lng 为 null → 不计数（不得因'其他条件都过'放行）"
      * (INV-23).
      *
      * The provider can produce an observation with null coordinates (e.g., when the
-     * environment could not resolve the target). The consumer must NOT count this
-     * attempt regardless of how many other conditions pass.
+     * environment could not resolve the target). The provider MUST detect that it
+     * cannot confirm coordinate delivery and downgrade verificationLevelWire.
+     * The consumer must NOT count this attempt regardless of other conditions.
+     *
+     * End-to-end: provider downgrades → TrustTupleJudge rejects via Leg 2
+     * (VERIFICATION_NOT_INDEPENDENT). Same pattern as M-BP-04 / M-IN-01.
      */
     @Test
     fun M_IN_03() {
-        // Force null coordinates
+        // Force null coordinates — provider cannot confirm delivery
         provider.overrideCoordinates = Pair(null, null)
 
         val applyResult = provider.apply(caller, ApplyRequestV1(
@@ -173,28 +206,62 @@ class IntentMatrixTest {
         val leaseId = applyResult.applyReceipt!!.leaseId
         val intentHash = applyResult.applyReceipt!!.acceptedIntentHash
 
-        val observeResult = provider.observe(caller, ObserveRequestV1(
+        // Pre-observation (null coords → provider must downgrade verification)
+        clock.advance(1_000L)
+        val preObs = provider.observe(caller, ObserveRequestV1(
             leaseId = leaseId,
-            operationId = "op-observe-null-coords",
+            operationId = "op-observe-pre-in03",
             expectedIntentHash = intentHash,
         ))
-
-        assertEquals(ContractResultKindV1.OBSERVE, observeResult.resultKindOrNull())
-        val obs = observeResult.environmentObservation!!
+        assertEquals(ContractResultKindV1.OBSERVE, preObs.resultKindOrNull())
+        val preObservation = preObs.environmentObservation!!
 
         // Coordinates must be null
-        assertNull(
-            "effectiveLatitude must be null",
-            obs.effectiveLatitude,
-        )
-        assertNull(
-            "effectiveLongitude must be null",
-            obs.effectiveLongitude,
+        assertNull("effectiveLatitude must be null", preObservation.effectiveLatitude)
+        assertNull("effectiveLongitude must be null", preObservation.effectiveLongitude)
+
+        // Provider-side assertion: verification level MUST be downgraded
+        assertNotEquals(
+            "provider must NOT report INDEPENDENTLY_VERIFIED for null coordinates",
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            preObservation.verificationLevelWire,
         )
 
-        // Consumer-side: null coordinates must not be counted.
-        // The consumer checks coordinates against target, and null coords means
-        // the distance is undefined → fail-closed → not counted.
-        // The spec is explicit: "不得因'其他条件都过'放行"
+        // Simulate CellRebel completion
+        val cellRebelCompletedAt = clock.elapsedRealtimeMs + 5_000L
+        clock.advance(6_000L)
+
+        // Post-observation
+        val postObs = provider.observe(caller, ObserveRequestV1(
+            leaseId = leaseId,
+            operationId = "op-observe-post-in03",
+            expectedIntentHash = intentHash,
+        ))
+        val postObservation = postObs.environmentObservation!!
+
+        // Consumer-side end-to-end: TrustTupleJudge must reject
+        val evidence = TrustTupleJudge.AttemptEvidence(
+            deliveryModeWire = postObservation.deliveryModeWire ?: DeliveryModeV1.SYSTEM_MOCK.wire,
+            verificationLevelWire = postObservation.verificationLevelWire,
+            isMock = postObservation.isMock,
+            scheduleDecisionWire = postObservation.scheduleDecisionWire,
+            continuityCoverageWire = postObservation.continuityCoverageWire,
+            continuitySinceElapsedMs = postObservation.continuitySinceElapsedRealtimeMs,
+            preObservedAtElapsedMs = preObservation.observedAtElapsedRealtimeMs,
+            postObservedAtElapsedMs = postObservation.observedAtElapsedRealtimeMs,
+            cellRebelCompletedAtElapsedMs = cellRebelCompletedAt,
+            evidenceRefs = postObservation.evidenceRefs,
+        )
+
+        val verdict = TrustTupleJudge.judge(evidence)
+        assertTrue(
+            "null coordinates must be rejected by trust policy",
+            verdict is TrustTupleJudge.Verdict.NotCounted,
+        )
+        assertEquals(
+            "rejection reason must be VERIFICATION_NOT_INDEPENDENT (provider downgraded)",
+            TrustTupleJudge.Refusal.VERIFICATION_NOT_INDEPENDENT,
+            (verdict as TrustTupleJudge.Verdict.NotCounted).reason,
+        )
     }
 }
