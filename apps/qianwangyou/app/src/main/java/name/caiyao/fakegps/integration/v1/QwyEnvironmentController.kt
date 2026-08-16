@@ -159,10 +159,20 @@ class QwyEnvironmentController(
             )
         }
 
+        // KB-8 (v1.62): coordinates are QWY-OWNED. The intent no longer carries
+        // them — resolve from the CURRENT SCHEDULE ITEM's profile row, the
+        // single coordinate owner. Auto supplies only the reference.
+        val currentItem = scheduleStore.getCurrentItemId()
+            ?: throw IllegalStateException("no current schedule item; environment cannot be applied without qwy-owned coordinates")
+        val coords = resolveItemCoordinates(currentItem)
+            ?: throw IllegalStateException(
+                "schedule item $currentItem has no profile coordinates; the schedule owner must provide them"
+            )
+
         val config = SpoofConfig(
             location = SpoofConfig.Location(
-                latitude = intent.latitude,
-                longitude = intent.longitude,
+                latitude = coords.first,
+                longitude = coords.second,
             ),
         )
         configHolder.update(ConfigCodec.toJson(config))
@@ -170,18 +180,18 @@ class QwyEnvironmentController(
         mockGateway!!.replaceGpsProvider()
         mockGateway!!.publish(
             MockLocationConfig(
-                latitude = intent.latitude,
-                longitude = intent.longitude,
+                latitude = coords.first,
+                longitude = coords.second,
             ),
         )
 
         val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
 
-        // P2 fix (dsf round-3/4): persist intent coords + publish outcome so
-        // observeEffective returns what the mock provider actually has (intent
-        // coords), with verification level matching the real sync result.
+        // P2 fix (dsf round-3/4): persist the applied coordinates + publish
+        // outcome so observeEffective returns what the mock provider actually
+        // has, with verification level matching the real sync result.
         scheduleStore.recordLastApplied(
-            intent.latitude, intent.longitude, android.os.SystemClock.elapsedRealtime(),
+            coords.first, coords.second, android.os.SystemClock.elapsedRealtime(),
             verified = published,
         )
 
@@ -192,11 +202,41 @@ class QwyEnvironmentController(
             VerificationLevelV1.NONE.wire
 
         return ApplyOutcome(
-            effectiveLatitude = intent.latitude,
-            effectiveLongitude = intent.longitude,
+            effectiveLatitude = coords.first,
+            effectiveLongitude = coords.second,
             deliveryModeWire = 1,
             verificationLevelWire = verificationLevel,
         )
+    }
+
+    /**
+     * KB-8 coordinate resolution: schedule item "profile-{dbId}" → that profile
+     * row's latitude/longitude from the existing temp table. Null when the row
+     * is missing or its coordinates are null — the schedule owner's data is
+     * the truth, and missing truth is reported, never guessed.
+     */
+    private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? {
+        if (!itemId.startsWith("profile-")) return null
+        val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
+        val dbFile = appContext.getDatabasePath("fakegps.db")
+        if (!dbFile.exists()) return null
+        return try {
+            SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                db.rawQuery(
+                    "SELECT latitude, longitude FROM temp WHERE id = ?",
+                    arrayOf(dbId.toString()),
+                ).use { cursor ->
+                    if (!cursor.moveToFirst()) return@use null
+                    val lat = cursor.getDouble(0)
+                    val lng = cursor.getDouble(1)
+                    if (lat == 0.0 && lng == 0.0 && cursor.isNull(0) && cursor.isNull(1)) null
+                    else if (!cursor.isNull(0) && !cursor.isNull(1)) lat to lng
+                    else null
+                }
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     override fun cleanup(leaseId: String): CleanupOutcome {

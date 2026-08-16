@@ -120,7 +120,7 @@ class LeaseMatrixTest {
         h.apply(key = "ls06-a")
 
         expectContractFailure(ContractErrorCodeV1.LEASE_CONFLICT) {
-            h.apply(key = "ls06-b", intent = h.intent(attemptId = "att-2", latitude = 31.9999000))
+            h.apply(key = "ls06-b", intent = h.intent(attemptId = "att-2"))
         }
         assertEquals(1, h.env.applyCount)
     }

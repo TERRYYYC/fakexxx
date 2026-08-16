@@ -4,17 +4,13 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
-import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
-import io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1
-import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
-import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
+import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1
+import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.IEnvironmentControlV1
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
-import io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1
 import io.github.terryyyc.fakexxx.contract.v1.PreflightRequestV1
-import io.github.terryyyc.fakexxx.contract.v1.ReleaseReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
 
 /**
@@ -28,14 +24,13 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  *    never ContractErrorCodeV1 values
  *  - exported across apps, no network surface
  *
- * STATUS — the provider is bindable and calls reach real handler logic.
- * [QwyEnvironmentController] is implemented (GREEN): schedule state is managed
- * by [QwyScheduleStore], environment application uses the existing
- * ConfigHolder / MockProviderGateway stack, and the relevant-change listener
- * is wired through [ProviderRuntime.compose].
- *
- * KNOWN BOUNDARY: the §6.3.3 typed-failure mapping is NOT implemented and
- * cannot be until #3 lands a delta — see [typed] for the verified reason.
+ * §6.3.3 typed-failure mapping is NOW LIVE (KB-7=A, v1.59): every call returns
+ * the app-public [EnvironmentControlResultV1] carrier. Expected business
+ * failures arrive as resultKindWire=ERROR + errorCodeWire (the frozen wire
+ * code), NOT as hidden framework exceptions — `android.os.ServiceSpecificException`
+ * is absent from the public SDK, so the typed carrier is the only app-public
+ * path a wire code can travel. Transport failures (binder death) remain
+ * outside this carrier, as the carrier's own contract states.
  *
  * All behavior lives in [EnvironmentControlHandler] so unit lanes never need
  * an Android runtime.
@@ -44,23 +39,23 @@ class EnvironmentControlService : Service() {
 
     private val binder: IEnvironmentControlV1.Stub = object : IEnvironmentControlV1.Stub() {
 
-        override fun discover(): CapabilitySnapshotV1 =
-            typed { handler().discover(callingUid()) }
+        override fun discover(): EnvironmentControlResultV1 =
+            typedResult { EnvironmentControlResultV1.discover(handler().discover(callingUid())) }
 
-        override fun preflight(request: PreflightRequestV1): PreflightReportV1 =
-            typed { handler().preflight(callingUid(), request) }
+        override fun preflight(request: PreflightRequestV1): EnvironmentControlResultV1 =
+            typedResult { EnvironmentControlResultV1.preflight(handler().preflight(callingUid(), request)) }
 
-        override fun apply(request: ApplyRequestV1): ApplyReceiptV1 =
-            typed { handler().apply(callingUid(), request) }
+        override fun apply(request: ApplyRequestV1): EnvironmentControlResultV1 =
+            typedResult { EnvironmentControlResultV1.apply(handler().apply(callingUid(), request)) }
 
-        override fun observe(request: ObserveRequestV1): EnvironmentObservationV1 =
-            typed { handler().observe(callingUid(), request) }
+        override fun observe(request: ObserveRequestV1): EnvironmentControlResultV1 =
+            typedResult { EnvironmentControlResultV1.observe(handler().observe(callingUid(), request)) }
 
-        override fun release(request: ReleaseRequestV1): ReleaseReceiptV1 =
-            typed { handler().release(callingUid(), request) }
+        override fun release(request: ReleaseRequestV1): EnvironmentControlResultV1 =
+            typedResult { EnvironmentControlResultV1.release(handler().release(callingUid(), request)) }
 
-        override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 =
-            typed { handler().completeAndAdvance(callingUid(), request) }
+        override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): EnvironmentControlResultV1 =
+            typedResult { EnvironmentControlResultV1.completeAndAdvance(handler().completeAndAdvance(callingUid(), request)) }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -90,33 +85,26 @@ class EnvironmentControlService : Service() {
     private fun callingUid(): Int = Binder.getCallingUid()
 
     /**
-     * §6.3.3 error mapping — BLOCKED ON A CONTRACT DELTA (#3 / PR #11).
+     * §6.3.3 typed-failure mapping (KB-7=A, v1.59): a [ContractException] from
+     * the handler is an EXPECTED business failure and travels inside the
+     * [EnvironmentControlResultV1] carrier as ERROR + the frozen wire code.
      *
-     * §1506 and the contract README both specify that expected business failures
-     * travel as `ServiceSpecificException(ContractErrorCodeV1.wire)`. That class
-     * is not implementable by an ordinary app: `android.os.ServiceSpecificException`
-     * is absent from the public SDK stub (verified against android-35 and
-     * android-36.1 android.jar, javap, and api-versions.xml — framework sources
-     * such as android/se/omapi/SEService.java do throw it, so it exists at
-     * runtime but is @hide to app compilation).
-     *
-     * It is also the ONLY exception in Parcel's writeException/readException set
-     * that can carry a caller-defined int. So under the public SDK there is no
-     * exception-shaped path for a wire code at all: carrying it would require a
-     * contract change (an error wire field on the receipts, or a result wrapper),
-     * which is #3's call and not something this seam may invent.
-     *
-     * Until that lands, a typed failure propagates instead of being laundered
-     * into a nearby public exception. That is deliberate and fail-closed: Auto
-     * reads it as a TRANSPORT failure and enters recovery, which is honest
-     * ("something went wrong, no environment claim"), whereas reusing
-     * IllegalStateException or an approximate code would let Auto make a trust
-     * decision on a fabricated business outcome. §1506's own rule for an
-     * unrecognized code is fail-closed, never guess-compatible.
-     *
-     * Note this mapping is the remaining blocker for fully typed error
-     * transport — the adapter itself is implemented, so both must land for
-     * production-grade error semantics.
+     * History: this seam previously propagated ContractException raw, because
+     * the spec named ServiceSpecificException as the channel and that class is
+     * @hide to app compilation — there was no app-public exception-shaped path
+     * for a wire code at all. The v1.59 carrier resolves that: the error code
+     * now crosses Binder as data, not as an exception. Anything that is NOT a
+     * ContractException (store I/O failure, adapter crash) still propagates as
+     * a transport failure — it is not a business answer and must not be
+     * laundered into one.
      */
-    private inline fun <T> typed(block: () -> T): T = block()
+    private inline fun typedResult(block: () -> EnvironmentControlResultV1): EnvironmentControlResultV1 =
+        try {
+            block()
+        } catch (e: ContractException) {
+            EnvironmentControlResultV1.failure(
+                errorCodeWire = e.code.wire,
+                diagnosticMessage = e.message,
+            )
+        }
 }

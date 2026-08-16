@@ -4,6 +4,7 @@ import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalIntentDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
@@ -79,9 +80,12 @@ class EnvironmentControlHandler(
             environmentRevision = snap.revision,
             profileRefs = emptyList(),
             scheduleRefs = if (schedule != null) listOf(schedule.scheduleId) else emptyList(),
+            // v1.55 schedule projection group: all four null together when no
+            // active schedule, all four non-null together otherwise.
             currentScheduleId = schedule?.scheduleId,
             currentItemId = schedule?.currentItemId,
             scheduleVersion = schedule?.scheduleVersion,
+            exhausted = schedule?.exhausted,
         )
     }
 
@@ -110,29 +114,28 @@ class EnvironmentControlHandler(
             continuityCoverageWire = snap.coverageWire,
             environmentRevision = snap.revision,
             blockingReasonWires = blockers,
-            scheduleItemId = schedule?.currentItemId ?: "",
-            scheduleVersion = schedule?.scheduleVersion ?: 0L,
+            // v1.55 schedule projection group: all three null together when no
+            // active schedule — NO sentinel values (""/0L are the round-5
+            // anti-pattern at the wire layer; null reads as "no schedule").
+            scheduleItemId = schedule?.currentItemId,
+            scheduleVersion = schedule?.scheduleVersion,
+            exhausted = schedule?.exhausted,
         )
     }
 
-    /** §6.3.3 wire 13: structural validation of an apply intent (M-RQ-01). */
+    /**
+     * §6.3.3 wire 13: structural validation of an apply intent (M-RQ-01).
+     *
+     * v1.62 (KB-8=A) removed the coordinate branches: coordinates are qwy-owned
+     * and no longer travel in the intent, so there is no coordinate assertion
+     * this gate could mismatch against — the branch was unreachable by
+     * construction and is deleted rather than kept dead.
+     */
     private fun validateApplyRequest(intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1) {
         if (intent.runId.isBlank() || intent.attemptId.isBlank() || intent.profileRef.isBlank()
             || intent.scheduleRef.isBlank()) {
             throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
                 "empty required ref in intent")
-        }
-        if (!intent.latitude.isFinite() || !intent.longitude.isFinite()) {
-            throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
-                "non-finite coordinate")
-        }
-        if (intent.latitude < -90.0 || intent.latitude > 90.0) {
-            throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
-                "latitude out of range: ${intent.latitude}")
-        }
-        if (intent.longitude < -180.0 || intent.longitude > 180.0) {
-            throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
-                "longitude out of range: ${intent.longitude}")
         }
         // Structural check: notBefore >= deadline with a future deadline is an
         // impossible window (M-RQ-01). Past deadlines are intentionally allowed
@@ -398,17 +401,11 @@ class EnvironmentControlHandler(
         // contract's frozen helper and compare exactly — a mismatch means the
         // digest does not bind this payload, so a forged (key, digest) pair can
         // no longer fetch a receipt bound to a different request.
-        // (apply()/release() already recompute; advance was the one path that
-        // trusted the wire value.)
-        val recomputedDigest = RequestDigests.advanceRequestDigest(
-            leaseId = request.leaseId,
-            expectedScheduleVersion = request.expectedScheduleVersion,
-            expectedCurrentItemId = request.expectedCurrentItemId,
-            proofScheduleItemId = proof.scheduleItemId,
-            proofTrustedSuccessCount = proof.trustedSuccessCount,
-            proofQuotaRequired = proof.quotaRequired,
-            proofLedgerRef = proof.ledgerRef,
-        )
+        // v1.71/v1.72: the preimage now includes expectedScheduleId — the
+        // provider consumes the contract's CanonicalAdvanceDigestV1 directly
+        // (a local field-assembly copy would be a second framing that drifts,
+        // dsf F-8's own lesson).
+        val recomputedDigest = CanonicalAdvanceDigestV1.compute(request)
         if (recomputedDigest != request.requestDigest) {
             throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
                 "requestDigest does not bind the received fields (recompute mismatch)")
@@ -454,9 +451,19 @@ class EnvironmentControlHandler(
                     "proof.scheduleItemId=${proof.scheduleItemId} does not match expectedCurrentItemId=${request.expectedCurrentItemId}")
             }
 
-            // --- step 4: schedule gates (16→14→15, spec v1.54 §6.7.4b intra-step ordering) ---
+            // --- step 4: schedule gates (17→16→14→15) ---
+            // v1.72: identity leg FIRST (wire 17 SCHEDULE_IDENTITY_MISMATCH) —
+            // 14/15/16 describe the state of ANOTHER schedule when the id
+            // doesn't match, so identity is judged before everything else.
+            // Then v1.54 intra-order 16→14→15: exhausted (terminal) before
+            // item mismatch before version stale.
             val schedule = environment.scheduleSnapshot()
                 ?: throw ContractException(ContractErrorCodeV1.REQUEST_INVALID, "no active schedule")
+
+            if (request.expectedScheduleId != schedule.scheduleId) {
+                throw ContractException(ContractErrorCodeV1.SCHEDULE_IDENTITY_MISMATCH,
+                    "expected schedule ${request.expectedScheduleId} current ${schedule.scheduleId}")
+            }
 
             // M-AD-11: already exhausted → wire 16 (checked FIRST per v1.54:
             // terminal state must be reported before item/version mismatch,

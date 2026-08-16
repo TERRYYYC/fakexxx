@@ -76,8 +76,8 @@ class ConcurrencyMatrixTest {
         val h = ProviderHarness.create()
         h.pair(AUTO_PKG, AUTO_SIGNER)
 
-        val intentA = h.intent(attemptId = "att-a", latitude = 31.1000000)
-        val intentB = h.intent(attemptId = "att-b", latitude = 32.2000000)
+        val intentA = h.intent(attemptId = "att-a")
+        val intentB = h.intent(attemptId = "att-b")
 
         val racer = Racer(h)
         racer.race(

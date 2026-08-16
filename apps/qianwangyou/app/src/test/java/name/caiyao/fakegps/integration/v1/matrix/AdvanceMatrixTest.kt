@@ -1,9 +1,9 @@
 package name.caiyao.fakegps.integration.v1.matrix
 
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
-import name.caiyao.fakegps.integration.v1.RequestDigests
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
@@ -44,26 +44,20 @@ class AdvanceMatrixTest {
         key: String,
         expectedItemId: String = "item-1",
         expectedVersion: Long = h.env.scheduleVersion,
+        expectedScheduleId: String = h.env.scheduleId,
     ): CompleteAndAdvanceRequestV1 {
         val completionProof = proof(h, expectedItemId)
-        val digest = RequestDigests.advanceRequestDigest(
-            leaseId = leaseId,
-            expectedScheduleVersion = expectedVersion,
-            expectedCurrentItemId = expectedItemId,
-            proofScheduleItemId = completionProof.scheduleItemId,
-            proofTrustedSuccessCount = completionProof.trustedSuccessCount,
-            proofQuotaRequired = completionProof.quotaRequired,
-            proofLedgerRef = completionProof.ledgerRef,
-        )
-        return CompleteAndAdvanceRequestV1(
+        val bare = CompleteAndAdvanceRequestV1(
             leaseId = leaseId,
             idempotencyKey = key,
-            requestDigest = digest,
+            requestDigest = "", // computed below via the frozen contract helper
+            expectedScheduleId = expectedScheduleId,
             expectedScheduleVersion = expectedVersion,
             expectedCurrentItemId = expectedItemId,
             completionProof = completionProof,
             callerProtocolVersion = 1,
         )
+        return bare.copy(requestDigest = CanonicalAdvanceDigestV1.compute(bare))
     }
 
     /**

@@ -27,10 +27,9 @@ class RequestMatrixTest {
             h.apply(key = "rq01-a", intent = h.intent(profileRef = ""))
         }
 
-        // Coordinate out of range.
-        expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {
-            h.apply(key = "rq01-b", intent = h.intent(latitude = 95.0))
-        }
+        // (v1.62 KB-8 removed the coordinate branches from M-RQ-01: the intent
+        // no longer carries coordinates, so the out-of-range leg is unreachable
+        // by construction — deleted rather than kept dead.)
 
         // deadline <= notBefore.
         expectContractFailure(ContractErrorCodeV1.REQUEST_INVALID) {

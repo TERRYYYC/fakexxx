@@ -232,15 +232,29 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
         applyCount += 1
-        effectiveLatitude = intent.latitude
-        effectiveLongitude = intent.longitude
+        // KB-8 (v1.62): the intent no longer carries coordinates — the
+        // provider resolves them from the current schedule item. The fake
+        // models the same KB-8 world: fixed qwy-owned coordinates per item.
+        val resolved = coordinateForItem(currentItemId)
+        effectiveLatitude = resolved?.first
+        effectiveLongitude = resolved?.second
         return ApplyOutcome(
-            effectiveLatitude = intent.latitude,
-            effectiveLongitude = intent.longitude,
+            effectiveLatitude = resolved?.first,
+            effectiveLongitude = resolved?.second,
             deliveryModeWire = DeliveryModeV1.SYSTEM_MOCK.wire,
             verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
         )
     }
+
+    /** KB-8 fake: qwy-owned coordinate table keyed by schedule item id. */
+    var itemCoordinates: MutableMap<String, Pair<Double, Double>> = mutableMapOf(
+        "item-1" to (31.2304000 to 121.4737000),
+        "item-2" to (31.2314000 to 121.4747000),
+        "item-3" to (31.2324000 to 121.4757000),
+    )
+
+    private fun coordinateForItem(itemId: String?): Pair<Double, Double>? =
+        itemId?.let { itemCoordinates[it] }
 
     override fun cleanup(leaseId: String): CleanupOutcome {
         cleanupCount += 1
