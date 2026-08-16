@@ -139,7 +139,12 @@ data class LegacyCompletionSnapshot(
  */
 @Entity(
     tableName = "provider_pairing_records",
-    indices = [Index(value = ["applicationId"], unique = true)]
+    // R44 (Sol GREEN-review-3 F4): the frozen authorization principal is (applicationId,
+    // currentSignerDigest) (§6.5.4) — lookup index on the PAIR, never a single-column UNIQUE on
+    // applicationId (that blocked signer rotation AND post-revocation re-approval, M-PA-10).
+    // Single-active-per-principal is enforced transactionally by ProviderTrustStore.approve; the
+    // index itself is non-unique so revoked history rows for the same pair can coexist.
+    indices = [Index(value = ["applicationId", "currentSignerDigest"])]
 )
 data class ProviderPairingRecord(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

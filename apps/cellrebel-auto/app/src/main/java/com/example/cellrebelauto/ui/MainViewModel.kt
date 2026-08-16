@@ -112,7 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun revokeProvider(entry: ProviderEntry) {
         viewModelScope.launch {
-            trustStore.revoke(entry.applicationId, System.currentTimeMillis())
+            trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
             refreshProviders()
         }
     }

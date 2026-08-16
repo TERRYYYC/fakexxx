@@ -114,7 +114,10 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
             """.trimIndent()
         )
 
-        // 5. provider_pairing_records — UNIQUE(applicationId).
+        // 5. provider_pairing_records — the frozen principal is (applicationId, currentSignerDigest)
+        //    (§6.5.4; R44, Sol GREEN-review-3 F4): a NON-unique composite lookup index. A
+        //    single-column UNIQUE(applicationId) blocked signer rotation AND post-revocation
+        //    re-approval (M-PA-10); single-active-per-principal is enforced by ProviderTrustStore.
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS `provider_pairing_records` (
@@ -128,8 +131,8 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
             """.trimIndent()
         )
         db.execSQL(
-            "CREATE UNIQUE INDEX IF NOT EXISTS `index_provider_pairing_records_applicationId` " +
-                "ON `provider_pairing_records`(`applicationId`)"
+            "CREATE INDEX IF NOT EXISTS `index_provider_pairing_records_applicationId_currentSignerDigest` " +
+                "ON `provider_pairing_records`(`applicationId`, `currentSignerDigest`)"
         )
 
         // Snapshot pre-A+ progress as LEGACY_UNVERIFIED. Trusted quota stays empty (INV-05/06).

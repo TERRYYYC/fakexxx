@@ -184,7 +184,7 @@ class Migration4to5Test {
 
         // (5) ProviderPairingRecord created and EMPTY — upgrade mints no trusted provider (§6.5.3).
         assertEquals(0, db.providerPairingDao().count())
-        assertNull(db.providerPairingDao().activeFor("any.application.id"))
+        assertNull(db.providerPairingDao().activeFor("any.application.id", "any-signer"))
 
         // (6) The new audit table exists and is empty.
         assertEquals(0, db.auditEventDao().count())

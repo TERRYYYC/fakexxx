@@ -24,15 +24,16 @@ interface ProviderPairingDao {
     @Query("SELECT * FROM provider_pairing_records WHERE applicationId = :applicationId ORDER BY id ASC")
     suspend fun byApplicationId(applicationId: String): List<ProviderPairingRecord>
 
-    /** Active = revokedAt IS NULL. */
-    @Query("SELECT * FROM provider_pairing_records WHERE applicationId = :applicationId AND revokedAt IS NULL LIMIT 1")
-    suspend fun activeFor(applicationId: String): ProviderPairingRecord?
+    /** Active = the (applicationId, currentSignerDigest) principal with revokedAt IS NULL (§6.5.4). */
+    @Query("SELECT * FROM provider_pairing_records WHERE applicationId = :applicationId AND currentSignerDigest = :signerDigest AND revokedAt IS NULL LIMIT 1")
+    suspend fun activeFor(applicationId: String, signerDigest: String): ProviderPairingRecord?
 
     @Query("SELECT * FROM provider_pairing_records ORDER BY applicationId ASC")
     suspend fun all(): List<ProviderPairingRecord>
 
-    @Query("UPDATE provider_pairing_records SET revokedAt = :revokedAt WHERE applicationId = :applicationId AND revokedAt IS NULL")
-    suspend fun revoke(applicationId: String, revokedAt: Long): Int
+    /** Revoke the ACTIVE row of the exact (applicationId, currentSignerDigest) principal only. */
+    @Query("UPDATE provider_pairing_records SET revokedAt = :revokedAt WHERE applicationId = :applicationId AND currentSignerDigest = :signerDigest AND revokedAt IS NULL")
+    suspend fun revoke(applicationId: String, signerDigest: String, revokedAt: Long): Int
 
     @Query("SELECT COUNT(*) FROM provider_pairing_records")
     suspend fun count(): Int

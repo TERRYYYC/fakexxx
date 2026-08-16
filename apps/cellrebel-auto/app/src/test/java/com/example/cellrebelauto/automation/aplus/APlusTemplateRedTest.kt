@@ -115,7 +115,7 @@ class APlusTemplateRedTest {
     fun `an unseen provider is not trusted`() = runTest {
         val store = ProviderTrustStore(db.providerPairingDao())
         // GREEN-from-skeleton: an unseen applicationId has no active pairing — no silent TOFU.
-        assertNull(store.findActive("com.cellrebel.app"))
+        assertNull(store.findActive("com.cellrebel.app", "sha256:abc"))
         assertEquals(0, db.providerPairingDao().count())
     }
 
@@ -125,7 +125,7 @@ class APlusTemplateRedTest {
         val approved = store.approve("com.cellrebel.app", signerDigest = "sha256:abc", versionCode = 10, approvedAt = 1000L)
         // RED: skeleton.approve returns null and findActive stays null → both fail until GREEN.
         assertNotNull("approve must persist and return the active record", approved)
-        val active = store.findActive("com.cellrebel.app")
+        val active = store.findActive("com.cellrebel.app", "sha256:abc")
         assertNotNull("an approved provider must be findActive", active)
         assertEquals("sha256:abc", active?.currentSignerDigest)
         assertEquals(10, active?.approvedVersionCode)
@@ -135,10 +135,10 @@ class APlusTemplateRedTest {
     fun `revocation is a state transition not a delete`() = runTest {
         val store = ProviderTrustStore(db.providerPairingDao())
         store.approve("com.cellrebel.app", "sha256:abc", 10, 1000L)
-        val revoked = store.revoke("com.cellrebel.app", revokedAt = 2000L)
+        val revoked = store.revoke("com.cellrebel.app", "sha256:abc", revokedAt = 2000L)
         // RED: skeleton.revoke returns false (no-op). GREEN must set revokedAt and stop findActive.
         assertTrue("revoke must return true on an active record", revoked)
-        assertNull("a revoked provider must not be findActive", store.findActive("com.cellrebel.app"))
+        assertNull("a revoked provider must not be findActive", store.findActive("com.cellrebel.app", "sha256:abc"))
         // The row is retained (revokedAt set), not deleted — revocation provenance is preserved
         // (§6.5.3: revocation is a state transition, never a hard delete).
         assertTrue(

@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "144ab6b770eb4d6c18ff129d4b880357",
+    "identityHash": "d383fe55ebaf76c1028db0e86925efb9",
     "entities": [
       {
         "tableName": "test_results",
@@ -783,13 +783,14 @@
         },
         "indices": [
           {
-            "name": "index_provider_pairing_records_applicationId",
-            "unique": true,
+            "name": "index_provider_pairing_records_applicationId_currentSignerDigest",
+            "unique": false,
             "columnNames": [
-              "applicationId"
+              "applicationId",
+              "currentSignerDigest"
             ],
             "orders": [],
-            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_provider_pairing_records_applicationId` ON `${TABLE_NAME}` (`applicationId`)"
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_provider_pairing_records_applicationId_currentSignerDigest` ON `${TABLE_NAME}` (`applicationId`, `currentSignerDigest`)"
           }
         ]
       },
@@ -1187,7 +1188,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '144ab6b770eb4d6c18ff129d4b880357')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd383fe55ebaf76c1028db0e86925efb9')"
     ]
   }
 }
