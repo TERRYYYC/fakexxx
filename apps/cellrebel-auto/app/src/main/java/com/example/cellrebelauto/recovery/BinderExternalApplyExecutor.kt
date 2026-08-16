@@ -132,4 +132,75 @@ class BinderExternalApplyExecutor(
         }
     }
 
+    // ---- R44 (Sol GREEN-review-3 F1): the frozen §6.1 journey surface, same connection, same
+    // validator — every failure mode fail-closes to null. ----
+
+    override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? {
+        val api = remote ?: return null
+        return try {
+            when (val v = ContractResponseValidator.validateDiscover(api.discover())) {
+                is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
+                is ContractResponseValidator.ValidatedContractResponse.Failure -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override fun preflight(
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String
+    ): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1? {
+        val api = remote ?: return null
+        return try {
+            val request = io.github.terryyyc.fakexxx.contract.v1.PreflightRequestV1(
+                intent = intent,
+                idempotencyKey = idempotencyKey,
+                callerProtocolVersion = ContractV1.PROTOCOL_VERSION
+            )
+            when (val v = ContractResponseValidator.validatePreflight(api.preflight(request), requestDigest)) {
+                is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
+                is ContractResponseValidator.ValidatedContractResponse.Failure -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override fun observe(
+        leaseId: String,
+        operationId: String,
+        expectedIntentHash: String
+    ): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? {
+        val api = remote ?: return null
+        return try {
+            val request = io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1(
+                leaseId = leaseId,
+                operationId = operationId,
+                expectedIntentHash = expectedIntentHash
+            )
+            when (val v = ContractResponseValidator.validateObserve(api.observe(request), leaseId, expectedIntentHash)) {
+                is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
+                is ContractResponseValidator.ValidatedContractResponse.Failure -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    override fun completeAndAdvance(
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String
+    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? {
+        val api = remote ?: return null
+        return try {
+            when (val v = ContractResponseValidator.validateCompleteAndAdvance(api.completeAndAdvance(request), expectedIntentHash)) {
+                is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
+                is ContractResponseValidator.ValidatedContractResponse.Failure -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
 }

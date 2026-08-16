@@ -71,6 +71,7 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 onSetTestStage = { vm.setTestStageEnabled(it) },
                 onStartOrResume = { vm.startOrResumePlan() },
                 onStop = { vm.stopAutomation() },
+                onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
                 onOpenRun = { vm.navigateTo(Screen.RUN) },
                 onOpenHistory = { vm.navigateTo(Screen.HISTORY) }
             )
@@ -91,6 +92,9 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 onStop = { vm.stopAutomation() },
                 onOpenPlan = { vm.navigateTo(Screen.PLAN) },
                 onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
+                // R44 F5: the seven-state incident card + provider-management entry.
+                pairingUiState = vm.pairingUiState.collectAsState().value,
+                onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
                 // # 调试功能
                 onExportLogs = { vm.exportLogs() },
                 onDumpA11yTree = { vm.dumpAccessibilityTree() }
@@ -108,12 +112,14 @@ fun MainApp(vm: MainViewModel = viewModel()) {
 
         Screen.PROVIDERS -> {
             // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
+            androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshProviders() }
             val entries by vm.providerEntries.collectAsState()
             ProviderApprovalScreen(
                 pending = entries.filter { !it.isApproved },
                 approved = entries.filter { it.isApproved },
                 onApprove = { vm.approveProvider(it) },
                 onRevoke = { vm.revokeProvider(it) },
+                onBack = { vm.navigateTo(Screen.PLAN) },
                 modifier = Modifier
             )
         }

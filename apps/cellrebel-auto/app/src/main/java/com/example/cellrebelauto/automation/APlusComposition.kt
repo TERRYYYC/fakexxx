@@ -82,6 +82,14 @@ object APlusComposition {
     fun productionBackend(
         context: android.content.Context,
         db: com.example.cellrebelauto.db.AppDatabase,
+        // R44 F1: resolves the provider's CURRENT signer for the §6.5.3 gate. The default is the
+        // PackageManager resolver; tests inject a fake.
+        providerSignerDigest: (applicationId: String) -> String? = {
+            com.example.cellrebelauto.environment.ProviderTrustGate.packageManagerSignerDigest(
+                context.packageManager, it
+            )
+        },
+        providerApplicationId: String = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
         // R43 F1: the SERVICE-LIFECYCLE executor (bound at AutomationService.onServiceConnected)
         // — reused across runs so the provider connection is real, not per-run constructed-and-
         // never-bound. When null (early construction), a fresh executor is created UNBOUND and
@@ -118,49 +126,109 @@ object APlusComposition {
                 }
             }
             override val evidenceSource: APlusEvidenceSource = object : APlusEvidenceSource {
-                // The production evidence source reconstructs §6.4 observations from the DURABLE
-                // carriers (the live Binder observation is Phase-D wiring exercised against a real
-                // provider; recovery reads durability either way).
+                // R44 (Sol GREEN-review-3 F1): the production evidence source is a LIVE Binder
+                // collector with durable replay. A fresh attempt has NO durable observation, so the
+                // FIRST writer of every phase evidence is executor.observe() over the frozen
+                // contract; the result is persisted to durable_observation_records BEFORE being
+                // returned (crash = re-read durability). The §6.5.3 reverse-authorization gate runs
+                // FIRST: an untrusted provider's artifacts never enter the trust path.
+                val trustGate = com.example.cellrebelauto.environment.ProviderTrustGate(
+                    com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()),
+                    providerSignerDigest
+                )
+
+                fun snapshotFromDurable(r: com.example.cellrebelauto.model.ledger.DurableObservationRecord) =
+                    com.example.cellrebelauto.environment.ObservationSnapshot(
+                        leaseId = r.leaseId, acceptedIntentHash = r.acceptedIntentHash,
+                        coverage = r.coverage, verificationLevel = r.verificationLevel,
+                        deliveryMode = r.deliveryMode, isMock = r.isMock,
+                        scheduleDecision = r.scheduleDecision,
+                        effectiveLat = r.effectiveLat, effectiveLng = r.effectiveLng,
+                        environmentRevision = r.environmentRevision,
+                        environmentFingerprint = r.environmentFingerprint,
+                        observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
+                        observedAtEpochMs = r.observedAtEpochMs,
+                        continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
+                        evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
+                    )
+
+                suspend fun observeLive(phase: String, attemptId: Long, runSessionId: Long):
+                    com.example.cellrebelauto.environment.ObservationSnapshot? {
+                    // §6.5.3 gate FIRST: untrusted current signer ⇒ no artifacts enter the trust path.
+                    if (!trustGate.isCurrentSignerTrusted(providerApplicationId)) return null
+                    // The observe tuple: lease (durable receipt first, attempt owner fallback),
+                    // operationId (durable receipt), expected hash (owner recompute).
+                    val receipt = db.operationReceiptDao().byKey(
+                        com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId)
+                    )
+                    val leaseId = receipt?.leaseId ?: db.testAttemptDao().getAplusLeaseId(attemptId) ?: return null
+                    val operationId = receipt?.operationId ?: return null
+                    // The owner recompute needs the full durable identity: attempt → task → plan.
+                    val attempt = db.testAttemptDao().getAttemptById(attemptId) ?: return null
+                    val task = db.locationTaskDao().getTaskById(attempt.taskId) ?: return null
+                    val plan = db.planDao().getPlanById(task.planId) ?: return null
+                    val expectedHash = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .requestDigest(
+                            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
+                                runSessionId, attemptId, plan.id, task.id,
+                                notBeforeEpochMs = plan.importedAt,
+                                deadlineEpochMs = Long.MAX_VALUE
+                            )
+                        )
+                    val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null
+                    val snapshot = com.example.cellrebelauto.environment.ObservationWireAdapter.toSnapshot(wire)
+                    // Persist BEFORE returning: a crash mid-decision re-reads durability (F3 pattern).
+                    db.durableObservationDao().insert(
+                        com.example.cellrebelauto.model.ledger.DurableObservationRecord(
+                            attemptId = attemptId, phase = phase,
+                            leaseId = snapshot.leaseId, acceptedIntentHash = snapshot.acceptedIntentHash,
+                            coverage = snapshot.coverage, verificationLevel = snapshot.verificationLevel,
+                            deliveryMode = snapshot.deliveryMode, isMock = snapshot.isMock,
+                            scheduleDecision = snapshot.scheduleDecision,
+                            effectiveLat = snapshot.effectiveLat, effectiveLng = snapshot.effectiveLng,
+                            environmentRevision = snapshot.environmentRevision,
+                            environmentFingerprint = snapshot.environmentFingerprint,
+                            observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
+                            observedAtEpochMs = snapshot.observedAtEpochMs,
+                            continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
+                            continuitySinceEpochMs = null,
+                            evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
+                            evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+                        )
+                    )
+                    return snapshot
+                }
+
                 override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) =
                     kotlinx.coroutines.runBlocking {
-                        db.durableObservationDao().forAttemptPhase(attemptId, "PRE")?.let { r ->
-                            com.example.cellrebelauto.environment.ObservationSnapshot(
-                                leaseId = r.leaseId, acceptedIntentHash = r.acceptedIntentHash,
-                                coverage = r.coverage, verificationLevel = r.verificationLevel,
-                                deliveryMode = r.deliveryMode, isMock = r.isMock,
-                                scheduleDecision = r.scheduleDecision,
-                                effectiveLat = r.effectiveLat, effectiveLng = r.effectiveLng,
-                                environmentRevision = r.environmentRevision,
-                                environmentFingerprint = r.environmentFingerprint,
-                                observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
-                                observedAtEpochMs = r.observedAtEpochMs,
-                                continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
-                                evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
-                            )
-                        }
+                        // Durable first (crash replay); live observe is the FIRST writer on a fresh run.
+                        db.durableObservationDao().forAttemptPhase(attemptId, "PRE")?.let { snapshotFromDurable(it) }
+                            ?: observeLive("PRE", attemptId, runSessionId)
                     }
                 override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) =
                     kotlinx.coroutines.runBlocking {
-                        db.durableObservationDao().forAttemptPhase(attemptId, "POST")?.let { r ->
-                            com.example.cellrebelauto.environment.ObservationSnapshot(
-                                leaseId = r.leaseId, acceptedIntentHash = r.acceptedIntentHash,
-                                coverage = r.coverage, verificationLevel = r.verificationLevel,
-                                deliveryMode = r.deliveryMode, isMock = r.isMock,
-                                scheduleDecision = r.scheduleDecision,
-                                effectiveLat = r.effectiveLat, effectiveLng = r.effectiveLng,
-                                environmentRevision = r.environmentRevision,
-                                environmentFingerprint = r.environmentFingerprint,
-                                observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
-                                observedAtEpochMs = r.observedAtEpochMs,
-                                continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
-                                evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
-                            )
-                        }
+                        db.durableObservationDao().forAttemptPhase(attemptId, "POST")?.let { snapshotFromDurable(it) }
+                            ?: observeLive("POST", attemptId, runSessionId)
                     }
                 override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? {
-                    // Completion evidence for a live attempt is provider-observed (§8.6) — pre-bind
-                    // this is unavailable, fail-closed null (the normal path records UNTRUSTED).
-                    return null
+                    // R44 F1: completion evidence is ASSEMBLED from the durable carriers the normal
+                    // path persisted at their phase boundaries — the owner execution row (written at
+                    // COMPLETION_OBSERVED) + the verbatim apply receipt. A missing carrier = fail-closed.
+                    return kotlinx.coroutines.runBlocking {
+                        if (!trustGate.isCurrentSignerTrusted(providerApplicationId)) return@runBlocking null
+                        val ownerExecId = db.testAttemptDao().getCurrentExecutionId(attemptId) ?: return@runBlocking null
+                        val exec = db.attemptExecutionDao().byExecutionId(ownerExecId) ?: return@runBlocking null
+                        if (exec.attemptId != attemptId) return@runBlocking null
+                        val receipt = db.operationReceiptDao().byKey(
+                            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId)
+                        ) ?: return@runBlocking null
+                        APlusCompletionEvidence(
+                            execution = exec,
+                            completionEvidenceWire = exec.completionEvidenceWire,
+                            applyReceiptIntentHash = receipt.acceptedIntentHash ?: return@runBlocking null,
+                            applyReceiptLease = receipt.leaseId ?: return@runBlocking null
+                        )
+                    }
                 }
             }
         }
@@ -193,6 +261,23 @@ object APlusComposition {
             releaseDigest: String,
             now: Long
         ): ApplyOutcome = ApplyOutcome("SKELETON_FAIL_CLOSED", providerHadAlreadyApplied = false)
+
+        // R44 (Sol GREEN-review-3 F1): the journey surface fail-closes too.
+        override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? = null
+        override fun preflight(
+            intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+            idempotencyKey: String,
+            requestDigest: String
+        ): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1? = null
+        override fun observe(
+            leaseId: String,
+            operationId: String,
+            expectedIntentHash: String
+        ): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? = null
+        override fun completeAndAdvance(
+            request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+            expectedIntentHash: String
+        ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? = null
     }
 
     /** Fail-closed skeleton recovery log — no receipt, no checkpoint, no release receipt. */

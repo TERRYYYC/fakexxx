@@ -102,6 +102,10 @@ fun ControlScreen(
     onStop: () -> Unit,
     onOpenPlan: () -> Unit,
     onOpenHistory: () -> Unit,
+    // R44 (Sol GREEN-review-3 F5): the seven-state pairing/incident card on the RUN surface —
+    // the operator sees WHAT is wrong and WHAT to do, with an entry into provider management.
+    pairingUiState: com.example.cellrebelauto.ui.PairingUiState = com.example.cellrebelauto.ui.PairingUiState.Trusted,
+    onOpenProviders: () -> Unit = {},
     // # 调试功能回调
     onExportLogs: () -> Unit = {},
     onDumpA11yTree: () -> Unit = {}
@@ -222,6 +226,18 @@ fun ControlScreen(
         }
 
         Spacer(modifier = Modifier.height(10.dp))
+
+        // R44 (Sol GREEN-review-3 F5): the pairing/incident status card — ALWAYS rendered on the
+        // run surface; the Trusted state renders quietly, every incident state shows its concrete
+        // recovery action. Not-approvable states offer the provider-management entry.
+        if (pairingUiState !is com.example.cellrebelauto.ui.PairingUiState.Trusted) {
+            PairingStatusCard(
+                state = pairingUiState,
+                onOpenApproval = onOpenProviders,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
         // # 主操作：仅 active session 显示 Stop（Start/Resume 在 Plan 页）
         if (isRunning) {

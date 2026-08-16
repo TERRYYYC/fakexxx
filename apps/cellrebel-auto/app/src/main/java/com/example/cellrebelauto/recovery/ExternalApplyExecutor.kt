@@ -68,6 +68,39 @@ interface ExternalApplyExecutor {
         releaseDigest: String,
         now: Long
     ): ApplyOutcome
+
+    // ---- R44 (Sol GREEN-review-3 F1): the rest of the frozen §6.1 journey surface. Without these
+    // the production tree has NO discover/preflight/observe/completeAndAdvance call at all, so a
+    // fresh attempt can never produce its first observation/completion evidence. Every method
+    // fail-closes (null) on transport failure, validator failure, or an unknown wire code. ----
+
+    /** discover(): provider capabilities + the §6.7.1 schedule projection group. Null = fail-closed. */
+    fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1?
+
+    /** preflight(): the provider's schedule decision for THIS intent (§6.7). Null = fail-closed. */
+    fun preflight(
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String
+    ): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1?
+
+    /** observe(): a lease-bound §6.4 observation. Null = fail-closed. */
+    fun observe(
+        leaseId: String,
+        operationId: String,
+        expectedIntentHash: String
+    ): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1?
+
+    /**
+     * completeAndAdvance(): complete the current schedule item and advance (§6.7.3). The request
+     * carries the CAS preconditions from the projection group captured WHEN THE ATTEMPT OPENED
+     * (persisted, replayed verbatim — v1.72). [expectedIntentHash] is the attempt's APPLY intent
+     * digest — the receipt's effectiveIntentHash must bind it. Null = fail-closed.
+     */
+    fun completeAndAdvance(
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String
+    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1?
 }
 
 /**

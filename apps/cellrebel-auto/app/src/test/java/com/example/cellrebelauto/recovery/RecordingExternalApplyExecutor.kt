@@ -100,4 +100,90 @@ class RecordingExternalApplyExecutor(
     fun releaseCallsFor(attemptId: Long): List<ReleaseCall> = releaseCalls.filter { it.attemptId == attemptId }
     fun effectCount(attemptId: Long): Int = effectCounts[attemptId] ?: 0
     fun invocationCount(idempotencyKey: String): Int = invocationCounts[idempotencyKey] ?: 0
+
+    // ---- R44 (Sol GREEN-review-3 F1): the frozen journey surface. A HEALTHY-provider default so the
+    // engine's production journey can run in tests; each response is a settable fixture and every
+    // call is recorded for oracle assertions. ----
+
+    var discoverFixture: io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? =
+        io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1(
+            serviceVersion = "fake-provider-1",
+            supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
+            supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
+            continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+            environmentRevision = 7L,
+            profileRefs = listOf("plan-1"),
+            scheduleRefs = listOf("task-42"),
+            currentScheduleId = "sched-1",
+            currentItemId = "item-1",
+            scheduleVersion = 1L,
+            exhausted = false
+        )
+    var discoverCalls = 0
+        private set
+
+    override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? {
+        discoverCalls++
+        return discoverFixture
+    }
+
+    var preflightDecisionWire: Int = io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire
+    val preflightCalls = mutableListOf<String>() // idempotencyKeys
+
+    override fun preflight(
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String
+    ): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1 {
+        preflightCalls += idempotencyKey
+        return io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1(
+            acceptedIntentHash = requestDigest,
+            scheduleDecisionWire = preflightDecisionWire,
+            waitUntilEpochMs = null,
+            achievableVerificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+            environmentRevision = 7L,
+            blockingReasonWires = emptyList(),
+            scheduleItemId = "item-1",
+            scheduleVersion = 1L,
+            exhausted = false
+        )
+    }
+
+    /** Phase-aware observation answers; default null (no observation). Tests driving the production
+     *  evidence source set this to return §6.4-valid wire observations stamped in the elapsed domain. */
+    var observeAnswers: (leaseId: String, operationId: String, expectedIntentHash: String) ->
+        io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? = { _, _, _ -> null }
+    val observeCalls = mutableListOf<String>() // leaseIds
+
+    override fun observe(
+        leaseId: String,
+        operationId: String,
+        expectedIntentHash: String
+    ): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? {
+        observeCalls += leaseId
+        return observeAnswers(leaseId, operationId, expectedIntentHash)
+    }
+
+    val advanceCalls = mutableListOf<io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1>()
+    var advanceOutcomeWire: Int = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.ADVANCED.wire
+
+    override fun completeAndAdvance(
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String
+    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1 {
+        advanceCalls += request
+        // The effective intent hash echoes the digest of the LAST apply this fake served (the intent
+        // currently in effect for the lease) — a real provider's receipt binds the same way.
+        val effectiveHash = appliedDigests.values.lastOrNull() ?: ""
+        return io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1(
+            outcomeWire = advanceOutcomeWire,
+            advancedFromItemId = request.expectedCurrentItemId,
+            advancedToItemId = "item-2",
+            scheduleVersionAfter = request.expectedScheduleVersion + 1,
+            effectiveIntentHash = effectiveHash,
+            effectiveEnvironmentRevision = 7L,
+            receiptDigest = "advance-receipt-${request.idempotencyKey}"
+        )
+    }
 }

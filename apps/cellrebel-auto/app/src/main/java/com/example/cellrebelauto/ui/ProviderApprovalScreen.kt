@@ -35,10 +35,14 @@ fun ProviderApprovalScreen(
     approved: List<ProviderEntry>,
     onApprove: (ProviderEntry) -> Unit,
     onRevoke: (ProviderEntry) -> Unit,
+    onBack: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Provider 管理", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+            Text("Provider 管理", style = MaterialTheme.typography.titleMedium)
+            OutlinedButton(onClick = onBack) { Text("返回") }
+        }
 
         Text("待批准候选", style = MaterialTheme.typography.titleSmall)
         if (pending.isEmpty()) {
@@ -49,7 +53,12 @@ fun ProviderApprovalScreen(
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(entry.applicationId, style = MaterialTheme.typography.bodyMedium)
                     Text("signer: ${entry.signerDigest}", style = MaterialTheme.typography.bodySmall)
-                    Text("来源: 配对请求（调用内快照）", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        // R44 F5: the REAL discovery source — the provider is installed and its
+                        // current signer was resolved at discovery time. Never a fabricated label.
+                        "来源: 已安装 provider（当前 signer 实测解析）",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                         Button(onClick = { onApprove(entry) }) { Text("批准") }
                     }

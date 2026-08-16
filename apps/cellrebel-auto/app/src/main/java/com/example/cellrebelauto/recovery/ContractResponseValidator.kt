@@ -69,7 +69,7 @@ object ContractResponseValidator {
         val payload = (base as ValidatedContractResponse.Success).payload
         val receipt = payload.applyReceipt
             ?: return ValidatedContractResponse.Failure("PROVIDER_APPLY_WITHOUT_RECEIPT")
-        if (hasForeignPayloads(result, expectApply = true)) {
+        if (hasForeignPayloads(result, ContractResultKindV1.APPLY)) {
             return ValidatedContractResponse.Failure("PROVIDER_APPLY_FOREIGN_PAYLOAD")
         }
         if (receipt.idempotencyKey != idempotencyKey) {
@@ -103,7 +103,7 @@ object ContractResponseValidator {
         val payload = (base as ValidatedContractResponse.Success).payload
         val receipt = payload.releaseReceipt
             ?: return ValidatedContractResponse.Failure("PROVIDER_RELEASE_WITHOUT_RECEIPT")
-        if (hasForeignPayloads(result, expectRelease = true)) {
+        if (hasForeignPayloads(result, ContractResultKindV1.RELEASE)) {
             return ValidatedContractResponse.Failure("PROVIDER_RELEASE_FOREIGN_PAYLOAD")
         }
         if (receipt.leaseId != leaseId) {
@@ -119,17 +119,97 @@ object ContractResponseValidator {
     /** Payload exclusivity: exactly ONE matching payload field non-null on a success kind. */
     private fun hasForeignPayloads(
         result: EnvironmentControlResultV1,
-        expectApply: Boolean = false,
-        expectRelease: Boolean = false
+        expectedKind: ContractResultKindV1
     ): Boolean {
         val slots = listOfNotNull(
-            result.capabilitySnapshot,
-            result.preflightReport,
-            if (expectApply) null else result.applyReceipt,
-            result.environmentObservation,
-            if (expectRelease) null else result.releaseReceipt,
-            result.advanceReceipt
+            if (expectedKind == ContractResultKindV1.DISCOVER) null else result.capabilitySnapshot,
+            if (expectedKind == ContractResultKindV1.PREFLIGHT) null else result.preflightReport,
+            if (expectedKind == ContractResultKindV1.APPLY) null else result.applyReceipt,
+            if (expectedKind == ContractResultKindV1.OBSERVE) null else result.environmentObservation,
+            if (expectedKind == ContractResultKindV1.RELEASE) null else result.releaseReceipt,
+            if (expectedKind == ContractResultKindV1.COMPLETE_AND_ADVANCE) null else result.advanceReceipt
         )
         return slots.isNotEmpty()
+    }
+
+    /** DISCOVER: exactly the capabilitySnapshot payload. */
+    fun validateDiscover(
+        result: EnvironmentControlResultV1
+    ): ValidatedContractResponse<io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1> {
+        val base = validateSchemaAndKind(result, ContractResultKindV1.DISCOVER)
+        if (base is ValidatedContractResponse.Failure) return base
+        val payload = (base as ValidatedContractResponse.Success).payload
+        val snapshot = payload.capabilitySnapshot
+            ?: return ValidatedContractResponse.Failure("PROVIDER_DISCOVER_WITHOUT_SNAPSHOT")
+        if (hasForeignPayloads(result, ContractResultKindV1.DISCOVER)) {
+            return ValidatedContractResponse.Failure("PROVIDER_DISCOVER_FOREIGN_PAYLOAD")
+        }
+        return ValidatedContractResponse.Success(snapshot)
+    }
+
+    /** PREFLIGHT: exactly the preflightReport payload; the report must bind the intent we sent. */
+    fun validatePreflight(
+        result: EnvironmentControlResultV1,
+        expectedIntentHash: String
+    ): ValidatedContractResponse<io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1> {
+        val base = validateSchemaAndKind(result, ContractResultKindV1.PREFLIGHT)
+        if (base is ValidatedContractResponse.Failure) return base
+        val payload = (base as ValidatedContractResponse.Success).payload
+        val report = payload.preflightReport
+            ?: return ValidatedContractResponse.Failure("PROVIDER_PREFLIGHT_WITHOUT_REPORT")
+        if (hasForeignPayloads(result, ContractResultKindV1.PREFLIGHT)) {
+            return ValidatedContractResponse.Failure("PROVIDER_PREFLIGHT_FOREIGN_PAYLOAD")
+        }
+        if (report.acceptedIntentHash != expectedIntentHash) {
+            return ValidatedContractResponse.Failure("PROVIDER_PREFLIGHT_INTENT_MISMATCH")
+        }
+        return ValidatedContractResponse.Success(report)
+    }
+
+    /** OBSERVE: exactly the observation payload; bound to the attempt's lease AND intent hash. */
+    fun validateObserve(
+        result: EnvironmentControlResultV1,
+        expectedLeaseId: String,
+        expectedIntentHash: String
+    ): ValidatedContractResponse<io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1> {
+        val base = validateSchemaAndKind(result, ContractResultKindV1.OBSERVE)
+        if (base is ValidatedContractResponse.Failure) return base
+        val payload = (base as ValidatedContractResponse.Success).payload
+        val observation = payload.environmentObservation
+            ?: return ValidatedContractResponse.Failure("PROVIDER_OBSERVE_WITHOUT_OBSERVATION")
+        if (hasForeignPayloads(result, ContractResultKindV1.OBSERVE)) {
+            return ValidatedContractResponse.Failure("PROVIDER_OBSERVE_FOREIGN_PAYLOAD")
+        }
+        if (observation.leaseId != expectedLeaseId) {
+            return ValidatedContractResponse.Failure("PROVIDER_OBSERVE_LEASE_MISMATCH")
+        }
+        if (observation.acceptedIntentHash != expectedIntentHash) {
+            return ValidatedContractResponse.Failure("PROVIDER_OBSERVE_INTENT_MISMATCH")
+        }
+        return ValidatedContractResponse.Success(observation)
+    }
+
+    /** COMPLETE_AND_ADVANCE: exactly the advanceReceipt payload; outcome wire decodes; the receipt's
+     *  effective intent hash binds the attempt's apply intent. */
+    fun validateCompleteAndAdvance(
+        result: EnvironmentControlResultV1,
+        expectedIntentHash: String
+    ): ValidatedContractResponse<io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1> {
+        val base = validateSchemaAndKind(result, ContractResultKindV1.COMPLETE_AND_ADVANCE)
+        if (base is ValidatedContractResponse.Failure) return base
+        val payload = (base as ValidatedContractResponse.Success).payload
+        val receipt = payload.advanceReceipt
+            ?: return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_WITHOUT_RECEIPT")
+        if (hasForeignPayloads(result, ContractResultKindV1.COMPLETE_AND_ADVANCE)) {
+            return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_FOREIGN_PAYLOAD")
+        }
+        // M-VS-02: an unknown advance outcome wire must NEVER be read optimistically.
+        if (io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.fromWire(receipt.outcomeWire) == null) {
+            return ValidatedContractResponse.Failure("PROVIDER_UNKNOWN_ADVANCE_OUTCOME")
+        }
+        if (receipt.effectiveIntentHash != expectedIntentHash) {
+            return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_INTENT_MISMATCH")
+        }
+        return ValidatedContractResponse.Success(receipt)
     }
 }

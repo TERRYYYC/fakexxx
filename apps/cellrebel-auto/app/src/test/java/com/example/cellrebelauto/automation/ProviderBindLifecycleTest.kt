@@ -59,4 +59,37 @@ class ProviderBindLifecycleTest {
         val release = executor.release(1L, "r-1", "lease-x", "rd", 1000L)
         assertEquals("release fail-closes identically", "PROVIDER_NOT_BOUND", release.outcome)
     }
+
+    @Test
+    fun `the PRODUCTION onServiceConnected attempts the provider bind (Sol GREEN-review-3 F1 oracle)`() {
+        // Drives the REAL AutomationService connect callback — not a self-constructed executor.
+        // Sol's surviving mutation made onServiceConnected's bind() call vanish while the executor
+        // self-test stayed green; this oracle counts the PRODUCTION callback's bind attempts via
+        // the service's observability counters.
+        AutomationService.resetProviderBindObservability()
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val service = AutomationService()
+        // Protected framework/callback methods — invoked via reflection (the standard test seam
+        // for lifecycle callbacks Robolectric does not drive for accessibility services).
+        // attachBaseContext is declared on ContextWrapper, not Service.
+        val attach = android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+        attach.isAccessible = true
+        attach.invoke(service, context)
+        val connect = AutomationService::class.java.getDeclaredMethod("onServiceConnected")
+        connect.isAccessible = true
+        connect.invoke(service)
+
+        org.junit.Assert.assertEquals(
+            "the PRODUCTION connect callback must attempt exactly one provider bind (0 = the Sol mutation)",
+            1,
+            AutomationService.providerBindAttempts
+        )
+        // The attempt dispatched against the frozen component (bindService returned true in the
+        // shadow environment where the component resolves).
+        org.junit.Assert.assertEquals(
+            "the production bind dispatched against the frozen provider component",
+            java.lang.Boolean.TRUE,
+            AutomationService.lastProviderBindReturnedTrue
+        )
+    }
 }

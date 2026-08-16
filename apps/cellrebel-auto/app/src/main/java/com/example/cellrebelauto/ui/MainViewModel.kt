@@ -86,17 +86,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _providerEntries = MutableStateFlow<List<ProviderEntry>>(emptyList())
     val providerEntries: StateFlow<List<ProviderEntry>> = _providerEntries
 
+    // R44 (Sol GREEN-review-3 F5): the SEVEN-state production projection — derived from DURABLE
+    // owner state only (pairing records + the crashed attempt's §8.1 phase + unverified records),
+    // combined with the attempts flow the History projection already observes. This is the state
+    // the run surface's PairingStatusCard renders; the UI never decides it.
+    private val dbInstance = AppDatabase.getInstance(application)
+    val pairingUiState: kotlinx.coroutines.flow.StateFlow<PairingUiState> =
+        kotlinx.coroutines.flow.combine(
+            planRepository.observeAttemptsWithTasks(),
+            _providerEntries
+        ) { attempts, entries ->
+            val hasActiveProvider = entries.any { it.isApproved }
+            val crashed = attempts.firstOrNull {
+                it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
+            }?.attempt
+            val hasUnverified = kotlinx.coroutines.runBlocking {
+                dbInstance.unverifiedAttemptRecordDao().getByAttempt(
+                    attempts.firstOrNull()?.attempt?.id ?: -1L
+                ) != null
+            }
+            PairingUiState.project(
+                hasProviderRecord = entries.isNotEmpty(),
+                providerActive = hasActiveProvider,
+                crashedAplusState = crashed?.aplusState,
+                hasUnverifiedRecord = hasUnverified
+            )
+        }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Lazily, PairingUiState.Trusted)
+
     fun refreshProviders() {
         viewModelScope.launch {
-            val rows = AppDatabase.getInstance(getApplication()).providerPairingDao().all()
-            _providerEntries.value = rows.map {
+            val app = getApplication<Application>()
+            val rows = AppDatabase.getInstance(app).providerPairingDao().all()
+            val approved = rows.filter { it.revokedAt == null }.map {
                 ProviderEntry(
                     applicationId = it.applicationId,
                     signerDigest = it.currentSignerDigest,
                     approvedVersionCode = it.approvedVersionCode,
-                    isApproved = it.revokedAt == null
+                    isApproved = true
                 )
             }
+            // R44 (Sol GREEN-review-3 F5): pending candidates are the providers DISCOVERED at
+            // call-time (installed + signer resolvable) that are NOT yet approved — resolved from
+            // the live package state, NEVER fabricated from revoked history rows. A revoked row is
+            // not a pending candidate; its re-approval must walk operator approval again (M-PA-10)
+            // via the same discovery path.
+            val pending = mutableListOf<ProviderEntry>()
+            for (appId in listOf(
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH
+            )) {
+                if (appId in approved.map { it.applicationId }) continue
+                val signer = com.example.cellrebelauto.environment.ProviderTrustGate
+                    .packageManagerSignerDigest(app.packageManager, appId) ?: continue
+                pending += ProviderEntry(
+                    applicationId = appId,
+                    signerDigest = signer,
+                    approvedVersionCode = null,
+                    isApproved = false
+                )
+            }
+            _providerEntries.value = approved + pending
         }
     }
 

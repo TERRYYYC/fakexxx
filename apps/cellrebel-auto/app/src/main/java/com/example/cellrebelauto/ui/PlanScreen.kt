@@ -70,7 +70,9 @@ fun PlanScreen(
     onStartOrResume: () -> Unit,
     onStop: () -> Unit,
     onOpenRun: () -> Unit,
-    onOpenHistory: () -> Unit
+    onOpenHistory: () -> Unit,
+    // R44 (Sol GREEN-review-3 F5): entry into provider management (§6.5.3 approval surface).
+    onOpenProviders: () -> Unit = {}
 ) {
     // # SAF 文件选择器（无需新增权限）
     val importLauncher = rememberLauncherForActivityResult(
@@ -302,6 +304,9 @@ fun PlanScreen(
                 }
                 OutlinedButton(onClick = onOpenHistory, modifier = Modifier.weight(1f)) {
                     Text("History")
+                }
+                OutlinedButton(onClick = onOpenProviders, modifier = Modifier.weight(1f)) {
+                    Text("Provider")
                 }
             }
         }
