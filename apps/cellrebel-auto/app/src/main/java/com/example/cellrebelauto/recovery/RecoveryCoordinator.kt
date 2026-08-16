@@ -46,6 +46,13 @@ class RecoveryCoordinator(
         private set
 
     /**
+     * R44 (DSF review P1-2): read-only access to the executor seam — the engine's preflight /
+     * completeAndAdvance consumers go through the SAME executor the coordinator drives for
+     * apply/release (single wiring point; the executor is a constructor-owned dependency).
+     */
+    fun executorBackend(): ExternalApplyExecutor = executor
+
+    /**
      * Reconcile a non-terminal attempt after crash/restart (§8.1 RECOVERY_REQUIRED). Returns a TYPED
      * result carrying the durable apply receipt + provider lease the engine MUST persist — the lease is
      * NOT invented by the caller; it comes back from the (idempotent) apply (Sol round-9 P1-3: the

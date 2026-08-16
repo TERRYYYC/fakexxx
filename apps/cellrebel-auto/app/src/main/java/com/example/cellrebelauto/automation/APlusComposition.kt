@@ -95,9 +95,13 @@ object APlusComposition {
         // never-bound. When null (early construction), a fresh executor is created UNBOUND and
         // fail-closes every call (PROVIDER_NOT_BOUND) — still safe, and the Service re-composes
         // with the bound one on the next run.
-        serviceLifecycleExecutor: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor? = null
+        // R44 (DSF review P1-1): the executor seam is the INTERFACE — production passes the
+        // service-lifecycle BinderExternalApplyExecutor (typed as BinderExternalApplyExecutor below
+        // for Service wiring), tests pass a fake that implements the SAME journey surface. This is
+        // what makes the production evidence source's observe/consumption chain oracle-drivable.
+        serviceLifecycleExecutor: ExternalApplyExecutor? = null
     ): APlusBackend {
-        val binderExecutor = serviceLifecycleExecutor
+        val binderExecutor: ExternalApplyExecutor = serviceLifecycleExecutor
             ?: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(context)
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
             db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()

@@ -631,11 +631,19 @@ class EngineTrustedPathRedTest {
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
         buildEngine(planId, runner, gps, clock, backend = backend).run()
 
-        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).first()
-        assertEquals("the shipped backend must fail closed at apply (no lease) — aplusState stays APPLY_PENDING", "APPLY_PENDING", attempt.aplusState)
-        assertNull("the shipped skeleton must never persist a lease", db.testAttemptDao().getAplusLeaseId(attempt.id))
-        assertEquals("no trusted mint through the shipped skeleton", 0, db.trustedQuotaDao().countAll())
-        assertEquals("legacy-zero through the shipped skeleton", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
+        // R44 (DSF review P1-2): the fail-closed point moved EARLIER — the run-start DISCOVER gate.
+        // An unbound provider yields discover()=null ⇒ the plan pauses BEFORE any attempt is created
+        // (strictly safer than the old apply-time pause: no half-created attempt rows).
+        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
+        assertTrue(
+            "the shipped backend fails closed at the discover gate — no attempt was created at all " +
+                "(or, if discover succeeded, it paused at apply with no lease)",
+            attempts.isEmpty() || attempts.all { it.aplusState == null || it.aplusState == "APPLY_PENDING" }
+        )
+        assertEquals("no lease ever persisted through the shipped backend", 0,
+            attempts.count { db.testAttemptDao().getAplusLeaseId(it.id) != null })
+        assertEquals("no trusted mint through the shipped backend", 0, db.trustedQuotaDao().countAll())
+        assertEquals("legacy-zero through the shipped backend", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
         assertEquals("paused", db.runSessionDao().getLatest()!!.status)
     }
 

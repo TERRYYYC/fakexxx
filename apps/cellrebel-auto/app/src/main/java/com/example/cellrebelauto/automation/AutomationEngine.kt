@@ -230,6 +230,19 @@ class AutomationEngine(
             _cycleCount.value = 0
             log("=== Plan run started (plan #$planId, session #$runSessionId) ===")
 
+            // R44 (DSF review P1-2): DISCOVER — §6.1's capability handshake at run start. The
+            // provider must advertise the frozen protocol version before any A+ attempt runs; an
+            // unavailable/discover-failed provider fail-closes the plan BEFORE the first apply.
+            recoveryCoordinator?.let { coord ->
+                val capabilities = coord.executorBackend().discover()
+                if (capabilities == null ||
+                    capabilities.protocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+                ) {
+                    aplusPause("provider discover failed or protocol incompatible (v1 required)")
+                    return@coroutineScope
+                }
+            }
+
             // ==================== Step 2+: plan loop ====================
             // # M-MG-02 GREEN：选择走 trusted 投影（count(trusted) >= required 才算完成），绝不读
             // # legacy counter 判定完成/跳过。attemptedThisRun 调和 legacy 重试语义：counter-full/
@@ -339,6 +352,21 @@ class AutomationEngine(
                         runSessionId, attemptId, planId, task.id, startedAt, startedAt + testTimeoutMs
                     )
                     val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
+                    // R44 (DSF review P1-2): PREFLIGHT — the provider's schedule decision for THIS
+                    // intent is consulted BEFORE the apply (§6.7): a DENIED/WAIT_UNTIL preflight
+                    // fail-closes the attempt BEFORE any external apply is dispatched. This is the
+                    // production consumer of executor.preflight().
+                    val preflight = aplusCoord.executorBackend()?.preflight(
+                        applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest
+                    )
+                    if (preflight != null && preflight.scheduleDecisionWire !=
+                        io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire
+                    ) {
+                        // §6.7: not allowed now ⇒ typed failure, no apply, no quota.
+                        planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
+                        aplusPause("preflight denied schedule for attempt $attemptId (decision=${preflight.scheduleDecisionWire})")
+                        return@coroutineScope
+                    }
                     // # P1-3：持久化当前操作（§7.1 Attempt 拥有当前 operation）。
                     planRepository.markAplusState(attemptId, "APPLY_PENDING")
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.BEGIN_APPLY) ?: aplusState
@@ -485,6 +513,41 @@ class AutomationEngine(
                                 // # P1-1 (Sol round-15): persist the authoritative phase — M-CR-07 crash
                                 // # (after the ledger commit) must recover as QUOTA_COMMITTED, not DECIDING.
                                 planRepository.markAplusState(attemptId, "QUOTA_COMMITTED")
+                                // R44 (DSF review P1-2): COMPLETE-AND-ADVANCE — §6.7.3's single seam
+                                // between Auto's quota ownership and the provider's schedule order.
+                                // Auto owns the completion judgement (the proof above); the provider
+                                // RECORDS it and advances ITS schedule. The CAS preconditions come
+                                // from the attempt's projection identity; the receipt's intent hash
+                                // must bind this attempt's apply intent (validator enforces).
+                                // The attempt's lease + apply identity + the §6.7.4b CAS preconditions
+                                // (expectedScheduleId first — two schedules may reuse (itemId, version)).
+                                val advanceLease = leaseIdForAttempt(attemptId)
+                                val advanceReceipt = aplusCoord.executorBackend().completeAndAdvance(
+                                    io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
+                                        leaseId = advanceLease,
+                                        idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                                        requestDigest = intentDigest,
+                                        expectedScheduleId = "plan-$planId",
+                                        expectedScheduleVersion = 1L,
+                                        expectedCurrentItemId = "task-${task.id}",
+                                        completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
+                                            scheduleItemId = "task-${task.id}",
+                                            trustedSuccessCount = planRepository.trustedCountForTaskPublic(task.id),
+                                            quotaRequired = task.requiredSuccesses,
+                                            ledgerRef = "ledger-$attemptId",
+                                            verifiedAtElapsedRealtimeMs = commitClockMs()
+                                        ),
+                                        callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+                                    ),
+                                    intentDigest
+                                )
+                                if (advanceReceipt == null) {
+                                    // Fail-closed: the provider could not prove the advance — the
+                                    // quota is committed locally but the schedule did NOT move. Pause
+                                    // for operator visibility; never silently continue (§6.7.3).
+                                    aplusPause("completeAndAdvance not proven for attempt $attemptId — schedule did not advance")
+                                    return@coroutineScope
+                                }
                                 updateState(AutomationState.SUCCEEDED)
                             } else {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_FAIL) ?: aplusState
@@ -990,6 +1053,13 @@ class AutomationEngine(
      *   FAIL wrote the unverified carrier); false when any durable carrier is missing (fail-closed:
      *   NO mint — the caller falls through to the release convergence + interrupted projection).
      */
+    /** The persisted lease for an attempt (never invented; null when absent). */
+    private suspend fun leaseIdForAttempt(attemptId: Long): String =
+        planRepository.getAplusLeaseId(attemptId) ?: ""
+
+    private suspend fun PlanRepository.trustedCountForTaskPublic(taskId: Long): Int =
+        trustedCountForTask(taskId)
+
     private suspend fun redecideDecidingAttempt(crashed: TestAttempt): Boolean {
         // Owner lookup (Sol R35 P1-2): the CURRENT execution is the row the owner pointer names.
         val ownerExecId = planRepository.getCurrentExecutionId(crashed.id) ?: return false

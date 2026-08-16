@@ -388,6 +388,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getUnverifiedRecord(attemptId: Long): UnverifiedAttemptRecord? =
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
 
+    /** R44 (DSF review P1-2): the trusted-count projection for the completeAndAdvance proof. */
+    suspend fun trustedCountForTask(taskId: Long): Int =
+        db.trustedQuotaDao().trustedCountForTask(taskId)
+
     // # A+ PASS 终态化（P1-5）：标记 attempt succeeded，successOrdinal 由可信计数投影 1-based（Sol round-9
     // # P1-6：绝不动 legacy completedSuccesses、绝不写 successOrdinal=0）。
     suspend fun finalizeAplusSuccess(attemptId: Long, taskId: Long, endedAt: Long, webScore: Double?, videoScore: Double?) =

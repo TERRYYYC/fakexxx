@@ -73,15 +73,21 @@ data class PlanUiState(
  * # 主界面 ViewModel：桥接 AutomationService 的状态
  * # 并为 Compose 界面提供操作接口
  */
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel(
+    application: Application,
+    // R44 (DSF review P2-1): test-injectable DB — production keeps the singleton; oracles seed an
+    // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
+    private val injectedDb: AppDatabase? = null
+) : AndroidViewModel(application) {
 
-    private val planRepository = PlanRepository(AppDatabase.getInstance(application))
+    private val db = injectedDb ?: AppDatabase.getInstance(application)
+    private val planRepository = PlanRepository(db)
     private val planConfigStore = PlanConfigStore(application)
 
     // R43 (spec Task 6 / Sol GREEN-review-2 F5): the ProviderTrustStore PRODUCTION callers —
     // the operator approval/revocation surface (§6.5.3). No silent TOFU: approval is explicit.
     private val trustStore = com.example.cellrebelauto.environment.ProviderTrustStore(
-        AppDatabase.getInstance(application).providerPairingDao()
+        db.providerPairingDao()
     )
     private val _providerEntries = MutableStateFlow<List<ProviderEntry>>(emptyList())
     val providerEntries: StateFlow<List<ProviderEntry>> = _providerEntries
@@ -90,7 +96,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // owner state only (pairing records + the crashed attempt's §8.1 phase + unverified records),
     // combined with the attempts flow the History projection already observes. This is the state
     // the run surface's PairingStatusCard renders; the UI never decides it.
-    private val dbInstance = AppDatabase.getInstance(application)
+    private val dbInstance = db
     val pairingUiState: kotlinx.coroutines.flow.StateFlow<PairingUiState> =
         kotlinx.coroutines.flow.combine(
             planRepository.observeAttemptsWithTasks(),
@@ -116,7 +122,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshProviders() {
         viewModelScope.launch {
             val app = getApplication<Application>()
-            val rows = AppDatabase.getInstance(app).providerPairingDao().all()
+            val rows = db.providerPairingDao().all()
             val approved = rows.filter { it.revokedAt == null }.map {
                 ProviderEntry(
                     applicationId = it.applicationId,
