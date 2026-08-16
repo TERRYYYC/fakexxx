@@ -56,10 +56,13 @@ object ContractResponseValidator {
         return ValidatedContractResponse.Success(result)
     }
 
-    /** APPLY: exactly the applyReceipt payload; the receipt's tuple is bound to the caller's key. */
+    /** APPLY: exactly the applyReceipt payload; the receipt's tuple is bound to the caller's key AND
+     *  the provider-accepted intent hash must equal the digest of the intent we actually sent (R44,
+     *  Sol GREEN-review-3 F2); an unknown verification wire code fail-closes (M-VS-02). */
     fun validateApply(
         result: EnvironmentControlResultV1,
-        idempotencyKey: String
+        idempotencyKey: String,
+        expectedIntentHash: String
     ): ValidatedContractResponse<io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1> {
         val base = validateSchemaAndKind(result, ContractResultKindV1.APPLY)
         if (base is ValidatedContractResponse.Failure) return base
@@ -76,6 +79,16 @@ object ContractResponseValidator {
         // present (the hash is compared against the owner recompute in the trust predicate).
         if (receipt.acceptedIntentHash.isBlank() || receipt.leaseId.isBlank()) {
             return ValidatedContractResponse.Failure("PROVIDER_RECEIPT_INCOMPLETE")
+        }
+        // R44 (Sol GREEN-review-3 F2): the accepted hash must bind the digest of the intent we SENT —
+        // a receipt attesting a DIFFERENT intent is not a proof for this operation.
+        if (receipt.acceptedIntentHash != expectedIntentHash) {
+            return ValidatedContractResponse.Failure("PROVIDER_RECEIPT_INTENT_MISMATCH")
+        }
+        // R44 (Sol GREEN-review-3 F2): unknown verification wire codes fail closed (M-VS-02) — an
+        // undecodable verification claim can never be trusted.
+        if (io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.fromWire(receipt.verificationLevelWire) == null) {
+            return ValidatedContractResponse.Failure("PROVIDER_UNKNOWN_VERIFICATION_WIRE")
         }
         return ValidatedContractResponse.Success(receipt)
     }

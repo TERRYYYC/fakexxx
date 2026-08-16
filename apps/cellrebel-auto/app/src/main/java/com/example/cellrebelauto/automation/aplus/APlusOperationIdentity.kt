@@ -30,28 +30,42 @@ object APlusOperationIdentity {
     fun releaseIdempotencyKey(attemptId: Long): String = "auto-aplus-release-$attemptId"
 
     /**
-     * The §6.3.1 intent preimage for an attempt, built from the DURABLE owner state. The legacy
-     * (latitude, longitude) parameters are RETAINED in the signature for call-site compatibility
-     * but are NOT part of the preimage (KB-8: coordinates were removed from the intent — the
-     * provider resolves the effective location from its own schedule item data).
+     * The §6.3.1 intent preimage for an attempt, built from the DURABLE owner state. KB-8: NO
+     * coordinates — the provider is the sole coordinate authority and resolves the effective
+     * location from its own schedule item data; Auto only hands over STABLE references.
+     *
+     * R44 (Sol GREEN-review-3 F2): the refs and the validity window are REAL, never invented
+     * constants — `profileRef`/`scheduleRef` name the plan/task the attempt belongs to, and
+     * [notBeforeEpochMs]/[deadlineEpochMs] are the attempt's own validity window (its persisted
+     * start .. start + test timeout). Every input is recomputable after a crash from the persisted
+     * attempt row + plan config, so the digest is byte-identical across the normal path and
+     * recovery — and "auto-profile"/"auto-schedule"/infinite-window placeholders are gone.
      */
-    fun intent(runSessionId: Long, attemptId: Long): EnvironmentIntentV1 = EnvironmentIntentV1(
+    fun intent(
+        runSessionId: Long,
+        attemptId: Long,
+        planId: Long,
+        taskId: Long,
+        notBeforeEpochMs: Long,
+        deadlineEpochMs: Long
+    ): EnvironmentIntentV1 = EnvironmentIntentV1(
         runId = "auto-run-$runSessionId",
         attemptId = attemptId.toString(),
-        profileRef = "auto-profile",     // single-profile batch v1; the plan's profile reference
-        scheduleRef = "auto-schedule",   // single-schedule batch v1; the plan's schedule reference
+        profileRef = "plan-$planId",   // the plan IS the batch profile (stable, plan-bound)
+        scheduleRef = "task-$taskId",  // the task IS the schedule item reference (stable, task-bound)
         requiredVerificationWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
             .SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
-        notBeforeEpochMs = 0L,
-        deadlineEpochMs = Long.MAX_VALUE // no per-attempt deadline in the batch v1 template
+        notBeforeEpochMs = notBeforeEpochMs,
+        deadlineEpochMs = deadlineEpochMs
     )
 
     /**
-     * Canonical request digest of the attempt's apply intent — the FROZEN §6.3.1 algorithm over
-     * the KB-8 preimage (no coordinates), deterministic in the durable owner identity.
+     * Canonical request digest of an apply intent — the FROZEN §6.3.1 algorithm over the SAME
+     * [EnvironmentIntentV1] object that goes on the wire. R44 (Sol GREEN-review-3 F2): the digest
+     * preimage and the Binder request are ONE object by construction — never two recomputations
+     * that can drift apart (the runSessionId-misbind probe).
      */
-    fun requestDigest(latitude: Double, longitude: Double, attemptId: Long, runSessionId: Long): String =
-        CanonicalIntentDigestV1.compute(intent(runSessionId, attemptId))
+    fun requestDigest(intent: EnvironmentIntentV1): String = CanonicalIntentDigestV1.compute(intent)
 
     /**
      * Canonical release digest — domain-separated frozen framing over the LEASE id (§6.3.4: the

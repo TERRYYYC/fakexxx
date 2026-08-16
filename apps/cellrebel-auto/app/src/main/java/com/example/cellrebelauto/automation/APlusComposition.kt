@@ -177,7 +177,13 @@ object APlusComposition {
 
     /** Fail-closed skeleton executor — drives no provider, reports no effect. */
     private object SkeletonExecutor : ExternalApplyExecutor {
-        override fun apply(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome =
+        override fun apply(
+            attemptId: Long,
+            intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+            idempotencyKey: String,
+            requestDigest: String,
+            now: Long
+        ): ApplyOutcome =
             ApplyOutcome("SKELETON_FAIL_CLOSED", providerHadAlreadyApplied = false)
 
         override fun release(

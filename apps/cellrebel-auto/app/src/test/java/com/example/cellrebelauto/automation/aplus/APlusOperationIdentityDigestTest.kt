@@ -7,62 +7,116 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * R43 (Sol GREEN-review-2 F2): CONSUMPTION-TYPE oracles for Auto's intent digest.
+ * R43 (Sol GREEN-review-2 F2) / R44 (Sol GREEN-review-3 F2): CONSUMPTION-TYPE oracles for Auto's
+ * intent digest.
  *
  * Sol's surviving mutation: replacing [APlusOperationIdentity.requestDigest] with a CONSTANT kept
  * the whole suite green — the previous digest test only exercised the contract library itself,
  * never Auto's consumption seam. These oracles drive AUTO'S function and pin:
  *  - it is a real 64-hex SHA-256 (never a placeholder string);
- *  - it EQUALS the frozen CanonicalIntentDigestV1 over the same intent (the delegation itself);
+ *  - it EQUALS the frozen CanonicalIntentDigestV1 over the same intent object (the delegation);
  *  - it is deterministic in the durable owner identity and sensitive to attempt/session identity;
- *  - it does NOT vary with coordinates (KB-8: coordinates are not in the preimage).
+ *  - R44: the plan/task refs and the validity window are REAL preimage inputs (never invented
+ *    constants like "auto-profile"/"auto-schedule" or the infinite window) and each moves the digest.
  *
- * # 消费型 digest oracle：直接驱动 Auto 的 requestDigest，钉死委托冻结算法 + 身份敏感 + KB-8 无坐标
+ * # 消费型 digest oracle：直接驱动 Auto 的 requestDigest，钉死委托冻结算法 + 身份敏感 + 真实 refs/窗口
  */
 class APlusOperationIdentityDigestTest {
 
+    private fun intent(
+        sessionId: Long = 5L,
+        attemptId: Long = 77L,
+        planId: Long = 1L,
+        taskId: Long = 42L,
+        notBefore: Long = 600L,
+        deadline: Long = 600L + 90_000L
+    ) = APlusOperationIdentity.intent(sessionId, attemptId, planId, taskId, notBefore, deadline)
+
     @Test
-    fun `Auto's requestDigest IS the frozen CanonicalIntentDigestV1 over the same owner identity`() {
-        val viaAuto = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId = 77L, runSessionId = 5L)
-        val viaContract = CanonicalIntentDigestV1.compute(APlusOperationIdentity.intent(5L, 77L))
+    fun `Auto's requestDigest IS the frozen CanonicalIntentDigestV1 over the same intent object`() {
+        val intent = intent()
         assertEquals(
             "Auto's digest must be EXACTLY the frozen contract digest over the same intent (the delegation seam, Sol GREEN-review-2 F2)",
-            viaContract,
-            viaAuto
+            CanonicalIntentDigestV1.compute(intent),
+            APlusOperationIdentity.requestDigest(intent)
         )
     }
 
     @Test
     fun `the digest is a real 64-hex SHA-256, never a placeholder string`() {
         for (attemptId in listOf(1L, 77L, 999L)) {
-            val d = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId, 5L)
+            val d = APlusOperationIdentity.requestDigest(intent(attemptId = attemptId))
             assertEquals("64 hex chars (SHA-256)", 64, d.length)
             assertTrue("lowercase hex only: $d", d.all { it in "0123456789abcdef" })
         }
     }
 
     @Test
-    fun `the digest is deterministic in the durable owner identity`() {
-        val d1 = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId = 77L, runSessionId = 5L)
-        val d2 = APlusOperationIdentity.requestDigest(1.0, 2.0, attemptId = 77L, runSessionId = 5L)
+    fun `the digest is deterministic in the durable owner identity (crash-recompute stability)`() {
         assertEquals(
-            "the same owner identity (attempt+session) yields the same digest regardless of coords (KB-8)",
-            d1, d2
+            "the same durable owner inputs yield the same digest (normal path == post-crash recompute)",
+            APlusOperationIdentity.requestDigest(intent()),
+            APlusOperationIdentity.requestDigest(intent())
         )
     }
 
     @Test
     fun `the digest is sensitive to the attempt identity`() {
-        val d77 = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId = 77L, runSessionId = 5L)
-        val d78 = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId = 78L, runSessionId = 5L)
-        assertNotEquals("a different attempt MUST digest differently (INV-13 / attribution)", d77, d78)
+        assertNotEquals(
+            "a different attempt MUST digest differently (INV-13 / attribution)",
+            APlusOperationIdentity.requestDigest(intent(attemptId = 77L)),
+            APlusOperationIdentity.requestDigest(intent(attemptId = 78L))
+        )
     }
 
     @Test
     fun `the digest is sensitive to the run-session identity`() {
-        val dS5 = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId = 77L, runSessionId = 5L)
-        val dS6 = APlusOperationIdentity.requestDigest(39.9, 116.4, attemptId = 77L, runSessionId = 6L)
-        assertNotEquals("a different run session MUST digest differently (attribution binding)", dS5, dS6)
+        assertNotEquals(
+            "a different run session MUST digest differently (attribution binding)",
+            APlusOperationIdentity.requestDigest(intent(sessionId = 5L)),
+            APlusOperationIdentity.requestDigest(intent(sessionId = 6L))
+        )
+    }
+
+    // R44 (Sol GREEN-review-3 F2): the plan/task refs and the validity window are REAL preimage
+    // inputs — never invented constants; each must move the digest.
+    @Test
+    fun `the digest is sensitive to the plan and task refs`() {
+        assertNotEquals(
+            "a different plan ref MUST digest differently",
+            APlusOperationIdentity.requestDigest(intent(planId = 1L)),
+            APlusOperationIdentity.requestDigest(intent(planId = 2L))
+        )
+        assertNotEquals(
+            "a different task ref MUST digest differently",
+            APlusOperationIdentity.requestDigest(intent(taskId = 42L)),
+            APlusOperationIdentity.requestDigest(intent(taskId = 43L))
+        )
+    }
+
+    @Test
+    fun `the digest is sensitive to the validity window`() {
+        assertNotEquals(
+            "a different window start MUST digest differently",
+            APlusOperationIdentity.requestDigest(intent(notBefore = 600L)),
+            APlusOperationIdentity.requestDigest(intent(notBefore = 700L))
+        )
+        assertNotEquals(
+            "a different deadline MUST digest differently",
+            APlusOperationIdentity.requestDigest(intent(deadline = 600L + 90_000L)),
+            APlusOperationIdentity.requestDigest(intent(deadline = 600L + 91_000L))
+        )
+    }
+
+    @Test
+    fun `the intent refs and window carry the real plan-task identity, never invented constants`() {
+        val i = intent(planId = 9L, taskId = 7L, notBefore = 1234L, deadline = 1234L + 5000L)
+        assertEquals("plan-9", i.profileRef)
+        assertEquals("task-7", i.scheduleRef)
+        assertEquals(1234L, i.notBeforeEpochMs)
+        assertEquals(1234L + 5000L, i.deadlineEpochMs)
+        assertEquals("auto-run-5", i.runId)
+        assertEquals("77", i.attemptId)
     }
 
     @Test
@@ -74,7 +128,7 @@ class APlusOperationIdentityDigestTest {
         assertNotEquals(
             "release digest lives in a DIFFERENT frozen domain than the intent digest",
             d1,
-            APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, 5L)
+            APlusOperationIdentity.requestDigest(intent())
         )
     }
 }

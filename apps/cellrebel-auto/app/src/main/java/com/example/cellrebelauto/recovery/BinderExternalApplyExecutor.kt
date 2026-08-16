@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
-import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1
@@ -70,24 +69,25 @@ class BinderExternalApplyExecutor(
         }
     }
 
-    override fun apply(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
+    override fun apply(
+        attemptId: Long,
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String,
+        now: Long
+    ): ApplyOutcome {
         val api = remote
             ?: return ApplyOutcome(outcome = "PROVIDER_NOT_BOUND", providerHadAlreadyApplied = false, leaseId = null)
         return try {
-            // F2: the REAL frozen intent preimage — runId from the owner identity carried in the key,
-            // no coordinates (KB-8), digest recomputable from durable owner state. The idempotency
-            // key IS the operation identity; the validator re-binds the receipt to it.
-            val attemptIdNum = attemptId
+            // F2 (R44): the request carries the SAME intent object the caller digested — no
+            // recomputation here, so the wire preimage and the digest can never drift apart.
             val request = ApplyRequestV1(
-                intent = APlusOperationIdentity.intent(
-                    runSessionId = runSessionFromKey(idempotencyKey),
-                    attemptId = attemptIdNum
-                ),
+                intent = intent,
                 idempotencyKey = idempotencyKey,
                 callerProtocolVersion = ContractV1.PROTOCOL_VERSION
             )
             val result: EnvironmentControlResultV1 = api.apply(request)
-            when (val v = ContractResponseValidator.validateApply(result, idempotencyKey)) {
+            when (val v = ContractResponseValidator.validateApply(result, idempotencyKey, expectedIntentHash = requestDigest)) {
                 is ContractResponseValidator.ValidatedContractResponse.Success ->
                     ApplyOutcome(
                         outcome = "APPLIED", providerHadAlreadyApplied = false, leaseId = v.payload.leaseId,
@@ -132,7 +132,4 @@ class BinderExternalApplyExecutor(
         }
     }
 
-    /** The apply idempotency key embeds the attempt id (applyIdempotencyKey); the session comes from the caller's owner state via the digest source. */
-    private fun runSessionFromKey(idempotencyKey: String): Long =
-        idempotencyKey.substringAfterLast('-').toLongOrNull() ?: 0L
 }

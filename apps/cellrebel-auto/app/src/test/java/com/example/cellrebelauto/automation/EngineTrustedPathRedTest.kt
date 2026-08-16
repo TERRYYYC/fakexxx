@@ -38,6 +38,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.example.cellrebelauto.recovery.testApplyIntent
 import org.robolectric.RobolectricTestRunner
 
 /**
@@ -145,12 +146,19 @@ class EngineTrustedPathRedTest {
         private val lng: Double,
         private val wire: Int,
         private val deliveryMode: String,
-        private val present: Boolean = true
+        private val present: Boolean = true,
+        // R44 (Sol GREEN-review-3 F2): the intent-hash preimage inputs must equal the engine's
+        // recompute — plan/task refs + the attempt validity window. Defaults match this harness
+        // (fresh-db plan 1, task 42, VirtualClock initial 1000, buildEngine timeout 90s).
+        private val planId: Long = 1L,
+        private val taskId: Long = 42L,
+        private val attemptStartedAt: Long = 1000L,
+        private val testTimeoutMs: Long = 90_000L
     ) : APlusEvidenceSource {
         // R43 GREEN: the INV-23 three-way hash is recomputed from the REAL owner session id the
         // engine passes in — the placeholder run id (0L) could never agree with the engine recompute.
         private fun intentHash(attemptId: Long, runSessionId: Long) =
-            APlusOperationIdentity.requestDigest(lat, lng, attemptId, runSessionId)
+            APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, runSessionId, planId, taskId, attemptStartedAt, testTimeoutMs))
 
         // The observation/evidence lease MUST match the provider's apply lease (INV-07/23) — Sol round-10
         // P1-1: a fixed "L1" would be rejected by a correct lease binding, so it must be the provider lease.
@@ -459,7 +467,7 @@ class EngineTrustedPathRedTest {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         // P1-4: the fixture uses the SAME frozen digest the recovery recomputes (never a divergent constant).
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), now = 1000L)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -487,8 +495,8 @@ class EngineTrustedPathRedTest {
         val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "RELEASE_PENDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
-        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -547,8 +555,8 @@ class EngineTrustedPathRedTest {
         val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), now = 1000L)
-        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(39.9, 116.4, 77L, sessionId), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
         val backend = FakeBackend(executor, log, SeededObserve(mapOf(77L to true)), SeededRevision(mapOf(applyKey(77L) to true)), SeededQuota(mapOf(77L to true)), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
@@ -645,7 +653,7 @@ class EngineTrustedPathRedTest {
         val seededEntry = TrustedQuotaEntry(id = insertedId, attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -669,7 +677,7 @@ class EngineTrustedPathRedTest {
         db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 99L, taskId = taskId, evidenceDigest = "decoy", committedAt = 1000L))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -687,7 +695,7 @@ class EngineTrustedPathRedTest {
         db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 99L, reason = "UNTRUSTED", evidenceDigest = "decoy"))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -705,7 +713,7 @@ class EngineTrustedPathRedTest {
         db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -724,7 +732,7 @@ class EngineTrustedPathRedTest {
         db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = 999L, evidenceDigest = "d", committedAt = 1000L))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -745,7 +753,7 @@ class EngineTrustedPathRedTest {
         db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -765,7 +773,7 @@ class EngineTrustedPathRedTest {
         db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = 999L, evidenceDigest = "d", committedAt = 1000L))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -792,7 +800,7 @@ class EngineTrustedPathRedTest {
         db.unverifiedAttemptRecordDao().insert(UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "d"))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))

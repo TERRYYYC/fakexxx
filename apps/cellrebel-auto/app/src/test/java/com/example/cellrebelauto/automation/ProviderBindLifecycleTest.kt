@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor
+import com.example.cellrebelauto.recovery.testApplyIntent
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -52,7 +53,7 @@ class ProviderBindLifecycleTest {
         // connection, `remote` stays null, and every apply fail-closes with a typed outcome.
         val executor = BinderExternalApplyExecutor(app, providerApplicationId = "no.such.provider")
         executor.bind() // dispatches the intent; the connection never delivers in this scenario
-        val outcome = executor.apply(1L, "k-1", "d", 1000L)
+        val outcome = executor.apply(1L, testApplyIntent(attemptId = 1L), "k-1", "d", 1000L)
         assertEquals("an unconnected provider fail-closes with a typed outcome", "PROVIDER_NOT_BOUND", outcome.outcome)
         assertEquals("never a lease from an unbound provider", null, outcome.leaseId)
         val release = executor.release(1L, "r-1", "lease-x", "rd", 1000L)

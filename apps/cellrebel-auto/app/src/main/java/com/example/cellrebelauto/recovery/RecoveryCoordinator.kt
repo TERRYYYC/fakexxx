@@ -67,6 +67,7 @@ class RecoveryCoordinator(
      */
     fun reconcile(
         attemptId: Long,
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
         idempotencyKey: String,
         requestDigest: String,
         now: Long
@@ -85,7 +86,7 @@ class RecoveryCoordinator(
         }
         // No durable receipt ⇒ M-CR-02 window (b): re-invoke the executor (the provider idempotently
         // no-ops if it already applied), record the receipt + checkpoint, advance with the fresh lease.
-        val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
+        val outcome = executor.apply(attemptId, intent, idempotencyKey, requestDigest, now)
         if (outcome.leaseId == null) {
             // A fail-closed executor yields no lease — the apply is not proven; fail closed.
             return ReconcileResult.InsufficientEvidence
@@ -176,6 +177,7 @@ class RecoveryCoordinator(
      */
     fun dispatchApply(
         attemptId: Long,
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
         idempotencyKey: String,
         requestDigest: String,
         now: Long
@@ -187,7 +189,7 @@ class RecoveryCoordinator(
         if (prior != null && prior.requestDigest != requestDigest) {
             return ApplyOutcome(outcome = "IDEMPOTENCY_CONFLICT", providerHadAlreadyApplied = false, leaseId = null)
         }
-        val outcome = executor.apply(attemptId, idempotencyKey, requestDigest, now)
+        val outcome = executor.apply(attemptId, intent, idempotencyKey, requestDigest, now)
         if (outcome.leaseId != null) {
             // R43 (Sol GREEN-review P1-5): the provider lease persists ATOMICALLY with the receipt —
             // a crash between this line and the attempt-owner markAplusLease still recovers the lease

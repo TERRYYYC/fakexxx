@@ -34,7 +34,13 @@ class RecordingExternalApplyExecutor(
     private val effectCounts = mutableMapOf<Long, Int>()
     private val invocationCounts = mutableMapOf<String, Int>()
 
-    override fun apply(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
+    override fun apply(
+        attemptId: Long,
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String,
+        now: Long
+    ): ApplyOutcome {
         invocationCounts[idempotencyKey] = (invocationCounts[idempotencyKey] ?: 0) + 1
         val priorDigest = appliedDigests[idempotencyKey]
         if (priorDigest != null && priorDigest != requestDigest) {

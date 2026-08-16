@@ -43,6 +43,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.example.cellrebelauto.recovery.testApplyIntent
 import org.robolectric.RobolectricTestRunner
 
 /**
@@ -238,9 +239,11 @@ class CrashMatrixTest {
 
     private fun applyKey(attemptId: Long) = APlusOperationIdentity.applyIdempotencyKey(attemptId)
     private fun releaseKey(attemptId: Long) = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
-    // The owner-state intent digest the recovery recomputes from the durable attempt coords + id + session.
-    private fun ownerIntentDigest(sessionId: Long, attemptId: Long = 77L) =
-        APlusOperationIdentity.requestDigest(TARGET_LAT, TARGET_LNG, attemptId, sessionId)
+    // The owner-state intent digest the recovery recomputes from the durable attempt identity.
+    // R44 (Sol GREEN-review-3 F2): identical inputs to the engine's recompute — plan/task refs +
+    // the seeded attempt's own validity window (startedAt=600 from seedAttempt, timeout=90s from buildEngine).
+    private fun ownerIntentDigest(sessionId: Long, planId: Long, attemptId: Long = 77L) =
+        APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, sessionId, planId, 42L, 600L, 90_000L))
 
     /**
      * Seed the DURABLE execution evidence (§8.1 COMPLETION_OBSERVED already persisted it) so the M-CR-06
@@ -324,7 +327,7 @@ class CrashMatrixTest {
         seedDurableReceipt(77L, receiptWire, receiptIntentHash, LEASE_ID)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
     }
 
@@ -344,7 +347,7 @@ class CrashMatrixTest {
         seedAttempt(planId, 42L, attemptId = 77L, aplusState = phase, aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         // Reacquirable source: returns a valid §6.4 observation/evidence; null source: cannot.
         val evidence = if (!reacquirable) SeededEvidenceSource() else SeededEvidenceSource(
             pre = validPre(), post = validPost(),
@@ -415,7 +418,7 @@ class CrashMatrixTest {
         )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val evidence = SeededEvidenceSource(
             evidence = APlusCompletionEvidence(
                 execution = fullEvidenceExecution("exec-src-77", 77L, WIRE_VERIFIED, "src-digest"),
@@ -455,11 +458,11 @@ class CrashMatrixTest {
             planId, 42L, attemptId = 77L, aplusState = "CELLREBEL_RUNNING",
             aplusLeaseId = LEASE_ID, currentExecutionId = "exec-owner-77"
         )
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         seedDurableObservation(77L, "PRE", validPre(intentDigest))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
 
         // Run 1 (successor process): re-classify → persist receipt + execution evidence → advance.
@@ -521,11 +524,11 @@ class CrashMatrixTest {
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         seedMcr06Fixture(sessionId, intentDigest, seededDigest, currentFirst = true)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
         buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
@@ -544,11 +547,11 @@ class CrashMatrixTest {
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         seedMcr06Fixture(sessionId, intentDigest, seededDigest, ownerExecId = "exec-decoy-77", currentFirst = true)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
         buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
@@ -564,11 +567,11 @@ class CrashMatrixTest {
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         seedMcr06Fixture(sessionId, intentDigest, seededDigest, ownerExecId = "exec-decoy-77", currentFirst = false)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
         buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
@@ -582,10 +585,10 @@ class CrashMatrixTest {
         // Null polarity: absent evidence → zero mint. This stays GREEN on skeleton (no evidence = no mint).
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        val applyOutcome = executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        val applyOutcome = executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, applyOutcome.outcome, 1000L)
         buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
@@ -612,7 +615,7 @@ class CrashMatrixTest {
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         seedMcr06Fixture(sessionId, intentDigest, seededDigest,
             preOverride = preOverride, postOverride = postOverride,
             receiptIntentHash = receiptIntentHash ?: intentDigest,
@@ -620,7 +623,7 @@ class CrashMatrixTest {
         )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
         buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
@@ -866,11 +869,11 @@ class CrashMatrixTest {
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
-        val intentDigest = ownerIntentDigest(sessionId)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
         seedMcr06Fixture(sessionId, intentDigest, seededDigest, currentFirst = true)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
 
         val COMMIT_CLOCK_VALUE = 99999L // deliberately different from RECOVERY_NOW (15000L)
@@ -905,7 +908,7 @@ class CrashMatrixTest {
         val seededEntry = TrustedQuotaEntry(id = insertedId, attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val clock = VirtualClock()
         buildEngine(planId, clock, FakeBackend(executor, log)).run()
 

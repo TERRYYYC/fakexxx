@@ -11,6 +11,7 @@ import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.repository.PlanRepository
 import com.example.cellrebelauto.recovery.FakeDurableRecoveryLog
+import com.example.cellrebelauto.recovery.testApplyIntent
 import com.example.cellrebelauto.recovery.RecordingExternalApplyExecutor
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -81,7 +82,7 @@ class ProductionCommitClockFactoryTest {
             )
         )
         val intentDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-            .requestDigest(39.9, 116.4, 77L, sessionId)
+            .requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L))
         val seededDigest = "ev-clock-${java.util.UUID.randomUUID()}"
         // Durable carriers (the GREEN recovery re-decide reads ONLY these).
         db.attemptExecutionDao().insert(
@@ -110,7 +111,7 @@ class ProductionCommitClockFactoryTest {
         repo.persistCompletionReceipt(77L, 1, intentDigest, "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), requestDigest = intentDigest, now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), intentDigest, "RELEASED", 1000L)
 
         val backend = com.example.cellrebelauto.automation.APlusComposition.run {

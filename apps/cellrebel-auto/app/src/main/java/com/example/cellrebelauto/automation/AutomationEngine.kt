@@ -333,15 +333,19 @@ class AutomationEngine(
                 val aplusEvidenceSrc = completionEvidenceSource
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
                     var aplusState = AttemptState.CREATED
-                    // # intent 身份由持久 attempt intent 重算（目标坐标 + attempt id，INV-23，Sol round-8 P1-2）。
-                    val intentDigest = APlusOperationIdentity.requestDigest(task.latitude, task.longitude, attemptId, runSessionId)
+                    // # intent 身份由持久 attempt owner 态重算（INV-23，Sol round-8 P1-2）。R44 (Sol
+                    // # GREEN-review-3 F2)：intent 只构造一次——digest 与 Binder request 共用同一对象，绝不各自重算。
+                    val applyIntent = APlusOperationIdentity.intent(
+                        runSessionId, attemptId, planId, task.id, startedAt, startedAt + testTimeoutMs
+                    )
+                    val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
                     // # P1-3：持久化当前操作（§7.1 Attempt 拥有当前 operation）。
                     planRepository.markAplusState(attemptId, "APPLY_PENDING")
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.BEGIN_APPLY) ?: aplusState
                     // # P1-2（Sol round-9）：正路径 apply 是 provider 驱动——dispatchApply → ApplyOutcome.leaseId
                     // # 持久化 lease（绝不凭空发明）；fail-closed executor 无 lease → PAUSED。
                     val applyOutcome = aplusCoord.dispatchApply(
-                        attemptId, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest, nowMs()
+                        attemptId, applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest, nowMs()
                     )
                     val leaseId = applyOutcome.leaseId
                     if (leaseId == null) {
@@ -929,8 +933,13 @@ class AutomationEngine(
         // replay) to obtain the lease, which comes BACK from the apply — never pre-seeded (Sol round-9 P1-3).
         if (crashed.aplusState == "APPLY_PENDING") {
             val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
-            val intentDigest = APlusOperationIdentity.requestDigest(crashed.latitude, crashed.longitude, crashed.id, crashed.runSessionId)
-            val result = coordinator.reconcile(crashed.id, applyKey, intentDigest, nowMs())
+            // R44 (Sol GREEN-review-3 F2): the SAME intent object feeds the digest and the wire
+            // request — all inputs from the durable owner state (attempt row + plan config).
+            val applyIntent = APlusOperationIdentity.intent(
+                crashed.runSessionId, crashed.id, planId, crashed.taskId, crashed.startedAt, crashed.startedAt + testTimeoutMs
+            )
+            val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
+            val result = coordinator.reconcile(crashed.id, applyIntent, applyKey, intentDigest, nowMs())
             val leaseId = when (result) {
                 is ReconcileResult.AdvancedToRelease -> result.leaseId
                 is ReconcileResult.ReplayedApply -> result.leaseId
@@ -991,9 +1000,12 @@ class AutomationEngine(
         val post = planRepository.getObservationSnapshot(crashed.id, "POST") ?: return false
         val receipt = planRepository.getCompletionReceipt(crashed.id) ?: return false
 
-        // INV-23: the owner recompute from the persisted attempt intent (coords + ids + session).
+        // INV-23: the owner recompute from the persisted attempt intent (ids + session + plan/task
+        // refs + window — R44, Sol GREEN-review-3 F2: identical inputs on every path).
         val intentDigest = APlusOperationIdentity.requestDigest(
-            crashed.latitude, crashed.longitude, crashed.id, crashed.runSessionId
+            APlusOperationIdentity.intent(
+                crashed.runSessionId, crashed.id, planId, crashed.taskId, crashed.startedAt, crashed.startedAt + testTimeoutMs
+            )
         )
         val trustCtx = CompletionTrustContext(
             execution = execution,

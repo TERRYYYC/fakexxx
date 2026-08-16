@@ -28,13 +28,25 @@ package com.example.cellrebelauto.recovery
 interface ExternalApplyExecutor {
 
     /**
-     * Drive the external apply for [idempotencyKey] + [requestDigest] (§6.3.4 canonical digest). The
-     * provider is idempotent on the key: a repeat returns the same outcome with no second effect.
+     * Drive the external apply for [intent] + [idempotencyKey] + [requestDigest] (§6.3.4 canonical
+     * digest). The provider is idempotent on the key: a repeat returns the same outcome with no
+     * second effect.
+     *
+     * R44 (Sol GREEN-review-3 F2): [intent] is the SAME object the digest was computed over — the
+     * caller builds it once and hands it to both, so the wire request and the digest preimage can
+     * never drift apart (the runSessionId-misbind probe shape). The attempt identity also lives
+     * inside `intent.attemptId`; [attemptId] is retained for effect accounting.
      *
      * @return the apply outcome plus whether the provider had ALREADY applied this key (idempotent
      *         replay at the provider — the signal that distinguishes crash window (b) recovery).
      */
-    fun apply(attemptId: Long, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome
+    fun apply(
+        attemptId: Long,
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String,
+        now: Long
+    ): ApplyOutcome
 
     /**
      * Drive the external lease RELEASE for [leaseId] (§8.1 BEGIN_RELEASE → RELEASE_RECEIPT; §8.2: no
