@@ -193,14 +193,22 @@ class RecordingExternalApplyExecutor(
         // The effective intent hash echoes the digest of the LAST apply this fake served (the intent
         // currently in effect for the lease) — a real provider's receipt binds the same way.
         val effectiveHash = appliedDigests.values.lastOrNull() ?: ""
-        val receipt = io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1(
+        // R46 (Sol R46 P1-2): a HEALTHY provider signs its receipt canonically — the engine now
+        // verifies this binding before trusting anything in the receipt. (The digest preimage
+        // excludes receiptDigest itself, so sign-then-fill is the canonical construction.)
+        var receipt = io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1(
             outcomeWire = advanceOutcomeWire,
             advancedFromItemId = request.expectedCurrentItemId,
             advancedToItemId = "item-2",
             scheduleVersionAfter = request.expectedScheduleVersion + 1,
             effectiveIntentHash = effectiveHash,
             effectiveEnvironmentRevision = 7L,
-            receiptDigest = "advance-receipt-${request.idempotencyKey}"
+            receiptDigest = ""
+        )
+        receipt = receipt.copy(
+            receiptDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
+                receipt, request.requestDigest, request.idempotencyKey
+            )
         )
         // R45 (Sol R45 P1-5): arm the four-leg-matching observation for the engine's independent
         // post-advance verification (a HEALTHY provider's environment matches its receipt).

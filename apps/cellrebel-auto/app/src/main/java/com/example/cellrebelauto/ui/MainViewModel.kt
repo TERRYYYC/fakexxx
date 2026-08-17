@@ -102,7 +102,15 @@ class MainViewModel(
             planRepository.observeAttemptsWithTasks(),
             _providerEntries
         ) { attempts, entries ->
-            val hasActiveProvider = entries.any { it.isApproved }
+            // R46 (Sol R46 P2): the Run surface's providerActive binds the CURRENT measured
+            // principal — an approved DB row PLUS a discovered pending candidate for the same
+            // appId means the signer rotated and the current signer is NOT approved (§6.5.4:
+            // signer 变化即新 provider). The old `entries.any { it.isApproved }` kept showing
+            // Trusted on a rotated-away principal.
+            val hasActiveProvider = currentPrincipalActive(
+                entries,
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+            )
             val crashed = attempts.firstOrNull {
                 it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
             }?.attempt
@@ -131,6 +139,17 @@ class MainViewModel(
     }
 
     companion object {
+        /**
+         * R46 (Sol R46 P2): True iff the provider's CURRENT principal is approved — an approved
+         * row exists AND discovery surfaced no pending candidate for the same appId (a pending
+         * candidate for an approved appId = the current signer rotated away from the approved
+         * principal). Pure so the projection is oracle-drivable.
+         * # 当前 principal 是否已批准：有 approved 行且同 appId 无 pending 候选（有 = signer 已轮转）
+         */
+        internal fun currentPrincipalActive(entries: List<ProviderEntry>, applicationId: String): Boolean =
+            entries.any { it.applicationId == applicationId && it.isApproved } &&
+                entries.none { it.applicationId == applicationId && !it.isApproved }
+
         /**
          * Pure projection (R45, Sol R45 P2): approved principals are the ACTIVE pairing rows; a
          * pending candidate is a KNOWN provider appId whose CURRENT resolved signer is NOT an

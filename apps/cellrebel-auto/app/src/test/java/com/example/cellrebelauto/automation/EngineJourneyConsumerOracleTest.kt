@@ -123,7 +123,15 @@ class EngineJourneyConsumerOracleTest {
             advanceCalls += request
             events += "advance"
             val receipt = advanceAnswer ?: return null
-            if (receipt.advancedToItemId == null) {
+            // R46 (Sol R46 P1-2): a HEALTHY provider signs canonically (the preimage excludes
+            // receiptDigest itself, so sign-then-fill is the canonical construction).
+            val signed = receipt.copy(
+                receiptDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
+                    receipt, request.requestDigest, request.idempotencyKey
+                )
+            )
+            advanceAnswer = signed
+            if (signed.advancedToItemId == null) {
                 // A HEALTHY provider: after the terminal advance the schedule IS exhausted at V+1.
                 discoverAnswer = discoverReadback ?: CapabilitySnapshotV1(
                     serviceVersion = "fake-1.0",
@@ -132,18 +140,18 @@ class EngineJourneyConsumerOracleTest {
                     continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
                     environmentRevision = 7L,
                     profileRefs = listOf("auto-profile"), scheduleRefs = listOf("auto-schedule"),
-                    currentScheduleId = receipt.let { anchorScheduleId },
-                    currentItemId = receipt.advancedFromItemId,
-                    scheduleVersion = receipt.scheduleVersionAfter,
+                    currentScheduleId = anchorScheduleId,
+                    currentItemId = signed.advancedFromItemId,
+                    scheduleVersion = signed.scheduleVersionAfter,
                     exhausted = true
                 )
             } else {
                 // A HEALTHY provider: the post-advance environment matches its own receipt.
                 armedPostAdvanceObservation = EnvironmentObservationV1(
                     leaseId = request.leaseId,
-                    acceptedIntentHash = receipt.effectiveIntentHash,
+                    acceptedIntentHash = signed.effectiveIntentHash,
                     observedAtEpochMs = 0L, observedAtElapsedRealtimeMs = 0L,
-                    environmentRevision = receipt.effectiveEnvironmentRevision,
+                    environmentRevision = signed.effectiveEnvironmentRevision,
                     environmentFingerprint = "post-advance-fp",
                     continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
                     continuitySinceEpochMs = null, continuitySinceElapsedRealtimeMs = null,
@@ -152,11 +160,11 @@ class EngineJourneyConsumerOracleTest {
                     effectiveLatitude = null, effectiveLongitude = null, isMock = true,
                     scheduleDecisionWire = ScheduleDecisionV1.ALLOWED_NOW.wire,
                     evidenceRefs = emptyList(),
-                    scheduleItemId = receipt.advancedToItemId!!,
-                    scheduleVersion = receipt.scheduleVersionAfter
+                    scheduleItemId = signed.advancedToItemId!!,
+                    scheduleVersion = signed.scheduleVersionAfter
                 )
             }
-            return receipt
+            return signed
         }
     }
 

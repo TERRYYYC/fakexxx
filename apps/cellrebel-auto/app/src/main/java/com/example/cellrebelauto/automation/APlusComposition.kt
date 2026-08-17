@@ -128,9 +128,16 @@ object APlusComposition {
                 if (trusted()) rawExecutor.apply(attemptId, intent, idempotencyKey, requestDigest, now)
                 else com.example.cellrebelauto.recovery.ApplyOutcome("PROVIDER_SIGNER_UNTRUSTED", providerHadAlreadyApplied = false)
 
+            // R46 (Sol R46 P1-3): release is EXEMPT from the trust gate. §6.5.4: revocation must
+            // stop NEW trusted work but the in-flight attempt ENTERS the release/recovery path —
+            // "进行中的 run 不静默继续——当前 attempt 进入 release/recovery 路径". Releasing an
+            // EXISTING lease is cleanup of a past authorization's consequence, not new trusted
+            // work; gating it would strand the lease forever after any revoke/rotation (the
+            // provider can never be released, INV-21's manual-recovery pause becomes the only
+            // exit). discover/preflight/apply/observe/completeAndAdvance stay gated — those mint
+            // NEW provider-backed evidence.
             override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): com.example.cellrebelauto.recovery.ApplyOutcome =
-                if (trusted()) rawExecutor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
-                else com.example.cellrebelauto.recovery.ApplyOutcome("PROVIDER_SIGNER_UNTRUSTED", providerHadAlreadyApplied = false)
+                rawExecutor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
 
             override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? =
                 if (trusted()) rawExecutor.discover() else null

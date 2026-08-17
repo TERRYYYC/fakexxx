@@ -90,4 +90,23 @@ class ProviderEntriesProjectionTest {
             entries.map { it.applicationId to it.isApproved }
         )
     }
+
+    @Test
+    fun `currentPrincipalActive binds the CURRENT measured principal - rotation deactivates (R46 P2)`() {
+        // Approved row sha256:a, but the CURRENT signer measured sha256:b (rotation):
+        val rotated = MainViewModel.computeProviderEntries(listOf(row(prod, "sha256:a"))) { appId ->
+            if (appId == prod) "sha256:b" else null
+        }
+        org.junit.Assert.assertFalse(
+            "a rotated-away principal is NOT the active one (killing mutation: any{isApproved} restored ⇒ true)",
+            MainViewModel.currentPrincipalActive(rotated, prod)
+        )
+        // The current signer IS the approved principal:
+        val stable = MainViewModel.computeProviderEntries(listOf(row(prod, "sha256:a"))) { appId ->
+            if (appId == prod) "sha256:a" else null
+        }
+        org.junit.Assert.assertTrue(MainViewModel.currentPrincipalActive(stable, prod))
+        // Nothing installed at all ⇒ no active current principal:
+        org.junit.Assert.assertFalse(MainViewModel.currentPrincipalActive(emptyList(), prod))
+    }
 }

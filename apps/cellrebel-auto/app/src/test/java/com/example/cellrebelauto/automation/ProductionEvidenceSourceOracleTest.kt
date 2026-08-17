@@ -209,6 +209,28 @@ class ProductionEvidenceSourceOracleTest {
     }
 
     @Test
+    fun `release is EXEMPT from the trust gate - lease cleanup passes through (R46 P1-3)`() = runBlocking {
+        signerTrusted = false // revoked / rotated away mid-run
+        val executor = backend().executor
+        // §6.5.4: the in-flight attempt ENTERS the release/recovery path after a revoke — the
+        // existing lease must still be releasable, or the lease is stranded forever.
+        assertEquals(
+            "release passes through for an untrusted signer (killing mutation: release gated ⇒ PROVIDER_SIGNER_UNTRUSTED)",
+            "RELEASED", executor.release(77L, "rel-key-77", "lease-77", "rel-digest", 0L).outcome
+        )
+        // NEW trusted work stays gated — the exemption is cleanup-only.
+        assertNull("discover stays gated", executor.discover())
+        val probeIntent = io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1(
+            runId = "5", attemptId = "77", profileRef = "p", scheduleRef = "s",
+            requiredVerificationWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            notBeforeEpochMs = 0L, deadlineEpochMs = 1L
+        )
+        assertNull("preflight stays gated", executor.preflight(probeIntent, "key", "digest"))
+        val applyOutcome = executor.apply(77L, probeIntent, "key", "digest", 0L)
+        assertEquals("apply stays gated — no new trusted work", "PROVIDER_SIGNER_UNTRUSTED", applyOutcome.outcome)
+    }
+
+    @Test
     fun `a null provider observation fails closed without durable write`() = runBlocking {
         observeResult = null // provider unavailable / validator rejected
         val evidence = backend().evidenceSource

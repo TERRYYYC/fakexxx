@@ -549,103 +549,14 @@ class AutomationEngine(
                                     return@coroutineScope
                                 }
                                 if (quotaReached) {
-                                    // R45 (Sol R45 P1-4): advance ONLY when the quota is met — an
-                                    // intermediate trusted success (1 of 2) releases and finalizes
-                                    // WITHOUT touching the provider's schedule pointer (§4.3 step 7).
-                                    // R45 (Sol R45 P1-3): the CAS triple is REPLAYED byte-for-byte
-                                    // from the attempt-open anchor — never re-discovered here — and
-                                    // requestDigest is the canonical ADVANCE framing
-                                    // (CanonicalAdvanceDigestV1), NOT the apply intent digest: a
-                                    // wrong-domain digest makes replay conflate distinct requests.
-                                    val anchor = planRepository.getAplusAdvanceAnchor(attemptId)
-                                    if (anchor == null) {
-                                        planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                                        aplusPause("advance anchor missing for attempt $attemptId — cannot build the CAS request (fail-closed)")
+                                    // R46 (Sol R46 P1-1): the normal path and the ADVANCE_* crash
+                                    // recovery share ONE replay+verify routine so a mid-advance crash
+                                    // resumes through the IDENTICAL durable-request replay (same
+                                    // idempotency key + canonical digest) and the same four-leg
+                                    // verification — the provider's idempotency returns the stored
+                                    // receipt for the same key, never a second advance.
+                                    if (!replayAdvanceAndVerify(attemptId, task.id, applyOutcome.operationId, intentDigest)) {
                                         return@coroutineScope
-                                    }
-                                    // §6.7.4a: the lease field is the HISTORICAL reference to where
-                                    // the quota was earned (the release above already made it RELEASED).
-                                    val advanceLease = leaseIdForAttempt(attemptId)
-                                    val baseAdvanceRequest = io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
-                                        leaseId = advanceLease,
-                                        idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
-                                        requestDigest = "",
-                                        expectedScheduleId = anchor.first,
-                                        expectedScheduleVersion = anchor.third,
-                                        expectedCurrentItemId = anchor.second,
-                                        completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
-                                            scheduleItemId = anchor.second,
-                                            trustedSuccessCount = planRepository.trustedCountForTaskPublic(task.id),
-                                            quotaRequired = task.requiredSuccesses,
-                                            ledgerRef = "ledger-$attemptId",
-                                            verifiedAtElapsedRealtimeMs = commitClockMs()
-                                        ),
-                                        callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
-                                    )
-                                    val advanceRequest = baseAdvanceRequest.copy(
-                                        requestDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1.compute(baseAdvanceRequest)
-                                    )
-                                    planRepository.markAplusState(attemptId, "ADVANCE_PENDING")
-                                    val advanceReceipt = aplusCoord.executorBackend().completeAndAdvance(advanceRequest, intentDigest)
-                                    if (advanceReceipt == null) {
-                                        // Fail-closed: the provider could not prove the advance — the
-                                        // quota is committed locally but the schedule did NOT move. Pause
-                                        // for operator visibility; never silently continue (§6.7.3).
-                                        planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                                        aplusPause("completeAndAdvance not proven for attempt $attemptId — schedule did not advance")
-                                        return@coroutineScope
-                                    }
-                                    // R45 (Sol R45 P1-5 / §6.7.5): the receipt is the provider's
-                                    // SELF-DESCRIPTION, not proof the environment moved. Independent
-                                    // verification is mandatory — non-terminal: observe() four legs
-                                    // (scheduleItemId == advancedToItemId ∧ scheduleVersion ==
-                                    // scheduleVersionAfter ∧ acceptedIntentHash == effectiveIntentHash
-                                    // ∧ environmentRevision == effectiveEnvironmentRevision); terminal
-                                    // (exhausted): a fresh discover() readback with the v1.55
-                                    // non-null group precondition then its own four legs.
-                                    val exhausted = advanceReceipt.advancedToItemId == null
-                                    if (!exhausted) {
-                                        planRepository.markAplusState(attemptId, "ADVANCE_OBSERVING")
-                                        // The observe tuple's operationId: the VERBATIM apply receipt
-                                        // first (the engine owns this attempt's apply result), the
-                                        // durable Room receipt as the recovery-shaped fallback.
-                                        val operationId = applyOutcome.operationId
-                                            ?: planRepository.getApplyOperationId(attemptId)
-                                        if (operationId == null) {
-                                            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                                            aplusPause("apply operationId missing for attempt $attemptId — cannot observe the new environment")
-                                            return@coroutineScope
-                                        }
-                                        val observed = aplusCoord.executorBackend().observe(
-                                            advanceLease, operationId, advanceReceipt.effectiveIntentHash
-                                        )
-                                        val legsMatch = (observed != null &&
-                                            observed.scheduleItemId == advanceReceipt.advancedToItemId &&
-                                            observed.scheduleVersion == advanceReceipt.scheduleVersionAfter &&
-                                            observed.acceptedIntentHash == advanceReceipt.effectiveIntentHash &&
-                                            observed.environmentRevision == advanceReceipt.effectiveEnvironmentRevision
-                                        )
-                                        if (!legsMatch) {
-                                            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                                            aplusPause("post-advance observe mismatch for attempt $attemptId — the new environment is not proven (four-leg)")
-                                            return@coroutineScope
-                                        }
-                                    } else {
-                                        planRepository.markAplusState(attemptId, "ADVANCE_STATE_READBACK")
-                                        val readback = aplusCoord.executorBackend().discover()
-                                        val readbackOk = (readback != null &&
-                                            readback.currentScheduleId != null && readback.currentItemId != null &&
-                                            readback.scheduleVersion != null && readback.exhausted != null &&
-                                            readback.currentScheduleId == anchor.first &&
-                                            readback.currentItemId == advanceReceipt.advancedFromItemId &&
-                                            readback.scheduleVersion == advanceReceipt.scheduleVersionAfter &&
-                                            readback.exhausted == true
-                                        )
-                                        if (!readbackOk) {
-                                            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                                            aplusPause("exhausted readback mismatch for attempt $attemptId — terminal state not proven (four-leg)")
-                                            return@coroutineScope
-                                        }
                                     }
                                 }
                                 if (!aplusFinalize(attemptId, task.id, endedAt = outcome.endedAt, webScore = outcome.webScore, videoScore = outcome.videoScore)) {
@@ -991,6 +902,36 @@ class AutomationEngine(
         //    interrupted — AND the release MUST converge durably before continuing; a non-durable
         //    release is a fail-closed PAUSE (the lease is unresolved — §8.1 RELEASE_INCOMPLETE).
         when (crashed.aplusState) {
+            // ---- R46 (Sol R46 P1-1): mid-advance crash recovery. The trusted mint is durable
+            // (QUOTA_COMMITTED preceded the advance) and the lease was already RELEASED (release
+            // precedes advance). Recovery REPLAYS the same durable advance request — identical
+            // idempotency key + canonical digest (the digest preimage excludes the audit
+            // timestamp, so the rebuilt request is byte-identical) — and re-runs the four-leg
+            // verification + receipt-digest binding. The provider's idempotency returns the
+            // STORED receipt for the same key; a crash never pushes a second advance.
+            "ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK" -> {
+                if (planRepository.getTrustedEntry(crashed.id) == null) {
+                    // The advance only ever runs quota-reached — a missing mint here is an
+                    // invariant break, fail-closed (never advance without the ledger authority).
+                    planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                    aplusPause("ADVANCE_* crash without a durable trusted mint for attempt ${crashed.id} — invariant break")
+                    return false
+                }
+                // INV-23: the intent digest recompute from the persisted attempt owner state —
+                // the same inputs the original apply digested.
+                val intentDigest = APlusOperationIdentity.requestDigest(
+                    APlusOperationIdentity.intent(
+                        crashed.runSessionId, crashed.id, planId, crashed.taskId, crashed.startedAt, crashed.startedAt + testTimeoutMs
+                    )
+                )
+                if (!replayAdvanceAndVerify(crashed.id, crashed.taskId, null, intentDigest)) {
+                    return false
+                }
+                planRepository.markAplusState(crashed.id, "CLOSED")
+                planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
+                log("A+ recovery: ADVANCE_* attempt ${crashed.id} replayed + independently verified — closed trusted")
+                return true
+            }
             "PRE_OBSERVED", "CELLREBEL_START_PENDING", "CELLREBEL_RUNNING", "POST_OBSERVE_PENDING" -> {
                 val src = completionEvidenceSource
                 if (src == null) {
@@ -1298,6 +1239,135 @@ class AutomationEngine(
             planRepository.finalizeAplusSuccess(attemptId, taskId, endedAt, webScore, videoScore)
         } else {
             planRepository.finalizeAttemptFailure(attemptId, reason ?: FailureReason.UNTRUSTED.name, endedAt)
+        }
+        return true
+    }
+
+    /**
+     * R46 (Sol R46 P1-1/P1-2): the SINGLE advance replay+verify routine shared by the normal
+     * quota-reached path and the ADVANCE_* crash recovery. Rebuilds the advance request from
+     * DURABLE state only (the attempt-open anchor triple + the trusted projection + the persisted
+     * lease) — the rebuild is byte-identical to the original request (the digest preimage excludes
+     * verifiedAtElapsedRealtimeMs), so an idempotent provider returns the STORED receipt for the
+     * same (key, digest) and a crash never pushes a second advance. Returns false = fail-closed
+     * (RECOVERY_REQUIRED + pause); true = the advance is proven by independent verification.
+     *
+     * R46 (Sol R46 P1-2): the receipt's receiptDigest is RECOMPUTED
+     * (CanonicalAdvanceReceiptDigestV1) before anything in it is trusted — a receipt that does
+     * not bind the request it answers is not evidence of anything.
+     */
+    private suspend fun replayAdvanceAndVerify(
+        attemptId: Long,
+        taskId: Long,
+        verbatimOperationId: String?,
+        intentDigest: String
+    ): Boolean {
+        val coordinator = recoveryCoordinator ?: run {
+            aplusPause("no coordinator to advance attempt $attemptId")
+            return false
+        }
+        val task = planRepository.getTask(taskId)
+        if (task == null) {
+            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+            aplusPause("task $taskId missing for attempt $attemptId — cannot build the advance proof")
+            return false
+        }
+        // R45 (Sol R45 P1-3): the CAS triple is REPLAYED byte-for-byte from the attempt-open
+        // anchor — never re-discovered here — and requestDigest is the canonical ADVANCE framing
+        // (CanonicalAdvanceDigestV1), NOT the apply intent digest.
+        val anchor = planRepository.getAplusAdvanceAnchor(attemptId)
+        if (anchor == null) {
+            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+            aplusPause("advance anchor missing for attempt $attemptId — cannot build the CAS request (fail-closed)")
+            return false
+        }
+        // §6.7.4a: the lease field is the HISTORICAL reference to where the quota was earned
+        // (the release already made it RELEASED before the advance was first dispatched).
+        val advanceLease = leaseIdForAttempt(attemptId)
+        val baseAdvanceRequest = io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
+            leaseId = advanceLease,
+            idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+            requestDigest = "",
+            expectedScheduleId = anchor.first,
+            expectedScheduleVersion = anchor.third,
+            expectedCurrentItemId = anchor.second,
+            completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
+                scheduleItemId = anchor.second,
+                trustedSuccessCount = planRepository.trustedCountForTaskPublic(taskId),
+                quotaRequired = task.requiredSuccesses,
+                ledgerRef = "ledger-$attemptId",
+                verifiedAtElapsedRealtimeMs = commitClockMs()
+            ),
+            callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        )
+        val advanceRequest = baseAdvanceRequest.copy(
+            requestDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1.compute(baseAdvanceRequest)
+        )
+        planRepository.markAplusState(attemptId, "ADVANCE_PENDING")
+        val advanceReceipt = coordinator.executorBackend().completeAndAdvance(advanceRequest, intentDigest)
+        if (advanceReceipt == null) {
+            // Fail-closed: the provider could not prove the advance — the quota is committed
+            // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
+            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+            aplusPause("completeAndAdvance not proven for attempt $attemptId — schedule did not advance")
+            return false
+        }
+        // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
+        // (requestDigest, idempotencyKey) together with the outcome the provider claims.
+        val expectedReceiptDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
+            advanceReceipt, advanceRequest.requestDigest, advanceRequest.idempotencyKey
+        )
+        if (advanceReceipt.receiptDigest != expectedReceiptDigest) {
+            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+            aplusPause("advance receipt digest mismatch for attempt $attemptId — the receipt does not bind this request")
+            return false
+        }
+        // R45 (Sol R45 P1-5 / §6.7.5): the receipt is the provider's SELF-DESCRIPTION, not proof
+        // the environment moved. Independent verification is mandatory — non-terminal: observe()
+        // four legs; terminal (exhausted): a fresh discover() readback with the v1.55 non-null
+        // group precondition then its own four legs.
+        val exhausted = advanceReceipt.advancedToItemId == null
+        if (!exhausted) {
+            planRepository.markAplusState(attemptId, "ADVANCE_OBSERVING")
+            // The observe tuple's operationId: the VERBATIM apply receipt first (the engine owns
+            // this attempt's apply result on the normal path), the durable Room receipt as the
+            // recovery-shaped fallback.
+            val operationId = verbatimOperationId ?: planRepository.getApplyOperationId(attemptId)
+            if (operationId == null) {
+                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+                aplusPause("apply operationId missing for attempt $attemptId — cannot observe the new environment")
+                return false
+            }
+            val observed = coordinator.executorBackend().observe(
+                advanceLease, operationId, advanceReceipt.effectiveIntentHash
+            )
+            val legsMatch = (observed != null &&
+                observed.scheduleItemId == advanceReceipt.advancedToItemId &&
+                observed.scheduleVersion == advanceReceipt.scheduleVersionAfter &&
+                observed.acceptedIntentHash == advanceReceipt.effectiveIntentHash &&
+                observed.environmentRevision == advanceReceipt.effectiveEnvironmentRevision
+            )
+            if (!legsMatch) {
+                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+                aplusPause("post-advance observe mismatch for attempt $attemptId — the new environment is not proven (four-leg)")
+                return false
+            }
+        } else {
+            planRepository.markAplusState(attemptId, "ADVANCE_STATE_READBACK")
+            val readback = coordinator.executorBackend().discover()
+            val readbackOk = (readback != null &&
+                readback.currentScheduleId != null && readback.currentItemId != null &&
+                readback.scheduleVersion != null && readback.exhausted != null &&
+                readback.currentScheduleId == anchor.first &&
+                readback.currentItemId == advanceReceipt.advancedFromItemId &&
+                readback.scheduleVersion == advanceReceipt.scheduleVersionAfter &&
+                readback.exhausted == true
+            )
+            if (!readbackOk) {
+                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+                aplusPause("exhausted readback mismatch for attempt $attemptId — terminal state not proven (four-leg)")
+                return false
+            }
         }
         return true
     }
