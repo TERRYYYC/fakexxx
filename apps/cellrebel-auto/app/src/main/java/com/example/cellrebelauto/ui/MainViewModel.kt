@@ -123,6 +123,28 @@ class MainViewModel(
         viewModelScope.launch {
             val app = getApplication<Application>()
             val rows = db.providerPairingDao().all()
+            _providerEntries.value = computeProviderEntries(rows) { appId ->
+                com.example.cellrebelauto.environment.ProviderTrustGate
+                    .packageManagerSignerDigest(app.packageManager, appId)
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * Pure projection (R45, Sol R45 P2): approved principals are the ACTIVE pairing rows; a
+         * pending candidate is a KNOWN provider appId whose CURRENT resolved signer is NOT an
+         * approved active principal. The current signer is resolved for EVERY known appId on EVERY
+         * refresh — the previous `appId in approved` skip meant a signer ROTATION on an already-
+         * approved appId was invisible: the UI kept showing the old principal as approved and no
+         * new pending principal ever appeared, violating §6.5.4 ("signer 变化即视为新 provider，
+         * 重新走批准"). Revoked rows are never pending candidates (M-PA-10: re-approval walks the
+         * operator approval UI again, via this same discovery path).
+         */
+        internal fun computeProviderEntries(
+            rows: List<com.example.cellrebelauto.model.plan.ProviderPairingRecord>,
+            resolveCurrentSigner: (applicationId: String) -> String?
+        ): List<ProviderEntry> {
             val approved = rows.filter { it.revokedAt == null }.map {
                 ProviderEntry(
                     applicationId = it.applicationId,
@@ -131,19 +153,15 @@ class MainViewModel(
                     isApproved = true
                 )
             }
-            // R44 (Sol GREEN-review-3 F5): pending candidates are the providers DISCOVERED at
-            // call-time (installed + signer resolvable) that are NOT yet approved — resolved from
-            // the live package state, NEVER fabricated from revoked history rows. A revoked row is
-            // not a pending candidate; its re-approval must walk operator approval again (M-PA-10)
-            // via the same discovery path.
+            val activePrincipals = rows.filter { it.revokedAt == null }
+                .map { it.applicationId to it.currentSignerDigest }.toSet()
             val pending = mutableListOf<ProviderEntry>()
             for (appId in listOf(
                 io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
                 io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH
             )) {
-                if (appId in approved.map { it.applicationId }) continue
-                val signer = com.example.cellrebelauto.environment.ProviderTrustGate
-                    .packageManagerSignerDigest(app.packageManager, appId) ?: continue
+                val signer = resolveCurrentSigner(appId) ?: continue // not installed / unresolvable
+                if (appId to signer in activePrincipals) continue // the CURRENT signer IS approved
                 pending += ProviderEntry(
                     applicationId = appId,
                     signerDigest = signer,
@@ -151,7 +169,7 @@ class MainViewModel(
                     isApproved = false
                 )
             }
-            _providerEntries.value = approved + pending
+            return approved + pending
         }
     }
 

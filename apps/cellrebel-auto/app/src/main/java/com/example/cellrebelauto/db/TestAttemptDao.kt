@@ -150,6 +150,36 @@ interface TestAttemptDao {
     @Query("UPDATE test_attempts SET currentExecutionId = :executionId WHERE id = :attemptId")
     suspend fun markCurrentExecutionId(attemptId: Long, executionId: String)
 
+    // ---- R45 (Sol R45 P1-3 / spec §4.3 step 1): the advance CAS anchor triple ----
+    // Persisted at attempt open from the SAME discover() projection group; completeAndAdvance
+    // replays this triple byte-for-byte and MUST NOT re-discover at advance time (§6.7.3 v1.72).
+
+    /** Persist the anchored advance CAS triple (before any external execution starts). */
+    @Query(
+        "UPDATE test_attempts SET aplusAnchorScheduleId = :scheduleId, aplusAnchorItemId = :itemId, " +
+            "aplusAnchorVersion = :version WHERE id = :attemptId"
+    )
+    suspend fun markAplusAdvanceAnchor(attemptId: Long, scheduleId: String, itemId: String, version: Long)
+
+    /** The anchored triple for an attempt (null columns = not yet anchored). */
+    @Query(
+        "SELECT aplusAnchorScheduleId, aplusAnchorItemId, aplusAnchorVersion FROM test_attempts WHERE id = :attemptId"
+    )
+    suspend fun getAplusAdvanceAnchor(attemptId: Long): AplusAdvanceAnchor?
+
+    /** The persisted apply-receipt operationId for an attempt (post-advance observe tuple leg). */
+    @Query(
+        "SELECT r.operationId FROM operation_receipts r WHERE r.idempotencyKey = :idempotencyKey"
+    )
+    suspend fun getOperationIdForIdempotencyKey(idempotencyKey: String): String?
+
+    /** Anchor projection row for [getAplusAdvanceAnchor]. */
+    data class AplusAdvanceAnchor(
+        val aplusAnchorScheduleId: String?,
+        val aplusAnchorItemId: String?,
+        val aplusAnchorVersion: Long?
+    )
+
     /** The persisted current executionId for an attempt. */
     @Query("SELECT currentExecutionId FROM test_attempts WHERE id = :attemptId")
     suspend fun getCurrentExecutionId(attemptId: Long): String?

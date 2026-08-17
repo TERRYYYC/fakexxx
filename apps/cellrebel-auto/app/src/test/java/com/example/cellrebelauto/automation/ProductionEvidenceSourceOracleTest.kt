@@ -78,10 +78,16 @@ class ProductionEvidenceSourceOracleTest {
     private var seededPlanId: Long = 0L
     private var seededTaskId: Long = 0L
 
+    // R45 (Sol R45 P1-1): the attempt validity window width — the SAME value handed to the
+    // production backend. The owner recompute MUST use (attempt.startedAt → startedAt + timeout):
+    // the seeded attempt started at 600L, NOT the plan import time (1000L). The previous fixture
+    // asserted the WRONG window (1000 → MAX), mirroring the production bug it should have killed.
+    private val attemptTimeoutMs = 90_000L
+
     private fun expectedHash(): String = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
         .requestDigest(
             com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
-                5L, 77L, seededPlanId, seededTaskId, 1000L, Long.MAX_VALUE
+                5L, 77L, seededPlanId, seededTaskId, 600L, 600L + attemptTimeoutMs
             )
         )
 
@@ -89,6 +95,7 @@ class ProductionEvidenceSourceOracleTest {
         ApplicationProvider.getApplicationContext(),
         db,
         providerSignerDigest = { if (signerTrusted) "sha256:trusted" else "sha256:other" },
+        attemptValidityTimeoutMs = attemptTimeoutMs,
         serviceLifecycleExecutor = fakeExecutor
     )
 

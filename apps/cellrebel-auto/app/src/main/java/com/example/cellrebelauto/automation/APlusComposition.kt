@@ -90,6 +90,12 @@ object APlusComposition {
             )
         },
         providerApplicationId: String = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+        // R45 (Sol R45 P1-1): the attempt validity window width — the SAME config value the engine
+        // uses to build the apply intent (startedAt → startedAt + testTimeoutMs). The evidence
+        // source must recompute the intent from the IDENTICAL durable inputs; before this seam the
+        // production observe recomputed with (plan.importedAt → Long.MAX_VALUE), so the real Binder
+        // validator rejected every production observation (engine apply digest ≠ observe digest).
+        attemptValidityTimeoutMs: Long,
         // R43 F1: the SERVICE-LIFECYCLE executor (bound at AutomationService.onServiceConnected)
         // — reused across runs so the provider connection is real, not per-run constructed-and-
         // never-bound. When null (early construction), a fresh executor is created UNBOUND and
@@ -101,8 +107,43 @@ object APlusComposition {
         // what makes the production evidence source's observe/consumption chain oracle-drivable.
         serviceLifecycleExecutor: ExternalApplyExecutor? = null
     ): APlusBackend {
-        val binderExecutor: ExternalApplyExecutor = serviceLifecycleExecutor
+        val rawExecutor: ExternalApplyExecutor = serviceLifecycleExecutor
             ?: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(context)
+        // R45 (Sol R45 P1-2): the §6.5.3 reverse-authorization gate guards the ENTIRE journey
+        // surface — discover/preflight/apply/observe/completeAndAdvance/release — not just the
+        // post-apply observation. Before this decorator the gate ran only inside the evidence
+        // source's observeLive, so an unapproved provider could pass preflight and APPLY (change
+        // the device environment) before any trust check executed. Every method fail-closes the
+        // same way the underlying executor does (null / no-lease ApplyOutcome) when the current
+        // signer is not an operator-approved active principal.
+        val trustGate = com.example.cellrebelauto.environment.ProviderTrustGate(
+            com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()),
+            providerSignerDigest
+        )
+        val binderExecutor: ExternalApplyExecutor = object : ExternalApplyExecutor {
+            private fun trusted(): Boolean =
+                kotlinx.coroutines.runBlocking { trustGate.isCurrentSignerTrusted(providerApplicationId) }
+
+            override fun apply(attemptId: Long, intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): com.example.cellrebelauto.recovery.ApplyOutcome =
+                if (trusted()) rawExecutor.apply(attemptId, intent, idempotencyKey, requestDigest, now)
+                else com.example.cellrebelauto.recovery.ApplyOutcome("PROVIDER_SIGNER_UNTRUSTED", providerHadAlreadyApplied = false)
+
+            override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): com.example.cellrebelauto.recovery.ApplyOutcome =
+                if (trusted()) rawExecutor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
+                else com.example.cellrebelauto.recovery.ApplyOutcome("PROVIDER_SIGNER_UNTRUSTED", providerHadAlreadyApplied = false)
+
+            override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? =
+                if (trusted()) rawExecutor.discover() else null
+
+            override fun preflight(intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1? =
+                if (trusted()) rawExecutor.preflight(intent, idempotencyKey, requestDigest) else null
+
+            override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? =
+                if (trusted()) rawExecutor.observe(leaseId, operationId, expectedIntentHash) else null
+
+            override fun completeAndAdvance(request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1, expectedIntentHash: String): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? =
+                if (trusted()) rawExecutor.completeAndAdvance(request, expectedIntentHash) else null
+        }
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
             db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
         )
@@ -171,12 +212,19 @@ object APlusComposition {
                     val attempt = db.testAttemptDao().getAttemptById(attemptId) ?: return null
                     val task = db.locationTaskDao().getTaskById(attempt.taskId) ?: return null
                     val plan = db.planDao().getPlanById(task.planId) ?: return null
+                    // R45 (Sol R45 P1-1): the intent window MUST be the SAME durable inputs the
+                    // engine used for the apply — (attempt.startedAt → startedAt + testTimeoutMs).
+                    // The previous recompute used (plan.importedAt → Long.MAX_VALUE), so the digest
+                    // NEVER attested the intent Auto actually digested: a real Binder provider's
+                    // validator rejects the observation (hash mismatch) and every production A+
+                    // attempt paused at pre-observe. The recovery path already recomputed with the
+                    // attempt window (INV-23); the live path now does too.
                     val expectedHash = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
                         .requestDigest(
                             com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
                                 runSessionId, attemptId, plan.id, task.id,
-                                notBeforeEpochMs = plan.importedAt,
-                                deadlineEpochMs = Long.MAX_VALUE
+                                notBeforeEpochMs = attempt.startedAt,
+                                deadlineEpochMs = attempt.startedAt + attemptValidityTimeoutMs
                             )
                         )
                     val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null

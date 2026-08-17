@@ -317,6 +317,9 @@ class AutomationService : AccessibilityService() {
             // store; an unbound provider fail-closes inside the adapters, not by stubs.
             val aplusBackend: APlusBackend = APlusComposition.productionBackend(
                 applicationContext, db,
+                // R45 (Sol R45 P1-1): the SAME timeout config the engine's apply intent uses — the
+                // evidence source must recompute the identical (startedAt → startedAt+timeout) window.
+                attemptValidityTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
                 serviceLifecycleExecutor = binderExecutor
             )
             val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)

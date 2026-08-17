@@ -256,6 +256,24 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getAplusLeaseId(attemptId: Long): String? =
         db.testAttemptDao().getAplusLeaseId(attemptId)
 
+    // ---- R45 (Sol R45 P1-3): the advance CAS anchor (spec §4.3 step 1 — persist before external execution) ----
+
+    suspend fun markAplusAdvanceAnchor(attemptId: Long, scheduleId: String, itemId: String, version: Long) =
+        db.testAttemptDao().markAplusAdvanceAnchor(attemptId, scheduleId, itemId, version)
+
+    /** The anchored triple, or null when any leg is absent (fail-closed — never invent a CAS precondition). */
+    suspend fun getAplusAdvanceAnchor(attemptId: Long): Triple<String, String, Long>? {
+        val a = db.testAttemptDao().getAplusAdvanceAnchor(attemptId)
+        return if (a?.aplusAnchorScheduleId == null || a.aplusAnchorItemId == null || a.aplusAnchorVersion == null) null
+        else Triple(a.aplusAnchorScheduleId!!, a.aplusAnchorItemId!!, a.aplusAnchorVersion!!)
+    }
+
+    /** The apply-receipt operationId (ObserveRequest tuple leg; the post-advance observe is lease-bound). */
+    suspend fun getApplyOperationId(attemptId: Long): String? =
+        db.testAttemptDao().getOperationIdForIdempotencyKey(
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId)
+        )
+
     // # R37 (Sol R36 P1-2): current execution owner persist/read
     suspend fun markCurrentExecutionId(attemptId: Long, executionId: String) =
         db.testAttemptDao().markCurrentExecutionId(attemptId, executionId)

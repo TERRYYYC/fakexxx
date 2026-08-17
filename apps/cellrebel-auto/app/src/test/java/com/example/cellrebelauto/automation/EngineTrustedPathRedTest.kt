@@ -624,7 +624,8 @@ class EngineTrustedPathRedTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         val backend = APlusComposition.productionBackend(
-            androidx.test.core.app.ApplicationProvider.getApplicationContext(), db
+            androidx.test.core.app.ApplicationProvider.getApplicationContext(), db,
+            attemptValidityTimeoutMs = 90_000L
         )
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)

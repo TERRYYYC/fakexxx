@@ -109,7 +109,14 @@ data class TestAttempt(
     // # R36（Sol R35 P1-2）：§8.1 START 前持久化的 current executionId（Auto-local，§8.6.1）。
     // # null = 尚未进入 CELLREBEL_START_PENDING（未派发 execution）。§7.1：一个 attempt 可有多个
     // # execution（历史 decoy + current），恢复必须按此字段定位 current execution，不可靠"只有一行"。
-    val currentExecutionId: String? = null
+    val currentExecutionId: String? = null,
+    // # R45（Sol R45 P1-3 / §4.3 第 1 步）：attempt 开启时从同一次 discover() 投影组落库的推进
+    // # CAS 三元组前置。(expectedScheduleId, expectedCurrentItemId, expectedScheduleVersion) 必须
+    // # 先落库再启动外部执行；completeAndAdvance 逐字节重放这一组，绝不在此刻重新 discover() 刷新
+    // # （§6.7.3 v1.72 / M-AD-28）。null = 尚未锚定（未进入 A+ 外部执行）。
+    val aplusAnchorScheduleId: String? = null,
+    val aplusAnchorItemId: String? = null,
+    val aplusAnchorVersion: Long? = null
 )
 
 /**

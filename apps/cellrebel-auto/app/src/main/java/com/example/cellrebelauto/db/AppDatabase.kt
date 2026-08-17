@@ -58,7 +58,7 @@ import com.example.cellrebelauto.recovery.ReleaseReceiptDao
         RecoveryCheckpointRow::class,
         ReleaseReceiptRow::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -154,6 +154,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 -> v6 (R45, Sol R45 P1-3 / spec §4.3 step 1): test_attempts gains the advance CAS
+         * anchor triple persisted at attempt open from the SAME discover() projection group.
+         * Additive nullable columns — no data transformation, no destructive path.
+         * # v5 到 v6：attempt 表新增推进 CAS 三元组锚（开启时从同一次 discover 投影组落库）
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusAnchorScheduleId TEXT")
+                db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusAnchorItemId TEXT")
+                db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusAnchorVersion INTEGER")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -162,7 +176,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "cellrebel_auto.db"
                 )
                     // # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }

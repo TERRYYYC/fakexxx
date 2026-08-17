@@ -55,7 +55,7 @@ class RecordingExternalApplyExecutor(
         }
         return ApplyOutcome(
             outcome = outcome, providerHadAlreadyApplied = alreadyApplied, leaseId = "lease-$attemptId",
-            operationId = operationId, acceptedIntentHash = acceptedIntentHash,
+            operationId = operationId ?: "op-$attemptId", acceptedIntentHash = acceptedIntentHash,
             appliedAtEpochMs = appliedAtEpochMs, environmentRevision = environmentRevision,
             verificationLevelWire = verificationLevelWire
         )
@@ -81,6 +81,7 @@ class RecordingExternalApplyExecutor(
     ): ApplyOutcome {
         releaseInvocationCounts[idempotencyKey] = (releaseInvocationCounts[idempotencyKey] ?: 0) + 1
         releaseCalls += ReleaseCall(attemptId, idempotencyKey, leaseId, releaseDigest)
+        releaseEvents += "release:$leaseId"
         val prior = releaseBindings[idempotencyKey]
         if (prior != null && (prior.first != leaseId || prior.second != releaseDigest)) {
             // Same key + different lease/digest → conflict.
@@ -156,16 +157,31 @@ class RecordingExternalApplyExecutor(
         io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? = { _, _, _ -> null }
     val observeCalls = mutableListOf<String>() // leaseIds
 
+    /**
+     * R45 (Sol R45 P1-5): the four-leg observation ARMED by a non-terminal advance — a healthy
+     * provider's post-advance environment matches its own receipt. Served ONCE by the next
+     * observe() (the engine's independent verification), then cleared: tests tamper legs by
+     * overwriting [observeAnswers] instead.
+     */
+    var armedPostAdvanceObservation: io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? = null
+
     override fun observe(
         leaseId: String,
         operationId: String,
         expectedIntentHash: String
     ): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? {
         observeCalls += leaseId
+        val armed = armedPostAdvanceObservation
+        if (armed != null) {
+            armedPostAdvanceObservation = null
+            return armed
+        }
         return observeAnswers(leaseId, operationId, expectedIntentHash)
     }
 
     val advanceCalls = mutableListOf<io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1>()
+    val advanceEvents = mutableListOf<String>() // "advance" — shared with release/apply ordering oracles
+    val releaseEvents = mutableListOf<String>()
     var advanceOutcomeWire: Int = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.ADVANCED.wire
 
     override fun completeAndAdvance(
@@ -173,10 +189,11 @@ class RecordingExternalApplyExecutor(
         expectedIntentHash: String
     ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1 {
         advanceCalls += request
+        advanceEvents += "advance"
         // The effective intent hash echoes the digest of the LAST apply this fake served (the intent
         // currently in effect for the lease) — a real provider's receipt binds the same way.
         val effectiveHash = appliedDigests.values.lastOrNull() ?: ""
-        return io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1(
+        val receipt = io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1(
             outcomeWire = advanceOutcomeWire,
             advancedFromItemId = request.expectedCurrentItemId,
             advancedToItemId = "item-2",
@@ -185,5 +202,24 @@ class RecordingExternalApplyExecutor(
             effectiveEnvironmentRevision = 7L,
             receiptDigest = "advance-receipt-${request.idempotencyKey}"
         )
+        // R45 (Sol R45 P1-5): arm the four-leg-matching observation for the engine's independent
+        // post-advance verification (a HEALTHY provider's environment matches its receipt).
+        armedPostAdvanceObservation = io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1(
+            leaseId = request.leaseId,
+            acceptedIntentHash = receipt.effectiveIntentHash,
+            observedAtEpochMs = 0L, observedAtElapsedRealtimeMs = 0L,
+            environmentRevision = receipt.effectiveEnvironmentRevision,
+            environmentFingerprint = "post-advance-fp",
+            continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+            continuitySinceEpochMs = null, continuitySinceElapsedRealtimeMs = null,
+            deliveryModeWire = io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire,
+            verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            effectiveLatitude = null, effectiveLongitude = null, isMock = true,
+            scheduleDecisionWire = io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire,
+            evidenceRefs = emptyList(),
+            scheduleItemId = receipt.advancedToItemId!!,
+            scheduleVersion = receipt.scheduleVersionAfter
+        )
+        return receipt
     }
 }
