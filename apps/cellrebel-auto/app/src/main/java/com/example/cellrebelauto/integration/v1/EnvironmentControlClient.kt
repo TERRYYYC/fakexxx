@@ -157,7 +157,17 @@ class EnvironmentControlClient(private val context: Context) {
 
             val service = IEnvironmentControlV1.Stub.asInterface(live)
             try {
-                HandshakeResult.Connected(providerPackage, service.discover())
+                val result = service.discover()
+                val snapshot = result.capabilitySnapshot
+                    ?: return HandshakeResult.Refused(
+                        providerPackage,
+                        IllegalStateException(
+                            "discover returned kind=${result.resultKindWire}" +
+                                " err=${result.errorCodeWire}" +
+                                " diag=${result.diagnosticMessage}"
+                        ),
+                    )
+                HandshakeResult.Connected(providerPackage, snapshot)
             } catch (t: Throwable) {
                 HandshakeResult.Refused(providerPackage, t)
             }
