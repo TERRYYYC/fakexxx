@@ -100,48 +100,61 @@ class FullLoopProbeActivity : Activity() {
         var leaseId: String? = null
         try {
             // ---- 1. discover -------------------------------------------------
-            val snap = svc.discover()
+            val discoverResult = svc.discover()
+            val snap = discoverResult.capabilitySnapshot
+                ?: run { appendLine("FAILED: discover returned no snapshot (kind=${discoverResult.resultKindWire}, err=${discoverResult.errorCodeWire})"); return@buildString }
             appendLine()
             appendLine("[1] discover → item=${snap.currentItemId} ver=${snap.scheduleVersion} rev=${snap.environmentRevision}")
             val itemId = snap.currentItemId
                 ?: run { appendLine("STOP: provider has no current schedule item"); return@buildString }
             val schedVer = snap.scheduleVersion
                 ?: run { appendLine("STOP: provider has no schedule version"); return@buildString }
+            val schedId = snap.currentScheduleId
+                ?: run { appendLine("STOP: provider has no current schedule id"); return@buildString }
 
             // ---- 2. preflight ------------------------------------------------
+            // KB-8: coordinates removed from EnvironmentIntentV1 — the provider
+            // resolves them from its own schedule item data; Auto passes only
+            // profileRef + scheduleRef as references.
             val intent = EnvironmentIntentV1(
                 runId = RUN_ID,
                 attemptId = "attempt-${UUID.randomUUID()}",
                 profileRef = itemId,
-                scheduleRef = snap.currentScheduleId ?: "",
-                latitude = 31.2304,
-                longitude = 121.4737,
+                scheduleRef = schedId,
                 requiredVerificationWire = 1,
                 notBeforeEpochMs = System.currentTimeMillis() - 1_000,
                 deadlineEpochMs = System.currentTimeMillis() + 600_000,
             )
-            val pre = svc.preflight(PreflightRequestV1(intent, "pf-${UUID.randomUUID()}", ContractV1.PROTOCOL_VERSION))
+            val preResult = svc.preflight(PreflightRequestV1(intent, "pf-${UUID.randomUUID()}", ContractV1.PROTOCOL_VERSION))
+            val pre = preResult.preflightReport
+                ?: run { appendLine("FAILED: preflight returned no report (kind=${preResult.resultKindWire}, err=${preResult.errorCodeWire})"); return@buildString }
             appendLine("[2] preflight → decision=${pre.scheduleDecisionWire} blockers=${pre.blockingReasonWires}")
             if (pre.blockingReasonWires.isNotEmpty()) {
                 appendLine("    (blocked — continuing anyway to surface the real apply answer)")
             }
 
             // ---- 3. apply — THE DEVICE ACTUALLY MOVES HERE --------------------
-            val receipt = svc.apply(ApplyRequestV1(intent, "ap-${UUID.randomUUID()}", ContractV1.PROTOCOL_VERSION))
+            val applyResult = svc.apply(ApplyRequestV1(intent, "ap-${UUID.randomUUID()}", ContractV1.PROTOCOL_VERSION))
+            val receipt = applyResult.applyReceipt
+                ?: run { appendLine("FAILED: apply returned no receipt (kind=${applyResult.resultKindWire}, err=${applyResult.errorCodeWire})"); return@buildString }
             leaseId = receipt.leaseId
             appendLine("[3] apply → lease=${receipt.leaseId.take(8)}… rev=${receipt.environmentRevision} verif=${receipt.verificationLevelWire}")
             appendLine("    intentHash=${receipt.acceptedIntentHash.take(16)}…")
 
             // ---- 4. observe — independent confirmation (§6.7.5) --------------
-            val obs = svc.observe(
+            val obsResult = svc.observe(
                 ObserveRequestV1(receipt.leaseId, "ob-${UUID.randomUUID()}", CanonicalIntentDigestV1.compute(intent))
             )
+            val obs = obsResult.environmentObservation
+                ?: run { appendLine("FAILED: observe returned no observation (kind=${obsResult.resultKindWire}, err=${obsResult.errorCodeWire})"); return@buildString }
             appendLine("[4] observe → rev=${obs.environmentRevision} coverage=${obs.continuityCoverageWire} mode=${obs.deliveryModeWire}")
             appendLine("    fingerprint=${obs.environmentFingerprint}")
             appendLine("    hashMatch=${obs.acceptedIntentHash == receipt.acceptedIntentHash}")
 
             // ---- 5. release BEFORE advance (§6.7.4a frozen order) ------------
-            val rel = svc.release(ReleaseRequestV1(receipt.leaseId, "rl-${UUID.randomUUID()}", "rk-${UUID.randomUUID()}"))
+            val relResult = svc.release(ReleaseRequestV1(receipt.leaseId, "rl-${UUID.randomUUID()}", "rk-${UUID.randomUUID()}"))
+            val rel = relResult.releaseReceipt
+                ?: run { appendLine("FAILED: release returned no receipt (kind=${relResult.resultKindWire}, err=${relResult.errorCodeWire})"); return@buildString }
             leaseId = null // released; the finally-guard no longer needs to fire
             appendLine("[5] release → complete=${rel.releaseComplete} residuals=${rel.residualReasonWires} rev=${rel.environmentRevision}")
 
@@ -157,6 +170,7 @@ class FullLoopProbeActivity : Activity() {
                 leaseId = receipt.leaseId,
                 idempotencyKey = "adv-${UUID.randomUUID()}",
                 requestDigest = "",
+                expectedScheduleId = schedId,
                 expectedScheduleVersion = schedVer,
                 expectedCurrentItemId = itemId,
                 completionProof = proof,
@@ -165,12 +179,16 @@ class FullLoopProbeActivity : Activity() {
             // The contract's own framing helper — a second local copy would drift
             // silently and simply compute a different digest.
             val advReq = draft.copy(requestDigest = CanonicalAdvanceDigestV1.compute(draft))
-            val adv = svc.completeAndAdvance(advReq)
+            val advResult = svc.completeAndAdvance(advReq)
+            val adv = advResult.advanceReceipt
+                ?: run { appendLine("FAILED: advance returned no receipt (kind=${advResult.resultKindWire}, err=${advResult.errorCodeWire})"); return@buildString }
             appendLine("[6] advance → outcome=${adv.outcomeWire} from=${adv.advancedFromItemId} to=${adv.advancedToItemId}")
             appendLine("    verAfter=${adv.scheduleVersionAfter} receiptDigest=${adv.receiptDigest.take(16)}…")
 
             // ---- 7. re-discover: the receipt is a claim, this is the evidence -
-            val after = svc.discover()
+            val afterResult = svc.discover()
+            val after = afterResult.capabilitySnapshot
+                ?: run { appendLine("FAILED: re-discover returned no snapshot (kind=${afterResult.resultKindWire}, err=${afterResult.errorCodeWire})"); return@buildString }
             appendLine("[7] discover → item=${after.currentItemId} ver=${after.scheduleVersion} rev=${after.environmentRevision}")
             appendLine()
             appendLine(
@@ -190,7 +208,7 @@ class FullLoopProbeActivity : Activity() {
                     svc.release(ReleaseRequestV1(stuck, "rl-cleanup", "rk-cleanup-${UUID.randomUUID()}"))
                 }
                 appendLine()
-                appendLine("CLEANUP: released stuck lease ${stuck.take(8)}… → ${cleaned.getOrNull()?.releaseComplete ?: "FAILED"}")
+                appendLine("CLEANUP: released stuck lease ${stuck.take(8)}… → ${cleaned.getOrNull()?.releaseReceipt?.releaseComplete ?: "FAILED"}")
             }
             runCatching { unbindService(conn) }
         }
