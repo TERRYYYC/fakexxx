@@ -195,7 +195,7 @@ class BinderExternalApplyExecutor(
     ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? {
         val api = remote ?: return null
         return try {
-            when (val v = ContractResponseValidator.validateCompleteAndAdvance(api.completeAndAdvance(request), expectedIntentHash)) {
+            when (val v = ContractResponseValidator.validateCompleteAndAdvance(api.completeAndAdvance(request), expectedIntentHash, request.requestDigest, request.idempotencyKey)) {
                 is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
                 is ContractResponseValidator.ValidatedContractResponse.Failure -> null
             }

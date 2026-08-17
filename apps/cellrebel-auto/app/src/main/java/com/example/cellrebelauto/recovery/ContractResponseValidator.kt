@@ -193,7 +193,10 @@ object ContractResponseValidator {
      *  effective intent hash binds the attempt's apply intent. */
     fun validateCompleteAndAdvance(
         result: EnvironmentControlResultV1,
-        expectedIntentHash: String
+        expectedIntentHash: String,
+        // R46 (Sol R46 P1-2): the request identity the receipt must canonically bind.
+        requestDigest: String,
+        idempotencyKey: String
     ): ValidatedContractResponse<io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1> {
         val base = validateSchemaAndKind(result, ContractResultKindV1.COMPLETE_AND_ADVANCE)
         if (base is ValidatedContractResponse.Failure) return base
@@ -209,6 +212,18 @@ object ContractResponseValidator {
         }
         if (receipt.effectiveIntentHash != expectedIntentHash) {
             return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_INTENT_MISMATCH")
+        }
+        // R46 (Sol R46 P1-2 / §6.7.3 M-AD-08 / M-AD-16): the receipt's canonical digest MUST
+        // recompute against the REQUEST it answers. A receipt that does not bind its request
+        // is not a weaker receipt — it is not a receipt. The requestDigest/idempotencyKey pair
+        // travels with the call site that built the request; the engine layer re-verifies with
+        // its own rebuilt request as the durable-recovery backstop (defense in depth: this
+        // validator guards the Binder response boundary, the engine guards the replay).
+        if (!io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.verify(
+                receipt, requestDigest, idempotencyKey
+            )
+        ) {
+            return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_RECEIPT_DIGEST_MISMATCH")
         }
         return ValidatedContractResponse.Success(receipt)
     }
