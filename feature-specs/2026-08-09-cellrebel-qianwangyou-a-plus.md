@@ -161,6 +161,7 @@ source_threads:
 | **v1.73** | PR-2 第十九轮（Sol T1 P1-1/P2-1） | **守卫报「0 处陈旧」，而树里当时就躺着它读不出的反例——第六次同形。** ①**P1-1**：`ARM_BARE` 的 lookbehind 排除前导 `*`，`ARM_BOLD` 只认「数字单独加粗」`**N** 行`，而文档实际写法是**整个短语加粗** `**88 行 \`owner-red\`**`——该形态**卡在两条臂之间，两条都读不到**，于是 guard 与 selftest 一起绿（selftest 的 `N-B` 也只种了前一种形态）。**这正是本文记过五次的那条：匹配器比文档实际记法窄，症状是把「存在」报成「缺席」。** ②修法不是把 88 改成 92 就完：先补 **`N-P`** 在旧臂上**实测判红**（plant 已应用、scan 已完成、就是读不出），再加 **`ARM_BOLD_PHRASE`**，再配 **`M-BOLDPHRASE`** 证明承重。③**按纪律先做记法普查再写正则**（不是写完再补），普查当场扫出**第二处同形陈旧**：§10 的 `**114 行 / 18 类**`（真值 118）——Sol 点的是 88 那处，**只修被点名的那处会让守卫照样瞎**。新臂上线后**原始臂命中** 68→95，而**唯一物理站点** **68→72，独有 4 处**。测法是让生产守卫自己报：把 `ARM_BOLD_PHRASE` 置 None 得 `68 raw / 68 unique`，恢复后得 `95 raw / 72 unique`。〔**v1.73c 二次更正**：本行先写「68→95、多出 27 处此前完全不可见」——把**臂命中**当成了**站点**；改正后又写「69→72、独有 3 处」——**仍然错，而且错得更值得记**：我用一个临时脚本按 `L{行}={值}` 去重来测，那正是 `(line, value)` 键，**也正是我在同一轮里刚把守卫的键从它改成 `(line, pos, value)` 的那个键**。于是 `L3595` 同一行两个物理上不同的 `39 行`（一个在 bold 短语内、只有新臂读得到；一个是 plain、由 bare 读）被折成一处，独有数少算 1。**我修好了守卫，然后用被我判定为不够的那把键去测量它。** 由 Sol 实测点破。〕顺带记：独有的 4 处里有 2 处正是本轮修掉的陈旧值，信噪比远高于我最初吹的 27。④**P2-1**：`IEnvironmentControlV1.aidl` 公开方法注释、`ContractRoundTripTest`「The two preconditions」与其具名断言、`CanonicalDigestV1` 承重理由段（仍写「14/15/16 全都还在」）三处仍在教 v1.71 的双腿读法；统一为身份·项·版本三腿，并补**只差 `expectedScheduleId` 的两个请求 round-trip 可区分性**直接断言——此前只有整体 `assertEquals` 的**间接**覆盖，它证明的是「整个对象活着」，不是「这个字段被携带且能区分」。⑤**我自己的扫描器也栽在同一形态上，只是换成了文件面**：上一轮那个一次性扫描器只扫 spec 与 main 包 `.kt`，**没扫 `.aidl`、没扫测试源**——所以 Sol 找到的那两处它天然看不见。同一天 glm52 的 KB-7 守卫被对抗种植抓到的正是「`.java` 源文件逃逸收集面」。**「臂读不懂记法」与「收集面漏掉文件」是同一个病的两种投影：守卫报告的覆盖率，上限是它看得见的东西。** 本轮普查已扩到 42 个文件全扩展名。见 §10.1 / §7 / `check-derived-counts.sh` |
 | **v1.74** | PR-2 第二十轮（Sol merge review） | **一个名叫「树等于上游」、实际放行 divergence 的绿 check。** ①`android-a-plus.yml` 的 provenance job 可见名是 `provenance (vendored trees == upstream SHAs)`，而 `--stage contract` 的谓词**自己打印**「has diverged from upstream (allowed at stage contract)」与「**does not bound WHICH paths diverged**」——名字断言的东西这道门早已停止证明。**这是 claim 宽于 measurement 的又一次，但载体换成了 CI check 的显示名**：它不在任何 spec、KDoc 或守卫里，而是在**读者扫一眼 checks 列表时唯一会看到的那行字**。②修法保持最窄：**job id `provenance` 不动**（不碰任何 required-check 绑定），只改可见 `name:` 为 `provenance (frozen upstream roots + reachable ancestry)`，并把注释里「the move is designed behaviour, **not a weakening**」改成实话——**它确实是收窄**，且旧措辞藏起了最关键的一条：**它不约束哪些路径可以分叉**（那是 scope gate 的活）。现列出该 stage 精确证明的三条与明确不证明的两条。③同类已扫：其余三个 job 名（`contract-v1 (static guards + both roots)`／两个 `(unit + lint + assemble)`）与各自谓词相符，无需改。④本轮由 Sol 的 **merge review** 抓到，不是实现 review——**同一个病在第五种载体上出现：spec 散文、守卫正则、selftest label、临时统计脚本，现在是 CI 显示名。** 见 `.github/workflows/android-a-plus.yml` |
 | **v1.75** | PR-2 第二十一轮（#18 归因门） | **「lease 不跨项」是已声明的不变量，而推进时没有任何门校验它——声明了十几轮，从没被测量过。** ①`request.leaseId` 在 §6.7.4b 六步里**命中为零**：它只进 `requestDigest` preimage，**绑字节不绑语义**。于是 foreign／伪造／wrong-item 的历史引用能穿过全部已冻结的门。②Sol 裁定不开 v2，要求在既有 1–17 内给出唯一映射 + 完整排除表。**排除表做完发现 canonical 早已答了四分之三**：foreign「不受本例外影响，仍无条件返回 8」、伪造「落不进窗口，只会走回 8」、active 由步 5 设备全局门 → 7。**只有 wrong-item 无门。** 而 wire 8 的属定义正是「该 leaseId 对**本次操作**不可用」——wrong-item 是同属的另一个种，**故落 8，不需要新 wire**。③新增 **步 3b 历史引用归因门**（foreign／unproven／wrong-item → 8），并冻结 **3b → 4 → 5** 次序：**归因先于状态比较**，否则伪造引用会收到 17/16/14/15，那些应答**泄露当前 schedule 状态**给尚未证明挣得过配额的调用方——与「步 1 安全门先于步 2 幂等查表」同源（未受信输入不得换取历史事实）。本步不判活跃性，ACTIVE 的自有引用在此放行、由步 5 判 7；**归因 8 / 状态 17·16·14·15 / 活跃性 7 三者互不吞并**。④新增 `M-AD-29`（wrong-item 精确落 8、指针不动、`advanceCount==0`，且不得答成 17/16/14/15/7）。⑤**台账自洽性守卫当场抓了我一次**：我复制 M-AD-28 的行只改 owner，留下 `Fable5 + apps/cellrebel-auto/` 这个**不配对**的 (owner, app-root)，两条 lane 选择器都选不中它，guard 报 `pr-3 39 + pr-4 53 = 92 but owner-red is 93 -- a lane selector lost rows`。改为 provider 侧路径后 `40 + 53 = 93`。**我又一次以为 owner 列是量具，而实际量具是 (owner, app-root) 配对。** §10／§10.1 118→**119**，owner-red 92→**93**（GLM 53 / Fable5 40），23 行 34 处缓存同 commit 重算。见 §6.3.3 / §6.7.4b / §10 |
+| **v1.76** | PR-2 第二十二轮（#18 unproven 唯一化） | **我把 observe 例外窗的谓词搬进了 advance 门，于是它在首次 advance 上无定义。** ①v1.75 的步 3b 把 `unproven` 写成「不是本 caller **最近一次成功 advance** 的历史引用」——该措辞出自 §6.3.3 的 **post-advance observe 例外窗**，那是规定 advance **之后** observe 能用哪个 lease；而 §6.7.4a 冻结 advance **当时**的 lease 来自「先 `release` 再 advance」，由 apply→release 周期产生。**同一个词，两个时刻，两个来源。**②三处错：循环（首次 advance 无「上一次 advance」）、来源错、无增益（item 绑定已由 `wrong-item` 承担）。且最近性会**误杀 §4.4 崩溃恢复重放**——同幂等键重放一个较旧但仍可证明、item 相符的自有 lease 正是恢复的正常形态。③唯一化为：`unproven` = provider **无法证明**该 leaseId 是它授予本 caller 且**已完成 release** 的 lease（不存在，或从未到达 `RELEASED`，含伪造）。**不定义最近性排序。**④补 L1/L2 判例：真实 L1（旧、item-1）推进 item-1 **通过 3b**；以 L2（新、item-2）推进 item-1 落 `wrong-item` → 8。⑤由 Sol 在 `4a17071` 上做 exact 文本审查时发现——**一个二义如果两种实现都能自洽，它就会一直活到测试替 contract 猜答案那一刻**。见 §6.7.4b |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -2065,14 +2066,28 @@ data class AdvanceReceiptV1(
                 → REQUEST_INVALID(13)。**本步只判请求自身是否自洽，不与设备实际 `currentItemId` 比对**
 3b. 历史引用归因  **`request.leaseId` 的归因在本步、且只在本步判定** → 均为 STALE_LEASE(8)：
                 `foreign`      该 leaseId 不属于本 caller
-                `unproven`     该 leaseId 不是本 caller 最近一次成功 advance 的历史引用，
-                               或 provider 留存的 receipt 中根本不存在它（含伪造）
+                `unproven`     provider **无法证明**该 leaseId 是它授予本 caller、且**已完成 `release`**
+                               的 lease：durable lease 记录中不存在，或存在但从未到达 `RELEASED`（含伪造）
                 `wrong-item`   它属于本 caller、确为历史引用，但**挣得配额的 item 与本次推进的 item 不同**
                 （v1.75：三者同为 wire 8 的**种**，因为该行的属定义就是「该 leaseId 对**本次操作**不可用」；
                  前两者 canonical 早已判为 8，本轮只把第三者收进同一属并给它一道可执行的门）
                 **本步必须先于步 4。** 否则伪造/他人的 leaseId 会收到 17/16/14/15 —— 那些应答**泄露当前
                 schedule 状态**给一个尚未证明自己挣得过配额的调用方。**归因先于状态比较**，与步 1 安全门
                 先于步 2 幂等查表同源：未受信输入不得换取历史事实。
+                **「最近性」不是判据（v1.76 唯一化）。** 本条初版写作「不是本 caller **最近一次成功
+                advance** 的历史引用」——那是把 §6.3.3 **post-advance observe 例外窗**的谓词误搬进
+                advance 门，三处错：①**循环**——首次 advance 之前不存在「上一次 advance」，该谓词无定义；
+                ②**来源错**——§6.7.4a 冻结 advance 时的 lease 来自「**先 `release` 再 advance**」，它由
+                apply→release 周期产生，**不是**由上一次 advance 携带；③**无增益**——item 绑定已由
+                `wrong-item` 承担，再叠一层最近性挡不住任何新东西，却会误杀 §4.4 的崩溃恢复重放
+                （同幂等键重放一个**较旧但仍可证明、且 item 相符**的自有 lease，正是恢复的正常形态）。
+                故**不定义最近性排序**（apply receipt／release completion／advance receipt 三者皆不需要）。
+
+                **判例（L1/L2）**：caller 持有两个已 `RELEASED` 的自有 lease —— L1（较旧，为 item-1 挣得）
+                与 L2（较新，为 item-2 挣得）；设备当前又回到 item-1。此时以**真实的 L1** 推进 item-1：
+                **通过步 3b**（自有 ✓、可证明已 RELEASED ✓、item 相符 ✓），随后照常受步 4／步 5 判定。
+                **它不因「不是最近一个」而落 8。** 反之若以 L2 推进 item-1，落 `wrong-item` → 8。
+
                 本步**不判活跃性**：`request.leaseId` 若属本 caller、确为本项历史引用但仍处 ACTIVE，
                 在此放行，由步 5 的设备全局 lease 门判 LEASE_CONFLICT(7)。**归因 8 / 状态 17·16·14·15 /
                 活跃性 7 三者互不吞并，次序固定为 3b → 4 → 5。**
