@@ -807,8 +807,10 @@ class EnvironmentControlHandler(
      *
      * For a legacy ADVANCE row, the receipt omits leaseId. It is safely
      * attributable only for an exact-digest replay, where the received
-     * request's digest binds [requestLeaseId]; a different digest cannot be
-     * reverse-mapped to the historical request and is therefore not migrated.
+     * request's digest binds [requestLeaseId]. A different digest cannot be
+     * reverse-mapped to the historical request, so the legacy key is returned
+     * without migration and the caller's normal digest comparison fails closed
+     * as IDEMPOTENCY_CONFLICT rather than treating the key as unused.
      */
     private fun idempotencyReceiptForCaller(
         caller: CallerIdentity,
@@ -836,7 +838,7 @@ class EnvironmentControlHandler(
             ContractOperation.APPLY -> deserializeApplyReceipt(record.receiptPayload).leaseId
             ContractOperation.RELEASE -> deserializeReleaseReceipt(record.receiptPayload).leaseId
             ContractOperation.ADVANCE -> {
-                if (record.requestDigest != requestDigest) return null
+                if (record.requestDigest != requestDigest) return record
                 requestLeaseId ?: return null
             }
         }

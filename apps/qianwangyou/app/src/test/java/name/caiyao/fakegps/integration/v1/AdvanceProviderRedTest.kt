@@ -1043,6 +1043,47 @@ class AdvanceProviderRedTest {
         assertEquals("foreign replay cannot advance again", 1, h.env.advanceCount)
     }
 
+    /**
+     * A pre-principal-scope ADVANCE receipt has neither signerDigest nor
+     * leaseId in its payload. An exact-digest replay can still be attributed
+     * through the received lease, but a different digest is irreducibly
+     * ambiguous: treating the old key as absent lets the same caller reuse an
+     * idempotency key for a second request. Fail closed as wire 12 instead.
+     */
+    @Test
+    fun advance_legacyAppScopedReceipt_differentDigestIsConflict() {
+        val h = harness()
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad-legacy-conflict-apply")
+        val idempotencyKey = "ad-legacy-conflict-key"
+        val legacyScopeKey = DurableFieldCodec.encode(
+            listOf(AUTO_PKG, ContractOperation.ADVANCE.name, idempotencyKey),
+        )
+        h.kv.write(
+            DurableIdempotencyStore.RECEIPT_NAMESPACE,
+            legacyScopeKey,
+            DurableFieldCodec.encode(
+                listOf(
+                    AUTO_PKG,
+                    ContractOperation.ADVANCE.name,
+                    idempotencyKey,
+                    "digest-of-a-different-legacy-request",
+                    "",
+                    h.clock.elapsedRealtimeMs().toString(),
+                    "payload-is-not-read-on-conflict",
+                ),
+            ),
+        )
+
+        expectContractFailure(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, idempotencyKey),
+            )
+        }
+        assertEquals("legacy conflict cannot move the pointer", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
+    }
+
     /** 3b `unproven` (forged branch of the OR clause): no receipt exists for the reference at all → exact 8. */
     @Test
     fun advance_forgedLeaseReference_staleLease() {
