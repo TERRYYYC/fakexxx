@@ -5,10 +5,13 @@ import io.github.terryyyc.fakexxx.contract.v1.CanonicalDigestV1
 /**
  * Durable operation receipts (§7.2 OperationReceipt, §6.3.4, §6.7.3).
  *
- * Lookup scope is (caller, operation, idempotencyKey). Same key + same
- * requestDigest → replay the ORIGINAL receipt; same key + different digest →
- * IDEMPOTENCY_CONFLICT (wire 12). resultDigest can never prove request equality
- * — two different requests may produce identical responses.
+ * Lookup scope is (caller, operation, idempotencyKey), where the frozen caller
+ * principal is (applicationId, signerDigest). Same key + same requestDigest →
+ * replay the ORIGINAL receipt; same key + different digest →
+ * IDEMPOTENCY_CONFLICT (wire 12). Scoping by applicationId alone lets a
+ * replacement signer retrieve the previous principal's receipt before the
+ * operation-specific ownership gate runs. resultDigest can never prove request
+ * equality — two different requests may produce identical responses.
  *
  * requestDigest preimages are the §6.3.4 / §6.7.3 frozen canonical forms with
  * domain separation, computed via the contract's shared framing helper
@@ -19,6 +22,8 @@ enum class ContractOperation { APPLY, RELEASE, ADVANCE }
 
 data class OperationReceiptRecord(
     val callerApplicationId: String,
+    /** Null only while decoding a pre-principal-scope durable record. */
+    val callerSignerDigest: String?,
     val operation: ContractOperation,
     val idempotencyKey: String,
     val requestDigest: String,
@@ -31,6 +36,7 @@ data class OperationReceiptRecord(
 interface IdempotencyStore {
     fun find(
         callerApplicationId: String,
+        callerSignerDigest: String,
         operation: ContractOperation,
         idempotencyKey: String,
     ): OperationReceiptRecord?
@@ -48,28 +54,51 @@ class DurableIdempotencyStore(
         const val RECEIPT_NAMESPACE: String = "integration.v1.receipts"
 
         /**
-         * Scope = (caller, operation, key), framed with the shared total codec:
+         * Scope = (caller principal, operation, key), framed with the shared
+         * total codec:
          * keys are FREE strings (§6.3.4), so a separator-joined scope key is
          * forgeable by a key containing the separator (Terra round-4 class).
          */
-        private fun scopeKey(callerApplicationId: String, operation: ContractOperation, idempotencyKey: String) =
-            DurableFieldCodec.encode(listOf(callerApplicationId, operation.name, idempotencyKey))
+        private fun scopeKey(
+            callerApplicationId: String,
+            callerSignerDigest: String,
+            operation: ContractOperation,
+            idempotencyKey: String,
+        ) = DurableFieldCodec.encode(
+            listOf(callerApplicationId, callerSignerDigest, operation.name, idempotencyKey),
+        )
+
+        /** Key shape used by the immediately preceding provider build. */
+        private fun legacyScopeKey(
+            callerApplicationId: String,
+            operation: ContractOperation,
+            idempotencyKey: String,
+        ) = DurableFieldCodec.encode(listOf(callerApplicationId, operation.name, idempotencyKey))
     }
 
     override fun find(
         callerApplicationId: String,
+        callerSignerDigest: String,
         operation: ContractOperation,
         idempotencyKey: String,
     ): OperationReceiptRecord? {
-        val raw = storage.read(RECEIPT_NAMESPACE, scopeKey(callerApplicationId, operation, idempotencyKey))
-            ?: return null
+        val raw = storage.read(
+            RECEIPT_NAMESPACE,
+            scopeKey(callerApplicationId, callerSignerDigest, operation, idempotencyKey),
+        ) ?: storage.read(
+            RECEIPT_NAMESPACE,
+            legacyScopeKey(callerApplicationId, operation, idempotencyKey),
+        ) ?: return null
         return deserialize(raw)
     }
 
     override fun record(record: OperationReceiptRecord) {
+        val signerDigest = requireNotNull(record.callerSignerDigest) {
+            "new operation receipts require the full caller principal"
+        }
         storage.write(
             RECEIPT_NAMESPACE,
-            scopeKey(record.callerApplicationId, record.operation, record.idempotencyKey),
+            scopeKey(record.callerApplicationId, signerDigest, record.operation, record.idempotencyKey),
             serialize(record),
         )
     }
@@ -86,12 +115,17 @@ class DurableIdempotencyStore(
             r.resultDigest,
             r.createdAtElapsedRealtimeMs.toString(),
             r.receiptPayload,
+            // Append-only schema extension: old seven-field records decode
+            // with null and are admitted only after the handler proves their
+            // receipt's lease belongs to the current full caller principal.
+            r.callerSignerDigest,
         ))
 
     private fun deserialize(s: String): OperationReceiptRecord {
         val parts = DurableFieldCodec.decodeNonNull(s)
         return OperationReceiptRecord(
             callerApplicationId = parts[0],
+            callerSignerDigest = parts.getOrNull(7),
             operation = ContractOperation.valueOf(parts[1]),
             idempotencyKey = parts[2],
             requestDigest = parts[3],

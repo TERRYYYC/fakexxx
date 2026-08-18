@@ -40,7 +40,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * toward the ledger (deleting it would still leave the verifier green).
  *
  * Judgment order is now FROZEN as §6.7.4b:
- *   proof → idempotency → schedule(14/15/16) → lease(7) → mutation
+ *   safety → idempotency → proof → attribution(8) →
+ *   schedule(17→16→14→15) → lease(7) → mutation
  * with two pinned rationales: idempotent replay precedes the schedule gate
  * (after a successful advance the replayed expectedCurrentItemId is
  * necessarily expired — schedule-first would collapse M-AD-02 into M-AD-04
@@ -222,7 +223,11 @@ class AdvanceProviderRedTest {
     @Test
     fun advance_wrongItemExpectation_scheduleItemMismatch_pointerUntouched() {
         val h = harness()
-        val leaseId = earnAndRelease(h)
+        // v1.75 fixture alignment: wire 14 is the CAS mismatch between the
+        // request's expectation and the DEVICE state — so the attribution
+        // dimension must be self-consistent (lease earned FOR the expected
+        // item), or step 3b answers 8 first and 14 is never reached.
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-2", key = "adv-k4b-apply")
 
         expectContractFailure(ContractErrorCodeV1.SCHEDULE_ITEM_MISMATCH) {
             h.handler.completeAndAdvance(
@@ -257,7 +262,9 @@ class AdvanceProviderRedTest {
     fun advance_lastItem_exhaustedReceipt_notAFailure() {
         val h = harness()
         h.env.currentItemId = "item-3"
-        val leaseId = earnAndRelease(h, key = "adv-last-apply")
+        // v1.75: quota for the last item must be earned under the last item's
+        // own attribution (step 3b).
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-3", key = "adv-last-apply")
 
         val receipt = h.handler.completeAndAdvance(
             AUTO_UID,
@@ -283,7 +290,11 @@ class AdvanceProviderRedTest {
     fun advance_afterExhausted_scheduleExhausted() {
         val h = harness()
         h.env.currentItemId = "item-3"
-        val leaseId = earnAndRelease(h, key = "adv-exh-apply")
+        // v1.75: earned under item-3's attribution — the post-restart retry
+        // reuses this same reference with expectedItemId = "item-3", so step 3b
+        // passes and the DURABLE exhausted discriminator (wire 16) stays the
+        // dimension under test.
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-3", key = "adv-exh-apply")
         h.handler.completeAndAdvance(
             AUTO_UID,
             request(h, leaseId, "adv-k7", expectedItemId = "item-3", completionProof = proof(h, "item-3")),
@@ -348,7 +359,8 @@ class AdvanceProviderRedTest {
     /**
      * §6.7.4b facet — FLIPPED for the v1.42 frozen order (Terra PR#22 P1-2 /
      * dsf F-7.1). The order is now:
-     *   safety(+recompute digest) → idempotency → proof → schedule → lease → mutation
+     *   safety(+recompute digest) → idempotency → proof → attribution →
+     *   schedule → lease → mutation
      * so idempotency is judged BEFORE proof, the reverse of what this row
      * asserted under v1.39.
      *
@@ -870,7 +882,10 @@ class AdvanceProviderRedTest {
         h.pair(AUTO_PKG, AUTO_SIGNER)
         h.env.itemIds = mutableListOf("item\tfrom", "item-2", "item-3")
         h.env.currentItemId = "item\tfrom"
-        val leaseId = earnAndRelease(h, key = "tab-src-apply")
+        // v1.75: attribution rides the tab-bearing item ref too — the
+        // earnedScheduleRef field goes through the same total codec, so this
+        // fixture now ALSO proves the attribution basis survives framing.
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item\tfrom", key = "tab-src-apply")
         val req = request(h, leaseId, "adv-tab-src", expectedItemId = "item\tfrom")
 
         h.env.failNextAdvancePointer = true
@@ -922,7 +937,7 @@ class AdvanceProviderRedTest {
     }
 
     // ------------- §6.7.4b step 3b: historical-reference attribution (v1.75, #18)
-    // Frozen at contract exact 4a17071: foreign / unproven(forged) / wrong-item
+    // Frozen at contract exact 00e2396: foreign / unproven / wrong-item
     // are SPECIES of STALE_LEASE(8) ("该 leaseId 对本次操作不可用"), judged at
     // step 3b BEFORE step 4 — answering 17/16/14/15 would leak current schedule
     // state to a caller who never proved earned quota. 3b does NOT judge
@@ -949,8 +964,10 @@ class AdvanceProviderRedTest {
     @Test
     fun advance_wrongItemHistoricalLease_staleLease() {
         val h = harness()
-        // Quota earned under item-2's attribution; schedule currently at item-1.
-        val leaseId = earnAndReleaseFor(h, earnedItem = "item-2", key = "ad29-apply")
+        // v1.76 exact L1/L2 negative: L1 is older and correct for item-1;
+        // newer L2 earned item-2. Recency grants L2 no authority over item-1.
+        earnAndReleaseFor(h, earnedItem = "item-1", key = "ad29-l1")
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-2", key = "ad29-l2")
 
         expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
             h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad29-k1"))
@@ -978,6 +995,54 @@ class AdvanceProviderRedTest {
         assertEquals(0, h.env.advanceCount)
     }
 
+    /**
+     * Caller identity is the frozen (applicationId, signerDigest) principal.
+     * Explicitly approving a replacement signer does not transfer historical
+     * leases earned by the old signer, even when applicationId is unchanged.
+     */
+    @Test
+    fun advance_sameApplicationIdDifferentSigner_isForeignStaleLease() {
+        val h = harness()
+        val oldSignerLease = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad3b-signer-old")
+
+        val replacementSigner = "signer-auto-2-repaired"
+        h.resolver.register(AUTO_UID, AUTO_PKG, replacementSigner)
+        h.pair(AUTO_PKG, replacementSigner)
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, oldSignerLease, "ad3b-signer-k1"),
+            )
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
+    }
+
+    /**
+     * Idempotency step 2 is scoped by `caller`, whose frozen authorization
+     * principal is (applicationId, signerDigest). A replacement signer using
+     * the exact old key and digest is NOT the same caller and must not retrieve
+     * the old receipt before step 3b can reject its foreign lease reference.
+     */
+    @Test
+    fun advance_idempotentReplayDoesNotCrossSignerPrincipal() {
+        val h = harness()
+        val oldSignerLease = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad3b-replay-old")
+        val originalRequest = request(h, oldSignerLease, "ad3b-replay-k1")
+        h.handler.completeAndAdvance(AUTO_UID, originalRequest)
+        assertEquals(1, h.env.advanceCount)
+
+        val replacementSigner = "signer-auto-2-repaired"
+        h.resolver.register(AUTO_UID, AUTO_PKG, replacementSigner)
+        h.pair(AUTO_PKG, replacementSigner)
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.completeAndAdvance(AUTO_UID, originalRequest)
+        }
+        assertEquals("foreign replay cannot advance again", 1, h.env.advanceCount)
+    }
+
     /** 3b `unproven` (forged branch of the OR clause): no receipt exists for the reference at all → exact 8. */
     @Test
     fun advance_forgedLeaseReference_staleLease() {
@@ -988,6 +1053,53 @@ class AdvanceProviderRedTest {
             h.handler.completeAndAdvance(
                 AUTO_UID,
                 request(h, "lease-that-never-existed", "ad3b-g-k1"),
+            )
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
+    }
+
+    /**
+     * v1.76 L1/L2 ruling: recency is NOT an advance-attribution predicate.
+     * L1 is older but caller-owned, durably RELEASED, and earned for item-1;
+     * newer L2 belongs to item-2. L1 must pass step 3b for current item-1.
+     */
+    @Test
+    fun advance_olderReleasedOwnLease_matchingItem_isStillProven() {
+        val h = harness()
+        val olderL1 = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad3b-l1")
+        earnAndReleaseFor(h, earnedItem = "item-2", key = "ad3b-l2")
+
+        val receipt = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, olderL1, "ad3b-old-k1"),
+        )
+        assertEquals("item-2", receipt.advancedToItemId)
+        assertEquals("older proven L1 advances exactly once", 1, h.env.advanceCount)
+    }
+
+    /**
+     * A pre-v1.75 durable lease is real and caller-owned, but has no persisted
+     * originating-item evidence. It is therefore `unproven` → exact wire 8;
+     * the schema upgrade must not crash while decoding the legacy row.
+     */
+    @Test
+    fun advance_legacyLeaseWithoutItemAttribution_staleLeaseNotCrash() {
+        val h = harness()
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad3b-legacy")
+        val key = "lease:$leaseId"
+        val current = h.kv.read("integration.v1.leases", key)!!
+        val legacyThirteenFields = DurableFieldCodec.decode(current).take(13)
+        h.kv.write(
+            "integration.v1.leases",
+            key,
+            DurableFieldCodec.encode(legacyThirteenFields),
+        )
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, leaseId, "ad3b-legacy-k1"),
             )
         }
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
@@ -1013,6 +1125,9 @@ class AdvanceProviderRedTest {
         val receipt = h.handler.completeAndAdvance(AUTO_UID, request(h, applyReceipt.leaseId, "ad20-k1"))
         assertEquals("item-2", receipt.advancedToItemId)
 
+        // The exception window is provider-durable, not a process-local flag.
+        h.restart(cleanlinessProvable = true)
+
         // Post-advance verification observe on the SAME (released) historical ref
         // — the frozen wire-8 exception window.
         val observation = h.handler.observe(
@@ -1024,6 +1139,100 @@ class AdvanceProviderRedTest {
             ),
         )
         assertEquals("post-advance readback reflects the advanced schedule", "item-2", h.env.currentItemId)
-        assertEquals("observation served, not STALE_LEASE", false, observation == null)
+        assertEquals("observation served for the advanced item", "item-2", observation.scheduleItemId)
+    }
+
+    /** The post-advance observe window is scoped to the full caller principal. */
+    @Test
+    fun advance_postAdvanceObserveWindow_doesNotTransferToReplacementSigner() {
+        val h = harness()
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad-observe-signer")
+        val receipt = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, leaseId, "ad-observe-signer-k1"),
+        )
+        assertEquals("item-2", receipt.advancedToItemId)
+
+        val replacementSigner = "signer-auto-2-repaired"
+        h.resolver.register(AUTO_UID, AUTO_PKG, replacementSigner)
+        h.pair(AUTO_PKG, replacementSigner)
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.observe(
+                AUTO_UID,
+                io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1(
+                    leaseId = leaseId,
+                    operationId = "op-observe-signer",
+                    expectedIntentHash = receipt.effectiveIntentHash,
+                ),
+            )
+        }
+    }
+
+    /**
+     * A lease granted to a DIFFERENT full caller principal must not close the
+     * original caller's post-advance observe window merely because both
+     * principals share applicationId. The old applicationId-only window key
+     * made the replacement signer's apply erase the original signer's slot.
+     */
+    @Test
+    fun advance_postAdvanceObserveWindow_replacementSignerGrantDoesNotCloseOriginalWindow() {
+        val h = harness()
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad-window-isolation")
+        val receipt = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, leaseId, "ad-window-isolation-k1"),
+        )
+        assertEquals("item-2", receipt.advancedToItemId)
+
+        val replacementSigner = "signer-auto-2-repaired"
+        h.resolver.register(AUTO_UID, AUTO_PKG, replacementSigner)
+        h.pair(AUTO_PKG, replacementSigner)
+        h.apply(
+            key = "ad-window-isolation-replacement-apply",
+            intent = h.intent(scheduleRef = "item-2", attemptId = "att-window-replacement"),
+        )
+
+        h.resolver.register(AUTO_UID, AUTO_PKG, AUTO_SIGNER)
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        val observation = h.handler.observe(
+            AUTO_UID,
+            io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1(
+                leaseId = leaseId,
+                operationId = "op-window-original-signer",
+                expectedIntentHash = receipt.effectiveIntentHash,
+            ),
+        )
+        assertEquals("original caller's durable window remains open", "item-2", observation.scheduleItemId)
+    }
+
+    /**
+     * The wire-8 observe exception exists only for NON-terminal advance, whose
+     * new environment must be independently observed. EXHAUSTED uses discover
+     * state readback instead, so terminal advance must not open this window.
+     */
+    @Test
+    fun advance_terminalExhausted_doesNotOpenReleasedObserveWindow() {
+        val h = harness()
+        h.env.itemIds = mutableListOf("item-1")
+        h.env.currentItemId = "item-1"
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-1", key = "ad-terminal")
+
+        val receipt = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, leaseId, "ad-terminal-k1"),
+        )
+        assertEquals(AdvanceOutcomeV1.EXHAUSTED.wire, receipt.outcomeWire)
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.observe(
+                AUTO_UID,
+                io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1(
+                    leaseId = leaseId,
+                    operationId = "op-terminal-obs",
+                    expectedIntentHash = receipt.effectiveIntentHash,
+                ),
+            )
+        }
     }
 }

@@ -166,7 +166,12 @@ class EnvironmentControlHandler(
         // committed advance still has an unapplied pointer change (Terra round-3).
         storage.transaction {
             // §6.3.4: idempotency check
-            val existing = idempotency.find(caller.applicationId, ContractOperation.APPLY, request.idempotencyKey)
+            val existing = idempotencyReceiptForCaller(
+                caller = caller,
+                operation = ContractOperation.APPLY,
+                idempotencyKey = request.idempotencyKey,
+                requestDigest = requestDigest,
+            )
             if (existing != null) {
                 if (existing.requestDigest == requestDigest) {
                     return@transaction deserializeApplyReceipt(existing.receiptPayload)
@@ -209,8 +214,16 @@ class EnvironmentControlHandler(
                 startingEnvironmentRevision = snap.revision,
                 deadlineElapsedRealtimeMs = deadlineElapsed,
                 applyOwnerGeneration = tracker.generation,
+                // v1.75 step 3b: the lease's quota is earned FOR this schedule
+                // item (§6.3/v1.72: intent.scheduleRef IS the item's stable ref).
+                earnedScheduleRef = intent.scheduleRef,
             )
             leaseStore.put(lease)
+
+            // §6.3.3 wire-8 observe exception: granting this caller a NEW lease
+            // closes its post-advance verification window ("此后尚未有新 lease
+            // 授予该 caller" leg) — same transaction as the grant itself.
+            storage.write(OBSERVE_WINDOW_NAMESPACE, observeWindowKey(caller), "")
 
             // Now apply environment
             environment.applyEnvironment(intent)
@@ -237,6 +250,7 @@ class EnvironmentControlHandler(
             // Persist receipt for idempotent replay
             idempotency.record(OperationReceiptRecord(
                 callerApplicationId = caller.applicationId,
+                callerSignerDigest = caller.signerDigest,
                 operation = ContractOperation.APPLY,
                 idempotencyKey = request.idempotencyKey,
                 requestDigest = requestDigest,
@@ -269,17 +283,38 @@ class EnvironmentControlHandler(
         val lease = leaseStore.get(request.leaseId)
             ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE, "unknown lease ${request.leaseId}")
 
-        // Lease must belong to this caller
-        if (lease.callerApplicationId != caller.applicationId) {
+        // Lease must belong to this caller — the "非本 caller 所有" branch is
+        // NOT lifted by the post-advance window ("不受本例外影响").
+        if (!leaseBelongsToCaller(lease, caller)) {
             throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                "lease ${request.leaseId} belongs to ${lease.callerApplicationId}")
+                "lease ${request.leaseId} belongs to a different caller principal")
         }
 
-        // Effective state must be ACTIVE
+        // Effective state must be ACTIVE — with ONE frozen exception (§6.3.3
+        // wire-8 row, third half of the v1.42/v1.43 rule): a non-terminal
+        // advance MUST be independently verified by observe(), and at that
+        // moment the only leaseId the caller can present is the RELEASED
+        // historical reference its completeAndAdvance carried (step 5's lease
+        // gate is device-global; the next lease arrives only with the next
+        // apply). So: caller's own reference + it IS the caller's most recent
+        // successful advance's reference + no new lease granted to this caller
+        // since (the grant clears the slot) → the "已 RELEASED" branch does not
+        // apply and the observation is SERVED. Refusing it would make the
+        // frozen "must verify" hop unconditionally unreachable. Divergence
+        // (another caller re-applied meanwhile) is deliberately NOT absorbed
+        // here: serving lets the effectiveIntentHash / revision comparison
+        // diagnose it; an 8 would be indistinguishable from "lease expired".
+        // Every other state (EXPIRED / REVOKED / RELEASE_INCOMPLETE) and any
+        // reference outside the window still answers 8.
         val effState = leaseStore.effectiveState(request.leaseId, tracker.generation)
         if (effState != LeaseState.ACTIVE) {
-            throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                "lease ${request.leaseId} effective state is $effState")
+            val windowRef = storage.read(OBSERVE_WINDOW_NAMESPACE, observeWindowKey(caller))
+            val inPostAdvanceWindow =
+                effState == LeaseState.RELEASED && request.leaseId == windowRef
+            if (!inPostAdvanceWindow) {
+                throw ContractException(ContractErrorCodeV1.STALE_LEASE,
+                    "lease ${request.leaseId} effective state is $effState")
+            }
         }
 
         observer.observe(lease, request)
@@ -291,14 +326,20 @@ class EnvironmentControlHandler(
         val lease = leaseStore.get(request.leaseId)
             ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE, "unknown lease ${request.leaseId}")
 
-        if (lease.callerApplicationId != caller.applicationId) {
+        if (!leaseBelongsToCaller(lease, caller)) {
             throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                "lease ${request.leaseId} belongs to ${lease.callerApplicationId}")
+                "lease ${request.leaseId} belongs to a different caller principal")
         }
 
         // §6.3.4 release idempotency check
         val requestDigest = RequestDigests.releaseDigest(request.leaseId)
-        val existing = idempotency.find(caller.applicationId, ContractOperation.RELEASE, request.idempotencyKey)
+        val existing = idempotencyReceiptForCaller(
+            caller = caller,
+            operation = ContractOperation.RELEASE,
+            idempotencyKey = request.idempotencyKey,
+            requestDigest = requestDigest,
+            requestLeaseId = request.leaseId,
+        )
         if (existing != null) {
             if (existing.requestDigest == requestDigest) {
                 return@withOwnerFence deserializeReleaseReceipt(existing.receiptPayload)
@@ -361,6 +402,7 @@ class EnvironmentControlHandler(
             // Persist for idempotent replay — same transaction as state transition
             idempotency.record(OperationReceiptRecord(
                 callerApplicationId = caller.applicationId,
+                callerSignerDigest = caller.signerDigest,
                 operation = ContractOperation.RELEASE,
                 idempotencyKey = request.idempotencyKey,
                 requestDigest = requestDigest,
@@ -380,9 +422,9 @@ class EnvironmentControlHandler(
     }
 
     fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
-        // §6.7.4b frozen judgment order (v1.42, amended v1.54 + v1.72):
+        // §6.7.4b frozen judgment order (v1.42, amended through v1.76):
         //   safety(+recompute digest) → idempotency → proof →
-        //   schedule(17→16→14→15) → lease(7) → mutation
+        //   attribution(8) → schedule(17→16→14→15) → lease(7) → mutation
         // (17 = schedule identity, judged first per v1.72; then exhausted(16)
         // before item(14)/version(15) per the v1.54 intra-step reorder.)
         // Steps 2–6 run inside ONE serialized transaction, exactly like apply():
@@ -430,7 +472,13 @@ class EnvironmentControlHandler(
         var replayed = true
         val committed = storage.transaction {
             // --- step 2: idempotency, keyed on the RECOMPUTED digest (M-AD-02/03) ---
-            val existing = idempotency.find(caller.applicationId, ContractOperation.ADVANCE, request.idempotencyKey)
+            val existing = idempotencyReceiptForCaller(
+                caller = caller,
+                operation = ContractOperation.ADVANCE,
+                idempotencyKey = request.idempotencyKey,
+                requestDigest = recomputedDigest,
+                requestLeaseId = request.leaseId,
+            )
             if (existing != null) {
                 if (existing.requestDigest == recomputedDigest) {
                     // M-AD-02: replay the SAME receipt without a second advance
@@ -451,6 +499,39 @@ class EnvironmentControlHandler(
             if (proof.scheduleItemId != request.expectedCurrentItemId) {
                 throw ContractException(ContractErrorCodeV1.REQUEST_INVALID,
                     "proof.scheduleItemId=${proof.scheduleItemId} does not match expectedCurrentItemId=${request.expectedCurrentItemId}")
+            }
+
+            // --- step 3b: historical-reference attribution (v1.75, frozen
+            // order 3b → 4 → 5) --- request.leaseId's attribution is judged
+            // HERE and only here; every failure is STALE_LEASE(8), because
+            // wire 8's genus is "该 leaseId 对本次操作不可用" and foreign /
+            // unproven / wrong-item are its species. 3b must precede step 4:
+            // answering 17/16/14/15 to a forged or foreign reference would
+            // leak current schedule state to a caller who never proved earned
+            // quota (same root as step 1 before step 2: untrusted input must
+            // not buy historical facts). 3b does NOT judge liveness — the
+            // caller's own ACTIVE reference passes here and step 5 answers 7.
+            //
+            // v1.76 removes recency from this gate: any caller-owned, provably
+            // persisted lease with the matching earned item passes attribution,
+            // even when a newer released lease exists. "Most recent" belongs
+            // only to the post-advance observe exception window below. A
+            // pre-v1.75 durable row has no item attribution and therefore
+            // remains decodable but fails closed here as `unproven` → 8.
+            val attributed = leaseStore.get(request.leaseId)
+                ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE,
+                    "leaseId ${request.leaseId} unproven: no provider record of it (forged or never earned)")
+            if (!leaseBelongsToCaller(attributed, caller)) {
+                throw ContractException(ContractErrorCodeV1.STALE_LEASE,
+                    "leaseId ${request.leaseId} is foreign: earned by another caller")
+            }
+            val earnedScheduleRef = attributed.earnedScheduleRef
+                ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE,
+                    "leaseId ${request.leaseId} unproven: durable row has no originating-item attribution")
+            if (earnedScheduleRef != request.expectedCurrentItemId) {
+                throw ContractException(ContractErrorCodeV1.STALE_LEASE,
+                    "leaseId ${request.leaseId} earned quota for item " +
+                        "$earnedScheduleRef, not ${request.expectedCurrentItemId} (wrong-item)")
             }
 
             // --- step 4: schedule gates (17→16→14→15) ---
@@ -514,7 +595,9 @@ class EnvironmentControlHandler(
                 if (toItemId == null) AdvanceOutcomeV1.EXHAUSTED.wire else AdvanceOutcomeV1.ADVANCED.wire
 
             val snap = tracker.snapshot()
-            val intentHash = leaseStore.get(request.leaseId)?.acceptedIntentHash ?: ""
+            // Step 3b proved the reference exists and is the caller's own —
+            // reuse that read; a fallback here would silently mask a broken gate.
+            val intentHash = attributed.acceptedIntentHash
 
             val receipt = AdvanceReceiptV1(
                 outcomeWire = outcomeWire,
@@ -537,6 +620,7 @@ class EnvironmentControlHandler(
             // Persist receipt for idempotent replay — the commit point.
             idempotency.record(OperationReceiptRecord(
                 callerApplicationId = caller.applicationId,
+                callerSignerDigest = caller.signerDigest,
                 operation = ContractOperation.ADVANCE,
                 idempotencyKey = request.idempotencyKey,
                 requestDigest = request.requestDigest,
@@ -553,6 +637,18 @@ class EnvironmentControlHandler(
                 ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY,
                 // (fromItemId, toItemId?) — toItemId is codec-native null when exhausted.
                 DurableFieldCodec.encode(listOf(request.expectedCurrentItemId, toItemId)),
+            )
+
+            // §6.3.3 wire-8 observe exception window opens only for a
+            // NON-terminal advance: that hop must observe the new environment.
+            // EXHAUSTED verifies through discover() schedule-state readback,
+            // so accepting a released observe there would widen the exception.
+            // Committed WITH the receipt; a forged leaseId cannot land here
+            // because step 3b precedes this write.
+            storage.write(
+                OBSERVE_WINDOW_NAMESPACE,
+                observeWindowKey(caller),
+                if (toItemId == null) "" else request.leaseId,
             )
 
             audit.append("advance",
@@ -683,6 +779,74 @@ class EnvironmentControlHandler(
     private val ownerLock = Any()
 
     /**
+     * Lease ownership uses the same full authorization principal as pairing:
+     * `(applicationId, signerDigest)`. An application reinstall or signer
+     * replacement must not inherit the previous principal's historical lease,
+     * release authority, or post-advance observe exception window merely by
+     * retaining the package/application id.
+     */
+    private fun leaseBelongsToCaller(lease: LeaseRecord, caller: CallerIdentity): Boolean =
+        lease.callerApplicationId == caller.applicationId &&
+            lease.callerSignerDigest == caller.signerDigest
+
+    /** Durable key for state owned by the frozen full caller principal. */
+    private fun observeWindowKey(caller: CallerIdentity): String =
+        DurableFieldCodec.encode(listOf(caller.applicationId, caller.signerDigest))
+
+    /**
+     * Read an idempotency receipt in the full caller-principal scope.
+     *
+     * The immediately preceding provider schema keyed receipts by
+     * applicationId only and did not persist signerDigest. [DurableIdempotencyStore]
+     * can still surface such a row, but it is not trusted merely because the
+     * package name matches: its operation's lease must independently prove the
+     * current signer owned the receipt. A safe row is rewritten under the new
+     * four-part scope. An unsafe/ambiguous row is treated as belonging to a
+     * different caller, so normal operation gates decide the request without
+     * leaking or replaying the old principal's receipt.
+     *
+     * For a legacy ADVANCE row, the receipt omits leaseId. It is safely
+     * attributable only for an exact-digest replay, where the received
+     * request's digest binds [requestLeaseId]; a different digest cannot be
+     * reverse-mapped to the historical request and is therefore not migrated.
+     */
+    private fun idempotencyReceiptForCaller(
+        caller: CallerIdentity,
+        operation: ContractOperation,
+        idempotencyKey: String,
+        requestDigest: String,
+        requestLeaseId: String? = null,
+    ): OperationReceiptRecord? {
+        val record = idempotency.find(
+            caller.applicationId,
+            caller.signerDigest,
+            operation,
+            idempotencyKey,
+        ) ?: return null
+
+        val storedSigner = record.callerSignerDigest
+        if (storedSigner != null) {
+            return record.takeIf {
+                it.callerApplicationId == caller.applicationId &&
+                    storedSigner == caller.signerDigest
+            }
+        }
+
+        val legacyLeaseId = when (operation) {
+            ContractOperation.APPLY -> deserializeApplyReceipt(record.receiptPayload).leaseId
+            ContractOperation.RELEASE -> deserializeReleaseReceipt(record.receiptPayload).leaseId
+            ContractOperation.ADVANCE -> {
+                if (record.requestDigest != requestDigest) return null
+                requestLeaseId ?: return null
+            }
+        }
+        val legacyLease = leaseStore.get(legacyLeaseId) ?: return null
+        if (!leaseBelongsToCaller(legacyLease, caller)) return null
+
+        return record.copy(callerSignerDigest = caller.signerDigest).also(idempotency::record)
+    }
+
+    /**
      * Run [block] under the owner fence, after finishing any advance whose
      * receipt committed but whose external pointer apply had not completed.
      * Settling FIRST means no entry — write, read, or replay — is served while
@@ -701,6 +865,18 @@ class EnvironmentControlHandler(
          */
         const val ADVANCE_PENDING_NAMESPACE: String = "integration.v1.advance.pending"
         const val ADVANCE_PENDING_KEY: String = "slot"
+
+        /**
+         * §6.3.3 wire-8 observe exception window (v1.75 GREEN): per-caller slot
+         * (storage key = total-codec framing of applicationId + signerDigest)
+         * holding the leaseId carried by that caller's most recent
+         * successful completeAndAdvance. Written in the
+         * advance commit transaction; cleared ("" — DurableKv has no delete)
+         * when a NEW lease is granted to the caller (apply admission), which is
+         * the frozen "此后尚未有新 lease 授予该 caller" window boundary.
+         * Provider-internal storage only — no wire/DTO/AIDL change.
+         */
+        const val OBSERVE_WINDOW_NAMESPACE: String = "integration.v1.observe.window"
     }
 
     // --- Durable field framing (Terra round-4 P1) ----------------------------

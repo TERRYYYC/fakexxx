@@ -147,7 +147,15 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
         runId: String = "run-1",
         attemptId: String = "att-1",
         profileRef: String = "profile-1",
-        scheduleRef: String = "sched-1",
+        // §6.3 / v1.72: scheduleRef is the schedule ITEM's stable reference —
+        // NOT the schedule id. The fake schedule starts at "item-1", so the
+        // default intent earns its lease ATTRIBUTED to the current item
+        // (v1.75 step 3b: advancing an item other than the one the lease
+        // earned quota for is wrong-item → STALE_LEASE(8)). The previous
+        // default "sched-1" bound every default lease to a non-item ref —
+        // exactly the mis-binding v1.72 warns "no gate or type system will
+        // object to".
+        scheduleRef: String = "item-1",
         requiredVerificationWire: Int = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
         notBeforeEpochMs: Long = clock.epochMs() - 1_000L,
         deadlineInMs: Long = 600_000L,
