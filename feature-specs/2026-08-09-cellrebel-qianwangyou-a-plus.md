@@ -60,10 +60,10 @@ source_threads:
 > **不证明** publisher identity）。DP-3 选 A 意味着这些上限被**接受并记录**，
 > 不意味着它们消失。
 >
-> **这三条不是已知边界的全集。** 连同 `INV-29`（`deferred`）、`KB-5`（契约留白）、
+> **这三条不是已知边界的全集。** 连同 `INV-29`（`deferred`）、
 > `KB-6`（provider 侧 advance 的覆盖缺口）、`KB-7`（契约的 `android.*` 引用无门禁）
 > 与 `KB-8`（Auto 无独立位置验证面——所有权已裁定，验证面是裁定**暴露**出来的上限）
-> 的完整**八条**见 **§20.1**——那里是"还有哪些没被
+> 的完整**七条**见 **§20.1**——那里是"还有哪些没被
 > 证明／没被冻结"的唯一入口。
 > 本告示只做提醒，**不做全集**：此前它与 §19 各列两条、§20 写作"无"，三个入口
 > 给出三个不同的子集，读者无从分辨"我没读到"与"它不存在"。
@@ -162,6 +162,7 @@ source_threads:
 | **v1.74** | PR-2 第二十轮（Sol merge review） | **一个名叫「树等于上游」、实际放行 divergence 的绿 check。** ①`android-a-plus.yml` 的 provenance job 可见名是 `provenance (vendored trees == upstream SHAs)`，而 `--stage contract` 的谓词**自己打印**「has diverged from upstream (allowed at stage contract)」与「**does not bound WHICH paths diverged**」——名字断言的东西这道门早已停止证明。**这是 claim 宽于 measurement 的又一次，但载体换成了 CI check 的显示名**：它不在任何 spec、KDoc 或守卫里，而是在**读者扫一眼 checks 列表时唯一会看到的那行字**。②修法保持最窄：**job id `provenance` 不动**（不碰任何 required-check 绑定），只改可见 `name:` 为 `provenance (frozen upstream roots + reachable ancestry)`，并把注释里「the move is designed behaviour, **not a weakening**」改成实话——**它确实是收窄**，且旧措辞藏起了最关键的一条：**它不约束哪些路径可以分叉**（那是 scope gate 的活）。现列出该 stage 精确证明的三条与明确不证明的两条。③同类已扫：其余三个 job 名（`contract-v1 (static guards + both roots)`／两个 `(unit + lint + assemble)`）与各自谓词相符，无需改。④本轮由 Sol 的 **merge review** 抓到，不是实现 review——**同一个病在第五种载体上出现：spec 散文、守卫正则、selftest label、临时统计脚本，现在是 CI 显示名。** 见 `.github/workflows/android-a-plus.yml` |
 | **v1.75** | PR-2 第二十一轮（#18 归因门） | **「lease 不跨项」是已声明的不变量，而推进时没有任何门校验它——声明了十几轮，从没被测量过。** ①`request.leaseId` 在 §6.7.4b 六步里**命中为零**：它只进 `requestDigest` preimage，**绑字节不绑语义**。于是 foreign／伪造／wrong-item 的历史引用能穿过全部已冻结的门。②Sol 裁定不开 v2，要求在既有 1–17 内给出唯一映射 + 完整排除表。**排除表做完发现 canonical 早已答了四分之三**：foreign「不受本例外影响，仍无条件返回 8」、伪造「落不进窗口，只会走回 8」、active 由步 5 设备全局门 → 7。**只有 wrong-item 无门。** 而 wire 8 的属定义正是「该 leaseId 对**本次操作**不可用」——wrong-item 是同属的另一个种，**故落 8，不需要新 wire**。③新增 **步 3b 历史引用归因门**（foreign／unproven／wrong-item → 8），并冻结 **3b → 4 → 5** 次序：**归因先于状态比较**，否则伪造引用会收到 17/16/14/15，那些应答**泄露当前 schedule 状态**给尚未证明挣得过配额的调用方——与「步 1 安全门先于步 2 幂等查表」同源（未受信输入不得换取历史事实）。本步不判活跃性，ACTIVE 的自有引用在此放行、由步 5 判 7；**归因 8 / 状态 17·16·14·15 / 活跃性 7 三者互不吞并**。④新增 `M-AD-29`（wrong-item 精确落 8、指针不动、`advanceCount==0`，且不得答成 17/16/14/15/7）。⑤**台账自洽性守卫当场抓了我一次**：我复制 M-AD-28 的行只改 owner，留下 `Fable5 + apps/cellrebel-auto/` 这个**不配对**的 (owner, app-root)，两条 lane 选择器都选不中它，guard 报 `pr-3 39 + pr-4 53 = 92 but owner-red is 93 -- a lane selector lost rows`。改为 provider 侧路径后 `40 + 53 = 93`。**我又一次以为 owner 列是量具，而实际量具是 (owner, app-root) 配对。** §10／§10.1 118→**119**，owner-red 92→**93**（GLM 53 / Fable5 40），23 行 34 处缓存同 commit 重算。见 §6.3.3 / §6.7.4b / §10 |
 | **v1.76** | PR-2 第二十二轮（#18 unproven 唯一化） | **我把 observe 例外窗的谓词搬进了 advance 门，于是它在首次 advance 上无定义。** ①v1.75 的步 3b 把 `unproven` 写成「不是本 caller **最近一次成功 advance** 的历史引用」——该措辞出自 §6.3.3 的 **post-advance observe 例外窗**，那是规定 advance **之后** observe 能用哪个 lease；而 §6.7.4a 冻结 advance **当时**的 lease 来自「先 `release` 再 advance」，由 apply→release 周期产生。**同一个词，两个时刻，两个来源。**②三处错：循环（首次 advance 无「上一次 advance」）、来源错、无增益（item 绑定已由 `wrong-item` 承担）。且最近性会**误杀 §4.4 崩溃恢复重放**——同幂等键重放一个较旧但仍可证明、item 相符的自有 lease 正是恢复的正常形态。③唯一化为：`unproven` = provider **无法证明**该 leaseId 是它授予本 caller 且**已完成 release** 的 lease（不存在，或从未到达 `RELEASED`，含伪造）。**不定义最近性排序。**④补 L1/L2 判例：真实 L1（旧、item-1）推进 item-1 **通过 3b**；以 L2（新、item-2）推进 item-1 落 `wrong-item` → 8。⑤由 Sol 在 `4a17071` 上做 exact 文本审查时发现——**一个二义如果两种实现都能自洽，它就会一直活到测试替 contract 猜答案那一刻**。见 §6.7.4b |
+| **v1.77** | PR #32 formal review（KB-5 活跃投影闭合） | **步 3b 已经冻结 foreign → 8，§6.3.3 与 §20.1 却仍把同一问题写成 `unfrozen`。** ①以 §6.7.4b 步 3b 为规范性真相源：`completeAndAdvance` 的历史引用若属于别的 caller，必须在任何 schedule 状态比较之前返回 `STALE_LEASE(8)`；wrong-item 是同属兄弟，二者不再留白。②同步清除顶部告示、§6.3.3、§19、§20 与 §20.1 五处陈旧活跃投影；`KB-5` 从开放边界总表转为闭合记录。历史 v1.42 行保留其当时事实，本行明确取代其现态投影，不改写历史。③PR #32 的 provider 证据仍须等 stacked candidate 真正抵达 `main` 才完成集成记账；**集成状态不重新打开已经冻结的契约语义**。本轮无 AIDL／DTO／wire／provider 行为变更。见 §6.3.3 / §6.7.4b / §19 / §20.1 |
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
 
@@ -1584,7 +1585,7 @@ data class ReleaseReceiptV1(
 
 这与上面 wire 7 那处是**同一条规则的两半**：§6.7.4a 冻结"违反 lease 门返回 7"时，同步加宽了本节对 7 的定义并写下"定义与用法必须同向"；但同一轮只改了加宽的那一半，紧邻的 8 需要的收窄没有跟着做——**同向要求是双向的，一次只修一个方向就会在相邻行上重新长出矛盾**。
 
-**仍未冻结，不要读成已解决**：`completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时如何处置。§6.7.4b 的判定次序里没有这道门，本节也不在此新增——归因造假的后果是审计把配额记到别人的 lease 名下，但该校验属 provider 侧行为，须与 `M-AD-12`/`M-AD-13` 的 owner 一并裁定后再冻结。在那之前两侧实现**都不得**擅自选一种读法并依赖它：一个用 8 拒绝、另一个放行，Auto 的恢复策略就不可移植，而这正是 §6.7.4b 冻结判定次序所要消除的形态。
+**非本 caller 的历史引用已经冻结为 wire 8。** `completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时，必须命中 §6.7.4b 步 3b 的历史引用归因门，在任何 schedule 状态比较之前返回 `STALE_LEASE(8)`；wrong-item 是该门内的同属兄弟。这里的 post-advance `observe` 例外不会放宽这条规则：例外只允许原 caller 在窄窗口内继续使用自己的已 `RELEASED` 历史引用，**非本 caller 所有**仍无条件返回 8。
 
 **`REVOKED` 不在上述三态里，因为它根本不可达。** 撤销的第一效果就是让该 caller 的每次 Binder 调用都失败（§6.5 要求逐次匹配 active `PairingRecord`），所以"让原 caller 去 release 一个 `REVOKED` lease"是自相矛盾的——它连调用都进不来。**两侧撤销必须分开定义**：
 
@@ -3788,7 +3789,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 - **`I3.5` 已闭合**：`(cd apps/qianwangyou && ./gradlew lintDebug)` **exit 0**（raw-green 终态门；ratchet 仅为中间证据）；
 - **`#13` 已闭合**：`M-AC-01..05` 全绿，设备层 cutover 与旧 App 移除完成 —— **Epic #1 不得在 #13 未闭合时 close**；
 - §20.1 表中**全部** `limit` 条目已在验收报告中显式记录、未被写成全绿：`KB-1`（§8.6.5 completion 跨 attempt 去重）、`KB-2`（§18.1 的 `FULL` 依赖）、`KB-3`（§6.5.3 的 TOFU 上限）、`KB-8`（§6.4.2 的位置腿：Auto 无独立验证面）。**以 §20.1 为准，不以本行的枚举为准**——本行此前只列前两条、漏掉 `KB-3`，正是 §20.1 要消除的"多入口各列子集"；`KB-8` 是 v1.62 由 `unfrozen` 转入 `limit` 后补进本行的，**转类当轮就补，不留给下一轮**；
-- §20.1 中的 `unfrozen` 与 `gap` 条目（当前为 `KB-5`／`KB-6`／`KB-7`）在完成前**必须已被处置**：`unfrozen` 或经其 owner 裁定后冻结为具体规则、或被显式改判并写明理由；`gap` 或补齐 ledger row **／门禁**并执行、或由 operator 显式承担该覆盖缺口。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；而带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"。**`KB-7` 是 v1.59 由 `unfrozen` 转入 `gap` 的实例：裁定闭合的是实例，不是同类**；**`KB-8` 是 v1.62 由 `unfrozen` 转出的第二例**——operator 裁定 A 冻结了坐标所有权，本条因此离开本行，但它转入的是 `limit` 而不是"已消失"：裁定关掉的是双所有者，关不掉 Auto 侧没有第二个信息源这件事（见上一行与 §20.1）；
+- §20.1 中当前的 `gap` 条目（`KB-6`／`KB-7`）在完成前**必须已被处置**：补齐 ledger row **／门禁**并执行，或由 operator 显式承担该覆盖缺口；若后续登记新的 `unfrozen` 条目，则须经其 owner 裁定后冻结为具体规则，或被显式改判并写明理由。**带着未冻结的契约点声称完成，等于交付一份两侧可以合法分叉的契约**；带着未补的 `gap` 声称完成，等于把"没测过"计入了"已覆盖"。`KB-5` 已由 v1.75 的 §6.7.4b 步 3b 冻结并移出开放表；PR #32 尚待 stacked candidate 抵达 `main` 的集成记账**不会**重新打开该契约语义。**`KB-7` 是 v1.59 由 `unfrozen` 转入 `gap` 的实例：裁定闭合的是实例，不是同类**；**`KB-8` 是 v1.62 由 `unfrozen` 转出的第二例**——operator 裁定 A 冻结了坐标所有权，本条因此离开本行，但它转入的是 `limit` 而不是"已消失"：裁定关掉的是双所有者，关不掉 Auto 侧没有第二个信息源这件事（见上一行与 §20.1）；
 - 两 App exact APK SHA、源码 HEAD、签名、设备串号和恢复后状态完整记录；
 - Hook 未验证结果与可信 System Mock 结果在类型、存储、UI、导出和配额上全部隔离；
 - 原仓 #14/#15 相关风险被诚实披露并取得本候选构建的验收结论；
@@ -3809,7 +3810,7 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 
 **因此本文现在是可开工的冻结实施基线**（与顶部告示一致）。
 
-仍然开放、但**不属于 operator 价值取舍**的技术项：`KB-5`（契约留白）、`KB-6`（覆盖缺口）与 `KB-7`（规则已冻结但零门禁），见下表。**以 §20.1 为准，不以本行的枚举为准**——本行此前只写 `KB-5` 一条，既漏掉 `KB-6`、也没跟上 `KB-7` 由 `unfrozen` 转入 `gap`；「一个入口列一个子集」正是 §20.1 建表要消灭的东西，而本行是它最后一个残存实例。本行此前写作"无"——那在 `KB-5` 被显式化之前只是**看起来**成立：该留白当时并没有不存在，而是以 §6.3.3 与 §6.7.4a 互斥的形式藏着，读者读到的是两条各自自洽的规则，而不是一处待裁定的空白。**矛盾是留白的伪装态**，v1.42 只是把它还原成留白。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置仍是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
+仍然开放、但**不属于 operator 价值取舍**的技术项只有 `KB-6`（覆盖缺口）与 `KB-7`（规则已冻结但零门禁），见下表。`KB-5` 已由 v1.75 的 §6.7.4b 步 3b 冻结为 foreign → `STALE_LEASE(8)`，v1.77 同步了 §6.3.3 的规范性散文，因此不再属于开放项；PR #32 的 provider 证据仍处于 stacked integration pending，但**交付记账未完成不等于契约重新留白**。**以 §20.1 为准，不以本行的枚举为准**——本行过去从"无"变成只写 `KB-5`，随后又漏掉 `KB-6` 与 `KB-7`，正是「一个入口列一个子集」会造成的漂移；本次保留这段历史说明，但活跃集合只由下表定义。实现中若发现 Android 无法对某类相关变化提供完整连续性事件源，正确处置仍是 capability 返回 `PARTIAL/NONE` 并停止可信计数，而不是降低本文的不变量。
 
 ### 20.1 已知边界总表（完整性投影）
 
@@ -3823,10 +3824,11 @@ A+ 不是在代码齐全时完成，而是在以下条件同时成立时达到 `
 | `KB-2` | `AC-05` 依赖千网游自报 `coverage == FULL`，Auto 没有第二个信息源可以反驳它 | `limit` 永久上限 | §18.1 | 架构上不可消除（§5：qwy 是环境唯一权威）。**上游 #14/#15 关闭也不消除它**——那只减少已知漏报，不建立独立验证面 | `AC-05` 标 `conditional-pass + 逐候选构建证据`，不得无条件通过 |
 | `KB-3` | operator 对首次见到、未经独立比对的 signer 做显式批准，密码学上**仍是一次 TOFU**；本方案**不证明** publisher identity | `limit` 永久上限 | §6.5.3 | 带外分发的 signer 指纹或受控 release key（§21 DP-1）——**不在 A+ 范围内** | **不得**把本机制描述为"已解决身份伪造"；能声称的只有"禁止并防住了自动／静默 TOFU" |
 | `KB-4` | `applicationId` cutover 不得孤儿化用户可见状态 | `deferred` 可触达、待闭合 | `INV-29`（§9）／§21 DP-2 | [Issue #13](https://github.com/TERRYYYC/fakexxx/issues/13) 闭合 | 未闭合前**不得**声称 `INV-29` 已覆盖，且**不得**执行任何 `applicationId` mutation |
-| `KB-5` | `completeAndAdvance` 收到**非本 caller 所有**的 `leaseId` 时如何处置 | `unfrozen` 契约留白 | §6.3.3 wire 8 例外段／§6.7.4a | `M-AD-12`／`M-AD-13` 的 owner 裁定后冻结（属 provider 侧行为，非本 PR 可单方决定） | 冻结前两侧**都不得**擅自选一种读法并依赖它——一侧用 8 拒绝、另一侧放行，Auto 的恢复策略即不可移植（§6.7.4b 冻结判定次序所要消除的正是这一形态） |
 | `KB-7` | **契约引用的每个 `android.*` 类型必须存在于 public compile SDK**（§6.1 v1.59 冻结的通用规则）——**这条规则零门禁**。它的第一个实例已闭合：v1.44 登记的「预期业务失败经 `ServiceSpecificException` 携带稳定 wire code 返回」按字面不可实现（`android.os.ServiceSpecificException` 是 `@hide`；对 `android-35` 与 `android-36.1` 的 `android.jar` 做 zip entry 枚举**零命中**，对照项 `android/os/Parcel.class` 命中，证明扫描有效而非空转），operator 裁定 **A** 后改由 `EnvironmentControlResultV1` 承载（§6.3.2） | `gap` 覆盖缺口 | §6.1（规则本体）／§6.3.2（承载它的载体） | 在 `scripts/check-contract-v1.sh` 增一节：枚举契约源码引用的全部 `android.*` 类型，断言每个都存在于 compileSdk 的 `android.jar`，带对照项证明扫描非空转，并配 `selftest-contract-v1.sh` 负例证明该节承重 | **不得**把「`ServiceSpecificException` 已换掉」读作「同类已防」——换掉的是**唯一已知实例**，规则本身仍只活在散文里，**而散文正是它当初能藏到 v1.44 才被发现的原因**。v1.44 ④ 当时挂起这道门禁的理由是「断言形状取决于所选通道」；通道已定，该理由已失效，故本条不随实例一起注销，改记为 `gap` |
 | `KB-8` | **INV-23 的位置腿在 Auto 侧没有独立验证面**：可信谓词要求"环境处在这个 attempt 要求的位置"，但目标坐标只有千网游持有（v1.62 裁定），Auto 只能读它报回的生效坐标，没有第二个信息源可以反驳它。**原登记的"坐标所有权未冻结"已由 operator 裁定 A 关闭**（千网游独占坐标所有权，Auto 只递交 profile / schedule item 引用），v1.62 已把 wire 面冻结完毕：intent 与 digest preimage 去坐标、`discover()` 不投影 item 坐标、无"坐标不匹配"错误码分支（不存在能与之不匹配的对端断言）。**剩下的不是没决定，是决定之后看清的东西** | `limit` 永久上限（v1.62 由 `unfrozen` 转入） | §6.4.2（意图绑定两条腿）／§6.4.1（表 2 `effectiveLat/Lng` 角色）／§6.3.1（preimage）／§2.2（所有权） | **架构上不可消除**：§5 冻结千网游为环境唯一权威，把目标坐标投影给 Auto 就是重新制造第二个持有者，即 A 裁定要消灭的那个缺陷本体。能减少的只有"位置错了却没人发现"的**漏报**（provider 侧 `M-IN-01` 覆盖），不能建立独立验证面——与 `KB-2` 同形 | 验收报告**不得**呈现为全绿；**不得**把"坐标所有权已裁定"读作"位置归属已被证明"。Auto 侧文案与 UI 只能声称身份腿（`acceptedIntentHash`／`scheduleItemId`／`scheduleVersion`）已独立重算，位置腿写明依赖 provider 自报。**并注意本条不是 v1.62 新造的损失**：旧文让 Auto 用 `intent.latitude/longitude` 做 haversine，而 §2.2 早已禁止 Auto 导入坐标——那两个字段在 Auto 侧从来没有合法来源，"独立位置校验"一直是把 provider 的数据转一手再和 provider 自己比。裁定只是把这件一直为假的事**停止假装** |
 | `KB-6` | provider 侧 compare-and-advance 的**产生逻辑**（§6.7.4b 的 CAS 三门判定、指针与 receipt 同事务、幂等重取）在 §10.1 台账中长期只有 `M-AD-12`／`M-AD-13` 两行；v1.46 增 `M-AD-20`、本轮再增 `M-AD-21`／`M-AD-22`，现为 `M-AD-12`／`M-AD-13`／`M-AD-20`／`M-AD-21`／`M-AD-22`（**此处刻意枚举、不计数**：本条的存货数已经过期过一次，而一个过期的数字没有任何东西能发现，一个缺失的 ID 有——这正是 `check-derived-counts` 作者为同一种病写下的解药「enumerate, never count」），但仍**零覆盖** proof/CAS provider 侧判定、同键持久重放、幂等记录+指针+receipt 原子提交、耗尽双态（`M-AD-21`／`M-AD-22` 只覆盖并发与事务边界两项）。**本条存货数此前写作「两行」已过期**——v1.46 加行时没回来改它，正是本表自己第 128 行冻结的「新增边界必须同时进两处」被违反了一次，而违反者是加那一行的人 | `gap` 覆盖缺口 | §10／§10.1（`M-AD-*` 台账行）；缺口由 v1.39 自述"provider-owned advance 覆盖的**第一批**" | 由 `M-AD-12`／`M-AD-13` 的 owner 按同一模式补齐其余 provider-owned 行，并同步 §10／§10.1 的行数与 §15 的逐 lane 派生计数 | **不得**把 `M-AD-01..13` 全绿读作"provider 的 compare-and-advance 已被证明"——`M-AD-01..11` 断言的是 **Auto 侧消费**这些结果的行为、锚在 Auto lane，provider 侧**产生**这些结果的行为目前只有两行覆盖 |
+
+**`KB-5` 闭合记录（不属于开放边界表）：** v1.75 已在 §6.7.4b 步 3b 冻结历史引用归因门：foreign／unproven／wrong-item 均返回 `STALE_LEASE(8)`，并且归因先于 schedule 状态比较；v1.76 又把 `unproven` 唯一化为 provider 无法证明该 lease 是授予本 caller 且已完成 release 的历史引用。PR #32 承载 provider 侧实现与测试证据，尚待 stacked candidate 真正抵达 `main` 后完成集成记账；该等待只阻塞交付完成声明，不改变已经冻结的 wire 语义。
 
 **四个类别不可互相改写**，因为每一类要求的下一步动作完全不同：`limit` 是**已经知道证明不了**（只能接受并披露）；`unfrozen` 是**还没决定**（需要 owner 裁定）；`deferred` 是**可触达、有确定载体、尚未闭合**（等载体，与 §10.1 对 `deferred:<DP-x>` 的规定同源）；`gap` 是**契约已冻结、但没有稳定的执行面证明实现符合它**（需要补 ledger row **或门禁**并执行——`KB-6` 缺的是行，`KB-7` 缺的是门禁，两者同类）。把留白写成上限，等于宣布它永远不修；把上限写成留白，等于承诺一件交付不出来的东西；把任一者写成 `deferred`，等于给它一个并不存在的闭合路径。而把 `gap` 写成 `limit`——**把"还没测"说成"测不了"**——是其中最该防的一种：它让一件待办永久退出待办清单，且伪装成物理限制之后没有人会再去挑战它。
 
