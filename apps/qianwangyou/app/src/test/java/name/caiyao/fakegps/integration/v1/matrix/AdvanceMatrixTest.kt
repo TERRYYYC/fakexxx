@@ -174,7 +174,9 @@ class AdvanceMatrixTest {
      * advanceCount==1). The non-final half lives in
      * AdvanceProviderRedTest::advance_concurrentAdvances_serializedNoDoubleAdvance;
      * the final-item half (winner EXHAUSTED receipt, loser exactly 16) lives
-     * in Opus's `2c70eea` row-16 test on feat/kb5-kb6-advance-predicates.
+     * in AdvanceProviderRedTest::advance_concurrentLastItem_winnerExhausted_loserExactScheduleExhausted
+     * on THIS line (salvaged from PR #28's c976313; it previously existed
+     * only on the conflicting feat/kb5-kb6-advance-predicates branch).
      * This row pins the judgment ORDER that makes those answers reachable.
      *
      * Rationale: "already exhausted" is a terminal state — telling the caller
