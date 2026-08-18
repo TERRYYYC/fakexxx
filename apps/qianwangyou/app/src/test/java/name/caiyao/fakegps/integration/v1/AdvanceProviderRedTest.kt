@@ -920,4 +920,110 @@ class AdvanceProviderRedTest {
         // And the durable receipt round-trips stably on a second replay.
         assertEquals(replay, h.handler.completeAndAdvance(AUTO_UID, req))
     }
+
+    // ------------- §6.7.4b step 3b: historical-reference attribution (v1.75, #18)
+    // Frozen at contract exact 4a17071: foreign / unproven(forged) / wrong-item
+    // are SPECIES of STALE_LEASE(8) ("该 leaseId 对本次操作不可用"), judged at
+    // step 3b BEFORE step 4 — answering 17/16/14/15 would leak current schedule
+    // state to a caller who never proved earned quota. 3b does NOT judge
+    // liveness (own ACTIVE ref passes 3b; step 5 answers 7 — see M_AD_12).
+    // Lease→item binding: the earned item is the apply intent's scheduleRef
+    // (§6.3 / v1.72: scheduleRef IS the schedule item's stable reference;
+    // v1.62: acceptedIntentHash binds runId/attemptId/profileRef/scheduleRef).
+
+    /** Earn + release a lease ATTRIBUTED to [earnedItem] (intent.scheduleRef = the item ref). */
+    private fun earnAndReleaseFor(h: ProviderHarness, earnedItem: String, key: String): String {
+        val receipt = h.apply(key = key, intent = h.intent(scheduleRef = earnedItem, attemptId = "att-$key"))
+        h.release(receipt.leaseId, key = "$key-rel")
+        return receipt.leaseId
+    }
+
+    /**
+     * M-AD-29 (frozen entry name): the reference is the caller's own RELEASED
+     * historical lease, every other request field self-consistent — but the
+     * quota it earned belongs to ANOTHER item than the one being advanced.
+     * Exact STALE_LEASE(8); pointer untouched; advanceCount == 0. Must NOT be
+     * 17/16/14/15 (schedule-state leak) and NOT 7 (already RELEASED — not a
+     * liveness question). expectContractFailure pins the exact code.
+     */
+    @Test
+    fun advance_wrongItemHistoricalLease_staleLease() {
+        val h = harness()
+        // Quota earned under item-2's attribution; schedule currently at item-1.
+        val leaseId = earnAndReleaseFor(h, earnedItem = "item-2", key = "ad29-apply")
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad29-k1"))
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals("no advance", 0, h.env.advanceCount)
+    }
+
+    /** 3b `foreign`: the REFERENCE itself belongs to another caller → exact 8 (not 7 — distinct from the device-global blocking gate). */
+    @Test
+    fun advance_foreignHistoricalLease_staleLease() {
+        val h = harness()
+        h.pair(OTHER_PKG, OTHER_SIGNER)
+        // OTHER earns and releases for the current item; AUTO tries to advance on it.
+        val foreignLease = h.apply(
+            uid = OTHER_UID, key = "ad3b-f-apply",
+            intent = h.intent(scheduleRef = "item-1", attemptId = "att-f"),
+        ).leaseId
+        h.release(foreignLease, uid = OTHER_UID, key = "ad3b-f-rel")
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.completeAndAdvance(AUTO_UID, request(h, foreignLease, "ad3b-f-k1"))
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
+    }
+
+    /** 3b `unproven` (forged branch of the OR clause): no receipt exists for the reference at all → exact 8. */
+    @Test
+    fun advance_forgedLeaseReference_staleLease() {
+        val h = harness()
+        earnAndReleaseFor(h, earnedItem = "item-1", key = "ad3b-g-apply")
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.handler.completeAndAdvance(
+                AUTO_UID,
+                request(h, "lease-that-never-existed", "ad3b-g-k1"),
+            )
+        }
+        assertEquals("pointer untouched", "item-1", h.env.currentItemId)
+        assertEquals(0, h.env.advanceCount)
+    }
+
+    /**
+     * The LEGAL non-terminal sequence (M-AD-20 family; #18 AC): earn under the
+     * current item's attribution → release → completeAndAdvance succeeds →
+     * observe(same leaseId) inside the post-advance verification window is the
+     * frozen wire-8 EXCEPTION (§6.3.3 8-row: released ref is this flow's
+     * normal shape) and must serve the observation instead of STALE_LEASE.
+     */
+    @Test
+    fun advance_legalSequence_releaseAdvanceObserve_endToEnd() {
+        val h = harness()
+        val applyReceipt = h.apply(
+            key = "ad20-apply",
+            intent = h.intent(scheduleRef = "item-1", attemptId = "att-ad20"),
+        )
+        h.release(applyReceipt.leaseId, key = "ad20-rel")
+
+        val receipt = h.handler.completeAndAdvance(AUTO_UID, request(h, applyReceipt.leaseId, "ad20-k1"))
+        assertEquals("item-2", receipt.advancedToItemId)
+
+        // Post-advance verification observe on the SAME (released) historical ref
+        // — the frozen wire-8 exception window.
+        val observation = h.handler.observe(
+            AUTO_UID,
+            io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1(
+                leaseId = applyReceipt.leaseId,
+                operationId = "op-ad20-obs",
+                expectedIntentHash = applyReceipt.acceptedIntentHash,
+            ),
+        )
+        assertEquals("post-advance readback reflects the advanced schedule", "item-2", h.env.currentItemId)
+        assertEquals("observation served, not STALE_LEASE", false, observation == null)
+    }
 }
