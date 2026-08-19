@@ -1,0 +1,11 @@
+# Build outputs (generated, not committed)
+build/
+*/build/
+.gradle/
+
+# Local config
+local.properties
+
+# IDE
+*.iml
+.idea/
