@@ -137,6 +137,29 @@ else
   fail "§10 has $MATRIX rows but §10.1 has $TOTAL -- one table was edited alone"
 fi
 
+# Exact-ID set comparison (Issue #20 guard gap fix):
+# Count equality alone cannot detect a swapped ID (e.g. M-AD-14 → M-AD-29 in one
+# table but not the other). Extract sorted ID sets from both tables and diff them.
+LEDGER_IDS=$(ledger_rows | sed -E 's/^\| `(M-[A-Z]{2}-[0-9]+)`.*/\1/' | sort)
+MATRIX_IDS=$(matrix_rows | sed -E 's/^\| `(M-[A-Z]{2}-[0-9]+)`.*/\1/' | sort)
+
+ONLY_IN_LEDGER=$(comm -23 <(echo "$LEDGER_IDS") <(echo "$MATRIX_IDS"))
+ONLY_IN_MATRIX=$(comm -13 <(echo "$LEDGER_IDS") <(echo "$MATRIX_IDS"))
+
+if [ -z "$ONLY_IN_LEDGER" ] && [ -z "$ONLY_IN_MATRIX" ]; then
+  pass "§10 and §10.1 contain exactly the same ID set"
+else
+  MSG=""
+  if [ -n "$ONLY_IN_LEDGER" ]; then
+    MSG="only in §10.1 ledger: $(echo "$ONLY_IN_LEDGER" | tr '\n' ' ')"
+  fi
+  if [ -n "$ONLY_IN_MATRIX" ]; then
+    [ -n "$MSG" ] && MSG="$MSG; "
+    MSG="${MSG}only in §10 matrix: $(echo "$ONLY_IN_MATRIX" | tr '\n' ' ')"
+  fi
+  fail "§10 and §10.1 have different ID sets -- $MSG"
+fi
+
 DUPES=$(ledger_rows | sed -E 's/^\| `(M-[A-Z]{2}-[0-9]+)`.*/\1/' | sort | uniq -d)
 if [ -z "$DUPES" ]; then
   pass "no duplicate ledger row IDs"
