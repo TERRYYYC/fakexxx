@@ -1,6 +1,9 @@
 package com.example.cellrebelauto.automation
 
 import android.util.Log
+import com.example.cellrebelauto.automation.advance.AdvanceCoordinator
+import com.example.cellrebelauto.automation.advance.AdvanceDecision
+import com.example.cellrebelauto.automation.advance.ScheduleContext
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.model.AutomationState
@@ -87,7 +90,11 @@ class AutomationEngine(
     // # 仅用于 returnToSelf（MIUI 中转）；测试不传
     private val bridge: AccessibilityBridge? = null,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
-    private val delayMs: suspend (Long) -> Unit = { delay(it) }
+    private val delayMs: suspend (Long) -> Unit = { delay(it) },
+    // # Issue #19: advance protocol coordinator. Nullable until PR #36 lands the
+    // # real ProviderGateway (AIDL-backed). When non-null, quota-met triggers
+    // # the advance protocol (§8.1) instead of just logging.
+    private val advanceCoordinator: AdvanceCoordinator? = null,
 ) {
     companion object {
         private const val TAG = "AutoEngine"
@@ -122,6 +129,14 @@ class AutomationEngine(
     private var runSessionId: Long = 0
     // # 在途尝试（停止/取消时标记 interrupted）
     private var currentAttemptId: Long? = null
+
+    // # Issue #19: schedule context captured at attempt open time (§6.7.3 v1.72).
+    // # Persisted and replayed verbatim into the advance request. Set when the
+    // # ProviderGateway is available (PR #36 wiring).
+    private var activeScheduleContext: ScheduleContext? = null
+    // # Issue #19: the RELEASED historical lease this attempt earned under.
+    // # Set from the environment-control handshake (PR #36).
+    private var currentLeaseId: String? = null
 
     /**
      * Runs the full plan loop. Call from a coroutine scope; cancelling the
@@ -344,6 +359,37 @@ class AutomationEngine(
                             // # F5：配额达成 → completed 已在 finalize 事务内完成
                             if (updated.status == "completed") {
                                 log("Location csvRow=${task.csvRow} quota complete ✔")
+                                // # Issue #19 AC-1..3: advance protocol (§8.1).
+                                // # The coordinator reads quota DURABLY from PlanRepository
+                                // # (Room QuotaReader), verifies the receipt digest, and
+                                // # independently verifies the post-advance state.
+                                // # ProviderGateway binding: PR #36 scope.
+                                advanceCoordinator?.let { coordinator ->
+                                    try {
+                                        val decision = coordinator.evaluateAfterRelease(
+                                            taskId = task.id.toString(),
+                                            requiredSuccesses = task.requiredSuccesses,
+                                            scheduleContext = activeScheduleContext
+                                                ?: return@let, // no schedule → skip advance
+                                            leaseId = currentLeaseId ?: return@let,
+                                            idempotencyKey = "adv-$attemptId",
+                                        )
+                                        when (decision) {
+                                            is AdvanceDecision.QuotaNotMet ->
+                                                log("Advance: quota not met (concurrent update?)")
+                                            is AdvanceDecision.Advanced ->
+                                                log("Advance: schedule advanced to ${decision.receipt.advancedToItemId}")
+                                            is AdvanceDecision.Exhausted ->
+                                                log("Advance: schedule exhausted (terminal)")
+                                            is AdvanceDecision.RecoveryRequired ->
+                                                log("WARNING: advance RECOVERY_REQUIRED: ${decision.reason}")
+                                        }
+                                    } catch (e: Exception) {
+                                        if (e is CancellationException) throw e
+                                        log("WARNING: advance protocol error: ${e.message}")
+                                        // Recovery will re-attempt on next engine cycle
+                                    }
+                                }
                             }
                         }
                         updateState(AutomationState.SUCCEEDED)

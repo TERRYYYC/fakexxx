@@ -12,6 +12,12 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
 /**
  * Auto consumer's advance protocol coordinator (§8.1 advance edges).
  *
+ * **Production binding**: [AutomationEngine] calls [evaluateAfterRelease] at the
+ * point where `finalizeAttemptSuccess()` marks a task "completed" (quota met).
+ * The coordinator reads quota DURABLY via [QuotaReader] (Room in production,
+ * [TrustedQuotaLedger] in tests) — this is what M-AD-15 enforces: after a crash,
+ * recovery re-reads from the durable store, never a stale snapshot.
+ *
  * Owns the three decisions the spec places on the AUTO side of the advance:
  *
  *  1. **Quota gate** (§8.1 RELEASE_RECEIPT → ADVANCE_PENDING vs CLOSED):
@@ -31,23 +37,22 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
  *       intentHash, revision). Refs #19 AC-3, M-AD-17, M-AD-18.
  *     - TERMINAL: `discover()` → group pre-check (all-non-null) → four-leg
  *       readback (scheduleId, item, version, exhausted). Refs M-AD-23.
- *
- * The coordinator is stateless and pure — it delegates persistence to the caller
- * so that the transactional boundaries (INV-3) are not duplicated here.
- *
- * # 坐标系设计备注
- * 本协调器不持有状态：入参是当前 attempt 的上下文快照，出参是决策 + 证据。
- * 持久化（attempt 行更新、配额账本）由调用方在同一事务内完成——把事务拆到两个
- * owner 里会让 INV-3 的原子性保证变成两个半保证。
  */
 class AdvanceCoordinator(
     private val provider: ProviderGateway,
+    private val quotaReader: QuotaReader,
 ) {
 
     /**
      * Evaluate the advance decision after a successful release.
      *
-     * @param quotaCount current `count(TrustedQuotaEntry where taskId)`
+     * The coordinator reads quota count DURABLY from [quotaReader] — never from
+     * a caller-supplied snapshot. This is the M-AD-15 enforcement: after a crash
+     * between quota write and this evaluation, recovery re-enters here and the
+     * coordinator re-reads from the durable store. A stale count cannot bypass
+     * the gate.
+     *
+     * @param taskId the task whose quota to check (durable read via [quotaReader])
      * @param requiredSuccesses the task's quota threshold
      * @param scheduleContext the persisted schedule projection from attempt open time (§6.7.3 v1.72)
      * @param leaseId the RELEASED historical lease this attempt earned under
@@ -55,14 +60,16 @@ class AdvanceCoordinator(
      * @return the decision and evidence, never throws for protocol-level outcomes
      */
     fun evaluateAfterRelease(
-        quotaCount: Int,
+        taskId: String,
         requiredSuccesses: Int,
         scheduleContext: ScheduleContext,
         leaseId: String,
         idempotencyKey: String,
     ): AdvanceDecision {
         // ── Step 1: Quota gate (§8.1 RELEASE_RECEIPT edges) ──
-        // M-AD-14: quota committed but NOT met → close, no advance
+        // M-AD-14: quota committed but NOT met → close, no advance.
+        // M-AD-15: re-read from durable store (not a stale snapshot).
+        val quotaCount = quotaReader.countTrustedEntries(taskId)
         if (quotaCount < requiredSuccesses) {
             return AdvanceDecision.QuotaNotMet
         }
@@ -139,8 +146,6 @@ class AdvanceCoordinator(
     ): AdvanceDecision {
         val observation = provider.observe(leaseId, scheduleContext)
 
-        // Four-leg comparison — each leg is checked individually so the typed
-        // reason can name which leg failed (§8.1 OBSERVED_TUPLE_MISMATCH).
         val mismatches = mutableListOf<String>()
         if (observation.scheduleItemId != receipt.advancedToItemId) {
             mismatches += "scheduleItemId(observed=${observation.scheduleItemId}, " +
@@ -173,11 +178,9 @@ class AdvanceCoordinator(
      * Terminal (EXHAUSTED) advance verification via `discover()` (§6.7.5 v1.58/v1.68).
      *
      * NOT via observe(): advancedToItemId is null for EXHAUSTED, while
-     * EnvironmentObservationV1.scheduleItemId is non-null — that leg can never
-     * hold, so observe() is structurally inapplicable for terminal advances.
+     * EnvironmentObservationV1.scheduleItemId is non-null — that leg can never hold.
      *
-     * NOT via preflight(): PreflightReportV1 carries no currentScheduleId and
-     * names its field scheduleItemId — it cannot establish schedule identity.
+     * NOT via preflight(): no currentScheduleId, cannot establish schedule identity.
      *
      * Steps:
      *   0. Group pre-check: all four projection fields non-null (v1.55 invariant)
@@ -238,26 +241,29 @@ class AdvanceCoordinator(
     }
 }
 
-/**
- * Advance protocol outcomes. Each variant carries the evidence the caller needs
- * to persist the state transition.
- */
+/** Advance protocol outcomes. Each variant carries the evidence for persistence. */
 sealed class AdvanceDecision {
-
     /** §8.1 RELEASE_RECEIPT(未达标) → CLOSED: quota not met, no advance issued. */
     object QuotaNotMet : AdvanceDecision()
-
     /** §8.1 ADVANCE_OBSERVING → CLOSED: non-terminal advance independently verified. */
     data class Advanced(val receipt: AdvanceReceiptV1) : AdvanceDecision()
-
     /** §8.1 ADVANCE_STATE_READBACK → CLOSED: terminal advance independently verified. */
     data class Exhausted(val receipt: AdvanceReceiptV1) : AdvanceDecision()
-
     /** §8.1 → RECOVERY_REQUIRED: typed reason names the failing leg. */
-    data class RecoveryRequired(
-        val reason: String,
-        val receipt: AdvanceReceiptV1? = null,
-    ) : AdvanceDecision()
+    data class RecoveryRequired(val reason: String, val receipt: AdvanceReceiptV1? = null) : AdvanceDecision()
+}
+
+/**
+ * Durable quota reader. In production: Room DAO query `count(TrustedQuotaEntry WHERE taskId)`.
+ * In tests: [TrustedQuotaLedger].
+ *
+ * The coordinator calls this instead of accepting a caller-supplied int. This is
+ * the M-AD-15 design: after a crash, recovery re-enters [evaluateAfterRelease]
+ * and the coordinator re-reads from the DURABLE store — a stale snapshot from
+ * before the crash cannot bypass the gate.
+ */
+interface QuotaReader {
+    fun countTrustedEntries(taskId: String): Int
 }
 
 /**
@@ -265,8 +271,7 @@ sealed class AdvanceDecision {
  *
  * These values are persisted when the attempt opens and replayed VERBATIM into
  * the advance request. Reading fresh values just before advance is the defect
- * the identity leg exists to stop — it answers "which schedule is effective now",
- * not "which schedule did this completion belong to" (M-AD-28).
+ * the identity leg exists to stop (M-AD-28).
  */
 data class ScheduleContext(
     val scheduleId: String,
@@ -279,16 +284,11 @@ data class ScheduleContext(
 /**
  * Gateway to the provider's advance-related operations.
  *
- * In production this wraps the AIDL ContentResolver calls; in tests the
- * [ConsumerHarness] implements it with controllable fakes.
+ * In production: wraps the AIDL ContentResolver calls (PR #36 EnvironmentControlClient).
+ * In tests: [FakeProviderGateway] in ConsumerHarness.
  */
 interface ProviderGateway {
-    /** §6.7 completeAndAdvance. May throw ContractException for typed errors. */
     fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1
-
-    /** §6.7.5 post-advance observe (non-terminal only). */
     fun observe(leaseId: String, context: ScheduleContext): EnvironmentObservationV1
-
-    /** §6.7.5 post-advance discover (terminal only, NOT preflight). */
     fun discover(): CapabilitySnapshotV1
 }

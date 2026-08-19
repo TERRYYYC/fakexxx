@@ -2,6 +2,7 @@ package com.example.cellrebelauto.support
 
 import com.example.cellrebelauto.automation.advance.AdvanceCoordinator
 import com.example.cellrebelauto.automation.advance.ProviderGateway
+import com.example.cellrebelauto.automation.advance.QuotaReader
 import com.example.cellrebelauto.automation.advance.ScheduleContext
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
@@ -24,15 +25,28 @@ import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
  *
  * Design: mirrored from `ProviderHarness` on the qwy side — same idiom but
  * from the consumer's perspective. The harness owns `FakeSchedule` (provider
- * state) and `QuotaLedger` (Auto state), and `AdvanceCoordinator` is the
- * system under test.
+ * state) and `TrustedQuotaLedger` (Auto state), and `AdvanceCoordinator` is
+ * the system under test.
+ *
+ * P1-1 fix: The coordinator takes [QuotaReader] and [ProviderGateway] interfaces
+ * — the SAME interfaces the production code uses (AutomationEngine with Room-
+ * backed QuotaReader and AIDL-backed ProviderGateway). The test doubles
+ * ([TrustedQuotaLedger], [FakeProviderGateway]) implement those interfaces.
+ *
+ * P1-2 fix: The coordinator reads quota via [QuotaReader.countTrustedEntries],
+ * never via a caller-supplied `quotaCount: Int`. After a crash, recovery
+ * re-enters `evaluateAfterRelease` and the coordinator re-reads from the
+ * durable store — a stale pre-crash snapshot cannot bypass the gate.
+ *
+ * P1-3 fix: [TrustedQuotaLedger] has attempt-keyed idempotency (UNIQUE
+ * constraint analog). Double-committing the same attempt counts once.
  */
 class ConsumerHarness private constructor(
     val schedule: FakeSchedule,
-    val quotaLedger: QuotaLedger,
+    val quotaLedger: TrustedQuotaLedger,
     private val gateway: FakeProviderGateway,
 ) {
-    val coordinator: AdvanceCoordinator = AdvanceCoordinator(gateway)
+    val coordinator: AdvanceCoordinator = AdvanceCoordinator(gateway, quotaLedger)
 
     companion object {
         private val DEFAULT_ITEMS = listOf("item-1", "item-2", "item-3")
@@ -42,11 +56,13 @@ class ConsumerHarness private constructor(
             items: List<String> = DEFAULT_ITEMS,
         ): ConsumerHarness {
             val schedule = FakeSchedule(scheduleId, items)
-            val quotaLedger = QuotaLedger()
+            val quotaLedger = TrustedQuotaLedger()
             val gateway = FakeProviderGateway(schedule)
             return ConsumerHarness(schedule, quotaLedger, gateway)
         }
     }
+
+    private var quotaSeq = 0
 
     /** Default schedule context from the current schedule state. */
     fun scheduleContext(
@@ -61,13 +77,23 @@ class ConsumerHarness private constructor(
     )
 
     /**
-     * Register N trusted quota entries for a task.
-     * Returns the count after registration.
+     * Register N trusted quota entries for a task, auto-generating unique
+     * attempt keys. Returns the count after registration.
      */
     fun commitQuota(taskId: String, count: Int): Int {
-        repeat(count) { quotaLedger.commitEntry(taskId) }
-        return quotaLedger.count(taskId)
+        repeat(count) {
+            quotaLedger.commitEntry(taskId, "$taskId:auto-${quotaSeq++}")
+        }
+        return quotaLedger.countTrustedEntries(taskId)
     }
+
+    /**
+     * Register a single trusted quota entry with an explicit attempt key.
+     * Use when the test needs to control idempotency behavior (M-AD-19).
+     * Returns true if the entry was new, false if deduplicated.
+     */
+    fun commitQuotaEntry(taskId: String, attemptKey: String): Boolean =
+        quotaLedger.commitEntry(taskId, attemptKey)
 
     /**
      * Override the observation the provider will return on the next `observe()`.
@@ -92,16 +118,6 @@ class ConsumerHarness private constructor(
     fun corruptNextReceiptDigest() {
         gateway.corruptNextDigest = true
     }
-
-    /**
-     * Inject a crash point: after the provider completes the advance but
-     * before the coordinator sees the receipt. On next call, the coordinator
-     * should replay with the same key and recover.
-     * Use for M-AD-15 (crash between quota commit and met determination).
-     */
-    fun injectCrashBeforeReceipt() {
-        gateway.crashBeforeReceipt = true
-    }
 }
 
 /**
@@ -124,9 +140,24 @@ class FakeSchedule(
     /** Idempotency store: key → receipt */
     private val idempotencyStore = mutableMapOf<String, AdvanceReceiptV1>()
 
-    /** Advance the pointer. Returns the receipt. */
-    fun advance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 {
-        // Idempotency check
+    /**
+     * Advance the pointer. Returns the receipt.
+     *
+     * @param corruptDigest if true, produce a receipt with a corrupted digest.
+     *   The advance is real (idempotency consumed, pointer moved) but the receipt
+     *   is unverifiable. Used for M-AD-16 (digest mismatch).
+     *
+     * P1-3 fix: idempotency check runs BEFORE the corrupt flag is evaluated.
+     * A replayed key returns the ORIGINAL receipt (honest or corrupt),
+     * never a second advance with a different corruption state.
+     */
+    fun advance(
+        request: CompleteAndAdvanceRequestV1,
+        corruptDigest: Boolean = false,
+    ): AdvanceReceiptV1 {
+        // Idempotency check — BEFORE corruption. A replayed key returns
+        // the cached receipt, not a new one. This is the P1-3 fix:
+        // advanceWithCorruptDigest must not bypass the idempotency store.
         idempotencyStore[request.idempotencyKey]?.let { return it }
 
         val fromItem = currentItemId
@@ -158,6 +189,7 @@ class FakeSchedule(
             versionAfter = scheduleVersion,
             requestDigest = request.requestDigest,
             idempotencyKey = request.idempotencyKey,
+            corrupt = corruptDigest,
         )
         idempotencyStore[request.idempotencyKey] = receipt
         return receipt
@@ -187,43 +219,6 @@ class FakeSchedule(
             CanonicalAdvanceReceiptDigestV1.compute(bare, requestDigest, idempotencyKey)
         }
         return bare.copy(receiptDigest = digest)
-    }
-
-    /**
-     * Build a receipt with a corrupted digest. Used for M-AD-16.
-     * Advances the schedule normally but the receipt is unverifiable.
-     */
-    fun advanceWithCorruptDigest(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 {
-        // Do the actual advance
-        val fromItem = currentItemId
-        val currentIndex = items.indexOf(currentItemId)
-        val isLast = currentIndex == items.size - 1
-
-        val outcome: AdvanceOutcomeV1
-        val toItem: String?
-
-        if (isLast) {
-            outcome = AdvanceOutcomeV1.EXHAUSTED
-            toItem = null
-            exhausted = true
-        } else {
-            outcome = AdvanceOutcomeV1.ADVANCED
-            toItem = items[currentIndex + 1]
-            currentItemId = toItem
-        }
-
-        scheduleVersion += 1
-        advanceCount += 1
-
-        return buildReceipt(
-            outcome = outcome,
-            fromItem = fromItem,
-            toItem = toItem,
-            versionAfter = scheduleVersion,
-            requestDigest = request.requestDigest,
-            idempotencyKey = request.idempotencyKey,
-            corrupt = true,
-        )
     }
 
     /** Build the observation that matches the CURRENT schedule state (honest). */
@@ -268,17 +263,33 @@ class FakeSchedule(
 }
 
 /**
- * Auto-side trusted quota ledger (simplified for testing).
- * In production this is Room + TrustedQuotaEntry table.
+ * Auto-side trusted quota ledger with attempt-keyed idempotency.
+ *
+ * Implements [QuotaReader] — the same interface the production coordinator
+ * reads from (production = Room DAO, test = this class).
+ *
+ * P1-3 fix: entries are keyed by `attemptKey` (UNIQUE constraint analog).
+ * Double-committing the same attempt key for a task counts as one entry.
+ * In production, Room enforces this via a UNIQUE constraint on
+ * `TrustedQuotaEntry(taskId, attemptKey)`. This prevents crash-recovery
+ * from inflating the quota count.
  */
-class QuotaLedger {
-    private val entries = mutableMapOf<String, Int>()
+class TrustedQuotaLedger : QuotaReader {
+    /** attemptKey → taskId (UNIQUE on attemptKey) */
+    private val entries = mutableMapOf<String, String>()
 
-    fun commitEntry(taskId: String) {
-        entries[taskId] = (entries[taskId] ?: 0) + 1
+    /**
+     * Commit a quota entry. Returns `true` if the entry was new, `false` if
+     * the attempt key was already committed (idempotent dedup).
+     */
+    fun commitEntry(taskId: String, attemptKey: String): Boolean {
+        if (entries.containsKey(attemptKey)) return false
+        entries[attemptKey] = taskId
+        return true
     }
 
-    fun count(taskId: String): Int = entries[taskId] ?: 0
+    override fun countTrustedEntries(taskId: String): Int =
+        entries.count { it.value == taskId }
 }
 
 /**
@@ -298,23 +309,10 @@ class FakeProviderGateway(
     /** If true, the next completeAndAdvance produces a corrupt receipt digest. */
     var corruptNextDigest: Boolean = false
 
-    /** If true, throw CrashSimulation before returning the receipt. */
-    var crashBeforeReceipt: Boolean = false
-
     override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 {
-        val receipt = if (corruptNextDigest) {
-            corruptNextDigest = false
-            schedule.advanceWithCorruptDigest(request)
-        } else {
-            schedule.advance(request)
-        }
-
-        if (crashBeforeReceipt) {
-            crashBeforeReceipt = false
-            throw CrashSimulation("crash injected between provider commit and Auto receipt")
-        }
-
-        return receipt
+        val corrupt = corruptNextDigest
+        corruptNextDigest = false
+        return schedule.advance(request, corruptDigest = corrupt)
     }
 
     override fun observe(leaseId: String, context: ScheduleContext): EnvironmentObservationV1 {
