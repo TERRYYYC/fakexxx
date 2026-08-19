@@ -1,5 +1,6 @@
 package name.caiyao.fakegps.integration.v1
 
+import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
@@ -7,6 +8,7 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_SIGNER
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_UID
+import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.fail
@@ -131,6 +133,31 @@ class ApplyReleaseProviderRedTest {
         assertNotEquals(receipt.leaseId, next.leaseId)
     }
 
+    /**
+     * INV-14 caller identity is the full (applicationId, signerDigest)
+     * principal. Approving a replacement signer for the same application id
+     * must not transfer release authority over a lease earned by the previous
+     * signer. The old applicationId-only check made this operation succeed.
+     */
+    @Test
+    fun release_sameApplicationIdDifferentSigner_isForeignStaleLease() {
+        val h = harness()
+        val receipt = h.apply(key = "rel-signer-apply")
+
+        val replacementSigner = "signer-auto-2-repaired"
+        h.resolver.register(AUTO_UID, AUTO_PKG, replacementSigner)
+        h.pair(AUTO_PKG, replacementSigner)
+
+        expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
+            h.release(receipt.leaseId, key = "rel-signer-replacement")
+        }
+        assertEquals(
+            "foreign replacement principal must leave the old lease active",
+            LeaseState.ACTIVE,
+            h.leases.get(receipt.leaseId)?.state,
+        )
+    }
+
     // ------------------------------------------------- idempotency scope
 
     /**
@@ -161,6 +188,102 @@ class ApplyReleaseProviderRedTest {
         val bReplay = h.apply(uid = OTHER_UID, key = "shared-k", intent = bIntent)
         assertEquals("per-caller replay returns the caller's own receipt", b, bReplay)
         assertEquals("replay executed nothing", 2, h.env.applyCount)
+    }
+
+    /**
+     * `caller` in the idempotency scope is the full authorization principal,
+     * not applicationId alone. After signer replacement, the same package and
+     * key identify a different caller and must create a fresh receipt instead
+     * of replaying the previous signer's lease.
+     */
+    @Test
+    fun idempotencyScope_sameApplicationIdAcrossSigners_isIsolated() {
+        val h = harness()
+        val old = h.apply(key = "shared-signer-k")
+        h.release(old.leaseId, key = "shared-signer-release")
+
+        val replacementSigner = "signer-auto-2-repaired"
+        h.resolver.register(AUTO_UID, AUTO_PKG, replacementSigner)
+        h.pair(AUTO_PKG, replacementSigner)
+
+        val replacement = h.apply(key = "shared-signer-k")
+        assertNotEquals("replacement principal gets a fresh lease", old.leaseId, replacement.leaseId)
+        assertEquals("both caller principals execute one apply", 2, h.env.applyCount)
+    }
+
+    /** A safely attributable pre-signer-scope receipt is replayed and migrated. */
+    @Test
+    fun idempotencyScope_legacyApplyReceipt_migratesOnlyAfterLeaseOwnershipProof() {
+        val h = harness()
+        val intent = h.intent()
+        val intentHash = io.github.terryyyc.fakexxx.contract.v1.CanonicalIntentDigestV1.compute(intent)
+        val leaseId = "legacy-receipt-lease"
+        h.leases.put(
+            LeaseRecord(
+                leaseId = leaseId,
+                callerApplicationId = AUTO_PKG,
+                callerSignerDigest = AUTO_SIGNER,
+                acceptedIntentHash = intentHash,
+                state = LeaseState.RELEASED,
+                applyIdempotencyKey = "legacy-receipt-key",
+                startingEnvironmentRevision = 0L,
+                deadlineElapsedRealtimeMs = h.clock.elapsedRealtimeMs() + 60_000L,
+                applyOwnerGeneration = h.tracker.generation,
+                earnedScheduleRef = "item-1",
+            ),
+        )
+        val original = io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1(
+            operationId = "legacy-operation",
+            idempotencyKey = "legacy-receipt-key",
+            leaseId = leaseId,
+            acceptedIntentHash = intentHash,
+            appliedAtEpochMs = h.clock.epochMs(),
+            environmentRevision = 0L,
+            verificationLevelWire =
+                io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
+                    .SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+        )
+        val receiptPayload = DurableFieldCodec.encode(
+            listOf(
+                original.operationId,
+                original.idempotencyKey,
+                original.leaseId,
+                original.acceptedIntentHash,
+                original.appliedAtEpochMs.toString(),
+                original.environmentRevision.toString(),
+                original.verificationLevelWire.toString(),
+            ),
+        )
+        val legacyKey = DurableFieldCodec.encode(
+            listOf(AUTO_PKG, ContractOperation.APPLY.name, original.idempotencyKey),
+        )
+        h.kv.write(
+            DurableIdempotencyStore.RECEIPT_NAMESPACE,
+            legacyKey,
+            DurableFieldCodec.encode(
+                listOf(
+                    AUTO_PKG,
+                    ContractOperation.APPLY.name,
+                    original.idempotencyKey,
+                    RequestDigests.applyDigest(intentHash),
+                    "",
+                    h.clock.elapsedRealtimeMs().toString(),
+                    receiptPayload,
+                ),
+            ),
+        )
+
+        assertEquals(original, h.apply(key = original.idempotencyKey, intent = intent))
+        assertEquals("legacy replay executes no environment mutation", 0, h.env.applyCount)
+        assertEquals(
+            AUTO_SIGNER,
+            h.idempotency.find(
+                AUTO_PKG,
+                AUTO_SIGNER,
+                ContractOperation.APPLY,
+                original.idempotencyKey,
+            )?.callerSignerDigest,
+        )
     }
 
     // ------------------------------------------------ durable codec totality
