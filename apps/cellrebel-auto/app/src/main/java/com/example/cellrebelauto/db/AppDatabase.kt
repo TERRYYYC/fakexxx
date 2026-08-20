@@ -8,17 +8,18 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.TestResult
+import com.example.cellrebelauto.model.plan.AdvanceRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 
 /**
  * Room database singleton.
- * # Room 数据库单例，版本 4（F003 阶段开关审计列）
+ * # Room 数据库单例，版本 5（Issue #19 advance_records 表）
  */
 @Database(
-    entities = [TestResult::class, RunSession::class, LocationPlan::class, LocationTask::class, TestAttempt::class],
-    version = 4,
+    entities = [TestResult::class, RunSession::class, LocationPlan::class, LocationTask::class, TestAttempt::class, AdvanceRecord::class],
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -28,6 +29,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun planDao(): PlanDao
     abstract fun locationTaskDao(): LocationTaskDao
     abstract fun testAttemptDao(): TestAttemptDao
+    abstract fun advanceRecordDao(): AdvanceRecordDao
 
     companion object {
         @Volatile
@@ -101,6 +103,36 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v4 -> v5 (Issue #19): advance_records table for durable advance state.
+         * Additive only — new table, no existing data touched.
+         * # v4 到 v5（Issue #19）：新增 advance_records 表，纯增量
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `advance_records` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`taskId` INTEGER NOT NULL, " +
+                        "`idempotencyKey` TEXT NOT NULL, " +
+                        "`scheduleId` TEXT NOT NULL, " +
+                        "`currentItemId` TEXT NOT NULL, " +
+                        "`scheduleVersion` INTEGER NOT NULL, " +
+                        "`ledgerRef` TEXT NOT NULL, " +
+                        "`verifiedAtElapsedRealtimeMs` INTEGER NOT NULL, " +
+                        "`leaseId` TEXT NOT NULL, " +
+                        "`state` TEXT NOT NULL, " +
+                        "`receiptDigest` TEXT, " +
+                        "`reason` TEXT, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_taskId` ON `advance_records`(`taskId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_state` ON `advance_records`(`state`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -109,7 +141,7 @@ abstract class AppDatabase : RoomDatabase() {
                     "cellrebel_auto.db"
                 )
                     // # 非破坏性迁移：保留历史数据
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

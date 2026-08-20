@@ -4,6 +4,10 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.cellrebelauto.automation.advance.AdvanceCoordinator
+import com.example.cellrebelauto.automation.advance.PendingProviderGateway
+import com.example.cellrebelauto.automation.advance.RoomAdvanceStateStore
+import com.example.cellrebelauto.automation.advance.RoomQuotaReader
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.data.PlanConfigStore
 import com.example.cellrebelauto.db.AppDatabase
@@ -278,6 +282,17 @@ class AutomationService : AccessibilityService() {
                 return@launch
             }
 
+            // # Issue #19: production advance protocol wiring.
+            // # PendingProviderGateway is the pre-PR#36 stub — every provider call
+            // # throws ProviderNotAvailableException, which the engine persists as
+            // # "provider_unavailable" for the recovery sweep to retry when the real
+            // # ProviderGateway lands. The quota gate still fires and the advance state
+            // # is durably persisted.
+            val quotaReader = RoomQuotaReader(planRepository)
+            val providerGateway = PendingProviderGateway()
+            val advanceCoordinator = AdvanceCoordinator(providerGateway, quotaReader)
+            val advanceStateStore = RoomAdvanceStateStore(db.advanceRecordDao())
+
             val newEngine = AutomationEngine(
                 planId = planId,
                 planRepository = planRepository,
@@ -291,7 +306,9 @@ class AutomationService : AccessibilityService() {
                     val c = configStore.config.first()
                     StageToggles(c.locationStageEnabled, c.testStageEnabled)
                 },
-                bridge = bridge
+                bridge = bridge,
+                advanceCoordinator = advanceCoordinator,
+                advanceStateStore = advanceStateStore,
             )
             engine = newEngine
 

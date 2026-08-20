@@ -18,25 +18,22 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
  * [TrustedQuotaLedger] in tests) — this is what M-AD-15 enforces: after a crash,
  * recovery re-reads from the durable store, never a stale snapshot.
  *
+ * All interfaces are `suspend` because the production implementations use Room
+ * (async) and AIDL ContentResolver (async). Tests use in-memory suspend stubs.
+ *
  * Owns the three decisions the spec places on the AUTO side of the advance:
  *
  *  1. **Quota gate** (§8.1 RELEASE_RECEIPT → ADVANCE_PENDING vs CLOSED):
  *     only `count(TrustedQuotaEntry where taskId) >= requiredSuccesses` may
- *     advance. A single committed entry does NOT mean "quota met" — that
- *     conflation would advance a `requiredSuccesses = 3` task after the first
- *     attempt (v1.46 defect). Refs #19 AC-1, M-AD-14.
+ *     advance. Refs #19 AC-1, M-AD-14.
  *
  *  2. **Receipt digest verification** (§6.7.3 / §8.1 ADVANCE_PENDING edges):
- *     a receipt whose `receiptDigest` does not recompute is not a "weaker
- *     receipt" — it is not a receipt. Both ADVANCED and EXHAUSTED outcomes
- *     require this; the exhausted path must NOT bypass it (v1.46 defect fix).
- *     Refs #19 AC-2, M-AD-16.
+ *     both ADVANCED and EXHAUSTED outcomes require this; the exhausted path
+ *     must NOT bypass it. Refs #19 AC-2, M-AD-16.
  *
  *  3. **Post-advance independent verification** (§6.7.5 / §8.1 observing edges):
- *     - NON-TERMINAL: `observe()` → four-leg tuple must match (item, version,
- *       intentHash, revision). Refs #19 AC-3, M-AD-17, M-AD-18.
- *     - TERMINAL: `discover()` → group pre-check (all-non-null) → four-leg
- *       readback (scheduleId, item, version, exhausted). Refs M-AD-23.
+ *     - NON-TERMINAL: `observe()` → four-leg tuple. Refs #19 AC-3, M-AD-17/18.
+ *     - TERMINAL: `discover()` → group pre-check → four-leg readback.
  */
 class AdvanceCoordinator(
     private val provider: ProviderGateway,
@@ -49,17 +46,9 @@ class AdvanceCoordinator(
      * The coordinator reads quota count DURABLY from [quotaReader] — never from
      * a caller-supplied snapshot. This is the M-AD-15 enforcement: after a crash
      * between quota write and this evaluation, recovery re-enters here and the
-     * coordinator re-reads from the durable store. A stale count cannot bypass
-     * the gate.
-     *
-     * @param taskId the task whose quota to check (durable read via [quotaReader])
-     * @param requiredSuccesses the task's quota threshold
-     * @param scheduleContext the persisted schedule projection from attempt open time (§6.7.3 v1.72)
-     * @param leaseId the RELEASED historical lease this attempt earned under
-     * @param idempotencyKey advance idempotency key (persisted before the call)
-     * @return the decision and evidence, never throws for protocol-level outcomes
+     * coordinator re-reads from the durable store.
      */
-    fun evaluateAfterRelease(
+    suspend fun evaluateAfterRelease(
         taskId: String,
         requiredSuccesses: Int,
         scheduleContext: ScheduleContext,
@@ -67,8 +56,6 @@ class AdvanceCoordinator(
         idempotencyKey: String,
     ): AdvanceDecision {
         // ── Step 1: Quota gate (§8.1 RELEASE_RECEIPT edges) ──
-        // M-AD-14: quota committed but NOT met → close, no advance.
-        // M-AD-15: re-read from durable store (not a stale snapshot).
         val quotaCount = quotaReader.countTrustedEntries(taskId)
         if (quotaCount < requiredSuccesses) {
             return AdvanceDecision.QuotaNotMet
@@ -85,7 +72,7 @@ class AdvanceCoordinator(
         val bareRequest = CompleteAndAdvanceRequestV1(
             leaseId = leaseId,
             idempotencyKey = idempotencyKey,
-            requestDigest = "", // computed below
+            requestDigest = "",
             expectedScheduleId = scheduleContext.scheduleId,
             expectedScheduleVersion = scheduleContext.scheduleVersion,
             expectedCurrentItemId = scheduleContext.currentItemId,
@@ -99,9 +86,6 @@ class AdvanceCoordinator(
         val receipt = provider.completeAndAdvance(request)
 
         // ── Step 4: Receipt digest verification (§6.7.3, M-AD-08 / M-AD-16) ──
-        // Both ADVANCED and EXHAUSTED outcomes require this — the exhausted path
-        // must NOT bypass it. "A receipt whose digest does not recompute is not a
-        // weaker receipt — it is not a receipt."
         if (!CanonicalAdvanceReceiptDigestV1.verify(receipt, requestDigest, idempotencyKey)) {
             return AdvanceDecision.RecoveryRequired(
                 reason = "ADVANCE_DIGEST_MISMATCH",
@@ -117,52 +101,26 @@ class AdvanceCoordinator(
             )
 
         return when (outcome) {
-            AdvanceOutcomeV1.ADVANCED -> verifyNonTerminal(
-                receipt = receipt,
-                leaseId = leaseId,
-                scheduleContext = scheduleContext,
-            )
-
-            AdvanceOutcomeV1.EXHAUSTED -> verifyTerminal(
-                receipt = receipt,
-                scheduleContext = scheduleContext,
-            )
+            AdvanceOutcomeV1.ADVANCED -> verifyNonTerminal(receipt, leaseId, scheduleContext)
+            AdvanceOutcomeV1.EXHAUSTED -> verifyTerminal(receipt, scheduleContext)
         }
     }
 
-    /**
-     * Non-terminal advance verification via `observe()` (§6.7.5).
-     *
-     * Four-leg tuple (v1.68):
-     *   observation.scheduleItemId     == receipt.advancedToItemId
-     *   observation.scheduleVersion    == receipt.scheduleVersionAfter
-     *   observation.acceptedIntentHash == receipt.effectiveIntentHash
-     *   observation.environmentRevision == receipt.effectiveEnvironmentRevision
-     */
-    private fun verifyNonTerminal(
+    private suspend fun verifyNonTerminal(
         receipt: AdvanceReceiptV1,
         leaseId: String,
         scheduleContext: ScheduleContext,
     ): AdvanceDecision {
         val observation = provider.observe(leaseId, scheduleContext)
-
         val mismatches = mutableListOf<String>()
-        if (observation.scheduleItemId != receipt.advancedToItemId) {
-            mismatches += "scheduleItemId(observed=${observation.scheduleItemId}, " +
-                "expected=${receipt.advancedToItemId})"
-        }
-        if (observation.scheduleVersion != receipt.scheduleVersionAfter) {
-            mismatches += "scheduleVersion(observed=${observation.scheduleVersion}, " +
-                "expected=${receipt.scheduleVersionAfter})"
-        }
-        if (observation.acceptedIntentHash != receipt.effectiveIntentHash) {
-            mismatches += "acceptedIntentHash(observed=${observation.acceptedIntentHash}, " +
-                "expected=${receipt.effectiveIntentHash})"
-        }
-        if (observation.environmentRevision != receipt.effectiveEnvironmentRevision) {
-            mismatches += "environmentRevision(observed=${observation.environmentRevision}, " +
-                "expected=${receipt.effectiveEnvironmentRevision})"
-        }
+        if (observation.scheduleItemId != receipt.advancedToItemId)
+            mismatches += "scheduleItemId(observed=${observation.scheduleItemId}, expected=${receipt.advancedToItemId})"
+        if (observation.scheduleVersion != receipt.scheduleVersionAfter)
+            mismatches += "scheduleVersion(observed=${observation.scheduleVersion}, expected=${receipt.scheduleVersionAfter})"
+        if (observation.acceptedIntentHash != receipt.effectiveIntentHash)
+            mismatches += "acceptedIntentHash(observed=${observation.acceptedIntentHash}, expected=${receipt.effectiveIntentHash})"
+        if (observation.environmentRevision != receipt.effectiveEnvironmentRevision)
+            mismatches += "environmentRevision(observed=${observation.environmentRevision}, expected=${receipt.effectiveEnvironmentRevision})"
 
         if (mismatches.isNotEmpty()) {
             return AdvanceDecision.RecoveryRequired(
@@ -170,65 +128,36 @@ class AdvanceCoordinator(
                 receipt = receipt,
             )
         }
-
         return AdvanceDecision.Advanced(receipt)
     }
 
-    /**
-     * Terminal (EXHAUSTED) advance verification via `discover()` (§6.7.5 v1.58/v1.68).
-     *
-     * NOT via observe(): advancedToItemId is null for EXHAUSTED, while
-     * EnvironmentObservationV1.scheduleItemId is non-null — that leg can never hold.
-     *
-     * NOT via preflight(): no currentScheduleId, cannot establish schedule identity.
-     *
-     * Steps:
-     *   0. Group pre-check: all four projection fields non-null (v1.55 invariant)
-     *   1. Four-leg readback (v1.68):
-     *        currentScheduleId  == the schedule this advance targeted
-     *        currentItemId      == receipt.advancedFromItemId
-     *        scheduleVersion    == receipt.scheduleVersionAfter
-     *        exhausted          == true
-     */
-    private fun verifyTerminal(
+    private suspend fun verifyTerminal(
         receipt: AdvanceReceiptV1,
         scheduleContext: ScheduleContext,
     ): AdvanceDecision {
         val snapshot = provider.discover()
 
-        // ── Group pre-check (v1.55 invariant, M-AD-27) ──
-        if (snapshot.currentScheduleId == null ||
-            snapshot.currentItemId == null ||
-            snapshot.scheduleVersion == null ||
-            snapshot.exhausted == null
+        // Group pre-check (v1.55 invariant)
+        if (snapshot.currentScheduleId == null || snapshot.currentItemId == null ||
+            snapshot.scheduleVersion == null || snapshot.exhausted == null
         ) {
             return AdvanceDecision.RecoveryRequired(
                 reason = "EXHAUSTED_STATE_MISMATCH: partial-null projection group " +
-                    "(currentScheduleId=${snapshot.currentScheduleId}, " +
-                    "currentItemId=${snapshot.currentItemId}, " +
-                    "scheduleVersion=${snapshot.scheduleVersion}, " +
-                    "exhausted=${snapshot.exhausted})",
+                    "(currentScheduleId=${snapshot.currentScheduleId}, currentItemId=${snapshot.currentItemId}, " +
+                    "scheduleVersion=${snapshot.scheduleVersion}, exhausted=${snapshot.exhausted})",
                 receipt = receipt,
             )
         }
 
-        // ── Four-leg readback ──
         val mismatches = mutableListOf<String>()
-        if (snapshot.currentScheduleId != scheduleContext.scheduleId) {
-            mismatches += "currentScheduleId(readback=${snapshot.currentScheduleId}, " +
-                "expected=${scheduleContext.scheduleId})"
-        }
-        if (snapshot.currentItemId != receipt.advancedFromItemId) {
-            mismatches += "currentItemId(readback=${snapshot.currentItemId}, " +
-                "expected=${receipt.advancedFromItemId})"
-        }
-        if (snapshot.scheduleVersion != receipt.scheduleVersionAfter) {
-            mismatches += "scheduleVersion(readback=${snapshot.scheduleVersion}, " +
-                "expected=${receipt.scheduleVersionAfter})"
-        }
-        if (snapshot.exhausted != true) {
+        if (snapshot.currentScheduleId != scheduleContext.scheduleId)
+            mismatches += "currentScheduleId(readback=${snapshot.currentScheduleId}, expected=${scheduleContext.scheduleId})"
+        if (snapshot.currentItemId != receipt.advancedFromItemId)
+            mismatches += "currentItemId(readback=${snapshot.currentItemId}, expected=${receipt.advancedFromItemId})"
+        if (snapshot.scheduleVersion != receipt.scheduleVersionAfter)
+            mismatches += "scheduleVersion(readback=${snapshot.scheduleVersion}, expected=${receipt.scheduleVersionAfter})"
+        if (snapshot.exhausted != true)
             mismatches += "exhausted(readback=${snapshot.exhausted}, expected=true)"
-        }
 
         if (mismatches.isNotEmpty()) {
             return AdvanceDecision.RecoveryRequired(
@@ -236,43 +165,27 @@ class AdvanceCoordinator(
                 receipt = receipt,
             )
         }
-
         return AdvanceDecision.Exhausted(receipt)
     }
 }
 
-/** Advance protocol outcomes. Each variant carries the evidence for persistence. */
+/** Advance protocol outcomes. */
 sealed class AdvanceDecision {
-    /** §8.1 RELEASE_RECEIPT(未达标) → CLOSED: quota not met, no advance issued. */
     object QuotaNotMet : AdvanceDecision()
-    /** §8.1 ADVANCE_OBSERVING → CLOSED: non-terminal advance independently verified. */
     data class Advanced(val receipt: AdvanceReceiptV1) : AdvanceDecision()
-    /** §8.1 ADVANCE_STATE_READBACK → CLOSED: terminal advance independently verified. */
     data class Exhausted(val receipt: AdvanceReceiptV1) : AdvanceDecision()
-    /** §8.1 → RECOVERY_REQUIRED: typed reason names the failing leg. */
     data class RecoveryRequired(val reason: String, val receipt: AdvanceReceiptV1? = null) : AdvanceDecision()
 }
 
 /**
- * Durable quota reader. In production: Room DAO query `count(TrustedQuotaEntry WHERE taskId)`.
- * In tests: [TrustedQuotaLedger].
- *
- * The coordinator calls this instead of accepting a caller-supplied int. This is
- * the M-AD-15 design: after a crash, recovery re-enters [evaluateAfterRelease]
- * and the coordinator re-reads from the DURABLE store — a stale snapshot from
- * before the crash cannot bypass the gate.
+ * Durable quota reader. Production: Room DAO. Tests: [TrustedQuotaLedger].
+ * Suspend because Room DAOs are async.
  */
 interface QuotaReader {
-    fun countTrustedEntries(taskId: String): Int
+    suspend fun countTrustedEntries(taskId: String): Int
 }
 
-/**
- * Schedule projection captured at attempt open time (§6.7.3 v1.72).
- *
- * These values are persisted when the attempt opens and replayed VERBATIM into
- * the advance request. Reading fresh values just before advance is the defect
- * the identity leg exists to stop (M-AD-28).
- */
+/** Schedule projection captured at attempt open time (§6.7.3 v1.72). */
 data class ScheduleContext(
     val scheduleId: String,
     val currentItemId: String,
@@ -283,12 +196,10 @@ data class ScheduleContext(
 
 /**
  * Gateway to the provider's advance-related operations.
- *
- * In production: wraps the AIDL ContentResolver calls (PR #36 EnvironmentControlClient).
- * In tests: [FakeProviderGateway] in ConsumerHarness.
+ * Suspend because production uses AIDL ContentResolver (async).
  */
 interface ProviderGateway {
-    fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1
-    fun observe(leaseId: String, context: ScheduleContext): EnvironmentObservationV1
-    fun discover(): CapabilitySnapshotV1
+    suspend fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1
+    suspend fun observe(leaseId: String, context: ScheduleContext): EnvironmentObservationV1
+    suspend fun discover(): CapabilitySnapshotV1
 }

@@ -3,6 +3,8 @@ package com.example.cellrebelauto.automation
 import android.util.Log
 import com.example.cellrebelauto.automation.advance.AdvanceCoordinator
 import com.example.cellrebelauto.automation.advance.AdvanceDecision
+import com.example.cellrebelauto.automation.advance.AdvanceStateStore
+import com.example.cellrebelauto.automation.advance.ProviderNotAvailableException
 import com.example.cellrebelauto.automation.advance.ScheduleContext
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
@@ -95,6 +97,10 @@ class AutomationEngine(
     // # real ProviderGateway (AIDL-backed). When non-null, quota-met triggers
     // # the advance protocol (§8.1) instead of just logging.
     private val advanceCoordinator: AdvanceCoordinator? = null,
+    // # Issue #19: durable advance state store. Must be non-null when
+    // # advanceCoordinator is non-null. Records survive crash and feed
+    // # the recovery sweep at engine start.
+    private val advanceStateStore: AdvanceStateStore? = null,
 ) {
     companion object {
         private const val TAG = "AutoEngine"
@@ -158,6 +164,44 @@ class AutomationEngine(
             val normalized = planRepository.normalizeQuotaCompletedTasks()
             if (normalized > 0) {
                 log("Recovery sweep: $normalized quota-full task(s) normalized to completed")
+            }
+            // # Issue #19: advance recovery sweep — replay unresolved advance records.
+            // # The coordinator re-reads quota durably and the provider's idempotency
+            // # key prevents double-advance. Under-quota records resolve immediately
+            // # without any provider call (M-AD-15 crash-safety).
+            advanceStateStore?.let { store ->
+                advanceCoordinator?.let { coordinator ->
+                    val unresolved = store.listAllUnresolved()
+                    if (unresolved.isNotEmpty()) {
+                        log("Advance recovery: ${unresolved.size} unresolved record(s)")
+                    }
+                    for (record in unresolved) {
+                        try {
+                            val task = planRepository.getTask(record.taskId)
+                            if (task == null) {
+                                store.resolve(record.id, "quota_not_met", null, "task not found")
+                                continue
+                            }
+                            val decision = coordinator.evaluateAfterRelease(
+                                taskId = record.taskId.toString(),
+                                requiredSuccesses = task.requiredSuccesses,
+                                scheduleContext = record.scheduleContext,
+                                leaseId = record.leaseId,
+                                idempotencyKey = record.idempotencyKey,
+                            )
+                            resolveAdvanceRecord(store, record.id, decision)
+                            log("Advance recovery: task=${record.taskId} → ${decision.javaClass.simpleName}")
+                        } catch (e: ProviderNotAvailableException) {
+                            store.resolve(record.id, "provider_unavailable", null, e.message)
+                            log("Advance recovery: task=${record.taskId} → provider_unavailable")
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            store.resolve(record.id, "recovery_required", null, e.message)
+                            log("Advance recovery: task=${record.taskId} → error: ${e.message}")
+                        }
+                    }
+                }
             }
 
             // ==================== Step 1: both-stages-off guard (AC-F3-4) ====================
@@ -363,17 +407,29 @@ class AutomationEngine(
                                 // # The coordinator reads quota DURABLY from PlanRepository
                                 // # (Room QuotaReader), verifies the receipt digest, and
                                 // # independently verifies the post-advance state.
-                                // # ProviderGateway binding: PR #36 scope.
+                                // # Durable state: write pending BEFORE calling coordinator,
+                                // # resolve AFTER — survives crash between the two.
                                 advanceCoordinator?.let { coordinator ->
+                                    val store = advanceStateStore ?: return@let
+                                    val ctx = activeScheduleContext ?: return@let
+                                    val lease = currentLeaseId ?: return@let
+                                    val advKey = "adv-$attemptId"
                                     try {
+                                        // Write pending record to Room BEFORE provider call
+                                        val recordId = store.createPending(
+                                            taskId = task.id,
+                                            idempotencyKey = advKey,
+                                            scheduleContext = ctx,
+                                            leaseId = lease,
+                                        )
                                         val decision = coordinator.evaluateAfterRelease(
                                             taskId = task.id.toString(),
                                             requiredSuccesses = task.requiredSuccesses,
-                                            scheduleContext = activeScheduleContext
-                                                ?: return@let, // no schedule → skip advance
-                                            leaseId = currentLeaseId ?: return@let,
-                                            idempotencyKey = "adv-$attemptId",
+                                            scheduleContext = ctx,
+                                            leaseId = lease,
+                                            idempotencyKey = advKey,
                                         )
+                                        resolveAdvanceRecord(store, recordId, decision)
                                         when (decision) {
                                             is AdvanceDecision.QuotaNotMet ->
                                                 log("Advance: quota not met (concurrent update?)")
@@ -384,10 +440,15 @@ class AutomationEngine(
                                             is AdvanceDecision.RecoveryRequired ->
                                                 log("WARNING: advance RECOVERY_REQUIRED: ${decision.reason}")
                                         }
+                                    } catch (e: ProviderNotAvailableException) {
+                                        // PendingProviderGateway (pre-PR#36): persist state,
+                                        // recovery sweep will retry when real gateway is wired
+                                        log("Advance: provider not available — persisted for recovery")
+                                    } catch (e: CancellationException) {
+                                        throw e
                                     } catch (e: Exception) {
-                                        if (e is CancellationException) throw e
                                         log("WARNING: advance protocol error: ${e.message}")
-                                        // Recovery will re-attempt on next engine cycle
+                                        // Record is in "pending" state — recovery sweep will retry
                                     }
                                 }
                             }
@@ -446,6 +507,29 @@ class AutomationEngine(
             }
             log("=== Automation ERROR: ${e.message} ===")
             Log.e(TAG, "Automation failed", e)
+        }
+    }
+
+    /**
+     * Resolve an advance record in the durable store based on the coordinator's
+     * decision. Maps [AdvanceDecision] to the store's string state.
+     *
+     * # 根据协调器的决策解决推进记录。将 AdvanceDecision 映射到存储的字符串状态。
+     */
+    private suspend fun resolveAdvanceRecord(
+        store: AdvanceStateStore,
+        recordId: Long,
+        decision: AdvanceDecision,
+    ) {
+        when (decision) {
+            is AdvanceDecision.QuotaNotMet ->
+                store.resolve(recordId, "quota_not_met", null, null)
+            is AdvanceDecision.Advanced ->
+                store.resolve(recordId, "advanced", decision.receipt.receiptDigest, null)
+            is AdvanceDecision.Exhausted ->
+                store.resolve(recordId, "exhausted", decision.receipt.receiptDigest, null)
+            is AdvanceDecision.RecoveryRequired ->
+                store.resolve(recordId, "recovery_required", null, decision.reason)
         }
     }
 
