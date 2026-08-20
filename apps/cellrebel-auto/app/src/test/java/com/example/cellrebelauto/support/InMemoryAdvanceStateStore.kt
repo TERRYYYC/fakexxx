@@ -51,7 +51,11 @@ class InMemoryAdvanceStateStore : AdvanceStateStore {
         receiptDigest: String?,
         reason: String?,
     ) {
-        records[id]?.state = outcome
+        records[id]?.let {
+            it.state = outcome
+            it.receiptDigest = receiptDigest
+            it.reason = reason
+        }
     }
 
     override suspend fun listAllUnresolved(): List<PendingAdvance> =
@@ -66,6 +70,8 @@ class InMemoryAdvanceStateStore : AdvanceStateStore {
         val scheduleContext: ScheduleContext,
         val leaseId: String,
         var state: String,
+        var receiptDigest: String? = null,
+        var reason: String? = null,
     ) {
         fun toPendingAdvance() = PendingAdvance(id, taskId, idempotencyKey, scheduleContext, leaseId, state)
     }

@@ -405,4 +405,72 @@ class EngineAdvanceTest {
         assertEquals("pending", unresolved[0].state)
         assertEquals("adv-engine-1", unresolved[0].idempotencyKey)
     }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // (g) P1-2: pre-create BEFORE finalize, CAS failure cleanup
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun preCreate_beforeFinalize_casFailure_resolvesOrphanRecord() = runBlocking {
+        // Simulates the engine's P1-2 fix flow when finalize CAS guard fails:
+        //   1. willCompleteQuota predicted → createPending BEFORE finalize
+        //   2. finalizeAttemptSuccess → CAS fails (returns false)
+        //   3. Orphan record resolved as "quota_not_met"
+        //
+        // After resolution, recovery sweep sees nothing to retry.
+
+        val store = InMemoryAdvanceStateStore()
+
+        // Step 1: pre-create (engine predicts quota will complete)
+        val recordId = store.createPending(
+            taskId = 100L, idempotencyKey = "adv-cas-fail",
+            scheduleContext = defaultCtx, leaseId = "lease-cas",
+        )
+        assertEquals("pending record created before finalize",
+            1, store.listAllUnresolved().size)
+
+        // Step 2: finalize CAS fails → engine resolves orphan
+        // (simulates the `if (!finalized) { resolve(... "quota_not_met") }` path)
+        store.resolve(recordId, "quota_not_met", null, "finalize CAS failed")
+
+        // Step 3: no unresolved records left
+        assertEquals("orphan resolved", 0, store.listAllUnresolved().size)
+        assertEquals("quota_not_met", store.allRecords[0].state)
+
+        // Step 4: recovery sweep sees nothing
+        val gateway = CountingProviderGateway()
+        val quotaReader = ConfigurableQuotaReader(count = 3)
+        val coordinator = AdvanceCoordinator(gateway, quotaReader)
+        runRecoverySweep(store, coordinator, mapOf(100L to 3))
+        assertEquals("zero provider calls after CAS cleanup", 0, gateway.completeAndAdvanceCount)
+    }
+
+    @Test
+    fun preCreate_beforeFinalize_crashAfterPending_recoveryHandlesOrphan() = runBlocking {
+        // Simulates crash AFTER createPending but BEFORE finalizeAttemptSuccess:
+        //   - Task completedSuccesses unchanged (quota still under threshold)
+        //   - Recovery sweep finds "pending" record, evaluates quota → QuotaNotMet
+        //   - Record resolved, no provider calls, no false advance
+
+        val store = InMemoryAdvanceStateStore()
+
+        // Step 1: pre-create happened (engine crashed right after)
+        store.createPending(
+            taskId = 100L, idempotencyKey = "adv-crash-before-finalize",
+            scheduleContext = defaultCtx, leaseId = "lease-x",
+        )
+
+        // Step 2: on restart, recovery sweep runs. Quota is STILL under threshold
+        // (finalize never happened → completedSuccesses not incremented).
+        val gateway = CountingProviderGateway()
+        val quotaReader = ConfigurableQuotaReader(count = 2) // 2/3 — under quota
+        val coordinator = AdvanceCoordinator(gateway, quotaReader)
+
+        runRecoverySweep(store, coordinator, mapOf(100L to 3))
+
+        // KEY: zero provider calls, resolved as quota_not_met
+        assertEquals("under-quota: zero provider calls", 0, gateway.completeAndAdvanceCount)
+        assertEquals(0, store.listAllUnresolved().size)
+        assertEquals("quota_not_met", store.allRecords[0].state)
+    }
 }

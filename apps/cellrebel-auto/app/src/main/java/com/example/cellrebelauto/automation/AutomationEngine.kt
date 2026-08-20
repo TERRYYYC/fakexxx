@@ -137,11 +137,13 @@ class AutomationEngine(
     private var currentAttemptId: Long? = null
 
     // # Issue #19: schedule context captured at attempt open time (§6.7.3 v1.72).
-    // # Persisted and replayed verbatim into the advance request. Set when the
-    // # ProviderGateway is available (PR #36 wiring).
+    // # Persisted and replayed verbatim into the advance request.
+    // # Pre-PR#36: synthesized from plan/task state at task selection.
+    // # Post-PR#36: captured from provider handshake snapshot.
     private var activeScheduleContext: ScheduleContext? = null
     // # Issue #19: the RELEASED historical lease this attempt earned under.
-    // # Set from the environment-control handshake (PR #36).
+    // # Pre-PR#36: synthesized as "auto-lease-{sessionId}-{taskId}".
+    // # Post-PR#36: captured from environment-control handshake.
     private var currentLeaseId: String? = null
 
     /**
@@ -236,6 +238,19 @@ class AutomationEngine(
                 if (advancingToNewTask) {
                     planRepository.markTaskActive(task.id)
                 }
+
+                // # Issue #19: capture schedule context at task selection time (§6.7.3 v1.72).
+                // # Pre-PR#36: synthesized from plan/task state. Post-PR#36: the provider
+                // # handshake replaces these with the real schedule snapshot.
+                activeScheduleContext = ScheduleContext(
+                    scheduleId = "plan-$planId",
+                    currentItemId = "task-${task.id}",
+                    scheduleVersion = task.completedSuccesses.toLong() + 1,
+                    ledgerRef = "auto:ledger:session-$runSessionId:task-${task.id}",
+                    verifiedAtElapsedRealtimeMs = nowMs(),
+                )
+                currentLeaseId = "auto-lease-$runSessionId-${task.id}"
+
                 log("--- Location csvRow=${task.csvRow} (${task.latitude},${task.longitude}) " +
                     "success ${task.completedSuccesses}/${task.requiredSuccesses} ---")
 
@@ -382,6 +397,29 @@ class AutomationEngine(
                 updateState(AutomationState.PROCESSING)
                 when (outcome) {
                     is AttemptOutcome.Success -> {
+                        // # Issue #19 P1-2 fix: create pending advance record BEFORE
+                        // # finalizeAttemptSuccess to eliminate the crash window between
+                        // # task-marked-completed and advance-record-created.
+                        // # If crash after pending but before finalize → recovery sees
+                        // # under-quota record → resolves as QuotaNotMet (no provider call).
+                        // # If crash after finalize but before coordinator → recovery sees
+                        // # pending record with quota met → calls coordinator normally.
+                        var preCreatedAdvRecordId: Long? = null
+                        val willCompleteQuota = task.completedSuccesses + 1 >= task.requiredSuccesses
+                        if (willCompleteQuota) {
+                            advanceCoordinator?.let {
+                                val store = advanceStateStore ?: return@let
+                                val ctx = activeScheduleContext ?: return@let
+                                val lease = currentLeaseId ?: return@let
+                                preCreatedAdvRecordId = store.createPending(
+                                    taskId = task.id,
+                                    idempotencyKey = "adv-$attemptId",
+                                    scheduleContext = ctx,
+                                    leaseId = lease,
+                                )
+                            }
+                        }
+
                         // # INV-3：单事务收尾（尝试行 + 守卫式自增）
                         val finalized = planRepository.finalizeAttemptSuccess(
                             attemptId = attemptId,
@@ -394,6 +432,10 @@ class AutomationEngine(
                         )
                         if (!finalized) {
                             log("WARNING: finalize skipped (stale expected count) — idempotent guard held")
+                            // CAS guard failed → quota didn't change → resolve orphan record
+                            preCreatedAdvRecordId?.let { recordId ->
+                                advanceStateStore?.resolve(recordId, "quota_not_met", null, "finalize CAS failed")
+                            }
                         }
                         val updated = planRepository.getTask(task.id)
                         if (updated != null) {
@@ -404,24 +446,15 @@ class AutomationEngine(
                             if (updated.status == "completed") {
                                 log("Location csvRow=${task.csvRow} quota complete ✔")
                                 // # Issue #19 AC-1..3: advance protocol (§8.1).
-                                // # The coordinator reads quota DURABLY from PlanRepository
-                                // # (Room QuotaReader), verifies the receipt digest, and
-                                // # independently verifies the post-advance state.
-                                // # Durable state: write pending BEFORE calling coordinator,
-                                // # resolve AFTER — survives crash between the two.
+                                // # Pending record already created BEFORE finalize (above).
+                                // # Now call the coordinator and resolve the record.
                                 advanceCoordinator?.let { coordinator ->
                                     val store = advanceStateStore ?: return@let
+                                    val recordId = preCreatedAdvRecordId ?: return@let
                                     val ctx = activeScheduleContext ?: return@let
                                     val lease = currentLeaseId ?: return@let
                                     val advKey = "adv-$attemptId"
                                     try {
-                                        // Write pending record to Room BEFORE provider call
-                                        val recordId = store.createPending(
-                                            taskId = task.id,
-                                            idempotencyKey = advKey,
-                                            scheduleContext = ctx,
-                                            leaseId = lease,
-                                        )
                                         val decision = coordinator.evaluateAfterRelease(
                                             taskId = task.id.toString(),
                                             requiredSuccesses = task.requiredSuccesses,
@@ -441,14 +474,16 @@ class AutomationEngine(
                                                 log("WARNING: advance RECOVERY_REQUIRED: ${decision.reason}")
                                         }
                                     } catch (e: ProviderNotAvailableException) {
-                                        // PendingProviderGateway (pre-PR#36): persist state,
-                                        // recovery sweep will retry when real gateway is wired
+                                        // PendingProviderGateway (pre-PR#36): record already
+                                        // persisted; recovery sweep will retry when real gateway
+                                        // is wired. Do NOT resolve here — leave as "pending"
+                                        // so recovery sweep picks it up.
                                         log("Advance: provider not available — persisted for recovery")
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {
                                         log("WARNING: advance protocol error: ${e.message}")
-                                        // Record is in "pending" state — recovery sweep will retry
+                                        // Record stays "pending" — recovery sweep will retry
                                     }
                                 }
                             }
