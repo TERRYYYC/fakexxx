@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 5,
-    "identityHash": "d383fe55ebaf76c1028db0e86925efb9",
+    "identityHash": "0d083aef0412f6d2ad3bbce31bf37f98",
     "entities": [
       {
         "tableName": "test_results",
@@ -286,7 +286,7 @@
       },
       {
         "tableName": "test_attempts",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `taskId` INTEGER NOT NULL, `runSessionId` INTEGER NOT NULL, `attemptOrdinal` INTEGER NOT NULL, `successOrdinal` INTEGER, `startedAt` INTEGER NOT NULL, `runningObservedAt` INTEGER, `endedAt` INTEGER, `status` TEXT NOT NULL, `failureReason` TEXT, `webBrowsingScore` REAL, `videoStreamingScore` REAL, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `stageNotes` TEXT, `aplusState` TEXT, `aplusLeaseId` TEXT, `currentExecutionId` TEXT, FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`runSessionId`) REFERENCES `run_sessions`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `taskId` INTEGER NOT NULL, `runSessionId` INTEGER NOT NULL, `attemptOrdinal` INTEGER NOT NULL, `successOrdinal` INTEGER, `startedAt` INTEGER NOT NULL, `runningObservedAt` INTEGER, `endedAt` INTEGER, `status` TEXT NOT NULL, `failureReason` TEXT, `webBrowsingScore` REAL, `videoStreamingScore` REAL, `latitude` REAL NOT NULL, `longitude` REAL NOT NULL, `stageNotes` TEXT, `aplusState` TEXT, `aplusLeaseId` TEXT, `currentExecutionId` TEXT, `aplusAnchorScheduleId` TEXT, `aplusAnchorItemId` TEXT, `aplusAnchorVersion` INTEGER, FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`runSessionId`) REFERENCES `run_sessions`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "id",
@@ -385,6 +385,21 @@
             "fieldPath": "currentExecutionId",
             "columnName": "currentExecutionId",
             "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "aplusAnchorScheduleId",
+            "columnName": "aplusAnchorScheduleId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "aplusAnchorItemId",
+            "columnName": "aplusAnchorItemId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "aplusAnchorVersion",
+            "columnName": "aplusAnchorVersion",
+            "affinity": "INTEGER"
           }
         ],
         "primaryKey": {
@@ -1188,7 +1203,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd383fe55ebaf76c1028db0e86925efb9')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '0d083aef0412f6d2ad3bbce31bf37f98')"
     ]
   }
 }

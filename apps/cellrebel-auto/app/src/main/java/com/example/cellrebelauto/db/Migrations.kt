@@ -153,6 +153,12 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusState TEXT")
         db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusLeaseId TEXT")
         db.execSQL("ALTER TABLE test_attempts ADD COLUMN currentExecutionId TEXT")
+        // R48 (DSF 0ec7dd4 review P1 / spec §4.3 step 1 / R9 P1-7 precedent): the advance CAS
+        // anchor triple is §7.1 attempt-owner shape — part of the FROZEN v5 end-state, folded
+        // into MIGRATION_4_5 (never a later bump).
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusAnchorScheduleId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusAnchorItemId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusAnchorVersion INTEGER")
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS `unverified_attempt_records` (
