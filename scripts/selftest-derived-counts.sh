@@ -271,7 +271,7 @@ neg() { # $1=label $2=old $3=new $4=expected finding substring
 # N-A: class 3 + class 1 combined -- a plain-text owner-red verify-comment,
 # invisible to the old backticked selector, carrying a bare "<n> 行".
 neg "N-A plain-text owner-red + bare count (39 -> planted 35)" \
-  '# 39 行 owner-red' \
+  '# 40 行 owner-red' \
   '# 35 行 owner-red' \
   ' bare 35 '
 
@@ -307,7 +307,7 @@ neg "N-E plain '个 owner-red' count (85)" \
 # N-F: bold-wrapped CELL (**37**) -- cell arm must tolerate bold inside the
 # cell, which is how the real aggregation table spells its counts.
 neg "N-F bold digit cell (**39** -> planted **37**)" \
-  '| **39** |' \
+  '| **40** |' \
   '| **37** |' \
   ' cell 37 '
 
@@ -520,7 +520,7 @@ mut() { # $1=label $2=sed expr against the guard $3=old $4=new $5=finding that m
 
 mut "M-BARE bare-count arm catches N-A" \
   's/^ARM_BARE = .*/ARM_BARE = None/' \
-  '# 39 行 owner-red' \
+  '# 40 行 owner-red' \
   '# 35 行 owner-red' \
   ' bare 35 '
 
@@ -533,13 +533,14 @@ mut "M-BOLD bold arm catches N-B" \
 mut "M-CN chinese-numeral arm catches N-C" \
   's/^ARM_CN = .*/ARM_CN = None/' \
   '，但仍**零覆盖** proof/CAS provider 侧判定' \
-  '、峰值曾达九十三行，但仍**零覆盖** proof/CAS provider 侧判定' \
-  ' cn 93 '
+  '、峰值曾达九十四行，但仍**零覆盖** proof/CAS provider 侧判定' \
+  ' cn 94 '
 
 # NOTE: M-CN plants 93 (N-C planted 90) so each case's finding substring is
 # distinct. The planted value must be one the ledger CANNOT produce, or the
 # mutation disarms itself. This has now happened TWICE for the same reason:
-# 91 was used until v1.68 made it the live owner-red count, and 92 until v1.72
+# 91 was used until v1.68, 92 until v1.72, and 93 until v1.75 (M-AD-29 moved
+# owner-red 92 -> 93) -- THREE times now, same cause
 # did the same (M-AD-28 moved owner-red 91 -> 92). Both times the planted "bad"
 # value silently became legal. Both times the selftest refused to pass on the
 # absence and reported INCONCLUSIVE rather than green -- which is the only reason
@@ -568,13 +569,13 @@ neg 'N-Q one physical site read by two arms reports 1 stale' \
 # where the production guard reports 4. Both directions of the key matter, so
 # this case pins the direction N-Q does not.
 neg 'N-R same line + same value + different pos stay two sites' \
-  '**39 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 39 行的' \
-  '**47 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 47 行的' \
+  '**40 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 40 行' \
+  '**47 行的 code owner 就是 Fable5 本人**，属自审。逐条核：该 ID 在 evidence manifest 中的 `passed` 记录是否真实存在、`exactHead` 是否相符、**断言语义是否真对应台账该行的「预期终态」列**。最后一项是本条的重点：**`verify-a-plus.sh` 的机械门 ①②③ 不校验它**（只校验 ID 集合、`status`+`exactHead`、未覆盖分类），因此这 47 行' \
   '2 stale cache site(s)'
 
 mut "M-BOLDPHRASE bold-phrase arm catches N-P" \
   's/^ARM_BOLD_PHRASE = .*/ARM_BOLD_PHRASE = None/' \
-  '那 **92 行 `owner-red`**' \
+  '那 **93 行 `owner-red`**' \
   '那 **47 行 `owner-red`**' \
   ' bold-phrase 47 '
 
@@ -629,26 +630,26 @@ mut "M-PLAIN-SCOPE plain-owner-red scoping catches its own isolated line" \
 # A self-test that executes its own prose, errors, and still reports green is the
 # same defect class this suite exists to catch -- one layer further out.
 neg 'N-P bold-phrase notation (**92 行 `owner-red`** -> planted 47)' \
-  '那 **92 行 `owner-red`**' \
+  '那 **93 行 `owner-red`**' \
   '那 **47 行 `owner-red`**' \
   ' bold-phrase 47 '
 
 neg "N-G owner-pair notation (GLM 52 / Fable5 39 -> planted 47)" \
-  '已归各自 code owner（GLM 53 / Fable5 39）' \
+  '已归各自 code owner（GLM 53 / Fable5 40）' \
   '已归各自 code owner（GLM 47 / Fable5 39）' \
   ' pair 47 '
 
 # N-H: "现行为 **N**" -- a claim whose whole purpose is to state the CURRENT
 # ledger value. ARM_BOLD requires a trailing 行 and walked past it.
 neg "N-H current-value notation (现行为 **91** -> planted 83)" \
-  '现行为 **92**（§10.1 现算）' \
+  '现行为 **93**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
 
 # N-I: a line whose ONLY scope token is lane discourse (`lane selector`). It
 # carries no owner-red / 台账 / 矩阵行 and no 全|全部 + N + 行.
 neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
-  'Fable5 同时拥有 PR-3 的 39 行' \
+  'Fable5 同时拥有 PR-3 的 40 行' \
   'Fable5 同时拥有 PR-3 的 41 行' \
   ' bare 41 '
 
@@ -657,31 +658,31 @@ neg "N-I lane-discourse scope (PR-3 的 39 行 -> planted 41)" \
 # "§6.4.1 的 8 行独立负例", which is not a cache of this ledger. Anchoring this
 # case on 这 would re-teach the shape the L-2 control exists to forbid.
 neg "N-J row-count-phrase scope (全 117 行 -> planted 43)" \
-  '**本 task 是唯一验证全 118 行的地方**' \
+  '**本 task 是唯一验证全 119 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \
   ' bare+bold-phrase 43 '
 
 mut "M-PAIR owner-pair arm catches N-G" \
   's/^ARM_OWNER_PAIR = .*/ARM_OWNER_PAIR = None/' \
-  '已归各自 code owner（GLM 53 / Fable5 39）' \
+  '已归各自 code owner（GLM 53 / Fable5 40）' \
   '已归各自 code owner（GLM 47 / Fable5 39）' \
   ' pair 47 '
 
 mut "M-CURVAL current-value arm catches N-H" \
   's/^ARM_CURVAL = .*/ARM_CURVAL = None/' \
-  '现行为 **92**（§10.1 现算）' \
+  '现行为 **93**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
 
 mut "M-LANE-SCOPE lane-discourse scoping catches N-I" \
   's/^SCOPE_LANE_DISCOURSE = .*/SCOPE_LANE_DISCOURSE = ""/' \
-  'Fable5 同时拥有 PR-3 的 39 行' \
+  'Fable5 同时拥有 PR-3 的 40 行' \
   'Fable5 同时拥有 PR-3 的 41 行' \
   ' bare 41 '
 
 mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
   's/^SCOPE_ROW_COUNT = .*/SCOPE_ROW_COUNT = ""/' \
-  '**本 task 是唯一验证全 118 行的地方**' \
+  '**本 task 是唯一验证全 119 行的地方**' \
   '**本 task 是唯一验证全 43 行的地方**' \
   ' bare+bold-phrase 43 '
 
@@ -691,7 +692,7 @@ mut "M-ROWCOUNT-SCOPE row-count-phrase scoping catches N-J" \
 # away; if it does not, the scan is reading some other list again.
 mut "M-ARMS-CENSUS scanner reads the ARMS table" \
   's/^ARMS = .*/ARMS = ()/' \
-  '现行为 **92**（§10.1 现算）' \
+  '现行为 **93**（§10.1 现算）' \
   '现行为 **83**（§10.1 现算）' \
   ' curval 83 '
 
@@ -702,7 +703,7 @@ mut "M-ARMS-CENSUS scanner reads the ARMS table" \
 # collapsed, and the arm's inventory line must disappear. Two paths, two
 # assertions, in opposite directions.
 d="$(mk)"
-if ! apply "$d" "$SPEC" '现行为 **92**（§10.1 现算）' '现行为 **83**（§10.1 现算）' 2>/dev/null; then
+if ! apply "$d" "$SPEC" '现行为 **93**（§10.1 现算）' '现行为 **83**（§10.1 现算）' 2>/dev/null; then
   bad "M-ENUM-CENSUS - INCONCLUSIVE: plant did not apply; the case never ran"
 else
   sed -i.bak 's/^ENUM_ARMS = .*/ENUM_ARMS = ["cell"]/' "$d/scripts/check-derived-counts.sh"

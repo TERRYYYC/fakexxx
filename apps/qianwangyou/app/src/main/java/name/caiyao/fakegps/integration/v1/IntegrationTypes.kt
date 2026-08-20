@@ -90,7 +90,13 @@ enum class LeaseState {
 /** Who revoked, when a lease lands in REVOKED (§6.5 / §8.4). */
 enum class RevokeSource { QWY_REVOKED_CALLER }
 
-/** §7.2 EnvironmentLease — fields frozen, do not extend without a #3 delta. */
+/**
+ * §7.2 EnvironmentLease — fields frozen, do not extend without a #3 delta.
+ *
+ * [earnedScheduleRef] is the v1.75/v1.76 (#18, contract exact 00e2396) delta:
+ * provider-INTERNAL storage backing the §6.7.4b step-3b attribution gate.
+ * It never travels on the wire — no DTO/AIDL change (START GATE discipline).
+ */
 data class LeaseRecord(
     val leaseId: String,
     val callerApplicationId: String,
@@ -106,6 +112,17 @@ data class LeaseRecord(
      * change, so a mismatch forces EXPIRED for ACQUIRING/ACTIVE.
      */
     val applyOwnerGeneration: Long,
+    /**
+     * v1.75 §6.7.4b step 3b: the schedule ITEM whose quota this lease earned —
+     * the apply intent's scheduleRef (§6.3/v1.72: scheduleRef IS the item's
+     * stable reference; v1.62: acceptedIntentHash binds it). completeAndAdvance
+     * for a different item on this historical reference is `wrong-item` →
+     * STALE_LEASE(8). New rows are non-null by construction because
+     * validateApplyRequest rejects a blank scheduleRef before any lease exists.
+     * Null is reserved for durable rows written before this internal field was
+     * introduced; such rows remain decodable but are `unproven` at step 3b.
+     */
+    val earnedScheduleRef: String?,
     val releaseIdempotencyKey: String? = null,
     val residualReasonWires: List<Int> = emptyList(),
     val revokeSource: RevokeSource? = null,
