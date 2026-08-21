@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only integration probe (§7 walking skeleton).
+
+  exported=true so `adb shell am start` can drive it without a launcher tile.
+  This manifest is src/debug, so the entry point cannot reach a release build.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name="com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
+            android:exported="true"
+            android:label="EC v1 handshake probe" />
+        <activity
+            android:name="com.example.cellrebelauto.integration.v1.FullLoopProbeActivity"
+            android:exported="true"
+            android:label="EC v1 full loop probe" />
+    </application>
+</manifest>
