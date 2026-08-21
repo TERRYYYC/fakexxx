@@ -179,6 +179,11 @@ class EnvironmentLeaseStore(
                 r.residualReasonWires.joinToString(","),
                 r.revokeSource?.name,
                 r.recoveryEvidenceRef,
+                // v1.75 step-3b attribution basis. New rows are non-null by
+                // construction; null preserves a pre-attribution row as an
+                // explicit "unproven" fact instead of making upgrade decode
+                // crash or inventing an item binding.
+                r.earnedScheduleRef,
             ),
         )
 
@@ -199,6 +204,11 @@ class EnvironmentLeaseStore(
                 ?.split(",")?.map { it.toInt() } ?: emptyList(),
             revokeSource = parts[11]?.let { RevokeSource.valueOf(it) },
             recoveryEvidenceRef = parts[12],
+            // Backward-compatible append-only decode: rows written by the
+            // immediately preceding provider schema have exactly 13 fields.
+            // Missing attribution cannot be reconstructed from a digest, so
+            // retain null and let step 3b fail closed with STALE_LEASE(8).
+            earnedScheduleRef = parts.getOrNull(13),
         )
     }
 }
