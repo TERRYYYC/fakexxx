@@ -20,12 +20,14 @@ class RoomAdvanceStateStore(
 
     override suspend fun createPending(
         taskId: Long,
+        runSessionId: Long,
         idempotencyKey: String,
         scheduleContext: ScheduleContext,
         leaseId: String,
     ): Long = dao.insert(
         AdvanceRecord(
             taskId = taskId,
+            runSessionId = runSessionId,
             idempotencyKey = idempotencyKey,
             scheduleId = scheduleContext.scheduleId,
             currentItemId = scheduleContext.currentItemId,

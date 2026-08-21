@@ -23,6 +23,7 @@ class InMemoryAdvanceStateStore : AdvanceStateStore {
 
     override suspend fun createPending(
         taskId: Long,
+        runSessionId: Long,
         idempotencyKey: String,
         scheduleContext: ScheduleContext,
         leaseId: String,
@@ -31,6 +32,7 @@ class InMemoryAdvanceStateStore : AdvanceStateStore {
         records[id] = MutablePendingAdvance(
             id = id,
             taskId = taskId,
+            runSessionId = runSessionId,
             idempotencyKey = idempotencyKey,
             scheduleContext = scheduleContext,
             leaseId = leaseId,
@@ -66,6 +68,7 @@ class InMemoryAdvanceStateStore : AdvanceStateStore {
     private data class MutablePendingAdvance(
         val id: Long,
         val taskId: Long,
+        val runSessionId: Long,
         val idempotencyKey: String,
         val scheduleContext: ScheduleContext,
         val leaseId: String,

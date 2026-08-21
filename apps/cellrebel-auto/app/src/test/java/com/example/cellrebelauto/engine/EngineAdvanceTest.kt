@@ -85,7 +85,8 @@ class EngineAdvanceTest {
                 resolveAdvanceRecord(store, record.id, decision)
                 results.add(record to decision)
             } catch (e: ProviderNotAvailableException) {
-                store.resolve(record.id, "provider_unavailable", null, e.message)
+                // R7 P1-1: provider absent — leave record pending for retry.
+                // §8.1: only verified ADVANCED/EXHAUSTED + readback resolves.
                 results.add(record to null)
             } catch (e: Exception) {
                 store.resolve(record.id, "recovery_required", null, e.message)
@@ -160,7 +161,7 @@ class EngineAdvanceTest {
         val store = InMemoryAdvanceStateStore()
 
         // Pre-seed a "pending" advance record (simulating crash mid-advance)
-        store.createPending(taskId = 100L, idempotencyKey = "adv-crash-1",
+        store.createPending(taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-crash-1",
             scheduleContext = defaultCtx, leaseId = "lease-1")
         assertEquals("unresolved record exists", 1, store.listAllUnresolved().size)
 
@@ -187,9 +188,9 @@ class EngineAdvanceTest {
         val store = InMemoryAdvanceStateStore()
 
         // Pre-seed multiple pending records for different tasks
-        store.createPending(taskId = 10L, idempotencyKey = "k1", scheduleContext = defaultCtx, leaseId = "l1")
-        store.createPending(taskId = 20L, idempotencyKey = "k2", scheduleContext = defaultCtx, leaseId = "l2")
-        store.createPending(taskId = 30L, idempotencyKey = "k3", scheduleContext = defaultCtx, leaseId = "l3")
+        store.createPending(taskId = 10L, runSessionId = 1L, idempotencyKey = "k1", scheduleContext = defaultCtx, leaseId = "l1")
+        store.createPending(taskId = 20L, runSessionId = 1L, idempotencyKey = "k2", scheduleContext = defaultCtx, leaseId = "l2")
+        store.createPending(taskId = 30L, runSessionId = 1L, idempotencyKey = "k3", scheduleContext = defaultCtx, leaseId = "l3")
 
         runRecoverySweep(store, coordinator, mapOf(10L to 3, 20L to 5, 30L to 2))
 
@@ -203,14 +204,16 @@ class EngineAdvanceTest {
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    fun recovery_thresholdAtCrash_replaysExactlyOnce() = runBlocking {
+    fun recovery_thresholdAtCrash_replaysExactlyOnce_staysPending() = runBlocking {
+        // R7 P1-1: threshold-at-crash replays exactly once per sweep. Provider
+        // throws → record stays pending (not terminal). Future sweeps retry.
         val gateway = CountingProviderGateway()
         val quotaReader = ConfigurableQuotaReader(count = 3) // 3/3 — at threshold
         val coordinator = AdvanceCoordinator(gateway, quotaReader)
         val store = InMemoryAdvanceStateStore()
 
         // Pre-seed ONE pending record at threshold
-        store.createPending(taskId = 100L, idempotencyKey = "adv-threshold-1",
+        store.createPending(taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-threshold-1",
             scheduleContext = defaultCtx, leaseId = "lease-1")
 
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
@@ -221,34 +224,42 @@ class EngineAdvanceTest {
         assertEquals("threshold recovery calls provider exactly once",
             1, gateway.completeAndAdvanceCount)
 
-        // Record should be in provider_unavailable (CountingProviderGateway throws)
+        // R7 P1-1: Record stays PENDING (provider absent = retry later)
         val records = store.allRecords
         assertEquals(1, records.size)
-        assertEquals("provider_unavailable", records[0].state)
+        assertEquals("provider absent leaves record pending",
+            "pending", records[0].state)
+        assertEquals("record remains unresolved for next sweep",
+            1, store.listAllUnresolved().size)
     }
 
     @Test
-    fun recovery_thresholdAtCrash_secondSweep_doesNotReplay_providerUnavailableTerminal() = runBlocking {
-        // R5 P1-1: provider_unavailable is TERMINAL — synthetic identity must
-        // not be replayed when a real gateway arrives. Second sweep makes ZERO calls.
+    fun recovery_providerUnavailable_staysPending_secondSweepRetries() = runBlocking {
+        // R7 P1-1: provider absence leaves record pending. §8.1 requires only
+        // verified ADVANCED/EXHAUSTED + readback to resolve. Second sweep retries.
         val gateway = CountingProviderGateway()
         val quotaReader = ConfigurableQuotaReader(count = 3)
         val coordinator = AdvanceCoordinator(gateway, quotaReader)
         val store = InMemoryAdvanceStateStore()
 
-        store.createPending(taskId = 100L, idempotencyKey = "adv-t2",
+        store.createPending(taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-t2",
             scheduleContext = defaultCtx, leaseId = "lease-1")
 
-        // First sweep: pending → provider calls → provider throws → provider_unavailable
+        // First sweep: pending → provider throws → stays pending (NOT terminal)
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
         assertEquals(1, gateway.completeAndAdvanceCount)
-        assertEquals("provider_unavailable", store.allRecords[0].state)
+        assertEquals("provider absent leaves record pending",
+            "pending", store.allRecords[0].state)
+        assertEquals("record remains unresolved",
+            1, store.listAllUnresolved().size)
 
-        // Second sweep: provider_unavailable is TERMINAL — not in listAllUnresolved()
+        // Second sweep: record still pending → retries (makes second call)
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
-        assertEquals("provider_unavailable is terminal — zero second-sweep calls",
-            1, gateway.completeAndAdvanceCount) // still 1, not 2
-        assertEquals("no unresolved records", 0, store.listAllUnresolved().size)
+        assertEquals("second sweep retries provider",
+            2, gateway.completeAndAdvanceCount)
+        // Still pending because CountingProviderGateway always throws
+        assertEquals("still pending after second attempt",
+            "pending", store.allRecords[0].state)
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -256,26 +267,28 @@ class EngineAdvanceTest {
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    fun advanceFailure_providerUnavailable_isTerminal() = runBlocking {
-        // R5 P1-1: PendingProviderGateway (production pre-PR#36 stub) throws
-        // ProviderNotAvailableException → record resolved as provider_unavailable
-        // (TERMINAL). Synthetic identity must not be replayed.
+    fun advanceFailure_providerUnavailable_staysPending() = runBlocking {
+        // R7 P1-1: PendingProviderGateway (production pre-PR#36 stub) throws
+        // ProviderNotAvailableException → record stays PENDING (not terminal).
+        // §8.1: only verified ADVANCED/EXHAUSTED receipt resolves. Provider
+        // absence means "can't verify yet" — record waits for next recovery sweep.
         val gateway = PendingProviderGateway()
         val quotaReader = ConfigurableQuotaReader(count = 3) // at threshold
         val coordinator = AdvanceCoordinator(gateway, quotaReader)
         val store = InMemoryAdvanceStateStore()
 
-        store.createPending(taskId = 100L, idempotencyKey = "adv-fail-1",
+        store.createPending(taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-fail-1",
             scheduleContext = defaultCtx, leaseId = "lease-1")
 
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
 
-        // provider_unavailable is TERMINAL — record is resolved, not unresolved
+        // provider_unavailable is NON-TERMINAL — record stays pending, remains unresolved
         val records = store.allRecords
         assertEquals(1, records.size)
-        assertEquals("provider_unavailable", records[0].state)
-        assertEquals("provider_unavailable is terminal — zero unresolved",
-            0, store.listAllUnresolved().size)
+        assertEquals("provider absent leaves record pending",
+            "pending", records[0].state)
+        assertEquals("record remains unresolved for next sweep",
+            1, store.listAllUnresolved().size)
     }
 
     @Test
@@ -307,7 +320,7 @@ class EngineAdvanceTest {
         val coordinator = AdvanceCoordinator(badReceiptGateway, quotaReader)
         val store = InMemoryAdvanceStateStore()
 
-        store.createPending(taskId = 100L, idempotencyKey = "adv-digest-1",
+        store.createPending(taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-digest-1",
             scheduleContext = defaultCtx, leaseId = "lease-1")
 
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
@@ -332,7 +345,7 @@ class EngineAdvanceTest {
         val store = InMemoryAdvanceStateStore()
 
         // Create and immediately resolve a record
-        val id = store.createPending(taskId = 100L, idempotencyKey = "adv-done",
+        val id = store.createPending(taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-done",
             scheduleContext = defaultCtx, leaseId = "l1")
         store.resolve(id, "advanced", "digest-123", null)
 
@@ -355,7 +368,7 @@ class EngineAdvanceTest {
         val coordinator = AdvanceCoordinator(gateway, quotaReader)
         val store = InMemoryAdvanceStateStore()
 
-        store.createPending(taskId = 999L, idempotencyKey = "adv-orphan",
+        store.createPending(taskId = 999L, runSessionId = 1L, idempotencyKey = "adv-orphan",
             scheduleContext = defaultCtx, leaseId = "l1")
 
         // Task 999 not in the map → treated as "task not found"
@@ -384,7 +397,7 @@ class EngineAdvanceTest {
 
         // Step 1: durable write
         val recordId = store.createPending(
-            taskId = 100L, idempotencyKey = "adv-engine-1",
+            taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-engine-1",
             scheduleContext = defaultCtx, leaseId = "lease-1",
         )
 
@@ -426,7 +439,7 @@ class EngineAdvanceTest {
 
         // Step 1: pre-create (engine predicts quota will complete)
         val recordId = store.createPending(
-            taskId = 100L, idempotencyKey = "adv-cas-fail",
+            taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-cas-fail",
             scheduleContext = defaultCtx, leaseId = "lease-cas",
         )
         assertEquals("pending record created before finalize",
@@ -459,7 +472,7 @@ class EngineAdvanceTest {
 
         // Step 1: pre-create happened (engine crashed right after)
         store.createPending(
-            taskId = 100L, idempotencyKey = "adv-crash-before-finalize",
+            taskId = 100L, runSessionId = 1L, idempotencyKey = "adv-crash-before-finalize",
             scheduleContext = defaultCtx, leaseId = "lease-x",
         )
 

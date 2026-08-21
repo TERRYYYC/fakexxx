@@ -34,11 +34,14 @@ import androidx.room.PrimaryKey
         parentColumns = ["id"], childColumns = ["taskId"],
         onDelete = ForeignKey.CASCADE,
     )],
-    indices = [Index("taskId"), Index("state")],
+    indices = [Index("taskId"), Index("state"), Index("runSessionId")],
 )
 data class AdvanceRecord(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val taskId: Long,
+    // # R7 P1-2: per-session binding — each advance record belongs to exactly
+    // # one run session. Without this, Plan A unresolved blocks Plan B upgrades.
+    val runSessionId: Long,
     val idempotencyKey: String,
     // # ScheduleContext flattened (§6.7.3 v1.72)
     val scheduleId: String,

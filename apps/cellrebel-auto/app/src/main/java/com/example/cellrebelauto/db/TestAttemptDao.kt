@@ -120,4 +120,16 @@ interface TestAttemptDao {
             "WHERE id = :attemptId AND status IN ('starting', 'running')"
     )
     suspend fun markInterruptedIfNonTerminal(attemptId: Long, nowMs: Long)
+
+    /**
+     * Mark attempt as ok_gps_only (terminal, non-quota). GPS-verified only —
+     * no CellRebel evidence, therefore excluded from trusted ledger (§7.3)
+     * and does NOT count toward quota or trigger advance (R7 P1-5).
+     * # GPS 验证即终态（不进可信账本、不计配额、不触发推进）
+     */
+    @Query(
+        "UPDATE test_attempts SET status = 'ok_gps_only', endedAt = :endedAt " +
+            "WHERE id = :attemptId AND status IN ('starting', 'running')"
+    )
+    suspend fun markGpsOnly(attemptId: Long, endedAt: Long)
 }

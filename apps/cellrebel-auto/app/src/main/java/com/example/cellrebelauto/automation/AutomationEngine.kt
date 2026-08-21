@@ -194,8 +194,11 @@ class AutomationEngine(
                             resolveAdvanceRecord(store, record.id, decision)
                             log("Advance recovery: task=${record.taskId} → ${decision.javaClass.simpleName}")
                         } catch (e: ProviderNotAvailableException) {
-                            store.resolve(record.id, "provider_unavailable", null, e.message)
-                            log("Advance recovery: task=${record.taskId} → provider_unavailable")
+                            // # R7 P1-1: provider absent during recovery — leave record
+                            // # pending. Same semantics as normal path (R6 P1-1).
+                            // # §8.1: only verified ADVANCED/EXHAUSTED + readback resolves.
+                            // # Record stays in listAllUnresolved() → recovery retries next start.
+                            log("Advance recovery: task=${record.taskId} → provider absent, stays pending")
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -370,28 +373,17 @@ class AutomationEngine(
 
                 // ==================== Test stage OFF：GPS 验证即终态（AC-F3-3） ====================
                 if (!toggles.testStageEnabled) {
-                    // # KD-F3-2：ok_gps_only 计配额；同事务守卫式收尾（INV-3 语义不变）
-                    log("CellRebel stage OFF — GPS-verified attempt terminates as ok_gps_only")
-                    planRepository.finalizeAttemptSuccess(
+                    // # R7 P1-5: GPS-only does NOT enter trusted ledger, does NOT
+                    // # count toward quota, does NOT trigger advance. GPS verification
+                    // # alone is not CellRebel VERIFIED_NEW_COMPLETION evidence (§7.3, §8.6).
+                    // # Only marks the attempt as terminal ok_gps_only for visibility.
+                    log("CellRebel stage OFF — GPS-verified attempt terminates as ok_gps_only (non-quota)")
+                    planRepository.finalizeGpsOnlyAttempt(
                         attemptId = attemptId,
-                        taskId = task.id,
-                        expectedCompletedSuccesses = task.completedSuccesses,
-                        runningObservedAt = null,
-                        endedAt = nowMs(),
-                        webScore = null,
-                        videoScore = null,
-                        status = "ok_gps_only"
+                        endedAt = nowMs()
                     )
-                    val updated = planRepository.getTask(task.id)
-                    if (updated != null) {
-                        _currentTask.value = _currentTask.value
-                            ?.copy(completedSuccesses = updated.completedSuccesses)
-                        if (updated.status == "completed") {
-                            log("Location csvRow=${task.csvRow} quota complete ✔")
-                        }
-                    }
                     updateState(AutomationState.SUCCEEDED)
-                    log("Attempt $attemptOrdinal ok_gps_only (test_skipped)")
+                    log("Attempt $attemptOrdinal ok_gps_only (test_skipped, non-quota)")
                     currentAttemptId = null
                     returnToSelf()
                     tasks = planRepository.getTasks(planId)
@@ -428,6 +420,7 @@ class AutomationEngine(
                                 val lease = currentLeaseId ?: return@let
                                 preCreatedAdvRecordId = store.createPending(
                                     taskId = task.id,
+                                    runSessionId = runSessionId,
                                     idempotencyKey = "adv-$attemptId",
                                     scheduleContext = ctx,
                                     leaseId = lease,

@@ -140,10 +140,12 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // # 1. advance_records: durable advance protocol state (§8.1)
+                // # R7 P1-2: runSessionId scopes each record to its session
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `advance_records` (" +
                         "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
                         "`taskId` INTEGER NOT NULL, " +
+                        "`runSessionId` INTEGER NOT NULL, " +
                         "`idempotencyKey` TEXT NOT NULL, " +
                         "`scheduleId` TEXT NOT NULL, " +
                         "`currentItemId` TEXT NOT NULL, " +
@@ -160,6 +162,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_taskId` ON `advance_records`(`taskId`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_state` ON `advance_records`(`state`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_runSessionId` ON `advance_records`(`runSessionId`)")
 
                 // # 2. trusted_quota_entries: insert-only quota ledger (§7.3, M-AD-14)
                 db.execSQL(

@@ -397,6 +397,7 @@ class MigrationTest {
         val advanceDao = db.advanceRecordDao()
         val record = com.example.cellrebelauto.model.plan.AdvanceRecord(
             taskId = 1L,
+            runSessionId = 1L,
             idempotencyKey = "adv-migration-test",
             scheduleId = "plan-1",
             currentItemId = "task-1",

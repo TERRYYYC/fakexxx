@@ -35,18 +35,21 @@ interface RunSessionDao {
     suspend fun markStaleRunningSessionsInterrupted(nowMs: Long): Int
 
     /**
-     * Issue #19 R6 P1-2: upgrade advance_pending sessions ONLY when no
-     * unresolved advance records remain. Called AFTER recovery sweep.
+     * Issue #19 R7 P1-2: upgrade advance_pending sessions ONLY when THIS
+     * session's own advance records are all resolved. Scoped by runSessionId
+     * to prevent Plan A's unresolved from blocking Plan B's completion.
      * §8.1: session stays advance_pending until verified ADVANCED or
      * EXHAUSTED receipt/readback resolves all its advance records.
-     * # 推进收尾：全局无未解决 advance 记录时，才将 advance_pending 升级为 completed
+     * # 推进收尾：仅当本 session 自身的 advance 记录全部 resolved 时升级；
+     * # 按 runSessionId 隔离，Plan A 未解决不阻塞 Plan B
      */
     @Query(
         "UPDATE run_sessions SET status = 'completed' " +
             "WHERE status = 'advance_pending' " +
             "AND NOT EXISTS (" +
             "  SELECT 1 FROM advance_records " +
-            "  WHERE state IN ('pending', 'recovery_required')" +
+            "  WHERE advance_records.runSessionId = run_sessions.id " +
+            "  AND state IN ('pending', 'recovery_required')" +
             ")"
     )
     suspend fun upgradeAdvancePendingSessions(): Int

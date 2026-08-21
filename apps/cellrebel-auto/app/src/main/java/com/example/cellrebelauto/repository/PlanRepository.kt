@@ -257,6 +257,18 @@ class PlanRepository(private val db: AppDatabase) {
     }
 
     /**
+     * GPS-only attempt finalization (R7 P1-5): marks attempt terminal WITHOUT
+     * entering the trusted quota ledger or incrementing completedSuccesses.
+     * GPS verification alone is NOT CellRebel VERIFIED_NEW_COMPLETION evidence,
+     * therefore it must not count toward quota, must not trigger advance, and
+     * must not enter the trusted ledger (§7.3, §8.6).
+     * # GPS 验证即终态：不进可信账本、不自增计数器、不触发推进——
+     * # 仅 CellRebel 完整证据才有资格进入 TrustedQuotaEntry
+     */
+    suspend fun finalizeGpsOnlyAttempt(attemptId: Long, endedAt: Long) =
+        db.testAttemptDao().markGpsOnly(attemptId, endedAt)
+
+    /**
      * Persist a failed attempt with typed reason (INV-4/10); never touches quota.
      * # 持久化失败尝试（带类型化原因），绝不动配额
      */

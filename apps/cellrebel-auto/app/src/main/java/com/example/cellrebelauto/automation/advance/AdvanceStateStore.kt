@@ -20,6 +20,7 @@ interface AdvanceStateStore {
     /** Create a pending advance record. Returns the record's durable ID. */
     suspend fun createPending(
         taskId: Long,
+        runSessionId: Long,
         idempotencyKey: String,
         scheduleContext: ScheduleContext,
         leaseId: String,
