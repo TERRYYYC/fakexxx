@@ -460,11 +460,11 @@ class EngineRecoveryTest {
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `provider unavailable is terminal and session completes`() = runTest {
-        // # R5 P1-1: PendingProviderGateway throws → record resolved as
-        // # provider_unavailable (TERMINAL). Synthetic identity is NOT replayed.
-        // # Session reaches "completed" because provider_unavailable is not
-        // # counted as unresolved.
+    fun `provider unavailable leaves record pending and session advance_pending`() = runTest {
+        // # R6 P1-1: PendingProviderGateway throws → record stays "pending"
+        // # (§8.1: quota-met release must remain on the ADVANCE_PENDING path
+        // # until a verified outcome resolves it). Session is "advance_pending",
+        // # NOT "completed" — the advance path must not close prematurely.
         val (planId, _) = seedPlan(quota = 1)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
@@ -477,24 +477,20 @@ class EngineRecoveryTest {
         val advanceStore = RoomAdvanceStateStore(db.advanceRecordDao())
 
         // # Engine run: success → quota met → advance call → provider throws →
-        // # record resolved as provider_unavailable (terminal)
+        // # record stays "pending" (R6 P1-1: NOT terminal)
         buildEngine(planId, runner, gps, clock,
             advanceCoordinator = coordinator, advanceStateStore = advanceStore).run()
 
-        // # KEY (R5 P1-1): provider_unavailable is TERMINAL — session "completed"
+        // # KEY (R6 P1-1): provider absent → record pending → session "advance_pending"
         val session = db.runSessionDao().getLatest()!!
-        assertEquals("provider_unavailable is terminal → session completed",
-            "completed", session.status)
+        assertEquals("provider absent → session advance_pending",
+            "advance_pending", session.status)
 
-        // # Zero unresolved records (provider_unavailable excluded)
+        // # One unresolved record (pending — provider absence is NOT terminal)
         val unresolved = advanceStore.listAllUnresolved()
-        assertTrue("no unresolved advance records",
-            unresolved.isEmpty())
-
-        // # Advance record exists in Room with terminal state
-        val allRecords = db.advanceRecordDao().listAllUnresolved()
-        assertTrue("provider_unavailable excluded from unresolved query",
-            allRecords.isEmpty())
+        assertEquals("one pending record for absent provider",
+            1, unresolved.size)
+        assertEquals("pending", unresolved[0].state)
 
         // # Task IS completed (quota met, measurements done)
         val task = db.locationTaskDao().getTasksForPlan(planId).first()
