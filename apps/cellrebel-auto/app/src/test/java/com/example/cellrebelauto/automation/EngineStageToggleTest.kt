@@ -162,7 +162,8 @@ class EngineStageToggleTest {
         assertNull(attempt.webBrowsingScore)
         val task = db.locationTaskDao().getTaskById(taskId)!!
         assertEquals(1, task.completedSuccesses)
-        assertEquals("completed", task.status)
+        // # §7.3 GREEN（M-MG-02）：GPS-only 终态（ok_gps_only）不铸 trusted entry ⇒ 完成投影保持 active
+        assertEquals("active", task.status)
     }
 
     @Test

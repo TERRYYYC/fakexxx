@@ -73,10 +73,141 @@ data class PlanUiState(
  * # 主界面 ViewModel：桥接 AutomationService 的状态
  * # 并为 Compose 界面提供操作接口
  */
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel(
+    application: Application,
+    // R44 (DSF review P2-1): test-injectable DB — production keeps the singleton; oracles seed an
+    // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
+    private val injectedDb: AppDatabase? = null
+) : AndroidViewModel(application) {
 
-    private val planRepository = PlanRepository(AppDatabase.getInstance(application))
+    private val db = injectedDb ?: AppDatabase.getInstance(application)
+    private val planRepository = PlanRepository(db)
     private val planConfigStore = PlanConfigStore(application)
+
+    // R43 (spec Task 6 / Sol GREEN-review-2 F5): the ProviderTrustStore PRODUCTION callers —
+    // the operator approval/revocation surface (§6.5.3). No silent TOFU: approval is explicit.
+    private val trustStore = com.example.cellrebelauto.environment.ProviderTrustStore(
+        db.providerPairingDao()
+    )
+    private val _providerEntries = MutableStateFlow<List<ProviderEntry>>(emptyList())
+    val providerEntries: StateFlow<List<ProviderEntry>> = _providerEntries
+
+    // R44 (Sol GREEN-review-3 F5): the SEVEN-state production projection — derived from DURABLE
+    // owner state only (pairing records + the crashed attempt's §8.1 phase + unverified records),
+    // combined with the attempts flow the History projection already observes. This is the state
+    // the run surface's PairingStatusCard renders; the UI never decides it.
+    private val dbInstance = db
+    val pairingUiState: kotlinx.coroutines.flow.StateFlow<PairingUiState> =
+        kotlinx.coroutines.flow.combine(
+            planRepository.observeAttemptsWithTasks(),
+            _providerEntries
+        ) { attempts, entries ->
+            // R46 (Sol R46 P2): the Run surface's providerActive binds the CURRENT measured
+            // principal — an approved DB row PLUS a discovered pending candidate for the same
+            // appId means the signer rotated and the current signer is NOT approved (§6.5.4:
+            // signer 变化即新 provider). The old `entries.any { it.isApproved }` kept showing
+            // Trusted on a rotated-away principal.
+            val hasActiveProvider = currentPrincipalActive(
+                entries,
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+            )
+            val crashed = attempts.firstOrNull {
+                it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
+            }?.attempt
+            val hasUnverified = kotlinx.coroutines.runBlocking {
+                dbInstance.unverifiedAttemptRecordDao().getByAttempt(
+                    attempts.firstOrNull()?.attempt?.id ?: -1L
+                ) != null
+            }
+            PairingUiState.project(
+                hasProviderRecord = entries.isNotEmpty(),
+                providerActive = hasActiveProvider,
+                crashedAplusState = crashed?.aplusState,
+                hasUnverifiedRecord = hasUnverified
+            )
+        }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Lazily, PairingUiState.Trusted)
+
+    fun refreshProviders() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val rows = db.providerPairingDao().all()
+            _providerEntries.value = computeProviderEntries(rows) { appId ->
+                com.example.cellrebelauto.environment.ProviderTrustGate
+                    .packageManagerSignerDigest(app.packageManager, appId)
+            }
+        }
+    }
+
+    companion object {
+        /**
+         * R46 (Sol R46 P2): True iff the provider's CURRENT principal is approved — an approved
+         * row exists AND discovery surfaced no pending candidate for the same appId (a pending
+         * candidate for an approved appId = the current signer rotated away from the approved
+         * principal). Pure so the projection is oracle-drivable.
+         * # 当前 principal 是否已批准：有 approved 行且同 appId 无 pending 候选（有 = signer 已轮转）
+         */
+        internal fun currentPrincipalActive(entries: List<ProviderEntry>, applicationId: String): Boolean =
+            entries.any { it.applicationId == applicationId && it.isApproved } &&
+                entries.none { it.applicationId == applicationId && !it.isApproved }
+
+        /**
+         * Pure projection (R45, Sol R45 P2): approved principals are the ACTIVE pairing rows; a
+         * pending candidate is a KNOWN provider appId whose CURRENT resolved signer is NOT an
+         * approved active principal. The current signer is resolved for EVERY known appId on EVERY
+         * refresh — the previous `appId in approved` skip meant a signer ROTATION on an already-
+         * approved appId was invisible: the UI kept showing the old principal as approved and no
+         * new pending principal ever appeared, violating §6.5.4 ("signer 变化即视为新 provider，
+         * 重新走批准"). Revoked rows are never pending candidates (M-PA-10: re-approval walks the
+         * operator approval UI again, via this same discovery path).
+         */
+        internal fun computeProviderEntries(
+            rows: List<com.example.cellrebelauto.model.plan.ProviderPairingRecord>,
+            resolveCurrentSigner: (applicationId: String) -> String?
+        ): List<ProviderEntry> {
+            val approved = rows.filter { it.revokedAt == null }.map {
+                ProviderEntry(
+                    applicationId = it.applicationId,
+                    signerDigest = it.currentSignerDigest,
+                    approvedVersionCode = it.approvedVersionCode,
+                    isApproved = true
+                )
+            }
+            val activePrincipals = rows.filter { it.revokedAt == null }
+                .map { it.applicationId to it.currentSignerDigest }.toSet()
+            val pending = mutableListOf<ProviderEntry>()
+            for (appId in listOf(
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH
+            )) {
+                val signer = resolveCurrentSigner(appId) ?: continue // not installed / unresolvable
+                if (appId to signer in activePrincipals) continue // the CURRENT signer IS approved
+                pending += ProviderEntry(
+                    applicationId = appId,
+                    signerDigest = signer,
+                    approvedVersionCode = null,
+                    isApproved = false
+                )
+            }
+            return approved + pending
+        }
+    }
+
+    fun approveProvider(entry: ProviderEntry) {
+        viewModelScope.launch {
+            trustStore.approve(
+                entry.applicationId, entry.signerDigest,
+                entry.approvedVersionCode ?: 0, System.currentTimeMillis()
+            )
+            refreshProviders()
+        }
+    }
+
+    fun revokeProvider(entry: ProviderEntry) {
+        viewModelScope.launch {
+            trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
+            refreshProviders()
+        }
+    }
 
     // ---- Navigation ----
 
@@ -378,5 +509,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 enum class Screen {
     PLAN,     // # 位置计划页（F001 首页）
     RUN,      // # 运行仪表盘（由旧 CONTROL 演进）
-    HISTORY   // # 历史记录页面
+    HISTORY,  // # 历史记录页面
+    PROVIDERS // # R43（spec Task 6）：Provider 批准/撤销管理页
 }

@@ -36,6 +36,10 @@ interface TestAttemptDao {
     @Query("SELECT * FROM test_attempts WHERE taskId = :taskId ORDER BY attemptOrdinal ASC")
     suspend fun getAttemptsForTask(taskId: Long): List<TestAttempt>
 
+    /** The single attempt row by id (GREEN: recordTrustedCompletion resolves attemptId → taskId here, never a constant). */
+    @Query("SELECT * FROM test_attempts WHERE id = :attemptId LIMIT 1")
+    suspend fun getAttemptById(attemptId: Long): TestAttempt?
+
     // # 经任务表联查某计划下的全部尝试
     @Query(
         "SELECT a.* FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
@@ -65,11 +69,18 @@ interface TestAttemptDao {
 
     /**
      * Recovery sweep (INV-9): mark leftover starting/running rows interrupted.
-     * # 恢复清扫（INV-9）：把残留的 starting/running 行标记为 interrupted
+     *
+     * R43 (Sol GREEN-review P1-2): rows that entered the A+ lifecycle (aplusState non-null) are
+     * EXCLUDED — they are §8.1 owner-state machines whose non-terminal phases are RECONCILED by the
+     * A+ recovery path (re-observe / classify / re-decide), never blind-swept to interrupted. A
+     * just-advanced recovery phase (e.g. CELLREBEL_START_PENDING with status still `starting`) must
+     * survive this sweep.
+     *
+     * # 恢复清扫（INV-9）：A+ 生命周期内的行绝不盲扫——由 §8.1 恢复路径协调
      */
     @Query(
         "UPDATE test_attempts SET status = 'interrupted', failureReason = 'INTERRUPTED', endedAt = :nowMs " +
-            "WHERE status IN ('starting', 'running')"
+            "WHERE status IN ('starting', 'running') AND aplusState IS NULL"
     )
     suspend fun markNonTerminalInterrupted(nowMs: Long): Int
 
@@ -120,4 +131,67 @@ interface TestAttemptDao {
             "WHERE id = :attemptId AND status IN ('starting', 'running')"
     )
     suspend fun markInterruptedIfNonTerminal(attemptId: Long, nowMs: Long)
+
+    // ---- A+ current-operation owner state (R9, Sol round-8 P1-3/P1-4) ----
+
+    /** Persist the current §8.1 phase on the attempt (§7.1: the Attempt owns its 当前 operation). */
+    @Query("UPDATE test_attempts SET aplusState = :aplusState WHERE id = :attemptId")
+    suspend fun markAplusState(attemptId: Long, aplusState: String)
+
+    /** Persist the provider-returned lease id (NOT derivable — must be durable, Sol round-8 P1-4). */
+    @Query("UPDATE test_attempts SET aplusLeaseId = :leaseId WHERE id = :attemptId")
+    suspend fun markAplusLease(attemptId: Long, leaseId: String)
+
+    /** The persisted lease id for an attempt (the release is bound to it, Sol round-8 P1-4). */
+    @Query("SELECT aplusLeaseId FROM test_attempts WHERE id = :attemptId")
+    suspend fun getAplusLeaseId(attemptId: Long): String?
+
+    /** Persist the current §8.6.1 executionId (Sol R35 P1-2: recovery must locate the CURRENT execution). */
+    @Query("UPDATE test_attempts SET currentExecutionId = :executionId WHERE id = :attemptId")
+    suspend fun markCurrentExecutionId(attemptId: Long, executionId: String)
+
+    // ---- R45 (Sol R45 P1-3 / spec §4.3 step 1): the advance CAS anchor triple ----
+    // Persisted at attempt open from the SAME discover() projection group; completeAndAdvance
+    // replays this triple byte-for-byte and MUST NOT re-discover at advance time (§6.7.3 v1.72).
+
+    /** Persist the anchored advance CAS triple (before any external execution starts). */
+    @Query(
+        "UPDATE test_attempts SET aplusAnchorScheduleId = :scheduleId, aplusAnchorItemId = :itemId, " +
+            "aplusAnchorVersion = :version WHERE id = :attemptId"
+    )
+    suspend fun markAplusAdvanceAnchor(attemptId: Long, scheduleId: String, itemId: String, version: Long)
+
+    /** The anchored triple for an attempt (null columns = not yet anchored). */
+    @Query(
+        "SELECT aplusAnchorScheduleId, aplusAnchorItemId, aplusAnchorVersion FROM test_attempts WHERE id = :attemptId"
+    )
+    suspend fun getAplusAdvanceAnchor(attemptId: Long): AplusAdvanceAnchor?
+
+    /** The persisted apply-receipt operationId for an attempt (post-advance observe tuple leg). */
+    @Query(
+        "SELECT r.operationId FROM operation_receipts r WHERE r.idempotencyKey = :idempotencyKey"
+    )
+    suspend fun getOperationIdForIdempotencyKey(idempotencyKey: String): String?
+
+    /** Anchor projection row for [getAplusAdvanceAnchor]. */
+    data class AplusAdvanceAnchor(
+        val aplusAnchorScheduleId: String?,
+        val aplusAnchorItemId: String?,
+        val aplusAnchorVersion: Long?
+    )
+
+    /** The persisted current executionId for an attempt. */
+    @Query("SELECT currentExecutionId FROM test_attempts WHERE id = :attemptId")
+    suspend fun getCurrentExecutionId(attemptId: Long): String?
+
+    /**
+     * A+ recoverable attempts: non-terminal rows that entered the A+ lifecycle (aplusState non-null) —
+     * recovery branches on their persisted phase, never on a generic `starting|running` status
+     * (Sol round-8 P1-3).
+     */
+    @Query(
+        "SELECT a.* FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
+            "WHERE t.planId = :planId AND a.aplusState IS NOT NULL AND a.status IN ('starting','running')"
+    )
+    suspend fun findAplusRecoverableAttempts(planId: Long): List<TestAttempt>
 }

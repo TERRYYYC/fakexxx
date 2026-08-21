@@ -8,18 +8,58 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.TestResult
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
+import com.example.cellrebelauto.model.execution.CellRebelExecution
+import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.LegacyCompletionSnapshot
+import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
+import com.example.cellrebelauto.model.ledger.DurableObservationRecord
+import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
+import com.example.cellrebelauto.recovery.OperationReceiptRow
+import com.example.cellrebelauto.recovery.RecoveryCheckpointRow
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
+import com.example.cellrebelauto.recovery.OperationReceiptDao
+import com.example.cellrebelauto.recovery.RecoveryCheckpointRoomDao
+import com.example.cellrebelauto.recovery.ReleaseReceiptDao
 
 /**
- * Room database singleton.
- * # Room 数据库单例，版本 4（F003 阶段开关审计列）
+ * Room database singleton, version 5 (Issue #5: trusted ledger + A+ execution tables).
+ *
+ * v5 introduces the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables
+ * (MIGRATION_4_5). `cellrebel_executions` is born in v5 carrying its FULL §7.1 / §8.6 completion-
+ * evidence field set — digest + 3 elapsed clocks + baseline/marker/RUNNING-duration/both scores/
+ * per-round timestamps — because these are the durable evidence a trusted-quota mint binds to, so
+ * they belong in the v5 CREATE TABLE, NOT a later ALTER (R5-F5 / INV-24: this task's schema end-state
+ * is exactly version 5). The schema JSON is exported for version control; `fallbackToDestructiveMigration`
+ * is intentionally never used — see MIGRATION_4_5.
+ *
+ * # Room 数据库单例，版本 5（可信账本 + A+ 执行表）；cellrebel_executions 建表即带 §7.1 全证据列；exportSchema=true；禁用 destructive fallback
  */
 @Database(
-    entities = [TestResult::class, RunSession::class, LocationPlan::class, LocationTask::class, TestAttempt::class],
-    version = 4,
-    exportSchema = false
+    entities = [
+        TestResult::class,
+        RunSession::class,
+        LocationPlan::class,
+        LocationTask::class,
+        TestAttempt::class,
+        TrustedQuotaEntry::class,
+        CellRebelExecution::class,
+        AutoAuditEvent::class,
+        LegacyCompletionSnapshot::class,
+        ProviderPairingRecord::class,
+        UnverifiedAttemptRecord::class,
+        DurableObservationRecord::class,
+        DurableCompletionReceipt::class,
+        OperationReceiptRow::class,
+        RecoveryCheckpointRow::class,
+        ReleaseReceiptRow::class
+    ],
+    version = 5,
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
 
@@ -28,6 +68,19 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun planDao(): PlanDao
     abstract fun locationTaskDao(): LocationTaskDao
     abstract fun testAttemptDao(): TestAttemptDao
+
+    // Issue #5 Task 4 — trusted ledger & friends.
+    abstract fun trustedQuotaDao(): TrustedQuotaDao
+    abstract fun attemptExecutionDao(): AttemptExecutionDao
+    abstract fun auditEventDao(): AuditEventDao
+    abstract fun legacyCompletionDao(): LegacyCompletionDao
+    abstract fun providerPairingDao(): ProviderPairingDao
+    abstract fun unverifiedAttemptRecordDao(): UnverifiedAttemptRecordDao
+    abstract fun durableObservationDao(): DurableObservationDao
+    abstract fun durableCompletionReceiptDao(): DurableCompletionReceiptDao
+    abstract fun operationReceiptDao(): OperationReceiptDao
+    abstract fun recoveryCheckpointRoomDao(): RecoveryCheckpointRoomDao
+    abstract fun releaseReceiptDao(): ReleaseReceiptDao
 
     companion object {
         @Volatile
@@ -108,8 +161,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "cellrebel_auto.db"
                 )
-                    // # 非破坏性迁移：保留历史数据
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    // # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

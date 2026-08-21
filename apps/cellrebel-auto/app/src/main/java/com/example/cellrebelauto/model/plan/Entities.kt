@@ -98,5 +98,66 @@ data class TestAttempt(
     val latitude: Double,
     val longitude: Double,
     // # F003：阶段跳过审计标记（gps_skipped / test_skipped / null=无跳过）
-    val stageNotes: String? = null
+    val stageNotes: String? = null,
+    // # R9（Sol round-8 P1-3）：当前 §8.1 操作阶段（CREATED/APPLY_PENDING/…/RELEASE_PENDING/CLOSED）。
+    // # null = 尚未进入 A+ 生命周期（legacy / pre-BEGIN_APPLY）。§7.1：Attempt 拥有"当前 operation"，
+    // # 恢复据此区分 apply 在飞 vs release 在飞 vs 从未派发 apply（绝不从 append-only audit 反推）。
+    val aplusState: String? = null,
+    // # R9（Sol round-8 P1-4）：apply 返回的 lease id（provider 单调值，不可派生，必须持久）。release
+    // # 收敛与 §8.4 lease 冲突谓词都绑定它。null = 尚未取得 lease。
+    val aplusLeaseId: String? = null,
+    // # R36（Sol R35 P1-2）：§8.1 START 前持久化的 current executionId（Auto-local，§8.6.1）。
+    // # null = 尚未进入 CELLREBEL_START_PENDING（未派发 execution）。§7.1：一个 attempt 可有多个
+    // # execution（历史 decoy + current），恢复必须按此字段定位 current execution，不可靠"只有一行"。
+    val currentExecutionId: String? = null,
+    // # R45（Sol R45 P1-3 / §4.3 第 1 步）：attempt 开启时从同一次 discover() 投影组落库的推进
+    // # CAS 三元组前置。(expectedScheduleId, expectedCurrentItemId, expectedScheduleVersion) 必须
+    // # 先落库再启动外部执行；completeAndAdvance 逐字节重放这一组，绝不在此刻重新 discover() 刷新
+    // # （§6.7.3 v1.72 / M-AD-28）。null = 尚未锚定（未进入 A+ 外部执行）。
+    val aplusAnchorScheduleId: String? = null,
+    val aplusAnchorItemId: String? = null,
+    val aplusAnchorVersion: Long? = null
+)
+
+/**
+ * Legacy v4 completion snapshot — written ONCE during v4→v5 migration, read-only thereafter.
+ * Holds the pre-A+ historical count so the operator still sees "N completed before evidence
+ * standard". Semantics: LEGACY_UNVERIFIED — **never generates TrustedQuotaEntry**, never enters
+ * the completion projection (§7.1, §7.3, INV-24, M-MG-01).
+ * # v4 历史完成快照：迁移时写一次，此后只读；绝不生成可信账本，不进完成投影
+ */
+@Entity(tableName = "legacy_completion_snapshots")
+data class LegacyCompletionSnapshot(
+    @PrimaryKey val taskId: Long,
+    val legacyCompletedSuccesses: Int,
+    val legacyStatus: String,
+    val migratedFromSchemaVersion: Int,
+    val migratedAt: Long
+)
+
+/**
+ * Auto-side provider allowlist (§6.5.3). Distinct from qwy's caller allowlist (PairingRecord).
+ * applicationId is the match key; currentSignerDigest is the trust root. `approvedVersionCode`
+ * is immutable & audit-only — provider upgrades do NOT rewrite it (new version only enters the
+ * append-only audit stream). Revocation sets `revokedAt` — it is a state transition, NOT a delete.
+ * No silent/automatic TOFU: an unseen signer stops at local NOT_PAIRED until operator approval
+ * (§6.5.3, §7.1, INV-22). Mutations only via ProviderTrustStore 3 narrow methods.
+ * # Auto 侧 provider allowlist：撤销是状态迁移不是删除；禁止 silent TOFU
+ */
+@Entity(
+    tableName = "provider_pairing_records",
+    // R44 (Sol GREEN-review-3 F4): the frozen authorization principal is (applicationId,
+    // currentSignerDigest) (§6.5.4) — lookup index on the PAIR, never a single-column UNIQUE on
+    // applicationId (that blocked signer rotation AND post-revocation re-approval, M-PA-10).
+    // Single-active-per-principal is enforced transactionally by ProviderTrustStore.approve; the
+    // index itself is non-unique so revoked history rows for the same pair can coexist.
+    indices = [Index(value = ["applicationId", "currentSignerDigest"])]
+)
+data class ProviderPairingRecord(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val applicationId: String,
+    val currentSignerDigest: String,
+    val approvedAt: Long,
+    val revokedAt: Long?,
+    val approvedVersionCode: Int
 )

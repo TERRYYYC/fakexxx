@@ -41,8 +41,14 @@ android {
     }
 }
 
+// Issue #5 Task 4 (INV-24): export Room schema JSON for version control + migration validation.
+// # 导出 Room schema JSON 纳入版本控制，配合 MIGRATION_4_5 校验
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
-    // Environment Control contract v1 (shared, frozen).
+    // R43: the frozen environment-control contract v1 (interface freeze 635a73a8).
     implementation(project(":environment-control-v1"))
 
     // Compose BOM

@@ -54,16 +54,32 @@ interface LocationTaskDao {
     /**
      * Quota-reached completion, called INSIDE the success finalize transaction
      * so the task never lingers active with a full quota (F5 crash window).
-     * # 配额达成即完成：在成功收尾事务内调用，杜绝 active+满配额 的崩溃窗口
+     *
+     * GREEN (M-MG-02, trusted-only): completion is a pure projection of the TRUSTED count —
+     * `(SELECT COUNT(*) FROM trusted_quota_entries WHERE taskId = …) >= requiredSuccesses`.
+     * The legacy `completedSuccesses` counter is NEVER consulted (no OR-branch alternate-truth)
+     * and NEVER mutated (§7.3: completion = count projection, not a counter column).
+     *
+     * # 配额达成即完成（GREEN 仅可信投影）：trusted 子查询是唯一真相；legacy 计数器既不读也不写
      */
-    @Query("UPDATE location_tasks SET status = 'completed' WHERE id = :taskId AND completedSuccesses >= requiredSuccesses")
+    @Query(
+        "UPDATE location_tasks SET status = 'completed' WHERE id = :taskId AND " +
+            "(SELECT COUNT(*) FROM trusted_quota_entries WHERE trusted_quota_entries.taskId = :taskId) >= requiredSuccesses"
+    )
     suspend fun completeTaskIfQuotaReached(taskId: Long): Int
 
     /**
      * Recovery normalization for the pre-fix crash window: any task whose quota
      * is already full but status was never flipped gets completed on plan load.
-     * # 恢复归一化：兜底修复历史崩溃窗口留下的满配额非 completed 任务
+     *
+     * GREEN (M-MG-02, trusted-only): same trusted-count projection — a counter-full /
+     * trusted-EMPTY task stays active; a trusted-complete / counter-empty task completes.
+     *
+     * # 恢复归一化（GREEN 仅可信投影）：满可信配额才补 completed；legacy 计数器不参与判定
      */
-    @Query("UPDATE location_tasks SET status = 'completed' WHERE completedSuccesses >= requiredSuccesses AND status != 'completed'")
+    @Query(
+        "UPDATE location_tasks SET status = 'completed' WHERE status != 'completed' AND " +
+            "(SELECT COUNT(*) FROM trusted_quota_entries WHERE trusted_quota_entries.taskId = location_tasks.id) >= requiredSuccesses"
+    )
     suspend fun normalizeQuotaCompletedTasks(): Int
 }

@@ -1,0 +1,286 @@
+package com.example.cellrebelauto.automation
+
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.plan.LocationPlan
+import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.recovery.ApplyOutcome
+import com.example.cellrebelauto.recovery.ExternalApplyExecutor
+import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
+import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
+import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
+import io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1
+import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
+import kotlinx.coroutines.test.runTest
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+
+/**
+ * R46 (Sol R46 P1-1): the ADVANCE_* crash-recovery oracle. A crash between the quota mint and
+ * the advance verification leaves the attempt at ADVANCE_PENDING / ADVANCE_OBSERVING /
+ * ADVANCE_STATE_READBACK. Recovery MUST:
+ *  - replay the SAME durable advance request (identical idempotency key + canonical digest —
+ *    killing mutation: a re-discovered triple changes the request and the digest);
+ *  - re-run the receipt-digest binding + four-leg verification;
+ *  - close the attempt TRUSTED (the mint is durable).
+ *
+ * Killing mutation: the recovery branch removed ⇒ the attempt stays at ADVANCE_* (never
+ * re-advanced, never closed) ⇒ every assertion below fails.
+ * # ADVANCE_* 崩溃恢复 oracle：同 key+digest 重放 + 四腿复验 + 可信收尾
+ */
+@RunWith(RobolectricTestRunner::class)
+class EngineAdvanceRecoveryOracleTest {
+
+    private lateinit var db: AppDatabase
+    private lateinit var repo: com.example.cellrebelauto.repository.PlanRepository
+
+    private val anchorScheduleId = "sched-recovery-7a"
+    private val anchorItemId = "item-recovery-3b"
+    private val anchorVersion = 12L
+
+    private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
+    private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
+        outcomeWire = 1, advancedFromItemId = "item-recovery-3b", advancedToItemId = "item-after-9z",
+        scheduleVersionAfter = 13L, effectiveIntentHash = "eff-recovery",
+        effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
+    )
+
+    private val journeyExecutor = object : ExternalApplyExecutor {
+        override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome =
+            ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
+        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome =
+            ApplyOutcome("RELEASED", false)
+        override fun discover(): CapabilitySnapshotV1? = CapabilitySnapshotV1(
+            serviceVersion = "fake-1.0",
+            supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
+            supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
+            continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+            environmentRevision = 7L,
+            profileRefs = listOf("p"), scheduleRefs = listOf("s"),
+            currentScheduleId = anchorScheduleId, currentItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
+        )
+        override fun preflight(intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): PreflightReportV1? =
+            PreflightReportV1(
+                acceptedIntentHash = requestDigest,
+                scheduleDecisionWire = ScheduleDecisionV1.ALLOWED_NOW.wire,
+                waitUntilEpochMs = null,
+                achievableVerificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                environmentRevision = 7L, blockingReasonWires = emptyList(),
+                scheduleItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
+            )
+        override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
+            val r = advanceAnswer ?: return null
+            if (r.advancedToItemId == null) return null
+            return EnvironmentObservationV1(
+                leaseId = leaseId, acceptedIntentHash = r.effectiveIntentHash,
+                observedAtEpochMs = 0L, observedAtElapsedRealtimeMs = 0L,
+                environmentRevision = r.effectiveEnvironmentRevision, environmentFingerprint = "fp",
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                continuitySinceEpochMs = null, continuitySinceElapsedRealtimeMs = null,
+                deliveryModeWire = io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire,
+                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                effectiveLatitude = null, effectiveLongitude = null, isMock = true,
+                scheduleDecisionWire = ScheduleDecisionV1.ALLOWED_NOW.wire,
+                evidenceRefs = emptyList(),
+                scheduleItemId = r.advancedToItemId!!, scheduleVersion = r.scheduleVersionAfter
+            )
+        }
+        override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+            advanceReplays += request
+            val base = advanceAnswer ?: return null
+            return base.copy(
+                receiptDigest = CanonicalAdvanceReceiptDigestV1.compute(base, request.requestDigest, request.idempotencyKey)
+            )
+        }
+    }
+
+    // Minimal non-null source: the ADVANCE_* recovery branch reads DURABLE state only (the mint
+    // is committed); it never re-acquires evidence. Production always wires a real source.
+    private val minimalEvidenceSource = object : com.example.cellrebelauto.automation.aplus.APlusEvidenceSource {
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) = null
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) = null
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long) = null
+    }
+
+    @Before
+    fun setUp() {
+        db = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            AppDatabase::class.java
+        ).build()
+        repo = com.example.cellrebelauto.repository.PlanRepository(db)
+    }
+
+    @After
+    fun tearDown() {
+        db.close()
+    }
+
+    private class VClock {
+        var now = 0L
+        val nowMs: () -> Long = { now }
+        val delayMs: suspend (Long) -> Unit = { now += it }
+    }
+
+    /** Seeds a plan/task plus a crashed attempt at [phase] with the full durable advance state:
+     *  anchor triple, trusted mint, persisted lease, Room apply receipt (operationId leg). */
+    private suspend fun seedCrashedAt(phase: String): Pair<Long, Long> {
+        val planId = db.planDao().insertPlanWithTasks(
+            LocationPlan(sourceFileName = "r.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
+            listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1))
+        )
+        val task = db.locationTaskDao().getTasksForPlan(planId).first()
+        val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
+        val attemptId = 31L
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = attemptId, taskId = task.id, runSessionId = sessionId, attemptOrdinal = 1,
+                successOrdinal = null, startedAt = 600L, runningObservedAt = null, endedAt = null,
+                status = "running", failureReason = null, webBrowsingScore = null, videoStreamingScore = null,
+                latitude = 39.9, longitude = 116.4,
+                aplusState = phase, aplusLeaseId = "lease-$attemptId", currentExecutionId = "exec-$attemptId",
+                aplusAnchorScheduleId = anchorScheduleId, aplusAnchorItemId = anchorItemId, aplusAnchorVersion = anchorVersion
+            )
+        )
+        // The durable trusted mint (the advance only ever runs quota-reached).
+        db.trustedQuotaDao().insert(
+            com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+                attemptId = attemptId, taskId = task.id, evidenceDigest = "ev-$attemptId", committedAt = 9000L
+            )
+        )
+        // The Room apply receipt carrying the verbatim operationId (the observe tuple's leg).
+        db.operationReceiptDao().insertIfAbsent(
+            com.example.cellrebelauto.recovery.OperationReceiptRow(
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                requestDigest = "h", resultOutcome = "APPLIED", createdAt = 1000L,
+                leaseId = "lease-$attemptId", operationId = "op-$attemptId"
+            )
+        )
+        return planId to task.id
+    }
+
+    private fun buildEngine(planId: Long, clock: VClock): AutomationEngine {
+        val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
+            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+        )
+        return AutomationEngine(
+            planId = planId, planRepository = repo,
+            cellRebelRunner = object : CellRebelRunner {
+                override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome {
+                    onRunningObserved(4242L)
+                    return AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
+                }
+            },
+            gpsSetter = object : GpsLocationSetter {
+                override suspend fun setLocation(lat: Double, lng: Double) = GpsOutcome.Active
+            },
+            bufferGate = com.example.cellrebelauto.automation.plan.BufferGate(0, clock.nowMs),
+            testTimeoutMs = 90_000L, gpsSettleMs = 0L,
+            nowMs = clock.nowMs, delayMs = clock.delayMs,
+            attemptDriver = com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao()),
+            recoveryCoordinator = coordinator,
+            completionEvidenceSource = minimalEvidenceSource,
+            elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
+        )
+    }
+
+    @Test
+    fun `an ADVANCE_PENDING crash replays the same durable request and closes trusted`() = runTest {
+        val (planId, taskId) = seedCrashedAt("ADVANCE_PENDING")
+        val clock = VClock()
+        buildEngine(planId, clock).run()
+
+        assertEquals("the recovery REPLAYED the advance (killing mutation: branch removed ⇒ zero replays)", 1, advanceReplays.size)
+        val req = advanceReplays[0]
+        assertEquals("the replay carries the SAME anchored CAS triple", anchorScheduleId, req.expectedScheduleId)
+        assertEquals(anchorItemId, req.expectedCurrentItemId)
+        assertEquals(anchorVersion, req.expectedScheduleVersion)
+        assertEquals(
+            "the replay's digest is the canonical advance framing of the rebuilt request",
+            CanonicalAdvanceDigestV1.compute(req), req.requestDigest
+        )
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("the crashed attempt closed TRUSTED (the mint was durable)", "succeeded", attempt.status)
+        assertEquals("CLOSED", attempt.aplusState)
+    }
+
+    @Test
+    fun `an ADVANCE_OBSERVING crash resumes through the same replay and verification`() = runTest {
+        val (planId, taskId) = seedCrashedAt("ADVANCE_OBSERVING")
+        val clock = VClock()
+        buildEngine(planId, clock).run()
+
+        assertEquals("the observation-phase crash also replays + verifies (idempotent provider returns the stored receipt)", 1, advanceReplays.size)
+        assertEquals("closed trusted", "succeeded", db.testAttemptDao().getAttemptById(31L)!!.status)
+    }
+
+    @Test
+    fun `an unproven replay fail-closes to RECOVERY_REQUIRED - never silently closed`() = runTest {
+        advanceAnswer = null // the provider cannot prove the advance
+        val (planId, taskId) = seedCrashedAt("ADVANCE_STATE_READBACK")
+        val clock = VClock()
+        buildEngine(planId, clock).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("fail-closed phase, never a silent trusted close", "RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals("no trusted terminal projection from an unproven advance", "running", attempt.status)
+    }
+
+    @Test
+    fun `a FORGED receipt digest fail-closes the recovery (R46 P1-2)`() = runTest {
+        // The provider returns a receipt whose receiptDigest does NOT bind this request — the
+        // four legs may all look healthy, but the receipt is not evidence of THIS replay.
+        val realExecutor = journeyExecutor
+        val forgedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+                val receipt = realExecutor.completeAndAdvance(request, expectedIntentHash) ?: return null
+                return receipt.copy(receiptDigest = "forged-${receipt.receiptDigest}")
+            }
+        }
+        val (planId, taskId) = seedCrashedAt("ADVANCE_PENDING")
+        val clock = VClock()
+        // Wire the forged executor through a fresh coordinator.
+        val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
+            forgedExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+        )
+        val engine = AutomationEngine(
+            planId = planId, planRepository = repo,
+            cellRebelRunner = object : CellRebelRunner {
+                override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome =
+                    AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
+            },
+            gpsSetter = object : GpsLocationSetter {
+                override suspend fun setLocation(lat: Double, lng: Double) = GpsOutcome.Active
+            },
+            bufferGate = com.example.cellrebelauto.automation.plan.BufferGate(0, clock.nowMs),
+            testTimeoutMs = 90_000L, gpsSettleMs = 0L,
+            nowMs = clock.nowMs, delayMs = clock.delayMs,
+            attemptDriver = com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao()),
+            recoveryCoordinator = coordinator,
+            completionEvidenceSource = minimalEvidenceSource,
+            elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
+        )
+        engine.run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "a receipt that does not bind this request is not a receipt — fail-closed (killing mutation: digest check removed ⇒ succeeded)",
+            "RECOVERY_REQUIRED", attempt.aplusState
+        )
+    }
+}

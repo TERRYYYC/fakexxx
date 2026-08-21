@@ -25,4 +25,12 @@ object PlanScheduler {
 
     fun isPlanComplete(tasks: List<LocationTask>): Boolean =
         tasks.all { it.status == "completed" }
+
+    // M-MG-02 trusted-aware selection/completion is DB-aware and lives in PlanRepository: the trusted
+    // count must be read from the real TrustedQuotaDao.trustedCountForTask projection, not an in-memory
+    // map. An isolated trusted helper here would let a bad impl green the suite without touching the
+    // production path (Sol round-3 counterexample), so the trusted seam is intentionally NOT on this
+    // pure object. See PlanRepository.selectNextTrustedTask + the trusted-aware completion SQL,
+    // exercised against a real Room DB by MmG02TrustedProjectionRedTest. The pure methods above are
+    // the v4 display-only counter path.
 }
