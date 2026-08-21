@@ -105,6 +105,30 @@
             android:exported="false"
             android:foregroundServiceType="location" />
 
+        <!--
+            Environment Control contract v1 (§6.1). This is the ONLY service here
+            that is exported, and it has to be: CellRebel Auto is a separate app
+            with a separate uid, and the whole contract is a cross-app bind on a
+            frozen explicit ComponentName (§1188). exported=false would make
+            bindService() fail in a way Auto cannot tell apart from "qwy is not
+            installed".
+
+            Exported does NOT mean open. There is no intent-filter, so only an
+            explicit ComponentName reaches it, and every call resolves its real
+            caller from Binder.getCallingUid() and must match an operator-approved
+            (applicationId, signerDigest) pairing (§6.5, INV-02). An unknown
+            caller gets NOT_PAIRED, never environment control.
+
+            No android:process: the provider runs in the main process. The durable
+            stores behind it are MODE_PRIVATE SharedPreferences with a
+            single-writer rule (§6.6 L3), and a second process writing them is
+            exactly the split-brain that rule forbids — qwy's :hook_verify process
+            must never touch these namespaces.
+        -->
+        <service
+            android:name=".integration.v1.EnvironmentControlService"
+            android:exported="true" />
+
     </application>
 
 </manifest>
