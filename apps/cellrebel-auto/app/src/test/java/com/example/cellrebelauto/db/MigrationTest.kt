@@ -375,7 +375,7 @@ class MigrationTest {
     }
 
     @Test
-    fun `migration 4 to 5 creates advance_records and preserves v4 data`() = runTest {
+    fun `migration 4 to 5 creates advance_records and trusted_quota_entries and preserves v4 data`() = runTest {
         createV4Database()
 
         // # Room v5 打开：跑 MIGRATION_4_5 + schema 校验（不通过会抛异常）
@@ -418,8 +418,36 @@ class MigrationTest {
         assertEquals("pending", unresolved[0].state)
         assertEquals("adv-migration-test", unresolved[0].idempotencyKey)
 
-        // # Foreign key to location_tasks enforced: taskId=1 exists
-        // # (FK violation would throw on insert)
+        // # trusted_quota_entries table exists and is writable (§7.3)
+        val quotaDao = db.trustedQuotaDao()
+        // # Attempt ID=1 exists (seeded v4 data) — FK enforced
+        val entryId = quotaDao.insert(
+            com.example.cellrebelauto.model.plan.TrustedQuotaEntry(
+                attemptId = 1L,
+                taskId = 1L,
+                evidenceDigest = "sha256-test-placeholder",
+                createdAt = 4160L,
+            )
+        )
+        assertTrue("trusted quota entry ID is positive", entryId > 0)
+
+        // # Count reflects the ledger entry
+        assertEquals(1, quotaDao.countForTask(1L))
+
+        // # UNIQUE(attemptId) enforced — duplicate insert returns -1 (IGNORE)
+        val duplicateId = quotaDao.insert(
+            com.example.cellrebelauto.model.plan.TrustedQuotaEntry(
+                attemptId = 1L,
+                taskId = 1L,
+                evidenceDigest = "sha256-test-different",
+                createdAt = 4170L,
+            )
+        )
+        assertEquals("duplicate attemptId returns -1 (IGNORE)", -1L, duplicateId)
+        assertEquals("count unchanged after duplicate", 1, quotaDao.countForTask(1L))
+
+        // # v4 legacy completedSuccesses preserved (denormalized, NOT quota truth)
+        assertEquals(1, task.completedSuccesses)
 
         db.close()
     }

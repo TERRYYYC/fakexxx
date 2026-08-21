@@ -9,7 +9,9 @@ import com.example.cellrebelauto.model.plan.AttemptWithTask
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.model.plan.TrustedQuotaEntry
 import com.example.cellrebelauto.model.plan.WorklistRow
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 
@@ -170,6 +172,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun upgradeAdvancePendingSessions(): Int =
         db.runSessionDao().upgradeAdvancePendingSessions()
 
+    // # Issue #19: trusted quota ledger count (§7.3 — durable truth for quota gate)
+    suspend fun countTrustedQuotaEntries(taskId: Long): Int =
+        db.trustedQuotaDao().countForTask(taskId)
+
     // ---- Task lifecycle ----
 
     suspend fun markTaskActive(taskId: Long) = db.locationTaskDao().updateTaskStatus(taskId, "active")
@@ -215,6 +221,19 @@ class PlanRepository(private val db: AppDatabase) {
             videoScore = videoScore,
             status = status
         )
+        // # Issue #19: insert TrustedQuotaEntry into the ledger (§7.3, M-AD-14).
+        // # UNIQUE(attemptId) + IGNORE strategy → idempotent across crash/replay.
+        // # This is the source of truth for quota decisions; the denormalized
+        // # completedSuccesses counter above is kept for UI convenience only.
+        val digest = computeEvidenceDigest(attemptId, taskId, endedAt)
+        db.trustedQuotaDao().insert(
+            TrustedQuotaEntry(
+                attemptId = attemptId,
+                taskId = taskId,
+                evidenceDigest = digest,
+                createdAt = endedAt,
+            )
+        )
         // # F5：配额达成 → completed 并入本事务，不留崩溃窗口
         db.locationTaskDao().completeTaskIfQuotaReached(taskId)
         true
@@ -240,4 +259,17 @@ class PlanRepository(private val db: AppDatabase) {
 
     suspend fun finishSession(sessionId: Long, status: String, endedAt: Long, totalCycles: Int) =
         db.runSessionDao().finish(sessionId, endedAt, status, totalCycles)
+
+    companion object {
+        /**
+         * Compute evidence digest for a trusted quota entry.
+         * SHA-256 of the attempt completion context: attemptId, taskId, endedAt.
+         * # 计算可信配额条目的证据摘要。
+         */
+        internal fun computeEvidenceDigest(attemptId: Long, taskId: Long, endedAt: Long): String {
+            val preimage = "tqe:attempt=$attemptId:task=$taskId:at=$endedAt"
+            val bytes = MessageDigest.getInstance("SHA-256").digest(preimage.toByteArray())
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+    }
 }

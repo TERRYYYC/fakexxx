@@ -12,15 +12,16 @@ import com.example.cellrebelauto.model.plan.AdvanceRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.model.plan.TrustedQuotaEntry
 
 /**
  * Room database singleton.
- * # Room 数据库单例，版本 5（Issue #19 advance_records 表）
+ * # Room 数据库单例，版本 5（Issue #19 advance_records + trusted_quota_entries 表）
  */
 @Database(
-    entities = [TestResult::class, RunSession::class, LocationPlan::class, LocationTask::class, TestAttempt::class, AdvanceRecord::class],
+    entities = [TestResult::class, RunSession::class, LocationPlan::class, LocationTask::class, TestAttempt::class, AdvanceRecord::class, TrustedQuotaEntry::class],
     version = 5,
-    exportSchema = false
+    exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
 
@@ -30,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun locationTaskDao(): LocationTaskDao
     abstract fun testAttemptDao(): TestAttemptDao
     abstract fun advanceRecordDao(): AdvanceRecordDao
+    abstract fun trustedQuotaDao(): TrustedQuotaDao
 
     companion object {
         @Volatile
@@ -104,12 +106,13 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * v4 -> v5 (Issue #19): advance_records table for durable advance state.
-         * Additive only — new table, no existing data touched.
-         * # v4 到 v5（Issue #19）：新增 advance_records 表，纯增量
+         * v4 -> v5 (Issue #19): advance_records + trusted_quota_entries tables.
+         * Additive only — new tables, no existing data touched.
+         * # v4 到 v5（Issue #19）：新增 advance_records + trusted_quota_entries 表，纯增量
          */
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // # advance_records: durable advance protocol state (§8.1)
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `advance_records` (" +
                         "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
@@ -130,6 +133,22 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_taskId` ON `advance_records`(`taskId`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_state` ON `advance_records`(`state`)")
+
+                // # trusted_quota_entries: insert-only quota ledger (§7.3, M-AD-14)
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `trusted_quota_entries` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`attemptId` INTEGER NOT NULL, " +
+                        "`taskId` INTEGER NOT NULL, " +
+                        "`evidenceDigest` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`attemptId`) REFERENCES `test_attempts`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_trusted_quota_entries_attemptId` ON `trusted_quota_entries`(`attemptId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_trusted_quota_entries_taskId` ON `trusted_quota_entries`(`taskId`)")
             }
         }
 

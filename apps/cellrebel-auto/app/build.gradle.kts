@@ -41,6 +41,13 @@ android {
     }
 }
 
+// # Issue #19: Room schema export for migration verification (INV-24).
+// # Exported JSON schemas allow MigrationTestHelper to validate migration
+// # correctness against the canonical schema definition.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 dependencies {
     // Environment Control contract v1 (shared, frozen).
     implementation(project(":environment-control-v1"))
