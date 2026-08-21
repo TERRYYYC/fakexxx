@@ -18,8 +18,11 @@ import androidx.room.PrimaryKey
  * embedded data classes from another package without TypeConverters,
  * and the flat layout keeps the migration simple.
  *
- * state: pending | quota_not_met | advanced | exhausted |
- *        recovery_required | provider_unavailable
+ * state: pending | quota_not_met | advanced | exhausted | recovery_required
+ *
+ * R6 P1-1: provider_unavailable removed — provider absence leaves records
+ * pending. §8.1 requires ADVANCE_PENDING path to persist until verified
+ * ADVANCED or EXHAUSTED receipt/readback resolves it.
  *
  * # 持久化的推进协议状态（§8.1 状态机）。
  * # 协调器调用前写入，崩溃后恢复清扫重放。

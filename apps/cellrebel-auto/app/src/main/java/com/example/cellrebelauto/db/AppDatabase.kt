@@ -9,17 +9,29 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.TestResult
 import com.example.cellrebelauto.model.plan.AdvanceRecord
+import com.example.cellrebelauto.model.plan.AutoAuditEvent
+import com.example.cellrebelauto.model.plan.CellRebelExecution
+import com.example.cellrebelauto.model.plan.LegacyCompletionSnapshot
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.model.plan.TrustedQuotaEntry
 
 /**
  * Room database singleton.
- * # Room 数据库单例，版本 5（Issue #19 advance_records + trusted_quota_entries 表）
+ * # Room 数据库单例，版本 5（Issue #19 全部五张 v5 A+ 表 + advance_records）
+ * # Task 4: TrustedQuotaEntry, CellRebelExecution, AutoAuditEvent,
+ * #         LegacyCompletionSnapshot, ProviderPairingRecord
  */
 @Database(
-    entities = [TestResult::class, RunSession::class, LocationPlan::class, LocationTask::class, TestAttempt::class, AdvanceRecord::class, TrustedQuotaEntry::class],
+    entities = [
+        TestResult::class, RunSession::class, LocationPlan::class,
+        LocationTask::class, TestAttempt::class, AdvanceRecord::class,
+        TrustedQuotaEntry::class, CellRebelExecution::class,
+        AutoAuditEvent::class, LegacyCompletionSnapshot::class,
+        ProviderPairingRecord::class,
+    ],
     version = 5,
     exportSchema = true,
 )
@@ -106,13 +118,28 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         /**
-         * v4 -> v5 (Issue #19): advance_records + trusted_quota_entries tables.
-         * Additive only — new tables, no existing data touched.
-         * # v4 到 v5（Issue #19）：新增 advance_records + trusted_quota_entries 表，纯增量
+         * v4 -> v5 (Issue #19): all five canonical A+ tables (Task 4) +
+         * advance_records + legacy data snapshot.
+         *
+         * Tables created:
+         *   1. advance_records — §8.1 durable advance state
+         *   2. trusted_quota_entries — §7.3 insert-only quota ledger
+         *   3. cellrebel_executions — §8.6 execution evidence
+         *   4. auto_audit_events — append-only audit trail
+         *   5. legacy_completion_snapshots — v4 progress snapshot (LEGACY_UNVERIFIED)
+         *   6. provider_pairing_records — §6.5.3 provider allowlist
+         *
+         * Legacy data migration: existing completedSuccesses/status from
+         * location_tasks are snapshotted into legacy_completion_snapshots.
+         * These are LEGACY_UNVERIFIED — they do NOT generate TrustedQuotaEntry
+         * rows and do NOT participate in the §7.3 completed projection.
+         * Trusted quota starts at zero for all tasks.
+         *
+         * # v4 到 v5（Issue #19）：全部五张 A+ 表 + advance + 旧进度快照
          */
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // # advance_records: durable advance protocol state (§8.1)
+                // # 1. advance_records: durable advance protocol state (§8.1)
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `advance_records` (" +
                         "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
@@ -134,7 +161,7 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_taskId` ON `advance_records`(`taskId`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_advance_records_state` ON `advance_records`(`state`)")
 
-                // # trusted_quota_entries: insert-only quota ledger (§7.3, M-AD-14)
+                // # 2. trusted_quota_entries: insert-only quota ledger (§7.3, M-AD-14)
                 db.execSQL(
                     "CREATE TABLE IF NOT EXISTS `trusted_quota_entries` (" +
                         "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
@@ -149,6 +176,71 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_trusted_quota_entries_attemptId` ON `trusted_quota_entries`(`attemptId`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_trusted_quota_entries_taskId` ON `trusted_quota_entries`(`taskId`)")
+
+                // # 3. cellrebel_executions: §8.6 execution evidence
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `cellrebel_executions` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`attemptId` INTEGER NOT NULL, " +
+                        "`executionId` TEXT NOT NULL, " +
+                        "`completionVerdict` TEXT NOT NULL, " +
+                        "`startedAtElapsed` INTEGER NOT NULL, " +
+                        "`endedAtElapsed` INTEGER, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "FOREIGN KEY(`attemptId`) REFERENCES `test_attempts`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_cellrebel_executions_attemptId` ON `cellrebel_executions`(`attemptId`)")
+
+                // # 4. auto_audit_events: append-only audit trail
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `auto_audit_events` (" +
+                        "`seq` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`correlationSessionId` INTEGER, " +
+                        "`correlationAttemptId` INTEGER, " +
+                        "`correlationAdvanceRecordId` INTEGER, " +
+                        "`event` TEXT NOT NULL, " +
+                        "`payloadDigest` TEXT, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+
+                // # 5. legacy_completion_snapshots: v4 progress (LEGACY_UNVERIFIED)
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `legacy_completion_snapshots` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`taskId` INTEGER NOT NULL, " +
+                        "`legacyCompletedSuccesses` INTEGER NOT NULL, " +
+                        "`legacyStatus` TEXT NOT NULL, " +
+                        "`migratedFromSchemaVersion` INTEGER NOT NULL, " +
+                        "`migratedAt` INTEGER NOT NULL, " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_legacy_completion_snapshots_taskId` ON `legacy_completion_snapshots`(`taskId`)")
+
+                // # 6. provider_pairing_records: §6.5.3 provider allowlist
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `provider_pairing_records` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`applicationId` TEXT NOT NULL, " +
+                        "`currentSignerDigest` TEXT NOT NULL, " +
+                        "`approvedVersionCode` INTEGER NOT NULL, " +
+                        "`approvedAt` INTEGER NOT NULL, " +
+                        "`revokedAt` INTEGER)"
+                )
+
+                // # Legacy data snapshot: preserve existing progress as
+                // # LEGACY_UNVERIFIED. Trusted quota starts at zero.
+                // # §7.3: LegacyCompletionSnapshot does NOT participate
+                // # in the completed projection.
+                db.execSQL(
+                    "INSERT INTO `legacy_completion_snapshots` " +
+                        "(`taskId`, `legacyCompletedSuccesses`, `legacyStatus`, " +
+                        " `migratedFromSchemaVersion`, `migratedAt`) " +
+                        "SELECT `id`, `completedSuccesses`, `status`, 4, " +
+                        "strftime('%s','now') * 1000 FROM `location_tasks` " +
+                        "WHERE `completedSuccesses` > 0"
+                )
             }
         }
 

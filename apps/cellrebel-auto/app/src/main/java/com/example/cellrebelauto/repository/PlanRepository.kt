@@ -14,6 +14,7 @@ import com.example.cellrebelauto.model.plan.WorklistRow
 import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 
 /**
  * Plan-level repository (O1–O4 data owner). Wraps the plan/task/attempt/session
@@ -175,6 +176,22 @@ class PlanRepository(private val db: AppDatabase) {
     // # Issue #19: trusted quota ledger count (§7.3 — durable truth for quota gate)
     suspend fun countTrustedQuotaEntries(taskId: Long): Int =
         db.trustedQuotaDao().countForTask(taskId)
+
+    /**
+     * Batch trusted quota counts for a plan, as a Map keyed by taskId (§7.3).
+     * Used by the engine to pass to PlanScheduler for quota decisions.
+     * # 批量获取某计划的可信配额计数 Map（engine → PlanScheduler 配额决策用）
+     */
+    suspend fun getTrustedQuotaCounts(planId: Long): Map<Long, Int> =
+        db.trustedQuotaDao().countsForPlan(planId).associate { it.taskId to it.count }
+
+    /**
+     * Observable trusted quota counts for a plan (§7.3, PlanUiState projection).
+     * # 可观察的计划级可信配额计数（PlanUiState 投影用）
+     */
+    fun observeTrustedQuotaCounts(planId: Long): Flow<Map<Long, Int>> =
+        db.trustedQuotaDao().observeCountsForPlan(planId)
+            .map { list -> list.associate { it.taskId to it.count } }
 
     // ---- Task lifecycle ----
 

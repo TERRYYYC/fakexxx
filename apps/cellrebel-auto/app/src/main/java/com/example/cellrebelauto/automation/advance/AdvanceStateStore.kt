@@ -38,14 +38,13 @@ interface AdvanceStateStore {
 /**
  * In-flight advance record. The `state` field tracks the §8.1 edge:
  *
- * - `"pending"`: created, coordinator not yet called (or crashed mid-call)
+ * - `"pending"`: created, coordinator not yet called (or crashed mid-call,
+ *   or provider absent — R6 P1-1: provider absence preserves pending state
+ *   so recovery can retry when provider becomes available)
  * - `"quota_not_met"`: coordinator returned QuotaNotMet (terminal, no advance)
  * - `"advanced"`: non-terminal advance independently verified (terminal)
  * - `"exhausted"`: terminal advance independently verified (terminal)
  * - `"recovery_required"`: digest/tuple mismatch detected (non-terminal — must retry)
- * - `"provider_unavailable"`: provider structurally absent (TERMINAL — R5 P1-1).
- *   Records with synthesized identity (pre-PR#36) must not be replayed
- *   when a real gateway arrives. New sessions create fresh records.
  */
 data class PendingAdvance(
     val id: Long,

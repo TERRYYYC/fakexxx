@@ -55,8 +55,11 @@ enum class AutomationState(val displayName: String) {
     COOLDOWN("Scheduler cooldown..."),
 
     // --- Terminal ---
-    // # 所有循环已完成
+    // # 所有循环已完成（advance 已验证）
     DONE("Done"),
+    // # 计划任务完成但推进协议未验证（§8.1 ADVANCE_PENDING 路径）
+    // # 恢复后重试推进——不等同于 DONE（R6 P1-2）
+    ADVANCE_PENDING("Advance pending..."),
     // # 发生不可恢复的错误
     ERROR("Error")
 }

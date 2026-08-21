@@ -237,8 +237,12 @@ class AutomationEngine(
 
             // ==================== Step 2+: plan loop ====================
             var tasks = planRepository.getTasks(planId)
+            // # Issue #19 R6 P1-3: trusted quota projection (§7.3).
+            // # PlanScheduler decisions use TrustedQuotaEntry counts,
+            // # NOT the denormalized completedSuccesses counter.
+            var trustedQuotaCounts = planRepository.getTrustedQuotaCounts(planId)
             while (isActive && !PlanScheduler.isPlanComplete(tasks)) {
-                val task = PlanScheduler.selectNext(tasks) ?: break
+                val task = PlanScheduler.selectNext(tasks, trustedQuotaCounts) ?: break
                 ensureActive()
 
                 // # 选中时是否为 pending（cooldown 卡的下一步去向据此投影）
@@ -251,17 +255,19 @@ class AutomationEngine(
                 // # Issue #19: capture schedule context at task selection time (§6.7.3 v1.72).
                 // # Pre-PR#36: synthesized from plan/task state. Post-PR#36: the provider
                 // # handshake replaces these with the real schedule snapshot.
+                // # R6 P1-3: scheduleVersion uses trusted quota count (§7.3).
+                val trustedCount = trustedQuotaCounts[task.id] ?: 0
                 activeScheduleContext = ScheduleContext(
                     scheduleId = "plan-$planId",
                     currentItemId = "task-${task.id}",
-                    scheduleVersion = task.completedSuccesses.toLong() + 1,
+                    scheduleVersion = trustedCount.toLong() + 1,
                     ledgerRef = "auto:ledger:session-$runSessionId:task-${task.id}",
                     verifiedAtElapsedRealtimeMs = nowMs(),
                 )
                 currentLeaseId = "auto-lease-$runSessionId-${task.id}"
 
                 log("--- Location csvRow=${task.csvRow} (${task.latitude},${task.longitude}) " +
-                    "success ${task.completedSuccesses}/${task.requiredSuccesses} ---")
+                    "trusted $trustedCount/${task.requiredSuccesses} ---")
 
                 // # 缓冲门禁（INV-5）：成功和失败后都要等（从持久化 endedAt 投影）
                 val lastEndedAt = planRepository.latestTerminalAttemptEndedAt(planId)
@@ -328,7 +334,7 @@ class AutomationEngine(
                     priority = task.priority,
                     latitude = task.latitude,
                     longitude = task.longitude,
-                    completedSuccesses = task.completedSuccesses,
+                    completedSuccesses = trustedCount,
                     requiredSuccesses = task.requiredSuccesses,
                     attemptOrdinal = attemptOrdinal
                 )
@@ -483,13 +489,16 @@ class AutomationEngine(
                                                 log("WARNING: advance RECOVERY_REQUIRED: ${decision.reason}")
                                         }
                                     } catch (e: ProviderNotAvailableException) {
-                                        // # Issue #19 R5 P1-1 fix: provider structurally
-                                        // # unavailable (PendingProviderGateway / pre-PR#36).
-                                        // # Resolve immediately as terminal — synthetic identity
-                                        // # values must NOT be replayed when real gateway arrives.
-                                        // # New sessions with real gateway create fresh records.
-                                        store.resolve(recordId, "provider_unavailable", null, e.message)
-                                        log("Advance: provider not available — resolved terminal (provider_unavailable)")
+                                        // # Issue #19 R6 P1-1 fix: provider absent — leave record
+                                        // # pending. §8.1: quota-met release must remain on the
+                                        // # ADVANCE_PENDING path until a verified ADVANCED or
+                                        // # EXHAUSTED receipt/readback resolves it. Terminal
+                                        // # resolution closes the advance path permanently; pending
+                                        // # preserves a real-identity recovery path for when
+                                        // # the provider becomes available.
+                                        // # Record stays "pending" → session stays "advance_pending"
+                                        // # → recovery sweep retries when provider is connected.
+                                        log("Advance: provider not available — record stays pending for recovery")
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {
@@ -512,26 +521,29 @@ class AutomationEngine(
                 }
                 currentAttemptId = null
                 tasks = planRepository.getTasks(planId)
+                trustedQuotaCounts = planRepository.getTrustedQuotaCounts(planId)
             }
 
             // # 只有计划投影真正 complete 才算成功完成（F5：selectNext == null
             // # 但投影未完成 = 状态不一致，绝不记 completed）
             tasks = planRepository.getTasks(planId)
             if (PlanScheduler.isPlanComplete(tasks)) {
-                // # Issue #19 P1-2 (R4) + R5 P1-1: unresolved advance records
-                // # physically prevent session from reaching "completed".
-                // # Unresolved = pending | recovery_required (NOT provider_unavailable,
-                // # which is terminal — R5 P1-1). provider_unavailable records with
-                // # synthetic identity are resolved immediately, so PendingProviderGateway
-                // # sessions reach "completed" directly.
-                val hasUnresolvedAdvance = advanceStateStore
-                    ?.listAllUnresolved()?.isNotEmpty() == true
-                if (hasUnresolvedAdvance) {
-                    updateState(AutomationState.DONE)
+                // # Issue #19 R6 P1-2: session terminal status is bound to
+                // # per-session verified advance outcome. A session reaches
+                // # "completed" ONLY when its advance records are ALL resolved
+                // # with verified outcomes (advanced | exhausted | quota_not_met).
+                // # Unresolved (pending | recovery_required) → advance_pending.
+                // # The provider_unavailable terminal state is removed (R6 P1-1):
+                // # absent provider leaves records pending, preserving the path.
+                val unresolved = advanceStateStore?.listAllUnresolved() ?: emptyList()
+                val hasUnresolvedForSession = unresolved.any { it.taskId in tasks.map { t -> t.id } }
+                if (hasUnresolvedForSession) {
+                    updateState(AutomationState.ADVANCE_PENDING)
                     planRepository.finishSession(
                         runSessionId, "advance_pending", nowMs(), _cycleCount.value)
                     log("=== Plan tasks complete but advance pending — session NOT terminal ===")
                 } else {
+                    // # Only publish DONE when advance outcome is verified
                     updateState(AutomationState.DONE)
                     planRepository.finishSession(
                         runSessionId, "completed", nowMs(), _cycleCount.value)
