@@ -10,7 +10,12 @@ import org.junit.Test
 /**
  * Deterministic plan scheduler tests: priority ASC / csvRow ASC order (INV-1),
  * quota gate before advancing (INV-2), plan completion projection.
+ *
+ * Quota decisions use trusted quota counts (§7.3), NOT the denormalized
+ * LocationTask.completedSuccesses counter.
+ *
  * # 确定性计划调度器测试：优先级/行号排序、配额门禁、计划完成投影
+ * # §7.3：配额决策使用可信配额计数，不用 completedSuccesses
  */
 class PlanSchedulerTest {
 
@@ -50,28 +55,43 @@ class PlanSchedulerTest {
             task(id = 1, csvRow = 1, priority = 1, status = "completed", completed = 2),
             task(id = 2, csvRow = 2, priority = 2)
         )
+        // # trusted quota counts not needed — task 1 is already "completed" status
         assertEquals(2L, PlanScheduler.selectNext(tasks)!!.id)
     }
 
     @Test
     fun `active unfinished task is reselected before any pending task`() {
         // # INV-2：活动任务配额未完成前不得推进到下一个 pending 任务
+        // # §7.3：trusted quota count = 1 < required = 3 → not complete
         val tasks = listOf(
-            task(id = 1, csvRow = 1, priority = 1, status = "active", required = 3, completed = 1),
+            task(id = 1, csvRow = 1, priority = 1, status = "active", required = 3),
             task(id = 2, csvRow = 2, priority = 2)
         )
-        assertEquals(1L, PlanScheduler.selectNext(tasks)!!.id)
+        val quotaCounts = mapOf(1L to 1)
+        assertEquals(1L, PlanScheduler.selectNext(tasks, quotaCounts)!!.id)
     }
 
     @Test
     fun `quota-met active task is not reselected even if status not yet completed`() {
         // # 配额已满的活动任务视为完成，不应再被选中
+        // # §7.3：trusted quota count = 2 >= required = 2 → complete
         val tasks = listOf(
-            task(id = 1, csvRow = 1, priority = 1, status = "active", required = 2, completed = 2),
+            task(id = 1, csvRow = 1, priority = 1, status = "active", required = 2),
             task(id = 2, csvRow = 2, priority = 2)
         )
-        assertEquals(2L, PlanScheduler.selectNext(tasks)!!.id)
-        assertTrue(PlanScheduler.isQuotaComplete(tasks[0]))
+        val quotaCounts = mapOf(1L to 2)
+        assertEquals(2L, PlanScheduler.selectNext(tasks, quotaCounts)!!.id)
+        assertTrue(PlanScheduler.isQuotaComplete(tasks[0], quotaCounts))
+    }
+
+    @Test
+    fun `missing quota count treated as zero`() {
+        // # §7.3：no TrustedQuotaEntry rows → count = 0 → not complete
+        val tasks = listOf(
+            task(id = 1, csvRow = 1, priority = 1, status = "active", required = 1)
+        )
+        assertFalse(PlanScheduler.isQuotaComplete(tasks[0], emptyMap()))
+        assertFalse(PlanScheduler.isQuotaComplete(tasks[0]))
     }
 
     @Test

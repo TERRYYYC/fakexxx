@@ -9,9 +9,12 @@ import com.example.cellrebelauto.model.plan.AttemptWithTask
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.model.plan.TrustedQuotaEntry
 import com.example.cellrebelauto.model.plan.WorklistRow
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 
 /**
  * Plan-level repository (O1–O4 data owner). Wraps the plan/task/attempt/session
@@ -166,6 +169,30 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markStaleSessionsInterrupted(nowMs: Long): Int =
         db.runSessionDao().markStaleRunningSessionsInterrupted(nowMs)
 
+    // # Issue #19: advance_pending → completed（全部 advance 记录 resolved 后升级）
+    suspend fun upgradeAdvancePendingSessions(): Int =
+        db.runSessionDao().upgradeAdvancePendingSessions()
+
+    // # Issue #19: trusted quota ledger count (§7.3 — durable truth for quota gate)
+    suspend fun countTrustedQuotaEntries(taskId: Long): Int =
+        db.trustedQuotaDao().countForTask(taskId)
+
+    /**
+     * Batch trusted quota counts for a plan, as a Map keyed by taskId (§7.3).
+     * Used by the engine to pass to PlanScheduler for quota decisions.
+     * # 批量获取某计划的可信配额计数 Map（engine → PlanScheduler 配额决策用）
+     */
+    suspend fun getTrustedQuotaCounts(planId: Long): Map<Long, Int> =
+        db.trustedQuotaDao().countsForPlan(planId).associate { it.taskId to it.count }
+
+    /**
+     * Observable trusted quota counts for a plan (§7.3, PlanUiState projection).
+     * # 可观察的计划级可信配额计数（PlanUiState 投影用）
+     */
+    fun observeTrustedQuotaCounts(planId: Long): Flow<Map<Long, Int>> =
+        db.trustedQuotaDao().observeCountsForPlan(planId)
+            .map { list -> list.associate { it.taskId to it.count } }
+
     // ---- Task lifecycle ----
 
     suspend fun markTaskActive(taskId: Long) = db.locationTaskDao().updateTaskStatus(taskId, "active")
@@ -211,10 +238,35 @@ class PlanRepository(private val db: AppDatabase) {
             videoScore = videoScore,
             status = status
         )
+        // # Issue #19: insert TrustedQuotaEntry into the ledger (§7.3, M-AD-14).
+        // # UNIQUE(attemptId) + IGNORE strategy → idempotent across crash/replay.
+        // # This is the source of truth for quota decisions; the denormalized
+        // # completedSuccesses counter above is kept for UI convenience only.
+        val digest = computeEvidenceDigest(attemptId, taskId, endedAt)
+        db.trustedQuotaDao().insert(
+            TrustedQuotaEntry(
+                attemptId = attemptId,
+                taskId = taskId,
+                evidenceDigest = digest,
+                createdAt = endedAt,
+            )
+        )
         // # F5：配额达成 → completed 并入本事务，不留崩溃窗口
         db.locationTaskDao().completeTaskIfQuotaReached(taskId)
         true
     }
+
+    /**
+     * GPS-only attempt finalization (R7 P1-5): marks attempt terminal WITHOUT
+     * entering the trusted quota ledger or incrementing completedSuccesses.
+     * GPS verification alone is NOT CellRebel VERIFIED_NEW_COMPLETION evidence,
+     * therefore it must not count toward quota, must not trigger advance, and
+     * must not enter the trusted ledger (§7.3, §8.6).
+     * # GPS 验证即终态：不进可信账本、不自增计数器、不触发推进——
+     * # 仅 CellRebel 完整证据才有资格进入 TrustedQuotaEntry
+     */
+    suspend fun finalizeGpsOnlyAttempt(attemptId: Long, endedAt: Long) =
+        db.testAttemptDao().markGpsOnly(attemptId, endedAt)
 
     /**
      * Persist a failed attempt with typed reason (INV-4/10); never touches quota.
@@ -236,4 +288,17 @@ class PlanRepository(private val db: AppDatabase) {
 
     suspend fun finishSession(sessionId: Long, status: String, endedAt: Long, totalCycles: Int) =
         db.runSessionDao().finish(sessionId, endedAt, status, totalCycles)
+
+    companion object {
+        /**
+         * Compute evidence digest for a trusted quota entry.
+         * SHA-256 of the attempt completion context: attemptId, taskId, endedAt.
+         * # 计算可信配额条目的证据摘要。
+         */
+        internal fun computeEvidenceDigest(attemptId: Long, taskId: Long, endedAt: Long): String {
+            val preimage = "tqe:attempt=$attemptId:task=$taskId:at=$endedAt"
+            val bytes = MessageDigest.getInstance("SHA-256").digest(preimage.toByteArray())
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+    }
 }

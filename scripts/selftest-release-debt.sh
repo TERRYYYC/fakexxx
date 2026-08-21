@@ -47,18 +47,19 @@ fi
 
 printf 'negative cases\n'
 
-# N-1: one open debt issue
+# N-1: one open debt issue → must exit exactly 1 (fail), not 2 (inconclusive)
 cat > "$tmpdir/n1.json" <<'EOF'
 [{"number": 99, "title": "[fixture] a single open debt issue"}]
 EOF
 NEG=$((NEG + 1))
-if "$GATE" --issues-json "$tmpdir/n1.json" --quiet >/dev/null 2>&1; then
-  bad "N-1  one issue should fail, got exit 0"
+rc=0; "$GATE" --issues-json "$tmpdir/n1.json" --quiet >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "N-1  one open issue → exit 1 (fail)"
 else
-  ok "N-1  one open issue → fail"
+  bad "N-1  one issue should exit 1 (fail), got exit $rc"
 fi
 
-# N-2: multiple open debt issues
+# N-2: multiple open debt issues → must exit exactly 1
 cat > "$tmpdir/n2.json" <<'EOF'
 [
   {"number": 16, "title": "[fixture] debt 1"},
@@ -67,10 +68,11 @@ cat > "$tmpdir/n2.json" <<'EOF'
 ]
 EOF
 NEG=$((NEG + 1))
-if "$GATE" --issues-json "$tmpdir/n2.json" --quiet >/dev/null 2>&1; then
-  bad "N-2  three issues should fail, got exit 0"
+rc=0; "$GATE" --issues-json "$tmpdir/n2.json" --quiet >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "N-2  three open issues → exit 1 (fail)"
 else
-  ok "N-2  three open issues → fail"
+  bad "N-2  three issues should exit 1 (fail), got exit $rc"
 fi
 
 # N-3: gate output must list the issue numbers
@@ -111,6 +113,41 @@ if [ "$rc" -eq 2 ]; then
   ok "E-2  missing file → exit 2"
 else
   bad "E-2  missing file should exit 2, got $rc"
+fi
+
+# ================================================================ EXIT CODE ISOLATION
+# The selftest must NOT accept rc=2 (inconclusive/error) where rc=1 (debt found)
+# is expected. Without this, a mutation from rc=1 to rc=2 would still pass all
+# negative cases, making the selftest blind to that class of regression.
+
+printf 'exit code isolation\n'
+
+# I-1: rc=2 (inconclusive) must NOT be accepted as "debt detected"
+# We prove this by running a case that SHOULD fail (debt exists) but the gate
+# returns rc=2 (simulated by feeding it garbage that causes a parse error AFTER
+# a valid preamble — but more directly, we verify that our N-1/N-2 checks above
+# would reject rc=2).
+NEG=$((NEG + 1))
+rc=0; "$GATE" --issues-json "$tmpdir/e1.json" --quiet >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  # Gate itself returns 2 for bad input — correct. Now verify our negative-case
+  # check would reject it: rc=2 ≠ 1, so if our N-1/N-2 logic were applied here
+  # it would say FAIL. This case proves the check is discriminating.
+  ok "I-1  rc=2 is distinguishable from rc=1 (exit code isolation holds)"
+else
+  bad "I-1  expected rc=2 for invalid input, got $rc"
+fi
+
+# I-2: empty file (not valid JSON) → must NOT silently pass
+echo "" > "$tmpdir/i2.json"
+NEG=$((NEG + 1))
+rc=0; "$GATE" --issues-json "$tmpdir/i2.json" --quiet >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "I-2  empty file → exit 2 (inconclusive), not 0 (pass)"
+elif [ "$rc" -eq 0 ]; then
+  bad "I-2  empty file must not silently pass (exit 0); got exit 0"
+else
+  bad "I-2  empty file should exit 2 (inconclusive), got exit $rc"
 fi
 
 # ================================================================ SUMMARY

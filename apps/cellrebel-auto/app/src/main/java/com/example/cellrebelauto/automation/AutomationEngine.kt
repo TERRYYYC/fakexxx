@@ -1,6 +1,11 @@
 package com.example.cellrebelauto.automation
 
 import android.util.Log
+import com.example.cellrebelauto.automation.advance.AdvanceCoordinator
+import com.example.cellrebelauto.automation.advance.AdvanceDecision
+import com.example.cellrebelauto.automation.advance.AdvanceStateStore
+import com.example.cellrebelauto.automation.advance.ProviderNotAvailableException
+import com.example.cellrebelauto.automation.advance.ScheduleContext
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.model.AutomationState
@@ -87,7 +92,15 @@ class AutomationEngine(
     // # 仅用于 returnToSelf（MIUI 中转）；测试不传
     private val bridge: AccessibilityBridge? = null,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
-    private val delayMs: suspend (Long) -> Unit = { delay(it) }
+    private val delayMs: suspend (Long) -> Unit = { delay(it) },
+    // # Issue #19: advance protocol coordinator. Nullable until PR #36 lands the
+    // # real ProviderGateway (AIDL-backed). When non-null, quota-met triggers
+    // # the advance protocol (§8.1) instead of just logging.
+    private val advanceCoordinator: AdvanceCoordinator? = null,
+    // # Issue #19: durable advance state store. Must be non-null when
+    // # advanceCoordinator is non-null. Records survive crash and feed
+    // # the recovery sweep at engine start.
+    private val advanceStateStore: AdvanceStateStore? = null,
 ) {
     companion object {
         private const val TAG = "AutoEngine"
@@ -123,6 +136,16 @@ class AutomationEngine(
     // # 在途尝试（停止/取消时标记 interrupted）
     private var currentAttemptId: Long? = null
 
+    // # Issue #19: schedule context captured at attempt open time (§6.7.3 v1.72).
+    // # Persisted and replayed verbatim into the advance request.
+    // # Pre-PR#36: synthesized from plan/task state at task selection.
+    // # Post-PR#36: captured from provider handshake snapshot.
+    private var activeScheduleContext: ScheduleContext? = null
+    // # Issue #19: the RELEASED historical lease this attempt earned under.
+    // # Pre-PR#36: synthesized as "auto-lease-{sessionId}-{taskId}".
+    // # Post-PR#36: captured from environment-control handshake.
+    private var currentLeaseId: String? = null
+
     /**
      * Runs the full plan loop. Call from a coroutine scope; cancelling the
      * coroutine cleanly stops the automation (in-flight attempt → interrupted).
@@ -143,6 +166,56 @@ class AutomationEngine(
             val normalized = planRepository.normalizeQuotaCompletedTasks()
             if (normalized > 0) {
                 log("Recovery sweep: $normalized quota-full task(s) normalized to completed")
+            }
+            // # Issue #19: advance recovery sweep — replay unresolved advance records.
+            // # The coordinator re-reads quota durably and the provider's idempotency
+            // # key prevents double-advance. Under-quota records resolve immediately
+            // # without any provider call (M-AD-15 crash-safety).
+            advanceStateStore?.let { store ->
+                advanceCoordinator?.let { coordinator ->
+                    val unresolved = store.listAllUnresolved()
+                    if (unresolved.isNotEmpty()) {
+                        log("Advance recovery: ${unresolved.size} unresolved record(s)")
+                    }
+                    for (record in unresolved) {
+                        try {
+                            val task = planRepository.getTask(record.taskId)
+                            if (task == null) {
+                                store.resolve(record.id, "quota_not_met", null, "task not found")
+                                continue
+                            }
+                            val decision = coordinator.evaluateAfterRelease(
+                                taskId = record.taskId.toString(),
+                                requiredSuccesses = task.requiredSuccesses,
+                                scheduleContext = record.scheduleContext,
+                                leaseId = record.leaseId,
+                                idempotencyKey = record.idempotencyKey,
+                            )
+                            resolveAdvanceRecord(store, record.id, decision)
+                            log("Advance recovery: task=${record.taskId} → ${decision.javaClass.simpleName}")
+                        } catch (e: ProviderNotAvailableException) {
+                            // # R7 P1-1: provider absent during recovery — leave record
+                            // # pending. Same semantics as normal path (R6 P1-1).
+                            // # §8.1: only verified ADVANCED/EXHAUSTED + readback resolves.
+                            // # Record stays in listAllUnresolved() → recovery retries next start.
+                            log("Advance recovery: task=${record.taskId} → provider absent, stays pending")
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            store.resolve(record.id, "recovery_required", null, e.message)
+                            log("Advance recovery: task=${record.taskId} → error: ${e.message}")
+                        }
+                    }
+                    // # Issue #19: after resolving all advance records, upgrade
+                    // # any prior session that was held in "advance_pending" because
+                    // # its advance records were unresolved at finalization time.
+                    if (store.listAllUnresolved().isEmpty()) {
+                        val upgraded = planRepository.upgradeAdvancePendingSessions()
+                        if (upgraded > 0) {
+                            log("Advance recovery: $upgraded session(s) upgraded advance_pending → completed")
+                        }
+                    }
+                }
             }
 
             // ==================== Step 1: both-stages-off guard (AC-F3-4) ====================
@@ -167,8 +240,12 @@ class AutomationEngine(
 
             // ==================== Step 2+: plan loop ====================
             var tasks = planRepository.getTasks(planId)
+            // # Issue #19 R6 P1-3: trusted quota projection (§7.3).
+            // # PlanScheduler decisions use TrustedQuotaEntry counts,
+            // # NOT the denormalized completedSuccesses counter.
+            var trustedQuotaCounts = planRepository.getTrustedQuotaCounts(planId)
             while (isActive && !PlanScheduler.isPlanComplete(tasks)) {
-                val task = PlanScheduler.selectNext(tasks) ?: break
+                val task = PlanScheduler.selectNext(tasks, trustedQuotaCounts) ?: break
                 ensureActive()
 
                 // # 选中时是否为 pending（cooldown 卡的下一步去向据此投影）
@@ -177,8 +254,23 @@ class AutomationEngine(
                 if (advancingToNewTask) {
                     planRepository.markTaskActive(task.id)
                 }
+
+                // # Issue #19: capture schedule context at task selection time (§6.7.3 v1.72).
+                // # Pre-PR#36: synthesized from plan/task state. Post-PR#36: the provider
+                // # handshake replaces these with the real schedule snapshot.
+                // # R6 P1-3: scheduleVersion uses trusted quota count (§7.3).
+                val trustedCount = trustedQuotaCounts[task.id] ?: 0
+                activeScheduleContext = ScheduleContext(
+                    scheduleId = "plan-$planId",
+                    currentItemId = "task-${task.id}",
+                    scheduleVersion = trustedCount.toLong() + 1,
+                    ledgerRef = "auto:ledger:session-$runSessionId:task-${task.id}",
+                    verifiedAtElapsedRealtimeMs = nowMs(),
+                )
+                currentLeaseId = "auto-lease-$runSessionId-${task.id}"
+
                 log("--- Location csvRow=${task.csvRow} (${task.latitude},${task.longitude}) " +
-                    "success ${task.completedSuccesses}/${task.requiredSuccesses} ---")
+                    "trusted $trustedCount/${task.requiredSuccesses} ---")
 
                 // # 缓冲门禁（INV-5）：成功和失败后都要等（从持久化 endedAt 投影）
                 val lastEndedAt = planRepository.latestTerminalAttemptEndedAt(planId)
@@ -245,7 +337,7 @@ class AutomationEngine(
                     priority = task.priority,
                     latitude = task.latitude,
                     longitude = task.longitude,
-                    completedSuccesses = task.completedSuccesses,
+                    completedSuccesses = trustedCount,
                     requiredSuccesses = task.requiredSuccesses,
                     attemptOrdinal = attemptOrdinal
                 )
@@ -281,28 +373,17 @@ class AutomationEngine(
 
                 // ==================== Test stage OFF：GPS 验证即终态（AC-F3-3） ====================
                 if (!toggles.testStageEnabled) {
-                    // # KD-F3-2：ok_gps_only 计配额；同事务守卫式收尾（INV-3 语义不变）
-                    log("CellRebel stage OFF — GPS-verified attempt terminates as ok_gps_only")
-                    planRepository.finalizeAttemptSuccess(
+                    // # R7 P1-5: GPS-only does NOT enter trusted ledger, does NOT
+                    // # count toward quota, does NOT trigger advance. GPS verification
+                    // # alone is not CellRebel VERIFIED_NEW_COMPLETION evidence (§7.3, §8.6).
+                    // # Only marks the attempt as terminal ok_gps_only for visibility.
+                    log("CellRebel stage OFF — GPS-verified attempt terminates as ok_gps_only (non-quota)")
+                    planRepository.finalizeGpsOnlyAttempt(
                         attemptId = attemptId,
-                        taskId = task.id,
-                        expectedCompletedSuccesses = task.completedSuccesses,
-                        runningObservedAt = null,
-                        endedAt = nowMs(),
-                        webScore = null,
-                        videoScore = null,
-                        status = "ok_gps_only"
+                        endedAt = nowMs()
                     )
-                    val updated = planRepository.getTask(task.id)
-                    if (updated != null) {
-                        _currentTask.value = _currentTask.value
-                            ?.copy(completedSuccesses = updated.completedSuccesses)
-                        if (updated.status == "completed") {
-                            log("Location csvRow=${task.csvRow} quota complete ✔")
-                        }
-                    }
                     updateState(AutomationState.SUCCEEDED)
-                    log("Attempt $attemptOrdinal ok_gps_only (test_skipped)")
+                    log("Attempt $attemptOrdinal ok_gps_only (test_skipped, non-quota)")
                     currentAttemptId = null
                     returnToSelf()
                     tasks = planRepository.getTasks(planId)
@@ -323,6 +404,30 @@ class AutomationEngine(
                 updateState(AutomationState.PROCESSING)
                 when (outcome) {
                     is AttemptOutcome.Success -> {
+                        // # Issue #19 P1-2 fix: create pending advance record BEFORE
+                        // # finalizeAttemptSuccess to eliminate the crash window between
+                        // # task-marked-completed and advance-record-created.
+                        // # If crash after pending but before finalize → recovery sees
+                        // # under-quota record → resolves as QuotaNotMet (no provider call).
+                        // # If crash after finalize but before coordinator → recovery sees
+                        // # pending record with quota met → calls coordinator normally.
+                        var preCreatedAdvRecordId: Long? = null
+                        val willCompleteQuota = task.completedSuccesses + 1 >= task.requiredSuccesses
+                        if (willCompleteQuota) {
+                            advanceCoordinator?.let {
+                                val store = advanceStateStore ?: return@let
+                                val ctx = activeScheduleContext ?: return@let
+                                val lease = currentLeaseId ?: return@let
+                                preCreatedAdvRecordId = store.createPending(
+                                    taskId = task.id,
+                                    runSessionId = runSessionId,
+                                    idempotencyKey = "adv-$attemptId",
+                                    scheduleContext = ctx,
+                                    leaseId = lease,
+                                )
+                            }
+                        }
+
                         // # INV-3：单事务收尾（尝试行 + 守卫式自增）
                         val finalized = planRepository.finalizeAttemptSuccess(
                             attemptId = attemptId,
@@ -335,6 +440,10 @@ class AutomationEngine(
                         )
                         if (!finalized) {
                             log("WARNING: finalize skipped (stale expected count) — idempotent guard held")
+                            // CAS guard failed → quota didn't change → resolve orphan record
+                            preCreatedAdvRecordId?.let { recordId ->
+                                advanceStateStore?.resolve(recordId, "quota_not_met", null, "finalize CAS failed")
+                            }
                         }
                         val updated = planRepository.getTask(task.id)
                         if (updated != null) {
@@ -344,6 +453,52 @@ class AutomationEngine(
                             // # F5：配额达成 → completed 已在 finalize 事务内完成
                             if (updated.status == "completed") {
                                 log("Location csvRow=${task.csvRow} quota complete ✔")
+                                // # Issue #19 AC-1..3: advance protocol (§8.1).
+                                // # Pending record already created BEFORE finalize (above).
+                                // # Now call the coordinator and resolve the record.
+                                advanceCoordinator?.let { coordinator ->
+                                    val store = advanceStateStore ?: return@let
+                                    val recordId = preCreatedAdvRecordId ?: return@let
+                                    val ctx = activeScheduleContext ?: return@let
+                                    val lease = currentLeaseId ?: return@let
+                                    val advKey = "adv-$attemptId"
+                                    try {
+                                        val decision = coordinator.evaluateAfterRelease(
+                                            taskId = task.id.toString(),
+                                            requiredSuccesses = task.requiredSuccesses,
+                                            scheduleContext = ctx,
+                                            leaseId = lease,
+                                            idempotencyKey = advKey,
+                                        )
+                                        resolveAdvanceRecord(store, recordId, decision)
+                                        when (decision) {
+                                            is AdvanceDecision.QuotaNotMet ->
+                                                log("Advance: quota not met (concurrent update?)")
+                                            is AdvanceDecision.Advanced ->
+                                                log("Advance: schedule advanced to ${decision.receipt.advancedToItemId}")
+                                            is AdvanceDecision.Exhausted ->
+                                                log("Advance: schedule exhausted (terminal)")
+                                            is AdvanceDecision.RecoveryRequired ->
+                                                log("WARNING: advance RECOVERY_REQUIRED: ${decision.reason}")
+                                        }
+                                    } catch (e: ProviderNotAvailableException) {
+                                        // # Issue #19 R6 P1-1 fix: provider absent — leave record
+                                        // # pending. §8.1: quota-met release must remain on the
+                                        // # ADVANCE_PENDING path until a verified ADVANCED or
+                                        // # EXHAUSTED receipt/readback resolves it. Terminal
+                                        // # resolution closes the advance path permanently; pending
+                                        // # preserves a real-identity recovery path for when
+                                        // # the provider becomes available.
+                                        // # Record stays "pending" → session stays "advance_pending"
+                                        // # → recovery sweep retries when provider is connected.
+                                        log("Advance: provider not available — record stays pending for recovery")
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        log("WARNING: advance protocol error: ${e.message}")
+                                        // Record stays "pending" — recovery sweep will retry
+                                    }
+                                }
                             }
                         }
                         updateState(AutomationState.SUCCEEDED)
@@ -359,15 +514,34 @@ class AutomationEngine(
                 }
                 currentAttemptId = null
                 tasks = planRepository.getTasks(planId)
+                trustedQuotaCounts = planRepository.getTrustedQuotaCounts(planId)
             }
 
             // # 只有计划投影真正 complete 才算成功完成（F5：selectNext == null
             // # 但投影未完成 = 状态不一致，绝不记 completed）
             tasks = planRepository.getTasks(planId)
             if (PlanScheduler.isPlanComplete(tasks)) {
-                updateState(AutomationState.DONE)
-                planRepository.finishSession(runSessionId, "completed", nowMs(), _cycleCount.value)
-                log("=== Plan completed: ${_cycleCount.value} attempts ===")
+                // # Issue #19 R6 P1-2: session terminal status is bound to
+                // # per-session verified advance outcome. A session reaches
+                // # "completed" ONLY when its advance records are ALL resolved
+                // # with verified outcomes (advanced | exhausted | quota_not_met).
+                // # Unresolved (pending | recovery_required) → advance_pending.
+                // # The provider_unavailable terminal state is removed (R6 P1-1):
+                // # absent provider leaves records pending, preserving the path.
+                val unresolved = advanceStateStore?.listAllUnresolved() ?: emptyList()
+                val hasUnresolvedForSession = unresolved.any { it.taskId in tasks.map { t -> t.id } }
+                if (hasUnresolvedForSession) {
+                    updateState(AutomationState.ADVANCE_PENDING)
+                    planRepository.finishSession(
+                        runSessionId, "advance_pending", nowMs(), _cycleCount.value)
+                    log("=== Plan tasks complete but advance pending — session NOT terminal ===")
+                } else {
+                    // # Only publish DONE when advance outcome is verified
+                    updateState(AutomationState.DONE)
+                    planRepository.finishSession(
+                        runSessionId, "completed", nowMs(), _cycleCount.value)
+                    log("=== Plan completed: ${_cycleCount.value} attempts ===")
+                }
             } else {
                 updateState(AutomationState.ERROR)
                 planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)
@@ -400,6 +574,29 @@ class AutomationEngine(
             }
             log("=== Automation ERROR: ${e.message} ===")
             Log.e(TAG, "Automation failed", e)
+        }
+    }
+
+    /**
+     * Resolve an advance record in the durable store based on the coordinator's
+     * decision. Maps [AdvanceDecision] to the store's string state.
+     *
+     * # 根据协调器的决策解决推进记录。将 AdvanceDecision 映射到存储的字符串状态。
+     */
+    private suspend fun resolveAdvanceRecord(
+        store: AdvanceStateStore,
+        recordId: Long,
+        decision: AdvanceDecision,
+    ) {
+        when (decision) {
+            is AdvanceDecision.QuotaNotMet ->
+                store.resolve(recordId, "quota_not_met", null, null)
+            is AdvanceDecision.Advanced ->
+                store.resolve(recordId, "advanced", decision.receipt.receiptDigest, null)
+            is AdvanceDecision.Exhausted ->
+                store.resolve(recordId, "exhausted", decision.receipt.receiptDigest, null)
+            is AdvanceDecision.RecoveryRequired ->
+                store.resolve(recordId, "recovery_required", null, decision.reason)
         }
     }
 

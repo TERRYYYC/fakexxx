@@ -38,20 +38,27 @@ import kotlinx.coroutines.withContext
 
 /**
  * Immutable view of the Plan screen: latest plan + tasks in execution order
- * + per-task attempt counts. Plan/task status is a pure projection (O1/O2) —
- * nothing here is persisted beyond the Room rows themselves.
- * # Plan 页的不可变视图：最近计划 + 执行顺序任务 + 每任务尝试数。
- * # 计划/任务状态是纯投影，不落第二份状态
+ * + per-task attempt counts + trusted quota projection (§7.3).
+ * Plan/task status is a pure projection (O1/O2) — nothing here is persisted
+ * beyond the Room rows themselves.
+ *
+ * completedSuccesses is derived from [trustedQuotaCounts] (§7.3), NOT from
+ * the denormalized LocationTask.completedSuccesses counter.
+ *
+ * # Plan 页的不可变视图：最近计划 + 执行顺序任务 + 每任务尝试数 + §7.3 可信配额。
+ * # completedSuccesses 来自可信配额台账，不是去归一化计数器
  */
 data class PlanUiState(
     val plan: LocationPlan? = null,
     // # 已按执行顺序（priority ASC, csvRow ASC）排序
     val tasks: List<LocationTask> = emptyList(),
     // # taskId -> 尝试总数
-    val attemptCounts: Map<Long, Int> = emptyMap()
+    val attemptCounts: Map<Long, Int> = emptyMap(),
+    // # taskId -> trusted quota entry count (§7.3)
+    val trustedQuotaCounts: Map<Long, Int> = emptyMap()
 ) {
-    // # 已验证成功总数（计划级进度）
-    val completedSuccesses: Int get() = tasks.sumOf { it.completedSuccesses }
+    // # 已验证成功总数（计划级进度，§7.3 trusted projection）
+    val completedSuccesses: Int get() = trustedQuotaCounts.values.sum()
 
     // # 计划未完成：存在未 completed 的任务
     val isUnfinished: Boolean
@@ -106,7 +113,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---- Plan screen state ----
 
-    // # 最近计划 + 任务 + 尝试数的组合流（Room 实时刷新）
+    // # 最近计划 + 任务 + 尝试数 + §7.3 可信配额计数的组合流（Room 实时刷新）
     @OptIn(ExperimentalCoroutinesApi::class)
     val planUiState: StateFlow<PlanUiState> = planRepository.observeLatestPlan()
         .flatMapLatest { plan ->
@@ -115,12 +122,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 combine(
                     planRepository.observeTasks(plan.id),
-                    planRepository.observeAttemptCounts(plan.id)
-                ) { tasks, counts ->
+                    planRepository.observeAttemptCounts(plan.id),
+                    planRepository.observeTrustedQuotaCounts(plan.id)
+                ) { tasks, counts, quotaCounts ->
                     PlanUiState(
                         plan = plan,
                         tasks = PlanScheduler.executionOrder(tasks),
-                        attemptCounts = counts.associate { it.taskId to it.count }
+                        attemptCounts = counts.associate { it.taskId to it.count },
+                        trustedQuotaCounts = quotaCounts
                     )
                 }
             }

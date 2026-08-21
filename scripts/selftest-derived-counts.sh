@@ -732,6 +732,124 @@ else
 fi
 rm -rf "$d"
 
+# ---------------------------------------------------------------------------
+# N-S / M-ID-SET: exact-ID set guard (Issue #20 gap fix).
+#
+# The count check alone cannot detect an ID SWAP: rename M-AD-14 → M-ZZ-99 in
+# the §10.1 ledger (but not in §10 matrix), and the row count stays unchanged.
+# Only the exact-ID set comparison (comm -23 / comm -13) catches this.
+#
+# N-S plants the swap; M-ID-SET disables the comm predicate and requires the
+# ID-mismatch finding to vanish — proving the predicate is load-bearing and not
+# redundantly caught by the count check.
+printf '\n== ID-set guard (Issue #20 exact-ID gap fix) ==\n'
+
+# N-S: same-count, different-ID set → guard must report "different ID sets"
+d="$(mk)"
+# Rename the first ledger row's ID to M-ZZ-99. The matrix row keeps the
+# original ID, so count stays the same but the ID set diverges.
+# Pass the spec path as argv[1] (not env) to avoid quoting issues.
+OLD_RENAMED_ID=$(python3 - "$d/$SPEC" <<'PYEOF'
+import re, io, sys
+spec_path = sys.argv[1]
+spec = io.open(spec_path, encoding='utf-8').read()
+# Match the first ledger row (has evidence class) and change ONLY its ID
+pat = re.compile(
+    r'^\| `(M-[A-Z]{2}-[0-9]+)` \| [a-z-]+ \| '
+    r'`(?:owner-red|sol-blackbox|static-guard|device)`',
+    re.MULTILINE)
+m = pat.search(spec)
+if not m:
+    print('NO_MATCH', file=sys.stderr); sys.exit(1)
+old_id = m.group(1)
+spec = spec[:m.start(1)] + 'M-ZZ-99' + spec[m.end(1):]
+io.open(spec_path, 'w', encoding='utf-8').write(spec)
+print(old_id)
+PYEOF
+)
+if [ -z "$OLD_RENAMED_ID" ] || [ "$OLD_RENAMED_ID" = "NO_MATCH" ]; then
+  bad "N-S - INCONCLUSIVE: could not rename a ledger ID (no ledger row matched)"
+  rm -rf "$d"
+else
+  nsout="$(run_gate "$d")"
+  if ! healthy "$nsout"; then
+    bad "N-S - INCONCLUSIVE: the guard did not complete a scan"
+    detail "$nsout"
+  elif ! printf '%s' "$nsout" | grep -qF 'different ID sets'; then
+    bad "N-S - guard did not report 'different ID sets' after ID swap ($OLD_RENAMED_ID → M-ZZ-99)"
+    detail "$nsout"
+  elif [ "$(verdict "$nsout")" != FAIL ]; then
+    bad "N-S - guard SAW the ID mismatch but did not BLOCK (verdict is not FAIL)"
+    detail "$nsout"
+  else
+    ok "N-S same-count different-ID: exact-ID set guard caught $OLD_RENAMED_ID → M-ZZ-99"
+    NEG=$((NEG + 1))
+  fi
+fi
+rm -rf "$d"
+
+# M-ID-SET: disable the exact-ID set comparison; the swap must become invisible
+# while the count check still passes (proving the ID-set guard is load-bearing).
+d="$(mk)"
+OLD_RENAMED_ID2=$(python3 - "$d/$SPEC" <<'PYEOF'
+import re, io, sys
+spec_path = sys.argv[1]
+spec = io.open(spec_path, encoding='utf-8').read()
+pat = re.compile(
+    r'^\| `(M-[A-Z]{2}-[0-9]+)` \| [a-z-]+ \| '
+    r'`(?:owner-red|sol-blackbox|static-guard|device)`',
+    re.MULTILINE)
+m = pat.search(spec)
+if not m:
+    print('NO_MATCH', file=sys.stderr); sys.exit(1)
+old_id = m.group(1)
+spec = spec[:m.start(1)] + 'M-ZZ-99' + spec[m.end(1):]
+io.open(spec_path, 'w', encoding='utf-8').write(spec)
+print(old_id)
+PYEOF
+)
+if [ -z "$OLD_RENAMED_ID2" ] || [ "$OLD_RENAMED_ID2" = "NO_MATCH" ]; then
+  bad "M-ID-SET - INCONCLUSIVE: could not rename a ledger ID"
+  rm -rf "$d"
+else
+  # First verify the INTACT gate catches the swap (prerequisite)
+  intact_out="$(run_gate "$d")"
+  if ! printf '%s' "$intact_out" | grep -qF 'different ID sets'; then
+    bad "M-ID-SET - INCONCLUSIVE: intact gate never reported 'different ID sets' for the swap"
+    detail "$intact_out"
+    rm -rf "$d"
+  elif [ "$(verdict "$intact_out")" != FAIL ]; then
+    bad "M-ID-SET - INCONCLUSIVE: intact gate reported the finding but did not FAIL"
+    detail "$intact_out"
+    rm -rf "$d"
+  else
+    # Now disable the ID-set comparison (neutralize comm predicates)
+    sed -i.bak 's/^ONLY_IN_LEDGER=.*(comm.*/ONLY_IN_LEDGER=""/' "$d/scripts/check-derived-counts.sh"
+    sed -i.bak2 's/^ONLY_IN_MATRIX=.*(comm.*/ONLY_IN_MATRIX=""/' "$d/scripts/check-derived-counts.sh"
+    if cmp -s "$d/scripts/check-derived-counts.sh" "$d/scripts/check-derived-counts.sh.bak"; then
+      bad "M-ID-SET - INCONCLUSIVE: the comm-disabling edit did not change the guard"
+      rm -rf "$d"
+    else
+      rm -f "$d/scripts/check-derived-counts.sh.bak" "$d/scripts/check-derived-counts.sh.bak2"
+      mutout="$(run_gate "$d")"
+      if ! healthy "$mutout"; then
+        bad "M-ID-SET - INCONCLUSIVE: the mutated guard did not complete a scan"
+        detail "$mutout"
+      elif printf '%s' "$mutout" | grep -qF 'different ID sets'; then
+        bad "M-ID-SET - finding survived with the ID-set predicate disabled, so it is not what catches it"
+        detail "$mutout"
+      elif [ "$(verdict "$mutout")" != PASS ]; then
+        bad "M-ID-SET - finding vanished but gate still fails (count check or dupe check may overlap)"
+        detail "$mutout"
+      else
+        ok "M-ID-SET disabling exact-ID set comparison makes the swap invisible — the predicate is load-bearing"
+        MUT=$((MUT + 1))
+      fi
+      rm -rf "$d"
+    fi
+  fi
+fi
+
 printf '\n'
 if [ "$FAILURES" -eq 0 ]; then
   printf 'selftest-derived-counts: PASS (%d positive, %d negative, %d mutation self-check(s) — every case ran against the production guard)\n' \

@@ -154,6 +154,19 @@ jobs:
         # present, the property it claimed was never actually carried.
         run: ./scripts/selftest-derived-counts.sh
 
+      - name: selftest-release-debt
+        # Issue #20 AC5: the selftest must run in CI to prove the release-debt
+        # gate boundary. Without this step the selftest existed on disk but
+        # never ran — the same "registration is not transport" shape that
+        # selftest-derived-counts once had.
+        #
+        # The selftest uses --issues-json (offline mode) so it needs no gh
+        # authentication. It proves: empty → pass (rc=0), open debt → fail
+        # (exactly rc=1, NOT any non-zero), invalid input → inconclusive
+        # (rc=2), and exit-code isolation (rc=2 is never accepted where rc=1
+        # is expected — the mutation that the original selftest could not catch).
+        run: ./scripts/selftest-release-debt.sh
+
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.
     name: cellrebel-auto (unit + lint + assemble)
