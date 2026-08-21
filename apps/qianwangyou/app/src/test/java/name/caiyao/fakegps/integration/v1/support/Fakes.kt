@@ -205,8 +205,23 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         get() = kv.read(SCHEDULE_NAMESPACE, "exhausted") == "1"
         set(value) = kv.write(SCHEDULE_NAMESPACE, "exhausted", if (value) "1" else "0")
 
-    override fun scheduleSnapshot(): ScheduleSnapshot =
-        ScheduleSnapshot(scheduleId, scheduleVersion, currentItemId, itemIds.toList(), exhausted)
+    /**
+     * Durable schedule-PRESENCE discriminator (KB-6 row 17, first leg): the qwy
+     * DB can genuinely hold NO schedule (§6.7.4 three-state model, state 1),
+     * and that state is durable too — a memory-only "no schedule" flag would
+     * be the same fake-green shape F-2 killed for the pointer. Default (key
+     * absent) = a schedule exists, so no existing scenario changes behaviour.
+     */
+    var hasSchedule: Boolean
+        get() = kv.read(SCHEDULE_NAMESPACE, "present") != "0"
+        set(value) = kv.write(SCHEDULE_NAMESPACE, "present", if (value) "1" else "0")
+
+    override fun scheduleSnapshot(): ScheduleSnapshot? =
+        if (!hasSchedule) {
+            null
+        } else {
+            ScheduleSnapshot(scheduleId, scheduleVersion, currentItemId, itemIds.toList(), exhausted)
+        }
 
     override fun advancePointer(fromItemId: String): AdvancePointerOutcome {
         if (failNextAdvancePointer) {

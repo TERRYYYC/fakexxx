@@ -27,6 +27,7 @@ class DurableRecordCodecTest {
         startingEnvironmentRevision = 1L,
         deadlineElapsedRealtimeMs = 100L,
         applyOwnerGeneration = 1L,
+        earnedScheduleRef = "item-1",
     )
 
     @Test
@@ -58,6 +59,75 @@ class DurableRecordCodecTest {
         val got = leaseStore(kv).get("L-null")!!
         assertNull("null release key stays null", got.releaseIdempotencyKey)
         assertNull("null evidence ref stays null", got.recoveryEvidenceRef)
+    }
+
+    /**
+     * #18 adds earnedScheduleRef as provider-internal attribution evidence, but
+     * durable rows written by the immediately preceding provider schema have
+     * only the original 13 fields. An app upgrade must still decode that row;
+     * absence means "unproven" at completeAndAdvance, not a process crash.
+     */
+    @Test
+    fun leaseStore_preAttributionRow_decodesWithUnprovenItemBinding() {
+        val kv = InMemoryDurableKv()
+        val legacyFields = listOf<String?>(
+            "L-legacy", "C", "S", "H", LeaseState.RELEASED.name, "AK",
+            "1", "100", "1", null, "", null, null,
+        )
+        kv.write(
+            "integration.v1.leases",
+            "lease:L-legacy",
+            DurableFieldCodec.encode(legacyFields),
+        )
+
+        val got = leaseStore(kv).get("L-legacy")!!
+        assertNull("legacy row carries no provable item attribution", got.earnedScheduleRef)
+    }
+
+    @Test
+    fun idempotencyStore_sameApplicationDifferentSigners_haveIndependentScopes() {
+        val kv = InMemoryDurableKv()
+        val store = DurableIdempotencyStore(kv)
+        fun record(signer: String, digest: String) = OperationReceiptRecord(
+            callerApplicationId = "C",
+            callerSignerDigest = signer,
+            operation = ContractOperation.APPLY,
+            idempotencyKey = "K",
+            requestDigest = digest,
+            resultDigest = "",
+            receiptPayload = "payload-$signer",
+            createdAtElapsedRealtimeMs = 1L,
+        )
+
+        store.record(record("S1", "D1"))
+        store.record(record("S2", "D2"))
+
+        assertEquals("D1", store.find("C", "S1", ContractOperation.APPLY, "K")?.requestDigest)
+        assertEquals("D2", store.find("C", "S2", ContractOperation.APPLY, "K")?.requestDigest)
+    }
+
+    /**
+     * The previous seven-field receipt schema remains decodable, but carries
+     * no signer proof. Handler-level migration must validate its lease before
+     * replaying or rewriting it under a full-principal key.
+     */
+    @Test
+    fun idempotencyStore_prePrincipalScopeRow_decodesAsUnattributed() {
+        val kv = InMemoryDurableKv()
+        val legacyKey = DurableFieldCodec.encode(
+            listOf("C", ContractOperation.APPLY.name, "K"),
+        )
+        kv.write(
+            DurableIdempotencyStore.RECEIPT_NAMESPACE,
+            legacyKey,
+            DurableFieldCodec.encode(
+                listOf("C", ContractOperation.APPLY.name, "K", "D", "", "1", "payload"),
+            ),
+        )
+
+        val got = DurableIdempotencyStore(kv).find("C", "S1", ContractOperation.APPLY, "K")!!
+        assertEquals("D", got.requestDigest)
+        assertNull("legacy receipt has no signer attribution", got.callerSignerDigest)
     }
 
     @Test
