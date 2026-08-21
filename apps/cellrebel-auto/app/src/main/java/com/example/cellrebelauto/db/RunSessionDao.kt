@@ -34,6 +34,14 @@ interface RunSessionDao {
     @Query("UPDATE run_sessions SET status = 'interrupted', endedAt = :nowMs WHERE status = 'running'")
     suspend fun markStaleRunningSessionsInterrupted(nowMs: Long): Int
 
+    /**
+     * Issue #19: upgrade sessions whose advance records have all been resolved.
+     * Called AFTER the advance recovery sweep resolves all pending/unresolved records.
+     * # 推进收尾：advance 记录全部 resolved 后，将 advance_pending 升级为 completed
+     */
+    @Query("UPDATE run_sessions SET status = 'completed' WHERE status = 'advance_pending'")
+    suspend fun upgradeAdvancePendingSessions(): Int
+
     // # 获取所有会话列表（用于历史查看）
     @Query("SELECT * FROM run_sessions ORDER BY startedAt DESC")
     fun getAllSessions(): Flow<List<RunSession>>

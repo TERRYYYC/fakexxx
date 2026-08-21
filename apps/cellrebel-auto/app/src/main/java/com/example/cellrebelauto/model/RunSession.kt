@@ -14,7 +14,9 @@ data class RunSession(
     val startedAt: Long,
     // # 结束时间戳（null = 仍在运行）
     val endedAt: Long? = null,
-    // # 状态：running / completed / stopped / error
+    // # 状态：running / completed / advance_pending / stopped / error / interrupted
+    // # advance_pending = 所有 task 配额已满但 advance 记录未全部 resolved（§8.1）
+    // # → recovery sweep 解决后自动升级为 completed
     val status: String = "running",
     // # 配置快照（序列化字符串）
     val configSnapshot: String = "",

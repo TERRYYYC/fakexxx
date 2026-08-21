@@ -292,4 +292,135 @@ class MigrationTest {
         assertEquals(8.0, attempt.webBrowsingScore!!, 0.001)
         db.close()
     }
+
+    /**
+     * Builds a genuine v4 database (v3 + stageNotes, WITHOUT advance_records).
+     * # 手工构建真正的 v4 库（v3 全部 + stageNotes 列，无 advance_records 表）
+     */
+    private fun createV4Database() {
+        val helper = object : SQLiteOpenHelper(context, dbName, null, 4) {
+            override fun onCreate(db: SQLiteDatabase) {
+                // # v2 两张旧表（含 planId）
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `run_sessions` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`startedAt` INTEGER NOT NULL, `endedAt` INTEGER, " +
+                        "`status` TEXT NOT NULL, `configSnapshot` TEXT NOT NULL, " +
+                        "`totalCycles` INTEGER NOT NULL, `planId` INTEGER)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `test_results` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`runSessionId` INTEGER NOT NULL, `timestamp` INTEGER NOT NULL, " +
+                        "`webBrowsingScore` REAL NOT NULL, `videoStreamingScore` REAL NOT NULL, " +
+                        "`latitude` REAL NOT NULL, `longitude` REAL NOT NULL, " +
+                        "`cycleIndex` INTEGER NOT NULL, `status` TEXT NOT NULL, " +
+                        "FOREIGN KEY(`runSessionId`) REFERENCES `run_sessions`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_test_results_runSessionId` ON `test_results`(`runSessionId`)")
+                // # v3 三张计划表 + v4 stageNotes
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `location_plans` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`sourceFileName` TEXT NOT NULL, `importedAt` INTEGER NOT NULL, " +
+                        "`globalBufferSeconds` INTEGER NOT NULL, `totalRows` INTEGER NOT NULL, " +
+                        "`totalRequiredSuccesses` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `location_tasks` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`planId` INTEGER NOT NULL, `csvRow` INTEGER NOT NULL, " +
+                        "`longitude` REAL NOT NULL, `latitude` REAL NOT NULL, " +
+                        "`priority` INTEGER NOT NULL, `requiredSuccesses` INTEGER NOT NULL, " +
+                        "`completedSuccesses` INTEGER NOT NULL DEFAULT 0, " +
+                        "`status` TEXT NOT NULL DEFAULT 'pending', " +
+                        "FOREIGN KEY(`planId`) REFERENCES `location_plans`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_location_tasks_planId` ON `location_tasks`(`planId`)")
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `test_attempts` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`taskId` INTEGER NOT NULL, `runSessionId` INTEGER NOT NULL, " +
+                        "`attemptOrdinal` INTEGER NOT NULL, `successOrdinal` INTEGER, " +
+                        "`startedAt` INTEGER NOT NULL, `runningObservedAt` INTEGER, " +
+                        "`endedAt` INTEGER, `status` TEXT NOT NULL, `failureReason` TEXT, " +
+                        "`webBrowsingScore` REAL, `videoStreamingScore` REAL, " +
+                        "`latitude` REAL NOT NULL, `longitude` REAL NOT NULL, " +
+                        "`stageNotes` TEXT, " +
+                        "FOREIGN KEY(`taskId`) REFERENCES `location_tasks`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE, " +
+                        "FOREIGN KEY(`runSessionId`) REFERENCES `run_sessions`(`id`) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_test_attempts_taskId` ON `test_attempts`(`taskId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_test_attempts_runSessionId` ON `test_attempts`(`runSessionId`)")
+            }
+
+            override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+        }
+        helper.writableDatabase.apply {
+            // # Seed: plan, task (completed with 1 success), session, attempt
+            execSQL("INSERT INTO location_plans (id, sourceFileName, importedAt, globalBufferSeconds, totalRows, totalRequiredSuccesses) VALUES (1, 'v4-test.csv', 4000, 60, 1, 1)")
+            execSQL("INSERT INTO location_tasks (id, planId, csvRow, longitude, latitude, priority, requiredSuccesses, completedSuccesses, status) VALUES (1, 1, 1, 116.4, 39.9, 1, 1, 1, 'completed')")
+            execSQL("INSERT INTO run_sessions (id, startedAt, endedAt, status, configSnapshot, totalCycles, planId) VALUES (1, 4100, 4200, 'completed', 'plan:1', 1, 1)")
+            execSQL(
+                "INSERT INTO test_attempts (taskId, runSessionId, attemptOrdinal, successOrdinal, startedAt, runningObservedAt, endedAt, status, failureReason, webBrowsingScore, videoStreamingScore, latitude, longitude, stageNotes) " +
+                    "VALUES (1, 1, 1, 1, 4110, 4120, 4130, 'succeeded', NULL, 8.5, 7.5, 39.9, 116.4, NULL)"
+            )
+            close()
+        }
+        helper.close()
+    }
+
+    @Test
+    fun `migration 4 to 5 creates advance_records and preserves v4 data`() = runTest {
+        createV4Database()
+
+        // # Room v5 打开：跑 MIGRATION_4_5 + schema 校验（不通过会抛异常）
+        val db = openRoomDb()
+
+        // # v4 数据完整保留
+        val plan = db.planDao().getPlanById(1L)!!
+        assertEquals("v4-test.csv", plan.sourceFileName)
+        val task = db.locationTaskDao().getTaskById(1L)!!
+        assertEquals("completed", task.status)
+        assertEquals(1, task.completedSuccesses)
+        val session = db.runSessionDao().getById(1L)!!
+        assertEquals("completed", session.status)
+        val attempt = db.testAttemptDao().getAttemptsForTask(1L).first()
+        assertEquals("succeeded", attempt.status)
+        assertEquals(8.5, attempt.webBrowsingScore!!, 0.001)
+
+        // # advance_records table exists and is writable
+        val advanceDao = db.advanceRecordDao()
+        val record = com.example.cellrebelauto.model.plan.AdvanceRecord(
+            taskId = 1L,
+            idempotencyKey = "adv-migration-test",
+            scheduleId = "plan-1",
+            currentItemId = "task-1",
+            scheduleVersion = 1L,
+            ledgerRef = "auto:ledger:1",
+            verifiedAtElapsedRealtimeMs = 4140L,
+            leaseId = "lease-migration-test",
+            state = "pending",
+            receiptDigest = null,
+            reason = null,
+            createdAt = 4150L,
+        )
+        val recordId = advanceDao.insert(record)
+        assertTrue("advance record ID is positive", recordId > 0)
+
+        // # Can query the record back
+        val unresolved = advanceDao.listAllUnresolved()
+        assertEquals(1, unresolved.size)
+        assertEquals("pending", unresolved[0].state)
+        assertEquals("adv-migration-test", unresolved[0].idempotencyKey)
+
+        // # Foreign key to location_tasks enforced: taskId=1 exists
+        // # (FK violation would throw on insert)
+
+        db.close()
+    }
 }

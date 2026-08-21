@@ -203,6 +203,15 @@ class AutomationEngine(
                             log("Advance recovery: task=${record.taskId} → error: ${e.message}")
                         }
                     }
+                    // # Issue #19: after resolving all advance records, upgrade
+                    // # any prior session that was held in "advance_pending" because
+                    // # its advance records were unresolved at finalization time.
+                    if (store.listAllUnresolved().isEmpty()) {
+                        val upgraded = planRepository.upgradeAdvancePendingSessions()
+                        if (upgraded > 0) {
+                            log("Advance recovery: $upgraded session(s) upgraded advance_pending → completed")
+                        }
+                    }
                 }
             }
 
@@ -507,9 +516,24 @@ class AutomationEngine(
             // # 但投影未完成 = 状态不一致，绝不记 completed）
             tasks = planRepository.getTasks(planId)
             if (PlanScheduler.isPlanComplete(tasks)) {
-                updateState(AutomationState.DONE)
-                planRepository.finishSession(runSessionId, "completed", nowMs(), _cycleCount.value)
-                log("=== Plan completed: ${_cycleCount.value} attempts ===")
+                // # Issue #19 P1-2 (R4): unresolved advance records physically
+                // # prevent session from reaching terminal "completed" state.
+                // # If advance records are still pending/recovery_required/
+                // # provider_unavailable, session → "advance_pending"; the recovery
+                // # sweep at next engine start resolves them and upgrades.
+                val hasUnresolvedAdvance = advanceStateStore
+                    ?.listAllUnresolved()?.isNotEmpty() == true
+                if (hasUnresolvedAdvance) {
+                    updateState(AutomationState.DONE)
+                    planRepository.finishSession(
+                        runSessionId, "advance_pending", nowMs(), _cycleCount.value)
+                    log("=== Plan tasks complete but advance pending — session NOT terminal ===")
+                } else {
+                    updateState(AutomationState.DONE)
+                    planRepository.finishSession(
+                        runSessionId, "completed", nowMs(), _cycleCount.value)
+                    log("=== Plan completed: ${_cycleCount.value} attempts ===")
+                }
             } else {
                 updateState(AutomationState.ERROR)
                 planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)

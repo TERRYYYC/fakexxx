@@ -166,6 +166,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markStaleSessionsInterrupted(nowMs: Long): Int =
         db.runSessionDao().markStaleRunningSessionsInterrupted(nowMs)
 
+    // # Issue #19: advance_pending → completed（全部 advance 记录 resolved 后升级）
+    suspend fun upgradeAdvancePendingSessions(): Int =
+        db.runSessionDao().upgradeAdvancePendingSessions()
+
     // ---- Task lifecycle ----
 
     suspend fun markTaskActive(taskId: Long) = db.locationTaskDao().updateTaskStatus(taskId, "active")
