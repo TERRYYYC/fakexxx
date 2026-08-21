@@ -177,14 +177,18 @@ class EnvironmentControlClient(private val context: Context) {
     }
 
     companion object {
-        /** §6.1 frozen service class; the package half varies by build type. */
-        const val PROVIDER_SERVICE_CLASS =
-            "name.caiyao.fakegps.integration.v1.EnvironmentControlService"
+        /**
+         * §6.1 frozen service class; the package half varies by build type.
+         *
+         * References the contract-module constant so Auto source never contains
+         * the provider package as a string literal (INV-01, M-BP-02).
+         */
+        const val PROVIDER_SERVICE_CLASS = ContractV1.SERVICE_CLASS_NAME
 
         /** Debug first: a developer device most often has the .bench build on it. */
         val PROVIDER_PACKAGES = arrayOf(
-            "name.caiyao.fakegps.bench",
-            "name.caiyao.fakegps",
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH,
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
         )
 
         /** §6.8: the version this client speaks, surfaced for skew reporting. */
