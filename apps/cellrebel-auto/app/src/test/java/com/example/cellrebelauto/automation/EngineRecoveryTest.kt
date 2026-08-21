@@ -5,8 +5,10 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.automation.advance.AdvanceCoordinator
 import com.example.cellrebelauto.automation.advance.AdvanceStateStore
 import com.example.cellrebelauto.automation.advance.PendingProviderGateway
+import com.example.cellrebelauto.automation.advance.ProviderGateway
 import com.example.cellrebelauto.automation.advance.RoomAdvanceStateStore
 import com.example.cellrebelauto.automation.advance.RoomQuotaReader
+import com.example.cellrebelauto.automation.advance.ScheduleContext
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
@@ -458,9 +460,11 @@ class EngineRecoveryTest {
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `provider unavailable prevents session from reaching completed`() = runTest {
-        // # Real AutomationEngine + Room + RoomAdvanceStateStore:
-        // # Prove unresolved advance records physically prevent session "completed".
+    fun `provider unavailable is terminal and session completes`() = runTest {
+        // # R5 P1-1: PendingProviderGateway throws → record resolved as
+        // # provider_unavailable (TERMINAL). Synthetic identity is NOT replayed.
+        // # Session reaches "completed" because provider_unavailable is not
+        // # counted as unresolved.
         val (planId, _) = seedPlan(quota = 1)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
@@ -472,51 +476,73 @@ class EngineRecoveryTest {
         val coordinator = AdvanceCoordinator(providerGateway, quotaReader)
         val advanceStore = RoomAdvanceStateStore(db.advanceRecordDao())
 
-        // # Engine run: success → quota met → advance fails (provider unavailable)
+        // # Engine run: success → quota met → advance call → provider throws →
+        // # record resolved as provider_unavailable (terminal)
         buildEngine(planId, runner, gps, clock,
             advanceCoordinator = coordinator, advanceStateStore = advanceStore).run()
 
-        // # KEY: session is "advance_pending", NOT "completed"
+        // # KEY (R5 P1-1): provider_unavailable is TERMINAL — session "completed"
         val session = db.runSessionDao().getLatest()!!
-        assertEquals("session must NOT be terminal",
-            "advance_pending", session.status)
+        assertEquals("provider_unavailable is terminal → session completed",
+            "completed", session.status)
 
-        // # Advance records are unresolved in Room
+        // # Zero unresolved records (provider_unavailable excluded)
         val unresolved = advanceStore.listAllUnresolved()
-        assertTrue("unresolved advance records must exist in Room",
-            unresolved.isNotEmpty())
+        assertTrue("no unresolved advance records",
+            unresolved.isEmpty())
 
-        // # Task IS completed (quota met, measurements done) — it's the
-        // # session that's blocked, not the task
+        // # Advance record exists in Room with terminal state
+        val allRecords = db.advanceRecordDao().listAllUnresolved()
+        assertTrue("provider_unavailable excluded from unresolved query",
+            allRecords.isEmpty())
+
+        // # Task IS completed (quota met, measurements done)
         val task = db.locationTaskDao().getTasksForPlan(planId).first()
         assertEquals("completed", task.status)
         assertEquals(1, task.completedSuccesses)
     }
 
     @Test
-    fun `advance resolved externally then recovery sweep upgrades session`() = runTest {
-        // # Real AutomationEngine + Room restart: prove that after advance records
-        // # are resolved (by real provider on a future run), the recovery sweep
-        // # upgrades advance_pending → completed.
+    fun `transient advance error keeps session advance_pending then recovery upgrades`() = runTest {
+        // # Prove the advance_pending → completed upgrade path for GENUINE
+        // # unresolved records (pending/recovery_required, NOT provider_unavailable).
+        // # Uses a gateway that throws RuntimeException (transient error) — the
+        // # engine's general-exception handler leaves the record as "pending"
+        // # (unresolved), which blocks the session in "advance_pending".
         val (planId, _) = seedPlan(quota = 1)
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
 
+        // # Gateway that throws RuntimeException (not ProviderNotAvailableException).
+        // # The engine's general catch(e: Exception) leaves the record as "pending".
+        val transientErrorGateway = object : ProviderGateway {
+            override suspend fun completeAndAdvance(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+            ) = throw RuntimeException("transient provider error")
+            override suspend fun observe(leaseId: String, context: ScheduleContext) =
+                throw RuntimeException("transient")
+            override suspend fun discover() =
+                throw RuntimeException("transient")
+        }
         val quotaReader = RoomQuotaReader(repo)
-        val providerGateway = PendingProviderGateway()
-        val coordinator = AdvanceCoordinator(providerGateway, quotaReader)
+        val coordinator = AdvanceCoordinator(transientErrorGateway, quotaReader)
         val advanceStore = RoomAdvanceStateStore(db.advanceRecordDao())
 
-        // # First run: session → advance_pending (provider unavailable)
+        // # First run: success → quota met → advance call → transient error →
+        // # record stays "pending" (unresolved) → session "advance_pending"
         buildEngine(planId, runner, gps, clock,
             advanceCoordinator = coordinator, advanceStateStore = advanceStore).run()
         val session1 = db.runSessionDao().getLatest()!!
-        assertEquals("advance_pending", session1.status)
+        assertEquals("transient error → advance_pending",
+            "advance_pending", session1.status)
 
-        // # Simulate external resolution: real provider resolved all advance records
-        // # (e.g., real AIDL ProviderGateway handled them between runs).
+        // # Record is "pending" (unresolved) — not provider_unavailable
         val unresolved = advanceStore.listAllUnresolved()
+        assertEquals("one pending record", 1, unresolved.size)
+        assertEquals("pending", unresolved[0].state)
+
+        // # Simulate external resolution between runs
         for (record in unresolved) {
             advanceStore.resolve(record.id, "advanced", "digest-ok", null)
         }

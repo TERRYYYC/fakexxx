@@ -483,11 +483,13 @@ class AutomationEngine(
                                                 log("WARNING: advance RECOVERY_REQUIRED: ${decision.reason}")
                                         }
                                     } catch (e: ProviderNotAvailableException) {
-                                        // PendingProviderGateway (pre-PR#36): record already
-                                        // persisted; recovery sweep will retry when real gateway
-                                        // is wired. Do NOT resolve here — leave as "pending"
-                                        // so recovery sweep picks it up.
-                                        log("Advance: provider not available — persisted for recovery")
+                                        // # Issue #19 R5 P1-1 fix: provider structurally
+                                        // # unavailable (PendingProviderGateway / pre-PR#36).
+                                        // # Resolve immediately as terminal — synthetic identity
+                                        // # values must NOT be replayed when real gateway arrives.
+                                        // # New sessions with real gateway create fresh records.
+                                        store.resolve(recordId, "provider_unavailable", null, e.message)
+                                        log("Advance: provider not available — resolved terminal (provider_unavailable)")
                                     } catch (e: CancellationException) {
                                         throw e
                                     } catch (e: Exception) {
@@ -516,11 +518,12 @@ class AutomationEngine(
             // # 但投影未完成 = 状态不一致，绝不记 completed）
             tasks = planRepository.getTasks(planId)
             if (PlanScheduler.isPlanComplete(tasks)) {
-                // # Issue #19 P1-2 (R4): unresolved advance records physically
-                // # prevent session from reaching terminal "completed" state.
-                // # If advance records are still pending/recovery_required/
-                // # provider_unavailable, session → "advance_pending"; the recovery
-                // # sweep at next engine start resolves them and upgrades.
+                // # Issue #19 P1-2 (R4) + R5 P1-1: unresolved advance records
+                // # physically prevent session from reaching "completed".
+                // # Unresolved = pending | recovery_required (NOT provider_unavailable,
+                // # which is terminal — R5 P1-1). provider_unavailable records with
+                // # synthetic identity are resolved immediately, so PendingProviderGateway
+                // # sessions reach "completed" directly.
                 val hasUnresolvedAdvance = advanceStateStore
                     ?.listAllUnresolved()?.isNotEmpty() == true
                 if (hasUnresolvedAdvance) {

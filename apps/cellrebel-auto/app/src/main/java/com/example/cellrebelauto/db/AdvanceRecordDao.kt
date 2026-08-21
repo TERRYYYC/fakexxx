@@ -18,12 +18,14 @@ interface AdvanceRecordDao {
 
     /**
      * Find the latest unresolved advance for a task.
-     * Unresolved states: pending, recovery_required, provider_unavailable.
-     * # 查找某任务最新的未解决推进记录
+     * Unresolved states: pending, recovery_required.
+     * provider_unavailable is TERMINAL — records with synthesized identity
+     * (pre-PR#36) must not be replayed when a real gateway arrives (R5 P1-1).
+     * # 查找某任务最新的未解决推进记录。provider_unavailable 是终态不重放。
      */
     @Query(
         "SELECT * FROM advance_records " +
-            "WHERE taskId = :taskId AND state IN ('pending', 'recovery_required', 'provider_unavailable') " +
+            "WHERE taskId = :taskId AND state IN ('pending', 'recovery_required') " +
             "ORDER BY id DESC LIMIT 1"
     )
     suspend fun getUnresolved(taskId: Long): AdvanceRecord?
@@ -40,11 +42,15 @@ interface AdvanceRecordDao {
 
     /**
      * List ALL unresolved records (for recovery sweep at engine start).
-     * # 列出全部未解决记录（引擎启动时恢复清扫用）
+     * Only pending and recovery_required are replayed.
+     * provider_unavailable is TERMINAL — synthetic identity must not reach
+     * a real gateway. New sessions create fresh records with real identity.
+     * # 列出全部未解决记录（引擎启动时恢复清扫用）。
+     * # provider_unavailable 是终态，不参与重放。
      */
     @Query(
         "SELECT * FROM advance_records " +
-            "WHERE state IN ('pending', 'recovery_required', 'provider_unavailable') " +
+            "WHERE state IN ('pending', 'recovery_required') " +
             "ORDER BY id ASC"
     )
     suspend fun listAllUnresolved(): List<AdvanceRecord>

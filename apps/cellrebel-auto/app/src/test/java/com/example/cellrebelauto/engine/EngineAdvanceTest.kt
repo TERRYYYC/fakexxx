@@ -228,7 +228,9 @@ class EngineAdvanceTest {
     }
 
     @Test
-    fun recovery_thresholdAtCrash_secondSweep_replaysAgain() = runBlocking {
+    fun recovery_thresholdAtCrash_secondSweep_doesNotReplay_providerUnavailableTerminal() = runBlocking {
+        // R5 P1-1: provider_unavailable is TERMINAL — synthetic identity must
+        // not be replayed when a real gateway arrives. Second sweep makes ZERO calls.
         val gateway = CountingProviderGateway()
         val quotaReader = ConfigurableQuotaReader(count = 3)
         val coordinator = AdvanceCoordinator(gateway, quotaReader)
@@ -237,14 +239,16 @@ class EngineAdvanceTest {
         store.createPending(taskId = 100L, idempotencyKey = "adv-t2",
             scheduleContext = defaultCtx, leaseId = "lease-1")
 
-        // First sweep
+        // First sweep: pending → provider calls → provider throws → provider_unavailable
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
         assertEquals(1, gateway.completeAndAdvanceCount)
         assertEquals("provider_unavailable", store.allRecords[0].state)
 
-        // provider_unavailable is an unresolved state — second sweep retries
+        // Second sweep: provider_unavailable is TERMINAL — not in listAllUnresolved()
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
-        assertEquals("second sweep retries", 2, gateway.completeAndAdvanceCount)
+        assertEquals("provider_unavailable is terminal — zero second-sweep calls",
+            1, gateway.completeAndAdvanceCount) // still 1, not 2
+        assertEquals("no unresolved records", 0, store.listAllUnresolved().size)
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -252,9 +256,10 @@ class EngineAdvanceTest {
     // ════════════════════════════════════════════════════════════════════════
 
     @Test
-    fun advanceFailure_recordStaysRecoveryRequired() = runBlocking {
-        // Use PendingProviderGateway (production pre-PR#36 stub) — every call
-        // throws ProviderNotAvailableException
+    fun advanceFailure_providerUnavailable_isTerminal() = runBlocking {
+        // R5 P1-1: PendingProviderGateway (production pre-PR#36 stub) throws
+        // ProviderNotAvailableException → record resolved as provider_unavailable
+        // (TERMINAL). Synthetic identity must not be replayed.
         val gateway = PendingProviderGateway()
         val quotaReader = ConfigurableQuotaReader(count = 3) // at threshold
         val coordinator = AdvanceCoordinator(gateway, quotaReader)
@@ -265,14 +270,12 @@ class EngineAdvanceTest {
 
         runRecoverySweep(store, coordinator, mapOf(100L to 3))
 
-        // The record is NOT terminal from the advance protocol perspective —
-        // it's in provider_unavailable, meaning the advance has not completed.
-        // The plan's task status is completely separate from advance state.
+        // provider_unavailable is TERMINAL — record is resolved, not unresolved
         val records = store.allRecords
         assertEquals(1, records.size)
         assertEquals("provider_unavailable", records[0].state)
-        // provider_unavailable IS an unresolved state — listAllUnresolved returns it
-        assertEquals("record is still unresolved", 1, store.listAllUnresolved().size)
+        assertEquals("provider_unavailable is terminal — zero unresolved",
+            0, store.listAllUnresolved().size)
     }
 
     @Test

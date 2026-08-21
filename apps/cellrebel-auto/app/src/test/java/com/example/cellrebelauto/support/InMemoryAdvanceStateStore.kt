@@ -77,6 +77,8 @@ class InMemoryAdvanceStateStore : AdvanceStateStore {
     }
 
     companion object {
-        private val UNRESOLVED_STATES = setOf("pending", "recovery_required", "provider_unavailable")
+        // provider_unavailable is TERMINAL (R5 P1-1): synthetic identity must
+        // not be replayed when a real gateway arrives.
+        private val UNRESOLVED_STATES = setOf("pending", "recovery_required")
     }
 }

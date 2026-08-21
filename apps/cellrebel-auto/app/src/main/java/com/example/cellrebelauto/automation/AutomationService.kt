@@ -284,10 +284,10 @@ class AutomationService : AccessibilityService() {
 
             // # Issue #19: production advance protocol wiring.
             // # PendingProviderGateway is the pre-PR#36 stub — every provider call
-            // # throws ProviderNotAvailableException, which the engine persists as
-            // # "provider_unavailable" for the recovery sweep to retry when the real
-            // # ProviderGateway lands. The quota gate still fires and the advance state
-            // # is durably persisted.
+            // # throws ProviderNotAvailableException. The engine resolves the advance
+            // # record as "provider_unavailable" (TERMINAL — R5 P1-1). Synthetic
+            // # identity values are NOT replayed when real gateway arrives.
+            // # The quota gate still fires and the advance state is durably persisted.
             val quotaReader = RoomQuotaReader(planRepository)
             val providerGateway = PendingProviderGateway()
             val advanceCoordinator = AdvanceCoordinator(providerGateway, quotaReader)

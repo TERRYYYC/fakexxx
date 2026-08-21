@@ -43,7 +43,9 @@ interface AdvanceStateStore {
  * - `"advanced"`: non-terminal advance independently verified (terminal)
  * - `"exhausted"`: terminal advance independently verified (terminal)
  * - `"recovery_required"`: digest/tuple mismatch detected (non-terminal — must retry)
- * - `"provider_unavailable"`: provider threw (non-terminal — retry when available)
+ * - `"provider_unavailable"`: provider structurally absent (TERMINAL — R5 P1-1).
+ *   Records with synthesized identity (pre-PR#36) must not be replayed
+ *   when a real gateway arrives. New sessions create fresh records.
  */
 data class PendingAdvance(
     val id: Long,
