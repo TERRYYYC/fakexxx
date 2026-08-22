@@ -231,6 +231,34 @@ else
 fi
 rm -rf "$D"
 
+# P-5: exact-ID set equality between §10 (matrix) and §10.1 (ledger). Sol R3 P1-4
+# proved that renaming M-AD-14→M-AD-140 in one table passed the count check (the
+# count stays the same). The ID-set guard must catch the drift.
+D="$(mk)"
+# Rename M-AD-14 to M-AD-140 in the LEDGER row only (the one with `owner-red`).
+# The matrix row (line ~2564) still says M-AD-14 → ID sets disagree.
+P5_OLD='| `M-AD-14` | advance | `owner-red`'
+P5_NEW='| `M-AD-140` | advance | `owner-red`'
+if ! apply "$D" "$SPEC" "$P5_OLD" "$P5_NEW" 2>/dev/null; then
+  bad "P-5 - INCONCLUSIVE: plant did not apply; the case never ran"
+else
+  OUT="$(run_gate "$D")"
+  if ! healthy "$OUT"; then
+    bad "P-5 - INCONCLUSIVE: the guard did not complete a scan"
+    detail "$OUT"
+  elif [ "$(verdict "$OUT")" != FAIL ]; then
+    bad "P-5 - renaming M-AD-14→M-AD-140 in the ledger did NOT trigger FAIL (ID-set drift missed)"
+    detail "$OUT"
+  elif ! printf '%s' "$OUT" | grep -qF 'M-AD-140'; then
+    bad "P-5 - the guard went FAIL but did not name M-AD-140 as the drifted ID"
+    detail "$OUT"
+  else
+    ok "P-5 exact-ID set equality: ledger-only rename caught (M-AD-14→M-AD-140)"
+    POS=$((POS + 1))
+  fi
+fi
+rm -rf "$D"
+
 # ---------------------------------------------------------------------------
 printf '\n== negative (a planted notation drift; the guard must name it) ==\n'
 

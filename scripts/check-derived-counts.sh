@@ -137,6 +137,19 @@ else
   fail "§10 has $MATRIX rows but §10.1 has $TOTAL -- one table was edited alone"
 fi
 
+# Sol R3 P1-4: exact-ID set equality, not just count. Renaming M-AD-14→M-AD-140
+# in one table and not the other still passes the count check but is a real drift.
+LEDGER_IDS=$(ledger_rows | sed -E 's/^\| `(M-[A-Z]{2}-[0-9]+)`.*/\1/' | sort)
+MATRIX_IDS=$(matrix_rows | sed -E 's/^\| `(M-[A-Z]{2}-[0-9]+)`.*/\1/' | sort)
+ONLY_IN_LEDGER=$(comm -23 <(echo "$LEDGER_IDS") <(echo "$MATRIX_IDS"))
+ONLY_IN_MATRIX=$(comm -13 <(echo "$LEDGER_IDS") <(echo "$MATRIX_IDS"))
+if [ -z "$ONLY_IN_LEDGER" ] && [ -z "$ONLY_IN_MATRIX" ]; then
+  pass "§10 and §10.1 contain the exact same ID set"
+else
+  [ -n "$ONLY_IN_LEDGER" ] && fail "IDs in §10.1 (ledger) but not §10 (matrix): $(echo "$ONLY_IN_LEDGER" | tr '\n' ' ')"
+  [ -n "$ONLY_IN_MATRIX" ] && fail "IDs in §10 (matrix) but not §10.1 (ledger): $(echo "$ONLY_IN_MATRIX" | tr '\n' ' ')"
+fi
+
 DUPES=$(ledger_rows | sed -E 's/^\| `(M-[A-Z]{2}-[0-9]+)`.*/\1/' | sort | uniq -d)
 if [ -z "$DUPES" ]; then
   pass "no duplicate ledger row IDs"

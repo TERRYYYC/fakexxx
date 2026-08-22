@@ -250,6 +250,34 @@ jobs:
             apps/qianwangyou/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
 
+  release-debt:
+    # Gate that proves open contract-v1.1-debt blocks release (Issue #19/#20).
+    # Runs the full selftest suite (12 cases) and matrix coverage check (M-AD-14..19).
+    # This job is the TRANSPORT for KB-7: "registration is not transport" — without
+    # this step, the gate exists but never runs in CI, which is the same as not existing.
+    name: release-debt (selftest + matrix coverage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: selftest-release-debt
+        run: ./scripts/selftest-release-debt.sh
+
+      - name: check-matrix-coverage
+        run: ./scripts/check-matrix-coverage.sh
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: gradle wrapper is executable
+        run: chmod +x apps/cellrebel-auto/gradlew
+
+      - name: advance matrix tests (M_AD_14..19)
+        working-directory: apps/cellrebel-auto
+        run: ./gradlew --no-daemon :app:testDebugUnitTest --tests "com.example.cellrebelauto.matrix.AdvanceMatrixTest"
+
   acceptance:
     # Independent acceptance harness (#6). Exercises the v1 contract through a
     # fake-qwy provider that shares ZERO code with the production provider.

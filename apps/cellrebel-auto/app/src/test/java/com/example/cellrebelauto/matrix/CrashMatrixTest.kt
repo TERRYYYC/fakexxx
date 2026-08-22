@@ -215,9 +215,9 @@ class CrashMatrixTest {
         )
     }
 
-    private suspend fun seedPlan(taskId: Long): Long {
-        val planId = db.planDao().insertPlan(LocationPlan(sourceFileName = "m.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1))
-        db.planDao().insertTasks(listOf(LocationTask(id = taskId, planId = planId, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1)))
+    private suspend fun seedPlan(taskId: Long, requiredSuccesses: Int = 1): Long {
+        val planId = db.planDao().insertPlan(LocationPlan(sourceFileName = "m.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = requiredSuccesses))
+        db.planDao().insertTasks(listOf(LocationTask(id = taskId, planId = planId, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = requiredSuccesses)))
         return planId
     }
 
@@ -902,7 +902,13 @@ class CrashMatrixTest {
     @Test
     fun `M_CR_07`() = runTest {
         val taskId = 42L
-        val planId = seedPlan(taskId = taskId)
+        // requiredSuccesses=2: one trusted entry (trustedCount=1) < required → quota NOT met →
+        // skips the advance path entirely (no anchor needed). M_CR_07 tests trusted-entry projection
+        // to succeeded, not the advance; the advance path is M_AD_14's domain.
+        // Sol R3 P1-1 fix: anchor null + quota met = invariant break → RECOVERY_REQUIRED. Before
+        // this fix, DECIDING was exempted; after, all phases are treated uniformly. Setting quota=2
+        // avoids the anchor gate while preserving the test's core semantics.
+        val planId = seedPlan(taskId = taskId, requiredSuccesses = 2)
         seedAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val insertedId = db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
         val seededEntry = TrustedQuotaEntry(id = insertedId, attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L)

@@ -1,0 +1,113 @@
+{
+  "$schema": "evidence-manifest-v1",
+  "description": "Issue #19/#20 closure evidence — canonical delta on origin/main@69c2acc",
+  "closesIssues": [19, 20],
+  "branch": "fix/issue19-20-canonical-delta",
+  "ciJob": "release-debt",
+  "liveIssues": 2,
+  "liveTransport": {
+    "workflow": ".github/workflows/android-a-plus.yml",
+    "job": "release-debt",
+    "steps": ["selftest-release-debt", "check-matrix-coverage", "advance matrix tests (M_AD_14..19)"],
+    "note": "2 live issues (#19, #20); CI transport covers selftest + matrix coverage + unit tests"
+  },
+  "evidenceEntrypoints": [
+    {
+      "id": "E-19-G1",
+      "issue": 19,
+      "group": 1,
+      "title": "QUOTA_COMMITTED/RELEASED crash recovery dispatches advance only when quota reached",
+      "kind": "unit-test",
+      "file": "apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/automation/EngineQuotaRecoveryRedTest.kt",
+      "testClass": "com.example.cellrebelauto.automation.EngineQuotaRecoveryRedTest",
+      "coverage": [
+        "M-AD-14: quota not met → no advance",
+        "M-AD-15: crash between quota commit and met determination"
+      ],
+      "killsMutation": "removing the >= guard on trustedCount vs requiredSuccesses"
+    },
+    {
+      "id": "E-19-G2",
+      "issue": 19,
+      "group": 2,
+      "title": "Trusted-ledger replay idempotency: no second advance after engine re-run",
+      "kind": "unit-test",
+      "file": "apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/automation/EngineQuotaRecoveryRedTest.kt",
+      "testClass": "com.example.cellrebelauto.automation.EngineQuotaRecoveryRedTest",
+      "tests": [
+        "a QUOTA_COMMITTED crash with quota NOT reached dispatches NO advance but closes succeeded",
+        "a RELEASED crash with quota NOT reached dispatches NO advance but closes succeeded",
+        "over-quota QUOTA_COMMITTED crash dispatches the advance exactly once",
+        "after quota-recovery closes the attempt a second engine run dispatches NO advance"
+      ],
+      "killsMutation": "using == instead of >= (misses over-quota); removing finalize (enables second replay)"
+    },
+    {
+      "id": "E-19-G3",
+      "issue": 19,
+      "group": 3,
+      "title": "Stable M-AD-16..18: four-leg observe/readback independent negatives",
+      "kind": "unit-test",
+      "file": "apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/automation/EngineAdvanceRecoveryOracleTest.kt",
+      "testClass": "com.example.cellrebelauto.automation.EngineAdvanceRecoveryOracleTest",
+      "tests": [
+        "M-AD-16 an EXHAUSTED receipt with a forged digest fail-closes the recovery",
+        "M-AD-16 supplement - an honest EXHAUSTED receipt with a matching readback closes trusted",
+        "M-AD-17 a non-terminal observe with intentHash mismatch fail-closes independently",
+        "M-AD-18 a non-terminal observe with environmentRevision mismatch fail-closes independently",
+        "M-AD-18 supplement - a non-terminal observe with scheduleVersion mismatch fail-closes independently"
+      ],
+      "coverage": [
+        "M-AD-16: exhausted receipt digest mismatch → RECOVERY_REQUIRED",
+        "M-AD-17: non-terminal observe intentHash mismatch → RECOVERY_REQUIRED",
+        "M-AD-18: non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED",
+        "M-AD-18 supplement: scheduleVersion mismatch → RECOVERY_REQUIRED"
+      ],
+      "killsMutation": "removing any single leg from the four-leg conjunction"
+    },
+    {
+      "id": "E-19-MATRIX",
+      "issue": 19,
+      "group": "canonical-matrix",
+      "title": "Stable AdvanceMatrixTest::M_AD_14..19 — spec-referenced exact-ID entry points",
+      "kind": "unit-test",
+      "file": "apps/cellrebel-auto/app/src/test/java/com/example/cellrebelauto/matrix/AdvanceMatrixTest.kt",
+      "testClass": "com.example.cellrebelauto.matrix.AdvanceMatrixTest",
+      "tests": [
+        "M_AD_14: quota not met → no advance (trustedCount < required ⇒ advanceReplays=0)",
+        "M_AD_15: DECIDING crash window with pre-existing mint → no ABORT",
+        "M_AD_16: exhausted receipt forged-digest → RECOVERY_REQUIRED",
+        "M_AD_17: non-terminal observe intentHash mismatch → RECOVERY_REQUIRED (typed leg)",
+        "M_AD_18: non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED (typed leg)",
+        "M_AD_19: cross-fork same-key replay → idempotent (0 second-run replays)"
+      ],
+      "coverage": [
+        "M-AD-14: quota not met → no advance",
+        "M-AD-15: crash between quota commit and met determination",
+        "M-AD-16: exhausted receipt digest mismatch → RECOVERY_REQUIRED",
+        "M-AD-17: non-terminal observe intentHash mismatch → RECOVERY_REQUIRED",
+        "M-AD-18: non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED",
+        "M-AD-19: cross-fork same-key replay → idempotent"
+      ],
+      "killsMutation": "removing any single M_AD_* test → check-matrix-coverage.sh exits 1",
+      "guardedBy": "scripts/check-matrix-coverage.sh"
+    },
+    {
+      "id": "E-20-GATE",
+      "issue": 20,
+      "group": 4,
+      "title": "CI release-debt gate proves open debt blocks release (exact-ID #19/#20)",
+      "kind": "shell-selftest",
+      "file": "scripts/selftest-release-debt.sh",
+      "gate": "scripts/check-release-debt.sh",
+      "tests": [
+        "N-5: #19 alone → exact rc=1",
+        "N-6: #20 alone → exact rc=1",
+        "N-7: #19+#20 → rc=1 AND both issue numbers listed in output",
+        "N-8: empty (post-closure) → rc=0 (gate is structural, not hardcoded)",
+        "N-9: check-matrix-coverage.sh → rc=0 (all M-AD IDs present)"
+      ],
+      "killsMutation": "removing the len(issues) > 0 check; hardcoding specific issue numbers; deleting any M_AD_* test method"
+    }
+  ]
+}

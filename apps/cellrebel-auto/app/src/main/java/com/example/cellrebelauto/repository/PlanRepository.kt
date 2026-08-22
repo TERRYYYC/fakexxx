@@ -250,6 +250,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markAplusState(attemptId: Long, aplusState: String) =
         db.testAttemptDao().markAplusState(attemptId, aplusState)
 
+    /** Atomically mark RECOVERY_REQUIRED with durable typed reason (Sol R2 P1-3). */
+    suspend fun markRecoveryRequired(attemptId: Long, reason: String) =
+        db.testAttemptDao().markRecoveryRequired(attemptId, reason)
+
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
         db.testAttemptDao().markAplusLease(attemptId, leaseId)
 
@@ -535,7 +539,18 @@ class PlanRepository(private val db: AppDatabase) {
         // execution row itself is the audit trail. Decision stays FAIL in that case.
         val attempt = db.testAttemptDao().getAttemptById(ctx.execution.attemptId)
         if (decision == TrustDecision.PASS && attempt != null) {
-            db.trustedQuotaDao().insert(
+            // Recovery-safe (P1-2 Sol Issue #19/#20): the DECIDING crash window (ledger committed
+            // but phase string not yet persisted as QUOTA_COMMITTED) causes redecideDecidingAttempt
+            // to re-invoke this method. If the prior mint survived the crash, insertIfAbsent is a
+            // no-op — the trusted count projection is idempotent (it counts existing rows).
+            // Using plain insert() here would ABORT the entire recovery transaction and leave the
+            // attempt stuck at DECIDING forever.
+            //
+            // Sol R2 P1-2: after IGNORE conflict, read back existing row and verify immutable field
+            // equality. A corrupted row (wrong taskId/evidenceDigest) must fail-closed, never be
+            // silently accepted. The IGNORE itself is correct (prevents ABORT), but we must validate
+            // that the existing row is the SAME mint, not a corrupted/different one.
+            val inserted = db.trustedQuotaDao().insertIfAbsent(
                 TrustedQuotaEntry(
                     attemptId = ctx.execution.attemptId,
                     taskId = attempt.taskId,
@@ -543,6 +558,21 @@ class PlanRepository(private val db: AppDatabase) {
                     committedAt = commitClockMs
                 )
             )
+            if (inserted == -1L) {
+                // IGNORE fired: row already exists. Read back and verify immutable fields match.
+                val existing = db.trustedQuotaDao().getByAttempt(ctx.execution.attemptId)
+                if (existing == null || existing.taskId != attempt.taskId ||
+                    existing.evidenceDigest != ctx.execution.evidencePayloadDigest) {
+                    // Immutable field mismatch: a corrupted row exists. Fail-closed.
+                    throw IllegalStateException(
+                        "TRUSTED_LEDGER_CORRUPTION: existing TrustedQuotaEntry for attempt " +
+                        "${ctx.execution.attemptId} has mismatched immutable fields " +
+                        "(taskId=${existing?.taskId} vs ${attempt.taskId}, " +
+                        "evidenceDigest=${existing?.evidenceDigest} vs ${ctx.execution.evidencePayloadDigest})"
+                    )
+                }
+                // Fields match: legitimate DECIDING crash window re-mint. No-op, proceed.
+            }
         } else if (decision == TrustDecision.FAIL && attempt != null) {
             // FAIL for a REAL attempt: the exact unverified carrier (typed reason + evidence digest).
             db.unverifiedAttemptRecordDao().insert(
