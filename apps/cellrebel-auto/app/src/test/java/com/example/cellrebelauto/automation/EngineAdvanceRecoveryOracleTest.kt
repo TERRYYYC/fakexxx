@@ -283,4 +283,198 @@ class EngineAdvanceRecoveryOracleTest {
             "RECOVERY_REQUIRED", attempt.aplusState
         )
     }
+
+    // ====================================================================================
+    // Group 3 (Sol closure verdict Issue #19): Stable M-AD-14..19 evidence.
+    // Exhausted forged-digest, intent-hash/revision independent negatives, recovery/idempotence.
+    //
+    // M-AD-14/15/19 are covered by EngineQuotaRecoveryRedTest (Groups 1 & 2).
+    // M-AD-16: Exhausted receipt with forged digest → RECOVERY_REQUIRED
+    // M-AD-17: Non-terminal observe intentHash mismatch → RECOVERY_REQUIRED
+    // M-AD-18: Non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED
+    // M-AD-18 supplement: Non-terminal observe scheduleVersion mismatch → RECOVERY_REQUIRED
+    //
+    // Each test independently proves ONE verification leg — a single-leg checker would miss
+    // the others' failure modes. Only the full four-leg conjunction + receipt-digest binding
+    // satisfies all assertions simultaneously.
+    //
+    // # M-AD-16..18 稳定证据：耗尽伪摘要、意图/修订独立反面、恢复/幂等
+    // ====================================================================================
+
+    /** Builds an engine with a custom executor (for tamper tests). */
+    private fun buildEngineWith(planId: Long, clock: VClock, executor: ExternalApplyExecutor): AutomationEngine {
+        val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
+            executor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+        )
+        return AutomationEngine(
+            planId = planId, planRepository = repo,
+            cellRebelRunner = object : CellRebelRunner {
+                override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome =
+                    AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
+            },
+            gpsSetter = object : GpsLocationSetter {
+                override suspend fun setLocation(lat: Double, lng: Double) = GpsOutcome.Active
+            },
+            bufferGate = com.example.cellrebelauto.automation.plan.BufferGate(0, clock.nowMs),
+            testTimeoutMs = 90_000L, gpsSettleMs = 0L,
+            nowMs = clock.nowMs, delayMs = clock.delayMs,
+            attemptDriver = com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao()),
+            recoveryCoordinator = coordinator,
+            completionEvidenceSource = minimalEvidenceSource,
+            elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
+        )
+    }
+
+    // ---- M-AD-16: EXHAUSTED receipt digest mismatch → RECOVERY_REQUIRED ----
+
+    @Test
+    fun `M-AD-16 an EXHAUSTED receipt with a forged digest fail-closes the recovery`() = runTest {
+        // An exhausted receipt (advancedToItemId == null) whose receiptDigest does not
+        // recompute must be rejected BEFORE the terminal readback — the exhausted path
+        // must NOT bypass receipt-digest verification (v1.46 defect).
+        advanceAnswer = AdvanceReceiptV1(
+            outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null, // EXHAUSTED
+            scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-recovery",
+            effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
+        )
+        val realExecutor = journeyExecutor
+        val forgedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+                val receipt = realExecutor.completeAndAdvance(request, expectedIntentHash) ?: return null
+                return receipt.copy(receiptDigest = "forged-exhausted-${receipt.receiptDigest}")
+            }
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        buildEngineWith(planId, VClock(), forgedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "M-AD-16: an exhausted receipt whose digest does not recompute must fail-closed " +
+                "(killing mutation: exhausted path skips digest check ⇒ proceeds to readback ⇒ succeeded)",
+            "RECOVERY_REQUIRED", attempt.aplusState
+        )
+        assertEquals("never silently closed as succeeded", "running", attempt.status)
+    }
+
+    @Test
+    fun `M-AD-16 supplement - an honest EXHAUSTED receipt with a matching readback closes trusted`() = runTest {
+        // Control case: proves the M-AD-16 test is not vacuously true. An honest exhausted
+        // receipt plus a fresh discover() readback that matches all four legs → succeeded.
+        advanceAnswer = AdvanceReceiptV1(
+            outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null, // EXHAUSTED
+            scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-recovery",
+            effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
+        )
+        val realExecutor = journeyExecutor
+        val exhaustedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
+                realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun discover(): CapabilitySnapshotV1? {
+                // In the ADVANCE_PENDING recovery path, the ONLY discover() call IS the readback
+                // (no prior capability check). Return the matching exhausted state directly.
+                return CapabilitySnapshotV1(
+                    serviceVersion = "fake-1.0",
+                    supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
+                    supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
+                    continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                    environmentRevision = 7L,
+                    profileRefs = listOf("p"), scheduleRefs = listOf("s"),
+                    currentScheduleId = anchorScheduleId,
+                    currentItemId = anchorItemId, // advanceReceipt.advancedFromItemId
+                    scheduleVersion = anchorVersion + 1, // advanceReceipt.scheduleVersionAfter
+                    exhausted = true
+                )
+            }
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        buildEngineWith(planId, VClock(), exhaustedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("honest exhausted receipt + matching readback ⇒ CLOSED", "CLOSED", attempt.aplusState)
+        assertEquals("closed trusted", "succeeded", attempt.status)
+    }
+
+    // ---- M-AD-17: Non-terminal observe intentHash mismatch → RECOVERY_REQUIRED ----
+
+    @Test
+    fun `M-AD-17 a non-terminal observe with intentHash mismatch fail-closes independently`() = runTest {
+        // After a non-terminal advance, observe() returns an observation where
+        // acceptedIntentHash ≠ receipt.effectiveIntentHash (but item/version/revision match).
+        // Without this leg, wrong intent attribution goes undetected when the item matches.
+        val realExecutor = journeyExecutor
+        val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
+                realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
+                val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
+                // Tamper ONLY the intentHash leg — all other legs still match
+                return honest?.copy(acceptedIntentHash = "wrong-intent-attribution")
+            }
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        buildEngineWith(planId, VClock(), tamperedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "M-AD-17: intentHash mismatch must fail-closed (killing mutation: removed " +
+                "intentHash leg from the conjunction ⇒ the other 3 legs pass ⇒ succeeded)",
+            "RECOVERY_REQUIRED", attempt.aplusState
+        )
+        assertEquals("running", attempt.status)
+    }
+
+    // ---- M-AD-18: Non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED ----
+
+    @Test
+    fun `M-AD-18 a non-terminal observe with environmentRevision mismatch fail-closes independently`() = runTest {
+        // observe().environmentRevision ≠ receipt.effectiveEnvironmentRevision (item, version,
+        // and intentHash all match). Distinct from M-AD-17: single-leg readers miss each
+        // other's failure mode. Only the full four-leg conjunction catches both.
+        val realExecutor = journeyExecutor
+        val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
+                realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
+                val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
+                // Tamper ONLY the environmentRevision leg
+                return honest?.copy(environmentRevision = 999L)
+            }
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        buildEngineWith(planId, VClock(), tamperedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "M-AD-18: revision mismatch must fail-closed (killing mutation: removed " +
+                "revision leg from the conjunction ⇒ the other 3 legs pass ⇒ succeeded)",
+            "RECOVERY_REQUIRED", attempt.aplusState
+        )
+        assertEquals("running", attempt.status)
+    }
+
+    @Test
+    fun `M-AD-18 supplement - a non-terminal observe with scheduleVersion mismatch fail-closes independently`() = runTest {
+        // observe().scheduleVersion ≠ receipt.scheduleVersionAfter. This is the fourth leg
+        // (v1.68) that stops same-topology reinit from being silently accepted.
+        val realExecutor = journeyExecutor
+        val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
+                realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
+                val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
+                // Tamper ONLY the scheduleVersion leg
+                return honest?.copy(scheduleVersion = 999L)
+            }
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        buildEngineWith(planId, VClock(), tamperedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "M-AD-18 supplement: version mismatch must fail-closed (killing mutation: " +
+                "removed version leg ⇒ 3 remaining legs pass ⇒ succeeded)",
+            "RECOVERY_REQUIRED", attempt.aplusState
+        )
+        assertEquals("running", attempt.status)
+    }
 }

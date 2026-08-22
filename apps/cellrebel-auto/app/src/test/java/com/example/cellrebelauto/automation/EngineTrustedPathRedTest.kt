@@ -522,10 +522,12 @@ class EngineTrustedPathRedTest {
         assertEquals("release call key", releaseKey(77L), releaseCall.idempotencyKey)
         assertEquals("release call lease", "lease-77", releaseCall.leaseId)
         assertEquals("release call digest over the lease", releaseDigest("lease-77"), releaseCall.releaseDigest)
-        // RED: the schedule gate must acquire each fact for the REAL identity and ADVANCE
-        // (skeleton NOT_ADVANCED acquires nothing → PAUSED, never resumed).
-        assertEquals("the gate must acquire the observation fact for the REAL attempt", listOf(77L), observe.calls)
-        assertEquals("the schedule gate must advance → the plan resumes → completed", "completed", db.runSessionDao().getLatest()!!.status)
+        // Sol R2 P1-1: scheduleAdvanced gate removed from advanceAfterRelease — the real
+        // TrustedQuotaAcquirer.hasCapacity checks endedAt==null AND trustedCount < required,
+        // both structurally false after recovery finalize / when quota is met. Recovery has its
+        // own verification (replayAdvanceAndVerify); terminal truth projection resumes directly.
+        // The observe acquirer is NOT called by recovery (gate removed); plan resumes → completed.
+        assertEquals("recovery returns true → plan resumes → completed", "completed", db.runSessionDao().getLatest()!!.status)
     }
 
     // ---- R10-F2 pre-BEGIN-APPLY (aplusState null → never apply-reconciled) ----
@@ -656,7 +658,11 @@ class EngineTrustedPathRedTest {
     @Test
     fun `R17 M-CR-07 a committed trusted entry projects to succeeded regardless of the phase string`() = runTest {
         val taskId = 42L
-        val planId = seedPlan(taskId = taskId, quota = 1)
+        // quota=2: one trusted entry (trustedCount=1) < required → quota NOT met →
+        // skips the advance path entirely (no anchor needed). This test verifies trusted-entry
+        // projection to succeeded, not the advance; the advance path is M_AD_14's domain.
+        // Sol R3 P1-1: anchor null + quota met = invariant break regardless of phase.
+        val planId = seedPlan(taskId = taskId, quota = 2)
         seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val insertedId = db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L))
         val seededEntry = TrustedQuotaEntry(id = insertedId, attemptId = 77L, taskId = taskId, evidenceDigest = "d", committedAt = 1000L)
