@@ -1163,8 +1163,51 @@ class AutomationEngine(
             return false
         }
         when {
-            trusted != null && trusted.taskId == crashed.taskId ->
+            trusted != null && trusted.taskId == crashed.taskId -> {
+                // Group 1 (Sol closure verdict Issue #19): re-compute quota from the durable
+                // trusted ledger and dispatch the external advance if the task's quota is
+                // reached AND the advance anchor is available (persisted when the attempt
+                // opened). The normal path (line 551) gates advance on quotaReached; recovery
+                // must do the same — a missing advance here means the schedule never moves
+                // after a QUOTA_COMMITTED/RELEASED crash with quota reached.
+                //
+                // P1-1 fix (Sol closure review R2): a missing TASK is always an invariant break
+                // (the task row is immutable after plan import). A missing ANCHOR is an invariant
+                // break only for QUOTA_COMMITTED/RELEASED (the lifecycle persists it before trust
+                // evaluation); for DECIDING crashes (where the trusted entry survived but the anchor
+                // was never set), anchor=null is legitimate — skip advance, finalize succeeded.
+                val task = planRepository.getTask(crashed.taskId)
+                if (task == null) {
+                    planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                    aplusPause("trusted recovery: task ${crashed.taskId} not found for attempt ${crashed.id} — invariant break")
+                    return false
+                }
+                val trustedCount = planRepository.trustedCountForTaskPublic(crashed.taskId)
+                val anchor = planRepository.getAplusAdvanceAnchor(crashed.id)
+                if (trustedCount >= task.requiredSuccesses && anchor != null) {
+                    val intentDigest = APlusOperationIdentity.requestDigest(
+                        APlusOperationIdentity.intent(
+                            crashed.runSessionId, crashed.id, planId, crashed.taskId,
+                            crashed.startedAt, crashed.startedAt + testTimeoutMs
+                        )
+                    )
+                    if (!replayAdvanceAndVerify(crashed.id, crashed.taskId, null, intentDigest)) {
+                        return false
+                    }
+                } else if (trustedCount >= task.requiredSuccesses && anchor == null) {
+                    // Anchor null + quota reached: invariant break for QUOTA_COMMITTED/RELEASED
+                    // (anchor MUST exist by that point); but for DECIDING crashes (redecide
+                    // fallthrough), it's legitimate — advance was never dispatched.
+                    val anchorRequiredPhases = setOf("QUOTA_COMMITTED", "RELEASED")
+                    if (crashed.aplusState in anchorRequiredPhases) {
+                        planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                        aplusPause("trusted recovery: anchor missing for ${crashed.aplusState} attempt ${crashed.id} — invariant break")
+                        return false
+                    }
+                    // DECIDING or other phases: anchor never set → skip advance, just finalize.
+                }
                 planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
+            }
             trusted != null && trusted.taskId != crashed.taskId -> {
                 // A wrong-task carrier violates §7.1 attempt+task binding → fail-closed, never succeeded.
                 planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
@@ -1175,16 +1218,16 @@ class AutomationEngine(
                 planRepository.finalizeAttemptFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
             else -> planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
         }
+        // Sol R2 P1-1: remove scheduleAdvanced gate from recovery. The gate was designed for
+        // the NORMAL path ("should we take the next address?") — its TrustedQuotaAcquirer checks
+        // endedAt==null (set by finalizeAplusSuccess) AND trustedCount < requiredSuccesses (false
+        // when quota is met). Both conditions are structurally false after recovery finalizes AND
+        // when quota is met. In production composition, recovery ALWAYS PAUSEs regardless of
+        // outcome. Recovery has its own verification (replayAdvanceAndVerify validates receipt +
+        // observe + digest); once terminal truth is projected and the attempt CLOSED, the engine
+        // resumes directly. The normal-path gate applies to normal-path advance decisions only.
         planRepository.markAplusState(crashed.id, "CLOSED")
-        // The schedule gate decides whether to resume (take the next address) — never the terminal truth.
-        val advance = coordinator.scheduleAdvanced(
-            crashed.id, APlusOperationIdentity.applyIdempotencyKey(crashed.id), nowMs()
-        )
-        if (advance != ScheduleAdvanceState.ADVANCED) {
-            aplusPause("schedule-advance gate held for recovered attempt ${crashed.id}")
-            return false
-        }
-        log("A+ recovery: attempt ${crashed.id} released + gate advanced — resuming plan")
+        log("A+ recovery: attempt ${crashed.id} terminal truth projected — resuming plan")
         return true
     }
 
@@ -1341,31 +1384,41 @@ class AutomationEngine(
             val observed = coordinator.executorBackend().observe(
                 advanceLease, operationId, advanceReceipt.effectiveIntentHash
             )
-            val legsMatch = (observed != null &&
-                observed.scheduleItemId == advanceReceipt.advancedToItemId &&
-                observed.scheduleVersion == advanceReceipt.scheduleVersionAfter &&
-                observed.acceptedIntentHash == advanceReceipt.effectiveIntentHash &&
-                observed.environmentRevision == advanceReceipt.effectiveEnvironmentRevision
-            )
-            if (!legsMatch) {
-                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                aplusPause("post-advance observe mismatch for attempt $attemptId — the new environment is not proven (four-leg)")
+            // P1-3 (Sol Issue #19/#20 R2): typed reason identifies WHICH leg failed independently.
+            // Each leg is verified separately so the failure reason names the exact mismatch —
+            // a generic "four-leg" message hides which verification surface is broken.
+            val mismatchLeg: String? = when {
+                observed == null -> "OBSERVE_NULL"
+                observed.scheduleItemId != advanceReceipt.advancedToItemId -> "scheduleItemId"
+                observed.scheduleVersion != advanceReceipt.scheduleVersionAfter -> "scheduleVersion"
+                observed.acceptedIntentHash != advanceReceipt.effectiveIntentHash -> "acceptedIntentHash"
+                observed.environmentRevision != advanceReceipt.effectiveEnvironmentRevision -> "environmentRevision"
+                else -> null
+            }
+            if (mismatchLeg != null) {
+                planRepository.markRecoveryRequired(attemptId, "OBSERVED_TUPLE_MISMATCH:$mismatchLeg")
+                aplusPause("post-advance observe mismatch for attempt $attemptId — leg $mismatchLeg does not match receipt (OBSERVED_TUPLE_MISMATCH)")
                 return false
             }
         } else {
             planRepository.markAplusState(attemptId, "ADVANCE_STATE_READBACK")
             val readback = coordinator.executorBackend().discover()
-            val readbackOk = (readback != null &&
-                readback.currentScheduleId != null && readback.currentItemId != null &&
-                readback.scheduleVersion != null && readback.exhausted != null &&
-                readback.currentScheduleId == anchor.first &&
-                readback.currentItemId == advanceReceipt.advancedFromItemId &&
-                readback.scheduleVersion == advanceReceipt.scheduleVersionAfter &&
-                readback.exhausted == true
-            )
-            if (!readbackOk) {
-                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                aplusPause("exhausted readback mismatch for attempt $attemptId — terminal state not proven (four-leg)")
+            // P1-3 (Sol Issue #19/#20 R2): typed reason for exhausted readback mismatch.
+            val readbackMismatchLeg: String? = when {
+                readback == null -> "READBACK_NULL"
+                readback.currentScheduleId == null -> "currentScheduleId_null"
+                readback.currentItemId == null -> "currentItemId_null"
+                readback.scheduleVersion == null -> "scheduleVersion_null"
+                readback.exhausted == null -> "exhausted_null"
+                readback.currentScheduleId != anchor.first -> "currentScheduleId"
+                readback.currentItemId != advanceReceipt.advancedFromItemId -> "currentItemId"
+                readback.scheduleVersion != advanceReceipt.scheduleVersionAfter -> "scheduleVersion"
+                readback.exhausted != true -> "exhausted"
+                else -> null
+            }
+            if (readbackMismatchLeg != null) {
+                planRepository.markRecoveryRequired(attemptId, "READBACK_TUPLE_MISMATCH:$readbackMismatchLeg")
+                aplusPause("exhausted readback mismatch for attempt $attemptId — leg $readbackMismatchLeg (READBACK_TUPLE_MISMATCH)")
                 return false
             }
         }

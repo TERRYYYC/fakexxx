@@ -522,10 +522,12 @@ class EngineTrustedPathRedTest {
         assertEquals("release call key", releaseKey(77L), releaseCall.idempotencyKey)
         assertEquals("release call lease", "lease-77", releaseCall.leaseId)
         assertEquals("release call digest over the lease", releaseDigest("lease-77"), releaseCall.releaseDigest)
-        // RED: the schedule gate must acquire each fact for the REAL identity and ADVANCE
-        // (skeleton NOT_ADVANCED acquires nothing → PAUSED, never resumed).
-        assertEquals("the gate must acquire the observation fact for the REAL attempt", listOf(77L), observe.calls)
-        assertEquals("the schedule gate must advance → the plan resumes → completed", "completed", db.runSessionDao().getLatest()!!.status)
+        // Sol R2 P1-1: scheduleAdvanced gate removed from advanceAfterRelease — the real
+        // TrustedQuotaAcquirer.hasCapacity checks endedAt==null AND trustedCount < required,
+        // both structurally false after recovery finalize / when quota is met. Recovery has its
+        // own verification (replayAdvanceAndVerify); terminal truth projection resumes directly.
+        // The observe acquirer is NOT called by recovery (gate removed); plan resumes → completed.
+        assertEquals("recovery returns true → plan resumes → completed", "completed", db.runSessionDao().getLatest()!!.status)
     }
 
     // ---- R10-F2 pre-BEGIN-APPLY (aplusState null → never apply-reconciled) ----

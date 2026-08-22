@@ -138,6 +138,14 @@ interface TestAttemptDao {
     @Query("UPDATE test_attempts SET aplusState = :aplusState WHERE id = :attemptId")
     suspend fun markAplusState(attemptId: Long, aplusState: String)
 
+    /**
+     * Atomically mark RECOVERY_REQUIRED with a typed reason (Sol R2 P1-3: durable leg-specific reason).
+     * The reason is stored in `failureReason` — the test can read it back to verify which specific
+     * invariant was violated (e.g., "OBSERVED_TUPLE_MISMATCH:acceptedIntentHash").
+     */
+    @Query("UPDATE test_attempts SET aplusState = 'RECOVERY_REQUIRED', failureReason = :reason WHERE id = :attemptId")
+    suspend fun markRecoveryRequired(attemptId: Long, reason: String)
+
     /** Persist the provider-returned lease id (NOT derivable — must be durable, Sol round-8 P1-4). */
     @Query("UPDATE test_attempts SET aplusLeaseId = :leaseId WHERE id = :attemptId")
     suspend fun markAplusLease(attemptId: Long, leaseId: String)
