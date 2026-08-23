@@ -113,40 +113,54 @@ adb install -r apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk  # 
 ### 6.0.0 抓取模板（每步通用，P1-2 生命周期显式化，不可省）
 
 探针在后台线程出报告（`thread(name="ec-…")`），`am start` 后立即 `adb logcat -d` 会**取不到输出**。
-每步按下述模板抓取：**保留 PID → trap 清场 → 有界轮询终态 → kill+wait → 当步日志即当次证据**。
+每步调用下面的 `capture_step` 函数。**退出码确定，与证据一致**（不变量）：
+
+> 清理幂等且**状态归一化**；匹配到终态 → **返回 0**；到点未匹配 → **`TIMEOUT after <s>` 追加进
+> 同一证据文件**、清理、**返回 1**。任何自动化或后续判定只看 `$?` + 证据文件，二者永不冲突。
 
 ```bash
-# A. 清空并起跟随（写入当步文件，保留 PID）
-adb logcat -c
-adb logcat <tag过滤器> > run-<step>.log &
-CAP_PID=$!
-trap 'kill $CAP_PID 2>/dev/null' INT TERM        # 中断时清掉跟随，不留孤儿 job
+# 会话开始时定义一次
+capture_step() {
+  local log="$1" tags="$2" pattern="$3" deadline_s="$4" amargs="$5"
+  adb logcat -c
+  adb logcat -s $tags > "$log" &          # -s 静默默认优先级，只显示列出的 tag（无 glob 风险）
+  local pid=$!
+  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null || true" INT TERM   # 中断不留孤儿
+  adb shell am start $amargs
+  local i=0
+  while [ "$i" -lt "$deadline_s" ]; do    # 有界轮询
+    grep -qE "$pattern" "$log" && break
+    sleep 1; i=$((i+1))
+  done
+  if grep -qE "$pattern" "$log"; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true   # 归一化：kill 后 wait 的状态被吸收
+    trap - INT TERM
+    return 0
+  fi
+  echo "TIMEOUT after ${i}s (deadline ${deadline_s}s)" >> "$log"   # 超时事件写进同一证据文件，非 stdout
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  trap - INT TERM
+  return 1
+}
+```
 
-# B. 启动探针
-adb shell am start -n <component>
-
-# C. 有界轮询终态（deadline 见下；到点没等到 = 本次 FAIL(TIMEOUT)）
-for i in $(seq 1 <deadline_s>); do
-  grep -qE "<终态pattern>" run-<step>.log && break
-  sleep 1
-done
-grep -qE "<终态pattern>" run-<step>.log \
-  || echo "TIMEOUT after <deadline_s>s — partial log preserved: run-<step>.log"
-
-# D. 停跟随并等它退出（不要用 Ctrl-C——它停不掉后台 job）
-kill $CAP_PID 2>/dev/null; wait $CAP_PID 2>/dev/null
+```bash
+# 每步用法（五个实参：log / tags / pattern / deadline / am start 参数）
+capture_step run-6.1-handshake.log ECHandshakeProbe "RESULT:" 60 \
+  "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
+echo "step exit=$?"   # 0=匹配终态 PASS；1=TIMEOUT（超时行已追加在 run-6.1-handshake.log 尾部）
 ```
 
 **每步三值 + deadline（确定性，勿改）：**
 
-| 步骤 | tag 过滤器 | 终态 pattern | deadline |
+| 步骤 | tag（`-s` 后） | 终态 pattern | deadline |
 |---|---|---|---|
-| 6.0 seed | `MockProviderAcceptance:V *:S` | `READY command=prepare_kyiv` | 30s |
-| 6.1 / 6.3 握手 | `ECHandshakeProbe:V *:S` | `RESULT:` | 60s |
-| 6.2 配对列表 | `ECPairingApproval:V *:S` | `pending callers\|no pending callers` | 30s |
-| 6.2 批准 | `ECPairingApproval:V *:S` | `APPROVED:\|NO MATCH:\|REFUSED:` | 30s |
-| 6.4 full loop | `ECFullLoop:V *:S` | `LOOP COMPLETE\|FAILED:\|STOP:\|LOOP ABORTED\|CLEANUP\|SAFETY:` | 180s |
-| 6.5 stop | `MockProviderAcceptance:V *:S` | `READY command=stop` | 30s |
+| 6.0 seed | `MockProviderAcceptance` | `READY command=prepare_kyiv` | 30s |
+| 6.1 / 6.3 握手 | `ECHandshakeProbe` | `RESULT:` | 60s |
+| 6.2 配对列表 | `ECPairingApproval` | `pending callers\|no pending callers` | 30s |
+| 6.2 批准 | `ECPairingApproval` | `APPROVED:\|NO MATCH:\|REFUSED:` | 30s |
+| 6.4 full loop | `ECFullLoop` | `LOOP COMPLETE\|FAILED:\|STOP:\|LOOP ABORTED\|CLEANUP\|SAFETY:` | 180s |
+| 6.5 stop | `MockProviderAcceptance` | `READY command=stop` | 30s |
 
 > pattern 列里的 `\|` 只是 Markdown 表格转义；实际 `grep -qE` 用裸 `|`（ERE 交替）。
 
@@ -156,8 +170,8 @@ kill $CAP_PID 2>/dev/null; wait $CAP_PID 2>/dev/null
 - full loop = 180s：唯一没有内部逐调用超时的步（只有 5s bind latch）；apply 含
   `LocationManager` 操作与 `ConfigPrefsSync.commit()`，每一步是本地 binder 往返；180s 是确定性上界。
 
-**超时 = 本次 FAIL(TIMEOUT)**：部分日志**保留为证据**（§11 记实际 deadline 与超时事件），
-按 §8 归因后重跑。**不得口头延长、不得无限等待。**
+**超时 = 本次 FAIL(TIMEOUT)（exit 1）**：超时行已在同一证据文件内，部分日志**保留为证据**
+（§11 记 exit code 与 `TIMEOUT after` 行），按 §8 归因后重跑。**不得口头延长、不得无限等待。**
 
 ### 6.0 基线：种子 `.bench` 调度数据
 
@@ -167,10 +181,10 @@ KB-8：千网游独占坐标）。`prepare_kyiv` 清空 bench 全部 profile、�
 `mockProviderCleanupRequired=false`：
 
 ```bash
-adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command prepare_kyiv
+capture_step run-6.0-seed.log MockProviderAcceptance "READY command=prepare_kyiv" 30 \
+  "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command prepare_kyiv"
+echo "seed exit=$?"   # 0=PASS；1=TIMEOUT
 ```
-按 §6.0.0 模板抓取：`component=…MockProviderAcceptanceActivity --es command prepare_kyiv`，
-tag=`MockProviderAcceptance:V *:S`，pattern=`READY command=prepare_kyiv`，deadline=30s。
 - 判据（§7.1a）：logcat `MockProviderAcceptance` 出 `READY command=prepare_kyiv`。
 - **种子 seam 只动 `.bench` 数据**（`src/debug`，仅 shell 的 DUMP 权限可进），永不触碰生产。
 
@@ -199,10 +213,10 @@ adb shell am force-stop name.caiyao.fakegps.bench
 **先跑握手，再批准。** 首次握手会失败并留下配对候选——这是设计（fail-closed working）。
 
 ```bash
-adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity
+capture_step run-6.1-handshake.log ECHandshakeProbe "RESULT:" 60 \
+  "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
+echo "handshake exit=$?"   # 0=终态已出（看内容判定 REFUSED/CONNECTED）；1=TIMEOUT
 ```
-按 §6.0.0 模板抓取：`component=…HandshakeProbeActivity`，tag=`ECHandshakeProbe:V *:S`，
-pattern=`RESULT:`，deadline=60s。
 
 - 新装设备预期：`RESULT: REFUSED`（§6.5 未批准 caller 拒绝——**这是安全 PASS，不是缺陷**）。
 - 若之前已批准过，可能直接 `RESULT: CONNECTED`（跳过 6.2）。
@@ -211,10 +225,10 @@ pattern=`RESULT:`，deadline=60s。
 
 ```bash
 # 列出 pending caller（先读身份，再批准）
-adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.v1.PairingApprovalActivity
+capture_step run-6.2a-pairing.log ECPairingApproval "pending callers|no pending callers" 30 \
+  "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.v1.PairingApprovalActivity"
+echo "pairing-list exit=$?"
 ```
-按 §6.0.0 模板抓取：`component=…PairingApprovalActivity`，tag=`ECPairingApproval:V *:S`，
-pattern=`pending callers|no pending callers`，deadline=30s。
 
 - 判据（§7.2a）：出现 `pending callers (N)`，其中
   `applicationId : com.example.cellrebelauto` + 一行 64 hex 的 `signerDigest`。
@@ -222,11 +236,10 @@ pattern=`pending callers|no pending callers`，deadline=30s。
   批准不是"批准一切 pending"，是点名两个半主元）：
 
 ```bash
-adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.v1.PairingApprovalActivity \
-  --es approve_application_id com.example.cellrebelauto \
-  --es approve_signer_digest <上一步读到的完整 64 hex>
+capture_step run-6.2b-approve.log ECPairingApproval "APPROVED:|NO MATCH:|REFUSED:" 30 \
+  "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.v1.PairingApprovalActivity --es approve_application_id com.example.cellrebelauto --es approve_signer_digest <上一步读到的完整 64 hex>"
+echo "approve exit=$?"
 ```
-按 §6.0.0 模板抓取：tag=`ECPairingApproval:V *:S`，pattern=`APPROVED:|NO MATCH:|REFUSED:`，deadline=30s。
 
 - 判据（§7.2b）：`APPROVED: com.example.cellrebelauto`。
 - `NO MATCH:` = 抄错了 digest 或 appId；从 pending 列表**逐字符**复制，批准刻意不做模糊匹配。
@@ -234,20 +247,20 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.
 ### 6.3 批准后握手
 
 ```bash
-adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity
+capture_step run-6.3-handshake.log ECHandshakeProbe "RESULT:" 60 \
+  "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
+echo "handshake exit=$?"
 ```
-按 §6.0.0 模板抓取：`component=…HandshakeProbeActivity`，tag=`ECHandshakeProbe:V *:S`，
-pattern=`RESULT:`，deadline=60s。
 
 - 判据（§7.3）：`RESULT: CONNECTED`、`protocolVersion  : 1`、**无** `!! PROTOCOL SKEW` 行。
 
 ### 6.4 完整 loop
 
 ```bash
-adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.FullLoopProbeActivity
+capture_step run-6.4-loop.log ECFullLoop "LOOP COMPLETE|FAILED:|STOP:|LOOP ABORTED|CLEANUP|SAFETY:" 180 \
+  "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.FullLoopProbeActivity"
+echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
 ```
-按 §6.0.0 模板抓取：`component=…FullLoopProbeActivity`，tag=`ECFullLoop:V *:S`，
-pattern=`LOOP COMPLETE|FAILED:|STOP:|LOOP ABORTED|CLEANUP|SAFETY:`，deadline=180s。
 
 - 判据（§7.4）：逐步匹配；终态 `LOOP COMPLETE — EXHAUSTED:`（单调度项种子 → 末项，预期 EXHAUSTED；
   只有 ≥2 项的调度才会 `LOOP COMPLETE — ADVANCED:`）。
@@ -256,12 +269,13 @@ pattern=`LOOP COMPLETE|FAILED:|STOP:|LOOP ABORTED|CLEANUP|SAFETY:`，deadline=18
 ### 6.5 清理验证 + 收尾
 
 1. 若 §6.4 出现 `CLEANUP UNSAFE — DEVICE MAY STILL BE IN MOCK STATE` → 执行 §9 协议。
-2. 无论红绿，收尾都显式停 mock（按 §6.0.0 模板抓取：tag=`MockProviderAcceptance:V *:S`，
-   pattern=`READY command=stop`，deadline=30s）：
+2. 无论红绿，收尾都显式停 mock：
    ```bash
-   adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command stop
+   capture_step run-6.5-stop.log MockProviderAcceptance "READY command=stop" 30 \
+     "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command stop"
+   echo "stop exit=$?"
    ```
-   判据（§7.5）：`READY command=stop`。
+   判据（§7.5）：`READY command=stop`（exit 0）。
 3. 打开任意地图 app，确认设备位置回到真实位置（不是 Kyiv）。
 4. 记录猫按 §11 封存证据。
 
@@ -378,12 +392,12 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 | 3 | 两只 APK versionCode/versionName | `adb shell dumpsys package <pkg> \| grep -E "versionCode\|versionName"` |
 | 4 | 批准所用的完整 signerDigest 与 approve 命令 | §6.2（基线="批准了谁"） |
 | 5 | 种子地址基线 | `prepare_kyiv` → Kyiv 50.4501 / 30.5234（§6.0） |
-| 6 | 每步探针的当次 logcat 全文 | §6.0.0 模板：`adb logcat <tag过滤器> > run-<step>.log` 跟随，保留 `$CAP_PID`，轮询到终态行或 deadline 后 `kill+wait`；**不得在 `am start` 后立即 `-d` 立取** |
+| 6 | 每步探针的当次 logcat 全文 | `capture_step` 产出的 `run-<step>.log`（§6.0.0）：跟随写文件、终态或 deadline 后 `kill+wait`；**不得在 `am start` 后立即 `-d` 立取** |
 | 7 | 每步探针屏幕截图 | `adb exec-out screencap -p > <run>-<step>.png` |
 | 8 | `[3] apply` 的 rev/verif/fingerprint 与 `[4]` 的 hashMatch | 探针输出（记录猫不补写） |
 | 9 | 任何 `CLEANUP UNSAFE` / `FAILED` / `STOP` 原文 | §9 协议完成后照实记 |
 | 10 | 冒烟后设备位置验证（地图 app 非 Kyiv） | §6.5 |
-| 11 | 每步实际使用的 deadline 与任何 `TIMEOUT after <s>` 事件 | §6.0.0 模板 C 步输出；超时即 FAIL，**部分日志必须随证据保留**，不得丢弃 |
+| 11 | 每步 `capture_step` 的 **exit code（0/1）** 与证据文件里的 `TIMEOUT after <s>` 行原文 | 超时行已**追加进同一 `run-<step>.log`**（非 stdout）；exit 1 = FAIL(TIMEOUT)，**部分日志必须随证据保留**，不得丢弃 |
 
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
 `reportDigest: sha256:<原始 logcat+截图 字节的 SHA-256>`）。**记录猫不得改原始字节。**
