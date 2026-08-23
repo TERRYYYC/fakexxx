@@ -66,9 +66,9 @@ exact_head: 280eb021d501c489dedb6eabedbc42cbf40ee6c3
   `LocationManager.setTestProvider*` 移动设备，必须有 `android:mock_location` app-op；
   等价命令行 `adb appops set name.caiyao.fakegps.bench android:mock_location allow`。
   千网游主 manifest 已声明 `ACCESS_MOCK_LOCATION`。
-- 千网游 bench 是 **Xposed 模块**（`xposedmodule=true`）。若设备有 LSPosed：
-  启用 `name.caiyao.fakegps.bench` 模块并配置作用域，让 HOOK 投递链路健康（影响 apply 的
-  verification 字段，见 §7.4）。**握手与配对步骤不依赖 Xposed。**
+- 千网游 bench 是 **Xposed 模块**（`xposedmodule=true`）。若设备有 LSPosed，启用
+  `name.caiyao.fakegps.bench` 模块并配置作用域（HOOK 投递是产品能力，本文只列为可选前置）。
+  **握手与配对步骤不依赖 Xposed**；apply 的 `verif` 字段含义见 §7.4——它**不度量**模块启用/作用域。
 
 ### 3.2 工具
 - JDK 17+、Android SDK（`ANDROID_HOME`）、`adb`、`gh`（无需——推代码用 git）。
@@ -110,11 +110,22 @@ adb install -r apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk  # 
 
 ## 6. 执行步骤
 
-> 每次启动前清空 logcat 再抓，判据基于**当次**输出：
+> **抓取方法（P1-2，不可省）：** 探针在后台线程出报告（`thread(name="ec-…")`），
+> `am start` 后立即 `adb logcat -d` 会**取不到输出**。必须**轮询等待终态行出现后再抓**：
+>
 > ```bash
+> # 1) 清空
 > adb logcat -c
-> adb logcat -d ECHandshakeProbe:V ECFullLoop:V ECPairingApproval:V MockProviderAcceptance:V *:S
+> # 2) 起一个前台跟随抓取到文件（或另开终端跟随）
+> adb logcat ECHandshakeProbe:V ECFullLoop:V ECPairingApproval:V MockProviderAcceptance:V *:S > run-<step>.log &
+> # 3) 启动探针（见各小节）
+> adb shell am start -n <component>
+> # 4) 轮询直到该步终态行出现：
+> #    handshake: RESULT: | pairing: APPROVED:|NO MATCH:|no pending | seed: READY | full loop: LOOP COMPLETE|FAILED|STOP|CLEANUP
+> until grep -qE "RESULT:|LOOP COMPLETE|FAILED:|STOP:|CLEANUP|APPROVED:|NO MATCH:|READY command=" run-<step>.log; do sleep 1; done
+> # 5) 终态行出现后再 Ctrl-C 停掉跟随，`run-<step>.log` 即当次证据
 > ```
+> 判据一律以**当次 `run-<step>.log`** 为准；`adb logcat -d` 只能在终态行出现后用于复核。
 
 ### 6.0 基线：种子 `.bench` 调度数据
 
@@ -127,8 +138,28 @@ KB-8：千网游独占坐标）。`prepare_kyiv` 清空 bench 全部 profile、�
 adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command prepare_kyiv
 ```
 
-- 判据（§7.1）：logcat `MockProviderAcceptance` 出 `READY command=prepare_kyiv`。
+- 判据（§7.1a）：logcat `MockProviderAcceptance` 出 `READY command=prepare_kyiv`。
 - **种子 seam 只动 `.bench` 数据**（`src/debug`，仅 shell 的 DUMP 权限可进），永不触碰生产。
+
+**6.0.1 进程重置（P1-1，不可省）：**
+
+```bash
+adb shell am force-stop name.caiyao.fakegps.bench
+```
+
+`ProviderRuntime.handler()` **每进程只构造一次**（`handlerRef`，第二次 bind 复用）；`QwyScheduleStore`
+只在 `QwyEnvironmentController` 构造时从 profile DB（`fakegps.db` 的 `temp` 表）初始化。
+而 `prepare_kyiv` **只写 Room DB**，不会刷新已存活进程里那份 in-memory 调度。所以：
+
+- 若 provider 进程在本轮冒烟**之前**已经活着（打开过 bench app / 上一轮跑过 / 先跑过 6.2），
+  live handler 会沿用**旧**调度 → 后续 `[1] discover` 报无当前项或陈旧项。
+- 因此**种子写入并确认 READY 之后、任何 EC bind 之前，必须 force-stop 一次**，
+  让下一次 bind 从新 DB 重建调度。此刻尚无 apply/lease，重置是安全的。
+- **每次重跑（同一进程存活）都必须重做 6.0 + 6.0.1**，否则不构成可重复过程。
+- **若上一轮以 `CLEANUP UNSAFE` 收场，必须先完成 §9（stop READY + 地图回真实位置）才能重跑 6.0。**
+  force-stop **不**移除系统侧 test providers（`removeTestProvider` 才做）；任何重置都不得凌驾于 §9 之上。
+- 若个别 ROM 对 `persistent` 生效导致 force-stop 无效，退路是 `adb uninstall` 后重装 bench
+  （清空 `.bench` 数据）并重新 6.0，把这一事实记入 §11。
 
 ### 6.1 首次握手（批准之前）
 
@@ -195,9 +226,12 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 
 > 判据 = **逐字匹配探针输出**。任何"差不多""看起来正常"都不算。
 
-### 7.1 种子 seam（§6.0）
-- **PASS**：`READY command=prepare_kyiv`
-- **FAIL**：无该行 / 出 `rejected`（说明 `--es command` 传错）
+### 7.1 种子 seam + 进程重置（§6.0 / §6.0.1）
+- **7.1a PASS**：`READY command=prepare_kyiv`
+- **7.1a FAIL**：无该行 / 出 `rejected`（说明 `--es command` 传错）
+- **7.1b（P1-1 的判据）**：重置后，后续 `[1] discover` 必须能看到**本次种子**的当前项
+  （`item=profile-…`），而不是 `STOP: provider has no current schedule item` 或陈旧项。
+  看不到 = 6.0.1 没生效（live handler 未重建），**不得继续**，重做 6.0 + 6.0.1。
 
 ### 7.2a 配对列表（§6.2）
 - **PASS**：`pending callers (N)` 且含 `applicationId : com.example.cellrebelauto` + 64 hex `signerDigest`
@@ -233,10 +267,12 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 | 任一 `FAILED:` / `STOP:` / `SAFETY: lease NOT cleared` / `LOOP ABORTED` | **FAIL**，按 §8 归因 |
 | `CLEANUP UNSAFE: … DEVICE MAY STILL BE IN MOCK STATE` | **FAIL + 必做 §9** |
 
-> **`verif` 字段**：`VerificationLevelV1` wire：1=`SYSTEM_MOCK_INDEPENDENTLY_VERIFIED`（
-> ConfigPrefsSync 发布回读成环）、3=`NONE`（未回读成环）。`verif=3` **不是 harness 失败**，
-> 是诚实报告"HOOK 投递链路没有回读确认"——常见于 Xposed 未启用/作用域未配置。
-> 判据只要求 `[3] apply` 有 lease 输出。
+> **`verif` 字段**：只报告 `ConfigPrefsSync.sync()` 的**发布事务**结果
+> （`QwyEnvironmentController.applyEnvironment`：`published=true` → `VerificationLevelV1`
+> `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED(1)`，否则 `NONE(3)`）。它是**发布真值**——
+> **不是** Xposed 模块启用/作用域的度量；发布未成环的具体根因（framework transport /
+> 文件 mode / 模块配置）无法从探针输出单独推断，需要时看 provider 侧日志。
+> 判据只要求 `[3] apply` 有 lease 输出，不依赖 verif 值；`verif=3` 照记 §11，不算 harness 失败。
 
 ### 7.5 清理收尾（§6.5）
 - **PASS**：`READY command=stop` + 地图 app 显示真实位置
@@ -249,7 +285,7 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 | 握手 `NOT BINDABLE` | ① bench 没装；② `pm list packages` 没有 bench；③ API 30+ 可见性（Auto `<queries>` 缺 bench 包） | 重装 bench（`adb install -r`）；确认包名列表三行齐全；真改 `<queries>` 属 harness 缺陷 → 记 finding |
 | 握手 `TIMED OUT after 5000 ms` | provider 进程活着但 `discover()` 不返回 | `adb shell am force-stop name.caiyao.fakegps.bench` 后重试；复现则记 finding（卡住≠缺失） |
 | 握手 `REFUSED`（已批准后） | signer 轮转 / 换 keystore / 批准被撤销 | 看 cause；重读 pending 列表重新批准 |
-| `[1] discover` STOP（无当前项） | 忘了 6.0 种子，或 `prepare_kyiv` 没成 | 重跑 6.0 + 核对 7.1 |
+| `[1] discover` STOP（无当前项） | ① 忘了 6.0 种子；② 漏了 6.0.1 进程重置（live handler 沿用旧调度——最常见于重跑）；③ `prepare_kyiv` 没成 | 重做 6.0 + 6.0.1（force-stop）后重跑，并核对 7.1b |
 | `[3] apply` 失败/抛错 | ① mock_location app-op 未给 bench（最常见）；② 无当前项/无坐标 | 检查 §3.1 开发设置（或 `adb appops set … allow`）；重跑 6.0 |
 | `[5] release` 非 complete | provider 未回读清理成环（mockGateway 层） | 看 `residuals`；执行 §9 后再跑一轮 |
 | `[6] advance` 回 `16/17/14/15/8` | 调度状态与请求前提不符（耗尽/身份/版本/项/lease 归因） | 对照 §7.4 表核 `expected*` 字段；复现 → 记 finding（wire code 是规范 §6.7.4b 的回答，不是探针错误） |
@@ -299,7 +335,7 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 | 3 | 两只 APK versionCode/versionName | `adb shell dumpsys package <pkg> \| grep -E "versionCode\|versionName"` |
 | 4 | 批准所用的完整 signerDigest 与 approve 命令 | §6.2（基线="批准了谁"） |
 | 5 | 种子地址基线 | `prepare_kyiv` → Kyiv 50.4501 / 30.5234（§6.0） |
-| 6 | 每步探针的当次 logcat 全文 | `adb logcat -d ECHandshakeProbe:V ECFullLoop:V ECPairingApproval:V MockProviderAcceptance:V *:S` |
+| 6 | 每步探针的当次 logcat 全文 | §6 抓取法：`adb logcat <tag过滤器> > run-<step>.log` 跟随 + 轮询到终态行后停，**不得在 `am start` 后立即 `-d` 立取** |
 | 7 | 每步探针屏幕截图 | `adb exec-out screencap -p > <run>-<step>.png` |
 | 8 | `[3] apply` 的 rev/verif/fingerprint 与 `[4]` 的 hashMatch | 探针输出（记录猫不补写） |
 | 9 | 任何 `CLEANUP UNSAFE` / `FAILED` / `STOP` 原文 | §9 协议完成后照实记 |
@@ -310,13 +346,18 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 
 ## 12. 退出标准 → G2 前置
 
-本冒烟 **PASS** 的定义（全绿才算一次通过的真机前置）：
+本冒烟 **PASS** 的定义（§7 全绿才算一次通过的冒烟执行）：
 
-1. §7.1 / §7.2a / §7.2b 全 PASS（种子 + 精确批准）
+1. §7.1a + 7.1b / §7.2a / §7.2b 全 PASS（种子 + 进程重置 + 精确批准）
 2. §7.3 握手 PASS（CONNECTED，无 SKEW）
 3. §7.4 完整 loop 到 **LOOP COMPLETE（EXHAUSTED 或 ADVANCED）**，四腿全匹配，无任何
    FAILED/STOP/SAFETY/CLEANUP UNSAFE
 4. §7.5 清理 PASS（stop READY + 设备回真实位置）
 
-PASS 后允许：`C2` 审者出非作者审 PASS → 与 `C3`（PR #36 R3）**合取**后，才谈上真机进入 G2。
-冒烟 PASS **不**自动放行 G2（见 §2 边界）。
+**执行时机顺序（调度线条件表，勿颠倒）：**
+`C1` runbook 落盘（本文） → `C2` runbook 非作者审 PASS → `C3` PR #36 R3 PASS →
+**`C4` = C2 ∧ C3 合取**（允许上真机，由 @opus5 显式持有）→ `C5` 冒烟执行（本 runbook，operator + 测试猫 + 记录猫）。
+
+- 本文 §7 的 PASS 是 **C5** 的合格定义，不是 C2/C3 的替代品。
+- **C5 只能在 C4 允许后执行**——冒烟 PASS 之前，C2/C3 必须先于它成立。
+- 冒烟 PASS **不**自动放行 G2（见 §2 边界）。
