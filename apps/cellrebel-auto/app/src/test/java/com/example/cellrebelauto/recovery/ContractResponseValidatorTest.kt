@@ -134,4 +134,63 @@ class ContractResponseValidatorTest {
             v
         )
     }
+
+    // ---- Sol R3 P1: outcome↔target implication (§6.7.1) ----
+    // ADVANCED ⇒ advancedToItemId != null; EXHAUSTED ⇒ advancedToItemId == null.
+    // A contradictory tuple is a malformed carrier regardless of digest correctness.
+
+    private fun advanceReceiptWithOutcomeAndTarget(
+        outcomeWire: Int,
+        advancedToItemId: String?,
+        effectiveIntentHash: String = "eff-1"
+    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1 {
+        val base = io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1(
+            outcomeWire = outcomeWire,
+            advancedFromItemId = "item-1",
+            advancedToItemId = advancedToItemId,
+            scheduleVersionAfter = 2L,
+            effectiveIntentHash = effectiveIntentHash,
+            effectiveEnvironmentRevision = 7L,
+            receiptDigest = ""
+        )
+        // Compute the canonical digest for this exact tuple so it passes the digest check —
+        // the point of this test is that the implication check fires BEFORE or AFTER digest,
+        // not that the digest itself is wrong.
+        val digest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
+            base, "req-digest-1", "adv-key-1"
+        )
+        return base.copy(receiptDigest = digest)
+    }
+
+    @Test
+    fun `EXHAUSTED with non-null advancedToItemId fail-closes (contradictory tuple)`() {
+        val contradictory = advanceReceiptWithOutcomeAndTarget(
+            outcomeWire = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedToItemId = "item-2"  // ← contradicts EXHAUSTED
+        )
+        val v = ContractResponseValidator.validateCompleteAndAdvance(
+            EnvironmentControlResultV1.completeAndAdvance(contradictory),
+            expectedIntentHash = "eff-1", requestDigest = "req-digest-1", idempotencyKey = "adv-key-1"
+        )
+        assertEquals(
+            ContractResponseValidator.ValidatedContractResponse.Failure("PROVIDER_EXHAUSTED_WITH_TARGET"),
+            v
+        )
+    }
+
+    @Test
+    fun `ADVANCED with null advancedToItemId fail-closes (contradictory tuple)`() {
+        val contradictory = advanceReceiptWithOutcomeAndTarget(
+            outcomeWire = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.ADVANCED.wire,
+            advancedToItemId = null  // ← contradicts ADVANCED
+        )
+        val v = ContractResponseValidator.validateCompleteAndAdvance(
+            EnvironmentControlResultV1.completeAndAdvance(contradictory),
+            expectedIntentHash = "eff-1", requestDigest = "req-digest-1", idempotencyKey = "adv-key-1"
+        )
+        assertEquals(
+            ContractResponseValidator.ValidatedContractResponse.Failure("PROVIDER_ADVANCED_WITHOUT_TARGET"),
+            v
+        )
+    }
 }
