@@ -113,10 +113,14 @@ adb install -r apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk  # 
 ### 6.0.0 抓取模板（每步通用，P1-2 生命周期显式化，不可省）
 
 探针在后台线程出报告（`thread(name="ec-…")`），`am start` 后立即 `adb logcat -d` 会**取不到输出**。
-每步调用下面的 `capture_step` 函数。**退出码确定，与证据一致**（不变量）：
+每步调用下面的 `capture_step` 函数。**三个终态，退出码确定，与证据一致**（不变量）：
 
-> 清理幂等且**状态归一化**；匹配到终态 → **返回 0**；到点未匹配 → **`TIMEOUT after <s>` 追加进
-> 同一证据文件**、清理、**返回 1**。任何自动化或后续判定只看 `$?` + 证据文件，二者永不冲突。
+> 清理幂等且**状态归一化**（`kill` 对已死 PID 是 no-op，`wait … || true` 吸收 kill 状态）：
+> - 匹配到终态 → 清理 → **返回 0**
+> - 到点未匹配 → `TIMEOUT after <s>` **追加进同一证据文件** → 清理 → **返回 1**
+> - 收到 SIGINT/SIGTERM → 立刻置 `aborted`、清掉 logcat 子进程 → `ABORTED by signal` **追加进同一证据文件** → 清理 → **返回 130**（第三终态，**不是**超时）
+>
+> 任何自动化或后续判定只看 `$?` + 证据文件，三者永不冲突。**退出码 130 = 立即停止本次运行**，见下。
 
 ```bash
 # 会话开始时定义一次
@@ -125,13 +129,20 @@ capture_step() {
   adb logcat -c
   adb logcat -s $tags > "$log" &          # -s 静默默认优先级，只显示列出的 tag（无 glob 风险）
   local pid=$!
-  trap "kill $pid 2>/dev/null; wait $pid 2>/dev/null || true" INT TERM   # 中断不留孤儿
+  local aborted=0
+  _sig() { aborted=1; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true; }
+  trap '_sig' INT TERM                    # 信号只清 logcat 并置标志，不续跑（见轮询条件）
   adb shell am start $amargs
   local i=0
-  while [ "$i" -lt "$deadline_s" ]; do    # 有界轮询
+  while [ "$i" -lt "$deadline_s" ] && [ "$aborted" -eq 0 ]; do   # aborted 短路 = 立即退出轮询
     grep -qE "$pattern" "$log" && break
     sleep 1; i=$((i+1))
   done
+  if [ "$aborted" -eq 1 ]; then
+    echo "ABORTED by signal" >> "$log"    # 第三终态证据进同一文件
+    trap - INT TERM
+    return 130
+  fi
   if grep -qE "$pattern" "$log"; then
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true   # 归一化：kill 后 wait 的状态被吸收
     trap - INT TERM
@@ -148,8 +159,15 @@ capture_step() {
 # 每步用法（五个实参：log / tags / pattern / deadline / am start 参数）
 capture_step run-6.1-handshake.log ECHandshakeProbe "RESULT:" 60 \
   "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
-echo "step exit=$?"   # 0=匹配终态 PASS；1=TIMEOUT（超时行已追加在 run-6.1-handshake.log 尾部）
+echo "step exit=$?"   # 0=匹配终态 PASS；1=TIMEOUT；130=ABORTED（行已追加进 run-*.log，见下）
 ```
+
+**退出码 130 处理（任何一步，强制）：**
+- 130 = operator 中断。**立即停止本次运行**，**不得**重试或进入下一步。
+- 若 130 发生在 **§6.4（full loop）**，设备侧探针（含 `[3] apply` 的 mock）**仍在设备上运行**，
+  宿主机已停止捕获 → **设备状态未验证**。必须先完成 §9：受控 `stop` + `READY command=stop`
+  验证 + 地图回真实位置，**之后**才能重试或继续任何步骤。
+- 发生在其他步骤同样按"停止本次运行"处理；`ABORTED by signal` 证据随 §11 封存。
 
 **每步三值 + deadline（确定性，勿改）：**
 
@@ -173,6 +191,9 @@ echo "step exit=$?"   # 0=匹配终态 PASS；1=TIMEOUT（超时行已追加在 
 **超时 = 本次 FAIL(TIMEOUT)（exit 1）**：超时行已在同一证据文件内，部分日志**保留为证据**
 （§11 记 exit code 与 `TIMEOUT after` 行），按 §8 归因后重跑。**不得口头延长、不得无限等待。**
 
+**中断 = FAIL(ABORTED)（exit 130）**：`ABORTED by signal` 已在同一证据文件内；立即停止本次运行，
+**不是**超时、**不**按重试处理。§6.4 内发生 → 先 §9 再任何后续（见上方"退出码 130 处理"）。
+
 ### 6.0 基线：种子 `.bench` 调度数据
 
 完整 loop 需要「当前调度项 + 该 profile 的坐标」（§6.7 的 apply 从**当前调度项**解析坐标，
@@ -183,7 +204,7 @@ KB-8：千网游独占坐标）。`prepare_kyiv` 清空 bench 全部 profile、�
 ```bash
 capture_step run-6.0-seed.log MockProviderAcceptance "READY command=prepare_kyiv" 30 \
   "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command prepare_kyiv"
-echo "seed exit=$?"   # 0=PASS；1=TIMEOUT
+echo "seed exit=$?"   # 0=PASS；1=TIMEOUT；130=ABORTED（立即停止）
 ```
 - 判据（§7.1a）：logcat `MockProviderAcceptance` 出 `READY command=prepare_kyiv`。
 - **种子 seam 只动 `.bench` 数据**（`src/debug`，仅 shell 的 DUMP 权限可进），永不触碰生产。
@@ -215,7 +236,7 @@ adb shell am force-stop name.caiyao.fakegps.bench
 ```bash
 capture_step run-6.1-handshake.log ECHandshakeProbe "RESULT:" 60 \
   "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
-echo "handshake exit=$?"   # 0=终态已出（看内容判定 REFUSED/CONNECTED）；1=TIMEOUT
+echo "handshake exit=$?"   # 0=终态已出（看内容判定）；1=TIMEOUT；130=ABORTED（立即停止）
 ```
 
 - 新装设备预期：`RESULT: REFUSED`（§6.5 未批准 caller 拒绝——**这是安全 PASS，不是缺陷**）。
@@ -227,7 +248,7 @@ echo "handshake exit=$?"   # 0=终态已出（看内容判定 REFUSED/CONNECTED�
 # 列出 pending caller（先读身份，再批准）
 capture_step run-6.2a-pairing.log ECPairingApproval "pending callers|no pending callers" 30 \
   "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.v1.PairingApprovalActivity"
-echo "pairing-list exit=$?"
+echo "pairing-list exit=$?"   # 0=PASS；1=TIMEOUT；130=ABORTED
 ```
 
 - 判据（§7.2a）：出现 `pending callers (N)`，其中
@@ -238,7 +259,7 @@ echo "pairing-list exit=$?"
 ```bash
 capture_step run-6.2b-approve.log ECPairingApproval "APPROVED:|NO MATCH:|REFUSED:" 30 \
   "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.v1.PairingApprovalActivity --es approve_application_id com.example.cellrebelauto --es approve_signer_digest <上一步读到的完整 64 hex>"
-echo "approve exit=$?"
+echo "approve exit=$?"   # 0=APPROVED/NO MATCH 已出；1=TIMEOUT；130=ABORTED
 ```
 
 - 判据（§7.2b）：`APPROVED: com.example.cellrebelauto`。
@@ -259,7 +280,7 @@ echo "handshake exit=$?"
 ```bash
 capture_step run-6.4-loop.log ECFullLoop "LOOP COMPLETE|FAILED:|STOP:|LOOP ABORTED|CLEANUP|SAFETY:" 180 \
   "-n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.FullLoopProbeActivity"
-echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
+echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT；130=ABORTED（先 §9）
 ```
 
 - 判据（§7.4）：逐步匹配；终态 `LOOP COMPLETE — EXHAUSTED:`（单调度项种子 → 末项，预期 EXHAUSTED；
@@ -273,7 +294,7 @@ echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
    ```bash
    capture_step run-6.5-stop.log MockProviderAcceptance "READY command=stop" 30 \
      "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command stop"
-   echo "stop exit=$?"
+   echo "stop exit=$?"   # 0=PASS；1=TIMEOUT；130=ABORTED
    ```
    判据（§7.5）：`READY command=stop`（exit 0）。
 3. 打开任意地图 app，确认设备位置回到真实位置（不是 Kyiv）。
@@ -323,6 +344,7 @@ echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
 | `LOOP COMPLETE — ADVANCED:` + 四腿 observe | **PASS（终态）**：item/ver/hash/rev 四腿全匹配（需 ≥2 项调度） |
 | 任一 `FAILED:` / `STOP:` / `SAFETY: lease NOT cleared` / `LOOP ABORTED` | **FAIL**，按 §8 归因 |
 | `CLEANUP UNSAFE: … DEVICE MAY STILL BE IN MOCK STATE` | **FAIL + 必做 §9** |
+| `capture_step` exit **130**（`ABORTED by signal` 在日志尾部） | **FAIL(ABORTED)**——**不是** TIMEOUT、**不是**重试机会；§6.4 内发生 → 设备状态未验证，先 §9 再任何后续 |
 
 > **`verif` 字段**：只报告 `ConfigPrefsSync.sync()` 的**发布事务**结果
 > （`QwyEnvironmentController.applyEnvironment`：`published=true` → `VerificationLevelV1`
@@ -361,14 +383,17 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 
 **operator 必须：**
 1. **停一切**：不要继续任何下一步、不要重复跑 loop。
-2. **手动断 mock**（shell seam，唯一受控出口）：
+2. **手动断 mock**（shell seam，唯一受控出口；用 `capture_step` 保证 stop 证据与退出码一致）：
    ```bash
-   adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command stop
+   capture_step run-9-stop.log MockProviderAcceptance "READY command=stop" 30 \
+     "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command stop"
+   echo "stop exit=$?"   # 0=READY 已出；1=TIMEOUT；130=ABORTED
    ```
-3. **验证**：logcat 出 `READY command=stop`；打开地图 app 确认位置真实（不是 Kyiv）。
+3. **验证**：`run-9-stop.log` 出 `READY command=stop`（exit 0）；打开地图 app 确认位置真实（不是 Kyiv）。
 4. **记录**：把完整 logcat（`ECFullLoop` + `MockProviderAcceptance`）与 `CLEANUP UNSAFE` 原文
    封进证据（§11），**不得隐藏**——"CLEANUP UNSAFE 但设备好像没问题" 是不成立的分句。
-5. 若 `READY command=stop` 也失败（异常少），用系统设置手动关闭位置模拟并重启位置服务。
+5. 若 stop 也 TIMEOUT/ABORTED（异常少），用系统设置手动关闭位置模拟并重启位置服务，
+   并把该事实记入 §11。
 
 ## 10. 角色分工（硬约束）
 
@@ -397,7 +422,7 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 | 8 | `[3] apply` 的 rev/verif/fingerprint 与 `[4]` 的 hashMatch | 探针输出（记录猫不补写） |
 | 9 | 任何 `CLEANUP UNSAFE` / `FAILED` / `STOP` 原文 | §9 协议完成后照实记 |
 | 10 | 冒烟后设备位置验证（地图 app 非 Kyiv） | §6.5 |
-| 11 | 每步 `capture_step` 的 **exit code（0/1）** 与证据文件里的 `TIMEOUT after <s>` 行原文 | 超时行已**追加进同一 `run-<step>.log`**（非 stdout）；exit 1 = FAIL(TIMEOUT)，**部分日志必须随证据保留**，不得丢弃 |
+| 11 | 每步 `capture_step` 的 **exit code（0/1/130）** 与证据文件里的 `TIMEOUT after <s>` / `ABORTED by signal` 行原文 | 超时/中断行已**追加进同一 `run-<step>.log`**（非 stdout）；exit 1 = FAIL(TIMEOUT)、exit 130 = FAIL(ABORTED)，**部分日志必须随证据保留**，不得丢弃；130 发生在 §6.4 → §9 结果一并封存 |
 
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
 `reportDigest: sha256:<原始 logcat+截图 字节的 SHA-256>`）。**记录猫不得改原始字节。**
@@ -409,8 +434,11 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 1. §7.1a + 7.1b / §7.2a / §7.2b 全 PASS（种子 + 进程重置 + 精确批准）
 2. §7.3 握手 PASS（CONNECTED，无 SKEW）
 3. §7.4 完整 loop 到 **LOOP COMPLETE（EXHAUSTED 或 ADVANCED）**，四腿全匹配，无任何
-   FAILED/STOP/SAFETY/CLEANUP UNSAFE
+   FAILED/STOP/SAFETY/CLEANUP UNSAFE/ABORTED
 4. §7.5 清理 PASS（stop READY + 设备回真实位置）
+
+> 任何一步 `capture_step` **exit 130（ABORTED）即本次冒烟 FAIL**——**不**是 TIMEOUT、
+> **不**可当作可重试的中断；§6.4 内发生必须先 §9（设备状态未验证）再谈重跑。
 
 **执行时机顺序（调度线条件表，勿颠倒）：**
 `C1` runbook 落盘（本文） → `C2` runbook 非作者审 PASS → `C3` PR #36 R3 PASS →
