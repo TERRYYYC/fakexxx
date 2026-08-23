@@ -244,51 +244,83 @@ class FullLoopProbeActivity : Activity() {
             appendLine("    verAfter=${adv.scheduleVersionAfter} receiptDigest=${adv.receiptDigest.take(16)}…")
 
             // ---- 7. post-advance verification — outcome-dependent ---------------
-            // The advance outcome determines the verification predicate. The probe
-            // must not declare success on an outcome it doesn't understand (the
-            // validator already rejected unknown wires above).
+            // The advance outcome determines WHICH verification carrier to use and
+            // WHICH predicate to check. The two paths are frozen in §6.7.5:
+            //   ADVANCED  → observe() on the released historical lease, four legs
+            //   EXHAUSTED → discover() readback, non-null group + four legs
+            // The production consumer splits identically (AutomationEngine.kt:1371-1425).
             val outcome = AdvanceOutcomeV1.fromWire(adv.outcomeWire)
                 ?: run { appendLine("FAILED: decoded outcome is null despite validator pass — internal error"); return@buildString }
 
-            // Re-discover (validated) — the receipt is a claim, this is the evidence.
-            val after = requireValid("[7] discover",
-                ContractResponseValidator.validateDiscover(svc.discover())
-            ) ?: return@buildString
-            appendLine("[7] discover → item=${after.currentItemId} ver=${after.scheduleVersion} rev=${after.environmentRevision}")
-
-            // Outcome-specific predicate verification
             appendLine()
             when (outcome) {
                 AdvanceOutcomeV1.ADVANCED -> {
-                    // §6.7.4a: pointer MUST have moved; receipt MUST bind the origin.
-                    val pointerMoved = after.currentItemId != itemId
-                    val fromBinds = adv.advancedFromItemId == itemId
-                    val versionBumped = after.scheduleVersion != null &&
-                        after.scheduleVersion == adv.scheduleVersionAfter
-                    if (pointerMoved && fromBinds && versionBumped) {
-                        appendLine("LOOP COMPLETE — ADVANCED: pointer moved $itemId → ${after.currentItemId}")
-                        appendLine("    from=${adv.advancedFromItemId} to=${adv.advancedToItemId} verAfter=${adv.scheduleVersionAfter}")
+                    // §6.7.5 non-terminal: observe() on the released historical lease.
+                    // The receipt says the pointer moved — we must independently verify
+                    // that the NEW environment matches by observing it through the lease
+                    // that just advanced. All four legs must bind the receipt.
+                    val postObs = requireValid("[7a] post-advance observe",
+                        ContractResponseValidator.validateObserve(
+                            svc.observe(ObserveRequestV1(
+                                receipt.leaseId, "ob-post-adv-${UUID.randomUUID()}",
+                                adv.effectiveIntentHash
+                            )),
+                            receipt.leaseId, adv.effectiveIntentHash
+                        )
+                    ) ?: return@buildString
+                    appendLine("[7a] post-advance observe → item=${postObs.scheduleItemId} ver=${postObs.scheduleVersion} rev=${postObs.environmentRevision}")
+
+                    // Four-leg predicate (AutomationEngine.kt:1393-1399)
+                    val mismatchLeg: String? = when {
+                        postObs.scheduleItemId != adv.advancedToItemId ->
+                            "scheduleItemId (${postObs.scheduleItemId} vs ${adv.advancedToItemId})"
+                        postObs.scheduleVersion != adv.scheduleVersionAfter ->
+                            "scheduleVersion (${postObs.scheduleVersion} vs ${adv.scheduleVersionAfter})"
+                        postObs.acceptedIntentHash != adv.effectiveIntentHash ->
+                            "acceptedIntentHash (${postObs.acceptedIntentHash.take(16)}… vs ${adv.effectiveIntentHash.take(16)}…)"
+                        postObs.environmentRevision != adv.effectiveEnvironmentRevision ->
+                            "environmentRevision (${postObs.environmentRevision} vs ${adv.effectiveEnvironmentRevision})"
+                        else -> null
+                    }
+                    if (mismatchLeg != null) {
+                        appendLine("FAILED: post-advance observe mismatch — leg $mismatchLeg")
                     } else {
-                        appendLine("FAILED: advance receipt says ADVANCED but post-advance state inconsistent")
-                        appendLine("    pointerMoved=$pointerMoved (${after.currentItemId} vs $itemId)")
-                        appendLine("    fromBinds=$fromBinds (${adv.advancedFromItemId} vs $itemId)")
-                        appendLine("    versionBumped=$versionBumped (${after.scheduleVersion} vs ${adv.scheduleVersionAfter})")
+                        appendLine("LOOP COMPLETE — ADVANCED: pointer moved $itemId → ${adv.advancedToItemId}, independently observed")
+                        appendLine("    four-leg observe: scheduleItemId=${postObs.scheduleItemId} ver=${postObs.scheduleVersion} rev=${postObs.environmentRevision} hash=${postObs.acceptedIntentHash.take(16)}…")
                     }
                 }
                 AdvanceOutcomeV1.EXHAUSTED -> {
-                    // §6.7.5: pointer MUST be retained; schedule is at terminal position.
-                    val pointerRetained = after.currentItemId == itemId
-                    val fromBinds = adv.advancedFromItemId == itemId
-                    val versionBumped = after.scheduleVersion != null &&
-                        after.scheduleVersion == adv.scheduleVersionAfter
-                    if (pointerRetained && fromBinds && versionBumped) {
-                        appendLine("LOOP COMPLETE — EXHAUSTED: pointer retained at $itemId (terminal position)")
-                        appendLine("    from=${adv.advancedFromItemId} verAfter=${adv.scheduleVersionAfter}")
+                    // §6.7.5 terminal: fresh discover() readback. The receipt says the
+                    // schedule is exhausted — we must verify the provider's live state
+                    // confirms it. The v1.55 non-null group precondition must pass before
+                    // any leg comparison; then four legs must bind.
+                    val readback = requireValid("[7b] exhausted readback",
+                        ContractResponseValidator.validateDiscover(svc.discover())
+                    ) ?: return@buildString
+                    appendLine("[7b] exhausted readback → sched=${readback.currentScheduleId} item=${readback.currentItemId} ver=${readback.scheduleVersion} exhausted=${readback.exhausted}")
+
+                    // Non-null group precondition (AutomationEngine.kt:1410-1415)
+                    val readbackMismatchLeg: String? = when {
+                        readback.currentScheduleId == null -> "currentScheduleId_null"
+                        readback.currentItemId == null -> "currentItemId_null"
+                        readback.scheduleVersion == null -> "scheduleVersion_null"
+                        readback.exhausted == null -> "exhausted_null"
+                        // Four-leg predicate (AutomationEngine.kt:1416-1419)
+                        readback.currentScheduleId != schedId ->
+                            "currentScheduleId (${readback.currentScheduleId} vs $schedId)"
+                        readback.currentItemId != adv.advancedFromItemId ->
+                            "currentItemId (${readback.currentItemId} vs ${adv.advancedFromItemId})"
+                        readback.scheduleVersion != adv.scheduleVersionAfter ->
+                            "scheduleVersion (${readback.scheduleVersion} vs ${adv.scheduleVersionAfter})"
+                        readback.exhausted != true ->
+                            "exhausted (${readback.exhausted} — expected true)"
+                        else -> null
+                    }
+                    if (readbackMismatchLeg != null) {
+                        appendLine("FAILED: exhausted readback mismatch — leg $readbackMismatchLeg")
                     } else {
-                        appendLine("FAILED: advance receipt says EXHAUSTED but post-advance state inconsistent")
-                        appendLine("    pointerRetained=$pointerRetained (${after.currentItemId} vs $itemId)")
-                        appendLine("    fromBinds=$fromBinds (${adv.advancedFromItemId} vs $itemId)")
-                        appendLine("    versionBumped=$versionBumped (${after.scheduleVersion} vs ${adv.scheduleVersionAfter})")
+                        appendLine("LOOP COMPLETE — EXHAUSTED: pointer retained at ${readback.currentItemId}, schedule confirmed exhausted")
+                        appendLine("    four-leg readback: schedId=${readback.currentScheduleId} item=${readback.currentItemId} ver=${readback.scheduleVersion} exhausted=${readback.exhausted}")
                     }
                 }
             }
@@ -297,12 +329,27 @@ class FullLoopProbeActivity : Activity() {
             appendLine("FAILED at the step above: ${t::class.java.name}: ${t.message}")
         } finally {
             // The device must not be left mocking a location because a step threw.
+            // This is the LAST safety path — it fires when the primary release failed
+            // or was never reached. It MUST go through the validator: a raw receipt
+            // that reports releaseComplete=true on a wrong-schema/wrong-kind/foreign-
+            // payload/different-lease response would tell the operator "cleaned up"
+            // while the device stays in mock state.
             leaseId?.let { stuck ->
-                val cleaned = runCatching {
-                    svc.release(ReleaseRequestV1(stuck, "rl-cleanup", "rk-cleanup-${UUID.randomUUID()}"))
+                val cleanupResult = runCatching {
+                    ContractResponseValidator.validateRelease(
+                        svc.release(ReleaseRequestV1(stuck, "rl-cleanup", "rk-cleanup-${UUID.randomUUID()}")),
+                        stuck
+                    )
                 }
                 appendLine()
-                appendLine("CLEANUP: released stuck lease ${stuck.take(8)}… → ${cleaned.getOrNull()?.releaseReceipt?.releaseComplete ?: "FAILED"}")
+                when (val validated = cleanupResult.getOrNull()) {
+                    is ValidatedContractResponse.Success ->
+                        appendLine("CLEANUP: released stuck lease ${stuck.take(8)}… → VALIDATED releaseComplete=true")
+                    is ValidatedContractResponse.Failure ->
+                        appendLine("CLEANUP UNSAFE: lease ${stuck.take(8)}… release validation failed → ${validated.typedOutcome} — DEVICE MAY STILL BE IN MOCK STATE")
+                    null ->
+                        appendLine("CLEANUP UNSAFE: lease ${stuck.take(8)}… release threw ${cleanupResult.exceptionOrNull()?.message} — DEVICE MAY STILL BE IN MOCK STATE")
+                }
             }
             runCatching { unbindService(conn) }
         }
