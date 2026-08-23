@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.example.cellrebelauto.recovery.ContractResponseValidator
+import com.example.cellrebelauto.recovery.ContractResponseValidator.ValidatedContractResponse
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.IEnvironmentControlV1
@@ -79,10 +81,11 @@ class EnvironmentControlClient(private val context: Context) {
         data class TimedOut(val providerPackage: String, val waitedMs: Long) : HandshakeResult
 
         /**
-         * Bound and called, and the provider answered with a failure. Carried as
-         * the raw throwable because §6.3.3's typed wire codes cannot currently
-         * cross Binder (ServiceSpecificException is @hide in the public SDK —
-         * issue #3), so the transport-level exception is the only honest signal.
+         * Bound and called, and the provider answered with a failure. This covers
+         * both transport-level exceptions (Binder death, SecurityException) and
+         * typed contract failures detected by [ContractResponseValidator]:
+         * schema mismatch, unexpected result kind, foreign payloads, or error
+         * responses with typed error codes.
          */
         data class Refused(val providerPackage: String, val cause: Throwable) : HandshakeResult
     }
@@ -158,16 +161,22 @@ class EnvironmentControlClient(private val context: Context) {
             val service = IEnvironmentControlV1.Stub.asInterface(live)
             try {
                 val result = service.discover()
-                val snapshot = result.capabilitySnapshot
-                    ?: return HandshakeResult.Refused(
-                        providerPackage,
-                        IllegalStateException(
-                            "discover returned kind=${result.resultKindWire}" +
-                                " err=${result.errorCodeWire}" +
-                                " diag=${result.diagnosticMessage}"
-                        ),
-                    )
-                HandshakeResult.Connected(providerPackage, snapshot)
+                // Route through the unified validator: schema version, result kind,
+                // payload exclusivity, and snapshot presence are all checked.
+                when (val validated = ContractResponseValidator.validateDiscover(result)) {
+                    is ValidatedContractResponse.Success ->
+                        HandshakeResult.Connected(providerPackage, validated.payload)
+                    is ValidatedContractResponse.Failure ->
+                        HandshakeResult.Refused(
+                            providerPackage,
+                            IllegalStateException(
+                                "discover validation failed: ${validated.typedOutcome}" +
+                                    " (kind=${result.resultKindWire}" +
+                                    " err=${result.errorCodeWire}" +
+                                    " diag=${result.diagnosticMessage})"
+                            ),
+                        )
+                }
             } catch (t: Throwable) {
                 HandshakeResult.Refused(providerPackage, t)
             }

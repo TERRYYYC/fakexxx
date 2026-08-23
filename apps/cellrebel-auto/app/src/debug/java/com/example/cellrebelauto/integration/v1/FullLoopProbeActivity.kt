@@ -11,6 +11,9 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
+import com.example.cellrebelauto.recovery.ContractResponseValidator
+import com.example.cellrebelauto.recovery.ContractResponseValidator.ValidatedContractResponse
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalIntentDigestV1
@@ -49,6 +52,16 @@ import kotlin.concurrent.thread
  * that happens if the loop reaches it — it happens even when an earlier step
  * throws. A probe that leaves a device lying about where it is because an
  * assertion failed halfway is worse than no probe.
+ *
+ * EVERY RESPONSE GOES THROUGH [ContractResponseValidator]
+ * -------------------------------------------------------
+ * Raw AIDL returns an [EnvironmentControlResultV1] carrier that can carry schema
+ * mismatches, unexpected result kinds, foreign payloads, and unknown wire codes.
+ * The probe must not silently accept any of these — a false green from a probe
+ * is worse than a false red, because it sends an operator to a device with a
+ * promise the wire didn't actually make. So every call site routes through the
+ * unified validator that already exists on main, and fails the probe on any
+ * violation rather than ploughing on.
  */
 class FullLoopProbeActivity : Activity() {
 
@@ -69,8 +82,23 @@ class FullLoopProbeActivity : Activity() {
         }
     }
 
+    /**
+     * Unwrap a validated response or fail the probe report.
+     * Every call site in this loop uses this — no raw payload extraction.
+     */
+    private fun <T> StringBuilder.requireValid(
+        step: String,
+        result: ValidatedContractResponse<T>
+    ): T? = when (result) {
+        is ValidatedContractResponse.Success -> result.payload
+        is ValidatedContractResponse.Failure -> {
+            appendLine("FAILED: $step → ${result.typedOutcome}")
+            null
+        }
+    }
+
     private fun runLoop(): String = buildString {
-        appendLine("Environment Control v1 — full loop")
+        appendLine("Environment Control v1 — full loop (validated)")
         appendLine("=".repeat(52))
 
         val binderRef = AtomicReference<IBinder?>(null)
@@ -99,10 +127,10 @@ class FullLoopProbeActivity : Activity() {
 
         var leaseId: String? = null
         try {
-            // ---- 1. discover -------------------------------------------------
-            val discoverResult = svc.discover()
-            val snap = discoverResult.capabilitySnapshot
-                ?: run { appendLine("FAILED: discover returned no snapshot (kind=${discoverResult.resultKindWire}, err=${discoverResult.errorCodeWire})"); return@buildString }
+            // ---- 1. discover — validated ----------------------------------------
+            val snap = requireValid("[1] discover",
+                ContractResponseValidator.validateDiscover(svc.discover())
+            ) ?: return@buildString
             appendLine()
             appendLine("[1] discover → item=${snap.currentItemId} ver=${snap.scheduleVersion} rev=${snap.environmentRevision}")
             val itemId = snap.currentItemId
@@ -112,7 +140,7 @@ class FullLoopProbeActivity : Activity() {
             val schedId = snap.currentScheduleId
                 ?: run { appendLine("STOP: provider has no current schedule id"); return@buildString }
 
-            // ---- 2. preflight ------------------------------------------------
+            // ---- 2. preflight — validated ---------------------------------------
             // KB-8: coordinates removed from EnvironmentIntentV1 — the provider
             // resolves them from its own schedule item data; Auto passes only
             // profileRef + scheduleRef as references.
@@ -125,40 +153,65 @@ class FullLoopProbeActivity : Activity() {
                 notBeforeEpochMs = System.currentTimeMillis() - 1_000,
                 deadlineEpochMs = System.currentTimeMillis() + 600_000,
             )
-            val preResult = svc.preflight(PreflightRequestV1(intent, "pf-${UUID.randomUUID()}", ContractV1.PROTOCOL_VERSION))
-            val pre = preResult.preflightReport
-                ?: run { appendLine("FAILED: preflight returned no report (kind=${preResult.resultKindWire}, err=${preResult.errorCodeWire})"); return@buildString }
+            val intentHash = CanonicalIntentDigestV1.compute(intent)
+            val pfKey = "pf-${UUID.randomUUID()}"
+            val pre = requireValid("[2] preflight",
+                ContractResponseValidator.validatePreflight(
+                    svc.preflight(PreflightRequestV1(intent, pfKey, ContractV1.PROTOCOL_VERSION)),
+                    intentHash
+                )
+            ) ?: return@buildString
             appendLine("[2] preflight → decision=${pre.scheduleDecisionWire} blockers=${pre.blockingReasonWires}")
             if (pre.blockingReasonWires.isNotEmpty()) {
                 appendLine("    (blocked — continuing anyway to surface the real apply answer)")
             }
 
-            // ---- 3. apply — THE DEVICE ACTUALLY MOVES HERE --------------------
-            val applyResult = svc.apply(ApplyRequestV1(intent, "ap-${UUID.randomUUID()}", ContractV1.PROTOCOL_VERSION))
-            val receipt = applyResult.applyReceipt
-                ?: run { appendLine("FAILED: apply returned no receipt (kind=${applyResult.resultKindWire}, err=${applyResult.errorCodeWire})"); return@buildString }
+            // ---- 3. apply — THE DEVICE ACTUALLY MOVES HERE (validated) ----------
+            val applyKey = "ap-${UUID.randomUUID()}"
+            val receipt = requireValid("[3] apply",
+                ContractResponseValidator.validateApply(
+                    svc.apply(ApplyRequestV1(intent, applyKey, ContractV1.PROTOCOL_VERSION)),
+                    applyKey, intentHash
+                )
+            ) ?: return@buildString
             leaseId = receipt.leaseId
             appendLine("[3] apply → lease=${receipt.leaseId.take(8)}… rev=${receipt.environmentRevision} verif=${receipt.verificationLevelWire}")
             appendLine("    intentHash=${receipt.acceptedIntentHash.take(16)}…")
 
-            // ---- 4. observe — independent confirmation (§6.7.5) --------------
-            val obsResult = svc.observe(
-                ObserveRequestV1(receipt.leaseId, "ob-${UUID.randomUUID()}", CanonicalIntentDigestV1.compute(intent))
-            )
-            val obs = obsResult.environmentObservation
-                ?: run { appendLine("FAILED: observe returned no observation (kind=${obsResult.resultKindWire}, err=${obsResult.errorCodeWire})"); return@buildString }
+            // ---- 4. observe — independent confirmation (§6.7.5, validated) ------
+            val obs = requireValid("[4] observe",
+                ContractResponseValidator.validateObserve(
+                    svc.observe(ObserveRequestV1(receipt.leaseId, "ob-${UUID.randomUUID()}", intentHash)),
+                    receipt.leaseId, intentHash
+                )
+            ) ?: return@buildString
             appendLine("[4] observe → rev=${obs.environmentRevision} coverage=${obs.continuityCoverageWire} mode=${obs.deliveryModeWire}")
             appendLine("    fingerprint=${obs.environmentFingerprint}")
             appendLine("    hashMatch=${obs.acceptedIntentHash == receipt.acceptedIntentHash}")
 
-            // ---- 5. release BEFORE advance (§6.7.4a frozen order) ------------
-            val relResult = svc.release(ReleaseRequestV1(receipt.leaseId, "rl-${UUID.randomUUID()}", "rk-${UUID.randomUUID()}"))
-            val rel = relResult.releaseReceipt
-                ?: run { appendLine("FAILED: release returned no receipt (kind=${relResult.resultKindWire}, err=${relResult.errorCodeWire})"); return@buildString }
-            leaseId = null // released; the finally-guard no longer needs to fire
+            // ---- 5. release BEFORE advance (§6.7.4a, validated) -----------------
+            // CRITICAL: leaseId is ONLY cleared when the validator confirms
+            // releaseComplete=true. An incomplete release leaves the cleanup guard
+            // armed and halts the probe — the device must not be left in mock state,
+            // and an unproven cleanup must not be followed by advance.
+            val rlKey = "rl-${UUID.randomUUID()}"
+            val rkKey = "rk-${UUID.randomUUID()}"
+            val rel = requireValid("[5] release",
+                ContractResponseValidator.validateRelease(
+                    svc.release(ReleaseRequestV1(receipt.leaseId, rlKey, rkKey)),
+                    receipt.leaseId
+                )
+            )
+            if (rel == null) {
+                // releaseComplete=false lands here via PROVIDER_RELEASE_INCOMPLETE.
+                // leaseId is NOT cleared — finally cleanup guard stays armed.
+                appendLine("SAFETY: lease NOT cleared — finally cleanup will attempt re-release")
+                return@buildString
+            }
+            leaseId = null // validated: releaseComplete=true, cleanup guard can retire
             appendLine("[5] release → complete=${rel.releaseComplete} residuals=${rel.residualReasonWires} rev=${rel.environmentRevision}")
 
-            // ---- 6. completeAndAdvance --------------------------------------
+            // ---- 6. completeAndAdvance — validated ------------------------------
             val proof = CompletionProofV1(
                 scheduleItemId = itemId,
                 trustedSuccessCount = 3,
@@ -166,9 +219,10 @@ class FullLoopProbeActivity : Activity() {
                 ledgerRef = "auto:ledger:$RUN_ID:$itemId",
                 verifiedAtElapsedRealtimeMs = SystemClock.elapsedRealtime(),
             )
+            val advKey = "adv-${UUID.randomUUID()}"
             val draft = CompleteAndAdvanceRequestV1(
                 leaseId = receipt.leaseId,
-                idempotencyKey = "adv-${UUID.randomUUID()}",
+                idempotencyKey = advKey,
                 requestDigest = "",
                 expectedScheduleId = schedId,
                 expectedScheduleVersion = schedVer,
@@ -178,29 +232,69 @@ class FullLoopProbeActivity : Activity() {
             )
             // The contract's own framing helper — a second local copy would drift
             // silently and simply compute a different digest.
-            val advReq = draft.copy(requestDigest = CanonicalAdvanceDigestV1.compute(draft))
-            val advResult = svc.completeAndAdvance(advReq)
-            val adv = advResult.advanceReceipt
-                ?: run { appendLine("FAILED: advance returned no receipt (kind=${advResult.resultKindWire}, err=${advResult.errorCodeWire})"); return@buildString }
+            val requestDigest = CanonicalAdvanceDigestV1.compute(draft)
+            val advReq = draft.copy(requestDigest = requestDigest)
+            val adv = requireValid("[6] advance",
+                ContractResponseValidator.validateCompleteAndAdvance(
+                    svc.completeAndAdvance(advReq),
+                    intentHash, requestDigest, advKey
+                )
+            ) ?: return@buildString
             appendLine("[6] advance → outcome=${adv.outcomeWire} from=${adv.advancedFromItemId} to=${adv.advancedToItemId}")
             appendLine("    verAfter=${adv.scheduleVersionAfter} receiptDigest=${adv.receiptDigest.take(16)}…")
 
-            // ---- 7. re-discover: the receipt is a claim, this is the evidence -
-            val afterResult = svc.discover()
-            val after = afterResult.capabilitySnapshot
-                ?: run { appendLine("FAILED: re-discover returned no snapshot (kind=${afterResult.resultKindWire}, err=${afterResult.errorCodeWire})"); return@buildString }
+            // ---- 7. post-advance verification — outcome-dependent ---------------
+            // The advance outcome determines the verification predicate. The probe
+            // must not declare success on an outcome it doesn't understand (the
+            // validator already rejected unknown wires above).
+            val outcome = AdvanceOutcomeV1.fromWire(adv.outcomeWire)
+                ?: run { appendLine("FAILED: decoded outcome is null despite validator pass — internal error"); return@buildString }
+
+            // Re-discover (validated) — the receipt is a claim, this is the evidence.
+            val after = requireValid("[7] discover",
+                ContractResponseValidator.validateDiscover(svc.discover())
+            ) ?: return@buildString
             appendLine("[7] discover → item=${after.currentItemId} ver=${after.scheduleVersion} rev=${after.environmentRevision}")
+
+            // Outcome-specific predicate verification
             appendLine()
-            appendLine(
-                if (after.currentItemId != itemId)
-                    "LOOP COMPLETE — pointer moved $itemId → ${after.currentItemId}, independently confirmed"
-                else
-                    "LOOP COMPLETE — pointer retained at $itemId (expected only when EXHAUSTED)"
-            )
+            when (outcome) {
+                AdvanceOutcomeV1.ADVANCED -> {
+                    // §6.7.4a: pointer MUST have moved; receipt MUST bind the origin.
+                    val pointerMoved = after.currentItemId != itemId
+                    val fromBinds = adv.advancedFromItemId == itemId
+                    val versionBumped = after.scheduleVersion != null &&
+                        after.scheduleVersion == adv.scheduleVersionAfter
+                    if (pointerMoved && fromBinds && versionBumped) {
+                        appendLine("LOOP COMPLETE — ADVANCED: pointer moved $itemId → ${after.currentItemId}")
+                        appendLine("    from=${adv.advancedFromItemId} to=${adv.advancedToItemId} verAfter=${adv.scheduleVersionAfter}")
+                    } else {
+                        appendLine("FAILED: advance receipt says ADVANCED but post-advance state inconsistent")
+                        appendLine("    pointerMoved=$pointerMoved (${after.currentItemId} vs $itemId)")
+                        appendLine("    fromBinds=$fromBinds (${adv.advancedFromItemId} vs $itemId)")
+                        appendLine("    versionBumped=$versionBumped (${after.scheduleVersion} vs ${adv.scheduleVersionAfter})")
+                    }
+                }
+                AdvanceOutcomeV1.EXHAUSTED -> {
+                    // §6.7.5: pointer MUST be retained; schedule is at terminal position.
+                    val pointerRetained = after.currentItemId == itemId
+                    val fromBinds = adv.advancedFromItemId == itemId
+                    val versionBumped = after.scheduleVersion != null &&
+                        after.scheduleVersion == adv.scheduleVersionAfter
+                    if (pointerRetained && fromBinds && versionBumped) {
+                        appendLine("LOOP COMPLETE — EXHAUSTED: pointer retained at $itemId (terminal position)")
+                        appendLine("    from=${adv.advancedFromItemId} verAfter=${adv.scheduleVersionAfter}")
+                    } else {
+                        appendLine("FAILED: advance receipt says EXHAUSTED but post-advance state inconsistent")
+                        appendLine("    pointerRetained=$pointerRetained (${after.currentItemId} vs $itemId)")
+                        appendLine("    fromBinds=$fromBinds (${adv.advancedFromItemId} vs $itemId)")
+                        appendLine("    versionBumped=$versionBumped (${after.scheduleVersion} vs ${adv.scheduleVersionAfter})")
+                    }
+                }
+            }
         } catch (t: Throwable) {
             appendLine()
             appendLine("FAILED at the step above: ${t::class.java.name}: ${t.message}")
-            appendLine("(a null return means the typed wire code could not cross Binder — issue #3)")
         } finally {
             // The device must not be left mocking a location because a step threw.
             leaseId?.let { stuck ->
