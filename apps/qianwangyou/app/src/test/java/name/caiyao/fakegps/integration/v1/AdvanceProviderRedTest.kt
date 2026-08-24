@@ -975,9 +975,11 @@ class AdvanceProviderRedTest {
     // step 3b BEFORE step 4 — answering 17/16/14/15 would leak current schedule
     // state to a caller who never proved earned quota. 3b does NOT judge
     // liveness (own ACTIVE ref passes 3b; step 5 answers 7 — see M_AD_12).
-    // Lease→item binding: the earned item is the apply intent's scheduleRef
-    // (§6.3 / v1.72: scheduleRef IS the schedule item's stable reference;
-    // v1.62: acceptedIntentHash binds runId/attemptId/profileRef/scheduleRef).
+    // Lease→item binding: the earned item is provider truth at apply time
+    // (`scheduleSnapshot()?.currentItemId` — F12), NOT the caller's
+    // intent.scheduleRef declaration. §6.3/v1.72 freezes scheduleRef as the
+    // item's stable reference, but anchoring attribution to the declaration
+    // let a caller mis-bind which item the lease earned (see the pin below).
 
     /**
      * Earn + release a lease GENUINELY attributed to [earnedItem]: the
