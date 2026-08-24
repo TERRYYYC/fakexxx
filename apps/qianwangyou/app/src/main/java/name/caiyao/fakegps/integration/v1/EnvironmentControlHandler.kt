@@ -64,6 +64,10 @@ class EnvironmentControlHandler(
     private val environment: QwyEnvironment,
     private val clock: MonotonicClock,
     private val storage: DurableKv,
+    // F-15: diagnostics seam so the step-3b species line reaches logcat in
+    // production while the JVM lane (which does not mock android.util.Log)
+    // keeps testing the rejection paths through a recorder.
+    private val diagnostics: DiagnosticLog = DiagnosticLog.ANDROID,
 ) {
     fun discover(callingUid: Int): CapabilitySnapshotV1 = withOwnerFence {
         authorizer.authorize(callingUid)
@@ -539,20 +543,39 @@ class EnvironmentControlHandler(
             // only to the post-advance observe exception window below. A
             // pre-v1.75 durable row has no item attribution and therefore
             // remains decodable but fails closed here as `unproven` → 8.
+            //
+            // F-15: the judgment itself now lives in attributeLease()
+            // (StaleLeaseAttribution.kt) so the four rejection branches are
+            // species-distinguishable — the verdict crosses Binder unchanged
+            // (messages are the historical strings, verbatim), and the species
+            // additionally reaches logcat via one greppable line, because the
+            // C5 probe never surfaced diagnosticMessage and F-12 could not
+            // tell the four wire-8 branches apart.
             val attributed = leaseStore.get(request.leaseId)
-                ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                    "leaseId ${request.leaseId} unproven: no provider record of it (forged or never earned)")
-            if (!leaseBelongsToCaller(attributed, caller)) {
-                throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                    "leaseId ${request.leaseId} is foreign: earned by another caller")
-            }
-            val earnedScheduleRef = attributed.earnedScheduleRef
-                ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                    "leaseId ${request.leaseId} unproven: durable row has no originating-item attribution")
-            if (earnedScheduleRef != request.expectedCurrentItemId) {
-                throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                    "leaseId ${request.leaseId} earned quota for item " +
-                        "$earnedScheduleRef, not ${request.expectedCurrentItemId} (wrong-item)")
+            val attribution = attributeLease(
+                leaseRow = attributed,
+                leaseId = request.leaseId,
+                caller = caller,
+                expectedCurrentItemId = request.expectedCurrentItemId,
+            )
+            val attributedRow: LeaseRecord
+            val earnedScheduleRef: String
+            when (attribution) {
+                is StaleLeaseAttribution.Rejected -> {
+                    diagnostics.warn(
+                        DIAG_TAG,
+                        staleLeaseSpeciesLogLine(
+                            attribution.species,
+                            request.leaseId,
+                            request.expectedCurrentItemId,
+                        ),
+                    )
+                    throw ContractException(ContractErrorCodeV1.STALE_LEASE, attribution.message)
+                }
+                is StaleLeaseAttribution.Attributed -> {
+                    attributedRow = attribution.row
+                    earnedScheduleRef = attribution.earnedScheduleRef
+                }
             }
 
             // --- step 4: schedule gates (17→16→14→15) ---
@@ -618,7 +641,7 @@ class EnvironmentControlHandler(
             val snap = tracker.snapshot()
             // Step 3b proved the reference exists and is the caller's own —
             // reuse that read; a fallback here would silently mask a broken gate.
-            val intentHash = attributed.acceptedIntentHash
+            val intentHash = attributedRow.acceptedIntentHash
 
             val receipt = AdvanceReceiptV1(
                 outcomeWire = outcomeWire,
@@ -900,6 +923,9 @@ class EnvironmentControlHandler(
          * Provider-internal storage only — no wire/DTO/AIDL change.
          */
         const val OBSERVE_WINDOW_NAMESPACE: String = "integration.v1.observe.window"
+
+        /** F-15: logcat tag for the step-3b species diagnostics line. */
+        const val DIAG_TAG: String = "EnvironmentControlHandler"
     }
 
     // --- Durable field framing (Terra round-4 P1) ----------------------------

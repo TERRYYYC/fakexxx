@@ -34,6 +34,13 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
     val resolver = FakeIdentityResolver()
 
     /**
+     * F-15: survives restart() like the other harness fakes so a scenario can
+     * assert the step-3b species log line emitted by the CURRENT handler
+     * instance without mocking android.util.Log.
+     */
+    val diagnostics = RecordingDiagnosticLog()
+
+    /**
      * The store the FAKE ENVIRONMENT persists its schedule state in.
      *
      * Default: the provider's own [kv] — convenient, but silently STRONGER
@@ -118,6 +125,7 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
             environment = env,
             clock = clock,
             storage = kv,
+            diagnostics = diagnostics,
         )
         if (!firstBoot) {
             handler.onOwnerProcessStart(cleanlinessProvable)
