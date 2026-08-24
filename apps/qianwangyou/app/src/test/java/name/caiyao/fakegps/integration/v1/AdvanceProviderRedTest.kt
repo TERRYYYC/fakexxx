@@ -159,6 +159,38 @@ class AdvanceProviderRedTest {
 
     // ---------------------------------------------------------- idempotency
 
+    /** F12 (C5): caller mis-binding scheduleRef must not poison step-3b attribution. */
+    @Test
+    fun advance_callerDeclaredNonItemScheduleRef_attributionIsProviderTruth() {
+        // C5 integration shape (F12, task 0001787595763599): Auto fills
+        // intent.scheduleRef with its OWN task ref ("task-42"), violating the
+        // v1.72 freeze (§6.3: scheduleRef IS the schedule item's stable ref —
+        // v1.72's own warning: "no gate or type system will object" to the
+        // mis-binding; this test is that gate). Step 3b's attribution anchor
+        // must be the item the provider ACTUALLY applied (provider truth at
+        // apply time), not the caller's unverified declaration — otherwise
+        // every legal release→advance on such a lease dies wrong-item →
+        // STALE_LEASE(8), which is exactly the deterministic C5 device
+        // failure (two main runs + one diagnostic rerun).
+        val h = harness()
+        val receipt = h.apply(key = "adv-c5", intent = h.intent(scheduleRef = "task-42"))
+        h.release(receipt.leaseId, key = "adv-c5-rel")
+
+        val adv = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, receipt.leaseId, "adv-c5-adv"),
+        )
+
+        assertEquals(
+            "legal same-caller RELEASED historical reference must advance; " +
+                "caller's mis-declared scheduleRef must not poison attribution",
+            AdvanceOutcomeV1.ADVANCED.wire,
+            adv.outcomeWire,
+        )
+        assertEquals("item-2", h.env.currentItemId)
+        assertEquals("pointer advanced exactly once", 1, h.env.advanceCount)
+    }
+
     /** Same key + same digest replay → SAME receipt, pointer moved exactly once (M-AD-02 provider half). */
     @Test
     fun advance_sameKeySameDigest_replaysReceipt_pointerOnce() {
@@ -947,10 +979,21 @@ class AdvanceProviderRedTest {
     // (§6.3 / v1.72: scheduleRef IS the schedule item's stable reference;
     // v1.62: acceptedIntentHash binds runId/attemptId/profileRef/scheduleRef).
 
-    /** Earn + release a lease ATTRIBUTED to [earnedItem] (intent.scheduleRef = the item ref). */
+    /**
+     * Earn + release a lease GENUINELY attributed to [earnedItem]: the
+     * provider applies while its schedule is ON that item, so the attribution
+     * anchor (provider truth at apply time — F12) really is [earnedItem]; the
+     * pointer is then restored. The intent still declares the same item ref
+     * (§6.3/v1.72), but the declaration is no longer what step 3b consumes —
+     * anchoring to the caller's declaration is exactly the mis-binding C5
+     * caught, and `advance_callerDeclaredNonItemScheduleRef_…` pins it.
+     */
     private fun earnAndReleaseFor(h: ProviderHarness, earnedItem: String, key: String): String {
+        val restore = h.env.currentItemId
+        h.env.currentItemId = earnedItem
         val receipt = h.apply(key = key, intent = h.intent(scheduleRef = earnedItem, attemptId = "att-$key"))
         h.release(receipt.leaseId, key = "$key-rel")
+        h.env.currentItemId = restore
         return receipt.leaseId
     }
 

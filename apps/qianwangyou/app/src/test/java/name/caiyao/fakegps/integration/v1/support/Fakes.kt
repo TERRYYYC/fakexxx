@@ -245,6 +245,15 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         }
     }
 
+    /**
+     * F14 (C5): the REAL controller computes this from the actual publish
+     * outcome (ConfigPrefsSync success → VERIFIED, failure → NONE; P1-2 fix).
+     * The fake exposes it as a knob so tests can model a failed publish and
+     * pin that the handler's receipt reports the COMPUTED level — not a
+     * constant.
+     */
+    var applyVerificationLevelWire: Int = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+
     override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
         applyCount += 1
         // KB-8 (v1.62): the intent no longer carries coordinates — the
@@ -257,7 +266,7 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             effectiveLatitude = resolved?.first,
             effectiveLongitude = resolved?.second,
             deliveryModeWire = DeliveryModeV1.SYSTEM_MOCK.wire,
-            verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            verificationLevelWire = applyVerificationLevelWire,
         )
     }
 

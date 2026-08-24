@@ -214,9 +214,20 @@ class EnvironmentControlHandler(
                 startingEnvironmentRevision = snap.revision,
                 deadlineElapsedRealtimeMs = deadlineElapsed,
                 applyOwnerGeneration = tracker.generation,
-                // v1.75 step 3b: the lease's quota is earned FOR this schedule
-                // item (§6.3/v1.72: intent.scheduleRef IS the item's stable ref).
-                earnedScheduleRef = intent.scheduleRef,
+                // v1.75 step 3b: the lease's quota is earned FOR the schedule
+                // item the provider is ACTUALLY applying — provider truth at
+                // apply time, NOT the caller's intent.scheduleRef declaration.
+                // §6.3/v1.72 freezes scheduleRef as the item's stable ref, but
+                // v1.72's own warning ("no gate or type system will object")
+                // came true on the C5 device: Auto declared "task-N", and
+                // anchoring attribution to that declaration made every legal
+                // release→advance die wrong-item → STALE_LEASE(8) (F12). The
+                // receipt/digest still bind the declared intent verbatim; only
+                // this internal attribution anchor is provider-owned — same
+                // philosophy as KB-8 coordinates and step 3b itself: untrusted
+                // input must not buy historical facts. Null (no active
+                // schedule) stays null and fails closed as unproven → 8.
+                earnedScheduleRef = environment.scheduleSnapshot()?.currentItemId,
             )
             leaseStore.put(lease)
 
@@ -225,8 +236,14 @@ class EnvironmentControlHandler(
             // 授予该 caller" leg) — same transaction as the grant itself.
             storage.write(OBSERVE_WINDOW_NAMESPACE, observeWindowKey(caller), "")
 
-            // Now apply environment
-            environment.applyEnvironment(intent)
+            // Now apply environment — and CONSUME the computed outcome
+            // (F14/C5): the controller derives verificationLevelWire from the
+            // real publish result (ConfigPrefsSync failure → NONE; P1-2 fix).
+            // Discarding this return and stamping a constant into the receipt
+            // made every trusted-ledger entry's verification level a CLAIM,
+            // not a measurement (C5: receipt verif=1 while observe reported
+            // verified=false).
+            val applyOutcome = environment.applyEnvironment(intent)
 
             // Transition to ACTIVE
             val activeLease = lease.copy(state = LeaseState.ACTIVE)
@@ -244,7 +261,7 @@ class EnvironmentControlHandler(
                 acceptedIntentHash = intentHash,
                 appliedAtEpochMs = nowEpoch,
                 environmentRevision = tracker.snapshot().revision,
-                verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                verificationLevelWire = applyOutcome.verificationLevelWire,
             )
 
             // Persist receipt for idempotent replay
