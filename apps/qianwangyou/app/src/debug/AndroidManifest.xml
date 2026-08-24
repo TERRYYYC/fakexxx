@@ -35,6 +35,7 @@
         <activity
             android:name="name.caiyao.fakegps.integration.v1.PairingApprovalActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="EC v1 pairing approval" />
     </application>
 

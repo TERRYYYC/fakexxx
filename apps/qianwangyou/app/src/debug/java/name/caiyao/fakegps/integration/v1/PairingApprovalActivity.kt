@@ -1,6 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import android.widget.ScrollView
@@ -35,15 +36,34 @@ import kotlin.concurrent.thread
  */
 class PairingApprovalActivity : Activity() {
 
+    private lateinit var view: TextView
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val view = TextView(this).apply {
+        view = TextView(this).apply {
             textSize = 12f
             setPadding(24, 48, 24, 24)
             text = "pairing — working…"
         }
         setContentView(ScrollView(this).apply { addView(view) })
+        processIntent(intent)
+    }
 
+    /**
+     * F-11: `adb shell am start` adds FLAG_ACTIVITY_NEW_TASK by default. With
+     * singleTop launch mode, a second `am start` on an already-running instance
+     * delivers here instead of creating a fresh Activity. Without this override
+     * the approve-extras from the runbook's second launch are silently dropped
+     * and §6.2 automation hangs.
+     */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        processIntent(intent)
+    }
+
+    private fun processIntent(intent: Intent?) {
+        view.text = "pairing — working…"
         val approveId = intent?.getStringExtra(EXTRA_APP_ID)
         val approveDigest = intent?.getStringExtra(EXTRA_SIGNER)
 

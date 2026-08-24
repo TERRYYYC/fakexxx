@@ -122,6 +122,7 @@ class DebugAcceptanceManifestGuardTest {
         val activityTag = """<activity
             android:name="name.caiyao.fakegps.integration.v1.PairingApprovalActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="EC v1 pairing approval" />"""
         // The real manifest must contain this (as a substring — baseline check).
         assertTrue(

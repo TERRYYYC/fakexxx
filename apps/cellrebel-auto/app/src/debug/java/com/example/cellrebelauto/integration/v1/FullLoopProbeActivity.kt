@@ -65,15 +65,33 @@ import kotlin.concurrent.thread
  */
 class FullLoopProbeActivity : Activity() {
 
+    private lateinit var view: TextView
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val view = TextView(this).apply {
+        view = TextView(this).apply {
             textSize = 11f
             setPadding(24, 48, 24, 24)
             text = "full §6.7 loop — running…"
         }
         setContentView(ScrollView(this).apply { addView(view) })
+        launchProbe()
+    }
 
+    /**
+     * F-11: singleTop + onNewIntent so repeated `adb shell am start` re-runs the
+     * full loop instead of silently bringing the stale result to front. The loop
+     * includes a finally-block release, so the previous run's mock state is cleaned
+     * up before the new run starts.
+     */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        launchProbe()
+    }
+
+    private fun launchProbe() {
+        view.text = "full §6.7 loop — running…"
         thread(name = "ec-full-loop") {
             val report = runCatching { runLoop() }
                 .getOrElse { "LOOP ABORTED: ${it::class.java.name}: ${it.message}" }

@@ -29,15 +29,31 @@ import kotlin.concurrent.thread
  */
 class HandshakeProbeActivity : Activity() {
 
+    private lateinit var view: TextView
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val view = TextView(this).apply {
+        view = TextView(this).apply {
             textSize = 12f
             setPadding(24, 48, 24, 24)
             text = "Environment Control v1 handshake — running…"
         }
         setContentView(ScrollView(this).apply { addView(view) })
+        runProbe()
+    }
 
+    /**
+     * F-11: singleTop + onNewIntent so repeated `adb shell am start` re-runs the
+     * probe instead of silently bringing the stale result to front.
+     */
+    override fun onNewIntent(intent: android.content.Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        runProbe()
+    }
+
+    private fun runProbe() {
+        view.text = "Environment Control v1 handshake — running…"
         // Binder calls block; the main thread is not allowed to wait on one.
         thread(name = "ec-handshake-probe") {
             val client = EnvironmentControlClient(applicationContext)

@@ -10,10 +10,12 @@
         <activity
             android:name="com.example.cellrebelauto.integration.v1.HandshakeProbeActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="EC v1 handshake probe" />
         <activity
             android:name="com.example.cellrebelauto.integration.v1.FullLoopProbeActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:label="EC v1 full loop probe" />
     </application>
 </manifest>
