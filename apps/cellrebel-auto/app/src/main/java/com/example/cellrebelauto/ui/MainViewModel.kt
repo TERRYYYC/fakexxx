@@ -73,7 +73,7 @@ data class PlanUiState(
  * # 主界面 ViewModel：桥接 AutomationService 的状态
  * # 并为 Compose 界面提供操作接口
  */
-class MainViewModel(
+class MainViewModel @JvmOverloads constructor(
     application: Application,
     // R44 (DSF review P2-1): test-injectable DB — production keeps the singleton; oracles seed an
     // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
