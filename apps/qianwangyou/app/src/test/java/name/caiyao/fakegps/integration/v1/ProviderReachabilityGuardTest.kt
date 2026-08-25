@@ -228,6 +228,12 @@ class ProviderReachabilityGuardTest {
         )
 
         override fun scheduleDecisionWire(scheduleRef: String): Int = 0
+
+        // F-17: this probe models NO capability (no gateway, no schedule), so
+        // its honest achievable ceiling is the fail-closed floor — never a
+        // constant trusted level (same rule the handler fix pins).
+        override fun achievableVerificationLevelWire(): Int =
+            io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.NONE.wire
     }
 
     /**

@@ -32,6 +32,20 @@ interface QwyEnvironment {
     fun cleanup(leaseId: String): CleanupOutcome
     fun observeEffective(): EffectiveEnvironment
     fun scheduleDecisionWire(scheduleRef: String): Int
+
+    /**
+     * F-17: the honest CEILING of verification an apply could reach right
+     * now, derived from the same capability reads [applyEnvironment] itself
+     * gates on (gateway availability, current schedule item, qwy-owned
+     * coordinates for that item). Any known blocker → NONE — preflight must
+     * never claim a level the environment cannot currently back (INV-08).
+     *
+     * NOT a prediction of the apply outcome: the publish result is measured
+     * truth, knowable only at apply time. The apply receipt (F-14 fix:
+     * computed from the real ConfigPrefsSync result) and observeEffective()
+     * remain the only trusted sources of an ACHIEVED level.
+     */
+    fun achievableVerificationLevelWire(): Int
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
 }
 
@@ -236,6 +250,22 @@ class QwyEnvironmentController(
             }
         } catch (e: Exception) {
             null
+        }
+    }
+
+    override fun achievableVerificationLevelWire(): Int {
+        // F-17: mirror applyEnvironment()'s own preconditions exactly — every
+        // branch here is a state where apply would throw (or refuse to publish)
+        // before any verification could happen, so claiming VERIFIED over it
+        // from preflight would be the same constant-lie F-14 killed in the
+        // apply receipt (Handler:247), wearing preflight's clothes (Handler:113).
+        if (mockGateway == null) return VerificationLevelV1.NONE.wire
+        val currentItem = scheduleStore.getCurrentItemId()
+            ?: return VerificationLevelV1.NONE.wire
+        return if (resolveItemCoordinates(currentItem) != null) {
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        } else {
+            VerificationLevelV1.NONE.wire
         }
     }
 

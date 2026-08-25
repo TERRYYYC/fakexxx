@@ -381,6 +381,15 @@ class AutomationEngine(
                     // result of an unbound transport / validator failure / illegal response, and it
                     // must block the apply exactly like a DENIED schedule. The previous null-pass-
                     // through let an unapproved/unreachable provider change the device environment.
+                    // F-17 (glm52, scheduling-line dispatch): preflight.achievableVerificationLevelWire
+                    // is deliberately NOT consumed here. It is the provider's pre-apply CAPABILITY
+                    // CEILING (gateway/item/coordinates preconditions), not a prediction of the apply
+                    // outcome — the publish result is only measurable at apply time. Trust decisions
+                    // already run on MEASURED levels (apply receipt verificationLevelWire via
+                    // ContractResponseValidator; observe() levels via TrustPolicy), so gating here
+                    // would add a second, weaker denial path without adding safety. Soft-logging
+                    // achievable=NONE divergences later would be an observability change, not a
+                    // trust change.
                     val preflight = aplusCoord.executorBackend()?.preflight(
                         applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest
                     )
