@@ -69,7 +69,13 @@ SERIAL="FAKESERIAL1"
 PKG="name.caiyao.fakegps.bench"
 APK="$WORK/app-debug.apk"
 printf 'fake-apk-bytes-for-f18' >"$APK"
-LOCAL_SHA="$(shasum -a 256 "$APK" | awk '{print $1}')"
+LOCAL_SHA="$(
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$APK"
+    else
+        sha256sum "$APK"
+    fi | awk '{print $1}'
+)"
 FOREIGN_SHA="1111111111111111111111111111111111111111111111111111111111111111"
 
 run_helper() { # dir -> sets OUT / RC
