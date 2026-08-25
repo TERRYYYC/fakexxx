@@ -475,13 +475,14 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 > ① 文件数量齐全 — 黑屏帧满足 ② hash 互不相同 — 转场半帧天然唯一 ③ 非黑屏计数 — 陈旧帧通过
 
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
-`reportDigest: sha256:<§11 全部已收集证据文件按步骤顺序串接的 SHA-256>`）。**记录猫不得改原始字节。**
+`reportDigest: sha256:<设备证据报告文件的 SHA-256>`）。**记录猫不得改原始字节。**
 
-> **reportDigest 字节域定义**：digest 的 preimage 包含本轮 §11 **全部已收集证据文件**
-> （Tier A logcat `run-<step>.log` + Tier B 截图 `<run>-<step>.png`，按步骤顺序、
-> 每步 log 后接 screenshot 直接串接；截图缺失的步骤跳过截图字节）。reportDigest
-> 是**完整性封印**，不是判定权重指标——Tier B 截图字节参与 digest 计算
-> 不等于参与 §7 判定。实际 preimage 文件列表在各轮证据报告中逐一列出。
+> **reportDigest 规范定义（§10.1 冻结）**：`SHA-256` 对**设备证据报告文件**
+> （即本节所描述的 `g1-smoke-*.md`）的完整字节流求摘要，小写 hex，无前缀。
+> `reportDigest` 是该报告在 evidence manifest 中的定位指针，**不是**原始证据
+> 文件（logcat / 截图 PNG）的拼接摘要。原始证据的逐文件完整性由独立的
+> `evidence-manifest.sha256` 校验。已有证据报告（如 run#2）中 reportDigest
+> 使用了拼接字节定义，保留原始计算不追溯修改；后续轮次按 §10.1 执行。
 
 ## 12. 退出标准 → G2 前置
 

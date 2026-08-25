@@ -17,11 +17,12 @@
 #   M5   Add screenshot reference to §12 exit criteria → false-green surface
 #   M6   Remove non-participation disclaimer from item 7 → weight ambiguity
 #
-# Isolated guard kills (P2-4/P3: each guard must be independently load-bearing):
+# Isolated guard kills (P2-4/P3/P4: each guard must be independently load-bearing):
 #   M7   Remove only "### Tier A" heading (keep Tier B) → classification heading guard
 #   M8   Remove only "判定承重" label (keep ### Tier A) → Tier A label guard
-#   M9   Remove "完整性封印" from digest block → integrity-seal framing guard
-#   M10  Remove "不等于…§7" disclaimer from digest block → non-verdict digest guard
+#   M9   Remove "设备证据报告文件" from summary line → report-file term guard
+#   M10  Add concatenation term to summary line → anti-concat guard
+#   M11  Remove §10.1 reference from definition block → spec-authority guard
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -172,28 +173,38 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/判定承重/证据必填/g' "$rb"
 assert_fail "M8 removing 判定承重 label is caught (isolated, P2-4)" "$sb"
 
-# ── M9: Remove 完整性封印 from digest block (P3) ────────────────────────────
+# ── M9: Remove "设备证据报告文件" from summary line (P4) ────────────────────
 #
-# The digest definition must frame reportDigest as 完整性封印.  Removing it
-# should kill the integrity-seal guard without affecting the non-verdict guard
-# (不等于…§7 is on a separate line).
+# The summary line must contain "设备证据报告文件" to prove reportDigest refers
+# to the report FILE (§10.1), not concatenated evidence bytes.  Shortening it
+# to "设备证据" drops the file reference.
 
-sb=$(setup_sandbox "m9-no-integrity-seal")
+sb=$(setup_sandbox "m9-no-report-file-term")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-sed -i.bak 's/完整性封印/integrity-seal/g' "$rb"
-assert_fail "M9 removing 完整性封印 from digest block is caught (P3)" "$sb"
+sed -i.bak 's/设备证据报告文件/设备证据/' "$rb"
+assert_fail "M9 removing 设备证据报告文件 from summary is caught (P4)" "$sb"
 
-# ── M10: Remove non-verdict disclaimer from digest block (P3) ───────────────
+# ── M10: Add concatenation term to summary line (P4) ────────────────────────
 #
-# The digest block must state that screenshot bytes in the digest do NOT equal
-# §7 judgment participation.  Deleting that line should kill the non-verdict
-# guard without affecting the integrity-seal guard (完整性封印 is on a
-# different line).
+# The summary line must NOT contain terms implying byte concatenation (拼接,
+# 串接, logcat.*截图, Tier A.*字节).  Appending such a term should trigger
+# the anti-concat guard without affecting the report-file-term guard.
 
-sb=$(setup_sandbox "m10-no-nonverdict-disclaimer")
+sb=$(setup_sandbox "m10-concat-in-summary")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-sed -i.bak '/不等于.*§7/d' "$rb"
-assert_fail "M10 removing non-verdict disclaimer from digest is caught (P3)" "$sb"
+sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与拼接截图的 SHA-256/' "$rb"
+assert_fail "M10 adding concatenation term to summary is caught (P4)" "$sb"
+
+# ── M11: Remove §10.1 reference from definition block (P4) ─────────────────
+#
+# The definition block must reference §10.1 as the canonical authority for
+# reportDigest semantics.  Removing that reference should kill the spec-
+# authority guard without affecting the summary-line guards.
+
+sb=$(setup_sandbox "m11-no-spec-ref")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/§10\.1/§10/g' "$rb"
+assert_fail "M11 removing §10.1 from definition block is caught (P4)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

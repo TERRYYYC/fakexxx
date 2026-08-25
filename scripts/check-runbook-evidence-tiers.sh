@@ -18,7 +18,7 @@
 #   3. §11 contains the two-tier classification (### Tier A / ### Tier B headings)
 #   4. §11 item 7 (screenshots) is classified as Tier B / 辅助附件
 #   5. The three known failure modes are documented in §11
-#   6. reportDigest framed as integrity seal; screenshot in digest ≠ §7 judgment
+#   6. reportDigest matches §10.1 canonical definition (report file, not byte concat)
 #
 # Exit codes: 0 = all checks passed; 1 = at least one check failed.
 
@@ -136,22 +136,25 @@ check "§11 documents black-screen failure mode" "$( [ "$HAS_BLACK_SCREEN" -ge 1
 check "§11 documents stale-frame failure mode" "$( [ "$HAS_STALE_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 
-# ── 6. reportDigest is integrity seal, not verdict input ────────────────────
+# ── 6. reportDigest matches §10.1 canonical definition ──────────────────────
 #
-# reportDigest includes ALL collected §11 evidence bytes (Tier A logs + Tier B
-# screenshots) for integrity verification — it is a completeness seal, not a
-# judgment-weight indicator.  The definition block must explicitly frame it as
-# 完整性封印 and state that screenshot participation in the digest does NOT
-# equal participation in §7 judgment.  This preserves the evidence-registration
-# contract (run#2 included screenshots in digest) while maintaining the Tier B
-# non-verdict invariant.  (P2-2 original concern: undefined preimage when PNGs
-# absent → resolved by "截图缺失的步骤跳过截图字节".)
+# §10.1 freezes reportDigest as SHA-256 of the raw device evidence REPORT FILE
+# (the g1-smoke-*.md document), not a concatenation of raw evidence bytes.
+# Three guards:
+#   14. Summary line must contain "设备证据报告文件" (report file, not concat bytes)
+#   15. Summary line must NOT contain concatenation/Tier-A-byte terms
+#   16. Definition block must reference §10.1 as canonical authority
 
-DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*字节域/,/^$/')
-HAS_SEAL=$(echo "$DIGEST_BLOCK" | grep -c '完整性封印' || true)
-check "reportDigest described as 完整性封印" "$( [ "$HAS_SEAL" -ge 1 ] && echo 0 || echo 1 )"
-HAS_NOT_VERDICT=$(echo "$DIGEST_BLOCK" | grep -c '不等于.*§7' || true)
-check "reportDigest block: screenshot in digest ≠ §7 judgment" "$( [ "$HAS_NOT_VERDICT" -ge 1 ] && echo 0 || echo 1 )"
+S11_DIGEST_SUMMARY=$(echo "$S11" | grep 'reportDigest:' | head -1)
+SUMMARY_HAS_REPORT_FILE=$(echo "$S11_DIGEST_SUMMARY" | grep -c '设备证据报告文件' || true)
+check "reportDigest summary references 设备证据报告文件" "$( [ "$SUMMARY_HAS_REPORT_FILE" -ge 1 ] && echo 0 || echo 1 )"
+
+SUMMARY_HAS_CONCAT=$(echo "$S11_DIGEST_SUMMARY" | grep -ciE '拼接|串接|logcat.*截图|Tier A.*字节|全部已收集' || true)
+check "reportDigest summary has no concatenation/byte-stream terms" "$( [ "$SUMMARY_HAS_CONCAT" -eq 0 ] && echo 0 || echo 1 )"
+
+DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*规范定义/,/^$/')
+HAS_SPEC_REF=$(echo "$DIGEST_BLOCK" | grep -c '§10.1' || true)
+check "reportDigest definition references §10.1" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

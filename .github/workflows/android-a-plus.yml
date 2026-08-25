@@ -165,11 +165,11 @@ jobs:
 
       - name: selftest-runbook-evidence-tiers
         # Same mutation-kill argument as selftest-contract-v1: runs the production
-        # gate against mutated copies and asserts each mutation is caught.  11
-        # negative cases (M1–M10 + M4b) cover structural regressions (tier
+        # gate against mutated copies and asserts each mutation is caught.  12
+        # negative cases (M1–M11 + M4b) cover structural regressions (tier
         # removal, item migration, disclaimer removal), fail-closed §7/§12
         # screenshot guards, and isolated guard kills for classification heading,
-        # label, integrity-seal framing, and non-verdict digest invariants.
+        # label, report-file term, anti-concat, and §10.1 spec-authority.
         run: ./scripts/selftest-runbook-evidence-tiers.sh
 
   cellrebel-auto:
