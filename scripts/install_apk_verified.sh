@@ -64,10 +64,15 @@ local_sha() {
 LOCAL_SHA="$(local_sha)"
 
 # ---- 1. install, loudly -------------------------------------------------------
+# R1: capture the exit status BEFORE any branching — `if ! OUT=$(...)` would
+# make $? inside the body the status of the negation (always 0), printing
+# "adb exit 0" for every real failure and destroying the diagnostic.
 TARGS=()
 [ "$TFLAG" -eq 1 ] && TARGS+=(-t)
-if ! OUT="$(adb -s "$SERIAL" install -r ${TARGS[@]+"${TARGS[@]}"} "$APK" 2>&1)"; then
-    echo "INSTALL FAILED (adb exit $?): $PACKAGE" >&2
+OUT="$(adb -s "$SERIAL" install -r ${TARGS[@]+"${TARGS[@]}"} "$APK" 2>&1)"
+adb_rc=$?
+if [ "$adb_rc" -ne 0 ]; then
+    echo "INSTALL FAILED (adb exit $adb_rc): $PACKAGE" >&2
     printf '%s\n' "$OUT" >&2
     case "$OUT" in
         *UPDATE_INCOMPATIBLE*)

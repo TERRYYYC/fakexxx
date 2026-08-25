@@ -123,5 +123,32 @@ rm -f "$D/pm_path.out"
 run_helper "$D"
 [ "$RC" -ne 0 ] && report ok "c5 package absent -> nonzero rc" || report fail "c5 package absent -> nonzero rc" "rc=0"
 
+# ------------------- case 6: the REAL adb exit status must be printed ---------
+# R1 finding: `if ! OUT=$(...)` made $? inside the body 0, so every failed
+# install was reported as "adb exit 0". The actual status is diagnostic gold
+# (protocol failure vs signature mismatch vs stream error) and must survive.
+D="$WORK/c6"; make_fake_adb "$D" real-status
+printf 'INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match\n' >"$D/install.out"
+printf '7' >"$D/install.rc"
+run_helper "$D"
+[ "$RC" -ne 0 ] && report ok "c6 nonzero rc -> nonzero rc" || report fail "c6 nonzero rc -> nonzero rc" "rc=0"
+grep -q "adb exit 7" <<<"$OUT" &&
+    report ok "c6 prints the REAL adb status (7)" || report fail "c6 prints the REAL adb status (7)" "$OUT"
+grep -q "adb exit 0" <<<"$OUT" &&
+    report fail "c6 must not claim exit 0" "false status in: $OUT" || report ok "c6 does not claim exit 0"
+
+# --------------------- case 7: rc=0 but no Success marker in output -----------
+# adb has been observed to exit 0 without installing; process status alone is
+# not an install proof. The helper must refuse and stay loud.
+D="$WORK/c7"; make_fake_adb "$D" no-success
+printf 'Performing streamed install\n' >"$D/install.out"
+printf '0' >"$D/install.rc"
+run_helper "$D"
+[ "$RC" -ne 0 ] && report ok "c7 rc0-no-Success -> nonzero rc" || report fail "c7 rc0-no-Success -> nonzero rc" "rc=0 (treated as installed!)"
+grep -q "no Success" <<<"$OUT" &&
+    report ok "c7 names the missing Success marker" || report fail "c7 names the missing Success marker" "$OUT"
+grep -q "Performing streamed install" <<<"$OUT" &&
+    report ok "c7 echoes the full adb output" || report fail "c7 echoes the full adb output" "$OUT"
+
 printf 'install_apk_verified selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

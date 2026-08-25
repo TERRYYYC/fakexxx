@@ -264,15 +264,25 @@ install_debug_apk_if_changed() {
     # mismatch against a foreign-signed package) must carry its full reason to
     # the caller, or the failure is silent and acceptance runs false-green on a
     # stale APK whose versionCode/versionName are unchanged.
-    local install_out
-    if ! install_out="$(adb install -r -t "$APK" 2>&1)"; then
-        echo "HARNESS_ERROR debug APK install failed; full adb output follows:" >&2
+    # R1: process status alone is not install proof either — the real adb exit
+    # status is captured before branching (an `if !` inversion would report 0),
+    # and exit 0 WITHOUT a Success marker is a refusal, not an update.
+    local install_out install_rc
+    install_out="$(adb install -r -t "$APK" 2>&1)"
+    install_rc=$?
+    if [ "$install_rc" -ne 0 ]; then
+        echo "HARNESS_ERROR debug APK install failed (adb exit $install_rc); full adb output follows:" >&2
         printf '%s\n' "$install_out" >&2
         case "$install_out" in
             *UPDATE_INCOMPATIBLE*)
                 echo "HARNESS_HINT signatures do not match (F-18): installed package carries a foreign signer — see c5-evidence/f18-signer-divergence/" >&2
                 ;;
         esac
+        return 2
+    fi
+    if ! grep -q "Success" <<<"$install_out"; then
+        echo "HARNESS_ERROR debug APK install reported no Success (adb exit 0); full adb output follows:" >&2
+        printf '%s\n' "$install_out" >&2
         return 2
     fi
 
