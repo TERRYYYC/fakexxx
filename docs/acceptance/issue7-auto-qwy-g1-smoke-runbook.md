@@ -89,6 +89,15 @@ cd apps/qianwangyou && ./gradlew :app:assembleDebug
 **构建可重复性要求**：记录两只 APK 各自对应的 git commit（`git rev-parse HEAD`）。
 同一 checkout 的同一个 commit 构建两只 app 是最干净基线；若分叉，两条 SHA 都要记（§11）。
 
+**构建产物指纹（F-13，必记）**：构建完成立刻对两只 APK 取 SHA-256 并留存，作为 §11 与
+设备实装比对的基线——`versionCode/versionName` 相同**不**证明设备跑的是这个包
+（install 可能静默未生效而版本号恰好不变，F-13 实测踩实）：
+
+```bash
+shasum -a 256 apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk \
+              apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk
+```
+
 ## 5. 安装（顺序重要）
 
 ```bash
@@ -166,7 +175,7 @@ echo "step exit=$?"   # 0=匹配终态 PASS；1=TIMEOUT；130=ABORTED（行已�
 - 130 = operator 中断。**立即停止本次运行**，**不得**重试或进入下一步。
 - 若 130 发生在 **§6.4（full loop）**，设备侧探针（含 `[3] apply` 的 mock）**仍在设备上运行**，
   宿主机已停止捕获 → **设备状态未验证**。必须先完成 §9：受控 `stop` + `READY command=stop`
-  验证 + 地图回真实位置，**之后**才能重试或继续任何步骤。
+  验证 + mock 状态直接验证通过（§6.5 step 3），**之后**才能重试或继续任何步骤。
 - 发生在其他步骤同样按"停止本次运行"处理；`ABORTED by signal` 证据随 §11 封存。
 
 **每步三值 + deadline（确定性，勿改）：**
@@ -224,7 +233,7 @@ adb shell am force-stop name.caiyao.fakegps.bench
 - 因此**种子写入并确认 READY 之后、任何 EC bind 之前，必须 force-stop 一次**，
   让下一次 bind 从新 DB 重建调度。此刻尚无 apply/lease，重置是安全的。
 - **每次重跑（同一进程存活）都必须重做 6.0 + 6.0.1**，否则不构成可重复过程。
-- **若上一轮以 `CLEANUP UNSAFE` 收场，必须先完成 §9（stop READY + 地图回真实位置）才能重跑 6.0。**
+- **若上一轮以 `CLEANUP UNSAFE` 收场，必须先完成 §9（stop READY + mock 状态直接验证通过）才能重跑 6.0。**
   force-stop **不**移除系统侧 test providers（`removeTestProvider` 才做）；任何重置都不得凌驾于 §9 之上。
 - 若个别 ROM 对 `persistent` 生效导致 force-stop 无效，退路是 `adb uninstall` 后重装 bench
   （清空 `.bench` 数据）并重新 6.0，把这一事实记入 §11。
@@ -297,7 +306,15 @@ echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
    echo "stop exit=$?"   # 0=PASS；1=TIMEOUT；130=ABORTED
    ```
    判据（§7.5）：`READY command=stop`（exit 0）。
-3. 打开任意地图 app，确认设备位置回到真实位置（不是 Kyiv）。
+3. **直接查 mock 状态本身**——不得用「地图不在 Kyiv」代理（F-13：C5 接手时设备被**第三方 app**
+   mock 在 49.959850,30.015237，距种子点 65.419 km，地图判据曾因此给出假绿；mock 可来自任意
+   app、指向任意坐标）：
+   ```bash
+   adb shell dumpsys location | grep 'provider \[mock\]'
+   adb shell appops get name.caiyao.fakegps.bench android:mock_location
+   ```
+   第一条**必须无输出**（无 `provider [mock]` 行 = 系统侧 mock provider 已清除）；
+   两条输出原文随 §11 记录项 10 封存。打开地图 app 目测位置可作辅助直觉校验，**不构成判据**。
 4. 记录猫按 §11 封存证据。
 
 ## 7. 验收判据（哪些字段算通过）
@@ -354,8 +371,10 @@ echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
 > 判据只要求 `[3] apply` 有 lease 输出，不依赖 verif 值；`verif=3` 照记 §11，不算 harness 失败。
 
 ### 7.5 清理收尾（§6.5）
-- **PASS**：`READY command=stop` + 地图 app 显示真实位置
-- **FAIL**：无 READY 行，或地图仍在 Kyiv
+- **PASS**：`READY command=stop` + `adb shell dumpsys location | grep 'provider \[mock\]'` **无输出**
+  （系统侧 mock provider 已清除——无论此前 mock 来自哪只 app、指向哪个坐标）
+- **FAIL**：无 READY 行，或仍检出 `provider [mock]` 行（设备仍在 mock 状态 = FAIL；
+  坐标在哪里、是不是 Kyiv、是不是本 bench 在 mock，都不改变判定）
 
 ## 8. 故障解读表
 
@@ -368,7 +387,7 @@ echo "loop exit=$?"   # 0=探针已出终态（逐行核对 §7.4）；1=TIMEOUT
 | `[3] apply` 失败/抛错 | ① mock_location app-op 未给 bench（最常见）；② 无当前项/无坐标 | 检查 §3.1 开发设置（或 `adb appops set … allow`）；重跑 6.0 |
 | `[5] release` 非 complete | provider 未回读清理成环（mockGateway 层） | 看 `residuals`；执行 §9 后再跑一轮 |
 | `[6] advance` 回 `16/17/14/15/8` | 调度状态与请求前提不符（耗尽/身份/版本/项/lease 归因） | 对照 §7.4 表核 `expected*` 字段；复现 → 记 finding（wire code 是规范 §6.7.4b 的回答，不是探针错误） |
-| 地图停在 Kyiv / mock 未清 | cleanup 验证失败 | 执行 §9，确认地图回真实位置后再继续任何步骤 |
+| `dumpsys location` 仍见 `provider [mock]` / mock 未清 | cleanup 验证失败（含第三方 app 在 mock 的情况，F-13） | 执行 §9，mock 状态直接验证通过（§7.5）后再继续任何步骤 |
 
 ## 9. 安全协议：`CLEANUP UNSAFE` 与 mock 状态清理
 
@@ -389,7 +408,13 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
      "-n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity --es command stop"
    echo "stop exit=$?"   # 0=READY 已出；1=TIMEOUT；130=ABORTED
    ```
-3. **验证**：`run-9-stop.log` 出 `READY command=stop`（exit 0）；打开地图 app 确认位置真实（不是 Kyiv）。
+3. **验证**：`run-9-stop.log` 出 `READY command=stop`（exit 0）；**直接查 mock 状态本身**
+   （不用「地图不在 Kyiv」代理，理由与判据同 §6.5 step 3 / §7.5）：
+   ```bash
+   adb shell dumpsys location | grep 'provider \[mock\]'   # 必须无输出
+   adb shell appops get name.caiyao.fakegps.bench android:mock_location
+   ```
+   两条输出原文记入 §11（记录项 10）。
 4. **记录**：把完整 logcat（`ECFullLoop` + `MockProviderAcceptance`）与 `CLEANUP UNSAFE` 原文
    封进证据（§11），**不得隐藏**——"CLEANUP UNSAFE 但设备好像没问题" 是不成立的分句。
 5. 若 stop 也 TIMEOUT/ABORTED（异常少），用系统设置手动关闭位置模拟并重启位置服务，
@@ -414,14 +439,14 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 |---|---|---|
 | 1 | 设备品牌/型号/OS 版本/API 级别/serial(前4) | `adb shell getprop ro.product.model`、`ro.build.version.release`、`adb get-serialno` |
 | 2 | 两只 APK 的 git commit（或同一 checkout SHA） | `git rev-parse HEAD` |
-| 3 | 两只 APK versionCode/versionName | `adb shell dumpsys package <pkg> \| grep -E "versionCode\|versionName"` |
+| 3 | 两只 APK versionCode/versionName **+ 实装 APK SHA-256 逐字比对** | versionCode/versionName：`adb shell dumpsys package <pkg> \| grep -E "versionCode\|versionName"`；SHA-256：`adb shell pm path <pkg>`（应只有一行 `base.apk`）→ `adb exec-out cat <path> \| shasum -a 256`，与 §4 构建产物 SHA-256 **逐字相等**——不等 = 设备跑的不是本次构建（versionCode 相同不算数，F-13），重装后重记 |
 | 4 | 批准所用的完整 signerDigest 与 approve 命令 | §6.2（基线="批准了谁"） |
 | 5 | 种子地址基线 | `prepare_kyiv` → Kyiv 50.4501 / 30.5234（§6.0） |
 | 6 | 每步探针的当次 logcat 全文 | `capture_step` 产出的 `run-<step>.log`（§6.0.0）：跟随写文件、终态或 deadline 后 `kill+wait`；**不得在 `am start` 后立即 `-d` 立取** |
 | 7 | 每步探针屏幕截图 | `adb exec-out screencap -p > <run>-<step>.png` |
 | 8 | `[3] apply` 的 rev/verif/fingerprint 与 `[4]` 的 hashMatch | 探针输出（记录猫不补写） |
 | 9 | 任何 `CLEANUP UNSAFE` / `FAILED` / `STOP` 原文 | §9 协议完成后照实记 |
-| 10 | 冒烟后设备位置验证（地图 app 非 Kyiv） | §6.5 |
+| 10 | 冒烟后 mock 状态直接验证（`dumpsys location` 与 `appops` 输出原文；地图目测只作辅助，不构成判据） | §6.5 / §7.5 |
 | 11 | 每步 `capture_step` 的 **exit code（0/1/130）** 与证据文件里的 `TIMEOUT after <s>` / `ABORTED by signal` 行原文 | 超时/中断行已**追加进同一 `run-<step>.log`**（非 stdout）；exit 1 = FAIL(TIMEOUT)、exit 130 = FAIL(ABORTED)，**部分日志必须随证据保留**，不得丢弃；130 发生在 §6.4 → §9 结果一并封存 |
 
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
@@ -435,7 +460,7 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 2. §7.3 握手 PASS（CONNECTED，无 SKEW）
 3. §7.4 完整 loop 到 **LOOP COMPLETE（EXHAUSTED 或 ADVANCED）**，四腿全匹配，无任何
    FAILED/STOP/SAFETY/CLEANUP UNSAFE/ABORTED
-4. §7.5 清理 PASS（stop READY + 设备回真实位置）
+4. §7.5 清理 PASS（stop READY + mock 状态直接验证无 `provider [mock]` 行）
 
 > 任何一步 `capture_step` **exit 130（ABORTED）即本次冒烟 FAIL**——**不**是 TIMEOUT、
 > **不**可当作可重试的中断；§6.4 内发生必须先 §9（设备状态未验证）再谈重跑。
