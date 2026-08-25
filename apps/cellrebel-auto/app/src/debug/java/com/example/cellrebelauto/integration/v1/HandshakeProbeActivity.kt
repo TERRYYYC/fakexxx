@@ -5,7 +5,6 @@ import android.os.Bundle
 import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
-import kotlin.concurrent.thread
 
 /**
  * Debug-only probe that performs one Environment Control handshake and reports
@@ -31,6 +30,17 @@ class HandshakeProbeActivity : Activity() {
 
     private lateinit var view: TextView
 
+    /**
+     * Serializes probe launches (same pattern as [FullLoopProbeActivity]).
+     *
+     * HandshakeProbeActivity only performs a read-only discover() — no leases,
+     * no device mutation — so the safety risk is lower than FullLoop. But
+     * concurrent handshake threads still corrupt the UI output, produce
+     * interleaved logcat, and confuse binder connection management. Same class
+     * of failure mode, same fix.
+     */
+    private val probeRunner = SerialProbeRunner()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         view = TextView(this).apply {
@@ -55,7 +65,8 @@ class HandshakeProbeActivity : Activity() {
     private fun runProbe() {
         view.text = "Environment Control v1 handshake — running…"
         // Binder calls block; the main thread is not allowed to wait on one.
-        thread(name = "ec-handshake-probe") {
+        // SerialProbeRunner ensures a second launch waits for the first to finish.
+        probeRunner.launch(threadName = "ec-handshake-probe") {
             val client = EnvironmentControlClient(applicationContext)
             val report = buildReport(client)
             // logcat carries it too, so the result survives the screen and can be

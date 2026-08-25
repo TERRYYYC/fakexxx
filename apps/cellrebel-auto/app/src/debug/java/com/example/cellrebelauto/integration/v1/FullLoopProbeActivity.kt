@@ -29,7 +29,6 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.concurrent.thread
 
 /**
  * One full §6.7 loop against a real provider on a real device.
@@ -67,6 +66,21 @@ class FullLoopProbeActivity : Activity() {
 
     private lateinit var view: TextView
 
+    /**
+     * Serializes probe launches so that at most one [runLoop] executes at a time.
+     *
+     * R5 P1-1: without this gate, `onNewIntent` spawned a new thread on every
+     * re-launch. Two concurrent `runLoop()` threads raced on the same provider
+     * and device mock state — lease cleanup, advance decisions, and UI callbacks
+     * all corrupted. The blocking happens on the WORKER thread (inside the
+     * SerialProbeRunner), never the main/UI thread, so there is no ANR risk.
+     *
+     * This makes the `onNewIntent` comment's promise real: "the previous run's
+     * mock state is cleaned up before the new run starts" — because the finally
+     * block (which releases the lease) runs while the gate is still held.
+     */
+    private val probeRunner = SerialProbeRunner()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         view = TextView(this).apply {
@@ -92,7 +106,7 @@ class FullLoopProbeActivity : Activity() {
 
     private fun launchProbe() {
         view.text = "full §6.7 loop — running…"
-        thread(name = "ec-full-loop") {
+        probeRunner.launch(threadName = "ec-full-loop") {
             val report = runCatching { runLoop() }
                 .getOrElse { "LOOP ABORTED: ${it::class.java.name}: ${it.message}" }
             Log.i(TAG, report)
