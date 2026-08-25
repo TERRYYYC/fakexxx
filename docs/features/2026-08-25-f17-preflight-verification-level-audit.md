@@ -36,7 +36,7 @@ preflight **无条件**宣称"系统 mock 已独立验证"可达，而真实 app
 1. `rg -n "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED"` 全仓（生产/测试/codec/docs/contracts/AIDL 产物）
 2. `rg -n "VerificationLevelV1\."` 生产 main source set（apps + contracts + acceptance）
 3. **魔法数字刀**：`(verificationLevelWire|achievableVerificationLevelWire|supportedVerificationLevelWires|verificationWire)\s*=\s*[0-9]`（枚举名都不写的直写 int——第二张面孔的变体家族）。范围 = 生产 main source set：`apps contracts acceptance` 且排除 `**/src/test/**`、`**/src/matrixTest/**`、`*.md`、`*.yaml` → 该范围内**零命中**
-4. **字符串刀**：`"SYSTEM_MOCK_INDEPENDENTLY_VERIFIED"` 字面（字符串形式绕过枚举），同上生产范围（`apps` main source set）→ 该范围内**仅 `TrustPolicy.kt:137`**（消费侧比较常量，合法——是直写但不属 claim 型）
+4. **字符串刀**：`"SYSTEM_MOCK_INDEPENDENTLY_VERIFIED"` 字面（字符串形式绕过枚举），范围 = 与第 3 刀完全相同的生产 main source set（`apps contracts acceptance` 且排除 `**/src/test/**`、`**/src/matrixTest/**`、`*.md`、`*.yaml`）→ 该范围内**仅 `TrustPolicy.kt:137`**（消费侧比较常量，合法——是直写但不属 claim 型）
 
 AIDL：仓库无手写 .aidl 源（仅 build 中间产物，字段走共享 Parcelable 库），无第二真相源。
 
