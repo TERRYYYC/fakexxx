@@ -207,8 +207,25 @@ object ContractResponseValidator {
             return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_FOREIGN_PAYLOAD")
         }
         // M-VS-02: an unknown advance outcome wire must NEVER be read optimistically.
-        if (io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.fromWire(receipt.outcomeWire) == null) {
-            return ValidatedContractResponse.Failure("PROVIDER_UNKNOWN_ADVANCE_OUTCOME")
+        val outcome = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.fromWire(receipt.outcomeWire)
+            ?: return ValidatedContractResponse.Failure("PROVIDER_UNKNOWN_ADVANCE_OUTCOME")
+        // Frozen contract implication (§6.7.1): the outcome and target field MUST be self-consistent.
+        //   ADVANCED  ⇒  advancedToItemId != null  (the pointer moved somewhere)
+        //   EXHAUSTED ⇒  advancedToItemId == null  (the pointer stayed; there is no "to")
+        // A contradictory tuple is not a weaker receipt — it is a malformed carrier. The digest
+        // may recompute correctly (it only proves the provider serialized its own fields), but
+        // field-level self-consistency is a separate invariant that must be enforced here.
+        when (outcome) {
+            io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.ADVANCED -> {
+                if (receipt.advancedToItemId == null) {
+                    return ValidatedContractResponse.Failure("PROVIDER_ADVANCED_WITHOUT_TARGET")
+                }
+            }
+            io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.EXHAUSTED -> {
+                if (receipt.advancedToItemId != null) {
+                    return ValidatedContractResponse.Failure("PROVIDER_EXHAUSTED_WITH_TARGET")
+                }
+            }
         }
         if (receipt.effectiveIntentHash != expectedIntentHash) {
             return ValidatedContractResponse.Failure("PROVIDER_ADVANCE_INTENT_MISMATCH")
