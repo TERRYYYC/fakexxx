@@ -18,6 +18,10 @@ SCREENSHOT_PATH="${SCREENSHOT_PATH:-}"
 RECOVERY_SCREENSHOT_PATH="${RECOVERY_SCREENSHOT_PATH:-}"
 FIRST_START_SCREENSHOT_PATH="${FIRST_START_SCREENSHOT_PATH:-}"
 ADB=(adb -s "$SERIAL")
+# F-18: installs go through the verified helper — adb install failures are loud,
+# and post-install identity is the SHA-256 of the device's base.apk vs this
+# build's bytes (never versionCode/versionName, which are signer-independent).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 ui_dump() {
     "${ADB[@]}" exec-out uiautomator dump /dev/tty 2>/dev/null \
@@ -365,7 +369,10 @@ else
 fi
 trap restore EXIT
 
-"${ADB[@]}" install -r "$BENCH_APK"
+# F-18: helper aborts this script (set -e) on install failure or byte mismatch —
+# previously a bare `install -r` could fail silently and every later step would
+# "pass" against the stale previously-installed package.
+"$REPO_ROOT/scripts/install_apk_verified.sh" -s "$SERIAL" -p "$BENCH_PACKAGE" -- "$BENCH_APK"
 for package_name in "$REFERENCE_PACKAGE" "$PRODUCT_PACKAGE" "$BENCH_PACKAGE"; do
     "${ADB[@]}" shell pm path "$package_name" | sed "s/^/INSTALLED $package_name /"
 done

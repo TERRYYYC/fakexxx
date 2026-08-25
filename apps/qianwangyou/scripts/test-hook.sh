@@ -260,8 +260,21 @@ install_debug_apk_if_changed() {
     fi
 
     echo "[install] $APK"
-    adb install -r -t "$APK" >/dev/null ||
-        { echo "HARNESS_ERROR debug APK install failed" >&2; return 2; }
+    # F-18: never swallow adb install output. A failed install (e.g. signature
+    # mismatch against a foreign-signed package) must carry its full reason to
+    # the caller, or the failure is silent and acceptance runs false-green on a
+    # stale APK whose versionCode/versionName are unchanged.
+    local install_out
+    if ! install_out="$(adb install -r -t "$APK" 2>&1)"; then
+        echo "HARNESS_ERROR debug APK install failed; full adb output follows:" >&2
+        printf '%s\n' "$install_out" >&2
+        case "$install_out" in
+            *UPDATE_INCOMPATIBLE*)
+                echo "HARNESS_HINT signatures do not match (F-18): installed package carries a foreign signer — see c5-evidence/f18-signer-divergence/" >&2
+                ;;
+        esac
+        return 2
+    fi
 
     # LSPosed may disable a module or clear its scope when PackageManager changes the APK path.
     # Rebooting cannot restore that user-owned policy, and writing LSPosed's private DB would fake
