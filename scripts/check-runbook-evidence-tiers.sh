@@ -15,10 +15,10 @@
 # What it checks:
 #   1. §7 (verdict criteria) does NOT reference screenshots at all (fail-closed)
 #   2. §12 (exit criteria) does NOT reference screenshots at all
-#   3. §11 contains the two-tier classification (Tier A / Tier B)
+#   3. §11 contains the two-tier classification (### Tier A / ### Tier B headings)
 #   4. §11 item 7 (screenshots) is classified as Tier B / 辅助附件
 #   5. The three known failure modes are documented in §11
-#   6. reportDigest domain excludes screenshots (Tier A only)
+#   6. reportDigest framed as integrity seal; screenshot in digest ≠ §7 judgment
 #
 # Exit codes: 0 = all checks passed; 1 = at least one check failed.
 
@@ -98,8 +98,8 @@ if [ -z "$S11" ]; then
   echo "check-runbook-evidence-tiers: 0 passed, 1 failed (§11 not found)"
   exit 1
 fi
-HAS_TIER_A=$(echo "$S11" | grep -c 'Tier A' || true)
-HAS_TIER_B=$(echo "$S11" | grep -c 'Tier B' || true)
+HAS_TIER_A=$(echo "$S11" | grep -c '### Tier A' || true)
+HAS_TIER_B=$(echo "$S11" | grep -c '### Tier B' || true)
 check "§11 defines Tier A classification" "$( [ "$HAS_TIER_A" -ge 1 ] && echo 0 || echo 1 )"
 check "§11 defines Tier B classification" "$( [ "$HAS_TIER_B" -ge 1 ] && echo 0 || echo 1 )"
 
@@ -136,17 +136,22 @@ check "§11 documents black-screen failure mode" "$( [ "$HAS_BLACK_SCREEN" -ge 1
 check "§11 documents stale-frame failure mode" "$( [ "$HAS_STALE_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 
-# ── 6. reportDigest domain excludes screenshots ─────────────────────────────
+# ── 6. reportDigest is integrity seal, not verdict input ────────────────────
 #
-# P2-2: reportDigest must NOT define its preimage as "logcat+截图" because Tier B
-# PNGs may be absent.  The digest domain must reference Tier A only.
-# Scoped to §11 to avoid hitting the intro paragraph's general "reportDigest" mention.
+# reportDigest includes ALL collected §11 evidence bytes (Tier A logs + Tier B
+# screenshots) for integrity verification — it is a completeness seal, not a
+# judgment-weight indicator.  The definition block must explicitly frame it as
+# 完整性封印 and state that screenshot participation in the digest does NOT
+# equal participation in §7 judgment.  This preserves the evidence-registration
+# contract (run#2 included screenshots in digest) while maintaining the Tier B
+# non-verdict invariant.  (P2-2 original concern: undefined preimage when PNGs
+# absent → resolved by "截图缺失的步骤跳过截图字节".)
 
-S11_DIGEST_LINE=$(echo "$S11" | grep -i 'reportDigest.*sha256' | head -1)
-S11_DIGEST_HAS_SCREENSHOT=$(echo "$S11_DIGEST_LINE" | grep -ciE '截图|screenshot|png' || true)
-S11_DIGEST_HAS_TIER_A=$(echo "$S11" | grep -A5 -i 'reportDigest.*sha256' | grep -c 'Tier A' || true)
-check "reportDigest domain does not reference screenshots" "$( [ "$S11_DIGEST_HAS_SCREENSHOT" -eq 0 ] && echo 0 || echo 1 )"
-check "reportDigest domain references Tier A" "$( [ "$S11_DIGEST_HAS_TIER_A" -ge 1 ] && echo 0 || echo 1 )"
+DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*字节域/,/^$/')
+HAS_SEAL=$(echo "$DIGEST_BLOCK" | grep -c '完整性封印' || true)
+check "reportDigest described as 完整性封印" "$( [ "$HAS_SEAL" -ge 1 ] && echo 0 || echo 1 )"
+HAS_NOT_VERDICT=$(echo "$DIGEST_BLOCK" | grep -c '不等于.*§7' || true)
+check "reportDigest block: screenshot in digest ≠ §7 judgment" "$( [ "$HAS_NOT_VERDICT" -ge 1 ] && echo 0 || echo 1 )"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

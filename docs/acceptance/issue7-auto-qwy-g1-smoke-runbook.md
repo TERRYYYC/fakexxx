@@ -475,13 +475,13 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 > ① 文件数量齐全 — 黑屏帧满足 ② hash 互不相同 — 转场半帧天然唯一 ③ 非黑屏计数 — 陈旧帧通过
 
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
-`reportDigest: sha256:<原始 Tier A 证据字节的 SHA-256>`）。**记录猫不得改原始字节。**
+`reportDigest: sha256:<§11 全部已收集证据文件按步骤顺序串接的 SHA-256>`）。**记录猫不得改原始字节。**
 
-> **reportDigest 字节域定义**：digest 的 preimage 仅含 **Tier A 证据文件**（logcat `run-<step>.log`
-> 按步骤顺序直接串接）。Tier B 截图 **不参与** reportDigest 计算——截图存在时由
-> 独立的逐文件 `evidence-manifest.sha256` 校验完整性，不与判定承重的 digest 混合。
-> 已有证据报告（如 run#2）中 reportDigest 含截图字节的，保留原始计算不追溯修改，
-> 但其截图字节对 verdict 无承重意义。
+> **reportDigest 字节域定义**：digest 的 preimage 包含本轮 §11 **全部已收集证据文件**
+> （Tier A logcat `run-<step>.log` + Tier B 截图 `<run>-<step>.png`，按步骤顺序、
+> 每步 log 后接 screenshot 直接串接；截图缺失的步骤跳过截图字节）。reportDigest
+> 是**完整性封印**，不是判定权重指标——Tier B 截图字节参与 digest 计算
+> 不等于参与 §7 判定。实际 preimage 文件列表在各轮证据报告中逐一列出。
 
 ## 12. 退出标准 → G2 前置
 

@@ -17,10 +17,11 @@
 #   M5   Add screenshot reference to §12 exit criteria → false-green surface
 #   M6   Remove non-participation disclaimer from item 7 → weight ambiguity
 #
-# Isolated guard kills (P2-4: each guard must be independently load-bearing):
-#   M7   Remove only "Tier A" keyword (keep Tier B) → Tier A classification guard
-#   M8   Remove only "判定承重" label (keep Tier A) → Tier A label guard
-#   M9   Revert reportDigest to "logcat+截图" → digest domain guard
+# Isolated guard kills (P2-4/P3: each guard must be independently load-bearing):
+#   M7   Remove only "### Tier A" heading (keep Tier B) → classification heading guard
+#   M8   Remove only "判定承重" label (keep ### Tier A) → Tier A label guard
+#   M9   Remove "完整性封印" from digest block → integrity-seal framing guard
+#   M10  Remove "不等于…§7" disclaimer from digest block → non-verdict digest guard
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -152,12 +153,17 @@ sed -i.bak '/^## 7\./a\
 只有此条件满足后，才可判定 PASS。' "$rb"
 assert_fail "M4b split-line screenshot verdict in §7 is caught (P2-1)" "$sb"
 
-# ── M7: Remove only "Tier A" keyword (isolated guard, P2-4) ─────────────────
+# ── M7: Remove only "### Tier A" heading (isolated guard, P2-4/P3) ──────────
+#
+# Targets the heading only (s/^### Tier A/), NOT a global s/Tier A/ — the old
+# global replacement also hit the digest definition block, triggering both the
+# classification guard AND the digest guard.  Heading-specific replacement
+# isolates M7 to the classification guard (Luna P3-1).
 
-sb=$(setup_sandbox "m7-no-tier-a-keyword")
+sb=$(setup_sandbox "m7-no-tier-a-heading")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-sed -i.bak 's/Tier A/Tier-Primary/g' "$rb"
-assert_fail "M7 removing Tier A keyword is caught (isolated, P2-4)" "$sb"
+sed -i.bak 's/^### Tier A/### Tier-Primary/' "$rb"
+assert_fail "M7 removing ### Tier A heading is caught (isolated, P2-4/P3)" "$sb"
 
 # ── M8: Remove only "判定承重" label (isolated guard, P2-4) ──────────────────
 
@@ -166,12 +172,28 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/判定承重/证据必填/g' "$rb"
 assert_fail "M8 removing 判定承重 label is caught (isolated, P2-4)" "$sb"
 
-# ── M9: Revert reportDigest to "logcat+截图" (P2-2) ─────────────────────────
+# ── M9: Remove 完整性封印 from digest block (P3) ────────────────────────────
+#
+# The digest definition must frame reportDigest as 完整性封印.  Removing it
+# should kill the integrity-seal guard without affecting the non-verdict guard
+# (不等于…§7 is on a separate line).
 
-sb=$(setup_sandbox "m9-digest-includes-screenshot")
+sb=$(setup_sandbox "m9-no-integrity-seal")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-sed -i.bak 's/Tier A 证据字节/logcat+截图 字节/g' "$rb"
-assert_fail "M9 reverting digest to logcat+截图 is caught (P2-2)" "$sb"
+sed -i.bak 's/完整性封印/integrity-seal/g' "$rb"
+assert_fail "M9 removing 完整性封印 from digest block is caught (P3)" "$sb"
+
+# ── M10: Remove non-verdict disclaimer from digest block (P3) ───────────────
+#
+# The digest block must state that screenshot bytes in the digest do NOT equal
+# §7 judgment participation.  Deleting that line should kill the non-verdict
+# guard without affecting the integrity-seal guard (完整性封印 is on a
+# different line).
+
+sb=$(setup_sandbox "m10-no-nonverdict-disclaimer")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak '/不等于.*§7/d' "$rb"
+assert_fail "M10 removing non-verdict disclaimer from digest is caught (P3)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
