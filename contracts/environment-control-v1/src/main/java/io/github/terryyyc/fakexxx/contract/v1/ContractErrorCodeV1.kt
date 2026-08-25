@@ -110,19 +110,24 @@ enum class ContractErrorCodeV1(val wire: Int) {
      *    which is indistinguishable from "your lease expired" and tells Auto
      *    nothing about whether to retry or recover.
      *
-     * **Frozen** (v1.75–v1.77; `KB-5` closed): `completeAndAdvance` judges the
-     * `leaseId`'s attribution in §6.7.4b step 3b (order 3b → 4 → 5), and every
-     * attribution failure is THIS code — wire 8's genus is "该 leaseId 对本次
-     * 操作不可用", with `foreign` (owned by a different caller), `unproven`
-     * (no provider record, no originating-item attribution, or never provably
-     * RELEASED — a forged or still-unreleased reference never buys history),
-     * and `wrong-item`
+     * **Frozen** (v1.75–v1.78; `KB-5` closed): `completeAndAdvance` judges
+     * the `leaseId`'s attribution in §6.7.4b step 3b (order 3b → 4 → 5), and
+     * every attribution failure is THIS code — wire 8's genus is "该 leaseId
+     * 对本次操作不可用", with `foreign` (owned by a different caller),
+     * `unproven` (no provider record, or no originating-item attribution — a
+     * forged reference never buys history), and `wrong-item`
      * (quota earned for another item) as its species. 3b precedes the step-4
      * schedule gates so a forged or foreign reference can never buy current
-     * schedule state (17/16/14/15) it never proved quota for; liveness stays
-     * step 5's answer (7). v1.76 removed recency from this gate: any
-     * caller-owned, provably RELEASED reference with the matching earned item
-     * passes attribution regardless of newer released leases.
+     * schedule state (17/16/14/15) it never proved quota for.
+     *
+     * **Attribution and liveness are orthogonal (v1.78)**: an own,
+     * item-matching reference that is provably live — still `ACTIVE`, never
+     * `RELEASED` — is NOT `unproven`; it passes step 3b and step 5's
+     * device-global lease gate answers `LEASE_CONFLICT`(7), not 8. `unproven
+     * → 8` is reserved for an absent provider record or a missing
+     * originating-item attribution. v1.76 removed recency from this gate: any
+     * caller-owned reference with the matching earned item passes attribution
+     * regardless of newer released leases.
      */
     STALE_LEASE(8),
 
