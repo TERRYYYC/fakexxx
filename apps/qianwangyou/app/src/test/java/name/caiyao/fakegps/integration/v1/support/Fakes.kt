@@ -245,6 +245,33 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         }
     }
 
+    /**
+     * F14 (C5): the REAL controller computes this from the actual publish
+     * outcome (ConfigPrefsSync success → VERIFIED, failure → NONE; P1-2 fix).
+     * The fake exposes it as a knob so tests can model a failed publish and
+     * pin that the handler's receipt reports the COMPUTED level — not a
+     * constant.
+     *
+     * R4 P3: the SAME publish outcome must drive the observe surface too —
+     * production records it via recordLastApplied(verified) at apply time and
+     * observeEffective() reads lastApplied.verified back, so a failed publish
+     * shows NONE on BOTH the receipt AND the observation. A fake that lets the
+     * knob drive only ApplyOutcome cannot reproduce the C5 cross-surface
+     * contradiction (receipt NONE while observe VERIFIED); see
+     * observeEffective().
+     */
+    var applyVerificationLevelWire: Int = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+
+    /**
+     * Mirror of production's recordLastApplied(verified) → lastApplied.verified:
+     * the verification level of the most recent apply, consumed by
+     * observeEffective() so both surfaces report the same publish outcome.
+     * null = no apply yet (cold start) → observe reports VERIFIED (the fake's
+     * pre-apply default, matching the production cold-start passthrough that
+     * reports what the hook transport actually holds).
+     */
+    private var lastAppliedVerificationLevelWire: Int? = null
+
     override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
         applyCount += 1
         // KB-8 (v1.62): the intent no longer carries coordinates — the
@@ -253,11 +280,12 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         val resolved = coordinateForItem(currentItemId)
         effectiveLatitude = resolved?.first
         effectiveLongitude = resolved?.second
+        lastAppliedVerificationLevelWire = applyVerificationLevelWire
         return ApplyOutcome(
             effectiveLatitude = resolved?.first,
             effectiveLongitude = resolved?.second,
             deliveryModeWire = DeliveryModeV1.SYSTEM_MOCK.wire,
-            verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            verificationLevelWire = applyVerificationLevelWire,
         )
     }
 
@@ -276,15 +304,28 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         return cleanupOutcome
     }
 
-    override fun observeEffective(): EffectiveEnvironment = EffectiveEnvironment(
-        latitude = effectiveLatitude,
-        longitude = effectiveLongitude,
-        isMock = isMock,
-        deliveryModeWire = DeliveryModeV1.SYSTEM_MOCK.wire,
-        verificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
-        environmentFingerprint = fingerprint,
-        evidenceRefs = evidenceRefs,
-    )
+    override fun observeEffective(): EffectiveEnvironment {
+        // R4 P3 (C5 cross-surface): the fake publish outcome must drive BOTH
+        // surfaces. Production: applyEnvironment records the publish result
+        // (recordLastApplied(verified)); observeEffective reads it back. So a
+        // failed publish (knob = NONE) makes the RECEIPT and the OBSERVATION
+        // agree on NONE — the C5 contradiction (receipt verif=1 while observe
+        // verified=false) is only reproducible when the fake lets the apply
+        // outcome reach the observe surface. null = no apply yet (cold start)
+        // → report the fake's pre-apply VERIFIED default.
+        val level = lastAppliedVerificationLevelWire
+            ?: VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        val verified = level == VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        return EffectiveEnvironment(
+            latitude = effectiveLatitude,
+            longitude = effectiveLongitude,
+            isMock = if (verified) isMock else false,
+            deliveryModeWire = if (verified) DeliveryModeV1.SYSTEM_MOCK.wire else null,
+            verificationLevelWire = level,
+            environmentFingerprint = fingerprint,
+            evidenceRefs = evidenceRefs,
+        )
+    }
 
     override fun scheduleDecisionWire(scheduleRef: String): Int = 1 // ALLOWED_NOW
 

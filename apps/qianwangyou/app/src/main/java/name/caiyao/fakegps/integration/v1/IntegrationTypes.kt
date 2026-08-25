@@ -113,14 +113,19 @@ data class LeaseRecord(
      */
     val applyOwnerGeneration: Long,
     /**
-     * v1.75 §6.7.4b step 3b: the schedule ITEM whose quota this lease earned —
-     * the apply intent's scheduleRef (§6.3/v1.72: scheduleRef IS the item's
-     * stable reference; v1.62: acceptedIntentHash binds it). completeAndAdvance
-     * for a different item on this historical reference is `wrong-item` →
-     * STALE_LEASE(8). New rows are non-null by construction because
-     * validateApplyRequest rejects a blank scheduleRef before any lease exists.
-     * Null is reserved for durable rows written before this internal field was
-     * introduced; such rows remain decodable but are `unproven` at step 3b.
+     * v1.75 §6.7.4b step 3b: the schedule ITEM whose quota this lease earned.
+     * Provider-owned at apply time — `scheduleSnapshot()?.currentItemId`, NOT
+     * the caller's intent.scheduleRef declaration (F12: Auto declared
+     * "task-N" and anchoring attribution to that declaration made every legal
+     * release→advance die wrong-item; the receipt/digest still bind the
+     * declared intent verbatim, only this internal attribution anchor is
+     * provider truth). completeAndAdvance for a different item on this
+     * historical reference is `wrong-item` → STALE_LEASE(8).
+     *
+     * Null when no schedule item is active at apply time (or on pre-#18
+     * durable rows written before this internal field was introduced). Either
+     * way such a row remains decodable but is `unproven` at step 3b and fails
+     * closed → STALE_LEASE(8).
      */
     val earnedScheduleRef: String?,
     val releaseIdempotencyKey: String? = null,

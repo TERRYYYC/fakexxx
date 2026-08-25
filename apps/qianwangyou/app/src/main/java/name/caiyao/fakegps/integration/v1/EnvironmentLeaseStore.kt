@@ -179,10 +179,12 @@ class EnvironmentLeaseStore(
                 r.residualReasonWires.joinToString(","),
                 r.revokeSource?.name,
                 r.recoveryEvidenceRef,
-                // v1.75 step-3b attribution basis. New rows are non-null by
-                // construction; null preserves a pre-attribution row as an
-                // explicit "unproven" fact instead of making upgrade decode
-                // crash or inventing an item binding.
+                // v1.75 step-3b attribution basis. Provider truth at apply
+                // time (scheduleSnapshot()?.currentItemId — F12): a NEW row is
+                // null when no schedule item is active at apply, and a legacy
+                // pre-#18 row is null because the field did not exist. Either
+                // way null is an explicit "unproven" fact at step 3b instead
+                // of making upgrade decode crash or inventing an item binding.
                 r.earnedScheduleRef,
             ),
         )

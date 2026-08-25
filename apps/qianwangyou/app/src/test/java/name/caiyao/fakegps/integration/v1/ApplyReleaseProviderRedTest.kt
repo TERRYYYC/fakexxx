@@ -1,6 +1,8 @@
 package name.caiyao.fakegps.integration.v1
 
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
+import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO_SIGNER
@@ -312,5 +314,89 @@ class ApplyReleaseProviderRedTest {
         val relReplay = h.release(first.leaseId, key = hostileReleaseKey)
         assertEquals("stored release receipt must round-trip byte-identically", rel, relReplay)
         assertEquals("cleanup ran once", 1, h.env.cleanupCount)
+    }
+
+    // ------------------------------------------------ F14: honest apply receipt
+
+    /**
+     * C5 F14 (task 0001787595763599): the apply receipt's
+     * `verificationLevelWire` must report the COMPUTED verification outcome of
+     * THIS apply — the controller already computes it from the real publish
+     * result (ConfigPrefsSync failure → NONE; P1-2 fix), but the handler
+     * discarded that return value and stamped the VERIFIED constant into the
+     * receipt. On the C5 device that produced receipt verif=1 while
+     * observe reported verified=false: a trusted-ledger entry whose
+     * verification level was CLAIMED, not measured (INV-08).
+     *
+     * Kill-the-regression shape: reverting the handler to the constant makes
+     * this red again, because the fake's publish outcome is pinned to NONE.
+     */
+    @Test
+    fun apply_publishFails_receiptReportsNone_notConstantVerified() {
+        val h = harness()
+        h.env.applyVerificationLevelWire = VerificationLevelV1.NONE.wire
+
+        val receipt = h.apply(key = "apl-f14-none")
+
+        assertEquals(
+            "receipt must carry the computed verification level (publish failed → NONE), not a constant",
+            VerificationLevelV1.NONE.wire,
+            receipt.verificationLevelWire,
+        )
+    }
+
+    /** Complement: a successful publish still reports VERIFIED through the same computed path. */
+    @Test
+    fun apply_publishSucceeds_receiptReportsVerified() {
+        val h = harness()
+        h.env.applyVerificationLevelWire =
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+
+        val receipt = h.apply(key = "apl-f14-ok")
+
+        assertEquals(
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            receipt.verificationLevelWire,
+        )
+    }
+
+    /**
+     * R4 P3 (C5 cross-surface): the F14 regression must reproduce the ORIGINAL
+     * device symptom — receipt/observe disagreeing — not just kill a handler
+     * constant. On the C5 device, receipt verif=1 while observe reported
+     * verified=false. The fake now mirrors production: the same publish
+     * outcome that lands in the receipt (recordLastApplied(verified)) also
+     * drives observeEffective(), so a failed publish must surface NONE on BOTH
+     * surfaces. Asserting observe == NONE here pins the cross-surface
+     * agreement that the old fake (observe hardcoded VERIFIED) could never
+     * fail on.
+     */
+    @Test
+    fun apply_publishFails_receiptAndObserveAgreeOnNone() {
+        val h = harness()
+        h.env.applyVerificationLevelWire = VerificationLevelV1.NONE.wire
+
+        val receipt = h.apply(key = "apl-f14-none")
+
+        assertEquals(
+            "receipt must carry the computed verification level (publish failed → NONE)",
+            VerificationLevelV1.NONE.wire,
+            receipt.verificationLevelWire,
+        )
+
+        val observed = h.handler.observe(
+            AUTO_UID,
+            ObserveRequestV1(
+                leaseId = receipt.leaseId,
+                operationId = "apl-f14-observe",
+                expectedIntentHash = receipt.acceptedIntentHash,
+            ),
+        )
+        assertEquals(
+            "observe must NOT report VERIFIED while the receipt says NONE — the " +
+                "C5 cross-surface contradiction is the original symptom",
+            VerificationLevelV1.NONE.wire,
+            observed.verificationLevelWire,
+        )
     }
 }

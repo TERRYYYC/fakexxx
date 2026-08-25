@@ -159,6 +159,38 @@ class AdvanceProviderRedTest {
 
     // ---------------------------------------------------------- idempotency
 
+    /** F12 (C5): caller mis-binding scheduleRef must not poison step-3b attribution. */
+    @Test
+    fun advance_callerDeclaredNonItemScheduleRef_attributionIsProviderTruth() {
+        // C5 integration shape (F12, task 0001787595763599): Auto fills
+        // intent.scheduleRef with its OWN task ref ("task-42"), violating the
+        // v1.72 freeze (§6.3: scheduleRef IS the schedule item's stable ref —
+        // v1.72's own warning: "no gate or type system will object" to the
+        // mis-binding; this test is that gate). Step 3b's attribution anchor
+        // must be the item the provider ACTUALLY applied (provider truth at
+        // apply time), not the caller's unverified declaration — otherwise
+        // every legal release→advance on such a lease dies wrong-item →
+        // STALE_LEASE(8), which is exactly the deterministic C5 device
+        // failure (two main runs + one diagnostic rerun).
+        val h = harness()
+        val receipt = h.apply(key = "adv-c5", intent = h.intent(scheduleRef = "task-42"))
+        h.release(receipt.leaseId, key = "adv-c5-rel")
+
+        val adv = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, receipt.leaseId, "adv-c5-adv"),
+        )
+
+        assertEquals(
+            "legal same-caller RELEASED historical reference must advance; " +
+                "caller's mis-declared scheduleRef must not poison attribution",
+            AdvanceOutcomeV1.ADVANCED.wire,
+            adv.outcomeWire,
+        )
+        assertEquals("item-2", h.env.currentItemId)
+        assertEquals("pointer advanced exactly once", 1, h.env.advanceCount)
+    }
+
     /** Same key + same digest replay → SAME receipt, pointer moved exactly once (M-AD-02 provider half). */
     @Test
     fun advance_sameKeySameDigest_replaysReceipt_pointerOnce() {
@@ -943,15 +975,33 @@ class AdvanceProviderRedTest {
     // step 3b BEFORE step 4 — answering 17/16/14/15 would leak current schedule
     // state to a caller who never proved earned quota. 3b does NOT judge
     // liveness (own ACTIVE ref passes 3b; step 5 answers 7 — see M_AD_12).
-    // Lease→item binding: the earned item is the apply intent's scheduleRef
-    // (§6.3 / v1.72: scheduleRef IS the schedule item's stable reference;
-    // v1.62: acceptedIntentHash binds runId/attemptId/profileRef/scheduleRef).
+    // Lease→item binding: the earned item is provider truth at apply time
+    // (`scheduleSnapshot()?.currentItemId` — F12), NOT the caller's
+    // intent.scheduleRef declaration. §6.3/v1.72 freezes scheduleRef as the
+    // item's stable reference, but anchoring attribution to the declaration
+    // let a caller mis-bind which item the lease earned (see the pin below).
 
-    /** Earn + release a lease ATTRIBUTED to [earnedItem] (intent.scheduleRef = the item ref). */
+    /**
+     * Earn + release a lease GENUINELY attributed to [earnedItem]: the
+     * provider applies while its schedule is ON that item, so the attribution
+     * anchor (provider truth at apply time — F12) really is [earnedItem]; the
+     * pointer is then restored. The intent still declares the same item ref
+     * (§6.3/v1.72), but the declaration is no longer what step 3b consumes —
+     * anchoring to the caller's declaration is exactly the mis-binding C5
+     * caught, and `advance_callerDeclaredNonItemScheduleRef_…` pins it.
+     */
     private fun earnAndReleaseFor(h: ProviderHarness, earnedItem: String, key: String): String {
-        val receipt = h.apply(key = key, intent = h.intent(scheduleRef = earnedItem, attemptId = "att-$key"))
-        h.release(receipt.leaseId, key = "$key-rel")
-        return receipt.leaseId
+        val restore = h.env.currentItemId
+        h.env.currentItemId = earnedItem
+        try {
+            val receipt = h.apply(key = key, intent = h.intent(scheduleRef = earnedItem, attemptId = "att-$key"))
+            h.release(receipt.leaseId, key = "$key-rel")
+            return receipt.leaseId
+        } finally {
+            // Honest under failure too: a throwing apply/release must not leave
+            // the pointer parked on earnedItem for the rest of the test.
+            h.env.currentItemId = restore
+        }
     }
 
     /**
