@@ -114,12 +114,14 @@ enum class ContractErrorCodeV1(val wire: Int) {
      * `leaseId`'s attribution in §6.7.4b step 3b (order 3b → 4 → 5), and every
      * attribution failure is THIS code — wire 8's genus is "该 leaseId 对本次
      * 操作不可用", with `foreign` (owned by a different caller), `unproven`
-     * (no provider record / no originating-item attribution), and `wrong-item`
+     * (no provider record, no originating-item attribution, or never provably
+     * RELEASED — a forged or still-unreleased reference never buys history),
+     * and `wrong-item`
      * (quota earned for another item) as its species. 3b precedes the step-4
      * schedule gates so a forged or foreign reference can never buy current
      * schedule state (17/16/14/15) it never proved quota for; liveness stays
      * step 5's answer (7). v1.76 removed recency from this gate: any
-     * caller-owned, provably persisted reference with the matching earned item
+     * caller-owned, provably RELEASED reference with the matching earned item
      * passes attribution regardless of newer released leases.
      */
     STALE_LEASE(8),

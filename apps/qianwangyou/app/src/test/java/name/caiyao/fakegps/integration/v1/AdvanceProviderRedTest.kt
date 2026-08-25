@@ -993,10 +993,15 @@ class AdvanceProviderRedTest {
     private fun earnAndReleaseFor(h: ProviderHarness, earnedItem: String, key: String): String {
         val restore = h.env.currentItemId
         h.env.currentItemId = earnedItem
-        val receipt = h.apply(key = key, intent = h.intent(scheduleRef = earnedItem, attemptId = "att-$key"))
-        h.release(receipt.leaseId, key = "$key-rel")
-        h.env.currentItemId = restore
-        return receipt.leaseId
+        try {
+            val receipt = h.apply(key = key, intent = h.intent(scheduleRef = earnedItem, attemptId = "att-$key"))
+            h.release(receipt.leaseId, key = "$key-rel")
+            return receipt.leaseId
+        } finally {
+            // Honest under failure too: a throwing apply/release must not leave
+            // the pointer parked on earnedItem for the rest of the test.
+            h.env.currentItemId = restore
+        }
     }
 
     /**
