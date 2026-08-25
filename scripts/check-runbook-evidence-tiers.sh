@@ -13,11 +13,12 @@
 # silently regressing.
 #
 # What it checks:
-#   1. §7 (verdict criteria) does NOT reference screenshots as judgment inputs
-#   2. §12 (exit criteria) does NOT reference screenshots as judgment inputs
+#   1. §7 (verdict criteria) does NOT reference screenshots at all (fail-closed)
+#   2. §12 (exit criteria) does NOT reference screenshots at all
 #   3. §11 contains the two-tier classification (Tier A / Tier B)
 #   4. §11 item 7 (screenshots) is classified as Tier B / 辅助附件
 #   5. The three known failure modes are documented in §11
+#   6. reportDigest domain excludes screenshots (Tier A only)
 #
 # Exit codes: 0 = all checks passed; 1 = at least one check failed.
 
@@ -61,16 +62,20 @@ extract_section() {
   ' "$RUNBOOK"
 }
 
-# ── 1. §7 must NOT reference screenshots as judgment inputs ──────────────────
+# ── 1. §7 must NOT reference screenshots at all ─────────────────────────────
+#
+# Fail-closed: ANY mention of screenshot-related terms in §7 is a regression.
+# §7 is the verdict section; screenshots are Tier B (auxiliary).  A split-line
+# pattern like "截图条件\n判定 PASS" evades same-line grep but still semantically
+# introduces a screenshot→verdict dependency.  Banning the term entirely closes
+# this gap (P2-1, Luna/Terra review).
 
 S7=$(extract_section "## 7\\.")
 if [ -z "$S7" ]; then
   check "§7 section found (extract_section)" 1
 else
-  # These terms appearing in §7 would indicate screenshots are being used as
-  # judgment criteria.  Bidirectional: catch both "截图…PASS" and "PASS…截图".
-  S7_SCREENSHOT_REFS=$(echo "$S7" | grep -ciE '截图.*(PASS|FAIL|判据|判定|通过|失败)|(PASS|FAIL|判据|判定|通过|失败).*截图|screenshot.*(PASS|FAIL|verdict|criteria)|(PASS|FAIL|verdict|criteria).*screenshot' || true)
-  check "§7 does not use screenshots as verdict criteria" "$( [ "$S7_SCREENSHOT_REFS" -eq 0 ] && echo 0 || echo 1 )"
+  S7_SCREENSHOT_ANY=$(echo "$S7" | grep -ciE '截图|screenshot|screencap|\.png' || true)
+  check "§7 does not reference screenshots (fail-closed)" "$( [ "$S7_SCREENSHOT_ANY" -eq 0 ] && echo 0 || echo 1 )"
 fi
 
 # ── 2. §12 must NOT reference screenshots ────────────────────────────────────
@@ -130,6 +135,18 @@ HAS_TRANSITION_FRAME=$(echo "$S11" | grep -c '转场半帧' || true)
 check "§11 documents black-screen failure mode" "$( [ "$HAS_BLACK_SCREEN" -ge 1 ] && echo 0 || echo 1 )"
 check "§11 documents stale-frame failure mode" "$( [ "$HAS_STALE_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION_FRAME" -ge 1 ] && echo 0 || echo 1 )"
+
+# ── 6. reportDigest domain excludes screenshots ─────────────────────────────
+#
+# P2-2: reportDigest must NOT define its preimage as "logcat+截图" because Tier B
+# PNGs may be absent.  The digest domain must reference Tier A only.
+# Scoped to §11 to avoid hitting the intro paragraph's general "reportDigest" mention.
+
+S11_DIGEST_LINE=$(echo "$S11" | grep -i 'reportDigest.*sha256' | head -1)
+S11_DIGEST_HAS_SCREENSHOT=$(echo "$S11_DIGEST_LINE" | grep -ciE '截图|screenshot|png' || true)
+S11_DIGEST_HAS_TIER_A=$(echo "$S11" | grep -A5 -i 'reportDigest.*sha256' | grep -c 'Tier A' || true)
+check "reportDigest domain does not reference screenshots" "$( [ "$S11_DIGEST_HAS_SCREENSHOT" -eq 0 ] && echo 0 || echo 1 )"
+check "reportDigest domain references Tier A" "$( [ "$S11_DIGEST_HAS_TIER_A" -ge 1 ] && echo 0 || echo 1 )"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

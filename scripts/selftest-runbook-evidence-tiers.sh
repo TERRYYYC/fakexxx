@@ -6,13 +6,21 @@
 # and asserts its exit code.  No case inspects source text — grepping the
 # checker for a literal proves the line exists, not that it does anything.
 #
-# Six mutation classes (F-19 real-world failure modes that must stay killed):
-#   M1  Remove Tier B from §11 → item 7 silently rejoins judgment-bearing items
-#   M2  Move item 7 back into the Tier A table → screenshots become承重 again
-#   M3  Remove failure-mode documentation → naïve checks appear sufficient
-#   M4  Add screenshot reference to §7 verdict criteria → false-green surface
-#   M5  Add screenshot reference to §12 exit criteria → false-green surface
-#   M6  Remove non-participation disclaimer from item 7 → weight ambiguity
+# Mutation classes (F-19 real-world failure modes that must stay killed):
+#
+# Structural regressions:
+#   M1   Remove Tier B entirely → item 7 silently rejoins judgment-bearing items
+#   M2   Move item 7 into Tier A table → screenshots become承重 again
+#   M3   Remove failure-mode documentation → naïve checks appear sufficient
+#   M4   Add screenshot reference to §7 (same line) → false-green surface
+#   M4b  Add screenshot reference to §7 (split line) → split-line bypass (P2-1)
+#   M5   Add screenshot reference to §12 exit criteria → false-green surface
+#   M6   Remove non-participation disclaimer from item 7 → weight ambiguity
+#
+# Isolated guard kills (P2-4: each guard must be independently load-bearing):
+#   M7   Remove only "Tier A" keyword (keep Tier B) → Tier A classification guard
+#   M8   Remove only "判定承重" label (keep Tier A) → Tier A label guard
+#   M9   Revert reportDigest to "logcat+截图" → digest domain guard
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -112,10 +120,10 @@ assert_fail "M3 removing failure-mode docs is caught" "$sb"
 
 sb=$(setup_sandbox "m4-screenshot-in-s7")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-# Inject a line into §7 that uses screenshots for verdict
+# Inject a line into §7 that mentions screenshots (fail-closed: any mention = fail)
 sed -i.bak '/^## 7\./a\
 截图显示 PASS 界面且对应日志一致时判定 PASS。' "$rb"
-assert_fail "M4 adding screenshot verdict to §7 is caught" "$sb"
+assert_fail "M4 adding screenshot mention to §7 is caught (fail-closed)" "$sb"
 
 # ── M5: Add screenshot reference to §12 exit criteria ───────────────────────
 
@@ -132,6 +140,38 @@ sb=$(setup_sandbox "m6-no-disclaimer")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/不参与 §7 判定//g; s/不影响 §12 退出标准//g' "$rb"
 assert_fail "M6 removing item-7 non-participation disclaimer is caught" "$sb"
+
+# ── M4b: Split-line screenshot→verdict in §7 (P2-1) ─────────────────────────
+
+sb=$(setup_sandbox "m4b-split-line-s7")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+# Two adjacent lines: "截图条件" on one, "判定 PASS" on the next.
+# The old same-line grep missed this; fail-closed catches it.
+sed -i.bak '/^## 7\./a\
+截图条件：每步必须附有效截图。\
+只有此条件满足后，才可判定 PASS。' "$rb"
+assert_fail "M4b split-line screenshot verdict in §7 is caught (P2-1)" "$sb"
+
+# ── M7: Remove only "Tier A" keyword (isolated guard, P2-4) ─────────────────
+
+sb=$(setup_sandbox "m7-no-tier-a-keyword")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/Tier A/Tier-Primary/g' "$rb"
+assert_fail "M7 removing Tier A keyword is caught (isolated, P2-4)" "$sb"
+
+# ── M8: Remove only "判定承重" label (isolated guard, P2-4) ──────────────────
+
+sb=$(setup_sandbox "m8-no-judgment-label")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/判定承重/证据必填/g' "$rb"
+assert_fail "M8 removing 判定承重 label is caught (isolated, P2-4)" "$sb"
+
+# ── M9: Revert reportDigest to "logcat+截图" (P2-2) ─────────────────────────
+
+sb=$(setup_sandbox "m9-digest-includes-screenshot")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/Tier A 证据字节/logcat+截图 字节/g' "$rb"
+assert_fail "M9 reverting digest to logcat+截图 is caught (P2-2)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

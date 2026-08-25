@@ -435,7 +435,7 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 
 每轮冒烟**必须**记录。记录项分两档：
 
-- **判定承重**（Tier A，#1–6 / #8–11）：**缺项即不可判定**——§7 判据与 §12 退出标准直接消费这些项，缺少任何一项该轮冒烟无法给出 PASS/FAIL。
+- **判定承重**（Tier A，#1–6 / #8–11）：**缺项即不可判定**——这些项要么被 §7 判据直接用作逐字匹配输入（#6 logcat / #8 apply-observe / #10 mock 状态 / #11 exit code / #9 失败原文），要么是证据准入前提（#1 设备身份 / #2 源码基线 / #3 构建身份 / #4 配对身份 / #5 种子基线），缺少任何一项该轮冒烟无法给出可验证的 PASS/FAIL。
 - **辅助附件**（Tier B，#7）：**缺项应补记但不阻塞判定**——仅供人工直觉参考与封存归档，不被 §7 任何判据引用，不影响 §12 退出标准。
 
 ### Tier A — 判定承重（缺项即不可判定）
@@ -469,12 +469,19 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 > | ❌ 转场半帧 | 动画中间帧，非稳态 UI | C5 run#2 v2：6.0 截图为上一轮握手界面的转场半帧（F-19） |
 > | ⚠️ 未核 | hash 唯一但未目视核对内容 | hash 唯一性**不**构成有效性证据 |
 > | ⚠️ 不适用 | 该步无对应探针 UI（如 force-stop） | 6.0.1 无探针 Activity |
+> | ❌ 其他无效 | 损坏/截断 PNG、错误前台 Activity、或上述类别未覆盖的无效状态 | PNG header 损坏；截图显示非目标 Activity |
 >
 > **三类朴素检查均不能替代逐步内容核对（F-19 实证）：**
 > ① 文件数量齐全 — 黑屏帧满足 ② hash 互不相同 — 转场半帧天然唯一 ③ 非黑屏计数 — 陈旧帧通过
 
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
-`reportDigest: sha256:<原始 logcat+截图 字节的 SHA-256>`）。**记录猫不得改原始字节。**
+`reportDigest: sha256:<原始 Tier A 证据字节的 SHA-256>`）。**记录猫不得改原始字节。**
+
+> **reportDigest 字节域定义**：digest 的 preimage 仅含 **Tier A 证据文件**（logcat `run-<step>.log`
+> 按步骤顺序直接串接）。Tier B 截图 **不参与** reportDigest 计算——截图存在时由
+> 独立的逐文件 `evidence-manifest.sha256` 校验完整性，不与判定承重的 digest 混合。
+> 已有证据报告（如 run#2）中 reportDigest 含截图字节的，保留原始计算不追溯修改，
+> 但其截图字节对 verdict 无承重意义。
 
 ## 12. 退出标准 → G2 前置
 
