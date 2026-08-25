@@ -110,7 +110,11 @@ class EnvironmentControlHandler(
             acceptedIntentHash = intentHash,
             scheduleDecisionWire = scheduleDecision,
             waitUntilEpochMs = null,
-            achievableVerificationLevelWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            // F-17: consume the environment's computed capability ceiling —
+            // the achievable level must vary with real capability (gateway,
+            // current item, qwy-owned coordinates), never a constant. Same
+            // fix shape as F-14/#41 at the receipt: claim follows measurement.
+            achievableVerificationLevelWire = environment.achievableVerificationLevelWire(),
             continuityCoverageWire = snap.coverageWire,
             environmentRevision = snap.revision,
             blockingReasonWires = blockers,

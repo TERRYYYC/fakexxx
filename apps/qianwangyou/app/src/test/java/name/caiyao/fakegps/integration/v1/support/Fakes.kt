@@ -329,6 +329,19 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     override fun scheduleDecisionWire(scheduleRef: String): Int = 1 // ALLOWED_NOW
 
+    /**
+     * F-17 honest fake: mirrors the production precondition set — no current
+     * item, or no qwy-owned coordinates for it, means apply cannot reach
+     * VERIFIED, so preflight must not claim it either. (The fake models no
+     * gateway, so that production leg has no fake counterpart by construction.)
+     */
+    override fun achievableVerificationLevelWire(): Int =
+        if (coordinateForItem(currentItemId) != null) {
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        } else {
+            VerificationLevelV1.NONE.wire
+        }
+
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
         relevantChangeListener = listener
     }
