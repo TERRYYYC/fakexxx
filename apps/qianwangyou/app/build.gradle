@@ -21,7 +21,7 @@ android {
     }
 
     signingConfigs {
-        // Release is signed with the SAME key as debug, on purpose.
+        // BOTH build types sign with the SAME repo-committed key, on purpose.
         //
         // This is a personal instrumentation module, never distributed through a store, so key
         // secrecy buys nothing here. What sharing one stable key does buy is real: debug and
@@ -29,10 +29,19 @@ android {
         // wipes /data/data, i.e. every profile the user configured — which has already cost us
         // one full loss of the user's saved profiles. One key, no data loss when switching builds.
         //
-        // The keystore lives outside the repo (~/.android/debug.keystore, created by the SDK) and
-        // is never committed.
-        release {
-            storeFile file("${System.getProperty('user.home')}/.android/debug.keystore")
+        // F-18 (2026-08-25): this used to point at the machine-local
+        // ~/.android/debug.keystore, which made the signer ENVIRONMENT state, not repo state.
+        // CI runners roll a fresh random debug.keystore per run; one such random-signed artifact
+        // (run 32763136108, commit d3008ea) was installed on device ZY22JHW9M4, after which every
+        // local `adb install -r` failed with INSTALL_FAILED_UPDATE_INCOMPATIBLE while
+        // versionCode/versionName stayed identical — acceptance read the stale package as the
+        // new build and ran false-green (sealed evidence: c5-evidence/f18-signer-divergence/).
+        // The committed bytes ARE the machine key the device already trusts
+        // (cert sha256 7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41),
+        // so install -r continuity holds for every existing device package.
+        // scripts/check-debug-signer.sh guards built artifacts against signer regressions.
+        bench {
+            storeFile rootProject.file('keystores/bench.keystore')
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
@@ -41,6 +50,7 @@ android {
 
     buildTypes {
         debug {
+            signingConfig signingConfigs.bench
             // Bench variant: installs as a SEPARATE app alongside the release (production) build.
             // Release = "name.caiyao.fakegps" (千网游), stays on the phone untouched.
             // Debug  = "name.caiyao.fakegps.bench" (千网游·测试), independent installation.
@@ -50,7 +60,7 @@ android {
             applicationIdSuffix ".bench"
         }
         release {
-            signingConfig signingConfigs.release
+            signingConfig signingConfigs.bench
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

@@ -191,6 +191,16 @@ jobs:
           printf 'source HEAD : %s\n' "$GITHUB_SHA"
           printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
 
+      # F-18: a random runner-rolled debug.keystore once shipped in a downloaded
+      # artifact and made the bench device uninstallable-over. The signer is now
+      # repo state; this gate proves the artifact actually carries it.
+      - name: debug signer pinned to repo keystore (F-18)
+        working-directory: .
+        run: |
+          ./scripts/check-debug-signer.sh \
+            apps/cellrebel-auto/keystores/bench.keystore \
+            apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -239,6 +249,16 @@ jobs:
           printf 'source HEAD : %s\n' "$GITHUB_SHA"
           printf 'apk         : %s\n' "$apk"
           printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
+
+      # F-18: a random runner-rolled debug.keystore once shipped in a downloaded
+      # artifact and made the bench device uninstallable-over. The signer is now
+      # repo state; this gate proves the artifact actually carries it.
+      - name: debug signer pinned to repo keystore (F-18)
+        working-directory: .
+        run: |
+          ./scripts/check-debug-signer.sh \
+            apps/qianwangyou/keystores/bench.keystore \
+            apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk
 
       - uses: actions/upload-artifact@v4
         if: always()

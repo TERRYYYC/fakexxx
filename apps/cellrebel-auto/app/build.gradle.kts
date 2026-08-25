@@ -17,7 +17,29 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        // F-18 (2026-08-25): pin the debug signer to the repo-committed keystore.
+        // The machine-local ~/.android/debug.keystore made the signer ENVIRONMENT state:
+        // CI runners roll a fresh random debug.keystore per run, and one random-signed
+        // artifact reached the bench device, after which `adb install -r` failed with
+        // INSTALL_FAILED_UPDATE_INCOMPATIBLE while version fields stayed identical
+        // (false-green acceptance; see apps/qianwangyou/app/build.gradle F-18 note and
+        // c5-evidence/f18-signer-divergence/). The committed bytes are the machine key
+        // (cert sha256 7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41)
+        // the device already trusts, so install -r continuity holds.
+        // scripts/check-debug-signer.sh guards built artifacts against signer regressions.
+        create("bench") {
+            storeFile = rootProject.file("keystores/bench.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("bench")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
