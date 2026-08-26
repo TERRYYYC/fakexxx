@@ -68,7 +68,7 @@ FN_LOGS="$(sed -n '/^read_acceptance_logs()/,/^}/p' "$TEST_HOOK")"
 # function itself fails on a script without --acceptance-readiness.
 if [ -z "$FN_READY" ]; then
     echo "FAIL red: run_acceptance_readiness not present — no canonical readiness path exists" >&2
-    echo "test-hook acceptance-readiness selftest: 0 passed, 1 failed" 
+    echo "test-hook acceptance-readiness selftest: 0 passed, 1 failed"
     exit 1
 fi
 for fn in "$FN_WAIT" "$FN_LOGS" "$CONSTS"; do
