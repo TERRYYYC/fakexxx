@@ -355,3 +355,21 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         relevantChangeListener?.invoke(RevisionBumpReason.PERMISSION_OR_OWNER_CHANGED)
     }
 }
+
+/**
+ * F-15: recording sink for the [name.caiyao.fakegps.integration.v1.DiagnosticLog]
+ * seam. The step-3b species line must be observable from the JVM lane WITHOUT
+ * mocking android.util.Log, and the recorder doubles as the assertion surface
+ * for branch-distinguishability (four branches → four mutually exclusive
+ * `STALE_LEASE_SPECIES=` tokens).
+ */
+class RecordingDiagnosticLog : name.caiyao.fakegps.integration.v1.DiagnosticLog {
+    private val _lines = mutableListOf<String>()
+    val lines: List<String> get() = _lines
+
+    override fun warn(tag: String, message: String) {
+        _lines += "$tag: $message"
+    }
+
+    fun clear() = _lines.clear()
+}

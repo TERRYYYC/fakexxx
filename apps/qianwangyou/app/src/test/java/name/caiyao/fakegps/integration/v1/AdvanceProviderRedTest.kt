@@ -1005,6 +1005,22 @@ class AdvanceProviderRedTest {
     }
 
     /**
+     * F-15 handler-level closure: the step-3b rejection surfaced its SPECIES
+     * through the diagnostics seam — exactly one line, naming the expected
+     * branch. expectContractFailure in each row already pins wire==8; this
+     * pins that logcat forensics can tell the FOUR 3b branches apart (the
+     * pairwise-distinctness of the tokens themselves is pinned in
+     * StaleLeaseAttributionTest).
+     */
+    private fun assertStaleLeaseSpecies(h: ProviderHarness, expected: StaleLeaseSpecies) {
+        assertEquals("exactly one 3b species diagnostic line", 1, h.diagnostics.lines.size)
+        assertTrue(
+            "diagnostic names the rejecting branch",
+            h.diagnostics.lines.single().contains("STALE_LEASE_SPECIES=${expected.logToken}"),
+        )
+    }
+
+    /**
      * M-AD-29 (frozen entry name): the reference is the caller's own RELEASED
      * historical lease, every other request field self-consistent — but the
      * quota it earned belongs to ANOTHER item than the one being advanced.
@@ -1023,6 +1039,7 @@ class AdvanceProviderRedTest {
         expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
             h.handler.completeAndAdvance(AUTO_UID, request(h, leaseId, "ad29-k1"))
         }
+        assertStaleLeaseSpecies(h, StaleLeaseSpecies.WRONG_ITEM)
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
         assertEquals("no advance", 0, h.env.advanceCount)
     }
@@ -1042,6 +1059,7 @@ class AdvanceProviderRedTest {
         expectContractFailure(ContractErrorCodeV1.STALE_LEASE) {
             h.handler.completeAndAdvance(AUTO_UID, request(h, foreignLease, "ad3b-f-k1"))
         }
+        assertStaleLeaseSpecies(h, StaleLeaseSpecies.FOREIGN_CALLER)
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
         assertEquals(0, h.env.advanceCount)
     }
@@ -1147,6 +1165,7 @@ class AdvanceProviderRedTest {
                 request(h, "lease-that-never-existed", "ad3b-g-k1"),
             )
         }
+        assertStaleLeaseSpecies(h, StaleLeaseSpecies.UNPROVEN_NO_PROVIDER_RECORD)
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
         assertEquals(0, h.env.advanceCount)
     }
@@ -1194,6 +1213,7 @@ class AdvanceProviderRedTest {
                 request(h, leaseId, "ad3b-legacy-k1"),
             )
         }
+        assertStaleLeaseSpecies(h, StaleLeaseSpecies.UNPROVEN_NO_ORIGINATING_ITEM)
         assertEquals("pointer untouched", "item-1", h.env.currentItemId)
         assertEquals(0, h.env.advanceCount)
     }
