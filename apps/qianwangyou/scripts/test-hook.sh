@@ -441,6 +441,12 @@ run_current_profile() {
 # (production + .bench coinstalled).
 # Guarded device-free by scripts/selftest-test-hook-acceptance-readiness.sh.
 run_acceptance_readiness() {
+    # Bounded-excerpt pattern sets, declared ONCE and emitted verbatim in the
+    # counts lines: the printed patterns= string is byte-for-byte the grep
+    # regex, so an auditor can re-run it against the raw text (gpt55 review
+    # finding: an underscore-mangled paraphrase is not re-runnable).
+    local gate_excerpt_re='SecurityException|Permission Denial|RUN_HOOK_ACCEPTANCE'
+    local start_excerpt_re='^(Starting: Intent|Status:|LaunchState:|ThisTime:|TotalTime:|WaitTime:|Complete|Error:)'
     preflight_device || return $?
     adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
     adb logcat -c >/dev/null 2>&1
@@ -470,16 +476,16 @@ run_acceptance_readiness() {
     # run on the FULL deny_out, but the frozen evidence directory must also
     # carry the raw denial bytes — a reviewer must confirm from the evidence
     # itself that the denial named the bench permission, not from the exit
-    # code. Bounded excerpt: ONLY lines matching the documented denial
-    # patterns (SecurityException | Permission Denial | RUN_HOOK_ACCEPTANCE)
-    # enter the evidence stream, so device-private noise on unmatched lines
-    # never does; the counts line (matched/total) lets an auditor re-run the
-    # same patterns on the raw text and verify no matched line was cropped.
+    # code. Bounded excerpt: ONLY lines matching gate_excerpt_re (declared
+    # above, emitted verbatim in the counts line) enter the evidence stream,
+    # so device-private noise on unmatched lines never does; the counts line
+    # (matched/total) lets an auditor re-run the same patterns on the raw
+    # text and verify no matched line was cropped.
     deny_total=$(printf '%s\n' "$deny_out" | wc -l | tr -d ' ')
     deny_excerpt=$(printf '%s\n' "$deny_out" |
-        grep -E 'SecurityException|Permission Denial|RUN_HOOK_ACCEPTANCE')
+        grep -E "$gate_excerpt_re")
     deny_matched=$(printf '%s\n' "$deny_excerpt" | grep -c .)
-    echo "READINESS_GATE_EXCERPT lines=$deny_matched/$deny_total patterns=SecurityException|Permission_Denial|RUN_HOOK_ACCEPTANCE"
+    echo "READINESS_GATE_EXCERPT lines=$deny_matched/$deny_total patterns=$gate_excerpt_re"
     printf '%s\n' "$deny_excerpt" | sed 's/^/  gate| /'
     echo "VERIFIED acceptance.gate signature permission denies unprivileged start"
 
@@ -491,17 +497,16 @@ run_acceptance_readiness() {
         return 2
     }
     # Stage 2 evidence parity (Terra verdict scope): same bounded-excerpt
-    # contract as Stage 1 — only lines matching the documented structured
-    # `am start -W` output markers enter the evidence stream. Bare prefixes
-    # like "Warning:" are deliberately NOT in the set: a prefix alone cannot
-    # distinguish am-generated markers from device noise that happens to
-    # carry the same word (E4). The counts line lets an auditor re-run the
-    # patterns on the raw text and verify no matched line was cropped.
+    # contract as Stage 1 — only lines matching start_excerpt_re (declared
+    # above, emitted verbatim in the counts line) enter the evidence stream.
+    # Bare prefixes like "Warning:" are deliberately NOT in the set: a prefix
+    # alone cannot distinguish am-generated markers from device noise that
+    # happens to carry the same word (E4).
     start_total=$(printf '%s\n' "$start_out" | wc -l | tr -d ' ')
     start_excerpt=$(printf '%s\n' "$start_out" |
-        grep -E '^(Starting: Intent|Status:|LaunchState:|ThisTime:|TotalTime:|WaitTime:|Complete|Error:)')
+        grep -E "$start_excerpt_re")
     start_matched=$(printf '%s\n' "$start_excerpt" | grep -c .)
-    echo "READINESS_START_EXCERPT lines=$start_matched/$start_total patterns=Starting_Intent|Status|LaunchState|ThisTime|TotalTime|WaitTime|Complete|Error"
+    echo "READINESS_START_EXCERPT lines=$start_matched/$start_total patterns=$start_excerpt_re"
     printf '%s\n' "$start_excerpt" | sed 's/^/  start2| /'
     wait_for_readiness_abort || {
         echo "HARNESS_ERROR no fail-fast abort signature from $ACCEPTANCE_ACT (not the acceptance probe?)" >&2

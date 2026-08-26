@@ -262,6 +262,15 @@ grep -q "Permission Denial" <<<"$OUT" &&
 grep -Eq 'READINESS_GATE_EXCERPT lines=[1-9][0-9]*/[1-9][0-9]*' <<<"$OUT" &&
     report ok "E2 excerpt counts line present" ||
     report fail "E2 excerpt counts line present" "$OUT"
+# E2b (gpt55 R-finding): the emitted patterns= string must be
+# byte-for-byte the real grep regex (one shared variable), so an auditor
+# can re-run it verbatim — not an underscore-mangled paraphrase.
+grep -qF 'patterns=SecurityException|Permission Denial|RUN_HOOK_ACCEPTANCE' <<<"$OUT" &&
+    report ok "E2b gate patterns= is the literal regex" ||
+    report fail "E2b gate patterns= is the literal regex" "not byte-identical to the grep regex: $OUT"
+grep -qF 'patterns=^(Starting: Intent|Status:|LaunchState:|ThisTime:|TotalTime:|WaitTime:|Complete|Error:)' <<<"$OUT" &&
+    report ok "E2b start patterns= is the literal regex" ||
+    report fail "E2b start patterns= is the literal regex" "not byte-identical to the grep regex: $OUT"
 
 # E3 (bounded excerpt / privacy): raw denial output may interleave device
 # noise; lines NOT matching the documented denial patterns must never enter
