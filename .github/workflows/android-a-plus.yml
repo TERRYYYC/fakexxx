@@ -191,6 +191,16 @@ jobs:
           printf 'source HEAD : %s\n' "$GITHUB_SHA"
           printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
 
+      # F-18: a random runner-rolled debug.keystore once shipped in a downloaded
+      # artifact and made the bench device uninstallable-over. The signer is now
+      # repo state; this gate proves the artifact actually carries it.
+      - name: debug signer pinned to repo keystore (F-18)
+        working-directory: .
+        run: |
+          ./scripts/check-debug-signer.sh \
+            apps/cellrebel-auto/keystores/bench.keystore \
+            apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -240,6 +250,16 @@ jobs:
           printf 'apk         : %s\n' "$apk"
           printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
 
+      # F-18: a random runner-rolled debug.keystore once shipped in a downloaded
+      # artifact and made the bench device uninstallable-over. The signer is now
+      # repo state; this gate proves the artifact actually carries it.
+      - name: debug signer pinned to repo keystore (F-18)
+        working-directory: .
+        run: |
+          ./scripts/check-debug-signer.sh \
+            apps/qianwangyou/keystores/bench.keystore \
+            apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -249,6 +269,28 @@ jobs:
             apps/qianwangyou/app/build/test-results/**
             apps/qianwangyou/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
+
+  install-guards:
+    # F-18: selftests for the signer gate and the verified-install helpers.
+    #
+    # The R2 review of PR #44 pinned the invariant this job exists to carry:
+    # a selftest that exists but never runs is not a guard (see the same
+    # argument at the selftest-derived-counts step). The three scripts below
+    # are device-free by construction (fake adb / fake keytool+apksigner PATH
+    # shims), so they run on a plain runner in seconds.
+    name: install guards (F-18 selftests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: selftest-debug-signer
+        run: ./scripts/selftest-debug-signer.sh
+
+      - name: selftest-install-apk-verified
+        run: ./scripts/selftest-install-apk-verified.sh
+
+      - name: selftest-test-hook-install-guard
+        run: ./scripts/selftest-test-hook-install-guard.sh
 
   release-debt:
     # Gate that proves open contract-v1.1-debt blocks release (Issue #19/#20).
