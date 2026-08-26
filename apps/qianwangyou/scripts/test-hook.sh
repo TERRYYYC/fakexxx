@@ -3,6 +3,14 @@
 # FakeGps public-API hook verification.
 #
 #   --current-profile   Read-only diagnostics for the user's effective profile.
+#   --acceptance-readiness
+#                       Read-only proof that the runner addresses the REAL
+#                       .bench acceptance component WITHOUT entering the §G
+#                       transaction: unprivileged start must be denied by the
+#                       bench signature permission (gate proof), then a
+#                       payload-less privileged start must fail fast with the
+#                       probe's own missing-extra abort (identity proof).
+#                       Never installs, publishes, or writes business state.
 #   --cellular-matrix   Strict, isolated acceptance transaction. Publishes
 #                       debug-only exact and behavioral schema-v3 payloads,
 #                       verifies every supported cellular field, and restores the
@@ -40,9 +48,9 @@ RUNTIME_VERIFY_TOOL="$SCRIPT_DIR/test_runtime_verify_flow.py"
 
 MODE=${1:---current-profile}
 case "$MODE" in
-    --current-profile|--cellular-matrix|--runtime-verify) ;;
+    --current-profile|--acceptance-readiness|--cellular-matrix|--runtime-verify) ;;
     *)
-        echo "usage: $0 [--current-profile|--cellular-matrix|--runtime-verify]" >&2
+        echo "usage: $0 [--current-profile|--acceptance-readiness|--cellular-matrix|--runtime-verify]" >&2
         exit 2
         ;;
 esac
@@ -147,9 +155,30 @@ has_state() {
 
 has_pending_recovery() {
     root_shell \
-        "find /data/misc -type f -name hook_acceptance_recovery.xml -exec cat {} \\;" \
+        "find /data/misc -type f -name hook_acceptance_recovery.xml -exec cat {} \;" \
         2>/dev/null |
         grep -F 'name="pending" value="true"' >/dev/null
+}
+
+# Poll for the payload-less fail-fast abort signature: the real probe's
+# onCreate requireNotNull(EXTRA_SESSION_ID) throws before any transaction
+# step, logging sessionId "unparsed" state "aborted" with the missing-extra
+# error under the FakeGPSAcceptance tag.
+wait_for_readiness_abort() {
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        logs=$(read_acceptance_logs)
+        if printf '%s\n' "$logs" |
+            grep -F '"sessionId":"unparsed","state":"aborted"' >/dev/null &&
+            printf '%s\n' "$logs" |
+                grep -F 'missing acceptance_session_id' >/dev/null
+        then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
 }
 
 restore_database_payload() {
@@ -397,6 +426,62 @@ run_current_profile() {
     echo "DIAGNOSTIC_ONLY current profile was not substituted with a distinct matrix"
 }
 
+# G2 §3.3-3 readiness entry: prove, OUTSIDE any §G transaction, that the
+# runner starts the real .bench acceptance component. Two-sided, read-only:
+#   Stage 1 (gate, unprivileged): the resolved component must be DENIED by
+#     the bench signature permission. A start that SUCCEEDS means the
+#     component is not the signature-gated probe (imposter / wrong package /
+#     gate dropped) — component resolution alone proves nothing.
+#   Stage 2 (identity, privileged, NO payload extras): the real probe's
+#     onCreate fails fast on the missing session extra and aborts BEFORE any
+#     transaction step (no recovery prepare, no publish). A "published" state
+#     log means a transaction was entered and this mode FAILS.
+# Deliberately does NOT reuse snapshot_prefs()/has_pending_recovery():
+# their unfiltered /data/misc scans loud-fail on two-package devices
+# (production + .bench coinstalled).
+# Guarded device-free by scripts/selftest-test-hook-acceptance-readiness.sh.
+run_acceptance_readiness() {
+    preflight_device || return $?
+    adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
+    adb logcat -c >/dev/null 2>&1
+
+    deny_out=$(adb shell am start -W -n "$ACCEPTANCE_ACT" 2>&1)
+    if printf '%s\n' "$deny_out" | grep -Eq 'Status:[[:space:]]*ok'; then
+        echo "HARNESS_ERROR unprivileged start succeeded; component is not signature-gated: $ACCEPTANCE_ACT" >&2
+        return 2
+    fi
+    printf '%s\n' "$deny_out" | grep -Eq 'SecurityException|Permission Denial' || {
+        echo "HARNESS_ERROR unprivileged start failed for a non-permission reason" >&2
+        printf '%s\n' "$deny_out" >&2
+        return 2
+    }
+    printf '%s\n' "$deny_out" |
+        grep -F "$BENCH_PACKAGE.permission.RUN_HOOK_ACCEPTANCE" >/dev/null || {
+        echo "HARNESS_ERROR denial does not name the bench acceptance permission" >&2
+        printf '%s\n' "$deny_out" >&2
+        return 2
+    }
+    echo "VERIFIED acceptance.gate signature permission denies unprivileged start"
+
+    start_out=$(root_shell "am start -W -n $ACCEPTANCE_ACT")
+    printf '%s\n' "$start_out" | grep -Eq 'Status:[[:space:]]*ok' || {
+        echo "HARNESS_ERROR payload-less acceptance start failed" >&2
+        printf '%s\n' "$start_out" >&2
+        return 2
+    }
+    wait_for_readiness_abort || {
+        echo "HARNESS_ERROR no fail-fast abort signature from $ACCEPTANCE_ACT (not the acceptance probe?)" >&2
+        read_acceptance_logs >&2
+        return 1
+    }
+    if read_acceptance_logs | grep -F '"state":"published"' >/dev/null; then
+        echo "HARNESS_ERROR acceptance transaction was entered from a readiness start" >&2
+        return 2
+    fi
+    echo "VERIFIED acceptance.component resolved and fail-fast aborted without payload"
+    echo "READINESS_PASS $ACCEPTANCE_ACT is the signature-gated bench acceptance component; no transaction entered"
+}
+
 run_scenario() {
     scenario=$1
     session="acceptance-$(date +%s)-$$-$scenario"
@@ -626,6 +711,7 @@ echo "════════════════════════�
 
 case "$MODE" in
     --current-profile) run_current_profile ;;
+    --acceptance-readiness) run_acceptance_readiness ;;
     --cellular-matrix) run_cellular_matrix ;;
     --runtime-verify) run_runtime_verify ;;
 esac

@@ -300,6 +300,15 @@ jobs:
         # "runs the production script, never a copy" argument as above.
         run: ./scripts/selftest-test-hook-package-identity.sh
 
+      - name: selftest-test-hook-acceptance-readiness
+        # G2 §3.3-3 last sentence / S1 block: without a transaction-free
+        # readiness path, an on-device run has no canonical way to prove it
+        # starts the REAL .bench acceptance component (the S1 incident shape:
+        # criterion weakened to a non-acceptance anchor). N1/N1b/N2/N3 pin
+        # the negative matrix; M1/M2 prove the guards load-bearing — a
+        # selftest that exists but never runs is not a guard.
+        run: ./scripts/selftest-test-hook-acceptance-readiness.sh
+
   release-debt:
     # Gate that proves open contract-v1.1-debt blocks release (Issue #19/#20).
     # Runs the full selftest suite (12 cases) and matrix coverage check (M-AD-14..19).
