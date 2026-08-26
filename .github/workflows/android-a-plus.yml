@@ -292,6 +292,14 @@ jobs:
       - name: selftest-test-hook-install-guard
         run: ./scripts/selftest-test-hook-install-guard.sh
 
+      - name: selftest-test-hook-package-identity
+        # G2 package §3.3-3: test-hook.sh must prove it drives the .bench
+        # acceptance install, never the production package. Red-first cases
+        # (R1 install identity, R2 dumpsys gate) demonstrably false-green on
+        # the pre-fix script (M1/M2 mutation checks) — the same
+        # "runs the production script, never a copy" argument as above.
+        run: ./scripts/selftest-test-hook-package-identity.sh
+
   release-debt:
     # Gate that proves open contract-v1.1-debt blocks release (Issue #19/#20).
     # Runs the full selftest suite (12 cases) and matrix coverage check (M-AD-14..19).

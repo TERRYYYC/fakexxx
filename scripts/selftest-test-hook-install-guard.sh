@@ -10,10 +10,12 @@
 # extracting that function from test-hook.sh (sed) and exercising it against a
 # fake adb — no device, no root, deterministic.
 #
-# The PKG/package-contract question (script PKG is the product id while the
-# debug APK installs as .bench) is deliberately OUT of scope here: R1 scoped
-# the fix to the local Success guard; shared-helper reuse waits for the
-# dispatch line to resolve the contract.
+# The PKG/package-contract question (script constants vs the .bench debug
+# install) was OUT of scope for R1 and is now guarded by its own selftest:
+# scripts/selftest-test-hook-package-identity.sh. Here the identity variable
+# is injected as the bench package purely so the extracted function runs
+# against a realistic coordinate; this fake adb's `pm path` answers empty
+# for any package (bench not installed), which is the install-branch shape.
 # Exit 0 = all cases pass; anything else = failure.
 
 set -uo pipefail
@@ -59,7 +61,7 @@ make_fake_adb() { # dir
 #!/usr/bin/env bash
 case "\$*" in
   *"pm path"*)
-    # product package not installed on the fake device -> empty pm path,
+    # bench package not installed on the fake device -> empty pm path,
     # function skips the idempotence branch and proceeds to install
     exit 0
     ;;
@@ -75,7 +77,7 @@ EOF
 }
 
 run_fn() { # dir -> sets OUT / RC
-    OUT="$(cd "$WORK" && PATH="$1:$PATH" PKG="name.caiyao.fakegps" bash -c '
+    OUT="$(cd "$WORK" && PATH="$1:$PATH" BENCH_PACKAGE="name.caiyao.fakegps.bench" bash -c '
         root_shell() { :; }
         APK="$1"
         '"$FN"'

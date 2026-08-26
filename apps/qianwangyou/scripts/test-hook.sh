@@ -11,10 +11,26 @@
 #                       in logcat. Never installs, clears logs, or changes the profile.
 set -u
 
-PKG="name.caiyao.fakegps"
-ACT="$PKG/.ui.ComposeActivity"
-ACCEPTANCE_ACT="$PKG/.probe.HookAcceptanceActivity"
-PROVIDER="content://$PKG.data.AppInfoProvider/app"
+# Package identity (G2 §3.3-3): the debug APK built here installs as the
+# .bench variant (build.gradle debug applicationIdSuffix ".bench"), and the
+# acceptance Activity, its signature permission, and the AppInfoProvider
+# authority exist ONLY inside that bench debug install (src/debug manifest
+# uses ${applicationId} placeholders). Every device-side coordinate below
+# therefore addresses the bench package, with component names spelled as
+# EXPLICIT namespace FQCNs: a `pkg/.ShortName` shorthand resolves relative
+# to the applicationId (…fakegps.bench.probe.*) and points at classes that
+# do not exist — the class namespace stays name.caiyao.fakegps.* (same
+# convention as mock_provider_acceptance.sh).
+# Guarded device-free by scripts/selftest-test-hook-package-identity.sh.
+#
+# Known residual (needs on-device path verification before pinning):
+# snapshot_prefs()/has_pending_recovery() scan /data/misc for
+# spoof_config.xml without a package filter; with BOTH production and bench
+# installed the fingerprint helpers fail loud (values != 1), never silent.
+BENCH_PACKAGE="name.caiyao.fakegps.bench"
+ACT="$BENCH_PACKAGE/name.caiyao.fakegps.ui.ComposeActivity"
+ACCEPTANCE_ACT="$BENCH_PACKAGE/name.caiyao.fakegps.probe.HookAcceptanceActivity"
+PROVIDER="content://$BENCH_PACKAGE.data.AppInfoProvider/app"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 APK="$REPO_ROOT/app/build/outputs/apk/debug/app-debug.apk"
@@ -137,7 +153,7 @@ has_pending_recovery() {
 }
 
 restore_database_payload() {
-    adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+    adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1 || true
     adb shell am start -W -n "$ACT" >/dev/null 2>&1 || {
         echo "HARNESS_ERROR failed to relaunch normal activity for restore" >&2
         return 1
@@ -247,7 +263,7 @@ install_debug_apk_if_changed() {
     local_sha=$(shasum -a 256 "$APK" 2>/dev/null | awk '{print $1}')
     [ -n "$local_sha" ] ||
         { echo "HARNESS_ERROR could not fingerprint debug APK" >&2; return 2; }
-    installed_path=$(adb shell pm path "$PKG" 2>/dev/null |
+    installed_path=$(adb shell pm path "$BENCH_PACKAGE" 2>/dev/null |
         sed -n 's/^package://p' | tr -d '\r' | head -1)
     installed_sha=""
     if [ -n "$installed_path" ]; then
@@ -307,21 +323,25 @@ preflight_matrix() {
 
     install_debug_apk_if_changed || return $?
 
-    root_shell "pm grant $PKG android.permission.ACCESS_FINE_LOCATION" >/dev/null 2>&1 ||
+    root_shell "pm grant $BENCH_PACKAGE android.permission.ACCESS_FINE_LOCATION" >/dev/null 2>&1 ||
         { echo "HARNESS_ERROR could not grant ACCESS_FINE_LOCATION" >&2; return 2; }
-    root_shell "pm grant $PKG android.permission.ACCESS_COARSE_LOCATION" >/dev/null 2>&1 ||
+    root_shell "pm grant $BENCH_PACKAGE android.permission.ACCESS_COARSE_LOCATION" >/dev/null 2>&1 ||
         { echo "HARNESS_ERROR could not grant ACCESS_COARSE_LOCATION" >&2; return 2; }
-    root_shell "pm grant $PKG android.permission.READ_PHONE_STATE" >/dev/null 2>&1 ||
+    root_shell "pm grant $BENCH_PACKAGE android.permission.READ_PHONE_STATE" >/dev/null 2>&1 ||
         { echo "HARNESS_ERROR could not grant READ_PHONE_STATE" >&2; return 2; }
 
-    package_dump=$(adb shell dumpsys package "$PKG" 2>/dev/null)
+    package_dump=$(adb shell dumpsys package "$BENCH_PACKAGE" 2>/dev/null)
+    # The acceptance permission is declared as ${applicationId}.permission.
+    # RUN_HOOK_ACCEPTANCE in the src/debug manifest, so inside the bench
+    # install it expands to the BENCH package's namespace. Spelling it via
+    # $BENCH_PACKAGE keeps this grep tied to the identity being proven.
     echo "$package_dump" | grep -F 'flags=[ DEBUGGABLE' >/dev/null &&
         echo "$package_dump" |
-        grep -F 'name.caiyao.fakegps.permission.RUN_HOOK_ACCEPTANCE: prot=signature' \
+        grep -F "$BENCH_PACKAGE.permission.RUN_HOOK_ACCEPTANCE: prot=signature" \
             >/dev/null ||
         { echo "HARNESS_ERROR installed APK is not the debug acceptance build" >&2; return 2; }
 
-    adb shell am force-stop "$PKG" >/dev/null 2>&1
+    adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
     adb logcat -c >/dev/null 2>&1
     adb shell am start -W -n "$ACT" >/dev/null 2>&1 ||
         { echo "HARNESS_ERROR normal activity failed to start" >&2; return 2; }
@@ -347,7 +367,7 @@ run_current_profile() {
     [ -n "$db" ] ||
         { echo "HARNESS_ERROR no saved profile (or provider unavailable)" >&2; return 2; }
 
-    adb shell am force-stop "$PKG" >/dev/null 2>&1
+    adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
     adb logcat -c >/dev/null 2>&1
     adb shell am start -W -n "$ACT" >/dev/null 2>&1 ||
         { echo "HARNESS_ERROR normal activity failed to start" >&2; return 2; }
@@ -388,11 +408,11 @@ run_scenario() {
     ) || return 2
     encoded=$(PAYLOAD="$payload" "$PY" -c \
         'import base64,os; print(base64.urlsafe_b64encode(os.environ["PAYLOAD"].encode()).decode().rstrip("="))')
-    remote_report="/data/user/0/$PKG/cache/hook-acceptance-$session.json"
+    remote_report="/data/user/0/$BENCH_PACKAGE/cache/hook-acceptance-$session.json"
     local_report="$TEMP_ROOT/$session.json"
 
     echo "[scenario] $scenario session=$session"
-    adb shell am force-stop "$PKG" >/dev/null 2>&1
+    adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
     adb logcat -c >/dev/null 2>&1
     root_shell \
         "am start -W -n $ACCEPTANCE_ACT --es acceptance_session_id $session --es acceptance_payload_base64 $encoded" \
@@ -473,7 +493,7 @@ verify_durable_recovery() {
         'import base64,os; print(base64.urlsafe_b64encode(os.environ["PAYLOAD"].encode()).decode().rstrip("="))')
 
     echo "[recovery] session=$session"
-    adb shell am force-stop "$PKG" >/dev/null 2>&1
+    adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
     adb logcat -c >/dev/null 2>&1
     root_shell \
         "am start -W -n $ACCEPTANCE_ACT --es acceptance_session_id $session --es acceptance_payload_base64 $encoded --ez acceptance_hold_after_publish true" \
@@ -505,7 +525,7 @@ verify_durable_recovery() {
         return 1
     }
 
-    pid=$(adb shell pidof "$PKG" 2>/dev/null | tr -d '\r' | awk '{print $1}')
+    pid=$(adb shell pidof "$BENCH_PACKAGE" 2>/dev/null | tr -d '\r' | awk '{print $1}')
     [ -n "$pid" ] || {
         echo "HARNESS_ERROR recovery probe process not found" >&2
         return 2
