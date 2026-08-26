@@ -445,6 +445,11 @@ run_acceptance_readiness() {
     adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
     adb logcat -c >/dev/null 2>&1
 
+    # Evidence capture (Terra validity verdict: "no executed command lines
+    # are frozen") — the executed command lines themselves enter the evidence
+    # stream verbatim; they are constructed from shipped constants, so they
+    # carry no device-private content.
+    echo "READINESS_CMD stage1 adb shell am start -W -n $ACCEPTANCE_ACT"
     deny_out=$(adb shell am start -W -n "$ACCEPTANCE_ACT" 2>&1)
     if printf '%s\n' "$deny_out" | grep -Eq 'Status:[[:space:]]*ok'; then
         echo "HARNESS_ERROR unprivileged start succeeded; component is not signature-gated: $ACCEPTANCE_ACT" >&2
@@ -478,12 +483,26 @@ run_acceptance_readiness() {
     printf '%s\n' "$deny_excerpt" | sed 's/^/  gate| /'
     echo "VERIFIED acceptance.gate signature permission denies unprivileged start"
 
+    echo "READINESS_CMD stage2 su -c am start -W -n $ACCEPTANCE_ACT"
     start_out=$(root_shell "am start -W -n $ACCEPTANCE_ACT")
     printf '%s\n' "$start_out" | grep -Eq 'Status:[[:space:]]*ok' || {
         echo "HARNESS_ERROR payload-less acceptance start failed" >&2
         printf '%s\n' "$start_out" >&2
         return 2
     }
+    # Stage 2 evidence parity (Terra verdict scope): same bounded-excerpt
+    # contract as Stage 1 — only lines matching the documented structured
+    # `am start -W` output markers enter the evidence stream. Bare prefixes
+    # like "Warning:" are deliberately NOT in the set: a prefix alone cannot
+    # distinguish am-generated markers from device noise that happens to
+    # carry the same word (E4). The counts line lets an auditor re-run the
+    # patterns on the raw text and verify no matched line was cropped.
+    start_total=$(printf '%s\n' "$start_out" | wc -l | tr -d ' ')
+    start_excerpt=$(printf '%s\n' "$start_out" |
+        grep -E '^(Starting: Intent|Status:|LaunchState:|ThisTime:|TotalTime:|WaitTime:|Complete|Error:)')
+    start_matched=$(printf '%s\n' "$start_excerpt" | grep -c .)
+    echo "READINESS_START_EXCERPT lines=$start_matched/$start_total patterns=Starting_Intent|Status|LaunchState|ThisTime|TotalTime|WaitTime|Complete|Error"
+    printf '%s\n' "$start_excerpt" | sed 's/^/  start2| /'
     wait_for_readiness_abort || {
         echo "HARNESS_ERROR no fail-fast abort signature from $ACCEPTANCE_ACT (not the acceptance probe?)" >&2
         read_acceptance_logs >&2

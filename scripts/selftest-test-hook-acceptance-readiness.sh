@@ -286,6 +286,53 @@ grep -qF "$BENCH_ID.permission.RUN_HOOK_ACCEPTANCE" <<<"$OUT" &&
     report fail "E3 permission line still excerpted" "$OUT"
 
 # ---------------------------------------------------------------------------
+# R4 (evidence parity, stage 2 — Terra verdict scope): the privileged
+# start's raw output must also enter the evidence stream, not just feed
+# the Status assertion and vanish ("no executed command lines are frozen").
+# Assert: READINESS_START_EXCERPT counts marker + the raw Status line.
+# ---------------------------------------------------------------------------
+grep -Eq 'READINESS_START_EXCERPT lines=[1-9][0-9]*/[1-9][0-9]*' <<<"$OUT" &&
+    report ok "R4 stage-2 excerpt counts line present" ||
+    report fail "R4 stage-2 excerpt counts line present" "$OUT"
+grep -Eq 'start2\| Status: ok' <<<"$OUT" &&
+    report ok "R4 raw stage-2 Status line in evidence" ||
+    report fail "R4 raw stage-2 Status line in evidence" "$OUT"
+
+# ---------------------------------------------------------------------------
+# R5: the EXECUTED COMMAND LINES themselves are frozen (constructed from
+# shipped constants — no device-private content).
+# ---------------------------------------------------------------------------
+grep -qF "READINESS_CMD stage1 adb shell am start -W -n $FQCN_ACT" <<<"$OUT" &&
+    report ok "R5 stage-1 command line frozen" ||
+    report fail "R5 stage-1 command line frozen" "$OUT"
+grep -qF "READINESS_CMD stage2 su -c am start -W -n $FQCN_ACT" <<<"$OUT" &&
+    report ok "R5 stage-2 command line frozen" ||
+    report fail "R5 stage-2 command line frozen" "$OUT"
+
+# E4 (privacy, stage 2): device noise on unmatched lines of the privileged
+# start output must not enter the evidence stream; matched lines still do.
+D="$WORK/e4"; make_fake_adb "$D"
+printf '%s\n' "$DENY_BENCH" >"$D/unpriv.out"
+printf '1' >"$D/unpriv.rc"
+{
+    printf 'Warning: device serialno=ZY22PRIVATE2 in unmatched line\n'
+    printf 'Starting: Intent { cmp=%s }\n' "$FQCN_ACT"
+    printf 'Status: ok\n'
+    printf 'Complete\n'
+} >"$D/priv.out"
+printf '%s\n' "$ABORT_LOG" >"$D/logcat.out"
+build_and_run "$D" ""
+[ "$RC" -eq 0 ] &&
+    report ok "E4 noisy stage-2 output still passes" ||
+    report fail "E4 noisy stage-2 output still passes" "rc=$RC out=$OUT"
+grep -q "ZY22PRIVATE2" <<<"$OUT" &&
+    report fail "E4 stage-2 device noise must not enter evidence" "leaked: $OUT" ||
+    report ok "E4 stage-2 device noise must not enter evidence"
+grep -Eq 'start2\| Starting: Intent' <<<"$OUT" &&
+    report ok "E4 stage-2 Starting line still excerpted" ||
+    report fail "E4 stage-2 Starting line still excerpted" "$OUT"
+
+# ---------------------------------------------------------------------------
 # S (static): mode wired into usage/case/dispatch; body does not reuse the
 # /data/misc-scanning helpers.
 # ---------------------------------------------------------------------------
