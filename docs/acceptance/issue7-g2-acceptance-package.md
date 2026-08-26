@@ -151,10 +151,14 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
    **脚本层已修**（PR #47，`6658f8e`）：runner 全部身份坐标改绑 `.bench` 实装（显式 namespace
    FQCN / bench 权限串 / provider authority），device-free selftest
    `scripts/selftest-test-hook-package-identity.sh` 红先绿后锁两条假绿线（install 身份、dumpsys
-   gate），CI install-guards job 常驻。**Hook 块仍为 `NOT_READY`**——device-free 证明不满足本条
-   要求的「canonical runner 在真机上证明启动的正是实装 `.bench` acceptance component」；真机
-   exact-build 执行（§5）仍是放行前置。`snapshot_prefs` 的 `/data/misc` 无包过滤扫描为已知
-   残留（两包并存时 loud fail），pin 需真机路径验证。
+   gate），CI install-guards job 常驻。**事务外 readiness 路径已补**（PR #48，`41b2b67`）：
+   `test-hook.sh --acceptance-readiness` 以只读双侧证明（无特权启动被 bench signature 权限拒
+   + 无 payload root 启动命中 probe 自身 fail-fast abort 签名、负断言不进事务）在 §G 事务外
+   验证 acceptance component；selftest `scripts/selftest-test-hook-acceptance-readiness.sh`
+   负矩阵锁死。**Hook 块仍为 `NOT_READY`**——上述均为 device-free 证明，不满足本条要求的
+   「canonical runner 在真机上证明启动的正是实装 `.bench` acceptance component」；真机
+   exact-build 执行（§5，S1 场次「后续门」）仍是放行前置。`snapshot_prefs` 的 `/data/misc`
+   无包过滤扫描为已知残留（两包并存时 loud fail），pin 需真机路径验证。
 4. 若选择 `SKEW=IN_G2`，必须先冻结两个方向各自的 old/new APK SHA、协议版本、支持集合与预期
    outcome。只有 `protocolVersion=1` 的同构双端或一行 `!! PROTOCOL SKEW` 不能证明 M-VS-01。
 
