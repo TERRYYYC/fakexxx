@@ -3,9 +3,12 @@ feature_ids: [1, 7]
 topics: [acceptance, g2, device, exact-build, recovery, release-gate]
 doc_kind: acceptance-package
 created: 2026-08-26
-status: draft
+status: accepted
 drafted_against: 85346a3c100f35b7c6a5633b32530d814ce4e5f6
 source_issue: 1
+accepted_at: 2026-08-26T14:23Z
+accepted_by: operator
+decision: "RELEASE=DUAL; SKEW=POST_V1; PROD=G3"
 ---
 
 # G2 验收包（Draft）— A+ exact-build 真机准出（pre-cutover）
@@ -54,6 +57,22 @@ ACCEPT G2-PACKAGE; RELEASE=OPERATOR_ONLY|DUAL; SKEW=POST_V1|IN_G2; PROD=G3|IN_G2
 - `PROD=G3`：G2 只验 pre-cutover 隔离构建；production/release 随 Issue #1 的依赖／放行阶梯
   G3 及 #13/PR #14 前置处理。这里的 G3 **不是** canonical spec §21 的 signer-cutover G3。
 - `PROD=IN_G2`：production 块在独立 signer/data/rollback 前置满足前保持 blocked；不得借本包跳过它们。
+
+### ✅ 已接受（operator，2026-08-26T14:23Z）
+
+```text
+ACCEPT G2-PACKAGE; RELEASE=DUAL; SKEW=POST_V1; PROD=G3
+```
+
+本包状态 `DRAFT → ACCEPTED`。三项取舍的**直接后果**（登记，不是解释）：
+
+| 取舍 | 后果 |
+|---|---|
+| `RELEASE=DUAL` | 证据齐后**不能由 operator 单点放行**；须先有一份非包作者、非执行者、非相关产品作者的 exact-build 验收 verdict，再由 operator 放行。 |
+| `SKEW=POST_V1` | **不等于 skew 已移出 G2。** §7 合取式要求 `SKEW=POST_V1 ∧ canonical disposition 已接受`；在 `M-VS-01`／Task 9 被一份已接受的 canonical disposition 明确移出前，skew **仍阻挡 G2 放行**。此为本次选择新增的前置工作项。 |
+| `PROD=G3` | G2 只验 pre-cutover 隔离构建；production/release 随 Issue #1 阶梯 G3 与 #13/PR #14 处理。此 G3 **不是** canonical spec §21 的 signer-cutover G3。 |
+
+接受**不等于** `READY_TO_SCHEDULE`：§3 准入 predicate 仍须全部成立才可消耗 operator 设备时间。
 
 ## 1. 包状态与终态
 
