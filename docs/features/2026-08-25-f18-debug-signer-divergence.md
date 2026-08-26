@@ -43,9 +43,9 @@ status: fixed-on-branch (fix/f18-signer-identity)
 | 签名=仓库态 | `apps/qianwangyou/keystores/bench.keystore`、`apps/cellrebel-auto/keystores/bench.keystore` | 入库 keystore（= 设备现信任的 7a598cbe 字节，install -r 连续性保持；两 app 各持一份拷贝，保持 app 独立性，字节相同是有意为之——见 build 文件注释）|
 | | `apps/qianwangyou/app/build.gradle` | signingConfigs `release`→`bench`（storeFile 指向入库 keystore）；debug buildType 显式挂 `signingConfigs.bench`|
 | | `apps/cellrebel-auto/app/build.gradle.kts` | 新增 signingConfigs.bench；debug buildType 挂之（release 维持 unsigned 不变）|
-| 防回归 gate | `scripts/check-debug-signer.sh` + `scripts/selftest-debug-signer.sh` | keystore 证书 vs APK signer 证书比对；CI 两 lane 各加 step；负例已用封存外来包实测 | 
-| selftest CI 传输 | `.github/workflows/android-a-plus.yml` `install guards (F-18 selftests)` job | R2 接线：三 selftest（signer 7/7 / install helper 16/16 / test-hook guard 8/8）在 CI 实跑，"存在但不跑"不是 guard | 
-| keystore 用途约束 | `apps/*/keystores/README.md` | file-adjacent scope：debug/bench 两侧 + qwy 既有 non-store release lane（PR-1 起有意共用，保 install -r 连续性/防 profiles 丢失）；禁 store/分发/信任根/跨项目复用；cellrebel-auto release 保持 unsigned（R3 精确化） | 
+| 防回归 gate | `scripts/check-debug-signer.sh` + `scripts/selftest-debug-signer.sh` | keystore 证书 vs APK signer 证书比对；CI 两 lane 各加 step；负例已用封存外来包实测 |
+| selftest CI 传输 | `.github/workflows/android-a-plus.yml` `install guards (F-18 selftests)` job | R2 接线：三 selftest（signer 7/7 / install helper 16/16 / test-hook guard 8/8）在 CI 实跑，"存在但不跑"不是 guard |
+| keystore 用途约束 | `apps/*/keystores/README.md` | file-adjacent scope：debug/bench 两侧 + qwy 既有 non-store release lane（PR-1 起有意共用，保 install -r 连续性/防 profiles 丢失）；禁 store/分发/信任根/跨项目复用；cellrebel-auto release 保持 unsigned（R3 精确化） |
 | install 不可静默 | `scripts/install_apk_verified.sh` + `scripts/selftest-install-apk-verified.sh` | install 退出码 + `Success` 双查、失败全文（含 INSTALL_FAILED_* 原因）回显；`pm path` 单 base.apk 断言；设备实装 SHA-256 vs 本地产物 SHA-256 字节比对|
 | 调用点 | `apps/qianwangyou/scripts/test-hook.sh` | 不再 `>/dev/null`；失败回显全文 + UPDATE_INCOMPATIBLE 提示（原有装前 SHA 幂等逻辑保留）|
 | | `apps/qianwangyou/scripts/mock_provider_acceptance.sh` | 裸 install 换成 verified helper（set -e 下失败即中止，不再在旧包上继续跑）|
