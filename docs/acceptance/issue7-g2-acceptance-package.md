@@ -48,8 +48,8 @@ ACCEPT G2-PACKAGE; RELEASE=OPERATOR_ONLY|DUAL; SKEW=POST_V1|IN_G2; PROD=G3|IN_G2
 ```
 
 - `RELEASE=OPERATOR_ONLY`：沿用 G1(A)，证据完成后由 operator 单点放行。
-- `RELEASE=DUAL`：先有一份非包作者、非执行者、非相关产品作者的 exact-build 验收 verdict，
-  再由 operator 放行。
+- `RELEASE=DUAL`：先有一份非包作者、非执行者、非独立记录者、非相关产品／证据实现作者的
+  exact-build 验收 verdict，再由 operator 放行。
 - `SKEW=POST_V1`：等存在至少两个真实协议版本及冻结兼容 oracle 后再测；这项选择只表达取舍，
   **不会自动改写** canonical `M-VS-01` / Task 9。它们必须先经被接受的 canonical disposition
   明确移出本 gate，否则仍阻挡 G2 放行。
@@ -68,7 +68,7 @@ ACCEPT G2-PACKAGE; RELEASE=DUAL; SKEW=POST_V1; PROD=G3
 
 | 取舍 | 后果 |
 |---|---|
-| `RELEASE=DUAL` | 证据齐后**不能由 operator 单点放行**；须先有一份非包作者、非执行者、非相关产品作者的 exact-build 验收 verdict，再由 operator 放行。 |
+| `RELEASE=DUAL` | 证据齐后**不能由 operator 单点放行**；须先有一份非包作者、非执行者、非独立记录者、非相关产品／证据实现作者的 exact-build 验收 verdict，再由 operator 放行。 |
 | `SKEW=POST_V1` | **不等于 skew 已移出 G2。** §7 合取式要求 `SKEW=POST_V1 ∧ canonical disposition 已接受`；在 `M-VS-01`／Task 9 被一份已接受的 canonical disposition 明确移出前，skew **仍阻挡 G2 放行**。此为本次选择新增的前置工作项。 |
 | `PROD=G3` | G2 只验 pre-cutover 隔离构建；production/release 随 Issue #1 阶梯 G3 与 #13/PR #14 处理。此 G3 **不是** canonical spec §21 的 signer-cutover G3。 |
 
@@ -89,7 +89,7 @@ DRAFT → ACCEPTED → READY_TO_SCHEDULE → EVIDENCE_COMPLETE → RELEASED | RE
 | `ACCEPTED` | operator 已选择上面的三项；仍未获得 device lease |
 | `READY_TO_SCHEDULE` | §3 全部准入 predicate 成立，才可拆执行场次 |
 | `EVIDENCE_COMPLETE` | 所有硬准出块 PASS，选择留在 G2 的条件块也 PASS；证据包完整性验证通过 |
-| `RELEASED` | 具有 §7 选定的放行权主体明确签字；此前不得写“G2 已过” |
+| `RELEASED` | §7 合取式成立、`DUAL` 前置 verdict 存在，且 operator 明确作出最终放行；此前不得写“G2 已过” |
 | `REJECTED` | 任一硬准出块 FAIL、证据无效或安全收尾不可证；不做多数票或平均分 |
 
 HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测试 fixture 任一变化，只让受影响的
@@ -103,12 +103,17 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 | 阶梯编排 carrier | Opus5 调度线 `thread_msun1z1pv5krwc5g` | operator 接受后才拆场次与路由；本 draft 不生成执行球权 |
 | device owner | operator | 唯一可批准 device lease、mock-location app、LSPosed scope 与任何 production-data 风险动作 |
 | 测试执行者 | 接受后由调度线点名一只猫 | 只执行冻结步骤并报告原始输出；不得兼任独立记录者／验收签字人 |
-| 独立记录者 | 接受后点名；优先保持与 C5 相同口径 | 收原始字节、跑 checksum、逐 predicate 记 PASS/FAIL；不得改原始证据 |
-| evidence validity reviewer | 非包作者、非执行者、非相关产品／证据实现作者 | 先判 harness／fixture／manifest 是否有效，再把真实 product red 路由给 canonical fix owner |
-| G2 放行人 | 由 `RELEASE` 选择决定 | `OPERATOR_ONLY` 或 `DUAL + operator`；无选择时没有放行权 |
+| 独立记录者 | 接受后点名；优先保持与 C5 相同口径 | 收原始字节、跑 checksum、逐 predicate 记 PASS/FAIL；不得改原始证据，也不得兼任 evidence validity reviewer 或 `DUAL` exact-build verdict signer |
+| evidence validity reviewer | 非包作者、非执行者、非独立记录者、非相关产品／证据实现作者 | 先判 harness／fixture／manifest 是否有效，再把真实 product red 路由给 canonical fix owner |
+| `DUAL` exact-build verdict signer | 仅在 `RELEASE=DUAL` 时点名；非包作者、非执行者、非独立记录者、非相关产品／证据实现作者 | 对冻结的 exact-build evidence package 出具独立前置 verdict；无权代 operator 最终放行 |
+| 最终 G2 放行人 | operator | 只有 operator 可作最终放行；`DUAL` signer 的 verdict 是前置条件，不是放行权 |
 
 本表是接受条件，不是跨猫派活。每个实际人选必须在 `READY_TO_SCHEDULE` 前落到 durable carrier；
 普通聊天里的“我来跑”不算 custody。
+
+对同一 evidence package，上述互斥是双向约束：执行者不得兼任记录／验收签字，独立记录者不得
+审自己封存的 evidence validity，也不得签 `DUAL` exact-build verdict。不得因为某一角色行没有重复
+另一行的禁语，就反向解释为允许兼任。
 
 ## 3. READY_TO_SCHEDULE 准入 predicate
 
@@ -118,6 +123,8 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 
 - [ ] operator 已用 §0 决策行接受本包；三项无空值。
 - [ ] 一只非作者已对本包 scope、证据口径、角色分离给出 verdict；包作者没有自审。
+- [ ] 执行者、独立记录者、evidence validity reviewer 与 `DUAL` signer 均已落到 durable carrier，
+      且满足 §2 的互斥；最终放行权仍只属于 operator。
 - [ ] candidate 使用完整 40 位 Git SHA，工作树 clean；记录 tree SHA、base SHA 与对应 CI run。
 - [ ] candidate current-HEAD 所需 CI 全绿；这只证明机器门，不替代真机证据。
 - [ ] 两只 app 从同一 candidate 构建；若无法同 HEAD，必须各自记录完整 SHA 与为什么分叉。
@@ -177,7 +184,8 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 ### 4.3 原始证据与 checksum
 
 - 每个场次建立独立目录，保留命令、stdout/stderr、exit code、logcat、直接状态查询与截图。
-- 原始文件写入后只读封存；独立记录者不得剪辑或“整理”承重字节。
+- 原始文件写入后只读封存；独立记录者不得剪辑或“整理”承重字节，也不得对自己封存的证据
+  出具 evidence-validity 或 `DUAL` exact-build verdict。
 - 生成列出**全部**原始文件的 SHA-256 manifest，并保存一次 `shasum -c` 全量通过输出。
 - 每个块各有 `reportDigest`，同时有整个包的 manifest digest；缺指向物的摘要等于没有证据。
 - 承重顺序延续 C5 run 2：完整 log／直接状态读回／退出码承重，截图是辅助附件，不能单独裁决。
@@ -319,8 +327,10 @@ hard(A,B,C,E,G) 全 PASS
 ```
 
 - `RELEASE=OPERATOR_ONLY`：上式成立后，只有 operator 可把 Issue #1 的 G2 行改为放行。
-- `RELEASE=DUAL`：上式成立 + 非包作者/非执行者/非相关产品作者 exact-build verdict 后，仍由
-  operator 作最终放行。
+- `RELEASE=DUAL`：上式成立 + 非包作者/非执行者/非独立记录者/非相关产品或证据实现作者的
+  exact-build verdict 后，仍只由 operator 作最终放行。
+- `DUAL` signer 只提供前置 verdict，不拥有最终放行权；evidence validity reviewer 与 signer
+  均不得由本 evidence package 的独立记录者兼任。
 - 包作者、执行者、记录者、CI 或 runbook 均无权单独放行。
 - G2 放行不 merge/undraft/close #13/#14，不授权 production deployment，也不表示 signer-cutover 三门完成。
 
