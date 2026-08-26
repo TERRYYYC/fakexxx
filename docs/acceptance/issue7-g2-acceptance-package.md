@@ -120,10 +120,15 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
    顺序、公开测试位置、每项 `requiredSuccesses`）并记录其 digest；模板存在不能代替这一步。
 2. `docs/acceptance/matrix-evidence-device.json` 当前不存在。实际 device row 执行前必须按 canonical
    §10.1 schema 创建；Markdown 模板不是 executed evidence。
-3. `apps/qianwangyou/scripts/test-hook.sh` 当前硬编码 `PKG=name.caiyao.fakegps`，但它构建并安装的
-   debug APK 具有 `applicationIdSuffix ".bench"`，acceptance Activity 也只在 debug source set。
-   在 canonical runner 能证明自己启动的正是实装 `.bench` acceptance component 前，Hook 块为
-   `NOT_READY`，不得拿旧脚本输出或 production package 代跑。
+3. ~~`apps/qianwangyou/scripts/test-hook.sh` 当前硬编码 `PKG=name.caiyao.fakegps`，但它构建并安装的
+   debug APK 具有 `applicationIdSuffix ".bench"`，acceptance Activity 也只在 debug source set。~~
+   **脚本层已修**（PR #47，`6658f8e`）：runner 全部身份坐标改绑 `.bench` 实装（显式 namespace
+   FQCN / bench 权限串 / provider authority），device-free selftest
+   `scripts/selftest-test-hook-package-identity.sh` 红先绿后锁两条假绿线（install 身份、dumpsys
+   gate），CI install-guards job 常驻。**Hook 块仍为 `NOT_READY`**——device-free 证明不满足本条
+   要求的「canonical runner 在真机上证明启动的正是实装 `.bench` acceptance component」；真机
+   exact-build 执行（§5）仍是放行前置。`snapshot_prefs` 的 `/data/misc` 无包过滤扫描为已知
+   残留（两包并存时 loud fail），pin 需真机路径验证。
 4. 若选择 `SKEW=IN_G2`，必须先冻结两个方向各自的 old/new APK SHA、协议版本、支持集合与预期
    outcome。只有 `protocolVersion=1` 的同构双端或一行 `!! PROTOCOL SKEW` 不能证明 M-VS-01。
 
