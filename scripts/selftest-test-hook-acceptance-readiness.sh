@@ -242,6 +242,50 @@ grep -qF "root-start shell su -c 'am start -W -n $FQCN_ACT" "$D/calls.log" &&
     report fail "G1 stage 2 launches explicit bench FQCN" "calls: $(cat "$D/calls.log")"
 
 # ---------------------------------------------------------------------------
+# R3 (evidence parity, red-first): the SUCCESS path must emit the raw denial
+# excerpt. S2-B finding: the gate assertions are real, but the frozen
+# evidence directory only carried the VERIFIED verdict + exit code — an
+# independent reviewer could not confirm from raw bytes that the denial
+# named the bench permission (Stage 2 already logs its raw fail-fast JSON;
+# the two stages' evidence grades must be equal).
+# ---------------------------------------------------------------------------
+grep -qF "$BENCH_ID.permission.RUN_HOOK_ACCEPTANCE" <<<"$OUT" &&
+    report ok "R3 success output carries the raw permission-naming line" ||
+    report fail "R3 success output carries the raw permission-naming line" "verdict only, denial bytes dropped: $OUT"
+grep -q "Permission Denial" <<<"$OUT" &&
+    report ok "R3 success output carries the denial marker" ||
+    report fail "R3 success output carries the denial marker" "$OUT"
+
+# E2: the excerpt is self-auditable — a counts line (matched/total + the
+# documented patterns) lets an auditor re-run the patterns on the raw text
+# and confirm no matched line was cropped.
+grep -Eq 'READINESS_GATE_EXCERPT lines=[1-9][0-9]*/[1-9][0-9]*' <<<"$OUT" &&
+    report ok "E2 excerpt counts line present" ||
+    report fail "E2 excerpt counts line present" "$OUT"
+
+# E3 (bounded excerpt / privacy): raw denial output may interleave device
+# noise; lines NOT matching the documented denial patterns must never enter
+# the evidence stream.
+D="$WORK/e3"; make_fake_adb "$D"
+{
+    printf 'Warning: device serialno=ZY22PRIVATE build-fingerprint=vendor/private/2026\n'
+    printf '%s\n' "$DENY_BENCH"
+} >"$D/unpriv.out"
+printf '1' >"$D/unpriv.rc"
+printf 'Status: ok\n' >"$D/priv.out"
+printf '%s\n' "$ABORT_LOG" >"$D/logcat.out"
+build_and_run "$D" ""
+[ "$RC" -eq 0 ] &&
+    report ok "E3 noisy denial still passes" ||
+    report fail "E3 noisy denial still passes" "rc=$RC out=$OUT"
+grep -q "ZY22PRIVATE" <<<"$OUT" &&
+    report fail "E3 device noise must not enter evidence" "leaked: $OUT" ||
+    report ok "E3 device noise must not enter evidence"
+grep -qF "$BENCH_ID.permission.RUN_HOOK_ACCEPTANCE" <<<"$OUT" &&
+    report ok "E3 permission line still excerpted" ||
+    report fail "E3 permission line still excerpted" "$OUT"
+
+# ---------------------------------------------------------------------------
 # S (static): mode wired into usage/case/dispatch; body does not reuse the
 # /data/misc-scanning helpers.
 # ---------------------------------------------------------------------------

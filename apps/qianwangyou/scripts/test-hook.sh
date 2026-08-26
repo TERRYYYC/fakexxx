@@ -461,6 +461,21 @@ run_acceptance_readiness() {
         printf '%s\n' "$deny_out" >&2
         return 2
     }
+    # Evidence parity with Stage 2 (S2-B finding): the gate assertions above
+    # run on the FULL deny_out, but the frozen evidence directory must also
+    # carry the raw denial bytes — a reviewer must confirm from the evidence
+    # itself that the denial named the bench permission, not from the exit
+    # code. Bounded excerpt: ONLY lines matching the documented denial
+    # patterns (SecurityException | Permission Denial | RUN_HOOK_ACCEPTANCE)
+    # enter the evidence stream, so device-private noise on unmatched lines
+    # never does; the counts line (matched/total) lets an auditor re-run the
+    # same patterns on the raw text and verify no matched line was cropped.
+    deny_total=$(printf '%s\n' "$deny_out" | wc -l | tr -d ' ')
+    deny_excerpt=$(printf '%s\n' "$deny_out" |
+        grep -E 'SecurityException|Permission Denial|RUN_HOOK_ACCEPTANCE')
+    deny_matched=$(printf '%s\n' "$deny_excerpt" | grep -c .)
+    echo "READINESS_GATE_EXCERPT lines=$deny_matched/$deny_total patterns=SecurityException|Permission_Denial|RUN_HOOK_ACCEPTANCE"
+    printf '%s\n' "$deny_excerpt" | sed 's/^/  gate| /'
     echo "VERIFIED acceptance.gate signature permission denies unprivileged start"
 
     start_out=$(root_shell "am start -W -n $ACCEPTANCE_ACT")
