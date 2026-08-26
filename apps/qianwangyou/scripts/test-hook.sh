@@ -489,7 +489,11 @@ run_acceptance_readiness() {
     printf '%s\n' "$deny_excerpt" | sed 's/^/  gate| /'
     echo "VERIFIED acceptance.gate signature permission denies unprivileged start"
 
-    echo "READINESS_CMD stage2 su -c am start -W -n $ACCEPTANCE_ACT"
+    # Frozen as the REAL host-side command shape — the root_shell wrapper
+    # executes `adb shell "su -c '$1'"`, so the evidence line carries the adb
+    # wrapper and the su -c quoting verbatim (gpt55 R2: a paraphrase without
+    # the wrapper/quoting is not the executed command).
+    echo "READINESS_CMD stage2 adb shell \"su -c 'am start -W -n $ACCEPTANCE_ACT'\""
     start_out=$(root_shell "am start -W -n $ACCEPTANCE_ACT")
     printf '%s\n' "$start_out" | grep -Eq 'Status:[[:space:]]*ok' || {
         echo "HARNESS_ERROR payload-less acceptance start failed" >&2

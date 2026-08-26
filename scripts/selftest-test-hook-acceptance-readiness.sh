@@ -308,15 +308,17 @@ grep -Eq 'start2\| Status: ok' <<<"$OUT" &&
     report fail "R4 raw stage-2 Status line in evidence" "$OUT"
 
 # ---------------------------------------------------------------------------
-# R5: the EXECUTED COMMAND LINES themselves are frozen (constructed from
-# shipped constants — no device-private content).
+# R5: the EXECUTED COMMAND LINES themselves are frozen — as the REAL host-side
+# command shapes, including the adb shell wrapper and the su -c quoting for
+# stage 2 (gpt55 R2: a paraphrase without the wrapper/quoting is not the
+# executed command; constructed from shipped constants, no private content).
 # ---------------------------------------------------------------------------
 grep -qF "READINESS_CMD stage1 adb shell am start -W -n $FQCN_ACT" <<<"$OUT" &&
     report ok "R5 stage-1 command line frozen" ||
     report fail "R5 stage-1 command line frozen" "$OUT"
-grep -qF "READINESS_CMD stage2 su -c am start -W -n $FQCN_ACT" <<<"$OUT" &&
-    report ok "R5 stage-2 command line frozen" ||
-    report fail "R5 stage-2 command line frozen" "$OUT"
+grep -qF "READINESS_CMD stage2 adb shell \"su -c 'am start -W -n $FQCN_ACT'\"" <<<"$OUT" &&
+    report ok "R5 stage-2 command line frozen (real wrapper+quoting)" ||
+    report fail "R5 stage-2 command line frozen (real wrapper+quoting)" "$OUT"
 
 # E4 (privacy, stage 2): device noise on unmatched lines of the privileged
 # start output must not enter the evidence stream; matched lines still do.
