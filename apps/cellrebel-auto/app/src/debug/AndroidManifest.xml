@@ -17,5 +17,12 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:label="EC v1 full loop probe" />
+        <!-- P10 (G2 §5B/§5C): debug-only provider-revoke command surface with
+             exact-window gating over durable Room state. src/debug only. -->
+        <activity
+            android:name="com.example.cellrebelauto.integration.v1.ProviderRevokeCollectorActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="EC v1 P10 provider-revoke collector" />
     </application>
 </manifest>

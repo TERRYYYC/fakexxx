@@ -37,6 +37,14 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:label="EC v1 pairing approval" />
+        <!-- P10 (G2 §5B/§5C): debug-only fault/revoke collector — dump durable
+             state, arm exact-window self-kill/revoke on committed lease gates,
+             drive the §6.3.3 revoked-lease self-cleanup. src/debug only. -->
+        <activity
+            android:name="name.caiyao.fakegps.integration.v1.FaultCollectorActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="EC v1 P10 fault/revoke collector" />
     </application>
 
 </manifest>
