@@ -40,13 +40,13 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.integration.
 # 撤销 caller（§5C 新 run 前；真实 transition：pairing revoke + lease REVOKED + audit）
 adb shell am start -n .../PairingApprovalActivity \
   --es revoke_application_id <appId> --es revoke_signer_digest <sha256>
-#   追加 --es revoke_run_cleanup 1 → 同时跑 §6.3.3 qwy 内部自清理
+#   追加 --ez revoke_run_cleanup true → 同时跑 §6.3.3 qwy 内部自清理
 #   （REVOKED → RELEASING → RELEASED / RELEASE_INCOMPLETE）
 
 # §5C run 中撤销（exact-window：caller 的 lease 落盘 ACTIVE 的那一刻开火）
 adb shell am start -n .../FaultCollectorActivity \
   --es cmd arm --es action revoke_caller --es caller <appId> --es signer <sha256> \
-  --es gate lease_active [--ei poll_ms 200] [--ei timeout_ms 600000]
+  --es gate lease_active [--el poll_ms 200] [--el timeout_ms 600000]
 
 # §5B 进程重启窗口（lease ACTIVE/ACQUIRING/RELEASING 时 SIGKILL 自己）
 adb shell am start -n .../FaultCollectorActivity \
@@ -79,13 +79,14 @@ adb shell am start -n .../ProviderRevokeCollectorActivity \
 adb shell am start -n .../ProviderRevokeCollectorActivity \
   --es cmd arm --es action revoke_provider --es app_id <p> --es signer <s> \
   --es gate run_active            # 或 attempt_state:<STATE>（§8.1 枚举名）
+#   （poll/timeout 同 qwy：--el poll_ms / --el timeout_ms）
 
 # §5B Auto checkpoint 崩溃（trusted ledger 不重计）
 adb shell am start -n .../ProviderRevokeCollectorActivity \
   --es cmd arm --es action self_kill --es gate trusted_count:<N>
 
 # FullLoopProbe fault 模式（§5B）
-adb shell am start -n .../FullLoopProbeActivity --es fault hold_lease --ei hold_ms 30000
+adb shell am start -n .../FullLoopProbeActivity --es fault hold_lease --el hold_ms 30000
 adb shell am start -n .../FullLoopProbeActivity --es fault release_receipt_loss
 adb shell am start -n .../FullLoopProbeActivity --es fault crash_after_apply
 adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es lease_id <id>
@@ -102,6 +103,20 @@ adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es 
 
 fault 名（冻结）：`hold_lease` / `release_receipt_loss` / `crash_after_apply` /
 `rerelease_stuck`（恢复工具，非注入）。
+
+## extra 类型纪律（R2 起）
+
+数值 extra 一律 `--el`（Long）、布尔一律 `--ez`——`am --ei` 存 Integer、
+`--es` 存 String，而实现侧已改为类型宽容读取（Int/Long/String 都接受，
+`ExtraCoerce`），但文档口径统一为 canonical 类型，避免执行猫复制粘贴出
+静默默认值。已由 `ExtraCoerceTest`（双侧）+ 守卫用例钉死。
+
+## `trusted_count:<N>` 基线纪律（R2 起，reviewer 条件接受）
+
+`>=N` 语义的 N 是**绝对目标**：挂 arm 前必须先 `cmd=state` 读当前
+trusted 总数 baseline，N = baseline + 期望新增提交数。禁止拍脑袋写 N——
+历史行会让门在非 in-flight 时刻立即打开（reviewer 指出的历史总数假开门
+只在此纪律下被排除；若需要相对语义，future work 另冻结 token）。
 
 ## 退出与归真锚点（matrix 冻结前的最小事实）
 

@@ -138,6 +138,41 @@ data class AutoArmSpec(
 }
 
 /**
+ * R2 (gpt55 P1-2): what "REVOKE PROVEN" is allowed to mean on the Auto side.
+ *
+ * The disease: proving from broad rows ("no active row for this appId")
+ * false-proves an empty row set (typo'd appId / never approved) or blames a
+ * same-app OTHER signer's still-active row. The honest proof binds the store's
+ * own boolean return (ProviderTrustStore.revoke returns true iff the EXACT
+ * principal's active row was flipped) plus the exact-principal activeFor
+ * query going inactive.
+ */
+object RevokeReadback {
+
+    enum class Verdict { PROVEN, NOT_PROVEN_NO_ROW_FLIPPED, NOT_PROVEN_STILL_ACTIVE, UNKNOWN }
+
+    fun verdict(
+        revokeReturned: Boolean?,
+        activeForPrincipalAfter: Boolean?,
+    ): Verdict = when {
+        revokeReturned == false -> Verdict.NOT_PROVEN_NO_ROW_FLIPPED
+        activeForPrincipalAfter == null -> Verdict.UNKNOWN
+        activeForPrincipalAfter == true -> Verdict.NOT_PROVEN_STILL_ACTIVE
+        else -> Verdict.PROVEN
+    }
+
+    fun render(v: Verdict): String = when (v) {
+        Verdict.PROVEN -> "REVOKE PROVEN: exact principal's row flipped (store returned true) and now reads inactive."
+        Verdict.NOT_PROVEN_NO_ROW_FLIPPED ->
+            "NOT PROVEN — ProviderTrustStore.revoke returned false: no ACTIVE row for that exact " +
+                "(appId, signer) was flipped. Typo, never approved, or already revoked. Treat as no-op."
+        Verdict.NOT_PROVEN_STILL_ACTIVE ->
+            "REVOKE NOT PROVEN — exact principal still reads ACTIVE after the fire. INVESTIGATE."
+        Verdict.UNKNOWN -> "REVOKE NOT PROVEN — after-state unreadable."
+    }
+}
+
+/**
  * Durable arm/fire/outcome record — `filesDir/debug-collector/arm.log`,
  * append-only. Same contract as the qwy side: Room stays the state truth;
  * this log binds WHAT THE COLLECTOR DID into the executor's evidence pack.

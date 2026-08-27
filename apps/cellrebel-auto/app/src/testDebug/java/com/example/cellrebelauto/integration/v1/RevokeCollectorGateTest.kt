@@ -94,6 +94,36 @@ class RevokeCollectorGateTest {
             "name.caiyao.fakegps.bench", "sha256:aa", 200, 60_000))
     }
 
+    /**
+     * R2 (gpt55 P1-2): the revoke verdict binds to the store's boolean return
+     * (true iff the EXACT principal's active row flipped) + exact-principal
+     * activeFor after. Empty row sets / wrong signers must NOT prove.
+     */
+    @Test
+    fun revokeReadbackKillsTheFalseGreens() {
+        // The real transition: row flipped, exact principal now inactive.
+        assertEquals(
+            RevokeReadback.Verdict.PROVEN,
+            RevokeReadback.verdict(revokeReturned = true, activeForPrincipalAfter = false),
+        )
+        // Typo'd appId / never approved / already revoked: store flipped nothing.
+        assertEquals(
+            "empty row set must NOT prove — store returned false",
+            RevokeReadback.Verdict.NOT_PROVEN_NO_ROW_FLIPPED,
+            RevokeReadback.verdict(revokeReturned = false, activeForPrincipalAfter = false),
+        )
+        // Exact principal still active after the fire — investigate.
+        assertEquals(
+            RevokeReadback.Verdict.NOT_PROVEN_STILL_ACTIVE,
+            RevokeReadback.verdict(revokeReturned = true, activeForPrincipalAfter = true),
+        )
+        // After-state unreadable.
+        assertEquals(
+            RevokeReadback.Verdict.UNKNOWN,
+            RevokeReadback.verdict(revokeReturned = true, activeForPrincipalAfter = null),
+        )
+    }
+
     @Test
     fun armRecordCodecSurvivesRoundTripWithNulls() {
         val line = AutoArmRecordCodec.ArmLine(

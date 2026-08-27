@@ -96,6 +96,7 @@ object QwyDurableSnapshot {
                 currentLeaseId = blocking?.leaseId,
                 leaseState = blocking?.state?.name,
                 callerApplicationId = blocking?.callerApplicationId,
+                callerSignerDigest = blocking?.callerSignerDigest,
             ),
             pendingCallers = pairing.pendingCandidates(),
             pairingStillActive = stillActive,

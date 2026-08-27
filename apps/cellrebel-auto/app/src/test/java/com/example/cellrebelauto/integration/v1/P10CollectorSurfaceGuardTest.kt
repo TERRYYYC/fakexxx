@@ -188,6 +188,52 @@ class P10CollectorSurfaceGuardTest {
         )
     }
 
+    /**
+     * R2 (gpt55 P1-1): numeric extras must be read through ExtraCoerce —
+     * adb `--ei` stores Integer and getLongExtra silently returns the default.
+     */
+    @Test
+    fun r2_extrasAreReadThroughTypeCoercion() {
+        val files = kotlinSourcesWithoutComments(debugSourceDir)
+        val revokeCollector = files.first { it.first.name == "ProviderRevokeCollectorActivity.kt" }.second
+        val probe = files.first { it.first.name == "FullLoopProbeActivity.kt" }.second
+        assertTrue(
+            "ProviderRevokeCollectorActivity must read long extras via ExtraCoerce.longOf",
+            revokeCollector.contains("ExtraCoerce.longOf("),
+        )
+        assertEquals(
+            "no raw getLongExtra may remain in ProviderRevokeCollectorActivity",
+            false,
+            Regex("""getLongExtra\(""").containsMatchIn(revokeCollector),
+        )
+        assertTrue(
+            "FullLoopProbeActivity must read hold_ms via ExtraCoerce.longOf — the runbook " +
+                "example --ei hold_ms 30000 stores an Integer",
+            probe.contains("ExtraCoerce.longOf("),
+        )
+    }
+
+    /**
+     * R2 (gpt55 P1-2): the revoke readback must prove the EXACT principal's
+     * transition — ProviderTrustStore.revoke's boolean return (row actually
+     * flipped) + activeFor(appId, signer) after. Broad byApplicationId rows
+     * must never carry the verdict.
+     */
+    @Test
+    fun r2_revokeReadbackProvesOnlyTheExactPrincipalTransition() {
+        val revokeCollector = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "ProviderRevokeCollectorActivity.kt" }.second
+        assertTrue(
+            "the revoke verdict must be computed by RevokeReadback over the store's " +
+                "boolean return + exact-principal activeFor query",
+            revokeCollector.contains("RevokeReadback."),
+        )
+        assertTrue(
+            "the revoke() boolean return must be captured for the proof",
+            Regex("""val revoked = runBlocking|\.revoke\(""").containsMatchIn(revokeCollector),
+        )
+    }
+
     // ------------------------------------------------------------------
     // Production purity
     // ------------------------------------------------------------------

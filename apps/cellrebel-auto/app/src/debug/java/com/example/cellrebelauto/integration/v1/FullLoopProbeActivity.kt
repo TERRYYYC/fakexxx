@@ -125,7 +125,10 @@ class FullLoopProbeActivity : Activity() {
         // DISCARD+REPLAY a release receipt, or CRASH mid-loop on purpose. The
         // default (no --es fault) remains the untouched complete loop.
         val fault = intent?.getStringExtra(EXTRA_FAULT)?.trim()?.takeIf { it.isNotEmpty() }
-        val holdMs = intent?.getLongExtra(EXTRA_HOLD_MS, 0L) ?: 0L
+        // R2 (gpt55 P1-1): the runbook example uses `--ei hold_ms 30000`, which
+        // adb stores as an Integer — getLongExtra would silently return 0 and
+        // the hold would refuse. Coerce Int/Long/String.
+        val holdMs = ExtraCoerce.longOf(intent?.extras?.get(EXTRA_HOLD_MS)) ?: 0L
         val stuckLeaseId = intent?.getStringExtra(EXTRA_LEASE_ID)?.trim()?.takeIf { it.isNotEmpty() }
         if (fault != null && fault !in KNOWN_FAULTS) {
             val report = "REFUSED: unknown fault '$fault' — known: $KNOWN_FAULTS"

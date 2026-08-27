@@ -284,6 +284,55 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
+     * R2 (gpt55 P1-1): adb `--ei` stores an Integer; `getLongExtra` returns the
+     * DEFAULT on type mismatch, so the documented `--ei hold_ms 30000` style
+     * commands would silently arm a 0ms hold / default poll+timeout. Every
+     * numeric/boolean extra the collector reads must go through ExtraCoerce
+     * (accepts Int/Long/String), and no raw getLongExtra may remain.
+     */
+    @Test
+    fun r2_extrasAreReadThroughTypeCoercion() {
+        val fault = File(debugSourceDir, "FaultCollectorActivity.kt")
+        assertTrue("FaultCollectorActivity.kt must exist", fault.isFile)
+        val faultCode = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first == fault }.second
+        assertTrue(
+            "FaultCollectorActivity must read long extras via ExtraCoerce.longOf — " +
+                "adb --ei writes Integer and getLongExtra silently defaults",
+            faultCode.contains("ExtraCoerce.longOf("),
+        )
+        assertEquals(
+            "no raw getLongExtra may remain in FaultCollectorActivity",
+            false,
+            Regex("""getLongExtra\(""").containsMatchIn(faultCode),
+        )
+        val pairing = File(debugSourceDir, "PairingApprovalActivity.kt")
+        val pairingCode = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first == pairing }.second
+        assertTrue(
+            "PairingApprovalActivity must read revoke_run_cleanup via ExtraCoerce.boolOf — " +
+                "adb --es writes a String and getBooleanExtra silently defaults to false",
+            pairingCode.contains("ExtraCoerce.boolOf("),
+        )
+    }
+
+    /**
+     * R2 (gpt55 P1-3 companion): the revoke PROOF must be bound to the exact
+     * principal's before→after transition (QwyRevokeProof), not to "any audit
+     * row + principal currently inactive" — a never-paired/typo'd principal
+     * would otherwise false-prove.
+     */
+    @Test
+    fun r2_revokeProofComesFromThePrincipalTransition() {
+        val debug = debugCode()
+        assertTrue(
+            "the revoke verdict must be computed by QwyRevokeProof (before-active → " +
+                "after-inactive + audit), never from broad row absence alone",
+            debug.contains("QwyRevokeProof."),
+        )
+    }
+
+    /**
      * Baseline sanity for the comment-stripper itself: the pipeline must not
      * over-strip and hide a REAL call that happens to sit on a line with a
      * trailing comment.

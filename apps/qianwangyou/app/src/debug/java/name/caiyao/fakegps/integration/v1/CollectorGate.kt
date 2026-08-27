@@ -24,12 +24,20 @@ package name.caiyao.fakegps.integration.v1
  * the per-injection exit/restore matrix freezes against them.
  */
 
-/** What a gate is allowed to see: a read-only projection of durable state. */
+/**
+ * What a gate is allowed to see: a read-only projection of durable state.
+ *
+ * R2 (gpt55 P1-3): `callerSignerDigest` is exposed because lease ownership is
+ * the FULL principal (applicationId, signerDigest) — §6.5: a signer rotation
+ * is a different provider/caller. A gate scoped by appId only could open on
+ * ANOTHER principal's in-flight lease and fire against the wrong transaction.
+ */
 data class QwyLeaseSnapshot(
     val currentLeaseId: String?,
     /** Raw persisted LeaseRecord.state.name — as-committed, pre-recovery. */
     val leaseState: String?,
     val callerApplicationId: String?,
+    val callerSignerDigest: String?,
 )
 
 sealed interface FaultGate {
@@ -86,21 +94,25 @@ enum class ArmAction(val token: String) {
 }
 
 /**
- * Caller scoping. A gate may optionally require the current lease to belong
- * to one caller — that is what makes "revoke caller X the moment X's lease is
- * active" a single command instead of a human watching a screen.
+ * Principal scoping. A gate may require the current lease to belong to one
+ * caller — and for a revoke, "one caller" means the FULL principal
+ * (applicationId AND signerDigest): a same-package rotated-signer lease is a
+ * DIFFERENT principal's transaction (§6.5), and firing a revoke against it at
+ * "the gated moment" would be exact-window for the wrong in-flight lease.
  */
-data class CallerScope(val applicationId: String?) {
-    fun matches(snapshot: QwyLeaseSnapshot): Boolean =
-        applicationId == null || snapshot.callerApplicationId == applicationId
+data class CallerScope(val applicationId: String?, val signerDigest: String? = null) {
+    fun matches(snapshot: QwyLeaseSnapshot): Boolean {
+        if (applicationId != null && snapshot.callerApplicationId != applicationId) return false
+        if (signerDigest != null && snapshot.callerSignerDigest != signerDigest) return false
+        return true
+    }
 }
 
 data class ArmSpec(
     val action: ArmAction,
     val gate: FaultGate,
+    /** REVOKE_CALLER: scope carries BOTH halves of the principal (§6.5 — never fuzzy). */
     val scope: CallerScope,
-    /** REVOKE_CALLER: both halves of the principal (§6.5 — never fuzzy). */
-    val revokeSignerDigest: String?,
     val pollMs: Long,
     val timeoutMs: Long,
 ) {
@@ -117,7 +129,6 @@ data class ArmSpec(
             action: ArmAction?,
             gate: FaultGate?,
             scope: CallerScope,
-            revokeSignerDigest: String?,
             pollMs: Long,
             timeoutMs: Long,
         ): String? {
@@ -126,9 +137,9 @@ data class ArmSpec(
             if (pollMs < 50) return "poll_ms must be >= 50 (got $pollMs) — tighter polls only burn CPU"
             if (timeoutMs !in 1_000..3_600_000) return "timeout_ms must be within [1000, 3600000]"
             if (action == ArmAction.REVOKE_CALLER) {
-                if (scope.applicationId == null || scope.applicationId.isBlank())
+                if (scope.applicationId.isNullOrBlank())
                     return "revoke_caller needs --es caller <applicationId>"
-                if (revokeSignerDigest == null || revokeSignerDigest.isBlank())
+                if (scope.signerDigest.isNullOrBlank())
                     return "revoke_caller needs --es signer <sha256> — half a principal is a different principal"
             }
             return null
@@ -182,4 +193,49 @@ object ArmRecordCodec {
             detail = parts[5],
         )
     }.getOrNull()
+}
+
+/**
+ * R2 (gpt55 P1-2 companion, qwy side): what "REVOKE PROVEN" is allowed to mean.
+ *
+ * The disease this object exists to kill: proving a revoke from broad
+ * post-conditions ("principal currently inactive + a caller_revoked audit row
+ * exists") false-proves for a typo'd or never-paired principal — the audit row
+ * is appended by the transition itself, and absence was always absent. The
+ * ONLY honest proof is the before→after transition of the EXACT principal:
+ *
+ *   before: findActive(appId, signer) != null   — the principal WAS paired
+ *   after:  findActive(appId, signer) == null   — durably inactive now
+ *   audit:  a caller_revoked row for the appId exists
+ *
+ * Anything else reports NOT_PROVEN_* with the reason — an executor must see
+ * "nothing was revoked", never a green that lies.
+ */
+object QwyRevokeProof {
+
+    enum class Verdict { PROVEN, NOT_PROVEN_NOTHING_ACTIVE, NOT_PROVEN_STILL_ACTIVE, NOT_PROVEN_NO_AUDIT, UNKNOWN }
+
+    fun verdict(
+        beforeActive: Boolean?,
+        afterActive: Boolean?,
+        revokeAudited: Boolean?,
+    ): Verdict = when {
+        beforeActive != true -> Verdict.NOT_PROVEN_NOTHING_ACTIVE
+        afterActive == null -> Verdict.UNKNOWN
+        afterActive == true -> Verdict.NOT_PROVEN_STILL_ACTIVE
+        revokeAudited != true -> Verdict.NOT_PROVEN_NO_AUDIT
+        else -> Verdict.PROVEN
+    }
+
+    fun render(v: Verdict): String = when (v) {
+        Verdict.PROVEN -> "REVOKE PROVEN: exact principal was active, now durably inactive, audit row present."
+        Verdict.NOT_PROVEN_NOTHING_ACTIVE ->
+            "NOT PROVEN — principal was NOT durably active before the fire. Nothing to revoke " +
+                "(typo, never paired, or already revoked). The revoke transition still ran; treat as no-op."
+        Verdict.NOT_PROVEN_STILL_ACTIVE ->
+            "REVOKE NOT PROVEN — principal STILL reads active after the fire. INVESTIGATE."
+        Verdict.NOT_PROVEN_NO_AUDIT ->
+            "REVOKE NOT PROVEN — principal inactive but no caller_revoked audit row. INVESTIGATE."
+        Verdict.UNKNOWN -> "REVOKE NOT PROVEN — after-state unreadable."
+    }
 }

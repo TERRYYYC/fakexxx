@@ -122,15 +122,18 @@ class FaultCollectorActivity : Activity() {
         val gate = FaultGate.parse(gateToken ?: "")
         val caller = intent?.getStringExtra(EXTRA_CALLER)?.trim()?.takeIf { it.isNotEmpty() }
         val signer = intent?.getStringExtra(EXTRA_SIGNER)?.trim()?.takeIf { it.isNotEmpty() }
-        val pollMs = intent?.getLongExtra(EXTRA_POLL_MS, ArmSpec.DEFAULT_POLL_MS) ?: ArmSpec.DEFAULT_POLL_MS
-        val timeoutMs = intent?.getLongExtra(EXTRA_TIMEOUT_MS, ArmSpec.DEFAULT_TIMEOUT_MS)
-            ?: ArmSpec.DEFAULT_TIMEOUT_MS
-        val scope = CallerScope(caller)
+        // R2 (gpt55 P1-1): adb --ei stores Integer and getLongExtra silently
+        // defaults — every numeric extra is coerced (Int/Long/String accepted).
+        val pollMs = ExtraCoerce.longOf(intent?.extras?.get(EXTRA_POLL_MS)) ?: ArmSpec.DEFAULT_POLL_MS
+        val timeoutMs = ExtraCoerce.longOf(intent?.extras?.get(EXTRA_TIMEOUT_MS)) ?: ArmSpec.DEFAULT_TIMEOUT_MS
+        // R2 (gpt55 P1-3): scope binds the FULL principal when both halves are
+        // given, so the gate can only open on THAT principal's in-flight lease.
+        val scope = CallerScope(caller, signer)
         // A previous disarm must not poison this arm: the flag is per-process
         // and process-local, so re-arm resets it (killed processes reset by dying).
         cancelled = false
 
-        val problem = ArmSpec.validate(action, gate, scope, signer, pollMs, timeoutMs)
+        val problem = ArmSpec.validate(action, gate, scope, pollMs, timeoutMs)
         if (problem != null) {
             appendLine("REFUSED: $problem")
             appendLine()
@@ -142,7 +145,6 @@ class FaultCollectorActivity : Activity() {
             action = action!!,
             gate = gate!!,
             scope = scope,
-            revokeSignerDigest = signer,
             pollMs = pollMs,
             timeoutMs = timeoutMs,
         )
@@ -206,19 +208,34 @@ class FaultCollectorActivity : Activity() {
                 Process.killProcess(Process.myPid())
             }
             ArmAction.REVOKE_CALLER -> {
+                // R2 (gpt55 P1-2 companion): the proof is the exact principal's
+                // BEFORE→AFTER transition, never broad post-conditions. Capture
+                // before firing so a typo'd/never-paired principal reports
+                // "NOTHING_ACTIVE", not a lying green.
+                val before = QwyDurableSnapshot.capture(
+                    QwyDurableSnapshot.durableDir(this@FaultCollectorActivity),
+                    spec.scope.applicationId, spec.scope.signerDigest,
+                )
                 // The REAL transition, through the runtime singleton — the same
                 // single-writer the contract path uses (pairing revoke + lease
                 // REVOKED + audit row, M-PA-09/M-LS-04).
                 ProviderRuntime.handler(applicationContext)
-                    .onCallerRevoked(spec.scope.applicationId!!, spec.revokeSignerDigest!!)
-                appendLine("[revoke_caller] onCallerRevoked fired. Durable readback:")
-                appendLine()
+                    .onCallerRevoked(spec.scope.applicationId!!, spec.scope.signerDigest!!)
                 val post = QwyDurableSnapshot.capture(
                     QwyDurableSnapshot.durableDir(this@FaultCollectorActivity),
-                    spec.scope.applicationId, spec.revokeSignerDigest,
+                    spec.scope.applicationId, spec.scope.signerDigest,
                 )
+                appendLine("[revoke_caller] onCallerRevoked fired. Durable readback:")
+                appendLine()
                 append(QwyDurableSnapshot.render(post))
-                val outcome = "stillActive=${post.pairingStillActive} revokedAudited=${post.revokeAudited}"
+                val verdict = QwyRevokeProof.verdict(
+                    beforeActive = before.pairingStillActive,
+                    afterActive = post.pairingStillActive,
+                    revokeAudited = post.revokeAudited,
+                )
+                appendLine()
+                appendLine(QwyRevokeProof.render(verdict))
+                val outcome = "verdict=$verdict stillActive=${post.pairingStillActive} revokedAudited=${post.revokeAudited}"
                 appendLine()
                 appendLine("OUTCOME: $outcome")
                 armLog.appendText(ArmRecordCodec.encode(ArmRecordCodec.ArmLine(

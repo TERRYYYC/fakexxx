@@ -140,22 +140,28 @@ class ProviderRevokeCollectorActivity : Activity() {
         }
         appendLine("[revoke] ProviderTrustStore.revoke($appId, ${signer.take(12)}…) " +
             "via the app's AppDatabase singleton — the same store the UI writes.")
-        val rows = runBlocking {
+        // R2 (gpt55 P1-2): the verdict binds to the store's boolean return
+        // (true iff the EXACT principal's active row flipped) and the
+        // exact-principal activeFor query — broad byApplicationId rows are
+        // context, never proof.
+        val (revoked, activeAfter, contextRows) = runBlocking {
             val db = AppDatabase.getInstance(applicationContext)
-            ProviderTrustStore(db.providerPairingDao())
-                .revoke(appId, signer, System.currentTimeMillis())
-            db.providerPairingDao().byApplicationId(appId)
+            val dao = db.providerPairingDao()
+            val flipped = ProviderTrustStore(dao).revoke(appId, signer, System.currentTimeMillis())
+            Triple(
+                flipped,
+                dao.activeFor(appId, signer) != null,
+                dao.byApplicationId(appId).size,
+            )
         }
-        appendLine("durable readback (provider_pairing_records for $appId):")
-        rows.forEach {
-            appendLine("  signer=${it.currentSignerDigest.take(12)}… revokedAt=${it.revokedAt ?: "STILL ACTIVE"}")
-        }
-        val anyActive = rows.any { it.revokedAt == null }
-        appendLine(if (anyActive) "!! SOME ROW STILL ACTIVE — see above" else "REVOKE PROVEN on durable rows.")
+        val verdict = RevokeReadback.verdict(revoked, activeAfter)
+        appendLine("store returned: $revoked; exact principal active after: $activeAfter; " +
+            "rows for app (context only): $contextRows")
+        appendLine(RevokeReadback.render(verdict))
         armLog().appendText(
             AutoArmRecordCodec.encode(AutoArmRecordCodec.ArmLine(
                 "OUTCOME", "revoke_provider", "at-rest", appId,
-                System.currentTimeMillis(), "anyActive=$anyActive",
+                System.currentTimeMillis(), "verdict=$verdict",
             )) + "\n",
         )
     }
@@ -166,12 +172,13 @@ class ProviderRevokeCollectorActivity : Activity() {
         val action = AutoArmAction.parse(intent?.getStringExtra(EXTRA_ACTION) ?: "")
         val gateToken = intent?.getStringExtra(EXTRA_GATE)?.trim() ?: ""
         val gate = AutoGate.parse(gateToken)
-        val appId = intent?.getStringExtra(EXTRA_APP_ID)?.trim()?.takeIf { it.isNotEmpty() }
+        val appIdRaw = intent?.getStringExtra(EXTRA_APP_ID)?.trim()?.takeIf { it.isNotEmpty() }
         val signer = intent?.getStringExtra(EXTRA_SIGNER)?.trim()?.takeIf { it.isNotEmpty() }
-        val pollMs = intent?.getLongExtra(EXTRA_POLL_MS, AutoArmSpec.DEFAULT_POLL_MS)
-            ?: AutoArmSpec.DEFAULT_POLL_MS
-        val timeoutMs = intent?.getLongExtra(EXTRA_TIMEOUT_MS, AutoArmSpec.DEFAULT_TIMEOUT_MS)
-            ?: AutoArmSpec.DEFAULT_TIMEOUT_MS
+        // R2 (gpt55 P1-1): adb --ei stores Integer and getLongExtra silently
+        // defaults — coerce every numeric extra (Int/Long/String accepted).
+        val pollMs = ExtraCoerce.longOf(intent?.extras?.get(EXTRA_POLL_MS)) ?: AutoArmSpec.DEFAULT_POLL_MS
+        val timeoutMs = ExtraCoerce.longOf(intent?.extras?.get(EXTRA_TIMEOUT_MS)) ?: AutoArmSpec.DEFAULT_TIMEOUT_MS
+        val appId = appIdRaw
 
         val problem = AutoArmSpec.validate(action, gate, gateToken, appId, signer, pollMs, timeoutMs)
         if (problem != null) {
@@ -237,19 +244,28 @@ class ProviderRevokeCollectorActivity : Activity() {
         when (spec.action) {
             AutoArmAction.REVOKE_PROVIDER -> {
                 appendLine("[revoke_provider] firing revoke NOW (in-flight moment).")
-                runBlocking {
+                // R2 (gpt55 P1-2): same principal-bound proof as the at-rest
+                // revoke — store boolean + exact-principal activeFor.
+                val (revoked, activeAfter, contextRows) = runBlocking {
                     val db = AppDatabase.getInstance(applicationContext)
-                    ProviderTrustStore(db.providerPairingDao())
+                    val dao = db.providerPairingDao()
+                    val flipped = ProviderTrustStore(dao)
                         .revoke(spec.providerApplicationId!!, spec.providerSignerDigest!!,
                             System.currentTimeMillis())
-                    val rows = db.providerPairingDao().byApplicationId(spec.providerApplicationId)
-                    val anyActive = rows.any { it.revokedAt == null }
-                    appendLine("durable readback: rows=${rows.size} anyActive=$anyActive")
-                    armLog().appendText(AutoArmRecordCodec.encode(AutoArmRecordCodec.ArmLine(
-                        "OUTCOME", spec.action.token, spec.gateToken, spec.providerApplicationId,
-                        System.currentTimeMillis(), "anyActive=$anyActive",
-                    )) + "\n")
+                    Triple(
+                        flipped,
+                        dao.activeFor(spec.providerApplicationId, spec.providerSignerDigest) != null,
+                        dao.byApplicationId(spec.providerApplicationId).size,
+                    )
                 }
+                val verdict = RevokeReadback.verdict(revoked, activeAfter)
+                appendLine("store returned: $revoked; exact principal active after: $activeAfter; " +
+                    "rows for app (context only): $contextRows")
+                appendLine(RevokeReadback.render(verdict))
+                armLog().appendText(AutoArmRecordCodec.encode(AutoArmRecordCodec.ArmLine(
+                    "OUTCOME", spec.action.token, spec.gateToken, spec.providerApplicationId,
+                    System.currentTimeMillis(), "verdict=$verdict",
+                )) + "\n")
                 appendLine()
                 appendLine("§5C assertion to observe next: the in-flight attempt must enter NORMAL")
                 appendLine("release/recovery (see state), NOT qwy's revoked-caller self-cleanup.")

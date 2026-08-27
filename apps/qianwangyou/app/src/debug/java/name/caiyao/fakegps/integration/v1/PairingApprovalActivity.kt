@@ -86,7 +86,9 @@ class PairingApprovalActivity : Activity() {
         val approveDigest = intent?.getStringExtra(EXTRA_SIGNER)
         revokeAppIdArg = intent?.getStringExtra(EXTRA_REVOKE_APP_ID)
         revokeSignerArg = intent?.getStringExtra(EXTRA_REVOKE_SIGNER)
-        runCleanupAfterRevoke = intent?.getBooleanExtra(EXTRA_REVOKE_RUN_CLEANUP, false) == true
+        // R2 (gpt55 P1-1): adb --es writes a String; getBooleanExtra silently
+        // defaults to false. Coerce (Boolean/Int/String accepted).
+        runCleanupAfterRevoke = ExtraCoerce.boolOf(intent?.extras?.get(EXTRA_REVOKE_RUN_CLEANUP)) ?: false
 
         // Touching the durable store must not run on the main thread.
         thread(name = "ec-pairing-approval") {
@@ -121,6 +123,12 @@ class PairingApprovalActivity : Activity() {
             // The REAL §6.5 revoke transition, through the runtime singleton:
             // pairing revoke + lease REVOKED + audit row (M-PA-09/M-LS-04).
             appendLine("REVOKING: $revokeId / ${revokeDigest.take(16)}…")
+            // R2: proof = the exact principal's BEFORE→AFTER transition. A
+            // typo'd or never-paired principal must report NOTHING_ACTIVE,
+            // never a false green.
+            val before = QwyDurableSnapshot.capture(
+                QwyDurableSnapshot.durableDir(applicationContext), revokeId, revokeDigest,
+            )
             ProviderRuntime.handler(applicationContext).onCallerRevoked(revokeId, revokeDigest)
             if (runCleanupAfterRevoke) {
                 appendLine("running §6.3.3 self-cleanup (runRevokedLeaseCleanup)…")
@@ -136,11 +144,11 @@ class PairingApprovalActivity : Activity() {
             appendLine("durable readback:")
             append(QwyDurableSnapshot.render(post))
             appendLine()
-            if (post.pairingStillActive == true || post.revokeAudited != true) {
-                appendLine("!! REVOKE NOT DURABLY PROVEN — see readback above")
-            } else {
-                appendLine("REVOKE PROVEN: pairing inactive on disk + caller_revoked audit row.")
-            }
+            appendLine(QwyRevokeProof.render(QwyRevokeProof.verdict(
+                beforeActive = before.pairingStillActive,
+                afterActive = post.pairingStillActive,
+                revokeAudited = post.revokeAudited,
+            )))
             appendLine()
         } else if (revokeId != null || revokeDigest != null) {
             appendLine("REFUSED: revoke needs BOTH --es $EXTRA_REVOKE_APP_ID and --es $EXTRA_REVOKE_SIGNER")

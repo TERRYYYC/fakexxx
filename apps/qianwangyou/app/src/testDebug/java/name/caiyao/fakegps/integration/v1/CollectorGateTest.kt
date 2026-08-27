@@ -21,6 +21,7 @@ class CollectorGateTest {
             currentLeaseId = state?.let { "lease-1" },
             leaseState = state,
             callerApplicationId = caller,
+            callerSignerDigest = "deadbeef",
         )
 
     @Test
@@ -58,25 +59,86 @@ class CollectorGateTest {
             CallerScope(null).matches(snapshot("ACTIVE", caller = "someone.else")))
     }
 
+    /**
+     * R2 (gpt55 P1-3): lease ownership is the FULL principal — a same-package
+     * rotated-signer lease is a DIFFERENT principal's transaction (§6.5). A
+     * revoke arm scoped (appId, signerA) must NOT open on signerB's lease.
+     */
+    @Test
+    fun callerScopeMustMatchBothHalvesOfThePrincipal() {
+        val fullScope = CallerScope("com.example.cellrebelauto", "signerA")
+        val rotatedSignerLease = snapshot("ACTIVE", caller = "com.example.cellrebelauto")
+            .copy(callerSignerDigest = "signerB")
+        assertFalse(
+            "a rotated-signer (same package) lease must not open a full-principal gate — " +
+                "that is exact-window for the WRONG in-flight transaction",
+            fullScope.matches(rotatedSignerLease),
+        )
+        assertTrue(fullScope.matches(snapshot("ACTIVE").copy(callerSignerDigest = "signerA")))
+        // appId-only scopes still match any signer (self_kill windows).
+        assertTrue(CallerScope("com.example.cellrebelauto", null).matches(rotatedSignerLease))
+    }
+
+    /**
+     * R2 (gpt55 P1-2 companion): the revoke verdict must be the principal's
+     * before→after transition — never broad post-conditions.
+     */
+    @Test
+    fun revokeProofKillsTheFalseGreens() {
+        // The real transition: active before → inactive after + audit row.
+        assertEquals(
+            QwyRevokeProof.Verdict.PROVEN,
+            QwyRevokeProof.verdict(beforeActive = true, afterActive = false, revokeAudited = true),
+        )
+        // Typo'd / never-paired / already-revoked principal: nothing WAS active.
+        assertEquals(
+            "absence-before must NOT prove — the audit row exists either way",
+            QwyRevokeProof.Verdict.NOT_PROVEN_NOTHING_ACTIVE,
+            QwyRevokeProof.verdict(beforeActive = false, afterActive = false, revokeAudited = true),
+        )
+        assertEquals(
+            QwyRevokeProof.Verdict.NOT_PROVEN_NOTHING_ACTIVE,
+            QwyRevokeProof.verdict(beforeActive = null, afterActive = null, revokeAudited = null),
+        )
+        // Still active after the fire — investigate, do not green.
+        assertEquals(
+            QwyRevokeProof.Verdict.NOT_PROVEN_STILL_ACTIVE,
+            QwyRevokeProof.verdict(beforeActive = true, afterActive = true, revokeAudited = true),
+        )
+        // Inactive but no audit row — investigate.
+        assertEquals(
+            QwyRevokeProof.Verdict.NOT_PROVEN_NO_AUDIT,
+            QwyRevokeProof.verdict(beforeActive = true, afterActive = false, revokeAudited = false),
+        )
+        // After-state unreadable.
+        assertEquals(
+            QwyRevokeProof.Verdict.UNKNOWN,
+            QwyRevokeProof.verdict(beforeActive = true, afterActive = null, revokeAudited = true),
+        )
+    }
+
     @Test
     fun armSpecValidationRefusesWhatCannotFire() {
         val gate = FaultGate.LeaseActive
-        val scope = CallerScope("com.example.cellrebelauto")
+        val scope = CallerScope("com.example.cellrebelauto", "sha256:aa")
+        val noSigner = CallerScope("com.example.cellrebelauto", null)
+        val noCaller = CallerScope(null, "sha256:aa")
 
         // A revoke without both halves of the principal is a different decision — refuse.
-        assertTrue(ArmSpec.validate(ArmAction.REVOKE_CALLER, gate, scope, null, 200, 60_000) != null)
-        val noCaller = CallerScope(null)
-        assertTrue(ArmSpec.validate(ArmAction.REVOKE_CALLER, gate, noCaller, "abc", 200, 60_000) != null)
+        assertTrue("signer-less scope must be refused for revoke_caller",
+            ArmSpec.validate(ArmAction.REVOKE_CALLER, gate, noSigner, 200, 60_000) != null)
+        assertTrue("caller-less scope must be refused for revoke_caller",
+            ArmSpec.validate(ArmAction.REVOKE_CALLER, gate, noCaller, 200, 60_000) != null)
 
         // Unknown action / unknown gate / absurd poll / out-of-range timeout.
-        assertTrue(ArmSpec.validate(null, gate, scope, null, 200, 60_000) != null)
-        assertTrue(ArmSpec.validate(ArmAction.SELF_KILL, null, scope, null, 200, 60_000) != null)
-        assertTrue(ArmSpec.validate(ArmAction.SELF_KILL, gate, scope, null, 10, 60_000) != null)
-        assertTrue(ArmSpec.validate(ArmAction.SELF_KILL, gate, scope, null, 200, 10) != null)
+        assertTrue(ArmSpec.validate(null, gate, scope, 200, 60_000) != null)
+        assertTrue(ArmSpec.validate(ArmAction.SELF_KILL, null, scope, 200, 60_000) != null)
+        assertTrue(ArmSpec.validate(ArmAction.SELF_KILL, gate, scope, 10, 60_000) != null)
+        assertTrue(ArmSpec.validate(ArmAction.SELF_KILL, gate, scope, 200, 10) != null)
 
-        // A clean self-kill arm validates.
-        assertNull(ArmSpec.validate(ArmAction.SELF_KILL, gate, scope, null, 200, 60_000))
-        assertNull(ArmSpec.validate(ArmAction.REVOKE_CALLER, gate, scope, "sha256:aa", 200, 60_000))
+        // Clean arms validate.
+        assertNull(ArmSpec.validate(ArmAction.SELF_KILL, gate, scope, 200, 60_000))
+        assertNull(ArmSpec.validate(ArmAction.REVOKE_CALLER, gate, scope, 200, 60_000))
     }
 
     @Test
