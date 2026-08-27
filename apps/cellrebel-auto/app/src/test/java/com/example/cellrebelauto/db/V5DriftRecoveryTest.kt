@@ -8,6 +8,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -183,4 +184,62 @@ class V5DriftRecoveryTest {
                 db.close()
             }
         }
+
+    /**
+     * Quarantine unit semantics (deliberately narrow deletion surface): only a
+     * `user_version = 5` file with a non-healthy identity hash is deleted. Absent files, v4 files
+     * (ladder territory — v2–v4 devices migrate, they are not blind-rebuilt) and healthy v5 files
+     * are never touched.
+     * # 隔离区三态：漂移 v5 删；v4 / 健康 v5 / 不存在一律不动
+     */
+    @Test
+    fun `quarantine deletes only drifted v5 and ignores v4 healthy and absent files`() {
+        val name = "quarantine-unit.db"
+        val file = context.getDatabasePath(name)
+        SQLiteDatabase.deleteDatabase(file)
+
+        // Absent file → no-op.
+        assertFalse(AppDatabase.quarantineDriftedV5Database(context, name))
+
+        // v4-version file with an old hash → no-op, file intact (ladder handles it).
+        SQLiteDatabase.openOrCreateDatabase(file, null).use {
+            it.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+            it.execSQL("INSERT INTO room_master_table VALUES (42, 'some-v4-era-hash')")
+            it.version = 4
+        }
+        assertFalse(AppDatabase.quarantineDriftedV5Database(context, name))
+        assertTrue("v4 file must survive quarantine untouched", file.exists())
+        SQLiteDatabase.deleteDatabase(file)
+
+        // v5 file with the healthy committed hash → no-op, file intact.
+        SQLiteDatabase.openOrCreateDatabase(file, null).use {
+            it.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+            it.execSQL(
+                "INSERT INTO room_master_table VALUES (42, '${AppDatabase.V5_HEALTHY_IDENTITY_HASH}')"
+            )
+            it.version = 5
+        }
+        assertFalse(AppDatabase.quarantineDriftedV5Database(context, name))
+        assertTrue("healthy v5 file must survive quarantine untouched", file.exists())
+        SQLiteDatabase.deleteDatabase(file)
+
+        // v5 file without room_master_table (half-broken) → probe fails → no-op, file intact:
+        // half-broken files must fail loudly in Room, not be silently destroyed.
+        SQLiteDatabase.openOrCreateDatabase(file, null).use {
+            it.execSQL("CREATE TABLE something_else (id INTEGER PRIMARY KEY)")
+            it.version = 5
+        }
+        assertFalse(AppDatabase.quarantineDriftedV5Database(context, name))
+        assertTrue("half-broken v5 file must not be deleted by the quarantine", file.exists())
+        SQLiteDatabase.deleteDatabase(file)
+
+        // v5 file with a drifted hash → quarantined: db + -wal/-shm siblings deleted.
+        SQLiteDatabase.openOrCreateDatabase(file, null).use {
+            it.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+            it.execSQL("INSERT INTO room_master_table VALUES (42, 'dea7bb1231570ea9fab363e19fc3c9b3')")
+            it.version = 5
+        }
+        assertTrue(AppDatabase.quarantineDriftedV5Database(context, name))
+        assertFalse("drifted v5 file must be deleted by quarantine", file.exists())
+    }
 }

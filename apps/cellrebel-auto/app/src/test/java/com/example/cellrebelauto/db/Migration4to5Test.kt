@@ -140,8 +140,8 @@ class Migration4to5Test {
 
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            // 本测试聚焦 4→5 的数据语义；当前 DB 版本 v6，故补 5→6（R9 aplusState/lease + unverified 表）。
-            .addMigrations(MIGRATION_4_5)
+            // 本测试聚焦 4→5 的数据语义；当前 DB 版本 v6，故补 no-op 的 MIGRATION_5_6（F-19）。
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
             .allowMainThreadQueries()
             .build()
 
@@ -149,7 +149,8 @@ class Migration4to5Test {
     fun `v4 to v5 migration preserves legacy data and snapshots legacy progress as unverified`() = runTest {
         createV4Database()
 
-        // Opening at v5 runs MIGRATION_4_5 + full schema validation (throws on mismatch).
+        // Opening at the current version runs MIGRATION_4_5 (+ no-op 5_6) + full schema
+        // validation (throws on mismatch).
         val db = openRoomDb()
 
         // (1) Historical plan/task/attempt survive untouched.
@@ -196,9 +197,10 @@ class Migration4to5Test {
     fun `v4 database without explicit migration is not silently destroyed`() = runTest {
         createV4Database()
 
-        // Without MIGRATION_4_5 registered, Room at v5 must NOT open a v4 file by destructive
-        // fallback — it must throw (INV-24). We assert the absence of a destructive path: opening
-        // with NO migration throws rather than wiping operator data.
+        // Without migrations registered, Room at the current version must NOT open a v4 file by
+        // destructive fallback — it must throw (INV-24 baseline; the F-19 exemption changes the
+        // PRODUCTION config, it does not change Room's default no-fallback contract, and this
+        // guard keeps proving that the default stays non-destructive).
         var threw = false
         val noMigrationDb = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
             // Intentionally NO addMigrations and NO fallbackToDestructiveMigration.
@@ -211,12 +213,41 @@ class Migration4to5Test {
         } finally {
             noMigrationDb.close()
         }
-        assertTrue("opening a v4 file at v5 without migration must fail, not destroy", threw)
+        assertTrue("opening a v4 file at v6 without migration must fail, not destroy", threw)
 
-        // The v4 file itself is intact (we did not register destructive fallback).
-        // Re-opening WITH the migration still works and preserves data.
+        // The v4 file itself is intact (no destructive fallback was registered).
+        // Re-opening WITH the migrations still works and preserves data.
         val db = openRoomDb()
         assertNotNull(db.locationTaskDao().getTaskById(1L))
         db.close()
+    }
+
+    /**
+     * F-19 regression guard for the dispatch requirement「真有 v2–v4 设备时仍走迁移，不是无脑重建」:
+     * the PRODUCTION configuration (quarantine + full ladder + fallbackToDestructiveMigration)
+     * must migrate a genuine v4 file 4→5→6 with ALL data preserved. The destructive fallback only
+     * fires when NO migration path exists — a complete ladder means it stays dormant, and the
+     * v5-drift quarantine must ignore non-v5 files entirely.
+     * # 生产配置（含 destructive fallback + 隔离区）打开 v4 库：走阶梯保数据，fallback 不误触发
+     */
+    @Test
+    fun `production config migrates v4 ladder end to end without data loss`() = runTest {
+        createV4Database()
+
+        val db = AppDatabase.buildProductionDatabase(context, dbName)
+        try {
+            // Legacy rows survive the full 4→5→6 ladder under the production builder.
+            val task = db.locationTaskDao().getTaskById(1L)
+            assertNotNull("v4 data must survive the production open path", task)
+            assertEquals(2, task!!.completedSuccesses)
+            val snapshot = db.legacyCompletionDao().forTask(1L)
+            assertNotNull("legacy snapshot must exist after ladder migration", snapshot)
+            assertEquals(1, db.testAttemptDao().getAttemptsForTask(1L).size)
+
+            // And the file really is at v6 now.
+            assertEquals(6, db.openHelper.readableDatabase.version)
+        } finally {
+            db.close()
+        }
     }
 }

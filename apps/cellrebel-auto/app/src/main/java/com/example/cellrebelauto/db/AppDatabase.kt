@@ -1,6 +1,8 @@
 package com.example.cellrebelauto.db
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -27,17 +29,35 @@ import com.example.cellrebelauto.recovery.RecoveryCheckpointRoomDao
 import com.example.cellrebelauto.recovery.ReleaseReceiptDao
 
 /**
- * Room database singleton, version 5 (Issue #5: trusted ledger + A+ execution tables).
+ * Room database singleton, version 6 (F-19; table-for-table identical to v5's committed end-state).
  *
- * v5 introduces the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables
+ * v5 introduced the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables
  * (MIGRATION_4_5). `cellrebel_executions` is born in v5 carrying its FULL §7.1 / §8.6 completion-
  * evidence field set — digest + 3 elapsed clocks + baseline/marker/RUNNING-duration/both scores/
  * per-round timestamps — because these are the durable evidence a trusted-quota mint binds to, so
- * they belong in the v5 CREATE TABLE, NOT a later ALTER (R5-F5 / INV-24: this task's schema end-state
- * is exactly version 5). The schema JSON is exported for version control; `fallbackToDestructiveMigration`
- * is intentionally never used — see MIGRATION_4_5.
+ * they belong in the v5 CREATE TABLE, NOT a later ALTER (R5-F5 / INV-24: Issue #5's schema
+ * end-state was frozen at version 5).
  *
- * # Room 数据库单例，版本 5（可信账本 + A+ 执行表）；cellrebel_executions 建表即带 §7.1 全证据列；exportSchema=true；禁用 destructive fallback
+ * v6 (F-19, 2026-08-27) changes NO table: it exists because a ZY22 device carries a database from
+ * an uncommitted ~8/01 build — `user_version = 5` with identity hash
+ * `dea7bb1231570ea9fab363e19fc3c9b3` (an abandoned schema branch: five old tables plus eight
+ * orphaned GPS columns), while committed v5 expects `0d083aef0412f6d2ad3bbce31bf37f98`. Both sides
+ * claim v5, Room only compares identity hashes at equal versions and cannot migrate inside one
+ * version, so the app could never open again (frozen crash: g2-auto-crash-triage-20260827).
+ * The version bump re-opens a migration window; recovery itself is the v5-drift quarantine +
+ * MIGRATION_5_6 no-op + destructive fallback, see [buildProductionDatabase].
+ *
+ * INV-24 chronicle — DO NOT silently re-freeze or delete: INV-24 (spec §invariants, AC-14) bans
+ * destructive fallback so operator data survives upgrades. The operator EXPLICITLY exempted this
+ * invariant on 2026-08-27T09:46Z, scoped to Auto only (`com.example.cellrebelauto`, dev-phase app,
+ * versionCode=1, stale 8/01 dev rows, sealed in triage raw/). The exemption does NOT extend to the
+ * qianwangyou production app (#46 / F-10 — real operator data, separate ruling). The exemption is
+ * registered in the spec's INV-24 / AC-14 ledger rows and in docs/features/2026-08-27-f19-*.md.
+ *
+ * # Room 数据库单例，版本 6（F-19：表结构与 v5 提交终态逐表相同）。v6 只为重开迁移窗口——
+ * # 设备存在未提交 8/01 分支的漂移 v5 库，同版本号下 Room 无迁移路径。恢复机构 = v5 漂移隔离区 +
+ * # no-op MIGRATION_5_6 + destructive fallback。INV-24 由 operator 2026-08-27T09:46Z 裁定豁免，
+ * # 范围仅限 Auto 开发期 app 本次事故，不外溢千网游生产包（#46 / F-10）。
  */
 @Database(
     entities = [
@@ -58,7 +78,7 @@ import com.example.cellrebelauto.recovery.ReleaseReceiptDao
         RecoveryCheckpointRow::class,
         ReleaseReceiptRow::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -154,16 +174,88 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * The one healthy committed v5 identity hash — `5.json`'s `identityHash`, frozen forever.
+         * A `user_version = 5` file bearing ANY other hash is an uncommitted-build drift variant
+         * (the ZY22 incident: `dea7bb1231570ea9fab363e19fc3c9b3`) that Room can neither open nor
+         * migrate. This constant never needs maintenance: v6+ files skip the quarantine entirely.
+         * # 唯一健康的 v5 identity hash（= 5.json，永久冻结）；v6 起的库根本不进隔离区
+         */
+        internal const val V5_HEALTHY_IDENTITY_HASH = "0d083aef0412f6d2ad3bbce31bf37f98"
+
+        /**
+         * F-19 v5-drift quarantine: if the on-disk database claims `user_version = 5` but carries
+         * a non-healthy identity hash, it is an uncommitted-build drift variant with no possible
+         * migration path (Room cannot migrate within one version). Under the operator's
+         * 2026-08-27T09:46Z plan-B ruling (INV-24 exemption, Auto dev app only) the stale file is
+         * deleted so Room rebuilds it fresh at the current version.
+         *
+         * Deliberately narrow: absent file, non-v5 version, healthy hash, or ANY probe failure
+         * (missing `room_master_table`, unreadable file) → returns false and touches nothing —
+         * v2–v4 devices keep their migration ladder, healthy v5 keeps its data, half-broken files
+         * fail loudly in Room instead of being silently destroyed.
+         *
+         * @return true iff the drifted file (and its -wal/-shm siblings) was deleted.
+         * # v5 漂移隔离区：只认「user_version=5 且 hash≠健康值」；探测失败一律不删，删除面收窄
+         */
+        internal fun quarantineDriftedV5Database(context: Context, dbName: String): Boolean {
+            val dbFile = context.getDatabasePath(dbName)
+            if (!dbFile.exists()) return false
+            val probe = try {
+                SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READWRITE)
+            } catch (e: Exception) {
+                return false // unreadable → leave to Room's own loud failure, never delete blind
+            }
+            val driftedHash: String? = try {
+                if (probe.version != 5) {
+                    null
+                } else {
+                    probe.rawQuery(
+                        "SELECT identity_hash FROM room_master_table LIMIT 1", null
+                    ).use { c -> if (c.moveToFirst()) c.getString(0) else null }
+                        ?.takeIf { it != V5_HEALTHY_IDENTITY_HASH }
+                }
+            } catch (e: Exception) {
+                null // no room_master_table / probe error → not our case, leave to Room
+            } finally {
+                probe.close()
+            }
+            if (driftedHash == null) return false
+            Log.w(
+                "AppDatabase",
+                "F-19 quarantine: deleting drifted v5 database (identity_hash=$driftedHash, " +
+                    "expected $V5_HEALTHY_IDENTITY_HASH); rebuilding fresh at current version " +
+                    "per operator 2026-08-27 plan-B ruling (INV-24 exemption, Auto only)"
+            )
+            return SQLiteDatabase.deleteDatabase(dbFile)
+        }
+
+        /**
+         * Production open path (extracted from [getInstance] so tests can exercise the exact
+         * production configuration against fixture files without the singleton).
+         *
+         * # INV-24 chronicle (2026-08-27) — REWRITTEN, not deleted. Original intent (Issue #5):
+         * # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）。
+         * # That ban still governs the qianwangyou production app (#46 / F-10). For Auto it was
+         * # EXPLICITLY exempted by the operator on 2026-08-27T09:46Z, scoped to this dev-phase app
+         * # (versionCode=1) whose only at-risk rows are stale 8/01 dev data (sealed in
+         * # g2-auto-crash-triage-20260827/raw/). Mechanism, in firing order:
+         * #   1. v5-drift quarantine (above) — the ZY22 incident path: drifted v5 → delete → fresh v6;
+         * #   2. explicit migration ladder 2→3→4→5→6 — v2–v4 devices and healthy v5 KEEP their data
+         * #      (MIGRATION_5_6 is a documented no-op; fallback does NOT fire when a path exists);
+         * #   3. fallbackToDestructiveMigration — belt for v1/unknown versions with no path.
+         */
+        internal fun buildProductionDatabase(context: Context, dbName: String): AppDatabase {
+            quarantineDriftedV5Database(context, dbName)
+            return Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .fallbackToDestructiveMigration(dropAllTables = true)
+                .build()
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabase::class.java,
-                    "cellrebel_auto.db"
-                )
-                    // # 非破坏性迁移：保留历史数据（INV-24：禁用 destructive fallback）
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
-                    .build()
+                INSTANCE ?: buildProductionDatabase(context.applicationContext, "cellrebel_auto.db")
                     .also { INSTANCE = it }
             }
         }

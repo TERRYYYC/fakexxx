@@ -146,7 +146,12 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
         )
 
         // ---- Owner-state current operation + unverified carrier (folded INTO v5, Sol round-9 P1 schema
-        //      boundary): the spec freezes version = 5; these §7.1 shapes belong in v5, never a later bump.
+        //      boundary): Issue #5's spec froze version = 5; these §7.1 shapes belong in v5, not a
+        //      LATER SCHEMA. [F-19 chronicle 2026-08-27: the freeze governed Issue #5's end-state and
+        //      still does — v6 adds NO table/column (see MIGRATION_5_6 below). The version NUMBER was
+        //      re-opened by the operator's 2026-08-27T09:46Z plan-B ruling because an uncommitted
+        //      ~8/01 build left a device on an unmigratable drifted v5; INV-24 exemption scoped to
+        //      Auto only, chronicle in AppDatabase.]
         //      `aplusState`/`aplusLeaseId` = the Attempt's 当前 operation (§7.1 P1-3); the unverified table
         //      is the independent §7.1 UnverifiedAttemptRecord carrier (P2). Non-destructive: nullable
         //      ALTER + a fresh empty table (no synthetic trusted/unverified rows minted by a migration). ----
@@ -265,5 +270,35 @@ val MIGRATION_4_5 = object : Migration(4, 5) {
             )
             """.trimIndent()
         )
+    }
+}
+
+/**
+ * v5 → v6 (F-19, 2026-08-27): DELIBERATE no-op — v6 is table-for-table identical to v5's committed
+ * end-state. The bump exists only to re-open a migration window after the ZY22 drift incident
+ * (a `user_version = 5` database from an uncommitted ~8/01 build, identity hash `dea7bb12…` ≠
+ * committed `0d083aef…`; Room cannot migrate inside one version).
+ *
+ * Why empty is CORRECT here, per entry path:
+ *  - v2–v4 ladder (2→3→4→5→6): MIGRATION_4_5 is maintained in lockstep with the entity DDL
+ *    (see its R3-1 note), so the schema arriving at this step already matches v6 — data is
+ *    preserved and Room's post-migration validation passes. NOT blind-rebuilt.
+ *  - Healthy committed v5 (`0d083aef…`, installs from afecace..HEAD): same shape as v6 — data
+ *    preserved, validation passes.
+ *  - Drifted v5 (the incident) NEVER reaches this migration: the AppDatabase v5-drift quarantine
+ *    deletes it pre-open (operator 2026-08-27T09:46Z plan-B ruling; INV-24 exemption, Auto only).
+ *    Without the quarantine an empty 5→6 would instead die in post-migration validation
+ *    ("Migration didn't properly handle") — fallbackToDestructiveMigration does NOT rescue a
+ *    failed migration, it only fires when NO path exists (v1/unknown versions).
+ *
+ * Adding real schema changes later? Put them in a NEW version (6→7) with a real migration —
+ * do not grow this one.
+ *
+ * # v5→v6（F-19）：故意空迁移——v6 与 v5 提交终态逐表相同，bump 只为重开迁移窗口。
+ * # 阶梯与健康 v5 保数据走这里；漂移 v5 由隔离区在开库前删除，永远到不了这一步。
+ */
+val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Intentionally empty — see the chronicle above.
     }
 }
