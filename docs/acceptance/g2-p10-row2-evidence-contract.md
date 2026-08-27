@@ -134,7 +134,9 @@ sealControlPaths[]
    command substitution 或 `sh -c`/`bash -c`。
 3. 每个 checklist 的所有外部命令都必须在 `commands[]` 中；runner 静态提取出的外部命令集合
    必须与该数组逐项、逐参数相等。
-4. `deviceAccess=write` 的第一项必须是 SET-01；此前全部设备命令必须是本契约列出的只读项。
+4. ADM-01..02 PASS 前，`deviceAccess` 只能为 `none`。此后第一项 `deviceAccess=write` 必须是
+   SET-01；在它之前，每条设备命令都必须是 packet 中逐项声明的 `deviceAccess=read` 项，且不得
+   出现 packet 之外的 device command。
 5. packet 或 runner 变化不改变 Terra 对本契约的 criteria sign，但使 Fable feasibility verdict
    失效。contract 变化使 Terra 与 Fable 两份 verdict 同时失效。
 6. `cwdRef` 只解析为 runner 进程内已有的逻辑根；`argv[]` 与所有 carrier bytes 不得出现 host
@@ -189,7 +191,11 @@ sealControlPaths[]
 
 ## 4. 上机准入与 pre-fire checklist
 
-以下 host-only admission 全部 PASS 前，不得运行 `adb` 或任何其他 device command：
+ADM-01..02 构成只使用 host carrier 的 device-access admission；两项全部 PASS 前禁止任何 device command，
+即不得运行 `deviceAccess=read|write` command。两项 PASS 后，PRE/P8 只允许执行 execution packet 已声明的
+`deviceAccess=read` 取证命令；在 `PREFIRE-CUTOFF` 前仍禁止任何 `deviceAccess=write`。本契约中的
+“device command”只按 packet 的 `deviceAccess` 分类，不把不连接设备的 `adb version` 等
+`deviceAccess=none` host command 误算为设备访问。
 
 | ID | required carrier | 机械 PASS 谓词 | FAIL 动作 |
 |---|---|---|---|
@@ -198,9 +204,14 @@ sealControlPaths[]
 
 ### 4.1 任何 device write 之前
 
-下表全部 PASS 才能越过 `PREFIRE-CUTOFF`。这里的 device write 包括 `am start`、`force-stop`、
-`logcat -c/-G`、安装、卸载、清数据、appops 修改、私库写入与注入；只读 `getprop`、`pm path`、
-`dumpsys`、`appops query-op`、`adb devices`、设备文件字节导出不算 write。
+`PREFIRE-CUTOFF` 是 PRE-12 成功结束与 SET-01 开始之间的唯一边界。执行顺序固定为：
+PRE-00..11 → P8-01..07 → PRE-12；三组全部 PASS 后才可启动第一条 `deviceAccess=write`。
+P8-08 在 SET-01 启动时回证这条边界，不是允许写入的前置 gate。这里的 device write 包括
+`am start`、`force-stop`、`logcat -c/-G`、安装、卸载、清数据、appops 修改、私库写入与注入；
+只读 `getprop`、`pm path`、`dumpsys`、`appops query-op`、`adb devices`、设备文件字节导出不算
+write，但必须逐项落在下列固定 read 集合并标记 `deviceAccess=read`：PRE-05、PRE-06、PRE-08、
+PRE-09、PRE-10、PRE-11 的 device-epoch read、P8-01、P8-05、P8-06。其他 PRE/P8 command
+必须为 `deviceAccess=none`；固定集合之外的任何 pre-fire device command 均 FAIL。
 
 | ID | required carrier | 机械 PASS 谓词 | FAIL 动作 |
 |---|---|---|---|
@@ -216,7 +227,7 @@ sealControlPaths[]
 | PRE-09 | 两包 device APK 字节、SHA、package/version/signer 六文件 | device bytes SHA 与对应 host artifact SHA 逐字相等；applicationId、version 与 signer 分别等于 packet；不得只比 version | WRONG_BUILD / STOP |
 | PRE-10 | production package `lastUpdateTime` before 六文件 | exit=0、非空；只供 after 负边界等值比较 | STOP |
 | PRE-11 | host-before、device epoch、host-after 与 clock-bridge parser 六文件 | 三次 read exit=0；host round-trip ≤2s；parser 固定输出 midpoint offset 与 uncertainty；uncertainty ≤1s | STOP |
-| PRE-12 | `meta/prefire-command-set.txt` | 从开始到 `PREFIRE-CUTOFF` 的全部 device 命令只属于本表只读集合 | STOP |
+| PRE-12 | `meta/prefire-read-command-audit.json` + 六文件 | 本 command 在 P8-07 后运行且 exit=0；截至其 start-utc 已完成并具有非空 command/start/end/exit carrier 的 device command，按 seq 排序后与 packet 中 SET-01 之前全部 `deviceAccess=read` command 的 seq／checklistIds／argv[]／六个 carrier path 逐项逐参数相等，且每项 end-utc < PRE-12 start-utc；missing／extra／duplicate／write counts 均=0；packet 下一条 device command 是 exact SET-01 且 `deviceAccess=write` | STOP；不得启动 SET-01 |
 
 允许的 device-write checklist 集合固定为：SET-01 的 exact `prepare_kyiv`；BFR-01、WIN-01、
 TERM-01、AFT-01 的 exact-principal Q-DUMP launch；BFR-02、AFT-02 的 Auto force-stop 与
@@ -227,6 +238,10 @@ component launch/force-stop、LSPosed path 的 write/open-for-write、Rows 3–7
 
 ### 4.2 Pre-fire P8
 
+P8-01..07 只产生并裁定 pre-write gate 输入；PRE-12 在 P8-07 后作最后一次 read-command
+集合审计。P8-08 只在 PRE-12 PASS 后由 runner wrapper 写入 SET-01 的真实首次 write carrier；
+它不能反向为任何更早的 write 授权。
+
 | ID | required carrier | 机械 PASS 谓词 | FAIL 动作 |
 |---|---|---|---|
 | P8-01 | `raw/p8/modules_config.db{,-wal,-shm}` 的三个 binary stdout + 各自六文件 | 三次导出 exit=0、stderr=0 bytes；DB/SHM >0 bytes；WAL 可为 0 bytes；三个路径全部存在 | STOP |
@@ -235,8 +250,8 @@ component launch/force-stop、LSPosed path 的 write/open-for-write、Rows 3–7
 | P8-04 | scope query 六文件 | bench scope 恰好包含 Auto client；production scope 零包含 Auto client | STOP |
 | P8-05 | `appops query-op android:mock_location allow` 六文件 | exit=0；allow 集合中包含 bench、排除 production；保存完整未过滤 stdout | STOP |
 | P8-06 | `raw/p8/dumpsys-location.txt` + count 六文件 | dumpsys exit=0 且 >0 bytes；独立 parser exit=0 且输出整数 `0` | STOP |
-| P8-07 | `meta/p8-gate.txt` | 内容逐字为 `P8-PREFIRE-PASS`；其 end-utc 晚于 P8-01..06，早于第一条 device write 的 start-utc | STOP |
-| P8-08 | `meta/first-device-write.txt` | 记录第一条 write 的 seq/command/start-utc；P8-01..07 全部 end-utc 严格早于它 | STOP |
+| P8-07 | `meta/p8-gate.txt` | 内容逐字为 `P8-PREFIRE-PASS`；其 start/end-utc 晚于 P8-01..06 的全部 end-utc | STOP |
+| P8-08 | `meta/first-device-write.json` + SET-01 command/start-utc carrier | 实际最早的 `deviceAccess=write` command 是 SET-01；其 seq／checklistIds／argv[] 与 PRE-12 的 next-device-command 逐项逐参数相等；PRE-00..12 与 P8-01..07 的全部 end-utc 严格早于 SET-01 start-utc；earlier-write count=0 | FAIL 后立即停止；若 SET-01 已开始，不得再发 device command，不得注入 |
 
 raw DB/WAL/SHM 在 manifest 冻结前只允许复制和 hash，不允许被 SQLite、文件预览器或 recorder
 直接打开。query 副本承担所有解析。
@@ -331,7 +346,8 @@ review 输出不得写回 evidenceDir：
 
 1. manifest 逐项校验与 payload／seal-control exact file-set equality；
 2. 每个 command unit 六文件完整性、序号唯一性、exit 可解析性；
-3. P8 end-utc < first device write start-utc；setup < before trio < injection；terminal ≤10s；
+3. PRE-12 end-utc 与全部 P8 end-utc < SET-01 first-write start-utc；setup < before trio <
+   injection；terminal ≤10s；
 4. full lease UUID 的 regex、唯一性与 apply/window/release/recovery 等值；
 5. before/window/terminal/after state 与 mock `0→2→0→0`；
 6. 完整 report 正／负 token；
@@ -404,6 +420,7 @@ window state 与 release 的 exact-byte 三方绑定。这个 blocker 必须在�
 |---|---|
 | executor／recorder／validity owner 未互斥，或 recorder 自签 validity | §2、ADM-02 |
 | 每条 probe/gate 缺 command/stdout/stderr/exit；复合命令只留末尾 exit；输出被 suppress | §3.2、PRE-03/04、FRZ-01/03、recorder #2 |
+| pre-fire blanket `no adb` 使 required read carrier 无法生成，或 read/write cutoff 不可复算 | §3.1-4、§4、PRE-12、P8-07/08、recorder #3 |
 | P8 在注入后才读取，无法证明 pre-fire 边界 | PRE-12、P8-01..08、recorder #3 |
 | 缺 bench-only appops raw | P8-05 |
 | 缺 contemporaneous candidate／device-count raw；只比 version | PRE-05..09 |
