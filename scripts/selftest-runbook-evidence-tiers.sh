@@ -25,6 +25,7 @@
 #   M11  Remove §10.1 reference from definition block → spec-authority guard
 #   M12  Invert definition block negation ("不是"→"是") → negation-assert guard (P5-1)
 #   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (P5-2)
+#   M14  Add contradictory positive concat assertion → exclusivity guard (R4 P2)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -232,6 +233,19 @@ sb=$(setup_sandbox "m13-reversed-word-order")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与截图的 SHA-256/' "$rb"
 assert_fail "M13 reversed-word-order raw-evidence term in summary is caught (P5-2)" "$sb"
+
+# ── M14: Add contradictory positive concatenation assertion (R4 P2) ────────
+#
+# Guard 17 proves a negation ("不是.*拼接") exists; Guard 18 proves that negation
+# is EXCLUSIVE — "拼接" appears exactly once on the canonical line.  Appending
+# "同时是拼接摘要" adds a second occurrence, creating a semantic contradiction
+# while Guard 17 stays green.  Isolated to Guard 18 (Guard 18 passes vacuously
+# when Guard 17 fails, preserving M12's isolation).
+
+sb=$(setup_sandbox "m14-contradictory-positive")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/\*\*不是\*\*原始证据文件（logcat \/ 截图 PNG）的拼接摘要。/\*\*不是\*\*原始证据文件（logcat \/ 截图 PNG）的拼接摘要，同时是拼接摘要。/' "$rb"
+assert_fail "M14 contradictory positive concat assertion is caught (R4 P2)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
