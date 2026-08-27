@@ -5,7 +5,7 @@ related_issues: [5, 7]
 topics: [room, schema-drift, migration, inv-24, destructive-rebuild, device, auto]
 doc_kind: bug-report
 created: 2026-08-27
-status: fix-in-review (fix/auto-room-v5-drift-destructive-rebuild)
+status: merged (PR #51, merge 8145baf) — 设备端 apply 待调度线排程
 ---
 
 # F-19: Auto 启动闪退 — Room v5 schema 漂移无迁移路径（operator 裁 B：v6 + destructive rebuild）
