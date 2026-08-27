@@ -206,11 +206,11 @@ class FullLoopProbeActivity : Activity() {
                 }
                 when (val v = rel.getOrNull()) {
                     is ValidatedContractResponse.Success ->
-                        appendLine("RERELEASE: lease ${stuck.take(8)}… → VALIDATED complete=${v.payload.releaseComplete} residuals=${v.payload.residualReasonWires}")
+                        appendLine("RERELEASE: lease $stuck → VALIDATED complete=${v.payload.releaseComplete} residuals=${v.payload.residualReasonWires}")
                     is ValidatedContractResponse.Failure ->
-                        appendLine("RERELEASE FAILED: ${v.typedOutcome}")
+                        appendLine("RERELEASE FAILED: lease $stuck → ${v.typedOutcome}")
                     null ->
-                        appendLine("RERELEASE THREW: ${rel.exceptionOrNull()?.message}")
+                        appendLine("RERELEASE THREW: lease $stuck → ${rel.exceptionOrNull()?.message}")
                 }
                 runCatching { unbindService(conn) }
                 return@buildString
@@ -264,7 +264,7 @@ class FullLoopProbeActivity : Activity() {
                 )
             ) ?: return@buildString
             leaseId = receipt.leaseId
-            appendLine("[3] apply → lease=${receipt.leaseId.take(8)}… rev=${receipt.environmentRevision} verif=${receipt.verificationLevelWire}")
+            appendLine("[3] apply → lease=${receipt.leaseId} rev=${receipt.environmentRevision} verif=${receipt.verificationLevelWire}")
             appendLine("    intentHash=${receipt.acceptedIntentHash.take(16)}…")
 
             // ---- 4. observe — independent confirmation (§6.7.5, validated) ------
@@ -303,7 +303,7 @@ class FullLoopProbeActivity : Activity() {
             // collector's arm commands (self_kill / revoke_caller gate on
             // lease_active). Hold with the lease committed ACTIVE for hold_ms.
             if (fault == "hold_lease") {
-                appendLine("FAULT hold_lease: holding lease ${leaseId?.take(8)}… ACTIVE for ${holdMs}ms — injection window open.")
+                appendLine("FAULT hold_lease: holding lease $leaseId ACTIVE for ${holdMs}ms — injection window open.")
                 if (holdMs <= 0) {
                     appendLine("REFUSED: hold_lease needs --ei hold_ms <N> > 0")
                     return@buildString
@@ -334,7 +334,7 @@ class FullLoopProbeActivity : Activity() {
                         receipt.leaseId,
                     )
                 ) ?: return@buildString
-                appendLine("[5a] release → complete=${first.releaseComplete} " +
+                appendLine("[5a] release → lease=${receipt.leaseId} complete=${first.releaseComplete} " +
                     "residuals=${first.residualReasonWires} — RECEIPT NOW DISCARDED (simulated loss)")
                 if (!first.releaseComplete) {
                     appendLine("SAFETY: release incomplete — aborting receipt-loss replay; lease NOT cleared.")
@@ -350,7 +350,7 @@ class FullLoopProbeActivity : Activity() {
                 val same = replay.releaseComplete == first.releaseComplete &&
                     replay.residualReasonWires == first.residualReasonWires &&
                     replay.environmentRevision == first.environmentRevision
-                appendLine("[5b] replay → complete=${replay.releaseComplete} " +
+                appendLine("[5b] replay → lease=${receipt.leaseId} complete=${replay.releaseComplete} " +
                     "residuals=${replay.residualReasonWires} rev=${replay.environmentRevision}")
                 appendLine(if (same)
                     "RECEIPT-LOSS-REPLAY: IDEMPOTENT — same receipt for the same keys, no second cleanup observable"
@@ -370,11 +370,11 @@ class FullLoopProbeActivity : Activity() {
             if (rel == null) {
                 // releaseComplete=false lands here via PROVIDER_RELEASE_INCOMPLETE.
                 // leaseId is NOT cleared — finally cleanup guard stays armed.
-                appendLine("SAFETY: lease NOT cleared — finally cleanup will attempt re-release")
+                appendLine("SAFETY: lease ${receipt.leaseId} NOT cleared — finally cleanup will attempt re-release")
                 return@buildString
             }
             leaseId = null // validated: releaseComplete=true, cleanup guard can retire
-            appendLine("[5] release → complete=${rel.releaseComplete} residuals=${rel.residualReasonWires} rev=${rel.environmentRevision}")
+            appendLine("[5] release → lease=${receipt.leaseId} complete=${rel.releaseComplete} residuals=${rel.residualReasonWires} rev=${rel.environmentRevision}")
 
             // ---- 6. completeAndAdvance — validated ------------------------------
             val proof = CompletionProofV1(
@@ -509,11 +509,11 @@ class FullLoopProbeActivity : Activity() {
                 appendLine()
                 when (val validated = cleanupResult.getOrNull()) {
                     is ValidatedContractResponse.Success ->
-                        appendLine("CLEANUP: released stuck lease ${stuck.take(8)}… → VALIDATED releaseComplete=true")
+                        appendLine("CLEANUP: released stuck lease $stuck → VALIDATED releaseComplete=true")
                     is ValidatedContractResponse.Failure ->
-                        appendLine("CLEANUP UNSAFE: lease ${stuck.take(8)}… release validation failed → ${validated.typedOutcome} — DEVICE MAY STILL BE IN MOCK STATE")
+                        appendLine("CLEANUP UNSAFE: lease $stuck release validation failed → ${validated.typedOutcome} — DEVICE MAY STILL BE IN MOCK STATE")
                     null ->
-                        appendLine("CLEANUP UNSAFE: lease ${stuck.take(8)}… release threw ${cleanupResult.exceptionOrNull()?.message} — DEVICE MAY STILL BE IN MOCK STATE")
+                        appendLine("CLEANUP UNSAFE: lease $stuck release threw ${cleanupResult.exceptionOrNull()?.message} — DEVICE MAY STILL BE IN MOCK STATE")
                 }
             }
             runCatching { unbindService(conn) }
