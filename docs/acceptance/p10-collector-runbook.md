@@ -3,7 +3,7 @@ feature_ids: [7]
 topics: [acceptance, g2, p10, fault-injection, revoke, collector, runbook]
 doc_kind: evidence
 created: 2026-08-27
-status: draft-interface
+status: matrix-frozen
 ---
 
 # P10 debug-only fault/revoke collector — 命令面 runbook
@@ -128,6 +128,85 @@ trusted 总数 baseline，N = baseline + 期望新增提交数。禁止拍脑袋
 - qwy `self_kill` 后下一次进程启动（服务 bind 或任何 boot 路径）触发 §8.4
   recovery——**不要用 cmd=dump 之外的方式先读回**，dump 不 boot 单例。
 - 一次只挂一个 arm；换注入前先 `disarm` 或确认 FIRED/TIMEOUT 已落 arm.log。
+
+## P10 零设备闭合裁决
+
+**可以在不向设备写入的前提下闭合 §3 P10。** P10 位于
+`READY_TO_SCHEDULE` 准入层，要求的是每个故障注入在调度前已经具备可达、
+逐项冻结的退出与设备归真步骤；它不是 §5B／§5C 的真机行为 verdict。
+
+本裁决绑定 collector PR #52：code head
+`24140d5c58497abd798a33ff34fcdb0776e91a2f`，merge commit
+`f20d715ed393b608e12c7c840b223b3dc6041120`。闭合 P10 必须同时满足：
+
+1. 下方七项矩阵与本文件的命令、token、extra 类型及代码入口逐字对应；
+2. debug gate、durable readback、principal-bound revoke、extra coercion、source/release
+   purity 的 host tests 与负矩阵通过；
+3. 非包作者的 evidence-validity reviewer 对 exact 文档／代码绑定给出 APPROVE。
+
+这三项成立后，P10 可从 `NOT SATISFIED` 改为 `SATISFIED`，但仍然：
+
+- **不**表示任何注入已经在真机执行；
+- **不**把 §5B 崩溃恢复或 §5C 撤销双侧写成 PASS；
+- **不**单独产生 device lease；必须再跑完整 §3 十一条 current-state audit；
+- **不**消除下方 `markRevoked(appId, …)` 的 production 残留。
+
+反向要求“P10 必须先靠真机注入证明”会形成自锁：§3 禁止 P10 满足前写设备，
+而 P10 又要写设备才能满足。真正的行为证明已经由 accepted package §5B／§5C
+承接，位于 `READY_TO_SCHEDULE` 之后，因此不存在 bootstrap 例外或提前 lease。
+
+## 逐注入四段矩阵（冻结）
+
+### 共同读回与失败底线
+
+矩阵里的 `Q-DUMP`、`A-STATE` 与 `MOCK-STATE` 分别指：
+
+- `Q-DUMP`：qwy `FaultCollectorActivity --es cmd dump`；需要判 revoke 时同时传
+  exact `app_id` 与 `signer`。它每次从新的 `FileDurableKv` 实例读磁盘，不启动
+  `ProviderRuntime`，因此 qwy 自杀后必须先用它封存 pre-recovery 状态；
+- `A-STATE`：Auto `ProviderRevokeCollectorActivity --es cmd state`，直接读 Room 的
+  pairing、running attempt／`aplusState` 与 trusted 总数；
+- `MOCK-STATE`：保存完整 `adb shell dumpsys location` 原文，并以
+  `provider [mock]` 零行作为归真谓词。坐标“不是 Kyiv”与 `force-stop` 都不能替代它。
+
+每项开始前保存 before 三件套，结束后保存 after 三件套；arm 类另保存对应 app 的
+`files/debug-collector/arm.log`。任一出现 `REFUSED`、`TIMEOUT`、`NOT PROVEN`、
+`DIVERGENT`、`CLEANUP UNSAFE`、`RERELEASE FAILED`／`THREW`、durable state
+不可读或 `MOCK-STATE` 非零，立即停止本场，不运行下一项。先走矩阵指定恢复；仍不能
+证明 mock 清除时转 operator 人工恢复。`adb reboot` 只可作为 operator 授权的最终清场，
+重启后仍须重新读取 `MOCK-STATE`。
+
+| token / 场景 | injection（触发与开火证据） | exit（正常出口） | direct-state（直接状态） | restore（失败恢复／归真） |
+|---|---|---|---|---|
+| `hold_lease` | Auto `FullLoopProbeActivity --es fault hold_lease --el hold_ms <N>`；必须先看到 validated apply/observe，再看到 `injection window open`，且窗口内 `Q-DUMP` 为同一 lease `ACTIVE`。`hold_ms` canonical 类型是 `--el` 且必须 `>0`。 | 单独运行时等待窗口关闭，probe 继续 validated release；只有 `[5] release … complete=true residuals=[]` 后才允许继续 advance。若它只是给另一条 arm 开窗口，则由那条注入的 exit 接管，不能把 hold 自身绿当整场绿。 | before／窗口内／after 的 `Q-DUMP`；before／after 的 `A-STATE` 与 `MOCK-STATE`；完整 probe report。 | probe／binder 中断时从 `Q-DUMP` 取 exact leaseId。`ACTIVE`／`EXPIRED`／`RELEASE_INCOMPLETE` 走 `rerelease_stuck`；`REVOKED` 走 `cleanup_revoked`；`RELEASING` 由 qwy owner 启动重放。最后必须 `MOCK-STATE=0`。 |
+| `release_receipt_loss` | Auto `FullLoopProbeActivity --es fault release_receipt_loss`；开火证据是 `[5a]` validated release 后明确 `RECEIPT NOW DISCARDED`，随后以同一 `rlKey/rkKey` 执行 `[5b]`。 | 自收敛；必须同时有两腿 `complete=true`、第二腿与第一腿同 receipt 字段，并出现 `RECEIPT-LOSS-REPLAY: IDEMPOTENT`。fault loop 随后跳过 advance 并结束。 | before／after `Q-DUMP`、`A-STATE`、`MOCK-STATE`；两腿完整 report。P10 只冻结可退出性；“无第二次 cleanup”的 §5B 行为 verdict 留给真机 raw evidence。 | 任一 release 不 complete 或 replay divergent：停止；`Q-DUMP` 若为 `ACTIVE`／`EXPIRED`／`RELEASE_INCOMPLETE`，用 `rerelease_stuck`；其余状态按本矩阵分流。归真必须由 `MOCK-STATE=0` 直接证明。 |
+| `crash_after_apply` | Auto `FullLoopProbeActivity --es fault crash_after_apply`；validated apply/observe 后写 `files/debug-collector/crash-*.log`，再真实 `Process.killProcess`。开火证据必须包含该 durable crash record 与 post-kill `Q-DUMP` 的同一 lease `ACTIVE`；屏幕或单条 logcat 不单独承重。 | **无正常出口**，进程死亡且 finally-release 不运行就是预期注入。不得把进程退出当归真。 | kill 后先 `Q-DUMP`（同 lease／raw state），再取 crash record、`A-STATE` 与 `MOCK-STATE`；不得先启动会隐式改变 qwy recovery state 的 runtime 路径。 | 用 `Q-DUMP` 的 exact leaseId 调 `rerelease_stuck`；只有 validated `complete=true residuals=[]`、after `Q-DUMP` 无 blocking lease 且 `MOCK-STATE=0` 才归真。失败转人工恢复。 |
+| `self_kill` | **qwy 侧**：`FaultCollectorActivity --es cmd arm --es action self_kill`，gate 分别取 `lease_active`、`lease_acquiring`、`lease_releasing`，由 companion transaction 打开；arm.log 必须有 `FIRED` 后进程真实死亡。**Auto 侧**：`ProviderRevokeCollectorActivity --es cmd arm --es action self_kill`，gate 取 `attempt_state:<STATE>` 或 `trusted_count:<N>`；arm.log `FIRED` 后真实死亡。数值 extra 一律 `--el`。 | **无同步正常出口**；自杀后的 state-aware recovery 才是出口。qwy `RELEASING` 在下一次 owner boot 重放；`ACQUIRING/ACTIVE` 的 unclean boot 应进入 `RELEASE_INCOMPLETE`。Auto 重启后必须从 persisted attempt phase 恢复，trusted count 不得重计。 | qwy kill 后第一读必须是 `Q-DUMP`（它不 boot runtime），再触发 owner boot 并二读；Auto kill 后先 `A-STATE`，再读 `Q-DUMP`。`trusted_count:<N>` 的 N 必须是 arm 前 `A-STATE` baseline + 本场期望新增数。全程保存 `MOCK-STATE`。 | qwy `REVOKED` 用 `cleanup_revoked`；`RELEASING` 让 owner boot 重放；`ACTIVE`／`EXPIRED`／`RELEASE_INCOMPLETE` 用 `rerelease_stuck`。Auto 正常 recovery 若未释放同样落到 `rerelease_stuck`。任何 trusted count 增量重复或 mock 未清均为 §5B FAIL，并进入人工恢复。 |
+| `revoke_caller` | **新 run 前**：`PairingApprovalActivity` 同时给 exact `revoke_application_id`／`revoke_signer_digest`；只有 before `Q-DUMP` 证明无 blocking lease 时才用该 at-rest 入口。可用 `--ez revoke_run_cleanup true`。**run 中**：qwy arm `revoke_caller`，exact full principal + `lease_active`；gate 必须命中同 principal，arm.log 有 `FIRED`／`OUTCOME`，报告必须 `REVOKE PROVEN`。 | at-rest：exact pairing active→inactive 且 audit row 存在；无 lease 时无需 cleanup。run 中：lease 必须先读为 `REVOKED`，再由 qwy `cleanup_revoked` 收敛为 `RELEASED` 或 loud `RELEASE_INCOMPLETE`；已失权 caller 的 release 仍应 typed 拒绝。 | exact-principal before／after `Q-DUMP`（pairing、audit、lease）；Auto 调用的 typed failure；`A-STATE` 与 `MOCK-STATE`。 | `REVOKED` 只能由 `cleanup_revoked` 恢复，不能交给已失权 caller；若变 `RELEASE_INCOMPLETE` 或 mock 仍在，停止并人工恢复。后续重跑前重新批准同 principal 是 operator 动作，历史 pairing 不得自动复活。 |
+| `revoke_provider` | **新 run 前**：Auto collector `--es cmd revoke` + exact `app_id`／`signer`，报告必须 `REVOKE PROVEN`。**run 中**：Auto arm `revoke_provider`，exact principal + `run_active` 或 `attempt_state:<STATE>`；arm.log `FIRED`／`OUTCOME`，报告必须 `REVOKE PROVEN`。 | at-rest：新 run 必须停在 `NOT_PAIRED`，不得产生 lease／trusted 增量。run 中：当前 attempt 进入 **Auto 正常 release/recovery**，不得误走 qwy `cleanup_revoked`；终态前不启新 run。 | before／after `A-STATE` 的 exact pairing row、running attempt／state、trusted total；同时 `Q-DUMP` 跟踪 lease 与 `MOCK-STATE`。 | 让 in-flight attempt 的正常 release/recovery 收敛；若 lease 卡在 caller 仍有权释放的 `ACTIVE`／`EXPIRED`／`RELEASE_INCOMPLETE`，用 `rerelease_stuck`。后续重新批准 provider 归 operator；mock 未清转人工恢复。 |
+| `rerelease_stuck` | **恢复工具，非注入。** 只有 `Q-DUMP` 已给出 exact leaseId，且 raw state 是同 caller 可 release 的 `ACTIVE`／`EXPIRED`／`RELEASE_INCOMPLETE` 时，才执行 Auto `FullLoopProbeActivity --es fault rerelease_stuck --es lease_id <id>`；fresh key pair 由实现生成。 | 必须出现 `RERELEASE: … VALIDATED complete=true residuals=[]`。`REVOKED` 不可走本工具；`RELEASING` 由 qwy owner boot replay。 | before／after `Q-DUMP`、`A-STATE`、`MOCK-STATE`，并绑定输入 leaseId 与 response 中同一 lease。 | `RERELEASE FAILED`／`THREW`、after 仍有 blocking lease、residual 非空或 mock 非零：立即人工恢复；不得把工具调用本身当原注入的行为 PASS。 |
+
+### principal 残留与矩阵适用条件
+
+生产 `EnvironmentLeaseStore.markRevoked(appId, …)` 仍只按 appId 找 blocking lease，
+没有在 store 层再次匹配 signer。PR #52 的 debug arm 在开火前以
+`(applicationId, signerDigest)` 全 principal 匹配 current lease，因此本矩阵只在以下前置成立时
+适用：
+
+- at-rest `revoke_caller` 前 `Q-DUMP` 必须证明没有 blocking lease；
+- mid-run `revoke_caller` 必须使用 full-principal arm，不能直接绕过 gate 调 revoke；
+- 任一 current lease 的 signer 与目标不同，立即拒绝本场，不把 appId-only transition 当证据。
+
+该限制使本轮 P10 readiness 不会重开 rotated-signer 收集器错误，但它**不是 production
+修复**，也不从 §5C 行为验收中消失；相关主线修复须独立 PR／review。
+
+### host-only 证据边界
+
+本矩阵冻结时允许使用且只使用 host 证据：merged PR／CI、源码、debug/unit tests、
+release-purity source/APK guards 与负矩阵。它们证明命令面真实可达、token/gate 可判、
+durable readback 不在读时改写 qwy bytes、错误 principal 不会假绿、collector 不进入 release。
+它们不能证明 Android 真机上的进程死亡、binder 重连、mock 清理或 trusted ledger 行为；这些
+结论必须由 §5B／§5C 场次的 raw evidence 承重。
 
 ## 测试与证据链
 
