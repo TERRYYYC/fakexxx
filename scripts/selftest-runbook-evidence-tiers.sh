@@ -23,6 +23,8 @@
 #   M9   Remove "设备证据报告文件" from summary line → report-file term guard
 #   M10  Add concatenation term to summary line → anti-concat guard
 #   M11  Remove §10.1 reference from definition block → spec-authority guard
+#   M12  Invert definition block negation ("不是"→"是") → negation-assert guard (P5-1)
+#   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (P5-2)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -205,6 +207,31 @@ sb=$(setup_sandbox "m11-no-spec-ref")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/§10\.1/§10/g' "$rb"
 assert_fail "M11 removing §10.1 from definition block is caught (P4)" "$sb"
+
+# ── M12: Invert definition block negation (P5-1, Luna) ────────────────────
+#
+# The definition block says "**不是**原始证据文件…的拼接摘要".  Changing "不是"
+# to "是" semantically inverts the claim (reportDigest IS a concatenation) while
+# all keyword-presence checks stay green.  Guard 17 ("不是.*拼接" on same line)
+# catches this inversion.  Isolated to guard 17.
+
+sb=$(setup_sandbox "m12-invert-negation")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/\*\*不是\*\*/是/' "$rb"
+assert_fail "M12 inverting definition block negation is caught (P5-1)" "$sb"
+
+# ── M13: Add raw-evidence term to summary in reversed word order (P5-2) ───
+#
+# The old pattern "logcat.*截图" missed reversed word order ("截图+logcat").
+# Guard 15 now bans individual raw-evidence terms (截图, logcat, .png, .log) on
+# the summary line — same category-ban principle as §7.  M13 adds "截图" to the
+# summary without adding any concatenation term, proving the individual-term ban
+# is load-bearing.  Isolated to guard 15.
+
+sb=$(setup_sandbox "m13-reversed-word-order")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与截图的 SHA-256/' "$rb"
+assert_fail "M13 reversed-word-order raw-evidence term in summary is caught (P5-2)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

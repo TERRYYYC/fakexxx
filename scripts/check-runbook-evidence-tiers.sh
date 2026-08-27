@@ -140,21 +140,35 @@ check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION
 #
 # §10.1 freezes reportDigest as SHA-256 of the raw device evidence REPORT FILE
 # (the g1-smoke-*.md document), not a concatenation of raw evidence bytes.
-# Three guards:
+# Four guards:
 #   14. Summary line must contain "设备证据报告文件" (report file, not concat bytes)
-#   15. Summary line must NOT contain concatenation/Tier-A-byte terms
+#   15. Summary line must NOT contain raw-evidence terms (fail-closed category ban)
 #   16. Definition block must reference §10.1 as canonical authority
+#   17. Definition block must negate concatenation ("不是.*拼接" on same line)
 
 S11_DIGEST_SUMMARY=$(echo "$S11" | grep 'reportDigest:' | head -1)
 SUMMARY_HAS_REPORT_FILE=$(echo "$S11_DIGEST_SUMMARY" | grep -c '设备证据报告文件' || true)
 check "reportDigest summary references 设备证据报告文件" "$( [ "$SUMMARY_HAS_REPORT_FILE" -ge 1 ] && echo 0 || echo 1 )"
 
-SUMMARY_HAS_CONCAT=$(echo "$S11_DIGEST_SUMMARY" | grep -ciE '拼接|串接|logcat.*截图|Tier A.*字节|全部已收集' || true)
-check "reportDigest summary has no concatenation/byte-stream terms" "$( [ "$SUMMARY_HAS_CONCAT" -eq 0 ] && echo 0 || echo 1 )"
+# Fail-closed category ban: the summary line references the REPORT FILE only.
+# Any raw-evidence term (截图, logcat, .png, .log) or concatenation term is a
+# regression — same principle as the §7 fail-closed guard.  Banning the category
+# (not individual patterns) closes reversed-word-order and novel-combination
+# bypasses (Luna P5-2).
+SUMMARY_HAS_RAW_EVIDENCE=$(echo "$S11_DIGEST_SUMMARY" | grep -ciE '拼接|串接|logcat|截图|\.png|\.log|Tier A.*字节|全部已收集' || true)
+check "reportDigest summary has no raw-evidence/concatenation terms" "$( [ "$SUMMARY_HAS_RAW_EVIDENCE" -eq 0 ] && echo 0 || echo 1 )"
 
 DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*规范定义/,/^$/')
 HAS_SPEC_REF=$(echo "$DIGEST_BLOCK" | grep -c '§10.1' || true)
 check "reportDigest definition references §10.1" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
+
+# Guard 17: the definition block must NEGATE concatenation.  "不是.*拼接" on the
+# same line asserts the report-level (not byte-concat) semantics.  Without this,
+# inverting "不是" → "是" flips the semantic claim while all keyword-presence
+# checks stay green (Luna P5-1).  The runbook text is reflowed so that "不是" and
+# "拼接" appear on the same blockquote line, enabling line-local grep.
+BLOCK_NEGATES_CONCAT=$(echo "$DIGEST_BLOCK" | grep -c '不是.*拼接' || true)
+check "reportDigest definition negates concatenation" "$( [ "$BLOCK_NEGATES_CONCAT" -ge 1 ] && echo 0 || echo 1 )"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
