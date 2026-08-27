@@ -178,6 +178,19 @@ jobs:
       - name: assemble
         run: ./gradlew --no-daemon assembleDebug
 
+      # P10 (G2 §3 P10): the fault/revoke collector is debug-only by hard
+      # constraint — the release variant must not carry it. Building release
+      # and byte-scanning the dex pool is the artifact half of that proof;
+      # source placement alone is necessary, not sufficient.
+      - name: release build (P10 purity gate)
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: debug-only collector purity (P10)
+        working-directory: .
+        run: |
+          ./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app \
+            --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release-unsigned.apk
+
       # Lint runs through the debt ratchet rather than as `lintDebug`, so a
       # green check never hides a growing error count. Budget for this app is 0.
       - name: lint debt ratchet
@@ -235,6 +248,17 @@ jobs:
       - name: assemble
         run: ./gradlew --no-daemon assembleDebug
 
+      # P10 (G2 §3 P10): same purity gate as the cellrebel-auto lane — the
+      # collector must be absent from the release artifact (byte scan).
+      - name: release build (P10 purity gate)
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: debug-only collector purity (P10)
+        working-directory: .
+        run: |
+          ./scripts/check-debug-only-collector.sh apps/qianwangyou/app \
+            --apk apps/qianwangyou/app/build/outputs/apk/release/app-release.apk
+
       # `lintDebug` exits non-zero here: 23 lint errors came in with
       # FakeGps-test@285e4ca, which never had CI. They are frozen, not silenced
       # — this step fails if the count grows. Fixing them is PR-3's disposition.
@@ -285,6 +309,14 @@ jobs:
 
       - name: selftest-debug-signer
         run: ./scripts/selftest-debug-signer.sh
+
+      - name: selftest-debug-only-collector
+        # P10 (G2 §3): negative matrix for the debug-only collector boundary.
+        # A purity guard that cannot fail is decoration — every check the
+        # guard makes is exercised against a hand-built violation (leak into
+        # src/main, vacuous marker, marker/class bytes in a release APK).
+        # Device-free by construction (fixture trees + fixture zips).
+        run: ./scripts/selftest-debug-only-collector.sh
 
       - name: selftest-install-apk-verified
         run: ./scripts/selftest-install-apk-verified.sh
