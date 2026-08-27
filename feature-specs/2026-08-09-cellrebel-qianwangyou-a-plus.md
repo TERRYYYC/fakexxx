@@ -2521,7 +2521,7 @@ enum class CellRebelCompletionEvidenceV1(val wire: Int) {
 | INV-21 | release 无法证明完成时暂停并暴露人工恢复，不静默继续 | release failure recovery test |
 | INV-22 | 终态 attempt/run 不可被 generic restore/list/delete 旁路复活 | DAO/repository bypass tests |
 | INV-23 | 可信配额要求 pre/post observation 的 `acceptedIntentHash` 等于 apply receipt 且等于 Auto 本地重算值，且 `effectiveLat/Lng` **非空**；容差内的距离比对自 v1.62（`KB-8` = A）起由千网游独占求值，Auto 无独立位置验证面（§6.4.2 / §20.1 `KB-8`） | intent-binding matrix：错误地址、意图漂移、apply 部分生效、lease 复用后意图切换、坐标为 null 五类负例 |
-| INV-24 | 用户可见持久数据的 schema 变更必须有显式 migration + 真实旧版本 fixture 测试；禁止 destructive fallback | Auto v4→v5 真实 fixture migration test；`fallbackToDestructiveMigration` 静态禁用扫描 |
+| INV-24 | 用户可见持久数据的 schema 变更必须有显式 migration + 真实旧版本 fixture 测试；禁止 destructive fallback | Auto v4→v5 真实 fixture migration test；`fallbackToDestructiveMigration` 静态禁用扫描。**例外登记（F-19，2026-08-27）**：operator 于 2026-08-27T09:46Z 裁定，**仅限 Auto**（`com.example.cellrebelauto`，开发期 versionCode=1）的 8/01 未提交构建 v5 identity 漂移事故豁免本条——`version=6` no-op bump + v5 漂移隔离区 + destructive fallback 兜底；健康 v5 与 v2–v4 阶梯仍保数据（`Migration5to6Test` / `Migration4to5Test` 守卫断言未放宽）。豁免**不外溢千网游**（#46 / F-10 性质不同，本条对其仍全效）。详见 `docs/features/2026-08-27-f19-auto-room-v5-drift-quarantine-rebuild.md` |
 | INV-25 | `environmentRevision`/coverage 跨进程单写者、持久、原子、单调；有损观察器与进程代际不明必须 bump + 降级 | 多进程并发 bump 测试；owner 进程重启代际测试；observer 丢事件注入测试 |
 | INV-26 | 禁止任何基于分数值的跨 attempt 去重（upstream INV-7：两次有效运行可产生相同结果）；改为对每次可信计数持久化完整 completion evidence，并向 operator 暴露可疑相邻计数的**去重审计报告**（低 RUNNING 时长、异常紧邻时间戳等），报告不自动否决计数 | evidence 持久化 schema 测试；审计报告触发条件测试；"分数相同的两次合法运行都被计入"正例 |
 | INV-27 | observation 的 mode/isMock/schedule/证据/时序必须与 `verificationLevel` 交叉一致；矛盾 tuple 一律 fail-closed；两次观察必须夹住执行窗且连续性窗口早于 pre 观察 | §6.4.1 矛盾 tuple 矩阵（8 行独立负例） |
@@ -3767,7 +3767,7 @@ Issue body 必须链接本文、列出依赖 issue、owner/reviewer、文件范�
 | AC-11 | 双 App 独立构建发布，version skew 明确运行或停止 | INV-03,19；CI + skew device matrix |
 | AC-12 | A+/B/C 触发门有持久 issue 与里程碑 verdict，不发生重写 | I7 + milestone evidence |
 | AC-13 | 可信完成必然归属于该 attempt 的目标地址；错记地址不可能发生 | INV-23；intent-binding matrix + 真机错址负例 |
-| AC-14 | 已有用户数据跨版本升级零丢失，无 destructive fallback | INV-24；v4 真实 fixture migration test |
+| AC-14 | 已有用户数据跨版本升级零丢失，无 destructive fallback | INV-24；v4 真实 fixture migration test（F-19 例外登记见 INV-24 行：Auto 开发期 v5 漂移事故 operator 豁免，2026-08-27；千网游不受影响） |
 
 AC 编号必须**顺序排列**，便于逐号完整性核对；新增 AC 一律追加到表尾，不得插入既有编号之间。
 
