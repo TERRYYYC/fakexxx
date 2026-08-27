@@ -140,12 +140,13 @@ check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION
 #
 # §10.1 freezes reportDigest as SHA-256 of the raw device evidence REPORT FILE
 # (the g1-smoke-*.md document), not a concatenation of raw evidence bytes.
-# Five guards:
+# Six guards:
 #   14. Summary line must contain "设备证据报告文件" (report file, not concat bytes)
 #   15. Summary line must NOT contain raw-evidence terms (fail-closed category ban)
 #   16. Definition block must reference §10.1 as canonical authority
-#   17. Definition block must negate concatenation ("不是.*拼接" on same line)
-#   18. Canonical negation line must be exclusive (no contradictory positive assertion)
+#   17. Canonical declaration is structurally bounded (CANONICAL markers exist)
+#   18. Canonical block negates concatenation (不是 + 拼接 in joined text)
+#   19. Canonical block has no contradictory positive (拼接 count = 1 in joined text)
 
 S11_DIGEST_SUMMARY=$(echo "$S11" | grep 'reportDigest:' | head -1)
 SUMMARY_HAS_REPORT_FILE=$(echo "$S11_DIGEST_SUMMARY" | grep -c '设备证据报告文件' || true)
@@ -163,32 +164,39 @@ DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*规范定义/,/^$/')
 HAS_SPEC_REF=$(echo "$DIGEST_BLOCK" | grep -c '§10.1' || true)
 check "reportDigest definition references §10.1" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
 
-# Guard 17: the definition block must NEGATE concatenation.  "不是.*拼接" on the
-# same line asserts the report-level (not byte-concat) semantics.  Without this,
-# inverting "不是" → "是" flips the semantic claim while all keyword-presence
-# checks stay green (Luna P5-1).  The runbook text is reflowed so that "不是" and
-# "拼接" appear on the same blockquote line, enabling line-local grep.
+# Guards 17–19: Structurally bounded canonical declaration (Luna R5).
 #
-# Layout constraint (P3, non-blocking): re-wrapping the blockquote so "不是" and
-# "拼接" land on different lines causes Guard 17 to fail-CLOSED (flags valid
-# document as broken).  This is safe (fail-closed ≠ fail-open) but means the
-# runbook's blockquote line breaks are load-bearing for CI.
-CANONICAL_NEGATION_LINE=$(echo "$DIGEST_BLOCK" | grep '不是.*拼接' | head -1)
-BLOCK_NEGATES_CONCAT=$( [ -n "$CANONICAL_NEGATION_LINE" ] && echo 1 || echo 0 )
-check "reportDigest definition negates concatenation" "$( [ "$BLOCK_NEGATES_CONCAT" -ge 1 ] && echo 0 || echo 1 )"
+# R1→R5 showed that line-local keyword guards are systematically bypassable:
+# each round the contradictory claim moved to a different line/position.  The fix
+# is to make the canonical declaration a BOUNDED BLOCK delimited by HTML comment
+# markers (CANONICAL:reportDigest:START/END).  The checker extracts the block,
+# JOINS all lines into a single string, and checks invariants on the block as a
+# whole.  Layout (line breaks, word wrapping) no longer matters.
+#
+# Historical run#2 prose ("使用了拼接字节定义") is OUTSIDE the markers, so it is
+# never checked — no false-positive risk from the backward-compatibility note.
 
-# Guard 18: the canonical negation line must be EXCLUSIVE — "拼接" appears exactly
-# once (inside the negation).  Appending a contradictory positive assertion like
-# "同时是拼接摘要" adds a second occurrence → caught (Luna R4 P2).
-#
-# When Guard 17 fails (no canonical line exists), Guard 18 passes vacuously:
-# there is no negation line to contradict, so nothing to check for exclusivity.
-# This preserves M12's isolation to Guard 17.
-if [ -n "$CANONICAL_NEGATION_LINE" ]; then
-  CONCAT_OCCURRENCES=$(echo "$CANONICAL_NEGATION_LINE" | grep -o '拼接' | wc -l | tr -d ' ')
-  check "reportDigest canonical negation is exclusive (no contradictory positive)" "$( [ "$CONCAT_OCCURRENCES" -eq 1 ] && echo 0 || echo 1 )"
+CANONICAL_BLOCK=$(echo "$S11" | sed -n '/CANONICAL:reportDigest:START/,/CANONICAL:reportDigest:END/p' | tr '\n' ' ')
+
+# Guard 17: structural boundary markers must exist.
+check "reportDigest canonical declaration is structurally bounded" "$( [ -n "$CANONICAL_BLOCK" ] && echo 0 || echo 1 )"
+
+if [ -n "$CANONICAL_BLOCK" ]; then
+  # Guard 18: the canonical block must negate concatenation.
+  BLOCK_HAS_NEGATION=$(echo "$CANONICAL_BLOCK" | grep -c '不是.*拼接' || true)
+  check "reportDigest canonical block negates concatenation" "$( [ "$BLOCK_HAS_NEGATION" -ge 1 ] && echo 0 || echo 1 )"
+
+  # Guard 19: "拼接" appears exactly once in the block (inside the negation).
+  # Any contradictory positive assertion — same line or split across lines —
+  # adds a second occurrence → count ≠ 1 → fail.
+  CANONICAL_CONCAT_COUNT=$(echo "$CANONICAL_BLOCK" | grep -o '拼接' | wc -l | tr -d ' ')
+  check "reportDigest canonical block has no contradictory positive concat" "$( [ "$CANONICAL_CONCAT_COUNT" -eq 1 ] && echo 0 || echo 1 )"
 else
-  check "reportDigest canonical negation is exclusive (no contradictory positive)" 0
+  # When Guard 17 fails (no markers), Guards 18–19 pass vacuously — there is
+  # no canonical block to check semantics on.  Guard 17 already caught the
+  # structural problem.  This preserves M15's isolation to Guard 17.
+  check "reportDigest canonical block negates concatenation" 0
+  check "reportDigest canonical block has no contradictory positive concat" 0
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

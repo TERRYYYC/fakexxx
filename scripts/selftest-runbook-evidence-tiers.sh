@@ -23,9 +23,11 @@
 #   M9   Remove "设备证据报告文件" from summary line → report-file term guard
 #   M10  Add concatenation term to summary line → anti-concat guard
 #   M11  Remove §10.1 reference from definition block → spec-authority guard
-#   M12  Invert definition block negation ("不是"→"是") → negation-assert guard (P5-1)
-#   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (P5-2)
-#   M14  Add contradictory positive concat assertion → exclusivity guard (R4 P2)
+#   M12  Invert definition block negation ("不是"→"是") → bounded negation guard (G18)
+#   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (G15)
+#   M14  Same-line contradictory positive concat → bounded exclusivity guard (G19)
+#   M15  Remove CANONICAL boundary markers → structural boundary guard (G17)
+#   M16  Split-line contradictory positive concat → bounded exclusivity guard (G19, R5)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -211,15 +213,15 @@ assert_fail "M11 removing §10.1 from definition block is caught (P4)" "$sb"
 
 # ── M12: Invert definition block negation (P5-1, Luna) ────────────────────
 #
-# The definition block says "**不是**原始证据文件…的拼接摘要".  Changing "不是"
-# to "是" semantically inverts the claim (reportDigest IS a concatenation) while
-# all keyword-presence checks stay green.  Guard 17 ("不是.*拼接" on same line)
-# catches this inversion.  Isolated to guard 17.
+# Inside the CANONICAL boundary, changing "不是" to "是" inverts the semantic
+# claim.  Guard 18 checks the JOINED canonical block for "不是.*拼接" — the
+# joined text loses "不是" → no match → fail.  Isolated to Guard 18 (Guard 19
+# still sees count=1 because "拼接" appears once either way).
 
 sb=$(setup_sandbox "m12-invert-negation")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/\*\*不是\*\*/是/' "$rb"
-assert_fail "M12 inverting definition block negation is caught (P5-1)" "$sb"
+assert_fail "M12 inverting definition block negation is caught (G18)" "$sb"
 
 # ── M13: Add raw-evidence term to summary in reversed word order (P5-2) ───
 #
@@ -234,18 +236,50 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与截图的 SHA-256/' "$rb"
 assert_fail "M13 reversed-word-order raw-evidence term in summary is caught (P5-2)" "$sb"
 
-# ── M14: Add contradictory positive concatenation assertion (R4 P2) ────────
+# ── M14: Same-line contradictory positive (R4 P2) ──────────────────────────
 #
-# Guard 17 proves a negation ("不是.*拼接") exists; Guard 18 proves that negation
-# is EXCLUSIVE — "拼接" appears exactly once on the canonical line.  Appending
-# "同时是拼接摘要" adds a second occurrence, creating a semantic contradiction
-# while Guard 17 stays green.  Isolated to Guard 18 (Guard 18 passes vacuously
-# when Guard 17 fails, preserving M12's isolation).
+# Inside the CANONICAL boundary, appending "同时是拼接摘要" on the SAME line
+# adds a second "拼接" to the joined block.  Guard 19 (count=1) catches it.
+# Isolated to Guard 19.
 
-sb=$(setup_sandbox "m14-contradictory-positive")
+sb=$(setup_sandbox "m14-same-line-contradiction")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-sed -i.bak 's/\*\*不是\*\*原始证据文件（logcat \/ 截图 PNG）的拼接摘要。/\*\*不是\*\*原始证据文件（logcat \/ 截图 PNG）的拼接摘要，同时是拼接摘要。/' "$rb"
-assert_fail "M14 contradictory positive concat assertion is caught (R4 P2)" "$sb"
+python3 -c "
+with open('$rb') as f: t = f.read()
+t = t.replace('的拼接摘要。', '的拼接摘要，同时是拼接摘要。')
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M14 same-line contradictory positive is caught (G19)" "$sb"
+
+# ── M15: Remove CANONICAL boundary markers (R5) ───────────────────────────
+#
+# Without the CANONICAL:reportDigest:START/END markers, the checker cannot
+# extract the bounded block → Guard 17 fails.  Guards 18–19 pass vacuously
+# (no block to check).  Isolated to Guard 17.
+
+sb=$(setup_sandbox "m15-no-markers")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak '/CANONICAL:reportDigest/d' "$rb"
+assert_fail "M15 removing CANONICAL markers is caught (G17)" "$sb"
+
+# ── M16: Split-line contradictory positive (R5, Luna) ──────────────────────
+#
+# This is the R5 finding: appending "同时是拼接摘要" on a SEPARATE blockquote
+# line INSIDE the CANONICAL boundary.  Old line-local guards missed this; the
+# bounded-block approach catches it because all lines are joined before counting.
+# Isolated to Guard 19 (same guard as M14 — different layout, same invariant).
+
+sb=$(setup_sandbox "m16-split-line-contradiction")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+t = t.replace(
+    '的拼接摘要。\n> <!-- CANONICAL:reportDigest:END -->',
+    '的拼接摘要。\n> 同时是拼接摘要。\n> <!-- CANONICAL:reportDigest:END -->'
+)
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M16 split-line contradictory positive is caught (G19, R5)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
