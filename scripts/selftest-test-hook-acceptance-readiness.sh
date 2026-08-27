@@ -242,6 +242,108 @@ grep -qF "root-start shell su -c 'am start -W -n $FQCN_ACT" "$D/calls.log" &&
     report fail "G1 stage 2 launches explicit bench FQCN" "calls: $(cat "$D/calls.log")"
 
 # ---------------------------------------------------------------------------
+# R3 (evidence parity, red-first): the SUCCESS path must emit the raw denial
+# excerpt. S2-B finding: the gate assertions are real, but the frozen
+# evidence directory only carried the VERIFIED verdict + exit code — an
+# independent reviewer could not confirm from raw bytes that the denial
+# named the bench permission (Stage 2 already logs its raw fail-fast JSON;
+# the two stages' evidence grades must be equal).
+# ---------------------------------------------------------------------------
+grep -qF "$BENCH_ID.permission.RUN_HOOK_ACCEPTANCE" <<<"$OUT" &&
+    report ok "R3 success output carries the raw permission-naming line" ||
+    report fail "R3 success output carries the raw permission-naming line" "verdict only, denial bytes dropped: $OUT"
+grep -q "Permission Denial" <<<"$OUT" &&
+    report ok "R3 success output carries the denial marker" ||
+    report fail "R3 success output carries the denial marker" "$OUT"
+
+# E2: the excerpt is self-auditable — a counts line (matched/total + the
+# documented patterns) lets an auditor re-run the patterns on the raw text
+# and confirm no matched line was cropped.
+grep -Eq 'READINESS_GATE_EXCERPT lines=[1-9][0-9]*/[1-9][0-9]*' <<<"$OUT" &&
+    report ok "E2 excerpt counts line present" ||
+    report fail "E2 excerpt counts line present" "$OUT"
+# E2b (gpt55 R-finding): the emitted patterns= string must be
+# byte-for-byte the real grep regex (one shared variable), so an auditor
+# can re-run it verbatim — not an underscore-mangled paraphrase.
+grep -qF 'patterns=SecurityException|Permission Denial|RUN_HOOK_ACCEPTANCE' <<<"$OUT" &&
+    report ok "E2b gate patterns= is the literal regex" ||
+    report fail "E2b gate patterns= is the literal regex" "not byte-identical to the grep regex: $OUT"
+grep -qF 'patterns=^(Starting: Intent|Status:|LaunchState:|ThisTime:|TotalTime:|WaitTime:|Complete|Error:)' <<<"$OUT" &&
+    report ok "E2b start patterns= is the literal regex" ||
+    report fail "E2b start patterns= is the literal regex" "not byte-identical to the grep regex: $OUT"
+
+# E3 (bounded excerpt / privacy): raw denial output may interleave device
+# noise; lines NOT matching the documented denial patterns must never enter
+# the evidence stream.
+D="$WORK/e3"; make_fake_adb "$D"
+{
+    printf 'Warning: device serialno=ZY22PRIVATE build-fingerprint=vendor/private/2026\n'
+    printf '%s\n' "$DENY_BENCH"
+} >"$D/unpriv.out"
+printf '1' >"$D/unpriv.rc"
+printf 'Status: ok\n' >"$D/priv.out"
+printf '%s\n' "$ABORT_LOG" >"$D/logcat.out"
+build_and_run "$D" ""
+[ "$RC" -eq 0 ] &&
+    report ok "E3 noisy denial still passes" ||
+    report fail "E3 noisy denial still passes" "rc=$RC out=$OUT"
+grep -q "ZY22PRIVATE" <<<"$OUT" &&
+    report fail "E3 device noise must not enter evidence" "leaked: $OUT" ||
+    report ok "E3 device noise must not enter evidence"
+grep -qF "$BENCH_ID.permission.RUN_HOOK_ACCEPTANCE" <<<"$OUT" &&
+    report ok "E3 permission line still excerpted" ||
+    report fail "E3 permission line still excerpted" "$OUT"
+
+# ---------------------------------------------------------------------------
+# R4 (evidence parity, stage 2 — Terra verdict scope): the privileged
+# start's raw output must also enter the evidence stream, not just feed
+# the Status assertion and vanish ("no executed command lines are frozen").
+# Assert: READINESS_START_EXCERPT counts marker + the raw Status line.
+# ---------------------------------------------------------------------------
+grep -Eq 'READINESS_START_EXCERPT lines=[1-9][0-9]*/[1-9][0-9]*' <<<"$OUT" &&
+    report ok "R4 stage-2 excerpt counts line present" ||
+    report fail "R4 stage-2 excerpt counts line present" "$OUT"
+grep -Eq 'start2\| Status: ok' <<<"$OUT" &&
+    report ok "R4 raw stage-2 Status line in evidence" ||
+    report fail "R4 raw stage-2 Status line in evidence" "$OUT"
+
+# ---------------------------------------------------------------------------
+# R5: the EXECUTED COMMAND LINES themselves are frozen — as the REAL host-side
+# command shapes, including the adb shell wrapper and the su -c quoting for
+# stage 2 (gpt55 R2: a paraphrase without the wrapper/quoting is not the
+# executed command; constructed from shipped constants, no private content).
+# ---------------------------------------------------------------------------
+grep -qF "READINESS_CMD stage1 adb shell am start -W -n $FQCN_ACT" <<<"$OUT" &&
+    report ok "R5 stage-1 command line frozen" ||
+    report fail "R5 stage-1 command line frozen" "$OUT"
+grep -qF "READINESS_CMD stage2 adb shell \"su -c 'am start -W -n $FQCN_ACT'\"" <<<"$OUT" &&
+    report ok "R5 stage-2 command line frozen (real wrapper+quoting)" ||
+    report fail "R5 stage-2 command line frozen (real wrapper+quoting)" "$OUT"
+
+# E4 (privacy, stage 2): device noise on unmatched lines of the privileged
+# start output must not enter the evidence stream; matched lines still do.
+D="$WORK/e4"; make_fake_adb "$D"
+printf '%s\n' "$DENY_BENCH" >"$D/unpriv.out"
+printf '1' >"$D/unpriv.rc"
+{
+    printf 'Warning: device serialno=ZY22PRIVATE2 in unmatched line\n'
+    printf 'Starting: Intent { cmp=%s }\n' "$FQCN_ACT"
+    printf 'Status: ok\n'
+    printf 'Complete\n'
+} >"$D/priv.out"
+printf '%s\n' "$ABORT_LOG" >"$D/logcat.out"
+build_and_run "$D" ""
+[ "$RC" -eq 0 ] &&
+    report ok "E4 noisy stage-2 output still passes" ||
+    report fail "E4 noisy stage-2 output still passes" "rc=$RC out=$OUT"
+grep -q "ZY22PRIVATE2" <<<"$OUT" &&
+    report fail "E4 stage-2 device noise must not enter evidence" "leaked: $OUT" ||
+    report ok "E4 stage-2 device noise must not enter evidence"
+grep -Eq 'start2\| Starting: Intent' <<<"$OUT" &&
+    report ok "E4 stage-2 Starting line still excerpted" ||
+    report fail "E4 stage-2 Starting line still excerpted" "$OUT"
+
+# ---------------------------------------------------------------------------
 # S (static): mode wired into usage/case/dispatch; body does not reuse the
 # /data/misc-scanning helpers.
 # ---------------------------------------------------------------------------
