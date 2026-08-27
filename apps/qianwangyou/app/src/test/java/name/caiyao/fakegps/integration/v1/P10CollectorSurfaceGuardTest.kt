@@ -122,6 +122,23 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
+     * Mutation killer — "arm exists but never actually fires": an armed
+     * self_kill that logs instead of dying would green every presence
+     * assertion while §5B's unclean-window semantics never happen. The
+     * unclean-death primitive itself must be present in the debug surface.
+     */
+    @Test
+    fun selfKillArmUsesTheRealUncleanDeathPrimitive() {
+        val debug = debugCode()
+        assertTrue(
+            "the arm/self_kill path must call Process.killProcess — anything else " +
+                "(log-only, exit(), finish()) is not an unclean death and cannot " +
+                "create the §5B.2 / M-LS-07 window",
+            Regex("""Process\.killProcess\(""").containsMatchIn(debug),
+        )
+    }
+
+    /**
      * §5C revoke naming: approval names BOTH halves of the principal
      * (applicationId + signerDigest) precisely because §6.5 forbids fuzzy /
      * "revoke whatever is pending" decisions. The revoke entry must use the

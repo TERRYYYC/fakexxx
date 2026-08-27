@@ -159,14 +159,33 @@ class P10CollectorSurfaceGuardTest {
         assertTrue("FullLoopProbeActivity.kt must exist in the debug source set", probe.isFile)
         val code = kotlinSourcesWithoutComments(debugSourceDir)
             .first { it.first == probe }.second
+        // Assert the BRANCH, not the bare name: a usage string that lists the
+        // fault names would green a name-only assertion while nothing ever
+        // fires (mutation "entry exists but never triggers").
         listOf("hold_lease", "release_receipt_loss", "crash_after_apply").forEach { fault ->
             assertTrue(
-                "FullLoopProbeActivity must implement the '$fault' fault mode — " +
+                "FullLoopProbeActivity must BRANCH on fault == \"$fault\" — " +
                     "currently the probe can only run the complete happy loop, so §5B " +
                     "has no deterministic Auto-side trigger",
-                code.contains(fault),
+                code.contains("""fault == "$fault""""),
             )
         }
+    }
+
+    /**
+     * Mutation killer — "arm/crash exists but never actually fires": logging a
+     * crash is not crashing. Both the armed self_kill and the crash_after_apply
+     * probe mode must use the real unclean-death primitive.
+     */
+    @Test
+    fun selfKillAndCrashModesUseTheRealUncleanDeathPrimitive() {
+        val debug = debugCode()
+        assertTrue(
+            "the arm/self_kill and crash_after_apply paths must call Process.killProcess — " +
+                "anything else is not an unclean death and cannot create the §5B " +
+                "checkpoint-crash window",
+            Regex("""Process\.killProcess\(""").containsMatchIn(debug),
+        )
     }
 
     // ------------------------------------------------------------------

@@ -28,6 +28,20 @@ import kotlin.concurrent.thread
  *
  *   list:    adb shell am start -n <pkg>/name.caiyao.fakegps.integration.v1.PairingApprovalActivity
  *   approve: ... --es approve_application_id <appId> --es approve_signer_digest <sha256>
+ *   revoke:  ... --es revoke_application_id <appId> --es revoke_signer_digest <sha256>
+ *   revoke-then-self-cleanup: add --es revoke_run_cleanup 1
+ *
+ * REVOKE (P10 / G2 §5C): onCallerRevoked had ZERO non-test call sites — the
+ * qwy-side revoke transition (pairing revoked + lease REVOKED + audit row,
+ * M-PA-09/M-LS-04) was unreachable on-device. The revoke entry drives the REAL
+ * transition through the runtime singleton, then reads back durable state.
+ *
+ * `--es revoke_run_cleanup 1` additionally runs runRevokedLeaseCleanup() — the
+ * §6.3.3 qwy-internal self-cleanup (REVOKED → RELEASING → RELEASED /
+ * RELEASE_INCOMPLETE), which also had zero call sites. Without it §5C cannot
+ * be observed to convergence. The mid-run exact-window variant of revoke (§5C
+ * "run 中") lives in FaultCollectorActivity's arm command, which gates on
+ * committed lease state; this entry is the plain at-rest revoke.
  *
  * src/debug only. An exported activity that can grant environment-control
  * access has no business in a release build; the real operator UI is a
@@ -62,10 +76,17 @@ class PairingApprovalActivity : Activity() {
         processIntent(intent)
     }
 
+    private var revokeAppIdArg: String? = null
+    private var revokeSignerArg: String? = null
+    private var runCleanupAfterRevoke: Boolean = false
+
     private fun processIntent(intent: Intent?) {
         view.text = "pairing — working…"
         val approveId = intent?.getStringExtra(EXTRA_APP_ID)
         val approveDigest = intent?.getStringExtra(EXTRA_SIGNER)
+        revokeAppIdArg = intent?.getStringExtra(EXTRA_REVOKE_APP_ID)
+        revokeSignerArg = intent?.getStringExtra(EXTRA_REVOKE_SIGNER)
+        runCleanupAfterRevoke = intent?.getBooleanExtra(EXTRA_REVOKE_RUN_CLEANUP, false) == true
 
         // Touching the durable store must not run on the main thread.
         thread(name = "ec-pairing-approval") {
@@ -94,6 +115,39 @@ class PairingApprovalActivity : Activity() {
             appendLine()
         }
 
+        val revokeId = revokeAppIdArg
+        val revokeDigest = revokeSignerArg
+        if (revokeId != null && revokeDigest != null) {
+            // The REAL §6.5 revoke transition, through the runtime singleton:
+            // pairing revoke + lease REVOKED + audit row (M-PA-09/M-LS-04).
+            appendLine("REVOKING: $revokeId / ${revokeDigest.take(16)}…")
+            ProviderRuntime.handler(applicationContext).onCallerRevoked(revokeId, revokeDigest)
+            if (runCleanupAfterRevoke) {
+                appendLine("running §6.3.3 self-cleanup (runRevokedLeaseCleanup)…")
+                ProviderRuntime.handler(applicationContext).runRevokedLeaseCleanup()
+            }
+            // Durable readback: what is committed on disk, read through a FRESH
+            // FileDurableKv (never the singleton cache) — the revoke only counts
+            // when pairing is durably inactive AND the audit row exists.
+            val post = QwyDurableSnapshot.capture(
+                QwyDurableSnapshot.durableDir(applicationContext), revokeId, revokeDigest,
+            )
+            appendLine()
+            appendLine("durable readback:")
+            append(QwyDurableSnapshot.render(post))
+            appendLine()
+            if (post.pairingStillActive == true || post.revokeAudited != true) {
+                appendLine("!! REVOKE NOT DURABLY PROVEN — see readback above")
+            } else {
+                appendLine("REVOKE PROVEN: pairing inactive on disk + caller_revoked audit row.")
+            }
+            appendLine()
+        } else if (revokeId != null || revokeDigest != null) {
+            appendLine("REFUSED: revoke needs BOTH --es $EXTRA_REVOKE_APP_ID and --es $EXTRA_REVOKE_SIGNER")
+            appendLine("Half a principal is not a weaker revoke, it is a different one (§6.5).")
+            appendLine()
+        }
+
         val pending = ProviderRuntime.pendingCallers(applicationContext)
         if (pending.isEmpty()) {
             appendLine("no pending callers")
@@ -116,5 +170,8 @@ class PairingApprovalActivity : Activity() {
         const val TAG = "ECPairingApproval"
         const val EXTRA_APP_ID = "approve_application_id"
         const val EXTRA_SIGNER = "approve_signer_digest"
+        const val EXTRA_REVOKE_APP_ID = "revoke_application_id"
+        const val EXTRA_REVOKE_SIGNER = "revoke_signer_digest"
+        const val EXTRA_REVOKE_RUN_CLEANUP = "revoke_run_cleanup"
     }
 }

@@ -61,6 +61,21 @@ import java.util.concurrent.atomic.AtomicReference
  * promise the wire didn't actually make. So every call site routes through the
  * unified validator that already exists on main, and fails the probe on any
  * violation rather than ploughing on.
+ *
+ * P10 FAULT MODES (G2 §5B) — --es fault <name>
+ * --------------------------------------------
+ *   hold_lease (--ei hold_ms N)      apply+observe, then HOLD the lease ACTIVE
+ *                                    for N ms: a stable window for the qwy-side
+ *                                    collector's arm commands.
+ *   release_receipt_loss             release validates → receipt DISCARDED →
+ *                                    same-key replay must return the same
+ *                                    receipt (idempotent, no second cleanup).
+ *   crash_after_apply                kill the process with the lease ACTIVE —
+ *                                    the Auto checkpoint crash window; the
+ *                                    finally-release deliberately never runs.
+ *   rerelease_stuck (--es lease_id)  recovery utility: converge a stuck lease
+ *                                    via the §6.3.3 carve-out (fresh keys).
+ * No --es fault = the untouched complete loop. Marker: P10DBG-COLLECTOR-V1.
  */
 class FullLoopProbeActivity : Activity() {
 
@@ -106,8 +121,20 @@ class FullLoopProbeActivity : Activity() {
 
     private fun launchProbe() {
         view.text = "full §6.7 loop — running…"
+        // P10 fault modes (G2 §5B): the loop can now be told to HOLD its lease,
+        // DISCARD+REPLAY a release receipt, or CRASH mid-loop on purpose. The
+        // default (no --es fault) remains the untouched complete loop.
+        val fault = intent?.getStringExtra(EXTRA_FAULT)?.trim()?.takeIf { it.isNotEmpty() }
+        val holdMs = intent?.getLongExtra(EXTRA_HOLD_MS, 0L) ?: 0L
+        val stuckLeaseId = intent?.getStringExtra(EXTRA_LEASE_ID)?.trim()?.takeIf { it.isNotEmpty() }
+        if (fault != null && fault !in KNOWN_FAULTS) {
+            val report = "REFUSED: unknown fault '$fault' — known: $KNOWN_FAULTS"
+            Log.i(TAG, report)
+            runOnUiThread { view.text = report }
+            return
+        }
         probeRunner.launch(threadName = "ec-full-loop") {
-            val report = runCatching { runLoop() }
+            val report = runCatching { runLoop(fault, holdMs, stuckLeaseId) }
                 .getOrElse { "LOOP ABORTED: ${it::class.java.name}: ${it.message}" }
             Log.i(TAG, report)
             runOnUiThread { view.text = report }
@@ -129,8 +156,9 @@ class FullLoopProbeActivity : Activity() {
         }
     }
 
-    private fun runLoop(): String = buildString {
-        appendLine("Environment Control v1 — full loop (validated)")
+    private fun runLoop(fault: String?, holdMs: Long, stuckLeaseId: String?): String = buildString {
+        appendLine("Environment Control v1 — full loop (validated)" +
+            (fault?.let { " — FAULT MODE: $it" } ?: ""))
         appendLine("=".repeat(52))
 
         val binderRef = AtomicReference<IBinder?>(null)
@@ -159,6 +187,32 @@ class FullLoopProbeActivity : Activity() {
 
         var leaseId: String? = null
         try {
+            // ---- P10 recovery utility: rerelease_stuck -----------------------
+            // §6.3.3 carve-out: release accepts ACTIVE/EXPIRED/RELEASE_INCOMPLETE,
+            // so a caller whose own process died mid-loop can converge a stuck
+            // lease by replaying release with a FRESH key pair. This is the
+            // per-injection EXIT/RESTORE path for the crash/hold fault modes.
+            if (fault == "rerelease_stuck") {
+                val stuck = stuckLeaseId
+                    ?: run { appendLine("REFUSED: rerelease_stuck needs --es lease_id <id>"); return@buildString }
+                val rel = runCatching {
+                    ContractResponseValidator.validateRelease(
+                        svc.release(ReleaseRequestV1(stuck, "rl-p10-${UUID.randomUUID()}", "rk-p10-${UUID.randomUUID()}")),
+                        stuck,
+                    )
+                }
+                when (val v = rel.getOrNull()) {
+                    is ValidatedContractResponse.Success ->
+                        appendLine("RERELEASE: lease ${stuck.take(8)}… → VALIDATED complete=${v.payload.releaseComplete} residuals=${v.payload.residualReasonWires}")
+                    is ValidatedContractResponse.Failure ->
+                        appendLine("RERELEASE FAILED: ${v.typedOutcome}")
+                    null ->
+                        appendLine("RERELEASE THREW: ${rel.exceptionOrNull()?.message}")
+                }
+                runCatching { unbindService(conn) }
+                return@buildString
+            }
+
             // ---- 1. discover — validated ----------------------------------------
             val snap = requireValid("[1] discover",
                 ContractResponseValidator.validateDiscover(svc.discover())
@@ -221,6 +275,40 @@ class FullLoopProbeActivity : Activity() {
             appendLine("    fingerprint=${obs.environmentFingerprint}")
             appendLine("    hashMatch=${obs.acceptedIntentHash == receipt.acceptedIntentHash}")
 
+            // ---- P10 FAULT: crash_after_apply ----------------------------------
+            // §5B Auto checkpoint crash window: the lease is ACTIVE, the
+            // receipt and intent hash are durable in the probe record, and the
+            // process dies WITHOUT the finally release — deliberately. §5B
+            // then asserts the trusted ledger does not re-count after restart.
+            // The device stays in mock state until the exit/restore step
+            // (rerelease_stuck or qwy-side convergence) — that is the fault.
+            if (fault == "crash_after_apply") {
+                val record = "crash_after_apply leaseId=$leaseId intentHash=$intentHash " +
+                    "at=${System.currentTimeMillis()} marker=$P10_MARKER"
+                java.io.File(applicationContext.filesDir, "debug-collector").apply { mkdirs() }
+                    .resolve("crash-${System.currentTimeMillis()}.log").writeText(record)
+                appendLine("FAULT crash_after_apply: killing process NOW — lease $leaseId left ACTIVE (by design).")
+                appendLine("Probe record written durably; finally-release will NOT run (SIGKILL).")
+                Log.i(TAG, toString())
+                runOnUiThread { view.text = toString() }
+                Thread.sleep(150)
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+
+            // ---- P10 FAULT: hold_lease -----------------------------------------
+            // A stable, durably verifiable ACTIVE window for the qwy-side
+            // collector's arm commands (self_kill / revoke_caller gate on
+            // lease_active). Hold with the lease committed ACTIVE for hold_ms.
+            if (fault == "hold_lease") {
+                appendLine("FAULT hold_lease: holding lease ${leaseId?.take(8)}… ACTIVE for ${holdMs}ms — injection window open.")
+                if (holdMs <= 0) {
+                    appendLine("REFUSED: hold_lease needs --ei hold_ms <N> > 0")
+                    return@buildString
+                }
+                SystemClock.sleep(holdMs)
+                appendLine("FAULT hold_lease: window closed, proceeding to release.")
+            }
+
             // ---- 5. release BEFORE advance (§6.7.4a, validated) -----------------
             // CRITICAL: leaseId is ONLY cleared when the validator confirms
             // releaseComplete=true. An incomplete release leaves the cleanup guard
@@ -228,6 +316,48 @@ class FullLoopProbeActivity : Activity() {
             // and an unproven cleanup must not be followed by advance.
             val rlKey = "rl-${UUID.randomUUID()}"
             val rkKey = "rk-${UUID.randomUUID()}"
+
+            // ---- P10 FAULT: release_receipt_loss --------------------------------
+            // §5B "release receipt 丢失后同键重放不产生第二个 lease/cleanup":
+            // release runs and validates, the receipt is then DISCARDED (the
+            // caller's loss — nothing is persisted client-side), and release is
+            // REPLAYED with the SAME idempotency keys. Idempotency is proven when
+            // the replay returns the SAME receipt (served from the idempotency
+            // store), and qwy-side cmd=dump can further confirm a single cleanup.
+            if (fault == "release_receipt_loss") {
+                val first = requireValid("[5a] release (to be lost)",
+                    ContractResponseValidator.validateRelease(
+                        svc.release(ReleaseRequestV1(receipt.leaseId, rlKey, rkKey)),
+                        receipt.leaseId,
+                    )
+                ) ?: return@buildString
+                appendLine("[5a] release → complete=${first.releaseComplete} " +
+                    "residuals=${first.residualReasonWires} — RECEIPT NOW DISCARDED (simulated loss)")
+                if (!first.releaseComplete) {
+                    appendLine("SAFETY: release incomplete — aborting receipt-loss replay; lease NOT cleared.")
+                    return@buildString
+                }
+                SystemClock.sleep(1_500)
+                val replay = requireValid("[5b] release replay (same keys)",
+                    ContractResponseValidator.validateRelease(
+                        svc.release(ReleaseRequestV1(receipt.leaseId, rlKey, rkKey)),
+                        receipt.leaseId,
+                    )
+                ) ?: return@buildString
+                val same = replay.releaseComplete == first.releaseComplete &&
+                    replay.residualReasonWires == first.residualReasonWires &&
+                    replay.environmentRevision == first.environmentRevision
+                appendLine("[5b] replay → complete=${replay.releaseComplete} " +
+                    "residuals=${replay.residualReasonWires} rev=${replay.environmentRevision}")
+                appendLine(if (same)
+                    "RECEIPT-LOSS-REPLAY: IDEMPOTENT — same receipt for the same keys, no second cleanup observable"
+                else
+                    "RECEIPT-LOSS-REPLAY: DIVERGENT — replay differs from the first receipt; INVESTIGATE")
+                leaseId = null // validated releaseComplete=true on both legs
+                appendLine("FAULT release_receipt_loss complete — skipping advance (fault loop ends here).")
+                return@buildString
+            }
+
             val rel = requireValid("[5] release",
                 ContractResponseValidator.validateRelease(
                     svc.release(ReleaseRequestV1(receipt.leaseId, rlKey, rkKey)),
@@ -390,5 +520,14 @@ class FullLoopProbeActivity : Activity() {
     private companion object {
         const val TAG = "ECFullLoop"
         const val RUN_ID = "probe-run-1"
+
+        /** P10DBG-COLLECTOR-V1 — the probe's fault-mode marker (release-APK scan keys on it). */
+        const val P10_MARKER = "P10DBG-COLLECTOR-V1"
+        const val EXTRA_FAULT = "fault"
+        const val EXTRA_HOLD_MS = "hold_ms"
+        const val EXTRA_LEASE_ID = "lease_id"
+
+        /** Frozen fault names — the per-injection exit/restore matrix freezes against these. */
+        val KNOWN_FAULTS = listOf("hold_lease", "release_receipt_loss", "crash_after_apply", "rerelease_stuck")
     }
 }
