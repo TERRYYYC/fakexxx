@@ -16,7 +16,8 @@ status: freeze-candidate
 本契约只收窄以下既有要求的证据载体，不修改产品行为契约：
 
 - `issue7-g2-acceptance-package.md` §4.1–§4.3：candidate／installed identity、每命令
-  `command + stdout + stderr + exit`、全量 manifest、直接状态优先；
+  `command + stdout + stderr + exit`、全量 manifest、per-block `reportDigest`、辅助截图、
+  直接状态优先与 host path/secret 禁入；
 - `p10-collector-runbook.md` §160–§187：每行 before／after 三件套、`hold_lease`
   的 ACTIVE 窗口、正常 release-before-advance、fresh-state recovery 分流；
 - `g2-p10-device-matrix-2026-08-27-ZY22.md`：空输出、覆盖旧 raw、恢复前置缺失、
@@ -64,10 +65,15 @@ executor 的 shell exit 0、托管命令“成功”或摘要中的 DONE 均不�
 verdict 按以下顺序机械选择，不做多数表决：
 
 1. ADM-01..02、PRE-00..12 或 P8-01..08 任一 FAIL：`WRONG_BUILD / PREFIRE STOP`；不得注入。
-2. 已注入后，任一 required carrier ID FAIL：`INCOMPLETE / NOT PROVEN`；但完整 carrier
-   明确记录的设备不安全事实仍触发恢复或 operator recovery。
-3. 全部 carrier ID PASS 后，EXIT-01/03 的行为谓词 FAIL：`PRODUCT FAIL`。
-4. 只有全部 normal-path required ID PASS，才能进入 `SCOPED ROW2 PASS` review。
+2. 已注入后，先只判每个 applicable required ID 的 **carrier completeness**：路径存在、非空规则、
+   command 绑定、真实 exit、时序输入、identity 输入与 manifest membership。任一 carrier 缺失、
+   为空、截断、未绑定或不可解析，固定为 `INCOMPLETE / NOT PROVEN`；本步不把行为值 false 当
+   carrier 缺失。完整 carrier 记录到设备不安全事实时仍立即进入恢复或 operator recovery。
+3. 全部 applicable carrier-completeness PASS 后，再判 predicate value。先判非行为结构谓词与
+   `EXIT-02` identity：false 时走各 ID 表内 STOP／NOT-PROVEN 路径；随后单独判 `EXIT-01/03`
+   behavior，任一 false 固定为 `PRODUCT FAIL`，不得回退解释成 carrier incomplete。
+4. `EXIT-01/03` behavior PASS 后再判 terminal／after／freeze 谓词；只有全部 normal-path
+   required ID 的 carrier 与 predicate 均 PASS，才能进入 `SCOPED ROW2 PASS` review。
 
 本契约的 normal-path required ID 是 ADM、PRE、P8、SET、BFR、INJ、ID-LEASE、WIN、EXIT、
 TERM-01..03、AFT 与 FRZ 的全部 ID。TERM-04/05、RST-01/02 只在没有正常 terminal report
@@ -77,7 +83,8 @@ ID 只裁定设备能否安全归真，不能把本次改回 PASS。未进入的
 
 ## 3. Evidence directory、execution packet 与每命令六文件
 
-每次获批执行使用一个从未存在过的绝对目录。固定结构：
+每次获批执行使用一个从未存在过的绝对 runtime 目录，但 evidence payload 只保存下列逻辑根与
+相对路径；host 绝对路径不进入 packet、command carrier、report 或 manifest：
 
 ```text
 <evidenceDir>/
@@ -102,16 +109,20 @@ contract 三个 SHA-256。JSON 必须含且只能从该文件读取以下执行�
 ```text
 schemaVersion
 contractGitHead / contractBlobSha / contractSha256
-runnerPath / runnerSha256
-evidenceDir / runId
-candidateHead / candidateTree / checkoutPath / buildType / gradleTasks[] / contractYamlSha256
+runnerRepoRelativePath / runnerSha256
+evidenceDirName / runId
+candidateHead / candidateTree / buildType / gradleTasks[] / contractYamlSha256
+buildEvidence.commandDigest / reportDigest / manifestDigest
+hostEnvironment.os / kernel / java / gradle / androidSdk / adb / sqlite / shasum / bash
 device.serial / model / fingerprint / androidRelease / api / timezone
-packages[bench|auto].applicationId / artifactPath / artifactSha256 / versionCode / versionName /
-                     signerSha256
+packages[bench|auto].applicationId / artifactRepoRelativePath / artifactSha256 / versionCode /
+                     versionName / signerSha256
 p8.expectedModules / p8.expectedScopes / p8.expectedMockAllowPackages
 kyiv.scheduleId / scheduleVersion / currentItemId / expectedBeforeState / expectedAfterState
+roles.executorTaskId|owner / recorderTaskId|owner / validityTaskId|owner
 holdMs=30000 / terminalTimeoutSeconds=70 / terminalReadMaxDelaySeconds=10
-commands[]: seq / checklistIds[] / phase / slug / argv[] / deviceAccess=none|read|write /
+commands[]: seq / checklistIds[] / phase / slug / cwdRef=repo|evidence|query / argv[] /
+            deviceAccess=none|read|write /
             carrier.command|stdout|stderr|exit|startUtc|endUtc
 sealControlPaths[]
 ```
@@ -126,6 +137,8 @@ sealControlPaths[]
 4. `deviceAccess=write` 的第一项必须是 SET-01；此前全部设备命令必须是本契约列出的只读项。
 5. packet 或 runner 变化不改变 Terra 对本契约的 criteria sign，但使 Fable feasibility verdict
    失效。contract 变化使 Terra 与 Fable 两份 verdict 同时失效。
+6. `cwdRef` 只解析为 runner 进程内已有的逻辑根；`argv[]` 与所有 carrier bytes 不得出现 host
+   绝对路径、用户名、home 目录、credential、token、cookie 或本地 secret。
 
 ### 3.2 每命令 carrier
 
@@ -181,7 +194,7 @@ sealControlPaths[]
 | ID | required carrier | 机械 PASS 谓词 | FAIL 动作 |
 |---|---|---|---|
 | ADM-01 | `meta/operator-authorization.json` + provenance | authoredBy=operator；明确只授权一个 Row-2 `hold_lease` run；逐字绑定 contract HEAD/blob、packet SHA-256、runner SHA-256、candidateHead、device serial 与 forbidden scope；messageId/timestamp 非空 | STOP；不得访问设备 |
-| ADM-02 | exact executor task readback | task subject 只覆盖 ADM-01 的一次 run；owner=executor；status=doing；taskId 与 authorization JSON 相等 | STOP；不得访问设备 |
+| ADM-02 | exact role-custody task readback | executor／recorder／validity 三个 taskId 与 owner 均非空且 owner 两两不同；executor task 只覆盖 ADM-01 的一次 run、status=doing；三组 task/owner 与 packet 逐字相等；recorder 不兼任 validity | STOP；不得访问设备 |
 
 ### 4.1 任何 device write 之前
 
@@ -195,10 +208,10 @@ sealControlPaths[]
 | PRE-01 | contract snapshot、Git blob/HEAD 与 SHA-256 六文件 | snapshot 逐字等于 reviewed HEAD 的本文件；完整 HEAD/blob 与 Terra sign 相等；SHA-256 为 64 位小写 hex 且等于 snapshot bytes | STOP |
 | PRE-02 | `meta/runner-sha256.txt` + runner payload | digest 逐字相等；runner 与 Fable feasibility verdict 绑定同一 digest | STOP |
 | PRE-03 | runner 的 `bash -n` 六文件 | exit=0，stderr=0 bytes | STOP |
-| PRE-04 | runner command-surface audit 六文件 | exit=0；runner 外部命令与 packet `commands[]` 逐项相等；全部 `deviceAccess=write` 只落在下述允许集合；forbidden argv 命中数=0 | STOP |
+| PRE-04 | runner command-surface／secret-path audit 六文件 | exit=0；runner 外部命令与 packet `commands[]` 逐项相等；全部 `deviceAccess=write` 只落在下述允许集合；forbidden argv、host absolute path、credential/secret 命中数均=0 | STOP |
 | PRE-05 | `adb devices -l` 六文件 | exit=0；恰好一个 state=`device` 的数据行；serial 为获批 execution packet 中的完整 serial | STOP |
 | PRE-06 | device identity 六文件 | model、fingerprint、Android release、API、timezone 各一条非空；serial 与 PRE-05 相同 | STOP |
-| PRE-07 | host candidate／artifact／contract identity 六文件 | checkout clean；完整 HEAD/tree、buildType、Gradle task、compatibility YAML SHA 与 packet 相等；两包 host artifact bytes 分别作为 >0-byte binary stdout 封存，其 SHA 与 packet 相等 | STOP |
+| PRE-07 | host candidate／build／artifact／contract identity 六文件 | checkout clean；完整 HEAD/tree、buildType、Gradle command 与 task、完整 build exit=0、compatibility YAML SHA、build report/manifest digests、可复现 hostEnvironment versions 均与 packet 相等；两包 host artifact bytes 分别作为 >0-byte binary stdout 封存，其 SHA 与 packet 相等；carrier 不含 host path/secret | STOP |
 | PRE-08 | 两包 `pm path` 六文件 | 每包 exit=0，stdout 恰好一个 `base.apk`；package 分别为 `name.caiyao.fakegps.bench` 与 `com.example.cellrebelauto` | STOP |
 | PRE-09 | 两包 device APK 字节、SHA、package/version/signer 六文件 | device bytes SHA 与对应 host artifact SHA 逐字相等；applicationId、version 与 signer 分别等于 packet；不得只比 version | WRONG_BUILD / STOP |
 | PRE-10 | production package `lastUpdateTime` before 六文件 | exit=0、非空；只供 after 负边界等值比较 | STOP |
@@ -248,16 +261,16 @@ setup 位于 P8 pre-fire 之后、Row 2 before trio 之前。不得沿用 setup 
 |---|---|---|---|
 | INJ-01 | 未过滤 `logcat -v epoch` 连续流六文件 | capture 在 injection 前启动；覆盖 terminal report；不得先执行 `logcat -c/-G`；background PID 的 start/stop/wait 各有独立 command unit 与 exit | STOP / NOT PROVEN |
 | INJ-02 | `FullLoopProbeActivity --es fault hold_lease --el hold_ms 30000` 六文件 | exact component 与 canonical `--el`；launch exit=0；stdout 含 Android launch success | STOP |
-| INJ-03 | 完整 probe report raw + extraction 六文件 | report 非空且包含 discover、preflight、apply、observe、window open、window closed、release、advance、`LOOP COMPLETE` | NOT PROVEN |
-| INJ-04 | probe report negative-token audit 六文件 | parser exit=0；`REFUSED|TIMEOUT|FAILED:|STOP:|DIVERGENT|CLEANUP UNSAFE|RERELEASE FAILED|THREW|LOOP ABORTED|PROVIDER_ERROR_8` 命中数为 0 | STOP |
+| INJ-03 | 完整 probe report raw + extraction 六文件 | report 为一次完整 `ECFullLoop` emission；parser exit=0 并对 discover、preflight、apply、observe、window open/closed、release、advance、completion、`FAILED:`、`LOOP ABORTED` 分别输出显式 boolean；boolean false 不等于 carrier 缺失 | NOT PROVEN |
+| INJ-04 | invalid-procedure token audit 六文件 | parser exit=0；`REFUSED\|TIMEOUT\|STOP:\|DIVERGENT\|CLEANUP UNSAFE\|RERELEASE FAILED\|RERELEASE THREW\|PROVIDER_ERROR_8` 命中数为 0；`FAILED:`/`LOOP ABORTED` 留给 behavior parser，不在本 ID 吞掉 `EXIT-01/03` | STOP |
 | ID-LEASE-01 | apply receipt carrier | 出现一个完整小写 UUID（`8-4-4-4-12`）；不得以 `take(8)`、省略号或前缀承重 | NOT PROVEN |
 | WIN-01 | `raw/window/q-dump.txt` 六文件 | raw >0；恰好一个 blocking lease；state=`ACTIVE`；caller=Auto；leaseId 为完整 UUID | STOP |
 | WIN-02 | `raw/window/dumpsys-location.txt` + count 六文件 | raw >0；parser exit=0；count=`2` | STOP |
 | ID-LEASE-02 | equality report 六文件 | parser exit=0；apply full UUID == WIN-01 full UUID，逐字 36 字符相等；前缀相等返回 FAIL | NOT PROVEN |
 | WIN-03 | window temporal report 六文件 | WIN-01 与 WIN-02 的 start/end 位于 injection command 开始后、terminal report 出现前；WIN-01 自身 state=ACTIVE | NOT PROVEN |
-| EXIT-01 | release report | `[5] release` 明确 `complete=true`、`residuals=[]`，且环境 revision 可解析 | PRODUCT FAIL（其余载体完整时） |
+| EXIT-01 | INJ-03 完整 report raw + release predicate parser 六文件 | parser stdout 非空并明确 boolean；`[5] release` 的值为 `complete=true`、`residuals=[]`，且环境 revision 可解析 | PRODUCT FAIL（全部 applicable carrier 完整且结构谓词 PASS 时） |
 | EXIT-02 | release identity carrier | 同一完整 lease UUID 与 ID-LEASE-01 逐字相等；没有完整 ID 的 release 摘要不承重 | NOT PROVEN |
-| EXIT-03 | advance／completion report | release 行严格早于 advance；只有 release complete 后出现 advance；最后有 `LOOP COMPLETE — EXHAUSTED` | PRODUCT FAIL（其余载体完整时） |
+| EXIT-03 | INJ-03 完整 report raw + advance/completion predicate parser 六文件 | parser stdout 非空并明确 boolean；release 行严格早于 advance；只有 release complete 后出现 advance；最后有 `LOOP COMPLETE — EXHAUSTED` | PRODUCT FAIL（全部 applicable carrier 完整且结构谓词 PASS 时） |
 | EXIT-04 | completion wait 六文件 | timeout 固定 70s；捕获到终态返回 0；无终态返回非零并创建 `FAIL-CLOSED`，不得输出 DONE | STOP |
 
 ## 7. Terminal、恢复分支与 after checklist
@@ -278,7 +291,11 @@ terminal direct-state 在终态 report 后立即采集。`terminal Q-DUMP` 必�
 | AFT-03 | `raw/after/dumpsys-location.txt` + count 六文件 | raw >0；parser exit=0；count=`0` | NOT PROVEN / unsafe |
 | AFT-04 | `derived/after-state.json` | schema 与 BFR-04 相同；attempt rows、trusted total、pairing principal 与 before 的预期 delta 在 execution packet 中逐字段列出 | NOT PROVEN |
 | AFT-05 | production package `lastUpdateTime` after 六文件 | 与 PRE-10 stdout 逐字相等 | 边界违规 / STOP |
-| AFT-06 | terminal-to-after order audit 六文件 | TERM-01/02 完成后依次执行 AFT-01..05；期间没有不属于 AFT 的 device command；全部属于同一 runId/evidenceDir | NOT PROVEN |
+| AFT-07 | auxiliary screenshot command 六文件；stdout canonical path=`raw/after/device-screen.png` | `deviceAccess=read`；exact `adb -s <packet serial> exec-out screencap -p` argv；stdout 是未经转换／裁剪的原始字节；exit=0；stderr 原字节保留；PNG >0 bytes 且 8-byte signature=`89504e470d0a1a0a`；carrier 全部进入 FRZ-01/03 | 缺失即 INCOMPLETE；内容不参与行为裁决 |
+| AFT-06 | terminal-to-after order audit 六文件 | TERM-01/02 完成后依次执行 AFT-01..05 与 AFT-07；期间没有不属于 AFT 的 device command；全部属于同一 runId/evidenceDirName | NOT PROVEN |
+
+AFT-07 只满足 accepted §4.3 的辅助附件保留。截图内容不得替代 log、direct-state、exit 或任一
+predicate，也不得把行为 FAIL 改成 PASS；但 carrier 缺失仍使完整 evidence package 为 INCOMPLETE。
 
 ## 8. Freeze、manifest 与独立复算 checklist
 
@@ -290,10 +307,18 @@ terminal direct-state 在终态 report 后立即采集。`terminal Q-DUMP` 必�
 | FRZ-03 | manifest-generate 六文件；stdout canonical path=`manifest.sha256` | 只列 FRZ-01 的全部 payload；不遗漏合法 0-byte 文件、runner、contract snapshot、packet、非 seal command 六文件、raw、query、derived；条目集合与 FRZ-01 逐字相等 | INCOMPLETE |
 | FRZ-04 | manifest-check 六文件 | `shasum -a 256 -c manifest.sha256` exit=0；stdout 条目数与 FRZ-01 相等；每条均以 `OK` 结束 | INCOMPLETE |
 | FRZ-05 | final-file-set 六文件 | stdout 恰好等于 FRZ-01 payload 集合 ∪ packet `sealControlPaths[]`；零额外文件；所有 seal-control path 不再新增 | INCOMPLETE |
-| FRZ-06 | raw immutability report | recorder 复算前后全部 raw digest 不变；packet/command argv 中 raw WAL 三件套只允许作为 byte-copy 或 hash 输入，SQLite 输入只允许 query 副本 | INCOMPLETE |
+| FRZ-06 | raw immutability／mode report 六文件 | report command exit=0；`raw/` 下全部普通文件相对路径逐项列出且 mode=0444；recorder 复算前后全部 raw digest 不变；packet/command argv 中 raw WAL 三件套只允许作为 byte-copy 或 hash 输入，SQLite 输入只允许 query 副本 | INCOMPLETE |
 | FRZ-07 | manifest-digest 六文件 | stdout 只含 64 位小写 hex 与换行，等于 `manifest.sha256` 文件字节 SHA-256 | INCOMPLETE |
+| FRZ-08 | Row-2 report、reportDigest 与 locator 三组六文件 | canonical report stdout=`derived/row2-report.json`，含 schemaVersion=1、runId、testId=`hold_lease`、candidateHead、outcome、sorted applicableChecklistIds 与逐 ID relative evidenceRefs；digest stdout=`derived/row2-report.digest.txt`，只含 report bytes 的 64 位小写 hex；locator stdout=`derived/row2-report-index.json`，其 reportPath/digest/rawRoots 与前两者逐字相等；三组 carrier 均属于 FRZ-01/03 payload | INCOMPLETE |
 
-seal 顺序固定为 `precreate-audit → top-level ls-A → payload-file-set → manifest-generate →
+`outcome` 只根据 seal 前 ADM..AFT 的事实按 §2 顺序取：`PREFIRE_STOP`、`CARRIER_INCOMPLETE`、
+`STRUCTURAL_STOP`、`PRODUCT_BEHAVIOR_FAIL_OBSERVED`、`RECOVERY_ONLY_NOT_PROVEN`、
+`NORMAL_PATH_EVIDENCE_CANDIDATE`。它是 facts report 的确定性分类，不是 executor 或 recorder
+签发的 evidence-validity verdict；FRZ 失败不回写 report，而由 reviewer 固定判 INCOMPLETE。
+只有独立 validity reviewer 能写 `SCOPED ROW2 PASS`。
+
+FRZ-08 的三组 carrier 在 seal precreate 前完成并成为普通 payload。随后 seal 顺序固定为
+`precreate-audit → top-level ls-A → payload-file-set → manifest-generate →
 manifest-check → manifest-digest → final-file-set`。FRZ-00 的 36 个 path 与 top-level ls carrier
 在 precreate-audit 前一次性建立；top-level ls carrier 在 payload-file-set 前写完并属于 payload。
 这是避免“校验输出又改变被校验集合”的有限闭包。manifest 只 hash payload，不声称 hash 自身
@@ -310,7 +335,8 @@ review 输出不得写回 evidenceDir：
 4. full lease UUID 的 regex、唯一性与 apply/window/release/recovery 等值；
 5. before/window/terminal/after state 与 mock `0→2→0→0`；
 6. 完整 report 正／负 token；
-7. 禁止命令面与 production `lastUpdateTime` 等值。
+7. 禁止命令面、host path/secret scan 与 production `lastUpdateTime` 等值；
+8. Row-2 report schema、relative evidenceRefs、`testId`/candidate/outcome 与 FRZ-08 reportDigest。
 
 任一复算失败，recorder 只能写 `INCOMPLETE / NOT PROVEN` 或明确的 prefire／boundary STOP；
 不得补 raw、改 manifest 或向设备重发命令。
@@ -376,18 +402,23 @@ window state 与 release 的 exact-byte 三方绑定。这个 blocker 必须在�
 
 | 已知失效模式／冻结要求 | 唯一承接 ID |
 |---|---|
+| executor／recorder／validity owner 未互斥，或 recorder 自签 validity | §2、ADM-02 |
 | 每条 probe/gate 缺 command/stdout/stderr/exit；复合命令只留末尾 exit；输出被 suppress | §3.2、PRE-03/04、FRZ-01/03、recorder #2 |
 | P8 在注入后才读取，无法证明 pre-fire 边界 | PRE-12、P8-01..08、recorder #3 |
 | 缺 bench-only appops raw | P8-05 |
 | 缺 contemporaneous candidate／device-count raw；只比 version | PRE-05..09 |
 | WAL/SHM raw 被 SQLite 打开或只有 query copy | P8-01/02、FRZ-06 |
+| raw 写完后未只读封存 | FRZ-06 |
 | before A-STATE 0 bytes、旧 log block 冒充 fresh report | §3.2-8/9、BFR-02、AFT-02 |
 | setup 发生在 before trio 之后 | BFR-05 |
 | apply/release 只保留 lease 前 8 位；用前缀绑定 window full UUID | ID-LEASE-01/02、EXIT-02、recorder #4 |
 | 正常 release 后误调 `rerelease_stuck` 制造假 oracle | TERM-01..05、RST-01/02 |
 | 行为摘要代替 before/window/terminal/after raw | BFR、WIN、TERM、AFT 全部 ID |
+| 缺 per-block canonical `reportDigest` 或 report/raw 定位关系 | FRZ-08、recorder #8 |
+| 缺 §4.3 辅助截图，或让截图单独承重 | AFT-07、§7 辅助边界 |
 | 0-byte transcript、无 terminal 仍输出 DONE、异步 reviewer 才追停 | INJ-03/04、EXIT-04 |
-| 复用目录、覆盖 raw、manifest 后回填、manifest 通过但文件集不完整 | §3、FRZ-00..07 |
+| host path/secret 进入 build evidence | §3.1-6、PRE-04/07、recorder #7 |
+| 复用目录、覆盖 raw、manifest 后回填、manifest 通过但文件集不完整 | §3、FRZ-00..08 |
 | 未签 criteria/feasibility 或沿用已消费授权直接上机 | ADM-01/02、§9 |
 
 Terra criteria sign 后，本表与其引用的 checklist 是本轮 evidence-sufficiency 的完整集合。执行后
