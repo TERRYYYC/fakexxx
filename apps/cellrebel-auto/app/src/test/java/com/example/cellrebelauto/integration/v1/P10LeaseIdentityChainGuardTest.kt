@@ -92,6 +92,12 @@ class P10LeaseIdentityChainGuardTest {
             // byte-for-byte like every other segment, and this tag must be
             // guarded or the omission false-greens.
             "aborting receipt-loss replay" to listOf("receipt.leaseId"),
+            // R3 (gpt55 P1): the durable crash record is a runbook load-bearing
+            // carrier (bound to post-kill Q-DUMP's same lease — screen/logcat
+            // do not carry alone). Both the record write and the firing line
+            // must be guarded, or a future deletion of leaseId false-greens.
+            "crash_after_apply leaseId=" to listOf("leaseId"),
+            "FAULT crash_after_apply: killing" to listOf("leaseId"),
             "RERELEASE: lease" to listOf("stuck"),
             "RERELEASE FAILED" to listOf("stuck"),
             "RERELEASE THREW" to listOf("stuck"),
@@ -200,6 +206,26 @@ class P10LeaseIdentityChainGuardTest {
             false,
             bound,
         )
+    }
+
+    /**
+     * R3 self-check (gpt55 P1): deleting the lease id from the durable crash
+     * record must NOT count as bound — the runbook binds that record to the
+     * post-kill Q-DUMP lease, so an id-less record is evidence that cannot
+     * bind, and the guard must catch its deletion.
+     */
+    @Test
+    fun mutationCrashRecordWithoutIdIsDetected() {
+        val preFix = """val record = "crash_after_apply intentHash=" + intentHash + " marker=x""""
+        val bound = preFix.contains("leaseId") && !Regex("""\.take\(""").containsMatchIn(preFix)
+        assertEquals(
+            "a durable crash record without leaseId must NOT count as bound",
+            false,
+            bound,
+        )
+        val fixed = """val record = "crash_after_apply leaseId=" + leaseId + " intentHash=x""""
+        val boundFixed = fixed.contains("leaseId") && !Regex("""\.take\(""").containsMatchIn(fixed)
+        assertEquals("the fixed durable crash record must count as bound", true, boundFixed)
     }
 
     /**
