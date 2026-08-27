@@ -305,7 +305,7 @@ class FullLoopProbeActivity : Activity() {
             if (fault == "hold_lease") {
                 appendLine("FAULT hold_lease: holding lease $leaseId ACTIVE for ${holdMs}ms — injection window open.")
                 if (holdMs <= 0) {
-                    appendLine("REFUSED: hold_lease needs --ei hold_ms <N> > 0")
+                    appendLine("REFUSED: hold_lease needs --el hold_ms <N> > 0 (lease $leaseId still held; finally-cleanup will attempt release)")
                     return@buildString
                 }
                 SystemClock.sleep(holdMs)
@@ -337,7 +337,7 @@ class FullLoopProbeActivity : Activity() {
                 appendLine("[5a] release → lease=${receipt.leaseId} complete=${first.releaseComplete} " +
                     "residuals=${first.residualReasonWires} — RECEIPT NOW DISCARDED (simulated loss)")
                 if (!first.releaseComplete) {
-                    appendLine("SAFETY: release incomplete — aborting receipt-loss replay; lease NOT cleared.")
+                    appendLine("SAFETY: lease ${receipt.leaseId} NOT cleared — release incomplete, aborting receipt-loss replay")
                     return@buildString
                 }
                 SystemClock.sleep(1_500)

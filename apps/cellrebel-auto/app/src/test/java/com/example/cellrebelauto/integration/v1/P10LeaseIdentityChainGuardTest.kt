@@ -87,6 +87,11 @@ class P10LeaseIdentityChainGuardTest {
             "[5a] release →" to listOf("receipt.leaseId"),
             "[5b] replay →" to listOf("receipt.leaseId"),
             "NOT cleared — finally cleanup" to listOf("receipt.leaseId"),
+            // R2 (gpt55 P1): the receipt-loss early-abort SAFETY verdict is a
+            // terminal segment in its own right — it must bind the lease
+            // byte-for-byte like every other segment, and this tag must be
+            // guarded or the omission false-greens.
+            "aborting receipt-loss replay" to listOf("receipt.leaseId"),
             "RERELEASE: lease" to listOf("stuck"),
             "RERELEASE FAILED" to listOf("stuck"),
             "RERELEASE THREW" to listOf("stuck"),
@@ -194,6 +199,36 @@ class P10LeaseIdentityChainGuardTest {
             "a segment line without the lease id must NOT count as bound",
             false,
             bound,
+        )
+    }
+
+    /**
+     * R2 self-check (gpt55 P1): the receipt-loss early-abort SAFETY verdict
+     * without an id is EXACTLY the mutation shape the guard exists to kill —
+     * the R1 guard green-lit it because the tag was missing from the map.
+     * Pin the detector so the tag can never quietly disappear again.
+     */
+    @Test
+    fun mutationReceiptLossSafetyWithoutIdIsDetected() {
+        // The R1 (pre-fix) shape: terminal verdict, no lease identity.
+        val preFix = """appendLine("SAFETY: release incomplete — aborting receipt-loss replay; lease NOT cleared.")"""
+        val boundPreFix = preFix.contains("receipt.leaseId") &&
+            !Regex("""\.take\(""").containsMatchIn(preFix)
+        assertEquals(
+            "the pre-fix receipt-loss SAFETY line must NOT count as bound (this " +
+                "is the false-green the R2 finding proved)",
+            false,
+            boundPreFix,
+        )
+
+        // The fixed shape: full id, no truncation — must count as bound.
+        val fixed = """appendLine("SAFETY: lease ${'$'}{receipt.leaseId} NOT cleared — release incomplete, aborting receipt-loss replay")"""
+        val boundFixed = fixed.contains("receipt.leaseId") &&
+            !Regex("""\.take\(""").containsMatchIn(fixed)
+        assertEquals(
+            "the fixed receipt-loss SAFETY line must count as bound",
+            true,
+            boundFixed,
         )
     }
 }
