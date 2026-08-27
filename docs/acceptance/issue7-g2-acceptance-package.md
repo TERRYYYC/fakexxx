@@ -155,7 +155,12 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
    `test-hook.sh --acceptance-readiness` 以只读双侧证明（无特权启动被 bench signature 权限拒
    + 无 payload root 启动命中 probe 自身 fail-fast abort 签名、负断言不进事务）在 §G 事务外
    验证 acceptance component；selftest `scripts/selftest-test-hook-acceptance-readiness.sh`
-   负矩阵锁死。**Hook 块仍为 `NOT_READY`**——上述均为 device-free 证明，不满足本条要求的
+   负矩阵锁死。**证据捕获已补**（PR #49，`85875b0`，Terra validity verdict「no executed
+   command lines are frozen」整类修复）：readiness 成功路径冻结实际执行的 host 命令行
+   （`READINESS_CMD`，stage 2 含 `adb shell "su -c '…'"` 真实形状）+ Stage 1 拒绝原文与
+   Stage 2 原始输出的有界摘录（patterns 与 grep regex 逐字一致并随 counts 行发射，可审计
+   复跑；设备噪声行不进证据流）。历史证据不回填；本修复为 S2-B 全新目录全覆盖重跑的前置。
+   **Hook 块仍为 `NOT_READY`**——上述均为 device-free 证明，不满足本条要求的
    「canonical runner 在真机上证明启动的正是实装 `.bench` acceptance component」；真机
    exact-build 执行（§5，S1 场次「后续门」）仍是放行前置。`snapshot_prefs` 的 `/data/misc`
    无包过滤扫描为已知残留（两包并存时 loud fail），pin 需真机路径验证。
