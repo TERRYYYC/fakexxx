@@ -208,7 +208,8 @@ class P10CollectorSurfaceGuardTest {
         )
         assertTrue(
             "FullLoopProbeActivity must read hold_ms via ExtraCoerce.longOf — the runbook " +
-                "example --ei hold_ms 30000 stores an Integer",
+                "example --el hold_ms 30000 is canonical; an --ei (Integer) " +
+                "typo must still coerce, not silently default",
             probe.contains("ExtraCoerce.longOf("),
         )
     }
