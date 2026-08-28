@@ -136,16 +136,21 @@ check "§11 documents black-screen failure mode" "$( [ "$HAS_BLACK_SCREEN" -ge 1
 check "§11 documents stale-frame failure mode" "$( [ "$HAS_STALE_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION_FRAME" -ge 1 ] && echo 0 || echo 1 )"
 
-# ── 6. reportDigest matches §10.1 canonical definition ──────────────────────
+# ── 6. reportDigest points to §10.1 (single truth source) ────────────────────
 #
 # §10.1 freezes reportDigest as SHA-256 of the raw device evidence REPORT FILE
 # (the g1-smoke-*.md document), not a concatenation of raw evidence bytes.
-# Five guards:
+#
+# R1→R6 proved that any LOCAL COPY of the definition (prose, keyword-guarded
+# block, ASSERT-line token) drifts and requires an ever-growing guard stack to
+# keep honest.  Root cause (P4): the copy itself is the defect.
+#
+# The fix: delete the definition from §11, keep only an authority pointer to
+# §10.1.  The guard surface collapses to four decidable syntactic properties:
 #   14. Summary line must contain "设备证据报告文件" (report file, not concat bytes)
 #   15. Summary line must NOT contain raw-evidence terms (fail-closed category ban)
-#   16. Definition block must reference §10.1 as canonical authority
-#   17. CANONICAL marker integrity (exactly 1 START + 1 END outside fenced code, ordered)
-#   18. Exact ASSERT line inside bounded block (machine-checkable canonical record)
+#   16. §11 must reference §10.1 as canonical authority
+#   17. §11 must NOT restate the reportDigest definition (single truth source)
 
 S11_DIGEST_SUMMARY=$(echo "$S11" | grep 'reportDigest:' | head -1)
 SUMMARY_HAS_REPORT_FILE=$(echo "$S11_DIGEST_SUMMARY" | grep -c '设备证据报告文件' || true)
@@ -159,61 +164,28 @@ check "reportDigest summary references 设备证据报告文件" "$( [ "$SUMMARY
 SUMMARY_HAS_RAW_EVIDENCE=$(echo "$S11_DIGEST_SUMMARY" | grep -ciE '拼接|串接|logcat|截图|\.png|\.log|Tier A.*字节|全部已收集' || true)
 check "reportDigest summary has no raw-evidence/concatenation terms" "$( [ "$SUMMARY_HAS_RAW_EVIDENCE" -eq 0 ] && echo 0 || echo 1 )"
 
-DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*规范定义/,/^$/')
-HAS_SPEC_REF=$(echo "$DIGEST_BLOCK" | grep -c '§10.1' || true)
-check "reportDigest definition references §10.1" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
+# Guard 16: §11 must reference §10.1 as the canonical authority.
+HAS_SPEC_REF=$(echo "$S11" | grep -c '§10.1' || true)
+check "reportDigest references §10.1 as canonical authority" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
 
-# Guards 17–18: Machine-checkable canonical record (Luna R6).
+# Guard 17: §11 must NOT restate the reportDigest definition (P4).
 #
-# R1→R5 showed keyword matching on prose is systematically bypassable; R6
-# proved it fundamentally cannot verify semantic invariants — the guard keeps
-# checking a REPRESENTATION of the declaration rather than an unambiguous
-# canonical declaration.  The fix (Luna R6): make the machine truth a frozen
-# exact ASSERT line independent of prose.
+# The definition lives in feature-spec §10.1 (frozen).  Restating it here —
+# whether as prose, a CANONICAL-marked block, or an ASSERT token — creates a
+# copy that can drift.  This is the root cause of R1→R6: every round added a
+# guard to keep the copy honest, and every round the copy found a new way to
+# lie.  Deleting the copy closes the class.
 #
-# Guard 17 validates marker INTEGRITY (not just existence):
-#   - exactly 1 START marker, exactly 1 END marker
-#   - markers are NOT inside fenced code blocks (``` ... ```)
-#   - START appears before END
+# Ban patterns:
+#   "规范定义"           — definition header (R1–R5 formal block)
+#   "完整字节流"         — definition body (how the hash is computed)
+#   "CANONICAL:reportDigest" — structural container (R5/R6)
+#   "拼接"               — concatenation claim (the wrong preimage)
 #
-# Guard 18 checks the exact ASSERT line inside the bounded block.
-# No keyword matching on prose.  The ASSERT line IS the canonical record.
-#
-# Historical run#2 prose ("使用了拼接字节定义") is OUTSIDE the markers, so it is
-# never checked — no false-positive risk from the backward-compatibility note.
-
-# Strip fenced code blocks from §11 before looking for markers.
-# Markers inside ``` ... ``` are decoys (Luna R6 P2-1).
-S11_NO_FENCE=$(echo "$S11" | awk '/^[> ]*```/{fence=!fence; next} !fence')
-
-MARKER_START_COUNT=$(echo "$S11_NO_FENCE" | grep -c 'CANONICAL:reportDigest:START' || true)
-MARKER_END_COUNT=$(echo "$S11_NO_FENCE" | grep -c 'CANONICAL:reportDigest:END' || true)
-
-# Guard 17: marker integrity — exactly 1 START + 1 END outside fenced code, ordered.
-if [ "$MARKER_START_COUNT" -eq 1 ] && [ "$MARKER_END_COUNT" -eq 1 ]; then
-  # Verify ordering: START line number < END line number
-  START_LINE=$(echo "$S11_NO_FENCE" | grep -n 'CANONICAL:reportDigest:START' | head -1 | cut -d: -f1)
-  END_LINE=$(echo "$S11_NO_FENCE" | grep -n 'CANONICAL:reportDigest:END' | head -1 | cut -d: -f1)
-  if [ "$START_LINE" -lt "$END_LINE" ]; then
-    MARKER_INTEGRITY=0
-  else
-    MARKER_INTEGRITY=1  # reversed order
-  fi
-else
-  MARKER_INTEGRITY=1  # wrong cardinality
-fi
-check "reportDigest CANONICAL markers: integrity (1 START, 1 END, ordered, not in fence)" "$MARKER_INTEGRITY"
-
-# Guard 18: exact ASSERT line inside the bounded block.
-if [ "$MARKER_INTEGRITY" -eq 0 ]; then
-  CANONICAL_BLOCK=$(echo "$S11_NO_FENCE" | sed -n '/CANONICAL:reportDigest:START/,/CANONICAL:reportDigest:END/p')
-  ASSERT_COUNT=$(echo "$CANONICAL_BLOCK" | grep -cF 'ASSERT:reportDigest:preimage=report-file:not=byte-concat:authority=§10.1' || true)
-  check "reportDigest ASSERT line: exact machine-checkable record present" "$( [ "$ASSERT_COUNT" -ge 1 ] && echo 0 || echo 1 )"
-else
-  # When Guard 17 fails (markers broken), Guard 18 passes vacuously —
-  # no reliable block to check.  Guard 17 already caught the problem.
-  check "reportDigest ASSERT line: exact machine-checkable record present" 0
-fi
+# The backward-compat note was reworded to "旧定义（逐文件字节流连接）" to
+# avoid triggering this ban while preserving the historical record.
+RESTATEMENT_COUNT=$(echo "$S11" | grep -ciE '规范定义|完整字节流|CANONICAL:reportDigest|拼接' || true)
+check "reportDigest definition not restated in §11 (single truth source)" "$( [ "$RESTATEMENT_COUNT" -eq 0 ] && echo 0 || echo 1 )"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

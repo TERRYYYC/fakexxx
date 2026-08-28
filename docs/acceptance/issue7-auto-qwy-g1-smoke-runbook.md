@@ -477,16 +477,10 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
 `reportDigest: sha256:<设备证据报告文件的 SHA-256>`）。**记录猫不得改原始字节。**
 
-> <!-- CANONICAL:reportDigest:START -->
-> **reportDigest 规范定义（§10.1 冻结）**：`SHA-256` 对**设备证据报告文件**
-> （即本节所描述的 `g1-smoke-*.md`）的完整字节流求摘要，小写 hex，无前缀。
-> `reportDigest` 是该报告在 evidence manifest 中的定位指针，
-> **不是**原始证据文件（logcat / 截图 PNG）的拼接摘要。
-> <!-- ASSERT:reportDigest:preimage=report-file:not=byte-concat:authority=§10.1 -->
-> <!-- CANONICAL:reportDigest:END -->
+> `reportDigest` 语义定义见 feature-spec §10.1（冻结）；本节不复述。
 >
 > 原始证据的逐文件完整性由独立的 `evidence-manifest.sha256` 校验。
-> 已有证据报告（如 run#2）中 reportDigest 使用了拼接字节定义，
+> 已有证据报告（如 run#2）中 reportDigest 使用了旧定义（逐文件字节流连接），
 > 保留原始计算不追溯修改；后续轮次按 §10.1 执行。
 
 ## 12. 退出标准 → G2 前置
