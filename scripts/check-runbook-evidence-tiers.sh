@@ -164,15 +164,24 @@ check "reportDigest summary references 设备证据报告文件" "$( [ "$SUMMARY
 SUMMARY_HAS_RAW_EVIDENCE=$(echo "$S11_DIGEST_SUMMARY" | grep -ciE '拼接|串接|logcat|截图|\.png|\.log|Tier A.*字节|全部已收集' || true)
 check "reportDigest summary has no raw-evidence/concatenation terms" "$( [ "$SUMMARY_HAS_RAW_EVIDENCE" -eq 0 ] && echo 0 || echo 1 )"
 
-# Guard 16: §11 must contain the exact authority pointer to §10.1.
+# Guard 16: §11 must contain the exact authority pointer to §10.1 in
+# operative prose (not inside a fenced code block).
 #
 # The pointer line is the entire value proposition of the P4 subtraction:
 # §11 does not restate the definition, it points to the frozen original.
 # Checking for any '§10.1' is insufficient — the backward-compat note also
 # mentions §10.1, so deleting the pointer leaves the guard green (Finding E,
 # opus5).  Fix: assert the exact pointer phrase.
-HAS_POINTER=$(echo "$S11" | grep -cF '语义定义见 feature-spec §10.1' || true)
-check "reportDigest authority pointer to §10.1 present" "$( [ "$HAS_POINTER" -ge 1 ] && echo 0 || echo 1 )"
+#
+# R7 (glm52) proved that a decoy pointer inside a fenced Markdown code block
+# (```…```) passes raw grep.  Fix: strip fenced code blocks before checking.
+# The awk pattern handles both plain ``` and blockquote-prefixed > ```.
+S11_PROSE=$(echo "$S11" | awk '
+  /^[> ]*```/ || /^[> ]*~~~/ { infence = !infence; next }
+  !infence { print }
+')
+HAS_POINTER=$(echo "$S11_PROSE" | grep -cF '语义定义见 feature-spec §10.1' || true)
+check "reportDigest authority pointer to §10.1 present (prose only, not fenced code)" "$( [ "$HAS_POINTER" -ge 1 ] && echo 0 || echo 1 )"
 
 # Guard 17: §11 should not restate the reportDigest definition (P4).
 #

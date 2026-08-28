@@ -26,6 +26,7 @@
 #   M12  Restate reportDigest definition in §11 → restatement ban (G17, P4)
 #   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (G15)
 #   M14  Delete authority pointer line (Finding E) → exact pointer guard (G16)
+#   M15  Fenced-code decoy pointer (R7) → prose-only pointer guard (G16)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -253,6 +254,28 @@ sb=$(setup_sandbox "m14-delete-pointer")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak '/语义定义见 feature-spec §10.1/d' "$rb"
 assert_fail "M14 deleting authority pointer is caught (G16, Finding E)" "$sb"
+
+# ── M15: Fenced-code decoy pointer (R7, glm52) ──────────────────────────────
+#
+# R7 proved that the exact pointer phrase inside a fenced Markdown code block
+# (```…```) satisfies raw grep -cF while the operative prose pointer is absent.
+# G16 now strips fenced code blocks before checking.  This mutation deletes the
+# real pointer and inserts the same phrase inside a fenced code block — the
+# checker must see through the decoy and fail.
+
+sb=$(setup_sandbox "m15-fenced-code-decoy")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+# Delete the real pointer and replace with a fenced-code decoy containing
+# the exact same phrase — the prose pointer is gone, only the code block remains.
+t = t.replace(
+    '> \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。',
+    '> \`\`\`\n> 语义定义见 feature-spec §10.1\n> \`\`\`'
+)
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M15 fenced-code decoy pointer is caught (G16, R7)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
