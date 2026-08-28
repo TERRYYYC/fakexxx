@@ -308,6 +308,15 @@ cmd_validate() {
     "$ENV_BASE" "$STDIN_CLOSED"
   [[ $pkt == $ee_pat ]] \
     || { printf 'PRE-00 FAIL: executionEnvelope env/stdin policy literals\n' >&2; fails=1; }
+  # frozen timing literals (contract §3.1: holdMs=30000 / terminalTimeoutSeconds=70 /
+  # terminalReadMaxDelaySeconds=10). Presence is not value: the review's
+  # 10→999 mutant passed — the same "field exists, contract wrong" disease as
+  # the false greens this whole plane exists to kill. One contiguous anchored
+  # literal (the builder emits the three adjacently, immediately
+  # before "commands":).
+  local timing_pat='"holdMs":30000,"terminalTimeoutSeconds":70,"terminalReadMaxDelaySeconds":10,"commands":['
+  [[ $pkt == *"$timing_pat"* ]] \
+    || { printf 'PRE-00 FAIL: frozen timing literals (holdMs=30000, terminalTimeoutSeconds=70, terminalReadMaxDelaySeconds=10)\n' >&2; fails=1; }
   # access-label scan FIRST (§3.1-4: the packet schema must not contain any)
   local key
   for key in deviceAccess declaredAccess accessClass deviceAccessClass declaredClass; do

@@ -32,11 +32,11 @@ dex 扫描守卫红线（同一 PR）：把 `FullLoopProbeActivity`/`HandshakePr
 | ③ executable manifest | `row2-packet.sh manifest-freeze`：经 runner 源内冻结 LOCATION 表解析 canonical path，真实 SHA-256 + stat mode 落 `meta/executable-manifest.json`；`executable-manifest.template.json` 为评审模板 | §3.1-8、PRE-02 |
 | ④ execution packet | `row2-packet.sh build/validate`：canonical key-order 构建器（carrier stem 机械派生）+ PRE-00 校验器（schemaVersion、top-level key 序列精确游走=无未知/乱序键、seq 连续唯一、carrier 路径唯一、envelope 完整性、**零 access-label 字段**、顶层 policy 字面量） | §3.1、§3.1-4、PRE-00 |
 
-生产 gate `check-row2-exec.sh` 九段全绿；`selftest-row2-exec.sh` 17 用例（含调度点名的
+生产 gate `check-row2-exec.sh` 九段全绿；`selftest-row2-exec.sh` 19 用例（含调度点名的
 三个 mutation：逃逸命令被放行 / 四元组缺失报成功 / packet-carrier 不匹配继续，各配 M-*
-load-bearing 证明；R7/M6+M8 覆盖 gpt55 review 的 F3/F1）；CI 新增 `row2-exec` job。dex 守卫扩展见提交 `9085151`。
+load-bearing 证明；R7/M6+M8 覆盖 gpt55 review 的 F3/F1；R8/M9 覆盖复审 F4 时序字面量）；CI 新增 `row2-exec` job。dex 守卫扩展见提交 `9085151`。
 
-## 冻结解释账本（I1–I11）
+## 冻结解释账本（I1–I13）
 
 契约把 grammar 以文本冻结、本 PR 以代码冻结。实现与文本的每一处解释差都在 payload
 头部逐条声明；**发现分歧按契约缺陷登记，不允许悄悄放宽本文件**：
@@ -52,6 +52,14 @@ load-bearing 证明；R7/M6+M8 覆盖 gpt55 review 的 F3/F1）；CI 新增 `row
   正常路径 ≤12 + 首写必须 `ADB-WRITE-PREPARE` + RST-01 仅在 TERM-04 后（Sol gate-B 冻结
   的机械化）；clean-env 子 shell 中 bash 自身注入的 `_` 是 execve 惯例 artifact（值为被
   执行程序的 canonical path，非继承数据），sentinel 证明其余键只余 LC_ALL/LANG/TZ。
+- **I12**（gpt55 R1 review F1 引入）：repo-payload command unit（argv[0]=bash token、
+  executableId=row2-*）由 launcher 经 manifest 冻结的 `interpreterId` 执行——canonical
+  interpreter 路径作 child argv[0]，canonical payload 路径作第一个参数（envelope 里的
+  repo-rel token 是 label，由 locationId 解析，不按 cwd 解析）；interpreter 与 payload
+  双双过 verify_executable。
+- **I13**（gpt55 R1 复审 F4 引入）：§3.1 钉死的三个时序字面量 `holdMs=30000 /
+  terminalTimeoutSeconds=70 / terminalReadMaxDelaySeconds=10` 由 PRE-00 按连续字面量
+  校验——"字段存在"不等于"值正确"（10→999 mutant 曾通过，同一假绿病根）。
 
 ## 未做 / 边界遵守
 

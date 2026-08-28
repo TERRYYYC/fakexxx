@@ -396,6 +396,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# M9/R8: frozen timing literals (gpt55 R1 re-review F4: 10→999 passed —
+# presence was checked, value was not; contract §3.1 pins all three).
+# ---------------------------------------------------------------------------
+T9="$WORK/m9-tree"
+copy_payload_tree "$T9"
+# disable ONLY the timing-literal arm (the check is a || guard — make its
+# test vacuously true so the failure arm can never fire)
+sed 's/\[\[ $pkt == \*"$timing_pat"\* \]\]/true/' "$PACKET" > "$T9/row2-packet.sh"
+EV9="$WORK/m9-ev"
+if build_green_session "$EV9"; then
+  sed 's/"terminalReadMaxDelaySeconds":10/"terminalReadMaxDelaySeconds":999/' "$EV9/meta/execution-packet.json" > "$WORK/mut9.json"
+  mkdir -p "$WORK/m9-mut/meta"
+  cp "$WORK/mut9.json" "$WORK/m9-mut/meta/execution-packet.json"
+  if "$PACKET" validate "$WORK/m9-mut" >/dev/null 2>&1; then
+    report fail "R8 timing-value mutant rejected" "999 ACCEPTED (contract timing not enforced)"
+  else
+    report ok "R8 timing-value mutant rejected with frozen-timing finding"
+  fi
+  if "$T9/row2-packet.sh" validate "$WORK/m9-mut" >/dev/null 2>&1; then
+    report ok "M9 timing-literal arm load-bearing (disabled → 999 passes)"
+  else
+    report fail "M9 timing-literal arm load-bearing" "disabled arm still rejected 999"
+  fi
+else
+  report fail "M9 setup" "green session failed"
+fi
+
+# ---------------------------------------------------------------------------
 # finally: the PRODUCTION gate must be green right now (selftest does not
 # leave the tree dirty and the guards hold on the real payloads)
 # ---------------------------------------------------------------------------

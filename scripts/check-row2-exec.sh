@@ -403,6 +403,7 @@ section_packet_schema() {
         'access-label|s/,"commands":/,"deviceAccess":"HOST-NONE","commands":/|access-label field'
         'dup-seq|s/"seq":"002"/"seq":"001"/|seq not contiguous: got 001, expected 002'
         'seq-gap|s/"seq":"003"/"seq":"013"/|seq not contiguous: got 013, expected 003'
+        'timing-value|s/"terminalReadMaxDelaySeconds":10/"terminalReadMaxDelaySeconds":999/|frozen timing literals'
         'missing-key|s/,"buildType":"debug"//|required key missing: buildType'
         'bad-env-policy|s/ROW2-CLEAN-ENV-V1","stdinPolicyId":"ROW2-STDIN-CLOSED-V1","argv/ROW2-DIRTY-ENV-V9","stdinPolicyId":"ROW2-STDIN-CLOSED-V1","argv/|envPolicyId'
         'dup-carrier|s/meta\/002-host-cat.command.txt/meta\/001-fileset-sort.command.txt/|carrier path reused'
