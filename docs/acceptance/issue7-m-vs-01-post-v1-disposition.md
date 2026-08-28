@@ -3,35 +3,52 @@ feature_ids: [1, 7]
 topics: [decision, acceptance, g2, version-skew, task-9, device-gate]
 doc_kind: acceptance-disposition
 created: 2026-08-29
-status: proposed
+status: accepted
 decision_id: G2-SKEW-POST-V1-DISPOSITION
+operator_decision_id: G2-SKEW-DISPOSITION
 operator_direction_ref: 0001787952746397-000121-df185e79
-acceptance: pending
+operator_acceptance_ref: 0001787953746336-000156-46dbd2e1
+accepted_at: 2026-08-28T21:49Z
+acceptance: accepted
 ---
 
-# Proposed canonical disposition — M-VS-01 / Task 9 version skew is post-v1
+# Canonical disposition — M-VS-01 / Task 9 version skew is post-v1
 
 ## Status and authority
 
-This is a **proposed** canonical scope/ledger disposition. It is not execution
-evidence, a device lease, a G2 release, or an accepted disposition.
+This is an **accepted** canonical scope/ledger disposition. It is not execution
+evidence, a device lease, or a G2 release.
 
 The operator directly replied `b` in
 `0001787952746397-000121-df185e79` after being presented with the two scope
-choices. That reply selects the **post-v1** direction only. It does **not**
-accept this document; this document remains `proposed` until a separate,
-explicit operator acceptance records its path and decision ID.
+choices. That reply selected the **post-v1** direction. The separate operator
+acceptance below then accepted this exact document path.
 
-## Disposition proposed for acceptance
+### Operator acceptance record
 
-On acceptance, remove `M-VS-01` and its Task 9 cross-version journey from the
-**current G2 gate only**. Keep the canonical `M-VS-01` definition and the
+Message `0001787953746336-000156-46dbd2e1` at `2026-08-28 21:49 UTC` reads
+verbatim:
+
+```text
+ACCEPT G2-SKEW-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-vs-01-post-v1-disposition.md; SCOPE=POST_V1; V2_GATE=REQUIRED
+```
+
+The operator's `G2-SKEW-DISPOSITION` is retained in
+`operator_decision_id`; this document's canonical `decision_id` remains
+`G2-SKEW-POST-V1-DISPOSITION`. They are not silently normalized. The exact
+`DOCUMENT=` path in the acceptance binds the operator's shorter identifier to
+this document.
+
+## Accepted disposition
+
+Remove `M-VS-01` and its Task 9 cross-version journey from the **current G2
+gate only**. Keep the canonical `M-VS-01` definition and the
 device-matrix registration intact: this is a scope deferral, not a deletion,
 PASS result, or claim that version skew is unimportant.
 
 The resulting G2 scope is a single real protocol-v1 world. It makes no claim
-that mixed protocol versions are compatible. Until this document is accepted,
-the G2 package §7 condition remains unsatisfied:
+that mixed protocol versions are compatible. The G2 package §7 binds its
+`canonical disposition 已接受` term to this exact accepted document:
 
 ```text
 SKEW=POST_V1 ∧ canonical disposition accepted
@@ -83,21 +100,14 @@ release gate rather than discarding them.
 
 ## Boundaries
 
-- This proposal changes neither the canonical spec nor the device matrix.
+- This disposition changes neither the canonical spec nor the device matrix.
 - It does not merge or undraft any PR, authorize a device command, consume a
   device lease, or change Issue #1's volatile G2 state.
 - It does not satisfy any other G2 prerequisite, including the Hook block,
   exact-build evidence, DUAL verdict, or operator release authority.
 
-## Acceptance and follow-through
+## Acceptance follow-through
 
-An operator acceptance must identify this exact path and set its status to
-`accepted`, for example:
-
-```text
-ACCEPT G2-SKEW-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-vs-01-post-v1-disposition.md; SCOPE=POST_V1; V2_GATE=REQUIRED
-```
-
-Only after that acceptance may a follow-up change link this disposition from
-the G2 package and the live G2 state. That follow-up must preserve the
-non-bypass v2 gate above and must not fabricate a deferred device-ledger row.
+The G2 package §7 now links this accepted disposition as the decidable
+`SKEW=POST_V1` branch. That link preserves the non-bypass v2 gate above and
+does not authorize a fabricated or deferred device-ledger row.

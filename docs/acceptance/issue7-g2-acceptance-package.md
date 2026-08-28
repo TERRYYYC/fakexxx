@@ -335,6 +335,25 @@ hard(A,B,C,E,G) 全 PASS
 ∧ 无 unresolved safety finding
 ```
 
+### §7 `SKEW=POST_V1` canonical disposition binding
+
+The `canonical disposition 已接受` term in the preceding conjunct is bound to
+[`issue7-m-vs-01-post-v1-disposition.md`](issue7-m-vs-01-post-v1-disposition.md).
+Its operator acceptance is message `0001787953746336-000156-46dbd2e1` at
+`2026-08-28 21:49 UTC`:
+
+```text
+ACCEPT G2-SKEW-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-vs-01-post-v1-disposition.md; SCOPE=POST_V1; V2_GATE=REQUIRED
+```
+
+The operator used `G2-SKEW-DISPOSITION`; the document retains the canonical
+identifier `G2-SKEW-POST-V1-DISPOSITION` and records the shorter operator
+identifier rather than silently rewriting either value. This accepted binding
+removes only `M-VS-01` / Task 9 from the **current G2** skew branch. It does
+not alter the device matrix or evidence ledger, and `V2_GATE=REQUIRED` keeps
+the document's two-direction old/new artifact proof as a non-bypass gate
+before any protocol-v2 release candidate or release.
+
 - `RELEASE=OPERATOR_ONLY`：上式成立后，只有 operator 可把 Issue #1 的 G2 行改为放行。
 - `RELEASE=DUAL`：上式成立 + 非包作者/非执行者/非独立记录者/非相关产品或证据实现作者的
   exact-build verdict 后，仍只由 operator 作最终放行。
