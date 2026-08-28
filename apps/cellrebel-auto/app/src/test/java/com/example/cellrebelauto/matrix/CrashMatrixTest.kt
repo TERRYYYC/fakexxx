@@ -221,7 +221,7 @@ class CrashMatrixTest {
         return planId
     }
 
-    private suspend fun seedAttempt(planId: Long, taskId: Long, attemptId: Long, aplusState: String?, aplusLeaseId: String? = null, currentExecutionId: String? = null): Long {
+    private suspend fun seedAttempt(planId: Long, taskId: Long, attemptId: Long, aplusState: String?, aplusLeaseId: String? = null, currentExecutionId: String? = null, aplusAnchorScheduleId: String? = "qwy-default-schedule"): Long {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
         db.testAttemptDao().insert(
             TestAttempt(
@@ -231,7 +231,8 @@ class CrashMatrixTest {
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
                 aplusState = aplusState, aplusLeaseId = aplusLeaseId,
-                currentExecutionId = currentExecutionId
+                currentExecutionId = currentExecutionId,
+                aplusAnchorScheduleId = aplusAnchorScheduleId
             )
         )
         return sessionId
@@ -243,7 +244,7 @@ class CrashMatrixTest {
     // R44 (Sol GREEN-review-3 F2): identical inputs to the engine's recompute — plan/task refs +
     // the seeded attempt's own validity window (startedAt=600 from seedAttempt, timeout=90s from buildEngine).
     private fun ownerIntentDigest(sessionId: Long, planId: Long, attemptId: Long = 77L) =
-        APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, sessionId, planId, 42L, 600L, 90_000L))
+        APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, sessionId, planId, "qwy-default-schedule", 600L, 90_000L))
 
     /**
      * Seed the DURABLE execution evidence (§8.1 COMPLETION_OBSERVED already persisted it) so the M-CR-06

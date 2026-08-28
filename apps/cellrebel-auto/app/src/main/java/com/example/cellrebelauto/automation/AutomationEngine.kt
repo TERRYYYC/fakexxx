@@ -346,12 +346,6 @@ class AutomationEngine(
                 val aplusEvidenceSrc = completionEvidenceSource
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
                     var aplusState = AttemptState.CREATED
-                    // # intent 身份由持久 attempt owner 态重算（INV-23，Sol round-8 P1-2）。R44 (Sol
-                    // # GREEN-review-3 F2)：intent 只构造一次——digest 与 Binder request 共用同一对象，绝不各自重算。
-                    val applyIntent = APlusOperationIdentity.intent(
-                        runSessionId, attemptId, planId, task.id, startedAt, startedAt + testTimeoutMs
-                    )
-                    val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
                     // R45 (Sol R45 P1-3 / spec §4.3 step 1): ANCHOR — the advance CAS triple
                     // (expectedScheduleId, expectedCurrentItemId, expectedScheduleVersion) is taken
                     // from a discover() projection group NOW and persisted to the attempt's durable
@@ -359,6 +353,8 @@ class AutomationEngine(
                     // completeAndAdvance later replays this triple BYTE-FOR-BYTE and must never
                     // re-discover at advance time (§6.7.3 v1.72 / M-AD-28: a refreshed precondition
                     // would push a previous generation's completion onto a NEW schedule).
+                    // F12: discover MUST precede intent construction — the provider's currentScheduleId
+                    // feeds into scheduleRef (the intent digest preimage), not Auto's task PK.
                     val anchorDiscover = aplusCoord.executorBackend()?.discover()
                     val anchorProjection = anchorDiscover?.takeIf {
                         it.currentScheduleId != null && it.currentItemId != null && it.scheduleVersion != null
@@ -373,6 +369,13 @@ class AutomationEngine(
                     planRepository.markAplusAdvanceAnchor(
                         attemptId, anchorProjection.currentScheduleId!!, anchorProjection.currentItemId!!, anchorProjection.scheduleVersion!!
                     )
+                    // # intent 身份由持久 attempt owner 态重算（INV-23，Sol round-8 P1-2）。R44 (Sol
+                    // # GREEN-review-3 F2)：intent 只构造一次——digest 与 Binder request 共用同一对象，绝不各自重算。
+                    // # F12：scheduleRef 来自 anchorProjection.currentScheduleId（provider 权威），不是 task.id。
+                    val applyIntent = APlusOperationIdentity.intent(
+                        runSessionId, attemptId, planId, anchorProjection.currentScheduleId!!, startedAt, startedAt + testTimeoutMs
+                    )
+                    val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
                     // R44 (DSF review P1-2): PREFLIGHT — the provider's schedule decision for THIS
                     // intent is consulted BEFORE the apply (§6.7): a DENIED/WAIT_UNTIL preflight
                     // fail-closes the attempt BEFORE any external apply is dispatched. This is the
@@ -919,9 +922,12 @@ class AutomationEngine(
                 }
                 // INV-23: the intent digest recompute from the persisted attempt owner state —
                 // the same inputs the original apply digested.
+                // F12: scheduleRef comes from the persisted anchor, not taskId.
+                val anchorScheduleRef = crashed.aplusAnchorScheduleId
+                    ?: run { aplusPause("ADVANCE_* recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed"); return false }
                 val intentDigest = APlusOperationIdentity.requestDigest(
                     APlusOperationIdentity.intent(
-                        crashed.runSessionId, crashed.id, planId, crashed.taskId, crashed.startedAt, crashed.startedAt + testTimeoutMs
+                        crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
                     )
                 )
                 if (!replayAdvanceAndVerify(crashed.id, crashed.taskId, null, intentDigest)) {
@@ -1041,8 +1047,11 @@ class AutomationEngine(
             val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
             // R44 (Sol GREEN-review-3 F2): the SAME intent object feeds the digest and the wire
             // request — all inputs from the durable owner state (attempt row + plan config).
+            // F12: scheduleRef comes from the persisted anchor, not taskId.
+            val anchorScheduleRef = crashed.aplusAnchorScheduleId
+                ?: run { aplusPause("APPLY_PENDING recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed"); return false }
             val applyIntent = APlusOperationIdentity.intent(
-                crashed.runSessionId, crashed.id, planId, crashed.taskId, crashed.startedAt, crashed.startedAt + testTimeoutMs
+                crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
             )
             val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
             val result = coordinator.reconcile(crashed.id, applyIntent, applyKey, intentDigest, nowMs())
@@ -1115,9 +1124,12 @@ class AutomationEngine(
 
         // INV-23: the owner recompute from the persisted attempt intent (ids + session + plan/task
         // refs + window — R44, Sol GREEN-review-3 F2: identical inputs on every path).
+        // F12: scheduleRef comes from the persisted anchor, not taskId.
+        val anchorScheduleRef = crashed.aplusAnchorScheduleId
+            ?: run { aplusPause("DECIDING recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed"); return false }
         val intentDigest = APlusOperationIdentity.requestDigest(
             APlusOperationIdentity.intent(
-                crashed.runSessionId, crashed.id, planId, crashed.taskId, crashed.startedAt, crashed.startedAt + testTimeoutMs
+                crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
             )
         )
         val trustCtx = CompletionTrustContext(
@@ -1186,9 +1198,12 @@ class AutomationEngine(
                 val trustedCount = planRepository.trustedCountForTaskPublic(crashed.taskId)
                 val anchor = planRepository.getAplusAdvanceAnchor(crashed.id)
                 if (trustedCount >= task.requiredSuccesses && anchor != null) {
+                    // F12: scheduleRef comes from the persisted anchor, not taskId.
+                    val anchorScheduleRef = crashed.aplusAnchorScheduleId
+                        ?: run { aplusPause("TRUSTED recovery: attempt ${crashed.id} has quota-met + anchor but no scheduleRef — invariant break"); return false }
                     val intentDigest = APlusOperationIdentity.requestDigest(
                         APlusOperationIdentity.intent(
-                            crashed.runSessionId, crashed.id, planId, crashed.taskId,
+                            crashed.runSessionId, crashed.id, planId, anchorScheduleRef,
                             crashed.startedAt, crashed.startedAt + testTimeoutMs
                         )
                     )

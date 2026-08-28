@@ -87,7 +87,7 @@ class ProductionEvidenceSourceOracleTest {
     private fun expectedHash(): String = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
         .requestDigest(
             com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
-                5L, 77L, seededPlanId, seededTaskId, 600L, 600L + attemptTimeoutMs
+                5L, 77L, seededPlanId, "qwy-default-schedule", 600L, 600L + attemptTimeoutMs
             )
         )
 
@@ -122,7 +122,8 @@ class ProductionEvidenceSourceOracleTest {
                 status = "starting", failureReason = null,
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
-                aplusState = "PRE_OBSERVED", aplusLeaseId = "lease-77", currentExecutionId = "exec-77"
+                aplusState = "PRE_OBSERVED", aplusLeaseId = "lease-77", currentExecutionId = "exec-77",
+                aplusAnchorScheduleId = "qwy-default-schedule"
             )
         )
         // Approve the TRUSTED signer principal for the production provider app id.

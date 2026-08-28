@@ -350,7 +350,7 @@ class AdvanceMatrixTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         val intentDigest = APlusOperationIdentity.requestDigest(
             APlusOperationIdentity.intent(
-                attempt.runSessionId, 31L, planId, attempt.taskId,
+                attempt.runSessionId, 31L, planId, anchorScheduleId,
                 attempt.startedAt, attempt.startedAt + 90_000L
             )
         )
@@ -473,7 +473,7 @@ class AdvanceMatrixTest {
         val snapA = db.testAttemptDao().getAttemptById(5001L)!!
         val intentA = APlusOperationIdentity.requestDigest(
             APlusOperationIdentity.intent(
-                snapA.runSessionId, 5001L, planIdA, snapA.taskId,
+                snapA.runSessionId, 5001L, planIdA, anchorScheduleId,
                 snapA.startedAt, snapA.startedAt + 90_000L
             )
         )
@@ -500,7 +500,7 @@ class AdvanceMatrixTest {
         val snapB = db.testAttemptDao().getAttemptById(9001L)!!
         val intentB = APlusOperationIdentity.requestDigest(
             APlusOperationIdentity.intent(
-                snapB.runSessionId, 9001L, planIdB, snapB.taskId,
+                snapB.runSessionId, 9001L, planIdB, anchorScheduleId,
                 snapB.startedAt, snapB.startedAt + 90_000L
             )
         )

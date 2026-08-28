@@ -226,10 +226,12 @@ object APlusComposition {
                     // validator rejects the observation (hash mismatch) and every production A+
                     // attempt paused at pre-observe. The recovery path already recomputed with the
                     // attempt window (INV-23); the live path now does too.
+                    // F12: scheduleRef comes from the persisted anchor, not task.id.
+                    val anchorScheduleRef = attempt.aplusAnchorScheduleId ?: return null
                     val expectedHash = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
                         .requestDigest(
                             com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
-                                runSessionId, attemptId, plan.id, task.id,
+                                runSessionId, attemptId, plan.id, anchorScheduleRef,
                                 notBeforeEpochMs = attempt.startedAt,
                                 deadlineEpochMs = attempt.startedAt + attemptValidityTimeoutMs
                             )

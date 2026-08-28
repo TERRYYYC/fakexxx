@@ -434,7 +434,7 @@ class EngineQuotaRecoveryRedTest {
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         val intentDigest = APlusOperationIdentity.requestDigest(
             APlusOperationIdentity.intent(
-                attempt.runSessionId, attemptId, planId, attempt.taskId,
+                attempt.runSessionId, attemptId, planId, "qwy-default-schedule",
                 attempt.startedAt, attempt.startedAt + 90_000L
             )
         )

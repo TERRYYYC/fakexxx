@@ -74,7 +74,7 @@ class BinderIntentIdentityTest {
         assertTrue("bind must dispatch against the frozen component", executor.bind())
         Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
 
-        val intent = APlusOperationIdentity.intent(5L, 77L, 9L, 7L, 1234L, 1234L + 90_000L)
+        val intent = APlusOperationIdentity.intent(5L, 77L, 9L, "qwy-default-schedule", 1234L, 1234L + 90_000L)
         val digest = APlusOperationIdentity.requestDigest(intent)
         val outcome = executor.apply(77L, intent, "auto-aplus-apply-77", digest, 1000L)
 
@@ -87,7 +87,7 @@ class BinderIntentIdentityTest {
         assertEquals("auto-run-5", sent.intent.runId)
         assertEquals("77", sent.intent.attemptId)
         assertEquals("plan-9", sent.intent.profileRef)
-        assertEquals("task-7", sent.intent.scheduleRef)
+        assertEquals("qwy-default-schedule", sent.intent.scheduleRef)  // F12: verbatim provider anchor
         assertEquals(1234L, sent.intent.notBeforeEpochMs)
         assertEquals(1234L + 90_000L, sent.intent.deadlineEpochMs)
         // And the digest of the WIRE intent equals the digest the caller computed (preimage == request).

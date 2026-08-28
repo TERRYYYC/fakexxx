@@ -174,11 +174,12 @@ class EngineJourneyConsumerOracleTest {
     private val evidenceSource = object : com.example.cellrebelauto.automation.aplus.APlusEvidenceSource {
         suspend fun hash(attemptId: Long, runSessionId: Long): String {
             val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
-            val task = db.locationTaskDao().getTaskById(attempt.taskId)!!
-            val plan = db.planDao().getPlanById(task.planId)!!
+            val plan = db.planDao().getPlanById(
+                db.locationTaskDao().getTaskById(attempt.taskId)!!.planId
+            )!!
             return com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.requestDigest(
                 com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
-                    runSessionId, attemptId, plan.id, task.id, attempt.startedAt, attempt.startedAt + 90_000L
+                    runSessionId, attemptId, plan.id, attempt.aplusAnchorScheduleId!!, attempt.startedAt, attempt.startedAt + 90_000L
                 )
             )
         }
