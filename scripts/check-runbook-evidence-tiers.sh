@@ -140,13 +140,12 @@ check "§11 documents transition-half-frame failure mode" "$( [ "$HAS_TRANSITION
 #
 # §10.1 freezes reportDigest as SHA-256 of the raw device evidence REPORT FILE
 # (the g1-smoke-*.md document), not a concatenation of raw evidence bytes.
-# Six guards:
+# Five guards:
 #   14. Summary line must contain "设备证据报告文件" (report file, not concat bytes)
 #   15. Summary line must NOT contain raw-evidence terms (fail-closed category ban)
 #   16. Definition block must reference §10.1 as canonical authority
-#   17. Canonical declaration is structurally bounded (CANONICAL markers exist)
-#   18. Canonical block negates concatenation (不是 + 拼接 in joined text)
-#   19. Canonical block has no contradictory positive (拼接 count = 1 in joined text)
+#   17. CANONICAL marker integrity (exactly 1 START + 1 END outside fenced code, ordered)
+#   18. Exact ASSERT line inside bounded block (machine-checkable canonical record)
 
 S11_DIGEST_SUMMARY=$(echo "$S11" | grep 'reportDigest:' | head -1)
 SUMMARY_HAS_REPORT_FILE=$(echo "$S11_DIGEST_SUMMARY" | grep -c '设备证据报告文件' || true)
@@ -164,39 +163,56 @@ DIGEST_BLOCK=$(echo "$S11" | awk '/reportDigest.*规范定义/,/^$/')
 HAS_SPEC_REF=$(echo "$DIGEST_BLOCK" | grep -c '§10.1' || true)
 check "reportDigest definition references §10.1" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
 
-# Guards 17–19: Structurally bounded canonical declaration (Luna R5).
+# Guards 17–18: Machine-checkable canonical record (Luna R6).
 #
-# R1→R5 showed that line-local keyword guards are systematically bypassable:
-# each round the contradictory claim moved to a different line/position.  The fix
-# is to make the canonical declaration a BOUNDED BLOCK delimited by HTML comment
-# markers (CANONICAL:reportDigest:START/END).  The checker extracts the block,
-# JOINS all lines into a single string, and checks invariants on the block as a
-# whole.  Layout (line breaks, word wrapping) no longer matters.
+# R1→R5 showed keyword matching on prose is systematically bypassable; R6
+# proved it fundamentally cannot verify semantic invariants — the guard keeps
+# checking a REPRESENTATION of the declaration rather than an unambiguous
+# canonical declaration.  The fix (Luna R6): make the machine truth a frozen
+# exact ASSERT line independent of prose.
+#
+# Guard 17 validates marker INTEGRITY (not just existence):
+#   - exactly 1 START marker, exactly 1 END marker
+#   - markers are NOT inside fenced code blocks (``` ... ```)
+#   - START appears before END
+#
+# Guard 18 checks the exact ASSERT line inside the bounded block.
+# No keyword matching on prose.  The ASSERT line IS the canonical record.
 #
 # Historical run#2 prose ("使用了拼接字节定义") is OUTSIDE the markers, so it is
 # never checked — no false-positive risk from the backward-compatibility note.
 
-CANONICAL_BLOCK=$(echo "$S11" | sed -n '/CANONICAL:reportDigest:START/,/CANONICAL:reportDigest:END/p' | tr '\n' ' ')
+# Strip fenced code blocks from §11 before looking for markers.
+# Markers inside ``` ... ``` are decoys (Luna R6 P2-1).
+S11_NO_FENCE=$(echo "$S11" | awk '/^[> ]*```/{fence=!fence; next} !fence')
 
-# Guard 17: structural boundary markers must exist.
-check "reportDigest canonical declaration is structurally bounded" "$( [ -n "$CANONICAL_BLOCK" ] && echo 0 || echo 1 )"
+MARKER_START_COUNT=$(echo "$S11_NO_FENCE" | grep -c 'CANONICAL:reportDigest:START' || true)
+MARKER_END_COUNT=$(echo "$S11_NO_FENCE" | grep -c 'CANONICAL:reportDigest:END' || true)
 
-if [ -n "$CANONICAL_BLOCK" ]; then
-  # Guard 18: the canonical block must negate concatenation.
-  BLOCK_HAS_NEGATION=$(echo "$CANONICAL_BLOCK" | grep -c '不是.*拼接' || true)
-  check "reportDigest canonical block negates concatenation" "$( [ "$BLOCK_HAS_NEGATION" -ge 1 ] && echo 0 || echo 1 )"
-
-  # Guard 19: "拼接" appears exactly once in the block (inside the negation).
-  # Any contradictory positive assertion — same line or split across lines —
-  # adds a second occurrence → count ≠ 1 → fail.
-  CANONICAL_CONCAT_COUNT=$(echo "$CANONICAL_BLOCK" | grep -o '拼接' | wc -l | tr -d ' ')
-  check "reportDigest canonical block has no contradictory positive concat" "$( [ "$CANONICAL_CONCAT_COUNT" -eq 1 ] && echo 0 || echo 1 )"
+# Guard 17: marker integrity — exactly 1 START + 1 END outside fenced code, ordered.
+if [ "$MARKER_START_COUNT" -eq 1 ] && [ "$MARKER_END_COUNT" -eq 1 ]; then
+  # Verify ordering: START line number < END line number
+  START_LINE=$(echo "$S11_NO_FENCE" | grep -n 'CANONICAL:reportDigest:START' | head -1 | cut -d: -f1)
+  END_LINE=$(echo "$S11_NO_FENCE" | grep -n 'CANONICAL:reportDigest:END' | head -1 | cut -d: -f1)
+  if [ "$START_LINE" -lt "$END_LINE" ]; then
+    MARKER_INTEGRITY=0
+  else
+    MARKER_INTEGRITY=1  # reversed order
+  fi
 else
-  # When Guard 17 fails (no markers), Guards 18–19 pass vacuously — there is
-  # no canonical block to check semantics on.  Guard 17 already caught the
-  # structural problem.  This preserves M15's isolation to Guard 17.
-  check "reportDigest canonical block negates concatenation" 0
-  check "reportDigest canonical block has no contradictory positive concat" 0
+  MARKER_INTEGRITY=1  # wrong cardinality
+fi
+check "reportDigest CANONICAL markers: integrity (1 START, 1 END, ordered, not in fence)" "$MARKER_INTEGRITY"
+
+# Guard 18: exact ASSERT line inside the bounded block.
+if [ "$MARKER_INTEGRITY" -eq 0 ]; then
+  CANONICAL_BLOCK=$(echo "$S11_NO_FENCE" | sed -n '/CANONICAL:reportDigest:START/,/CANONICAL:reportDigest:END/p')
+  ASSERT_COUNT=$(echo "$CANONICAL_BLOCK" | grep -cF 'ASSERT:reportDigest:preimage=report-file:not=byte-concat:authority=§10.1' || true)
+  check "reportDigest ASSERT line: exact machine-checkable record present" "$( [ "$ASSERT_COUNT" -ge 1 ] && echo 0 || echo 1 )"
+else
+  # When Guard 17 fails (markers broken), Guard 18 passes vacuously —
+  # no reliable block to check.  Guard 17 already caught the problem.
+  check "reportDigest ASSERT line: exact machine-checkable record present" 0
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

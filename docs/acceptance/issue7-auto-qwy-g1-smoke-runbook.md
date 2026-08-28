@@ -482,6 +482,7 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 > （即本节所描述的 `g1-smoke-*.md`）的完整字节流求摘要，小写 hex，无前缀。
 > `reportDigest` 是该报告在 evidence manifest 中的定位指针，
 > **不是**原始证据文件（logcat / 截图 PNG）的拼接摘要。
+> <!-- ASSERT:reportDigest:preimage=report-file:not=byte-concat:authority=§10.1 -->
 > <!-- CANONICAL:reportDigest:END -->
 >
 > 原始证据的逐文件完整性由独立的 `evidence-manifest.sha256` 校验。

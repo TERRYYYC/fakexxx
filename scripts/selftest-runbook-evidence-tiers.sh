@@ -23,11 +23,13 @@
 #   M9   Remove "设备证据报告文件" from summary line → report-file term guard
 #   M10  Add concatenation term to summary line → anti-concat guard
 #   M11  Remove §10.1 reference from definition block → spec-authority guard
-#   M12  Invert definition block negation ("不是"→"是") → bounded negation guard (G18)
+#   M12  Modify ASSERT line value → ASSERT exact-match guard (G18)
 #   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (G15)
-#   M14  Same-line contradictory positive concat → bounded exclusivity guard (G19)
-#   M15  Remove CANONICAL boundary markers → structural boundary guard (G17)
-#   M16  Split-line contradictory positive concat → bounded exclusivity guard (G19, R5)
+#   M14  Remove ASSERT line entirely → ASSERT exact-match guard (G18)
+#   M15  Remove CANONICAL boundary markers → marker integrity guard (G17)
+#   M16  Duplicate marker pair (2× START, 2× END) → marker integrity guard (G17)
+#   M17  Reversed marker order (END before START) → marker integrity guard (G17)
+#   M18  Markers inside fenced code block (decoy) → marker integrity guard (G17)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -211,17 +213,16 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/§10\.1/§10/g' "$rb"
 assert_fail "M11 removing §10.1 from definition block is caught (P4)" "$sb"
 
-# ── M12: Invert definition block negation (P5-1, Luna) ────────────────────
+# ── M12: Modify ASSERT line value (R6, Luna) ──────────────────────────────
 #
-# Inside the CANONICAL boundary, changing "不是" to "是" inverts the semantic
-# claim.  Guard 18 checks the JOINED canonical block for "不是.*拼接" — the
-# joined text loses "不是" → no match → fail.  Isolated to Guard 18 (Guard 19
-# still sees count=1 because "拼接" appears once either way).
+# The ASSERT line is the machine-checkable canonical record.  Changing any
+# key-value pair (here: preimage=report-file → preimage=byte-concat) must
+# be caught by Guard 18's exact-string match.  Prose around it is irrelevant.
 
-sb=$(setup_sandbox "m12-invert-negation")
+sb=$(setup_sandbox "m12-modify-assert-value")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-sed -i.bak 's/\*\*不是\*\*/是/' "$rb"
-assert_fail "M12 inverting definition block negation is caught (G18)" "$sb"
+sed -i.bak 's/preimage=report-file/preimage=byte-concat/' "$rb"
+assert_fail "M12 modifying ASSERT line value is caught (G18)" "$sb"
 
 # ── M13: Add raw-evidence term to summary in reversed word order (P5-2) ───
 #
@@ -236,20 +237,16 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与截图的 SHA-256/' "$rb"
 assert_fail "M13 reversed-word-order raw-evidence term in summary is caught (P5-2)" "$sb"
 
-# ── M14: Same-line contradictory positive (R4 P2) ──────────────────────────
+# ── M14: Remove ASSERT line entirely (R6, Luna) ───────────────────────────
 #
-# Inside the CANONICAL boundary, appending "同时是拼接摘要" on the SAME line
-# adds a second "拼接" to the joined block.  Guard 19 (count=1) catches it.
-# Isolated to Guard 19.
+# Deleting the ASSERT line while keeping the CANONICAL markers and all prose
+# intact must be caught.  Guard 18 checks for the exact ASSERT string inside
+# the bounded block — absent line → no match → fail.
 
-sb=$(setup_sandbox "m14-same-line-contradiction")
+sb=$(setup_sandbox "m14-remove-assert-line")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
-python3 -c "
-with open('$rb') as f: t = f.read()
-t = t.replace('的拼接摘要。', '的拼接摘要，同时是拼接摘要。')
-with open('$rb','w') as f: f.write(t)
-"
-assert_fail "M14 same-line contradictory positive is caught (G19)" "$sb"
+sed -i.bak '/ASSERT:reportDigest/d' "$rb"
+assert_fail "M14 removing ASSERT line is caught (G18)" "$sb"
 
 # ── M15: Remove CANONICAL boundary markers (R5) ───────────────────────────
 #
@@ -262,24 +259,64 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak '/CANONICAL:reportDigest/d' "$rb"
 assert_fail "M15 removing CANONICAL markers is caught (G17)" "$sb"
 
-# ── M16: Split-line contradictory positive (R5, Luna) ──────────────────────
+# ── M16: Duplicate marker pair (R6, Luna) ──────────────────────────────────
 #
-# This is the R5 finding: appending "同时是拼接摘要" on a SEPARATE blockquote
-# line INSIDE the CANONICAL boundary.  Old line-local guards missed this; the
-# bounded-block approach catches it because all lines are joined before counting.
-# Isolated to Guard 19 (same guard as M14 — different layout, same invariant).
+# Adding a second START/END pair creates ambiguity — the checker cannot know
+# which block is canonical.  Guard 17 requires exactly 1 START + 1 END.
+# Two of each → cardinality check fails.
 
-sb=$(setup_sandbox "m16-split-line-contradiction")
+sb=$(setup_sandbox "m16-duplicate-markers")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 python3 -c "
 with open('$rb') as f: t = f.read()
+# Append a second marker pair after the existing END marker
 t = t.replace(
-    '的拼接摘要。\n> <!-- CANONICAL:reportDigest:END -->',
-    '的拼接摘要。\n> 同时是拼接摘要。\n> <!-- CANONICAL:reportDigest:END -->'
+    '> <!-- CANONICAL:reportDigest:END -->',
+    '> <!-- CANONICAL:reportDigest:END -->\n> <!-- CANONICAL:reportDigest:START -->\n> decoy\n> <!-- CANONICAL:reportDigest:END -->'
 )
 with open('$rb','w') as f: f.write(t)
 "
-assert_fail "M16 split-line contradictory positive is caught (G19, R5)" "$sb"
+assert_fail "M16 duplicate marker pair is caught (G17)" "$sb"
+
+# ── M17: Reversed marker order (R6, Luna) ─────────────────────────────────
+#
+# Swapping START↔END (END appears first) must be caught.  Guard 17 checks
+# START line < END line.
+
+sb=$(setup_sandbox "m17-reversed-markers")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+t = t.replace('CANONICAL:reportDigest:START', 'CANONICAL:reportDigest:XSTART')
+t = t.replace('CANONICAL:reportDigest:END', 'CANONICAL:reportDigest:START')
+t = t.replace('CANONICAL:reportDigest:XSTART', 'CANONICAL:reportDigest:END')
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M17 reversed marker order is caught (G17)" "$sb"
+
+# ── M18: Markers inside fenced code block (R6 P2-1, Luna) ─────────────────
+#
+# Wrapping the canonical block (markers + ASSERT line) inside a fenced code
+# block (```) makes it a documentation example, not a live declaration.
+# Guard 17 strips fenced code before looking for markers → no markers found
+# outside fence → cardinality fails.
+
+sb=$(setup_sandbox "m18-markers-in-fence")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+# Wrap the canonical block in a fenced code block
+t = t.replace(
+    '> <!-- CANONICAL:reportDigest:START -->',
+    '> \`\`\`\n> <!-- CANONICAL:reportDigest:START -->'
+)
+t = t.replace(
+    '> <!-- CANONICAL:reportDigest:END -->',
+    '> <!-- CANONICAL:reportDigest:END -->\n> \`\`\`'
+)
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M18 markers inside fenced code block is caught (G17, R6 P2-1)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
