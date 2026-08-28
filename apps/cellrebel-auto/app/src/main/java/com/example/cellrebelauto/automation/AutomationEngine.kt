@@ -886,8 +886,16 @@ class AutomationEngine(
         // re-acquiring stale observations) and re-runs recordTrustedCompletion with the commit clock.
         if (crashed.aplusState == "DECIDING") {
             if (!redecideDecidingAttempt(crashed)) {
-                // Missing durable evidence ⇒ fail-closed: no mint, fall through to the release
-                // convergence; the terminal projection marks the attempt interrupted (never succeeded).
+                // R7 (glm52 P1-1c): distinguish "missing carrier" (benign — fall through to
+                // release convergence) from "invariant break" (anchor null — already marked
+                // RECOVERY_REQUIRED inside redecideDecidingAttempt). The downstream release/
+                // advance path overwrites RECOVERY_REQUIRED with CLOSED if we fall through.
+                if (crashed.aplusAnchorScheduleId == null) {
+                    // Anchor null = invariant break, already durably marked — stop here.
+                    return false
+                }
+                // Missing durable evidence (benign) ⇒ no mint, fall through to the release
+                // convergence; the terminal projection marks the attempt interrupted.
                 log("A+ recovery: DECIDING attempt ${crashed.id} lacks durable evidence — fail-closed, no re-mint")
             }
         }
@@ -923,8 +931,15 @@ class AutomationEngine(
                 // INV-23: the intent digest recompute from the persisted attempt owner state —
                 // the same inputs the original apply digested.
                 // F12: scheduleRef comes from the persisted anchor, not taskId.
+                // Same durable fail-closed as redecideDecidingAttempt (R7 P1-1c): anchor
+                // null at ADVANCE_* is an invariant break (anchor is set before apply).
                 val anchorScheduleRef = crashed.aplusAnchorScheduleId
-                    ?: run { aplusPause("ADVANCE_* recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed"); return false }
+                    ?: run {
+                        planRepository.markRecoveryRequired(crashed.id,
+                            "ANCHOR_MISSING_QUOTA_MET:phase=${crashed.aplusState}")
+                        aplusPause("ADVANCE_* recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed")
+                        return false
+                    }
                 val intentDigest = APlusOperationIdentity.requestDigest(
                     APlusOperationIdentity.intent(
                         crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
@@ -1125,8 +1140,17 @@ class AutomationEngine(
         // INV-23: the owner recompute from the persisted attempt intent (ids + session + plan/task
         // refs + window — R44, Sol GREEN-review-3 F2: identical inputs on every path).
         // F12: scheduleRef comes from the persisted anchor, not taskId.
+        // R7 (glm52 P1-1c): anchor null here is an invariant break — the normal path sets
+        // the anchor BEFORE entering DECIDING, so reaching DECIDING without one means a
+        // lifecycle violation.  Must mark RECOVERY_REQUIRED + typed failureReason (matching
+        // advanceAfterRelease's else-if branch at L1213), not just log+return.
         val anchorScheduleRef = crashed.aplusAnchorScheduleId
-            ?: run { aplusPause("DECIDING recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed"); return false }
+            ?: run {
+                planRepository.markRecoveryRequired(crashed.id,
+                    "ANCHOR_MISSING_QUOTA_MET:phase=DECIDING")
+                aplusPause("DECIDING recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed")
+                return false
+            }
         val intentDigest = APlusOperationIdentity.requestDigest(
             APlusOperationIdentity.intent(
                 crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
@@ -1199,8 +1223,15 @@ class AutomationEngine(
                 val anchor = planRepository.getAplusAdvanceAnchor(crashed.id)
                 if (trustedCount >= task.requiredSuccesses && anchor != null) {
                     // F12: scheduleRef comes from the persisted anchor, not taskId.
+                    // Durable fail-closed (same pattern as P1-1c/ADVANCE_*): anchor triple
+                    // exists but scheduleId column null = structural inconsistency.
                     val anchorScheduleRef = crashed.aplusAnchorScheduleId
-                        ?: run { aplusPause("TRUSTED recovery: attempt ${crashed.id} has quota-met + anchor but no scheduleRef — invariant break"); return false }
+                        ?: run {
+                            planRepository.markRecoveryRequired(crashed.id,
+                                "ANCHOR_MISSING_QUOTA_MET:phase=${crashed.aplusState}")
+                            aplusPause("TRUSTED recovery: attempt ${crashed.id} has quota-met + anchor but no scheduleRef — invariant break")
+                            return false
+                        }
                     val intentDigest = APlusOperationIdentity.requestDigest(
                         APlusOperationIdentity.intent(
                             crashed.runSessionId, crashed.id, planId, anchorScheduleRef,

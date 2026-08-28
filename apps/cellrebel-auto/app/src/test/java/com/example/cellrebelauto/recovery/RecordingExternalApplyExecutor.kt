@@ -106,6 +106,12 @@ class RecordingExternalApplyExecutor(
     // engine's production journey can run in tests; each response is a settable fixture and every
     // call is recorded for oracle assertions. ----
 
+    // F12: the discover fixture's currentScheduleId is the provider's durable anchor that the
+    // engine persists and includes in the intent digest.  It MUST match FakeEvidenceSource's
+    // default scheduleRef ("qwy-default-schedule") — otherwise the engine computes digest A
+    // (from the anchored discover value) while the evidence source returns observations with
+    // digest B (from its hardcoded scheduleRef), and trust policy rejects every observation.
+    // Before F12 the intent digest used taskId, so the mismatch was invisible.
     var discoverFixture: io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? =
         io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1(
             serviceVersion = "fake-provider-1",
@@ -114,8 +120,8 @@ class RecordingExternalApplyExecutor(
             continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
             environmentRevision = 7L,
             profileRefs = listOf("plan-1"),
-            scheduleRefs = listOf("task-42"),
-            currentScheduleId = "sched-1",
+            scheduleRefs = listOf("qwy-default-schedule"),
+            currentScheduleId = "qwy-default-schedule",
             currentItemId = "item-1",
             scheduleVersion = 1L,
             exhausted = false
