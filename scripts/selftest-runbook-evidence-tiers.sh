@@ -25,6 +25,7 @@
 #   M11  Remove §10.1 reference → spec-authority guard (G16)
 #   M12  Restate reportDigest definition in §11 → restatement ban (G17, P4)
 #   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (G15)
+#   M14  Delete authority pointer line (Finding E) → exact pointer guard (G16)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -197,16 +198,15 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与拼接截图的 SHA-256/' "$rb"
 assert_fail "M10 adding concatenation term to summary is caught (P4)" "$sb"
 
-# ── M11: Remove §10.1 reference from definition block (P4) ─────────────────
+# ── M11: Corrupt §10.1 references throughout §11 (P4) ─────────────────────
 #
-# The definition block must reference §10.1 as the canonical authority for
-# reportDigest semantics.  Removing that reference should kill the spec-
-# authority guard without affecting the summary-line guards.
+# §11 must reference §10.1 as the canonical authority.  Changing "§10.1" to
+# "§10" globally must be caught by Guard 16's exact pointer assertion.
 
 sb=$(setup_sandbox "m11-no-spec-ref")
 rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/§10\.1/§10/g' "$rb"
-assert_fail "M11 removing §10.1 from definition block is caught (P4)" "$sb"
+assert_fail "M11 corrupting §10.1 references is caught (G16)" "$sb"
 
 # ── M12: Restate reportDigest definition in §11 (P4) ──────────────────────
 #
@@ -241,6 +241,18 @@ rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
 sed -i.bak 's/设备证据报告文件的 SHA-256/设备证据报告文件与截图的 SHA-256/' "$rb"
 assert_fail "M13 reversed-word-order raw-evidence term in summary is caught (P5-2)" "$sb"
 
+# ── M14: Delete authority pointer (Finding E, opus5) ──────────────────────
+#
+# The pointer line is the entire value of the P4 subtraction.  Deleting it
+# while the backward-compat note ("后续轮次按 §10.1 执行") survives must be
+# caught.  Old Guard 16 (grep -c '§10.1' >= 1) missed this because the
+# backward-compat mention satisfied the count.  New Guard 16 checks the
+# exact pointer phrase.
+
+sb=$(setup_sandbox "m14-delete-pointer")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+sed -i.bak '/语义定义见 feature-spec §10.1/d' "$rb"
+assert_fail "M14 deleting authority pointer is caught (G16, Finding E)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

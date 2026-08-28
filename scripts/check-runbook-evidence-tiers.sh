@@ -164,19 +164,35 @@ check "reportDigest summary references 设备证据报告文件" "$( [ "$SUMMARY
 SUMMARY_HAS_RAW_EVIDENCE=$(echo "$S11_DIGEST_SUMMARY" | grep -ciE '拼接|串接|logcat|截图|\.png|\.log|Tier A.*字节|全部已收集' || true)
 check "reportDigest summary has no raw-evidence/concatenation terms" "$( [ "$SUMMARY_HAS_RAW_EVIDENCE" -eq 0 ] && echo 0 || echo 1 )"
 
-# Guard 16: §11 must reference §10.1 as the canonical authority.
-HAS_SPEC_REF=$(echo "$S11" | grep -c '§10.1' || true)
-check "reportDigest references §10.1 as canonical authority" "$( [ "$HAS_SPEC_REF" -ge 1 ] && echo 0 || echo 1 )"
+# Guard 16: §11 must contain the exact authority pointer to §10.1.
+#
+# The pointer line is the entire value proposition of the P4 subtraction:
+# §11 does not restate the definition, it points to the frozen original.
+# Checking for any '§10.1' is insufficient — the backward-compat note also
+# mentions §10.1, so deleting the pointer leaves the guard green (Finding E,
+# opus5).  Fix: assert the exact pointer phrase.
+HAS_POINTER=$(echo "$S11" | grep -cF '语义定义见 feature-spec §10.1' || true)
+check "reportDigest authority pointer to §10.1 present" "$( [ "$HAS_POINTER" -ge 1 ] && echo 0 || echo 1 )"
 
-# Guard 17: §11 must NOT restate the reportDigest definition (P4).
+# Guard 17: §11 should not restate the reportDigest definition (P4).
 #
-# The definition lives in feature-spec §10.1 (frozen).  Restating it here —
-# whether as prose, a CANONICAL-marked block, or an ASSERT token — creates a
-# copy that can drift.  This is the root cause of R1→R6: every round added a
-# guard to keep the copy honest, and every round the copy found a new way to
-# lie.  Deleting the copy closes the class.
+# STATUS: best-effort lint / defense-in-depth.  NOT load-bearing.
 #
-# Ban patterns:
+# The class is closed STRUCTURALLY by the P4 subtraction: §11 no longer
+# contains an authoritative definition copy, only an authority pointer
+# (Guard 16).  This keyword ban catches the most likely re-insertion
+# patterns but is inherently incomplete — synonyms (连接, 首尾相接, …)
+# bypass it, and extending the list is the R1→R6 treadmill.  That is
+# acceptable because:
+#   - There is no authoritative copy to contradict (the pointer IS the
+#     authority delegation, and it is visible prose, not a hidden token).
+#   - A casual wrong sentence next to the pointer is a review finding,
+#     not a CI-catchable structural regression.
+#
+# If a future reviewer files a P2 against a synonym bypass of this guard,
+# the correct response is "won't fix — see this comment", not a 5th keyword.
+#
+# Ban patterns (best-effort, not exhaustive):
 #   "规范定义"           — definition header (R1–R5 formal block)
 #   "完整字节流"         — definition body (how the hash is computed)
 #   "CANONICAL:reportDigest" — structural container (R5/R6)
