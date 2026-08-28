@@ -134,6 +134,28 @@ section_fixtures() {
 # ---------------------------------------------------------------------------
 # 4. RULE COVERAGE — every rule in the frozen table has a positive fixture.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 3b. PATH-LESS BUILTINS — the leaf payloads must run with NO environment at
+#     all (review F2: dirname / cat-heredoc spawns broke under PATH=).
+# ---------------------------------------------------------------------------
+section_pathless() {
+    [ -f "$CLASSIFIER" ] && [ -f "$RUNNER" ] || return 0
+    local t
+    t=$(mktemp -d)
+    printf 'meta/fixture-ok\n' > "$t/probe.txt"
+    if (cd "$t" && env -i /bin/bash "$REPO_ROOT/$CLASSIFIER" fixture POS-HOST-CAT out.json) >/dev/null 2>&1        && grep -q '"verdict":"PASS"' "$t/out.json"; then
+        ok "classifier fixture mode runs with env -i (no PATH)"
+    else
+        fail "classifier needs an external binary (builtins-only violated)"
+    fi
+    if (cd "$t" && env -i /bin/bash "$REPO_ROOT/$CLASSIFIER" fixture NEG-ESC-AWK-SYSTEM out2.json) >/dev/null 2>&1        && grep -q '"verdict":"PASS"' "$t/out2.json"; then
+        ok "classifier negative fixture also PATH-less green"
+    else
+        fail "classifier negative fixture not PATH-less clean"
+    fi
+    rm -rf "$t"
+}
+
 section_rule_coverage() {
     [ -f "$CLASSIFIER" ] && [ -f "$FIXTURES" ] || return 0
     local -a rules=() missing=()
@@ -236,6 +258,10 @@ printf 'ECFullLoop line\nLOOP ABORTED\n' > derived/in-grep.txt
 add_command 001 meta fileset-sort sort evidence ROW2-CLEAN-ENV-V1 -- sort -- derived/in-sort.txt
 add_command 002 meta host-cat cat evidence ROW2-CLEAN-ENV-V1 -- cat -- derived/in-cat.txt
 add_command 003 meta text-grep grep evidence ROW2-CLEAN-ENV-V1 -- grep -F -v -e LOOP -- derived/in-grep.txt
+# repo-payload units — the review's F1: these validated but could not run;
+# their output path IS the unit's frozen stdout carrier
+add_command 004 meta runner-parse row2-runner evidence ROW2-CLEAN-ENV-V1 -- bash scripts/row2/row2-runner.sh parse envelope meta/001-fileset-sort.command.txt meta/004-runner-parse.stdout.txt
+add_command 005 meta classifier-fixture row2-classifier evidence ROW2-CLEAN-ENV-V1 -- bash scripts/row2/row2-classifier-v2.sh fixture POS-HOST-CAT meta/005-classifier-fixture.stdout.txt
 SPEC
 }
 
@@ -264,7 +290,7 @@ section_launcher() {
     fi
     local sup_err="$ev/supervise.err"
     if (cd "$ev" && bash "$REPO_ROOT/$RUNNER" supervise . 2>"$sup_err"); then
-        ok "supervise: 3 host units executed via launcher"
+        ok "supervise: 5 host units executed via launcher (incl. repo-payload interpreter exec)"
     else
         fail "supervise failed: $(tail -3 "$sup_err" 2>/dev/null | tr '\n' ' ')"
         rm -rf "$(dirname "$ev")"
@@ -276,11 +302,20 @@ section_launcher() {
         [ "$(cat "$x")" = "0" ] || exits_bad=1
     done
     [ "$exits_bad" -eq 0 ] && ok "all leaf exits = 0" || fail "nonzero leaf exit in green path"
-    printf 'meta/001-fileset-sort\nmeta/002-host-cat\nmeta/003-text-grep\n' > "$ev/meta/stems.txt"
+    printf 'meta/001-fileset-sort\nmeta/002-host-cat\nmeta/003-text-grep\nmeta/004-runner-parse\nmeta/005-classifier-fixture\n' > "$ev/meta/stems.txt"
     if (cd "$ev" && bash "$REPO_ROOT/$RUNNER" gate six-file-carrier meta/stems.txt meta/gate.json) >/dev/null 2>&1; then
         ok "six-file carrier gate: PASS"
     else
-        fail "six-file carrier gate red on the green session"
+        fail "six-file carrier gate red on the green session: $(tail -1 "$ev/meta/gate.json" 2>/dev/null)"
+    fi
+    # repo-payload units must have actually RUN (review F1: exit 126/2 shapes)
+    local rp_exit rp_out
+    rp_exit=$(cat "$ev/meta/004-runner-parse.exit.txt" 2>/dev/null || echo missing)
+    rp_out=$(cat "$ev/meta/004-runner-parse.stdout.txt" 2>/dev/null | head -c 200)
+    if [ "$rp_exit" = "0" ] && [[ $rp_out == *'"executableId":"sort"'* ]]; then
+        ok "repo-payload unit 004 ran via interpreter (exit=0, parse output real)"
+    else
+        fail "repo-payload unit 004 broken: exit=$rp_exit out=$rp_out"
     fi
     cat "$ev"/meta/.cls-00*.json > "$ev/meta/cls-all.txt"
     if (cd "$ev" && bash "$REPO_ROOT/$RUNNER" audit command-surface meta/cls-all.txt meta/audit.json) >/dev/null 2>&1 \
@@ -366,7 +401,8 @@ section_packet_schema() {
     declare -a CASES=(
         'unknown-key|s/,"commands":/,"zzzPlanted":1,"commands":/|key sequence mismatch'
         'access-label|s/,"commands":/,"deviceAccess":"HOST-NONE","commands":/|access-label field'
-        'dup-seq|s/"seq":"002"/"seq":"001"/|duplicate seq'
+        'dup-seq|s/"seq":"002"/"seq":"001"/|seq not contiguous: got 001, expected 002'
+        'seq-gap|s/"seq":"003"/"seq":"013"/|seq not contiguous: got 013, expected 003'
         'missing-key|s/,"buildType":"debug"//|required key missing: buildType'
         'bad-env-policy|s/ROW2-CLEAN-ENV-V1","stdinPolicyId":"ROW2-STDIN-CLOSED-V1","argv/ROW2-DIRTY-ENV-V9","stdinPolicyId":"ROW2-STDIN-CLOSED-V1","argv/|envPolicyId'
         'dup-carrier|s/meta\/002-host-cat.command.txt/meta\/001-fileset-sort.command.txt/|carrier path reused'
@@ -414,11 +450,13 @@ exit $fail')
 section_presence
 section_syntax
 section_fixtures
+section_pathless
 section_rule_coverage
 section_mode_manifest
 section_launcher
 section_write_budget
 section_packet_schema
+section_sha256
 section_packet_schema_mended() { :; }  # placeholder guard removed below
 
 if [ ! -f "$CLASSIFIER" ] || [ ! -f "$RUNNER" ] || [ ! -f "$PACKET_TOOL" ]; then

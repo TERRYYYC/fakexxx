@@ -59,7 +59,14 @@
 set -uo pipefail
 LC_ALL=C; LANG=C; TZ=UTC; export LC_ALL LANG TZ
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# builtin-only, ABSOLUTE SELF_DIR (dirname is an external binary — the PATH=
+# review finding; and ${var%/*} eats the only slash for single-dir relative
+# invocations, so resolve through the cd/pwd builtins instead)
+if [[ ${BASH_SOURCE[0]} == */* ]]; then
+  SELF_DIR=$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+else
+  SELF_DIR=$PWD
+fi
 REPO_ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 . "$SELF_DIR/row2-envelope.sh"
 
@@ -553,10 +560,24 @@ run_command_unit() {
   path=$(location_of "$locid")
   local t0 t1 rc
   t0=$(launcher_exec SYS_BIN_DATE -u +%Y-%m-%dT%H:%M:%SZ)
-  # the envelope's logical argv[0] is the manifest's argv0Token (identity
-  # only); the canonical path becomes the child's argv[0] — passing both
-  # would hand the leaf its own name as an operand (the exit=2 sort lesson)
-  clean_env_exec "$path" "$PU_CARRIER_STDOUT" "$PU_CARRIER_STDERR" ${PU_ARGV[@]+"${PU_ARGV[@]:1}"}
+  # 5. exec the leaf with clean env + closed stdin, carriers attached.
+  #    Repo-payload units (argv[0]=bash token, executableId=row2-*) exec via
+  #    the manifest-frozen INTERPRETER with the canonical payload path as the
+  #    first argument — executing the payload file itself produced exit=126
+  #    (not a binary) / exit=2 (payload path fed to itself as an operand),
+  #    both accepted by PRE-00 (review F1).
+  local kind interp_id interp_loc interp_path
+  kind=$(mft_field "$MANIFEST" "$PU_EXECID" "kind")
+  if [[ $kind == repo-payload ]]; then
+    interp_id=$(mft_field "$MANIFEST" "$PU_EXECID" "interpreterId")
+    [[ -n $interp_id ]] || { printf 'STOP: %s has no interpreterId\n' "$PU_EXECID" >&2; return 1; }
+    verify_executable "$interp_id" || return 1
+    interp_loc=$(mft_field "$MANIFEST" "$interp_id" "locationId")
+    interp_path=$(location_of "$interp_loc") || return 1
+    clean_env_exec "$interp_path" "$PU_CARRIER_STDOUT" "$PU_CARRIER_STDERR" "$path" ${PU_ARGV[@]+"${PU_ARGV[@]:2}"}
+  else
+    clean_env_exec "$path" "$PU_CARRIER_STDOUT" "$PU_CARRIER_STDERR" ${PU_ARGV[@]+"${PU_ARGV[@]:1}"}
+  fi
   rc=$?
   t1=$(launcher_exec SYS_BIN_DATE -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$t0" > "$PU_CARRIER_START"
@@ -666,14 +687,13 @@ main() {
 }
 
 usage() {
-  cat >&2 <<'EOF'
-usage:
+  # builtin-only (the PATH= review finding: no external cat even here)
+  printf '%s\n' 'usage:
   bash row2-runner.sh <mode> <mode-id> <input-rel> <output-rel>   (HOST-RUNNER-MODE leaf)
       modes: parse:{envelope,packet} audit:command-surface
              gate:{six-file-carrier,prefire-write-boundary}
              seal:file-set-equality
-  bash row2-runner.sh supervise <evidence-dir>                   (orchestration root)
-EOF
+  bash row2-runner.sh supervise <evidence-dir>                   (orchestration root)' >&2
 }
 
 main "$@"

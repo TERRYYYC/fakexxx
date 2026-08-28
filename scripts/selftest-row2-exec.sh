@@ -59,6 +59,14 @@ copy_payload_tree() {
   cp "$ROW2"/*.sh "$ROW2"/*.json "$1/"
 }
 
+# copy_repo_layout <dst> — mirrors scripts/row2 nesting so SUPERVISOR-face
+# copies resolve REPO_ROOT the way the real checkout does (leaf-face copies
+# don't need this; supervise does)
+copy_repo_layout() {
+  mkdir -p "$1/scripts/row2"
+  cp "$ROW2"/*.sh "$ROW2"/*.json "$1/scripts/row2/"
+}
+
 # Extract the gate's canonical spec (single source; the sed is the same
 # "extract the REAL shipped pieces" pattern selftest-test-hook-package-identity.sh uses).
 extract_gate_spec() { # <out-path>
@@ -331,6 +339,60 @@ if build_green_session "$EV5"; then
   fi
 else
   report fail "M5 setup" "green session failed"
+fi
+
+# ---------------------------------------------------------------------------
+# M6/R7: seq-contiguity arm (gpt55 review F3: 001,004,003 was accepted).
+# ---------------------------------------------------------------------------
+T6="$WORK/m6-tree"
+copy_payload_tree "$T6"
+# disable ONLY the comparison (arm-off); the counter still increments
+sed 's/if \[\[ $seq != "$expected" \]\]; then/if false; then/' "$PACKET" > "$T6/row2-packet.sh"
+
+EV6="$WORK/m6-ev"
+if build_green_session "$EV6"; then
+  # gap without collision: the 5-command spec has a real seq 004 (the F1
+  # repo-payload unit), so 002→004 would be a DUPLICATE finding instead of a
+  # contiguity finding — shift 003→013 instead
+  sed 's/"seq":"003"/"seq":"013"/' "$EV6/meta/execution-packet.json" > "$WORK/mut6.json"
+  mkdir -p "$WORK/m6-mut/meta"
+  cp "$WORK/mut6.json" "$WORK/m6-mut/meta/execution-packet.json"
+  if "$PACKET" validate "$WORK/m6-mut" >/dev/null 2>&1; then
+    report fail "R7 seq-gap rejected by production validator" "gap mutant ACCEPTED"
+  else
+    report ok "R7 seq-gap rejected by production validator"
+  fi
+  if "$T6/row2-packet.sh" validate "$WORK/m6-mut" >/dev/null 2>&1; then
+    report ok "M6 seq-contiguity arm load-bearing (disabled → gap passes)"
+  else
+    report fail "M6 seq-contiguity arm load-bearing" "disabled arm still rejected the gap"
+  fi
+else
+  report fail "M6 setup" "green session failed"
+fi
+
+# ---------------------------------------------------------------------------
+# M8: interpreter-exec arm (gpt55 review F1: repo-payload units exit 126/2).
+# With the repo-payload branch removed, unit 004 must degrade to exit!=0.
+# ---------------------------------------------------------------------------
+T7="$WORK/m7-tree"
+copy_repo_layout "$T7"
+# route repo-payload units down the DIRECT-exec path (the F1 failure shape)
+sed 's/if \[\[ $kind == repo-payload \]\]; then/if false; then/' "$T7/scripts/row2/row2-runner.sh" > "$T7/rr.tmp" && mv "$T7/rr.tmp" "$T7/scripts/row2/row2-runner.sh"
+
+EV7="$WORK/m7-ev"
+mkdir -p "$EV7/meta" "$EV7/derived"
+# the whole session is self-hosted on the PATCHED tree (manifest digests must
+# bind the patched runner, else verify_executable stops before unit 004)
+"$T7/scripts/row2/row2-packet.sh" manifest-freeze "$EV7" bash cat sort grep shasum row2-runner row2-classifier >/dev/null 2>&1
+extract_gate_spec "$WORK/m7-spec.bash"
+"$T7/scripts/row2/row2-packet.sh" build "$EV7" "$WORK/m7-spec.bash" >/dev/null 2>&1
+(cd "$EV7" && bash "$T7/scripts/row2/row2-runner.sh" supervise .) >/dev/null 2>&1
+e7=$(cat "$EV7/meta/004-runner-parse.exit.txt" 2>/dev/null || echo missing)
+if [ "$e7" != "0" ] && [ "$e7" != "missing" ]; then
+  report ok "M8 interpreter arm load-bearing (removed → unit 004 exit=$e7)"
+else
+  report fail "M8 interpreter arm load-bearing" "unit 004 exit=$e7 without the interpreter branch"
 fi
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,14 @@
 set -uo pipefail
 LC_ALL=C; LANG=C; TZ=UTC; export LC_ALL LANG TZ
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# builtin-only, ABSOLUTE SELF_DIR (dirname is an external binary — the PATH=
+# review finding; and ${var%/*} eats the only slash for single-dir relative
+# invocations, so resolve through the cd/pwd builtins instead)
+if [[ ${BASH_SOURCE[0]} == */* ]]; then
+  SELF_DIR=$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+else
+  SELF_DIR=$PWD
+fi
 . "$SELF_DIR/row2-envelope.sh"
 
 ENV_BASE="ROW2-CLEAN-ENV-V1"
@@ -257,7 +264,7 @@ cmd_build() {
     done
   fi
   local pkt
-  printf -v pkt '{"schemaVersion":2,"contractGitHead":"%s","contractBlobSha":"%s","contractSha256":"%s","runnerRepoRelativePath":"scripts/row2/row2-runner.sh","runnerSha256":"%s","accessClassifier":{"policyId":"ROW2-EXEC-ACCESS-V2","implementationRepoRelativePath":"scripts/row2/row2-classifier-v2.sh","implementationSha256":"%s"},"executionEnvelope":{"executableManifestRelativePath":"meta/executable-manifest.json","executableManifestSha256":"%s","envPolicyId":"%s","stdinPolicyId":"%s"},"evidenceDirName":"%s","runId":"%s","candidateHead":"%s","candidateTree":"%s","buildType":"%s","gradleTasks":[%s],"contractYamlSha256":"%s","buildEvidence":{"commandDigest":"%s","reportDigest":"%s","manifestDigest":"%s","sandboxPolicyId":"ROW2-BUILD-NO-DEVICE-V1","sandboxReportDigest":"%s"},"hostEnvironment":{"os":"%s","kernel":"%s","java":"%s","gradle":"%s","androidSdk":"%s","adb":"%s","sqlite":"%s","shasum":"%s","bash":"%s","gitRepoConfigSha256":"%s"},"device":{"serial":"%s","model":"%s","fingerprint":"%s","androidRelease":"%s","api":"%s","timezone":"%s","adbServerPolicyId":"ROW2-PREEXISTING-LOCAL-ADB-SERVER-V1"},"packages":{"bench":{"applicationId":"%s","artifactRepoRelativePath":"%s","artifactSha256":"%s","versionCode":"%s","versionName":"%s","signerSha256":"%s","installedBaseApkPath":"%s"},"auto":{"applicationId":"%s","artifactRepoRelativePath":"%s","artifactSha256":"%s","versionCode":"%s","versionName":"%s","signerSha256":"%s","installedBaseApkPath":"%s"},"production":{"applicationId":"%s"}},"components":{"benchAcceptance":"%s","qwyCollector":"%s","autoHandshake":"%s","autoState":"%s","autoProbe":"%s"},"p8":{"rawDevicePaths":{"db":"%s","wal":"%s","shm":"%s"},"expectedModules":"%s","expectedScopes":"%s","expectedMockAllowPackages":"%s"},"kyiv":{"scheduleId":"%s","scheduleVersion":"%s","currentItemId":"%s","expectedBeforeState":"%s","expectedAfterState":"%s"},"roles":{"executorTaskId":"%s","executorOwner":"%s","recorderTaskId":"%s","recorderOwner":"%s","validityTaskId":"%s","validityOwner":"%s"},"holdMs":%s,"terminalTimeoutSeconds":%s,"commands":[%s],"sealControlPaths":[%s]}\n' \
+  printf -v pkt '{"schemaVersion":2,"contractGitHead":"%s","contractBlobSha":"%s","contractSha256":"%s","runnerRepoRelativePath":"scripts/row2/row2-runner.sh","runnerSha256":"%s","accessClassifier":{"policyId":"ROW2-EXEC-ACCESS-V2","implementationRepoRelativePath":"scripts/row2/row2-classifier-v2.sh","implementationSha256":"%s"},"executionEnvelope":{"executableManifestRelativePath":"meta/executable-manifest.json","executableManifestSha256":"%s","envPolicyId":"%s","stdinPolicyId":"%s"},"evidenceDirName":"%s","runId":"%s","candidateHead":"%s","candidateTree":"%s","buildType":"%s","gradleTasks":[%s],"contractYamlSha256":"%s","buildEvidence":{"commandDigest":"%s","reportDigest":"%s","manifestDigest":"%s","sandboxPolicyId":"ROW2-BUILD-NO-DEVICE-V1","sandboxReportDigest":"%s"},"hostEnvironment":{"os":"%s","kernel":"%s","java":"%s","gradle":"%s","androidSdk":"%s","adb":"%s","sqlite":"%s","shasum":"%s","bash":"%s","gitRepoConfigSha256":"%s"},"device":{"serial":"%s","model":"%s","fingerprint":"%s","androidRelease":"%s","api":"%s","timezone":"%s","adbServerPolicyId":"ROW2-PREEXISTING-LOCAL-ADB-SERVER-V1"},"packages":{"bench":{"applicationId":"%s","artifactRepoRelativePath":"%s","artifactSha256":"%s","versionCode":"%s","versionName":"%s","signerSha256":"%s","installedBaseApkPath":"%s"},"auto":{"applicationId":"%s","artifactRepoRelativePath":"%s","artifactSha256":"%s","versionCode":"%s","versionName":"%s","signerSha256":"%s","installedBaseApkPath":"%s"},"production":{"applicationId":"%s"}},"components":{"benchAcceptance":"%s","qwyCollector":"%s","autoHandshake":"%s","autoState":"%s","autoProbe":"%s"},"p8":{"rawDevicePaths":{"db":"%s","wal":"%s","shm":"%s"},"expectedModules":"%s","expectedScopes":"%s","expectedMockAllowPackages":"%s"},"kyiv":{"scheduleId":"%s","scheduleVersion":"%s","currentItemId":"%s","expectedBeforeState":"%s","expectedAfterState":"%s"},"roles":{"executorTaskId":"%s","executorOwner":"%s","recorderTaskId":"%s","recorderOwner":"%s","validityTaskId":"%s","validityOwner":"%s"},"holdMs":%s,"terminalTimeoutSeconds":%s,"terminalReadMaxDelaySeconds":%s,"commands":[%s],"sealControlPaths":[%s]}\n' \
     "$SPEC_contractGitHead" "$SPEC_contractBlobSha" "$SPEC_contractSha256" \
     "$runner_sha" "$classifier_sha" "$manifest_sha" "$ENV_BASE" "$STDIN_CLOSED" \
     "$SPEC_evidenceDirName" "$SPEC_runId" \
@@ -272,7 +279,7 @@ cmd_build() {
     "$SPEC_p8_db" "$SPEC_p8_wal" "$SPEC_p8_shm" "$SPEC_p8_expectedModules" "$SPEC_p8_expectedScopes" "$SPEC_p8_expectedMockAllowPackages" \
     "$SPEC_kyiv_scheduleId" "$SPEC_kyiv_scheduleVersion" "$SPEC_kyiv_currentItemId" "$SPEC_kyiv_expectedBeforeState" "$SPEC_kyiv_expectedAfterState" \
     "$SPEC_roles_executorTaskId" "$SPEC_roles_executorOwner" "$SPEC_roles_recorderTaskId" "$SPEC_roles_recorderOwner" "$SPEC_roles_validityTaskId" "$SPEC_roles_validityOwner" \
-    "${SPEC_holdMs:-30000}" "${SPEC_terminalTimeoutSeconds:-70}" \
+    "${SPEC_holdMs:-30000}" "${SPEC_terminalTimeoutSeconds:-70}" "${SPEC_terminalReadMaxDelaySeconds:-10}" \
     "$CMDS" "$seal"
   printf '%s\n' "$pkt" > "$ev/meta/execution-packet.json"
   printf 'build: %d commands -> %s/meta/execution-packet.json\n' "$CMD_COUNT" "$ev"
@@ -281,7 +288,7 @@ cmd_build() {
 # ---------------------------------------------------------------------------
 # validate (PRE-00)
 # ---------------------------------------------------------------------------
-REQUIRED_TOP="schemaVersion contractGitHead contractBlobSha contractSha256 runnerRepoRelativePath runnerSha256 accessClassifier executionEnvelope evidenceDirName runId candidateHead candidateTree buildType gradleTasks contractYamlSha256 buildEvidence hostEnvironment device packages components p8 kyiv roles holdMs terminalTimeoutSeconds commands sealControlPaths"
+REQUIRED_TOP="schemaVersion contractGitHead contractBlobSha contractSha256 runnerRepoRelativePath runnerSha256 accessClassifier executionEnvelope evidenceDirName runId candidateHead candidateTree buildType gradleTasks contractYamlSha256 buildEvidence hostEnvironment device packages components p8 kyiv roles holdMs terminalTimeoutSeconds terminalReadMaxDelaySeconds commands sealControlPaths"
 FORBIDDEN_ACCESS_KEYS='"deviceAccess" '"'"'declaredAccess'"'"' "accessClass" "deviceAccessClass" "declaredRuleId"'
 
 cmd_validate() {
@@ -395,6 +402,16 @@ validate_command_object() { # <canonical command object>
     printf 'PRE-00 FAIL: seq "%s" not 3-digit decimal\n' "$seq" >&2
     return 1
   fi
+  # contract §3.1-1: seq is 三位十进制、从 001 开始、连续、不得跳号. The
+  # review's gap mutant (001,004,003 accepted) proved the uniqueness check
+  # alone is not contiguity.
+  local expected
+  printf -v expected '%03d' "$EXPECTED_SEQ"
+  if [[ $seq != "$expected" ]]; then
+    printf 'PRE-00 FAIL: seq not contiguous: got %s, expected %s\n' "$seq" "$expected" >&2
+    return 1
+  fi
+  EXPECTED_SEQ=$((EXPECTED_SEQ + 1))
   if seq_seen "$seq"; then
     printf 'PRE-00 FAIL: duplicate seq %s\n' "$seq" >&2
     return 1
@@ -429,6 +446,7 @@ validate_command_object() { # <canonical command object>
 # lists are fine at packet scale (~100 commands, ~600 carrier paths).
 SEEN_SEQS=()
 SEEN_PATHS=()
+EXPECTED_SEQ=1
 seq_seen()   { [[ -n ${SEEN_SEQS[@]+x} ]] || return 1; local x; for x in "${SEEN_SEQS[@]}";   do [[ $x == "$1" ]] && return 0; done; return 1; }
 path_seen()  { [[ -n ${SEEN_PATHS[@]+x} ]] || return 1; local x; for x in "${SEEN_PATHS[@]}";  do [[ $x == "$1" ]] && return 0; done; return 1; }
 
@@ -443,12 +461,11 @@ main() {
 }
 
 usage() {
-  cat >&2 <<'EOF'
-usage:
+  # builtin-only (the PATH= review finding: no external cat even here)
+  printf '%s\n' 'usage:
   row2-packet.sh manifest-freeze <evidence-dir> <executableId>...
   row2-packet.sh build <evidence-dir> <spec.bash>
-  row2-packet.sh validate <evidence-dir>
-EOF
+  row2-packet.sh validate <evidence-dir>' >&2
 }
 
 main "$@"

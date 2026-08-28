@@ -68,7 +68,14 @@
 set -uo pipefail
 LC_ALL=C; LANG=C; TZ=UTC; export LC_ALL LANG TZ
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# builtin-only, ABSOLUTE SELF_DIR (dirname is an external binary — the PATH=
+# review finding; and ${var%/*} eats the only slash for single-dir relative
+# invocations, so resolve through the cd/pwd builtins instead)
+if [[ ${BASH_SOURCE[0]} == */* ]]; then
+  SELF_DIR=$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)
+else
+  SELF_DIR=$PWD
+fi
 . "$SELF_DIR/row2-envelope.sh"
 
 ENV_BASE="ROW2-CLEAN-ENV-V1"
@@ -117,7 +124,13 @@ fixture_packet_text() {
 # values (repeated two-char patterns) — distinct per executable so a wrong
 # digest fixture can use a neighbor's value.
 fixture_manifest_text() {
-  cat <<'EOF'
+  # builtin-only (a heredoc through `cat` is an external process — the
+  # PATH= review finding: this payload must run with an empty PATH); the
+  # frozen bytes below are identical to the reviewed heredoc
+  printf '%s' "$FIXTURE_MANIFEST_TEXT"
+}
+
+FIXTURE_MANIFEST_TEXT='
 {"schemaVersion":1,"executables":[
 {"executableId":"adb","argv0Token":"adb","kind":"system","locationId":"SYS_BIN_ADB","sha256":"adadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad"},
 {"executableId":"bash","argv0Token":"bash","kind":"system","locationId":"SYS_BIN_BASH","sha256":"babababababababababababababababababababababababababababababababa"},
@@ -146,8 +159,8 @@ fixture_manifest_text() {
 {"executableId":"row2-classifier","argv0Token":"bash","kind":"repo-payload","locationId":"PAYLOAD_ROW2_CLASSIFIER","sha256":"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1","interpreterId":"bash"},
 {"executableId":"fastboot","argv0Token":"fastboot","kind":"system","locationId":"SYS_BIN_FASTBOOT","sha256":"fbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfbfb"}
 ]}
-EOF
-}
+'
+
 
 # ---------------------------------------------------------------------------
 # Packet-constant extraction (canonical prefix scans; the packet is emitted

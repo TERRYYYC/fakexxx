@@ -32,9 +32,9 @@ dex 扫描守卫红线（同一 PR）：把 `FullLoopProbeActivity`/`HandshakePr
 | ③ executable manifest | `row2-packet.sh manifest-freeze`：经 runner 源内冻结 LOCATION 表解析 canonical path，真实 SHA-256 + stat mode 落 `meta/executable-manifest.json`；`executable-manifest.template.json` 为评审模板 | §3.1-8、PRE-02 |
 | ④ execution packet | `row2-packet.sh build/validate`：canonical key-order 构建器（carrier stem 机械派生）+ PRE-00 校验器（schemaVersion、top-level key 序列精确游走=无未知/乱序键、seq 连续唯一、carrier 路径唯一、envelope 完整性、**零 access-label 字段**、顶层 policy 字面量） | §3.1、§3.1-4、PRE-00 |
 
-生产 gate `check-row2-exec.sh` 九段全绿；`selftest-row2-exec.sh` 14 用例（含调度点名的
+生产 gate `check-row2-exec.sh` 九段全绿；`selftest-row2-exec.sh` 17 用例（含调度点名的
 三个 mutation：逃逸命令被放行 / 四元组缺失报成功 / packet-carrier 不匹配继续，各配 M-*
-load-bearing 证明）；CI 新增 `row2-exec` job。dex 守卫扩展见提交 `9085151`。
+load-bearing 证明；R7/M6+M8 覆盖 gpt55 review 的 F3/F1）；CI 新增 `row2-exec` job。dex 守卫扩展见提交 `9085151`。
 
 ## 冻结解释账本（I1–I11）
 
