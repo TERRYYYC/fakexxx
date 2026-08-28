@@ -341,6 +341,32 @@ jobs:
         # selftest that exists but never runs is not a guard.
         run: ./scripts/selftest-test-hook-acceptance-readiness.sh
 
+  row2-exec:
+    # G2 Row 2 execution plane (host-side lane of the PR #55 evidence
+    # contract): runner + ROW2-EXEC-ACCESS-V2 classifier + executable
+    # manifest + execution packet, with the mutation matrix that keeps every
+    # guard load-bearing. Device-free by construction — the only executables
+    # the launcher ever starts in the gate are sort/cat/grep/bash class host
+    # binaries in throwaway evidence roots; adb exists only as classifier
+    # grammar. This job is the host precondition Fable's EXECUTABLE verdict
+    # and the later device authorization depend on.
+    name: row2-exec (gate + mutation matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check-row2-exec
+        run: ./scripts/check-row2-exec.sh
+
+      - name: selftest-row2-exec
+        # The gate being green carries information only while its guards are
+        # still sensitive to the drift they claim to catch (the same argument
+        # as selftest-contract-v1). R1-R6 mutate throwaway payload copies —
+        # escape allowed / missing carrier quadruple / packet-carrier
+        # mismatch / write-budget off-by-one / grammar narrowing / access
+        # labels — and M-* disable one arm each to prove load-bearing.
+        run: ./scripts/selftest-row2-exec.sh
+
   release-debt:
     # Gate that proves open contract-v1.1-debt blocks release (Issue #19/#20).
     # Runs the full selftest suite (12 cases) and matrix coverage check (M-AD-14..19).

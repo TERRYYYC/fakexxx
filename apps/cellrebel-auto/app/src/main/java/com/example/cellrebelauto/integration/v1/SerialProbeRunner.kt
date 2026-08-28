@@ -8,17 +8,18 @@ import kotlin.concurrent.thread
  *
  * WHY THIS EXISTS (R5 P1-1)
  * -------------------------
- * `FullLoopProbeActivity.launchProbe()` spawned a new thread on every
- * `onNewIntent` with no gate. Two concurrent `runLoop()` threads raced on the
- * same provider and device mock state: lease cleanup, advance decisions, and UI
- * callbacks all corrupted. The same pattern existed in `HandshakeProbeActivity`.
+ * The debug-only probe activities (full-loop probe, handshake probe) spawned a
+ * new thread on every `onNewIntent` with no gate. Two concurrent `runLoop()`
+ * threads raced on the same provider and device mock state: lease cleanup,
+ * advance decisions, and UI callbacks all corrupted. Both probe types shared
+ * the same pattern.
  *
  * HOW IT WORKS
  * ------------
  * Each [launch] spawns a worker thread that acquires [runGate] before entering
  * the probe body. If a previous run is still active (holding the lock), the new
  * thread blocks until the previous run's `finally` block releases the lock —
- * which includes the lease-release cleanup in `FullLoopProbeActivity.runLoop()`.
+ * which includes the lease-release cleanup in the full-loop probe's `runLoop()`.
  *
  * This satisfies the claim in the `onNewIntent` comment: "the previous run's
  * mock state is cleaned up before the new run starts." The blocking happens on
