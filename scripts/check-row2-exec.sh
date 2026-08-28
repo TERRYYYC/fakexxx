@@ -262,10 +262,11 @@ section_launcher() {
         rm -rf "$(dirname "$ev")"
         return 0
     fi
-    if (cd "$ev" && bash "$REPO_ROOT/$RUNNER" supervise .) >/dev/null 2>&1; then
+    local sup_err="$ev/supervise.err"
+    if (cd "$ev" && bash "$REPO_ROOT/$RUNNER" supervise . 2>"$sup_err"); then
         ok "supervise: 3 host units executed via launcher"
     else
-        fail "supervise failed"
+        fail "supervise failed: $(tail -3 "$sup_err" 2>/dev/null | tr '\n' ' ')"
         rm -rf "$(dirname "$ev")"
         return 0
     fi
