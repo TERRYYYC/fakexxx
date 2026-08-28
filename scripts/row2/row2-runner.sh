@@ -493,9 +493,15 @@ verify_executable() { # <execId> -> 0 ok; 3 verification STOP
   sha=$(mft_field "$MANIFEST" "$id" "sha256") || return 3
   path=$(location_of "$locid") || return 3
   [[ -L "$path" || ! -f "$path" ]] && { printf 'verify: %s bad file type\n' "$id" >&2; return 3; }
+  # portable mode probe: GNU stat -c first (GNU `stat -f '%Sp'` SUCCEEDS with
+  # useless default output instead of failing — the CI mode-drift lesson),
+  # then BSD stat -f; either way the shape is validated before comparison
   local mode_ok
-  mode_ok=$(launcher_exec SYS_BIN_STAT -f '%Sp' "$path" 2>/dev/null) || mode_ok=$(launcher_exec SYS_BIN_STAT -c '%A' "$path" 2>/dev/null) || {
-    printf 'verify: stat failed for %s\n' "$id" >&2; return 3; }
+  mode_ok=$(launcher_exec SYS_BIN_STAT -c '%A' "$path" 2>/dev/null) \
+    || mode_ok=$(launcher_exec SYS_BIN_STAT -f '%Sp' "$path" 2>/dev/null) \
+    || { printf 'verify: stat failed for %s\n' "$id" >&2; return 3; }
+  [[ $mode_ok =~ ^[bcdlps-]?[rwxStTs-]{9}$ ]] || {
+    printf 'verify: %s mode probe returned junk: %s\n' "$id" "$mode_ok" >&2; return 3; }
   local frozen_mode
   frozen_mode=$(mft_field "$MANIFEST" "$id" "modePattern")
   if [[ -n ${frozen_mode//\"/} && -n $frozen_mode ]] && [[ $frozen_mode != "-" && "$mode_ok" != "$frozen_mode" ]]; then

@@ -103,7 +103,14 @@ location_for() { # <execId> -> canonical path (parsed from the runner's frozen m
 }
 
 stat_mode() { # <path> -> portable mode string
-  /usr/bin/stat -f '%Sp' "$1" 2>/dev/null || /usr/bin/stat -c '%A' "$1" 2>/dev/null || /bin/stat -c '%A' "$1" 2>/dev/null
+  # GNU `stat -f '%Sp'` does NOT fail — it "succeeds" printing default
+  # filesystem-stat output (CI lesson: mode drift "File: ..." != frozen).
+  # So: try GNU -c first, VALIDATE the shape, then BSD -f, validate again.
+  local m
+  m=$(/usr/bin/stat -c '%A' "$1" 2>/dev/null || /bin/stat -c '%A' "$1" 2>/dev/null) \
+    || m=$(/usr/bin/stat -f '%Sp' "$1" 2>/dev/null || /bin/stat -f '%Sp' "$1" 2>/dev/null)
+  [[ $m =~ ^[bcdlps-]?[rwxStTs-]{9}$ ]] || return 1
+  printf '%s' "$m"
 }
 
 # ---------------------------------------------------------------------------
