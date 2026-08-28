@@ -26,7 +26,10 @@
 #   M12  Restate reportDigest definition in §11 → restatement ban (G17, P4)
 #   M13  Add raw-evidence term to summary (reversed word order) → category-ban guard (G15)
 #   M14  Delete authority pointer line (Finding E) → exact pointer guard (G16)
-#   M15  Fenced-code decoy pointer (R7) → prose-only pointer guard (G16)
+#   M15  Fenced-code decoy pointer (R7) → fail-closed pointer guard (G16)
+#   M16  4-space indent decoy pointer (R8) → fail-closed pointer guard (G16)
+#   M17  HTML comment decoy pointer (R8) → fail-closed pointer guard (G16)
+#   M18  Nested blockquote decoy pointer (R8) → fail-closed pointer guard (G16)
 #
 # Plus one positive:
 #   P1  Pristine (unmodified) runbook must pass
@@ -276,6 +279,60 @@ t = t.replace(
 with open('$rb','w') as f: f.write(t)
 "
 assert_fail "M15 fenced-code decoy pointer is caught (G16, R7)" "$sb"
+
+# ── M16: 4-space indent decoy pointer (R8, Luna) ─────────────────────────
+#
+# Moving the pointer into a 4-space indented code block (> followed by 4+
+# spaces) makes it non-operative prose.  The anchored grep `^> \`` requires
+# blockquote level 1 with no extra spaces → structurally excluded.
+
+sb=$(setup_sandbox "m16-indent-decoy")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+t = t.replace(
+    '> \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。',
+    '>     \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。'
+)
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M16 4-space indent decoy pointer is caught (G16, R8)" "$sb"
+
+# ── M17: HTML comment decoy pointer (R8, Luna) ───────────────────────────
+#
+# Wrapping the pointer in an HTML comment (<!-- … -->) makes it invisible
+# in rendered markdown.  The anchored grep `^> \`` requires the line to
+# start with `> \`` not `> <!--` → structurally excluded.
+
+sb=$(setup_sandbox "m17-html-comment-decoy")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+t = t.replace(
+    '> \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。',
+    '> <!-- \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。 -->'
+)
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M17 HTML comment decoy pointer is caught (G16, R8)" "$sb"
+
+# ── M18: Nested blockquote decoy pointer (R8, Luna) ──────────────────────
+#
+# Moving the pointer into a deeper blockquote level (> >) changes its
+# structural position.  The anchored grep `^> \`` requires exactly one `>`
+# before the backtick → `> > \`` has an extra `> `, structurally excluded.
+
+sb=$(setup_sandbox "m18-nested-quote-decoy")
+rb="$sb/docs/acceptance/issue7-auto-qwy-g1-smoke-runbook.md"
+python3 -c "
+with open('$rb') as f: t = f.read()
+t = t.replace(
+    '> \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。',
+    '> > \`reportDigest\` 语义定义见 feature-spec §10.1（冻结）；本节不复述。'
+)
+with open('$rb','w') as f: f.write(t)
+"
+assert_fail "M18 nested blockquote decoy pointer is caught (G16, R8)" "$sb"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
