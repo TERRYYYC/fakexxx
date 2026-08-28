@@ -30,7 +30,8 @@ status: freeze-candidate
 
 1. `DRAFT`：Sol 起草，零设备命令；
 2. `CRITERIA_SIGNED`：Terra 对 exact Git HEAD 明确签署“仅按本文件即可判定”；
-3. `EXECUTABLE`：Fable 对 exact HEAD、runner 与 argv classifier SHA-256 给出 host-only 可执行性结论；
+3. `EXECUTABLE`：Fable 对 exact HEAD、runner、V2 envelope classifier、executable/env/stdin/ADB-server
+   policy 与隔离 build manifest/report 给出 host-only 可执行性结论；
 4. `AUTHORIZED`：调度线取得新的 operator 直接授权；此前不得执行任何 device command。
 
 `CRITERIA_SIGNED` 后修改本文件任一字节会使签字失效。`AUTHORIZED` 后出现的新证据充分性要求
@@ -103,19 +104,25 @@ ID 只裁定设备能否安全归真，不能把本次改回 PASS。未进入的
 
 ### 3.1 冻结 execution packet
 
-`meta/execution-packet.json` 在 feasibility 开始前冻结；Fable verdict 同时绑定 packet、runner、
-classifier implementation 与 contract 四个 SHA-256。JSON 必须含且只能从该文件读取以下执行参数：
+`meta/execution-packet.json` 在 feasibility 开始前冻结；Fable verdict 同时绑定 contract、packet、
+runner、classifier implementation、executable manifest、env/stdin policy 与隔离 build manifest/report。
+JSON 必须含且只能从该文件读取以下执行参数：
 
 ```text
-schemaVersion
+schemaVersion=2
 contractGitHead / contractBlobSha / contractSha256
 runnerRepoRelativePath / runnerSha256
-accessClassifier.policyId=ROW2-ARGV-ACCESS-V1 / implementationRepoRelativePath / implementationSha256
+accessClassifier.policyId=ROW2-EXEC-ACCESS-V2 / implementationRepoRelativePath / implementationSha256
+executionEnvelope.executableManifestRelativePath=meta/executable-manifest.json / executableManifestSha256 /
+                  envPolicyId=ROW2-CLEAN-ENV-V1 / stdinPolicyId=ROW2-STDIN-CLOSED-V1
 evidenceDirName / runId
 candidateHead / candidateTree / buildType / gradleTasks[] / contractYamlSha256
-buildEvidence.commandDigest / reportDigest / manifestDigest
-hostEnvironment.os / kernel / java / gradle / androidSdk / adb / sqlite / shasum / bash
-device.serial / model / fingerprint / androidRelease / api / timezone
+buildEvidence.commandDigest / reportDigest / manifestDigest / sandboxPolicyId=ROW2-BUILD-NO-DEVICE-V1 /
+              sandboxReportDigest
+hostEnvironment.os / kernel / java / gradle / androidSdk / adb / sqlite / shasum / bash /
+                gitRepoConfigSha256
+device.serial / model / fingerprint / androidRelease / api / timezone /
+       adbServerPolicyId=ROW2-PREEXISTING-LOCAL-ADB-SERVER-V1
 packages[bench|auto].applicationId / artifactRepoRelativePath / artifactSha256 / versionCode /
                      versionName / signerSha256 / installedBaseApkPath
 packages.production.applicationId
@@ -125,7 +132,8 @@ p8.expectedModules / p8.expectedScopes / p8.expectedMockAllowPackages
 kyiv.scheduleId / scheduleVersion / currentItemId / expectedBeforeState / expectedAfterState
 roles.executorTaskId|owner / recorderTaskId|owner / validityTaskId|owner
 holdMs=30000 / terminalTimeoutSeconds=70 / terminalReadMaxDelaySeconds=10
-commands[]: seq / checklistIds[] / phase / slug / cwdRef=repo|evidence|query / argv[] /
+commands[]: seq / checklistIds[] / phase / slug / executableId / executableSha256 /
+            cwdRef=repo|evidence|query / envPolicyId / stdinPolicyId / argv[] /
             carrier.command|stdout|stderr|exit|startUtc|endUtc
 sealControlPaths[]
 ```
@@ -133,28 +141,53 @@ sealControlPaths[]
 机械规则：
 
 1. `seq` 为从 `001` 开始的连续三位十进制；不得重复或跳号。
-2. `argv[]` 是不经 shell 二次解析的完整参数数组；不得含 secret、未展开变量、glob、alias、
-   command substitution 或 `sh -c`/`bash -c`。
+2. 每条 command 冻结的是完整 execution envelope，不只是 argv。`argv[]` 是不经 shell 二次解析的
+   完整参数数组；不得含 secret、未展开变量、glob、alias、command substitution 或
+   `sh -c`/`bash -c`。`executableId` 与 `argv[0]` 必须命中同一条 rule，digest 必须命中冻结
+   executable manifest；env/stdin policy 必须逐字等于 V2 固定值。
 3. 每个 checklist 的所有外部命令都必须在 `commands[]` 中；runner 静态提取出的外部命令集合
-   必须与该数组逐项、逐参数相等。
+   必须与该数组逐 envelope、逐参数相等。
 4. packet schema **不得出现** `deviceAccess`、`declaredAccess` 或等价的自报读写字段。每条
-   `argv[]` 的唯一 access class 只由 §3.1.1 classifier 重新计算；packet 不能选择或覆盖结果。
+   execution envelope 的唯一 access class 只由 §3.1.1 classifier 重新计算；packet 不能选择或覆盖结果。
 5. ADM-01..02 PASS 前，classifier 结果只能为 `HOST-NONE`。此后第一项 `DEVICE-WRITE` 必须是
    SET-01；在它之前，每条设备命令都必须逐项命中固定的 `DEVICE-READ` rule，且不得出现 packet
    之外的 device command。
-6. packet、runner 或 classifier implementation 变化不改变 Terra 对本契约的 criteria sign，但使
-   Fable feasibility verdict 失效。contract 变化使 Terra 与 Fable 两份 verdict 同时失效。
+6. packet、runner、classifier implementation、executable manifest、env/stdin policy、build manifest
+   或 candidate 变化不改变 Terra 对本契约的 criteria sign，但使 Fable feasibility verdict 失效。
+   contract 变化使 Terra 与 Fable 两份 verdict 同时失效。
 7. `cwdRef` 只解析为 runner 进程内已有的逻辑根；`argv[]` 与所有 carrier bytes 不得出现 host
    绝对路径、用户名、home 目录、credential、token、cookie 或本地 secret。
+8. launcher 不从 inherited `PATH` 解析 executable。manifest 只保存逻辑 ID、payload/interpreter
+   digest 与非路径 `locationId`；reviewed launcher source 内置 `locationId` 到 canonical system location
+   或 repo-relative frozen payload 的映射，不把 absolute path 写入 packet/carrier。launcher
+   拒绝 symlink／非常规文件／owner-mode 变化，exec 前逐份校验 SHA-256，按该 exact canonical path
+   执行，wait 后再次校验 identity/digest；任一步不稳定即 STOP。carrier 只记录逻辑 ID/digest，不泄漏
+   host absolute path；不得退化为 basename/PATH lookup。该 identity check 防 accidental drift/PATH shadow；
+   若 feasibility 的 threat model 包含同一 uid 并发换 inode 而 host 又没有 verified-fd exec，必须
+   `BLOCKED`，不能把 pre/post hash 冒充 hostile-TOCTOU 防护。
+9. `ROW2-CLEAN-ENV-V1` 从空环境构造，共同键只有固定 `LC_ALL=C`、`LANG=C`、`TZ=UTC`；Git envelope
+   另且只能加入 `GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`。`PATH`、`HOME`、shell startup、
+   其他 Git helper/config env、Java/Gradle、Perl/Python、dynamic-loader、ADB server/socket 与其他 inherited
+   变量全部不存在。repo `.git/config` 不假装不存在：PRE-02 只记录其 digest，Git rule 用 flags 逐面关闭
+   fsmonitor、pager、external diff 与 textconv；digest 改变即 feasibility 失效。某 executable 若物理上还需
+   变量，必须修改本契约逐字加入新 policy；packet 不能追加。`ROW2-STDIN-CLOSED-V1` 对每条命令提供
+   EOF，不读取 terminal、pipe 或 inherited fd。
+10. Gradle/build logic 不属于本 execution runner。两包必须先在 `ROW2-BUILD-NO-DEVICE-V1` 隔离构建
+    环境产生：该环境无 USB passthrough、ADB server/socket、device transport 与 production data，
+    并冻结完整 command/report/manifest、process-tree audit 与两包 digest。packet 只绑定这些结果；
+    authorized run 内不得再启动 Gradle、Java build task 或其 wrapper。
 
-### 3.1.1 Canonical argv→access classifier
+### 3.1.1 Canonical execution-envelope→access classifier
 
-`ROW2-ARGV-ACCESS-V1` 是本契约唯一的 argv access policy。classifier 的输入只有 packet 常量与
-一条 canonical JSON `argv[]`；输出固定为 `HOST-NONE`、`DEVICE-READ`、`DEVICE-WRITE` 或
+`ROW2-EXEC-ACCESS-V2` 是本契约唯一的 execution-envelope access policy。classifier 的输入只有
+packet 常量、冻结 executable manifest 与一条 canonical JSON execution envelope；输出固定为
+`HOST-NONE`、`DEVICE-READ`、`DEVICE-WRITE` 或
 `CLASSIFIER-REJECT`，并同时输出唯一 `ruleId`。`deviceAccess` 等 packet 标签不是输入。规则按下列
-顺序求值，任何 argv 命中 0 条或 2 条以上均输出 `CLASSIFIER-REJECT`：
+顺序求值，任何 envelope 命中 0 条或 2 条以上均输出 `CLASSIFIER-REJECT`：
 
-1. `argv[]` 不做 basename、路径、大小写、空白、quote 或 shell normalization；元素逐字节比较。
+1. `executableId`、digest、argv、cwdRef、envPolicyId 与 stdinPolicyId 都不做 basename、PATH、路径、
+   大小写、空白、quote 或 shell normalization；元素逐字节比较。任一字段缺失、manifest 不等、
+   env/stdin 非 V2 固定 policy 均拒绝，尚未检查 argv 前不得启动进程。
 2. exact `["adb","version"]` 唯一命中 `HOST-ADB-VERSION`。除此以外，`argv[0]="adb"` 必须
    命中下表一条 `ADB-READ-*` 或 `ADB-WRITE-*`；不得落入 `HOST-NONE`。
 3. 非 `adb` argv 只有命中 `HOST-NONE-*` 表一条时才为 `HOST-NONE`。`fastboot`、`scrcpy`、
@@ -162,31 +195,67 @@ sealControlPaths[]
    substitution、pipeline 与 redirection token 全部 `CLASSIFIER-REJECT`。唯一允许的 command-string
    参数是 `ADB-READ-LSPOSED` 中逐字固定的三条 `cat <path>`；它不含 metacharacter、变量或额外 token。
 4. classifier implementation 是独立于 packet 的冻结 payload。PRE-02 校验其 SHA-256；PRE-04
-   校验 implementation 对本节正例／负例 fixture 的完整输出，并对 packet 与 runner 的每条 argv
+   校验 implementation 对本节正例／负例 fixture 的完整输出，并对 packet 与 runner 的每条 envelope
    重新分类。implementation 不得读取 packet 中的任何 access label。
+5. argv 元素若会被目标 executable 解释为 program、command、query、init、plugin 或 hook，则只有两种
+   形状可放行：本节逐字列出的完整 bytes；或 PRE-02 已绑定 digest、且 PRE-04 已证明所有外部进程只经
+   唯一 launcher 的 runner／classifier payload。自然语言里的“不得启动子进程”不是 grammar，不能把
+   任意 program text 判为 `HOST-NONE`。凡 executable 能从该元素触发 `system`、pipe/getline、`exec`、
+   shell、extension、include 或动态加载而本节没有逐字列出，均 `CLASSIFIER-REJECT`。
 
 `HOST-NONE` 是下列显式 host-only allowlist；其中 `<repo-rel>`、`<evidence-rel>`、`<query-rel>`
-必须是无 `..` 的相对路径且解析后仍在对应逻辑根内。每行是完整 argv grammar：没有逐字列出的
+必须匹配 `[A-Za-z0-9][A-Za-z0-9._/-]*`，每段非空且不为 `.`/`..`，不得以 `-` 开头，不含反斜线、
+控制字符或 percent-encoded separator，解析后仍在对应逻辑根内。支持 `--` 的 executable 必须在
+首个 path 前逐字使用 `--`；不支持 `--` 的 fixed position 仍受 leading-`-` 禁令。每行是完整 argv grammar：没有逐字列出的
 subcommand、flag、primary 或 token 均拒绝；表中的 `...` 只代表该行“额外限制”明确允许的重复 token，
 不是任意尾参。表外 host argv 一律拒绝：
 
 | ruleId | canonical argv shape | 额外限制 |
 |---|---|---|
 | HOST-ADB-VERSION | `["adb","version"]` | 不含 serial 或 transport selector |
-| HOST-GIT-READ | `git` + `status --porcelain=v1`、`rev-parse`、`hash-object`、`diff --exit-code` 之一 | 无 network／checkout／reset／clean／写 index 参数；path 仅 `<repo-rel>` |
+| HOST-GIT-READ | exact `git --no-pager -c core.fsmonitor=false --no-optional-locks status --porcelain=v1`；`git --no-pager rev-parse <HEAD-literal>`；`git --no-pager hash-object -- <repo-rel>`；`git --no-pager diff --no-ext-diff --no-textconv --exit-code -- <repo-rel>...` 之一 | `<HEAD-literal>` 只为 `HEAD,HEAD^{tree},HEAD^,HEAD:<repo-rel>`；system/global config disabled，repo config digest frozen；每条 shape 关闭 pager，status 关闭 fsmonitor，diff 关闭 external-diff/textconv；无 network／checkout／reset／clean／写 index 参数 |
 | HOST-BASH-SYNTAX | `["bash","-n",<runner-rel>]` | `<runner-rel>` 逐字等于 packet runner path |
-| HOST-RUNNER-MODE | `["bash",<runner-rel>,<mode>,...]` | mode∈`parse,audit,gate,seal`；尾参只可为 packet seq/checklist ID、fixed literal 或逻辑根内 carrier；runner digest 已由 PRE-02 绑定；不得含 `-c` |
-| HOST-CLASSIFIER | `["bash",<classifier-rel>,<mode>,...]` | mode∈`fixture,classify`；尾参只可为 packet／canonical command carrier／classification report；classifier digest 已由 PRE-02 绑定；不得含 `-c` |
-| HOST-GRADLE | `["./gradlew","--offline","--no-daemon",<task>...]` | `<task>...` 与 packet `gradleTasks[]` 逐项相等；不得含 install task |
-| HOST-HASH | `["shasum","-a","256",<relative-path>...]` 或 `["shasum","-a","256","-c","manifest.sha256"]` | 每个 path 只在 `<repo-rel>/<evidence-rel>/<query-rel>`；manifest check cwdRef=evidence；仍受 §3.2 禁 suppress 规则约束 |
-| HOST-CAT | `["cat",<relative-path>]` | 输入只在三个逻辑根且不是 raw DB/WAL/SHM；binary artifact stdout 允许 |
-| HOST-FILESET | `["find",".","-type","f","-print"]`、`["sort",<evidence-rel>]`、`["ls","-A","."]` 之一 | `find` cwdRef=evidence 且不接受 `-exec/-delete`；sort 输入为冻结 path-list carrier |
-| HOST-FILEMETA | `stat`、`wc -c`、`wc -l`、`cmp`、`diff` + 1–2 个受限 relative path | 无 dereference／write flag；输入只在三个逻辑根 |
-| HOST-EVIDENCE-FS | `cp`、`chmod 0444`、`mkdir -p`、`touch` + 受限 relative path | source/destination 只在三个逻辑根；不得覆盖既有 evidenceDir；raw 只按 §8 转 0444 |
-| HOST-TEXT | `grep` 的 `-E,-F,-c,-n,-o,-v`、`sed -n`、`awk`、`cut`、`head -n`、`tail -n` + literal program/pattern + carrier path | 输入只来自已冻结 carrier；不得含 quiet flag、启动子进程或读取 device node |
-| HOST-SQLITE | `["sqlite3","-readonly",<query-rel>,<sql-literal>]` | DB 只在 `query/p8/`；SQL 不含 `ATTACH`、写 pragma 或 mutation |
-| HOST-ENV-TIME | executable∈`date,uname,java` | argv 只允许 packet hostEnvironment 所列 version／UTC probe shape |
-| HOST-PROCESS | executable∈`sleep,kill` | 只等待或停止本 runner 创建且已冻结 PID 的 host capture process |
+| HOST-RUNNER-MODE | `["bash",<runner-rel>,<mode>,<mode-id>,<input-rel>,<output-rel>]` | mode∈`parse,audit,gate,seal`；mode-id 必须属于 reviewed runner source 内的有限 manifest，static extraction 与 fixture 逐 tuple 枚举；exact 6 argv；helper 只用 shell builtins，不得调用 launcher／外部进程／eval |
+| HOST-CLASSIFIER | `["bash",<classifier-rel>,"fixture",<fixture-id>,<output-rel>]` 或 `["bash",<classifier-rel>,"classify",<command-carrier>,<output-rel>]` | fixture-id 属于 reviewed classifier source 的有限 manifest；exact arity；只用 shell builtins，不得调用 launcher／外部进程／eval；classifier digest 已由 PRE-02 绑定 |
+| HOST-HASH | `["shasum","-a","256","--",<relative-path>...]` 或 `["shasum","-a","256","-c","manifest.sha256"]` | direct path 只在三逻辑根；check 前 digest-bound parser 证明 manifest 每行是 `64-lowerhex + two spaces + exact sealed relative path`，file set/digest 与 packet 相等且无 absolute/traversal/device path |
+| HOST-CAT | `["cat","--",<relative-path>]` | 输入只在三个逻辑根且不是 raw DB/WAL/SHM；binary artifact stdout 允许 |
+| HOST-FILESET | `["find",".","-type","f","-print"]`、`["sort","--",<evidence-rel>]`、`["ls","-A","."]` 之一 | `find` cwdRef=evidence 且不接受额外 primary；sort 输入为冻结 path-list carrier |
+| HOST-FILEMETA | `["stat","--",<path>]`、`["wc","-c","--",<path>]`、`["wc","-l","--",<path>]`、`["cmp","--",<path>,<path>]`、`["diff","--",<path>,<path>]` 之一 | 无其他 flag；1–2 个 path 只在三个逻辑根 |
+| HOST-EVIDENCE-FS | `["cp","--",<source>,<destination>]`、`["chmod","0444",<path>]`、`["mkdir","-p","--",<path>]`、`["touch","--",<path>]` 之一 | source/destination 只在三个逻辑根；不得覆盖既有 evidenceDir；raw 只按 §8 转 0444；chmod path 受 leading-`-` 禁令 |
+| HOST-TEXT | `["grep",<grep-mode>...,"-e",<pattern>,"--",<carrier-rel>]` | `<grep-mode>` 只能是下文有限 tuple；恰好一个已冻结 carrier 输入；pattern 只作为 grep 数据，不是 program；`awk`、`sed`、`cut`、`head`、`tail` 与额外 operand 全部拒绝 |
+| HOST-SQLITE | `["sqlite3","-safe","-batch","-bail","-readonly","-nofollow","query/p8/modules_config.db",<sql-exact>]` | `<sql-exact>` 只能是下文三条逐字 SQL；不得读取 init、stdin 或其他 DB，不接受任意 SQL／dot-command／extension |
+| HOST-ENV-TIME | exact `["date","-u","+%Y-%m-%dT%H:%M:%SZ"]`、`["uname","-a"]`、`["java","-version"]` | 只允许三种逐字 hostEnvironment／UTC probe shape |
+| HOST-PROCESS | `["sleep",<bounded-seconds>]` 或 `["kill","-TERM",<capture-pid>]` | 秒数只为 packet 固定正十进制且不超过 timeout；PID 只属于本 runner 已冻结的 host capture process |
+
+`HOST-TEXT` 的 `<grep-mode>` 只接受以下完整 token tuple；不得合并短 flag、换序、重复或增加 flag：
+
+```text
+["-E"] ["-F"]
+["-E","-c"] ["-F","-c"]
+["-E","-n"] ["-F","-n"]
+["-E","-o"] ["-F","-o"]
+["-E","-v"] ["-F","-v"]
+["-E","-v","-c"] ["-F","-v","-c"]
+```
+
+`<pattern>` 必须是 1..512 bytes 的 printable ASCII（`0x20..0x7e`），不得含 NUL／CR／LF／control，
+位于 exact `-e` operand，classifier 逐字输出其 SHA-256；它只能由 `grep` 匹配恰好一个
+`<carrier-rel>`。需要结构化转换、截取或多文件关联时，
+逻辑必须写进 PRE-02 digest 绑定的
+runner／parser payload，并接受 PRE-04 的 no-second-spawn 静态审计，不能从 packet 注入另一种语言。
+
+`HOST-SQLITE` 的 `<sql-exact>` 只接受以下三个完整 argv 元素；空白、大小写、分号与列顺序都逐字相等：
+
+```text
+PRAGMA integrity_check;
+SELECT module_pkg_name, enabled FROM modules ORDER BY mid;
+SELECT m.module_pkg_name, s.app_pkg_name, s.user_id FROM modules m JOIN scope s ON m.mid=s.mid ORDER BY m.module_pkg_name, s.app_pkg_name, s.user_id;
+```
+
+三条查询只输出完整 integrity／module／scope raw；P8-03/04 的计数与集合判断由 digest 绑定的 parser 对
+这些 frozen raw 重算。`.shell`、`.system`、`.read`、`.load`、`.once`、`load_extension`、
+`readfile`、`writefile`、`ATTACH`、任意 `PRAGMA` 变体与其他 SQL 均 `CLASSIFIER-REJECT`；不能靠
+substring blacklist 把任意 SQL 变成 allowlist。
 
 所有 device rule 都要求 literal prefix `["adb","-s",<packet device.serial>,...]`，唯独
 `ADB-READ-DEVICES` 使用 exact `["adb","devices","-l"]`。classifier 在匹配 argv 前先校验 packet
@@ -241,7 +310,19 @@ write allowlist 固定为以下 exact shapes；任一 extra、顺序、component
 classifier fixture 至少包含每条 allow rule 一个 positive、每个 placeholder 一项不等值 negative，并固定包含：
 误标为 host 的 `adb shell am start`、无 serial／错 serial、`adb shell input`、`adb install`、
 `adb logcat -c/-G`、`fastboot`、production launch／force-stop、未知 component、`sh -c`／`bash -c`、
-含 redirection／pipeline 的 argv。所有 negative 必须输出 `CLASSIFIER-REJECT`。
+含 redirection／pipeline 的 argv，以及下列 embedded-language child-process 逃逸：`awk system(...)`、
+`awk` pipe/getline、`sed` 的 exec command、SQLite `.shell`、`load_extension(...)`、`readfile(...)`、
+`writefile(...)` 与任意非三条 corpus SQL。另含 `grep` 缺 `-e`／`--`、0-byte／513-byte／control
+pattern、未知／乱序／重复 flag、第二个输入 carrier 的 negative。所有 negative 必须输出
+`CLASSIFIER-REJECT`；PRE-04、PRE-12、P8-08 与
+recorder 复算同一份 policy/fixture digest，不得各自实现较宽的 HOST-TEXT／HOST-SQLITE matcher。
+fixture 还必须改变 envelope 而不改 argv，逐项证明 PATH-shadow executable、错 executable digest、
+非空 stdin，以及 `BASH_ENV`、`ENV`、`GIT_EXTERNAL_DIFF`、任一非 policy/追加的 `GIT_CONFIG_*`、`JAVA_TOOL_OPTIONS`、
+`JDK_JAVA_OPTIONS`、`GRADLE_OPTS`、`PERL5OPT`、`PERL5LIB`、`LD_*`、`DYLD_*`、
+`ADB_SERVER_SOCKET` 任一注入都会在 exec 前拒绝。集成 sentinel 另证明：repo config 即使声明
+`pager.status=true`/`core.pager=<child>`，每条合法 Git shape 也不启动 pager；`git diff` 不启动
+external diff/textconv，`git status` 不启动 fsmonitor，合法 leaf command 无 descendant exec；所有 embedded-language 与
+envelope negatives 均不产生 child marker、不读第二输入、不写 sentinel 文件。
 
 ### 3.2 每命令 carrier
 
@@ -264,18 +345,36 @@ classifier fixture 至少包含每条 allow rule 一个 positive、每个 placeh
 `<stem>.stdout.*`，packet 的 `carrier.stdout` 直接指向 canonical path；不得再复制一份 stdout。
 所有 carrier path 在整个 packet 中必须唯一，且全部位于 `<evidenceDir>` 内。
 
+executor 启动的 digest-bound runner **supervisor** 是 orchestration root，不是 packet command unit；
+ADM-01 逐字授权该 payload，supervisor 在任何 device access 前以 internal builtins 校验 ADM/PRE-00..02，
+并且只有一个 process-spawn call site：唯一 launcher。表中的 `HOST-RUNNER-MODE` 是 supervisor 启动的
+leaf helper，不是第二个 supervisor；helper 必须在同一 process 内完成固定 mode 后退出，不能再调用
+launcher。PRE-04 的 `leaf descendant-exec=0` 统计 helper 与普通 host executable 的**本机** descendants，
+不把 supervisor 按 packet leaf 误计。
+
+`ROW2-PREEXISTING-LOCAL-ADB-SERVER-V1` 要求 runner 启动前已有且只用 localhost:5037 的 ADB server。
+supervisor 用内嵌 socket client 完成 host protocol version handshake，不启动 `adb`，把结果与 server
+endpoint policy digest 写入 PRE-02；连接不存在即在 PRE-05 前 STOP，严禁自动 `start-server`。每个 adb
+leaf 都接受 host process-tree audit，出现新 adb-server descendant 即 boundary STOP。设备侧由 exact
+`adb shell/exec-out` argv 触发的 remote process 是该父 envelope 已分类的 device effect，不是假装成
+host descendant；remote command 仍只能是 §3.1.1 逐 token shape，除固定 LSPosed `cat` 外无 shell string。
+
 机械规则：
 
-1. `command.txt` 是 packet `argv[]` 的 canonical UTF-8 JSON array 加一个换行；不得保存 shell
-   command string。唯一 launcher 先逐字写入该 carrier，再把同一内存数组交给内嵌的冻结 classifier；
-   只有唯一 ruleId、derivedClass 与当前 phase/checklist allowlist 全部匹配时，才把**同一数组**直接交给
-   `execve` 等价 API。reject／ambiguous／phase mismatch 时外部进程根本不启动，runner 立即 STOP；
-   classifier 不读取 packet access label，也不得 eval `command.txt`。
-2. runner、classifier implementation 与 parser／gate payload 的所有外部进程只能经上述唯一 launcher
-   启动；静态 call-site
+1. `command.txt` 是 packet command 的 canonical UTF-8 JSON object 加一个换行，完整包含
+   `executableId/executableSha256/cwdRef/envPolicyId/stdinPolicyId/argv[]`；不得只保存 argv 或 shell
+   command string。唯一 launcher 先逐字写入该 carrier，再把同一内存 envelope 交给内嵌冻结 classifier；
+   只有 executable closure digest、clean env、closed stdin、唯一 ruleId、derivedClass 与当前
+   phase/checklist allowlist 全部匹配时，才把**同一 argv**交给已 identity-bound 的 executable，使用
+   V2 固定 env 与 EOF stdin 调用 `execve` 等价 API。reject／ambiguous／phase mismatch 时外部进程
+   根本不启动，runner 立即 STOP；classifier 不读取 packet access label，也不得 eval `command.txt`。
+2. supervisor、classifier implementation 与 parser／gate payload 的所有外部进程只能经上述唯一
+   launcher 启动；静态 call-site
    audit 必须证明不存在第二个 process-spawn、raw `adb`、`system`、`eval`、subshell 或 process
-   substitution 路径。一个 command unit 只启动一个外部进程。`;`、`&&`、`||` 与 pipeline 不能把多个外部命令
-   合成一个承重 exit；解析命令另占序号。
+   substitution 路径。一个 command unit 只启动一个 leaf 外部进程，leaf 必须没有 descendant exec；
+   runner 只有在前一 leaf 完整 wait/封存后才能经唯一 launcher 启动下一 leaf。`;`、`&&`、`||` 与
+   pipeline 不能把多个外部命令合成一个承重 exit；解析命令另占序号。Gradle wrapper/build process tree
+   永远不属于本 runner，只有 §3.1 的隔离 build manifest 可被读取。
 3. command 自身不得含 `>/dev/null`、`2>/dev/null`、quiet flag 或等价 suppress。wrapper 负责把
    stdout、stderr 原字节分别写入对应文件；两者即使 0 bytes 也必须存在。
 4. `exit.txt` 只含一个十进制整数与换行，值来自该外部进程本身；不得取末尾 `grep`、`stat`
@@ -301,13 +400,13 @@ classifier fixture 至少包含每条 allow rule 一个 positive、每个 placeh
 ADM-01..02 构成只使用 `HOST-NONE` carrier 的 device-access admission；两项全部 PASS 前，classifier
 结果为 `DEVICE-READ` 或 `DEVICE-WRITE` 的命令均禁止执行。两项 PASS 后，PRE/P8 只允许执行
 §3.1.1 固定 shape 推导为 `DEVICE-READ` 的取证命令；在 `PREFIRE-CUTOFF` 前仍禁止任何推导为
-`DEVICE-WRITE` 的命令。任何 `CLASSIFIER-REJECT`、多 rule 命中、packet／runner／carrier argv
+`DEVICE-WRITE` 的命令。任何 `CLASSIFIER-REJECT`、多 rule 命中、packet／runner／carrier envelope
 不等或 classifier implementation／fixture 不一致均在 SET-01 前 STOP。exact `adb version` 由
 `HOST-ADB-VERSION` 判为 host-only；其他 `adb` argv 永远不能自选 `HOST-NONE`。
 
 | ID | required carrier | 机械 PASS 谓词 | FAIL 动作 |
 |---|---|---|---|
-| ADM-01 | `meta/operator-authorization.json` + provenance | authoredBy=operator；明确只授权一个 Row-2 `hold_lease` run；逐字绑定 contract HEAD/blob、packet SHA-256、runner SHA-256、classifier SHA-256、candidateHead、device serial 与 forbidden scope；messageId/timestamp 非空 | STOP；不得访问设备 |
+| ADM-01 | `meta/operator-authorization.json` + provenance | authoredBy=operator；明确只授权一个 Row-2 `hold_lease` run；逐字绑定 contract HEAD/blob、packet SHA-256、runner SHA-256、classifier SHA-256、executable-manifest SHA-256、env/stdin/ADB-server policy、candidateHead、device serial 与 forbidden scope；messageId/timestamp 非空 | STOP；不得访问设备 |
 | ADM-02 | exact role-custody task readback | executor／recorder／validity 三个 taskId 与 owner 均非空且 owner 两两不同；executor task 只覆盖 ADM-01 的一次 run、status=doing；三组 task/owner 与 packet 逐字相等；recorder 不兼任 validity | STOP；不得访问设备 |
 
 ### 4.1 任何 device write 之前
@@ -326,19 +425,19 @@ PRE-09、PRE-10、PRE-11 的 device-epoch read、P8-01、P8-05、P8-06。其他 
 
 | ID | required carrier | 机械 PASS 谓词 | FAIL 动作 |
 |---|---|---|---|
-| PRE-00 | execution packet、packet SHA-256 与 schema-validation 六文件 | schemaVersion=1；required key 全部存在且无 unknown key；每个 command 的 seq/path 唯一；validation exit=0 | STOP |
+| PRE-00 | execution packet、packet SHA-256 与 schema-validation 六文件 | schemaVersion=2；required key 全部存在且无 unknown key；每个 command 的 seq/path 唯一；每份 envelope 的 executable/digest/cwd/env/stdin/argv 完整；validation exit=0 | STOP |
 | PRE-01 | contract snapshot、Git blob/HEAD 与 SHA-256 六文件 | snapshot 逐字等于 reviewed HEAD 的本文件；完整 HEAD/blob 与 Terra sign 相等；SHA-256 为 64 位小写 hex 且等于 snapshot bytes | STOP |
-| PRE-02 | runner／classifier SHA-256 carrier + 两份 payload | 两个 digest 分别逐字等于 packet；policyId=`ROW2-ARGV-ACCESS-V1`；runner 与 classifier 均与 Fable feasibility verdict 绑定同一 digest | STOP |
+| PRE-02 | runner／classifier／executable-manifest SHA-256 carrier + 三份 payload + runtime local ADB-server handshake | 三个 digest 分别逐字等于 packet；policyId=`ROW2-EXEC-ACCESS-V2`；env/stdin policy 为 V2 固定值；manifest 覆盖每个 executable 与 interpreter closure；Fable 预先绑定 handshake implementation/policy 与 expected protocol constraints，不预签未来结果；本 run 的内嵌 socket handshake 必须当场证明 localhost:5037 server 已存在且未启动 adb child，并冻结 actual result | STOP |
 | PRE-03 | runner 的 `bash -n` 六文件 | exit=0，stderr=0 bytes | STOP |
-| PRE-04 | runner command-surface／secret-path audit六文件 + `meta/argv-access-classification.json` | exit=0；runner／classifier／parser／gate payload 在唯一 launcher 静态 call-site 之外 process-spawn 数=0；runner 外部命令与 packet `commands[]` 逐项相等；packet schema 的 access-label field 数=0；classifier 全部 positive/negative fixture 逐字通过；对 packet 与 runner 的**每条** argv 各输出 seq、argvSha256、ruleId、derivedClass、command carrier，且两侧结果逐项相等；unclassified／ambiguous／mismatch／forbidden／host absolute path／credential/secret counts 均=0；全部 `DEVICE-WRITE` 只落在下述允许集合 | STOP |
+| PRE-04 | runner command-surface／secret-path audit六文件 + `meta/execution-access-classification.json` | exit=0；supervisor／classifier／parser／gate payload 在唯一 launcher static call-site 之外 process-spawn 数=0；每个 packet leaf 的本机 descendant-exec 数=0，ADB remote process 不计但新 host adb-server child 必须为 0；runner 外部命令与 packet `commands[]` 逐 envelope 相等；Gradle/build wrapper command 数=0；packet schema 的 access-label field 数=0；classifier 全部 argv/envelope positive/negative fixture 与 no-effect sentinel 逐字通过；对 packet 与 runner 的**每条** envelope 各输出 seq、envelopeSha256、argvSha256、executableId/digest、env/stdin policy、ruleId、derivedClass、command carrier，且两侧逐项相等；unclassified／ambiguous／mismatch／inherited-env／open-stdin／forbidden／host absolute path／credential/secret counts 均=0；全部 `DEVICE-WRITE` 只落在下述允许集合 | STOP |
 | PRE-05 | `adb devices -l` 六文件 | exit=0；恰好一个 state=`device` 的数据行；serial 为获批 execution packet 中的完整 serial | STOP |
 | PRE-06 | device identity 六文件 | model、fingerprint、Android release、API、timezone 各一条非空；serial 与 PRE-05 相同 | STOP |
-| PRE-07 | host candidate／build／artifact／contract identity 六文件 | checkout clean；完整 HEAD/tree、buildType、Gradle command 与 task、完整 build exit=0、compatibility YAML SHA、build report/manifest digests、可复现 hostEnvironment versions 均与 packet 相等；两包 host artifact bytes 分别作为 >0-byte binary stdout 封存，其 SHA 与 packet 相等；carrier 不含 host path/secret | STOP |
+| PRE-07 | host candidate／隔离 build manifest／artifact／contract identity 六文件 | checkout clean；完整 HEAD/tree、buildType、预先冻结的 Gradle command/task、完整 build exit=0、`ROW2-BUILD-NO-DEVICE-V1` sandbox report/process-tree audit、compatibility YAML SHA、build report/manifest digests、可复现 hostEnvironment versions 均与 packet 相等；本 run 未执行 Gradle/build wrapper；两包 host artifact bytes 分别作为 >0-byte binary stdout 封存，其 SHA 与 packet 相等；carrier 不含 host path/secret | STOP |
 | PRE-08 | 两包 `pm path` 六文件 | 每包 exit=0，stdout 恰好一个 `base.apk`；package 分别为 `name.caiyao.fakegps.bench` 与 `com.example.cellrebelauto` | STOP |
 | PRE-09 | 两包 device APK 字节、SHA、package/version/signer 六文件 | device bytes SHA 与对应 host artifact SHA 逐字相等；applicationId、version 与 signer 分别等于 packet；不得只比 version | WRONG_BUILD / STOP |
 | PRE-10 | production package `lastUpdateTime` before 六文件 | exit=0、非空；只供 after 负边界等值比较 | STOP |
 | PRE-11 | host-before、device epoch、host-after 与 clock-bridge parser 六文件 | 三次 read exit=0；host round-trip ≤2s；parser 固定输出 midpoint offset 与 uncertainty；uncertainty ≤1s | STOP |
-| PRE-12 | `meta/prefire-read-command-audit.json` + 六文件 | 本 command 在 P8-07 后运行且 exit=0；解析截至其 start-utc 已完成的每份 canonical `command.txt`，逐份运行 §3.1.1 classifier，不读取 packet label；按 seq 排序后的全部 carrier argv／ruleId／derivedClass 与 PRE-04 对应项逐字相等；其中 `DEVICE-READ` 集合与 packet 中 PRE-12 前 §3.1.1 approved read shapes 的 seq／checklistIds／argv[]／六个 carrier path 逐项逐参数相等且每项 end-utc < PRE-12 start-utc；missing／extra／duplicate／reject／ambiguous／label-field／derived-write counts 均=0；packet suffix 接着只能是 SET-01 专属 `ADB-READ-LOGCAT` capture start，再接 classifier 结果恰为 `ADB-WRITE-PREPARE`／`DEVICE-WRITE` 的 exact SET-01 | STOP；不得启动 SET-01 capture 或 SET-01 |
+| PRE-12 | `meta/prefire-read-command-audit.json` + 六文件 | 本 command 在 P8-07 后运行且 exit=0；解析截至其 start-utc 已完成的每份 canonical `command.txt`，逐份运行 §3.1.1 classifier，不读取 packet label；按 seq 排序后的全部 carrier envelope／ruleId／derivedClass 与 PRE-04 对应项逐字相等；其中 `DEVICE-READ` 集合与 packet 中 PRE-12 前 approved read shapes 的 seq／checklistIds／完整 envelope／六个 carrier path 逐项逐参数相等且每项 end-utc < PRE-12 start-utc；missing／extra／duplicate／reject／ambiguous／digest/env/stdin/label-field／derived-write counts 均=0；packet suffix 接着只能是 SET-01 专属 `ADB-READ-LOGCAT` capture start，再接 classifier 结果恰为 `ADB-WRITE-PREPARE`／`DEVICE-WRITE` 的 exact SET-01 | STOP；不得启动 SET-01 capture 或 SET-01 |
 
 允许的 device-write checklist 集合固定为：SET-01 的 exact `prepare_kyiv` 与其后 bench force-stop、
 SET-02 的 exact handshake discover；BFR-01、WIN-01、
@@ -363,7 +462,7 @@ P8-01..07 只产生并裁定 pre-write gate 输入；PRE-12 在 P8-07 后作最�
 | P8-05 | `appops query-op android:mock_location allow` 六文件 | exit=0；allow 集合中包含 bench、排除 production；保存完整未过滤 stdout | STOP |
 | P8-06 | `raw/p8/dumpsys-location.txt` + count 六文件 | dumpsys exit=0 且 >0 bytes；独立 parser exit=0 且输出整数 `0` | STOP |
 | P8-07 | `meta/p8-gate.txt` | 内容逐字为 `P8-PREFIRE-PASS`；其 start/end-utc 晚于 P8-01..06 的全部 end-utc | STOP |
-| P8-08 | `meta/first-device-write.json` + SET-01 capture／command／start-utc carrier | 解析所有在 SET-01 start-utc 前已开始的冻结 command carriers 并用 §3.1.1 classifier 重算，不读取 packet label；PRE-12 后仅有一个仍在运行的 `ADB-READ-LOGCAT`，其 checklistIds 只含 SET-01 且 start-utc < SET-01 start-utc；实际最早的 `DEVICE-WRITE` ruleId=`ADB-WRITE-PREPARE` 且 command 是 SET-01；其 seq／checklistIds／canonical argv 与 PRE-12 的 next-device-write 逐项逐参数相等；PRE-00..12 与 P8-01..07 的全部 end-utc 严格早于 capture 与 SET-01 start-utc；更早 carrier 的 derived-write／reject／ambiguous counts 均=0 | FAIL 后立即停止；若 SET-01 已开始，不得再发 device command，不得注入 |
+| P8-08 | `meta/first-device-write.json` + SET-01 capture／command／start-utc carrier | 解析所有在 SET-01 start-utc 前已开始的冻结 command carriers 并用 §3.1.1 classifier 重算，不读取 packet label；PRE-12 后仅有一个仍在运行的 `ADB-READ-LOGCAT`，其 checklistIds 只含 SET-01 且 start-utc < SET-01 start-utc；实际最早的 `DEVICE-WRITE` ruleId=`ADB-WRITE-PREPARE` 且 command 是 SET-01；其 seq／checklistIds／canonical envelope 与 PRE-12 的 next-device-write 逐项逐参数相等；PRE-00..12 与 P8-01..07 的全部 end-utc 严格早于 capture 与 SET-01 start-utc；更早 carrier 的 derived-write／reject／ambiguous／digest-env-stdin mismatch counts 均=0 | FAIL 后立即停止；若 SET-01 已开始，不得再发 device command，不得注入 |
 
 raw DB/WAL/SHM 在 manifest 冻结前只允许复制和 hash，不允许被 SQLite、文件预览器或 recorder
 直接打开。query 副本承担所有解析。
@@ -458,8 +557,9 @@ review 输出不得写回 evidenceDir：
 
 1. manifest 逐项校验与 payload／seal-control exact file-set equality；
 2. 每个 command unit 六文件完整性、序号唯一性、exit 可解析性；对每份 canonical command carrier
-   独立运行冻结 classifier，ruleId／derivedClass 与 PRE-04、PRE-12、P8-08 全部逐项一致，且无
-   access label、reject、ambiguous、runner/packet/carrier argv mismatch；
+   独立运行冻结 classifier，executable/digest/env/stdin/envelopeSha256/ruleId／derivedClass 与
+   PRE-04、PRE-12、P8-08 全部逐项一致，且无 access label、reject、ambiguous、inherited env、
+   open stdin、runner/packet/carrier envelope mismatch；
 3. PRE-12 end-utc 与全部 P8 end-utc < SET-01 first-write start-utc；classifier 推导的第一条
    `DEVICE-WRITE` 是 exact SET-01；setup < before trio <
    injection；terminal ≤10s；
@@ -483,19 +583,21 @@ I can issue the scoped Row 2 evidence-validity verdict without adding a new
 evidence-sufficiency predicate after device execution.
 ```
 
-Fable 的 feasibility verdict 必须绑定同一 Git HEAD、packet SHA-256、runner SHA-256 与 classifier
-implementation SHA-256，并逐项给：
+Fable 的 feasibility verdict 必须绑定同一 Git HEAD、packet SHA-256、runner SHA-256、classifier
+implementation SHA-256、executable-manifest SHA-256、env/stdin policy 与隔离 build manifest/report
+digest、repo-config digest、pre-existing local ADB-server policy／handshake implementation／expected
+protocol constraints（不预签 execution-time result），并逐项给：
 
 - `EXECUTABLE`：每个 device command 与 carrier 在获批 candidate 上物理可产生；或
 - `BLOCKED`：列出不能产生的 checklist ID、源码／工具坐标与所需的 device-free 前置修复。
 
 只有 `CRITERIA APPROVE + EXECUTABLE` 同时存在，调度线才可向 operator 请求新的单次授权。
-packet、runner、classifier implementation 或 candidate 变化后必须重新做 feasibility；本文件变化后
-Terra 与 Fable 两份 verdict 全部失效。
+packet、runner、classifier implementation、executable manifest、env/stdin/ADB-server policy、build manifest
+或 candidate 变化后必须重新做 feasibility；本文件变化后 Terra 与 Fable 两份 verdict 全部失效。
 
-## 10. 已知 pre-authorization blocker（起草时静态发现）
+## 10. 已知 pre-authorization blocker（起草时发现，当前仅代码面关闭）
 
-当前 collector candidate `f20d715ed393b608e12c7c840b223b3dc6041120` **不能满足**
+起草时的 collector candidate `f20d715ed393b608e12c7c840b223b3dc6041120` **不能满足**
 normal path 的 `ID-LEASE-01/02`、`EXIT-02`，也不能满足条件恢复 path 的 `RST-02`：
 
 ```text
@@ -506,8 +608,7 @@ FullLoopProbeActivity.kt:377  release report 不输出 leaseId
 ```
 
 Q-DUMP 会输出 full UUID，但“Q-DUMP full UUID + probe 8 位前缀”仍只是前缀关联，不是 apply receipt、
-window state 与 release 的 exact-byte 三方绑定。这个 blocker 必须在请求下一次 operator 授权之前，
-通过下列二选一关闭：
+window state 与 release 的 exact-byte 三方绑定。这个 blocker 在当时必须通过下列二选一关闭：
 
 1. 找到并冻结一个当前 candidate 已存在、同时含 apply 与 release full UUID 的 raw carrier；或
 2. 先走独立的 debug-only instrumentation 变更、测试、非作者 review、合入、构建与安装授权，
@@ -515,6 +616,16 @@ window state 与 release 的 exact-byte 三方绑定。这个 blocker 必须在�
 
 本契约不授权上述代码或安装动作。Fable 的 feasibility review 必须独立确认该 blocker，不能把
 8 位前缀降级接受，也不能把下一次真机执行当 feasibility probe。
+
+代码面 closure 已由 PR #56 合入 main `507b78d26bdfa1ce7b37e68473dce359b51f712c`：apply、hold、
+normal release、receipt-loss、rerelease、finally cleanup 与 durable crash record 均输出同一完整 UUID，
+且 `P10LeaseIdentityChainGuardTest` 固定禁止 lease `take(8)` 与缺 ID segment。它只证明
+`507b78d` 是解除该历史 blocker 的最小 eligible base，不是本契约的 `EXECUTABLE` verdict。
+
+最终 execution packet 的 `candidateHead` 必须为 `507b78d` 的 descendant，current-head CI／host
+identity guard 必须重跑，Fable 仍须把该 exact candidate 与 packet、runner、V2 classifier、
+executable/env/stdin policy 逐项复核。candidate 不是 descendant、任一 full-UUID guard 失败，或
+66 个 carrier 仍有物理不可产出项时，本 blocker 重新为 `BLOCKED`；不得沿用 #56 merge 时的结论。
 
 ## 11. 明确排除
 
@@ -537,6 +648,7 @@ window state 与 release 的 exact-byte 三方绑定。这个 blocker 必须在�
 | executor／recorder／validity owner 未互斥，或 recorder 自签 validity | §2、ADM-02 |
 | 每条 probe/gate 缺 command/stdout/stderr/exit；复合命令只留末尾 exit；输出被 suppress | §3.2、PRE-03/04、FRZ-01/03、recorder #2 |
 | pre-fire blanket `no adb` 使 required read carrier 无法生成，或 packet 自报 `deviceAccess`／误标 `none` 绕过 write cutoff | §3.1-4、§3.1.1、§4、PRE-04/12、P8-07/08、recorder #2/3 |
+| `awk`／`sed`／SQLite／Git helper、PATH/env/stdin 或 Gradle descendant 在 parent argv classifier 外启动进程、读第二输入或写 sentinel | §3.1-2/8/9/10、§3.1.1 HOST-GIT/HOST-TEXT/HOST-SQLITE、PRE-02/04/07/12、P8-08、recorder #2 |
 | P8 在注入后才读取，无法证明 pre-fire 边界 | PRE-12、P8-01..08、recorder #3 |
 | 缺 bench-only appops raw | P8-05 |
 | 缺 contemporaneous candidate／device-count raw；只比 version | PRE-05..09 |
