@@ -151,14 +151,14 @@ class EngineTrustedPathRedTest {
         // recompute — plan/task refs + the attempt validity window. Defaults match this harness
         // (fresh-db plan 1, task 42, VirtualClock initial 1000, buildEngine timeout 90s).
         private val planId: Long = 1L,
-        private val taskId: Long = 42L,
+        private val scheduleRef: String = "qwy-default-schedule",
         private val attemptStartedAt: Long = 1000L,
         private val testTimeoutMs: Long = 90_000L
     ) : APlusEvidenceSource {
         // R43 GREEN: the INV-23 three-way hash is recomputed from the REAL owner session id the
         // engine passes in — the placeholder run id (0L) could never agree with the engine recompute.
         private fun intentHash(attemptId: Long, runSessionId: Long) =
-            APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, runSessionId, planId, taskId, attemptStartedAt, testTimeoutMs))
+            APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, runSessionId, planId, scheduleRef, attemptStartedAt, testTimeoutMs))
 
         // The observation/evidence lease MUST match the provider's apply lease (INV-07/23) — Sol round-10
         // P1-1: a fixed "L1" would be rejected by a correct lease binding, so it must be the provider lease.
@@ -291,7 +291,8 @@ class EngineTrustedPathRedTest {
         taskId: Long,
         attemptId: Long,
         aplusState: String?,
-        aplusLeaseId: String? = null
+        aplusLeaseId: String? = null,
+        aplusAnchorScheduleId: String? = "qwy-default-schedule"  // F12: provider's durable anchor
     ): Long {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
         db.testAttemptDao().insert(
@@ -301,7 +302,8 @@ class EngineTrustedPathRedTest {
                 status = "starting", failureReason = null,
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
-                aplusState = aplusState, aplusLeaseId = aplusLeaseId
+                aplusState = aplusState, aplusLeaseId = aplusLeaseId,
+                aplusAnchorScheduleId = aplusAnchorScheduleId
             )
         )
         return sessionId
@@ -467,7 +469,7 @@ class EngineTrustedPathRedTest {
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         // P1-4: the fixture uses the SAME frozen digest the recovery recomputes (never a divergent constant).
-        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), now = 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, "qwy-default-schedule", 600L, 90_000L)), now = 1000L)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -495,8 +497,8 @@ class EngineTrustedPathRedTest {
         val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "RELEASE_PENDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), now = 1000L)
-        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, "qwy-default-schedule", 600L, 90_000L)), now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, "qwy-default-schedule", 600L, 90_000L)), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
         val observe = SeededObserve(mapOf(77L to true))
         val revision = SeededRevision(mapOf(applyKey(77L) to true))
         val quota = SeededQuota(mapOf(77L to true))
@@ -557,8 +559,8 @@ class EngineTrustedPathRedTest {
         val sessionId = seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), now = 1000L)
-        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L)), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, "qwy-default-schedule", 600L, 90_000L)), now = 1000L)
+        log.seedReceipt(idempotencyKey = applyKey(77L), requestDigest = APlusOperationIdentity.requestDigest(testApplyIntent(77L, sessionId, planId, "qwy-default-schedule", 600L, 90_000L)), outcome = "RELEASED", createdAt = 1000L) // durable apply receipt (P1-4 receipt-first)
         val backend = FakeBackend(executor, log, SeededObserve(mapOf(77L to true)), SeededRevision(mapOf(applyKey(77L) to true)), SeededQuota(mapOf(77L to true)), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)

@@ -78,11 +78,12 @@ class ProductionCommitClockFactoryTest {
                 status = "starting", failureReason = null,
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
-                aplusState = "DECIDING", aplusLeaseId = "lease-77"
+                aplusState = "DECIDING", aplusLeaseId = "lease-77",
+                aplusAnchorScheduleId = "qwy-default-schedule"
             )
         )
         val intentDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-            .requestDigest(testApplyIntent(77L, sessionId, planId, taskId, 600L, 90_000L))
+            .requestDigest(testApplyIntent(77L, sessionId, planId, "qwy-default-schedule", 600L, 90_000L))
         val seededDigest = "ev-clock-${java.util.UUID.randomUUID()}"
         // Durable carriers (the GREEN recovery re-decide reads ONLY these).
         db.attemptExecutionDao().insert(

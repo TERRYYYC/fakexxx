@@ -16,8 +16,8 @@ fun testApplyIntent(
     attemptId: Long = 77L,
     sessionId: Long = 1L,
     planId: Long = 1L,
-    taskId: Long = 42L,
+    scheduleRef: String = "qwy-default-schedule",
     startedAt: Long = 600L,
     timeoutMs: Long = 90_000L
 ): EnvironmentIntentV1 =
-    APlusOperationIdentity.intent(sessionId, attemptId, planId, taskId, startedAt, startedAt + timeoutMs)
+    APlusOperationIdentity.intent(sessionId, attemptId, planId, scheduleRef, startedAt, startedAt + timeoutMs)

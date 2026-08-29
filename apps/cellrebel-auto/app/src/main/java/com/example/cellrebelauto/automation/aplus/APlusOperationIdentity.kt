@@ -35,24 +35,31 @@ object APlusOperationIdentity {
      * location from its own schedule item data; Auto only hands over STABLE references.
      *
      * R44 (Sol GREEN-review-3 F2): the refs and the validity window are REAL, never invented
-     * constants — `profileRef`/`scheduleRef` name the plan/task the attempt belongs to, and
-     * [notBeforeEpochMs]/[deadlineEpochMs] are the attempt's own validity window (its persisted
-     * start .. start + test timeout). Every input is recomputable after a crash from the persisted
-     * attempt row + plan config, so the digest is byte-identical across the normal path and
-     * recovery — and "auto-profile"/"auto-schedule"/infinite-window placeholders are gone.
+     * constants — `profileRef` names the plan, `scheduleRef` carries the provider's durable
+     * schedule anchor (e.g., `"qwy-default-schedule"`), and [notBeforeEpochMs]/[deadlineEpochMs]
+     * are the attempt's own validity window (its persisted start .. start + test timeout). Every
+     * input is recomputable after a crash from the persisted attempt row + plan config, so the
+     * digest is byte-identical across the normal path and recovery.
+     *
+     * F12: [scheduleRef] is the provider's `scheduleId` from its discover() projection,
+     * persisted as `aplusAnchorScheduleId` on the attempt BEFORE external execution (§4.3).
+     * Recovery reads the same persisted anchor, so the three legs — wire intent, canonical
+     * digest preimage (§6.3.1), crash-recovery replay — are byte-identical by construction.
+     * The provider's `scheduleDecisionWire` compares this value against its own `scheduleId`;
+     * an Auto-local task PK like `"task-N"` would be DENIED on real hardware.
      */
     fun intent(
         runSessionId: Long,
         attemptId: Long,
         planId: Long,
-        taskId: Long,
+        scheduleRef: String,
         notBeforeEpochMs: Long,
         deadlineEpochMs: Long
     ): EnvironmentIntentV1 = EnvironmentIntentV1(
         runId = "auto-run-$runSessionId",
         attemptId = attemptId.toString(),
         profileRef = "plan-$planId",   // the plan IS the batch profile (stable, plan-bound)
-        scheduleRef = "task-$taskId",  // the task IS the schedule item reference (stable, task-bound)
+        scheduleRef = scheduleRef,     // F12: provider's durable schedule anchor, NOT "task-$taskId"
         requiredVerificationWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
             .SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
         notBeforeEpochMs = notBeforeEpochMs,

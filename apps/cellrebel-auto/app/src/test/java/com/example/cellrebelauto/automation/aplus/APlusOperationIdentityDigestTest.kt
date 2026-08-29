@@ -27,10 +27,10 @@ class APlusOperationIdentityDigestTest {
         sessionId: Long = 5L,
         attemptId: Long = 77L,
         planId: Long = 1L,
-        taskId: Long = 42L,
+        scheduleRef: String = "qwy-default-schedule",
         notBefore: Long = 600L,
         deadline: Long = 600L + 90_000L
-    ) = APlusOperationIdentity.intent(sessionId, attemptId, planId, taskId, notBefore, deadline)
+    ) = APlusOperationIdentity.intent(sessionId, attemptId, planId, scheduleRef, notBefore, deadline)
 
     @Test
     fun `Auto's requestDigest IS the frozen CanonicalIntentDigestV1 over the same intent object`() {
@@ -78,19 +78,20 @@ class APlusOperationIdentityDigestTest {
         )
     }
 
-    // R44 (Sol GREEN-review-3 F2): the plan/task refs and the validity window are REAL preimage
+    // R44 (Sol GREEN-review-3 F2): the plan/schedule refs and the validity window are REAL preimage
     // inputs — never invented constants; each must move the digest.
+    // F12: scheduleRef is now the provider's durable anchor, not "task-$taskId".
     @Test
-    fun `the digest is sensitive to the plan and task refs`() {
+    fun `the digest is sensitive to the plan and schedule refs`() {
         assertNotEquals(
             "a different plan ref MUST digest differently",
             APlusOperationIdentity.requestDigest(intent(planId = 1L)),
             APlusOperationIdentity.requestDigest(intent(planId = 2L))
         )
         assertNotEquals(
-            "a different task ref MUST digest differently",
-            APlusOperationIdentity.requestDigest(intent(taskId = 42L)),
-            APlusOperationIdentity.requestDigest(intent(taskId = 43L))
+            "a different schedule ref MUST digest differently",
+            APlusOperationIdentity.requestDigest(intent(scheduleRef = "qwy-default-schedule")),
+            APlusOperationIdentity.requestDigest(intent(scheduleRef = "qwy-custom-schedule"))
         )
     }
 
@@ -109,10 +110,10 @@ class APlusOperationIdentityDigestTest {
     }
 
     @Test
-    fun `the intent refs and window carry the real plan-task identity, never invented constants`() {
-        val i = intent(planId = 9L, taskId = 7L, notBefore = 1234L, deadline = 1234L + 5000L)
+    fun `the intent refs and window carry the real identity, never invented constants`() {
+        val i = intent(planId = 9L, scheduleRef = "qwy-test-schedule", notBefore = 1234L, deadline = 1234L + 5000L)
         assertEquals("plan-9", i.profileRef)
-        assertEquals("task-7", i.scheduleRef)
+        assertEquals("qwy-test-schedule", i.scheduleRef)  // F12: verbatim provider anchor
         assertEquals(1234L, i.notBeforeEpochMs)
         assertEquals(1234L + 5000L, i.deadlineEpochMs)
         assertEquals("auto-run-5", i.runId)
