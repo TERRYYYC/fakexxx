@@ -57,12 +57,18 @@ object APlus10APlanSeed {
     const val SCHEDULE_ITEM_PREFIX = "profile-"
 
     /**
-     * KB-8 sentinel for the legacy non-null coordinate columns. 0.0/0.0 is a
-     * real place (Gulf of Guinea) but the value is INERT under the frozen
-     * predicate — and deliberately conspicuous in any log that still consumes
-     * it, which is exactly how the known product drift stays visible.
+     * KB-8 sentinel for the legacy non-null coordinate columns.
+     *
+     * 999.0 is OUTSIDE the legal geographic domain on both axes
+     * (lat ∈ [-90,90], lng ∈ [-180,180]) — structurally impossible to mistake
+     * for a real target (dispatch hard constraint: the placeholder must not
+     * LOOK like a coordinate; 0.0/0.0 is the Gulf of Guinea and was therefore
+     * rejected). Any validator in the isFiniteGeo family rejects it outright
+     * instead of computing a plausible-looking distance, so code that still
+     * consumes these columns (the registered TrustPolicy drift, gap⑥) fails
+     * loudly on an impossible value rather than quietly on a far-away one.
      */
-    const val COORDINATE_PLACEHOLDER = 0.0
+    const val COORDINATE_PLACEHOLDER = 999.0
 
     /** The wire-safe triple Auto is allowed to consume (KB-8). No coordinates. */
     data class FixtureItem(

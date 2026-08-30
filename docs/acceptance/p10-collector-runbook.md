@@ -137,7 +137,9 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
 # Auto：种 plan + 10 task（csvRow/priority=fixtureIndex → 执行序=fixture 序）
 #   KB-8（spec v1.62，operator 裁定）：Auto 只消费 {顺序, journeyCaseId, requiredSuccesses}，
 #   **不导入坐标**——坐标千网游独占，Auto 无独立位置验证面（KB-8 永久 limit）。
-#   LocationTask 的遗留 non-null 坐标列种入惰性占位值，冻结谓词不消费它们。
+#   LocationTask 的遗留 non-null 坐标列种入**结构性超界占位**（999.0，双轴均超出合法
+#   地理域——不可能被误当真 target；isFiniteGeo 族校验一律直接拒绝而非算出一个
+#   "看似合理"的距离）。冻结谓词不消费这些列。
 adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity \
   --es cmd seed_plan \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
