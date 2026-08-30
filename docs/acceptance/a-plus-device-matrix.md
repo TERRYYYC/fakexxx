@@ -74,19 +74,10 @@ the execution candidate's `exactHead`.
 > `matrix-evidence-device.json` 里。
 
 **Fixture 真相源（机器可读）**：`docs/acceptance/a-plus-10a-fixture.json`
-**冻结 digest（对该文件字节的 SHA-256，无前缀，fixtureVersion 2）**：
-`2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e`
+**冻结 digest（对该文件字节的 SHA-256，无前缀）**：
+`cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`
 
 验证命令：`shasum -a 256 docs/acceptance/a-plus-10a-fixture.json`
-
-> **v1 → v2 登记（2026-08-30，编排前；本节协议的第一次执行）**：v2 是**纯散文修正**——
-> `autoSideConsumes` 一行 + 新增 `v2ChangeLog` 登记块；items 的坐标/quota/顺序/id **零字节变化**
-> （下方两张投影表因此不变）。v1 把 KB-8 的 wire 语义写成了消费语义；实际上 Auto 侧存储的
-> task 坐标是 §6.4 System-Mock 谓词的承重比对项（`TrustPolicy.kt:73/:105`、
-> `AutomationEngine.kt:539`），按 v1 字面 seed 占位坐标会把 10 项旅程全部假红。完整依据在
-> fixture 文件内的 `v2ChangeLog`。v1 digest（仅历史证据引用有效，如
-> `g2-s3-gate-audit-2026-08-27-ZY22.md`）：
-> `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`
 
 fixture 文件任何字节变化 = `fixtureVersion` 递增 + 在本节重新登记 digest，
 且必须发生在**编排之前**；session 开始后的变化使该 session 的旅程证据

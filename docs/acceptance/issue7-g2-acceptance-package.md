@@ -144,13 +144,9 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 1. `docs/acceptance/a-plus-device-matrix.md` 目前只登记 `M-CO-06` 与 `M-VS-01`；它**没有**
    枚举 10 个地址、各自 quota 或旅程 case ID。调度前必须冻结一份 10 项 fixture（稳定 item id、
    顺序、公开测试位置、每项 `requiredSuccesses`）并记录其 digest；模板存在不能代替这一步。
-   **fixture 已冻结**：`docs/acceptance/a-plus-10a-fixture.json`（fixtureVersion 2，digest
-   `2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e`，10 项 profile-1..10，
-   `totalRequiredSuccesses=17`；v1→v2 为纯散文修正——v1 的 `autoSideConsumes` 把 KB-8 wire
-   语义写成消费语义，按其字面 seed 占位坐标会假红全部 10 项（§6.4 trust 谓词以 Auto 侧
-   task 坐标为承重比对项）。坐标/quota/id 零变；登记见 fixture 内 `v2ChangeLog` 与
-   `a-plus-device-matrix.md`；v1 digest `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`
-   仅历史证据引用有效）。**设备可达消费面已补**（harness backfill PR）：起草时
+   **fixture 已冻结**：`docs/acceptance/a-plus-10a-fixture.json`（digest
+   `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`，10 项 profile-1..10，
+   `totalRequiredSuccesses=17`）。**设备可达消费面已补**（harness backfill PR）：起草时
    fixture 无任何代码消费者、Auto 产品 run 从 shell 不可达（plan 仅文件选择器 `importCsv`、
    run 仅 `exported=false` 的 `AutomationService`）——这是 A/B/C 共享的缺口①。backfill 加
    debug-only seed 面（qwy `prepare_10a` 显式 id=1..10；Auto `APlusSeedActivity` `seed_plan`/

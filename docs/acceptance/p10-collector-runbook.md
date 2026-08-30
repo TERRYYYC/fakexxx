@@ -108,9 +108,8 @@ adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es 
 文件选择器；run 只能 `AutomationService`，`exported=false`+`BIND_ACCESSIBILITY_SERVICE`）。
 下列 debug seed 面关闭该缺口（A/B/C 共享的缺口①）。**seed 面是 seed，不是 §5B/§5C 故障注入。**
 
-payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.json`，fixtureVersion 2，
-digest `2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e`；v1→v2 登记见
-`a-plus-device-matrix.md` 与 fixture 内 `v2ChangeLog`）。执行者 host 侧
+payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.json`，digest
+`cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`）。执行者 host 侧
 `base64 < a-plus-10a-fixture.json` 生成 payload、`shasum -a 256` 记 digest；两侧 seeder
 各自对解码 payload 重算 SHA-256，与传入 digest 不等即 REFUSED——证明落设备的正是冻结 fixture。
 
@@ -119,7 +118,7 @@ digest `2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e`；v1�
 adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity \
   --es command prepare_10a \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
-  --es fixture_digest 2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e
+  --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
 #   判据：logcat MockProviderAcceptance 出 seed 映射（fixtureIndex↔scheduleItemId↔dbId↔
 #   journeyCaseId↔requiredSuccesses）+ READY command=prepare_10a。seed 后必须 force-stop
 #   name.caiyao.fakegps.bench 再 bind（schedule 在 QwyEnvironmentController 构造时从 temp
@@ -129,7 +128,7 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
 adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity \
   --es cmd seed_plan \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
-  --es fixture_digest 2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e \
+  --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852 \
   [--ei global_buffer_seconds 60]
 #   判据：logcat ECAPlusSeed 出 fixtureIndex↔taskId↔journeyCaseId↔requiredSuccesses 映射
 #   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId。
