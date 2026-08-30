@@ -367,8 +367,8 @@ The `MCO06_ACCEPTED_HOST_COVERAGE_DISPOSITION` term is bound to
 `MCO06_DEVICE_PASS` means the unchanged matrix procedure produced a genuine
 current-candidate `passed` device result with the §4.4 raw-evidence/ledger binding.
 
-The linked document is now **accepted** through operator message
-`0001788110999154-000617-c8111cb0`:
+The linked document is now **accepted** through the exact acceptance-token
+excerpt in operator message `0001788110999154-000617-c8111cb0`:
 
 ```text
 ACCEPT G2-M-CO-06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED

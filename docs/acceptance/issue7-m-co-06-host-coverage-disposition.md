@@ -38,12 +38,13 @@ Message `0001788110999154-000617-c8111cb0` at `2026-08-30 17:29 UTC` reads
 verbatim:
 
 ```text
-ACCEPT G2-M-CO-06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED
+合   ACCEPT G2-M-CO-06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED
 ```
 
-The identifier exactly matches this document's sole canonical `decision_id`,
-and the exact `DOCUMENT=` path binds this accepted disposition. The message
-was recorded before PR #60 merged this document into `main` as
+The leading `合` is the merge authorization; the `ACCEPT …` portion is the
+acceptance token. Its identifier exactly matches this document's sole canonical
+`decision_id`, and the exact `DOCUMENT=` path binds this accepted disposition.
+The message was recorded before PR #60 merged this document into `main` as
 `9b41386822c11727e92c07481bef50901e7fa842` at `2026-08-30 17:33:49 UTC`.
 It is a durable operator acceptance record, not a claim that the document had
 already landed on `main` when the message was sent.
