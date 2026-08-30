@@ -210,6 +210,9 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 - 每行必须含 `rowId / exactHead / lane=device / status / testId / reportDigest`，且 raw report 可定位、
   `testId` 与 outcome 能在该报告中找到。
 - `exactHead` 必须等于本次 candidate。`skipped`、`failed` 或 `deferred` 都不满足最终 gate。
+- `M-CO-06` 保持 canonical device row。若 §7 的 host-coverage disposition 分支日后被接受，
+  它只使该 §7 分支可判，**不**在此 ledger 造 `passed`、`deferred` 或替代行；在 disposition
+  仍为 pending 时，该分支为 false，不能绕过本行的正常 device-evidence 路径。
 - 10 地址旅程、撤销、恢复与 Hook 的 device 证据不得伪造成新的 §10 row；它们按 Task 9 的
   用户旅程验收进入本 G2 evidence report。若要新增 row，须先走 canonical spec 变更，而不是在包里造号。
 
@@ -227,8 +230,10 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
   `UNVERIFIED`、legacy counter 与截图不得进入 trusted count。
 - 每次环境切换均为 release-before-advance；任一 `CLEANUP UNSAFE`、重复计数、提前推进、错项归因
   或设备状态不明，整块 FAIL。
-- 同场执行 `M-CO-06`：running marker 完全缺失时所有 attempt 均为 `UNVERIFIED`，显式告警，
-  不得回退到 disabled-Start 弱信号。
+- `M-CO-06` 由 §7 的独立合取项裁决。若没有被接受的 host-coverage disposition，必须在同场
+  执行原 device procedure：running marker 完全缺失时所有 attempt 均为 `UNVERIFIED`，显式告警，
+  不得回退到 disabled-Start 弱信号。被接受的 disposition 只能替代本次 G2 的该项证明路径，
+  不得称为 device PASS 或伪造 ledger row；pending disposition 不满足也不移除此项。
 
 ### B. 崩溃与恢复（硬准出）
 
@@ -327,7 +332,8 @@ digest、七块逐项状态，以及 operator 对 skew/production 的 dispositio
 **PASS 的合取式：**
 
 ```text
-hard(A,B,C,E,G) 全 PASS
+hard(A 的 10-address predicate, B,C,E,G) 全 PASS
+∧ (MCO06_DEVICE_PASS ∨ MCO06_ACCEPTED_HOST_COVERAGE_DISPOSITION)
 ∧ ((SKEW=POST_V1 ∧ canonical disposition 已接受) ∨ D PASS)
 ∧ (PROD=G3 ∨ F PASS)
 ∧ raw evidence checksum 100% PASS
@@ -353,6 +359,22 @@ removes only `M-VS-01` / Task 9 from the **current G2** skew branch. It does
 not alter the device matrix or evidence ledger, and `V2_GATE=REQUIRED` keeps
 the document's two-direction old/new artifact proof as a non-bypass gate
 before any protocol-v2 release candidate or release.
+
+### §7 `M-CO-06` host-coverage disposition binding
+
+The `MCO06_ACCEPTED_HOST_COVERAGE_DISPOSITION` term is bound to
+[`issue7-m-co-06-host-coverage-disposition.md`](issue7-m-co-06-host-coverage-disposition.md).
+`MCO06_DEVICE_PASS` means the unchanged matrix procedure produced a genuine
+current-candidate `passed` device result with the §4.4 raw-evidence/ledger binding.
+
+The linked document is currently **proposed** with `acceptance: pending`; its
+host-coverage term is therefore false. It does not make this equation true,
+does not claim M-CO-06 device PASS, and does not permit a ledger row. Only a
+later exact operator acceptance that names this `DOCUMENT=` path and retains
+`V2_GATE=NOT_APPLICABLE` plus `MARKERLESS_SDK_DEVICE_GATE=REQUIRED` can make
+the alternative branch true for the current G2 scope. That branch preserves a
+non-bypass real-device gate when a controllable marker-less/marker-altered SDK
+fixture becomes available.
 
 - `RELEASE=OPERATOR_ONLY`：上式成立后，只有 operator 可把 Issue #1 的 G2 行改为放行。
 - `RELEASE=DUAL`：上式成立 + 非包作者/非执行者/非独立记录者/非相关产品或证据实现作者的
