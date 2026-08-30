@@ -7,8 +7,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * CellRebel screen-state detector tests (AC-B1/B2, INV-6).
- * # CellRebel 屏幕状态检测器测试：旧分数绝不作为完成证据
+ * CellRebel screen-state detector tests (AC-B1/B2, INV-6, INV-11).
+ * # CellRebel 屏幕状态检测器测试：旧分数绝不作为完成证据（INV-6）；
+ * # disabled-Start 绝不作为运行证据（INV-11 / M-CO-06）
  */
 class CellRebelStateDetectorTest {
 
@@ -40,9 +41,24 @@ class CellRebelStateDetectorTest {
     }
 
     @Test
-    fun `start disabled alone is RUNNING evidence`() {
+    fun `start disabled alone is NOT running evidence - INV-11 M-CO-06`() {
+        // # INV-11（M-CO-06）：marker 缺失时绝不得把 disabled-Start 弱信号当 RUNNING 的
+        // # 替代品；该路径被验收条款明文禁止。无标记 + Start 禁用 → 必须不是 RUNNING，
+        // # 落入 UNKNOWN（fail-closed），让生命周期走 NO_RUNNING_EVIDENCE 停跑告警
         val nodes = CellRebelFixtures.startDisabledOnly().flatten()
-        assertEquals(CellRebelScreenState.RUNNING, detector.classify(nodes))
+        assertTrue(detector.classify(nodes) != CellRebelScreenState.RUNNING)
+        assertEquals(CellRebelScreenState.UNKNOWN, detector.classify(nodes))
+    }
+
+    @Test
+    fun `stale scores with Start disabled and no markers is NOT RUNNING - INV-11 M-CO-06`() {
+        // # M-CO-06 场景镜像：running 屏去掉全部处理标记（模拟无 marker 的 SDK 版本），
+        // # 只剩旧分数残留 + Start 禁用。旧断言把它锁成 RUNNING —— 正是 INV-11 禁止的
+        // # 弱信号回退。必须不是 RUNNING，也不是 COMPLETED（INV-6：Start 未启用）
+        val nodes = CellRebelFixtures.runningWithoutMarkers().flatten()
+        assertTrue(detector.classify(nodes) != CellRebelScreenState.RUNNING)
+        assertTrue(detector.classify(nodes) != CellRebelScreenState.COMPLETED)
+        assertEquals(CellRebelScreenState.UNKNOWN, detector.classify(nodes))
     }
 
     @Test
