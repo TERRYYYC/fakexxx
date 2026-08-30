@@ -104,6 +104,29 @@ object CellRebelFixtures {
     )
 
     /**
+     * Operator state 2 with ALL processing markers stripped (M-CO-06 precondition:
+     * SDK version that never emits the running marker). Old scores remain, Start disabled.
+     * # 运行态去掉全部处理标记（M-CO-06：完全不出现 running marker 的 SDK），
+     * # 旧分数残留、Start 禁用 —— INV-11 下绝不能因此判 RUNNING
+     */
+    fun runningWithoutMarkers(): ScreenNode = n(
+        className = "android.widget.FrameLayout",
+        children = listOf(
+            n(children = listOf(
+                n(text = "Web Browsing Score"),
+                n(text = "EXCELLENT"),
+                n(text = "10.00")
+            )),
+            n(children = listOf(
+                n(text = "Video Streaming Score"),
+                n(text = "GOOD"),
+                n(text = "7.50")
+            )),
+            startButton(enabled = false)
+        )
+    )
+
+    /**
      * Not the test screen at all: no Start button, no score labels, no markers.
      * # 完全不是测试页：无 Start、无分数标签、无标记
      */

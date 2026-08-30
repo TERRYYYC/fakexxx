@@ -20,16 +20,23 @@ data class ExtractedScores(
 /**
  * Pure state classification over a flattened ScreenNode list (AC-B1/B2).
  *
- * RUNNING:   processing markers present, OR Start clickable-but-disabled.
+ * RUNNING:   processing markers present. Marker presence is the ONLY running
+ *            evidence — the "Start" button's disabled state must NEVER be used
+ *            as a weaker substitute (INV-11 / M-CO-06: fail-closed, not
+ *            fallback). Marker-absent screens fall through to UNKNOWN, so the
+ *            lifecycle records NO_RUNNING_EVIDENCE and alerts instead of
+ *            minting a phantom RUNNING confirmation.
  * COMPLETED: scores extractable AND no markers AND Start enabled.
  * READY:     Start enabled, no markers, no scores.
  * UNKNOWN:   everything else.
  *
  * Score presence alone is NEVER completion evidence (INV-6): stale scores
- * behind the running overlay stay RUNNING because markers / disabled Start win.
+ * behind the running overlay stay RUNNING because markers win; stale scores
+ * with NO markers (marker-less SDK, M-CO-06) are UNKNOWN, never RUNNING.
  *
- * # 纯状态分类器：分数存在本身绝不是完成证据（INV-6），
- * # 覆盖层残留的旧分数在标记存在或 Start 禁用时仍判为 RUNNING
+ * # 纯状态分类器：分数存在本身绝不是完成证据（INV-6）；
+ * # RUNNING 唯一证据是处理标记——disabled-Start 绝不作为弱替代（INV-11，
+ * # M-CO-06 fail-closed）；无标记的旧分数屏判 UNKNOWN，不判 RUNNING
  */
 class CellRebelStateDetector {
 
@@ -69,7 +76,9 @@ class CellRebelStateDetector {
         }
         val start = nodes.firstOrNull { it.text.equals("Start", ignoreCase = true) && it.clickable }
 
-        if (hasMarker || (start != null && !start.enabled)) return CellRebelScreenState.RUNNING
+        // # INV-11（M-CO-06）：hasMarker 是 RUNNING 的唯一证据；
+        // # 禁止 (start != null && !start.enabled) 这一弱信号回退 —— 无 marker 即不判 RUNNING
+        if (hasMarker) return CellRebelScreenState.RUNNING
         if (extractScores(nodes) != null && start?.enabled == true) return CellRebelScreenState.COMPLETED
         if (start?.enabled == true) return CellRebelScreenState.READY
         return CellRebelScreenState.UNKNOWN
