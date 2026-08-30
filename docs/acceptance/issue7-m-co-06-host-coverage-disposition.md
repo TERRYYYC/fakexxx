@@ -3,18 +3,20 @@ feature_ids: [1, 7]
 topics: [decision, acceptance, g2, m-co-06, host-coverage, device-gate]
 doc_kind: acceptance-disposition
 created: 2026-08-30
-status: proposed
+status: accepted
 decision_id: G2-M-CO-06-HOST-COVERAGE-DISPOSITION
 operator_direction_ref: 0001788106695038-000525-eda3e1d7
-acceptance: pending
+operator_acceptance_ref: 0001788110999154-000617-c8111cb0
+accepted_at: 2026-08-30T17:29Z
+acceptance: accepted
 ---
 
-# Canonical disposition (proposed) — M-CO-06 host coverage while no controlled current device fixture exists
+# Canonical disposition — M-CO-06 host coverage while no controlled current device fixture exists
 
 ## Status and authority
 
-This is a **proposed** canonical scope/evidence disposition. It is not an
-accepted disposition, device evidence, a device lease, or a G2 release.
+This is an **accepted** canonical scope/evidence disposition. It is not device
+evidence, a device lease, a device PASS, or a G2 release.
 
 The operator's exact reply in `0001788106695038-000525-eda3e1d7` is:
 
@@ -30,13 +32,25 @@ reply is therefore retained only as `operator_direction_ref`: it contains no
 `DOCUMENT=`, decision identifier, scope/gate fields, or acceptance record for
 this document.
 
-Until an operator explicitly accepts this exact path and its gate terms,
-`acceptance: pending` means the host-coverage branch is **not satisfied**.
-Nothing in this document may be read as “M-CO-06 passed on a real device.”
+### Operator acceptance record
 
-## Proposed disposition for the current G2 gate
+Message `0001788110999154-000617-c8111cb0` at `2026-08-30 17:29 UTC` reads
+verbatim:
 
-The proposed G2-only predicate is:
+```text
+ACCEPT G2-M-CO-06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED
+```
+
+The identifier exactly matches this document's sole canonical `decision_id`,
+and the exact `DOCUMENT=` path binds this accepted disposition. The message
+was recorded before PR #60 merged this document into `main` as
+`9b41386822c11727e92c07481bef50901e7fa842` at `2026-08-30 17:33:49 UTC`.
+It is a durable operator acceptance record, not a claim that the document had
+already landed on `main` when the message was sent.
+
+## Accepted disposition for the current G2 gate
+
+The accepted G2-only predicate is:
 
 ```text
 MCO06_DEVICE_PASS ∨ MCO06_ACCEPTED_HOST_COVERAGE_DISPOSITION
@@ -44,13 +58,13 @@ MCO06_DEVICE_PASS ∨ MCO06_ACCEPTED_HOST_COVERAGE_DISPOSITION
 
 `MCO06_DEVICE_PASS` remains the normal path: execute the unchanged
 `M-CO-06` procedure from the device matrix, preserve raw device evidence, and
-write the genuine canonical `passed` ledger row. The proposed alternative is available
-only after this document has an exact operator acceptance.
+write the genuine canonical `passed` ledger row. The accepted alternative is
+available for the current G2 scope through the exact operator acceptance above.
 
-While this document is pending, the alternative is false. It does not remove
-the device-matrix row, convert a device prerequisite into a `passed`,
-`deferred`, or `skipped` ledger row, or make G2 §7 true. The current ledger is
-still the original empty array (`[]`, 3 bytes,
+The accepted alternative does not remove the device-matrix row, convert a device
+prerequisite into a `passed`, `deferred`, or `skipped` ledger row, or satisfy
+the rest of the G2 §7 conjunction. The current ledger is still the original
+empty array (`[]`, 3 bytes,
 `37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570`).
 
 ## Evidence basis and its limits
@@ -100,7 +114,7 @@ screen projects the typed last failure.
 That is host-side implementation coverage of the fail-closed path. The direct
 M-CO-06 tests are classifier tests; they are not a real-device execution, and
 they do not independently prove the full device-session outcome or a captured
-UI alert. This distinction is why this proposed disposition cannot be called a
+UI alert. This distinction is why this accepted disposition cannot be called a
 device PASS.
 
 ## V2 and future device gate
@@ -122,22 +136,19 @@ bind the candidate and installed bytes, and write the resulting genuine device
 ledger row. Neither host tests nor this disposition can replace that later
 device gate.
 
-## Boundaries and required acceptance
+## Boundaries
 
-- This proposal changes neither the canonical device matrix nor the original
+- This disposition changes neither the canonical device matrix nor the original
   facts in its evidence-registration template.
 - It authorizes no device command, build, candidate change, device-ledger row,
   G2 release, or volatile gate update.
 - It does not satisfy any other G2 predicate, including the journey, recovery,
   revocation, exact-build, Hook, DUAL-verdict, or operator-release predicates.
 
-If the operator chooses to accept the proposed branch after review, the
-acceptance must bind this exact document and retain both future-gate values;
-for example:
+## Acceptance follow-through
 
-```text
-ACCEPT G2-M-CO-06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED
-```
-
-Only that later exact acceptance may change this document from proposed to
-accepted and make the corresponding G2 §7 branch decidable as satisfied.
+The operator acceptance record above makes
+`MCO06_ACCEPTED_HOST_COVERAGE_DISPOSITION` true for the current G2 §7 scope.
+The G2 package binds that single alternative branch to this document. It does
+not make the entire G2 conjunction true, authorize a G2 release, or replace
+the future marker-less SDK real-device gate.
