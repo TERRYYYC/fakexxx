@@ -111,36 +111,58 @@ adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es 
 payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.json`，digest
 `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`）。执行者 host 侧
 `base64 < a-plus-10a-fixture.json` 生成 payload、`shasum -a 256` 记 digest；两侧 seeder
-各自对解码 payload 重算 SHA-256，与传入 digest 不等即 REFUSED——证明落设备的正是冻结 fixture。
+各自对解码 payload 重算 SHA-256，与传入 digest 不等即 REFUSED。digest 与 payload 同源于
+执行者，故 seeder **另行独立绑定注册结构**（恰好 10 项、fixtureIndex 1..10 连续同序、
+`profile-N` 对齐、`scheduleId=qwy-default-schedule`、quota 和=17=声明值）——篡改/截断/乱序
+即使带对 digest 也 REFUSED（PR #62 P1-2）。
 
 ```
-# qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture）
+# qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture——
+#      千网游是坐标唯一所有者，KB-8）
 adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity \
   --es command prepare_10a \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
   --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
 #   判据：logcat MockProviderAcceptance 出 seed 映射（fixtureIndex↔scheduleItemId↔dbId↔
-#   journeyCaseId↔requiredSuccesses）+ READY command=prepare_10a。seed 后必须 force-stop
+#   journeyCaseId↔requiredSuccesses）+ READY command=prepare_10a。
+#   失败发 SEED_FAILED command=prepare_10a 且**无 READY**（P1-3：READY 仅在 seed 全部证明
+#   后发射——digest+结构校验、schedule store 已清、显式 id 无漂移、ConfigPrefsSync 发布成功）。
+#   seed 内部先清 durable schedule store（同拓扑重种在 ScheduleReinitPolicy 下是 NoOp、
+#   会保留上一轮 mid-run 指针/exhausted=true——清空后下次 boot 走 Rule 1 全新 generation：
+#   version 1、pointer=profile-1、exhausted=false）。seed 后必须 force-stop
 #   name.caiyao.fakegps.bench 再 bind（schedule 在 QwyEnvironmentController 构造时从 temp
-#   表 id ASC 重建为 profile-1..profile-10；与 prepare_kyiv 的 6.0.1 进程重置同理）。
+#   表 id ASC 重建；与 prepare_kyiv 的 6.0.1 进程重置同理），随后 discover() 回读
+#   profile-1..profile-10 完整有序 + currentItemId=profile-1（种子契约第 3 条）。
 
-# Auto：种 plan + 10 task（csvRow/priority=fixtureIndex → 执行序=fixture 序；坐标=trust target）
+# Auto：种 plan + 10 task（csvRow/priority=fixtureIndex → 执行序=fixture 序）
+#   KB-8（spec v1.62，operator 裁定）：Auto 只消费 {顺序, journeyCaseId, requiredSuccesses}，
+#   **不导入坐标**——坐标千网游独占，Auto 无独立位置验证面（KB-8 永久 limit）。
+#   LocationTask 的遗留 non-null 坐标列种入惰性占位值，冻结谓词不消费它们。
 adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity \
   --es cmd seed_plan \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
   --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852 \
-  [--ei global_buffer_seconds 60]
+  [--el global_buffer_seconds 60]
 #   判据：logcat ECAPlusSeed 出 fixtureIndex↔taskId↔journeyCaseId↔requiredSuccesses 映射
 #   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId。
 
 # Auto：启动 run（产品自身入口 AutomationService.startAutomation；无障碍服务须已启用）
 adb shell am start -n .../APlusSeedActivity --es cmd start_run --el plan_id <planId>
+#   判据：START_CONFIRMED（isRunning 在 10s 内变 true）才算启动；START_NOT_CONFIRMED =
+#   无障碍服务未连接（startAutomation 静默 no-op），不得当作已启动。真相在
+#   ProviderRevokeCollector cmd=state 的 durable attempt 行，不在这行输出。
 ```
 
 **跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider
-schedule item `profile-(i+1)` 必须同序——二者都按 fixture items[] 数组序 seed。trust 谓词
-比对 provider 报告的 effective 坐标 vs Auto task 坐标，两者同源同序才 PASS；错序 → haversine
-超容差 → 该项假红。qwy 显式 id=N、Auto csvRow/priority=fixtureIndex 共同锁死此序。
+schedule item `profile-(i+1)` 必须同序——二者都按 fixture items[] 数组序 seed（qwy 显式
+id=N、Auto csvRow/priority=fixtureIndex 双向锁死，双侧 parser 各自强校验该序）。位置腿
+按 §6.4.1 由千网游独占求值（KB-8）；Auto 侧承重的是身份腿（acceptedIntentHash /
+scheduleItemId / scheduleVersion 独立重算）。
+
+> **已知 product/spec drift（gap⑥，编排前置）**：当前 `TrustPolicy` 仍在 Auto 侧对
+> task 坐标列求 haversine（spec v1.62 L1757 明令退役的「旧文」形状）。产品修复合入前，
+> **任何** seed 方案都无法在真机产出 trusted completion——A 块 device 场次必须排在该
+> 产品修复之后。修复归 canonical fix owner 独立 PR，不在本 debug-only backfill 内。
 
 ## 门控词表（冻结）
 

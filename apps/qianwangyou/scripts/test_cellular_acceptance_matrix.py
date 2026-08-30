@@ -11,16 +11,30 @@ from scripts import cellular_acceptance_matrix as matrix
 SESSION_ID = "acceptance-123"
 
 
+def _writer_schema_version() -> int:
+    """Read ConfigPrefsSync.SCHEMA_VERSION — the ONE writer contract.
+
+    Every schemaVersion assertion in this file goes through here so a writer
+    bump red-fails the Python lane instead of leaving a hardcoded literal
+    that silently disagrees (the PR #62 P1-4 shape: matrix emitted 3 while
+    the writer required 4, and §G aborted on-device before report_ready).
+    """
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "app/src/main/java/name/caiyao/fakegps/config/ConfigPrefsSync.kt"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"const val SCHEMA_VERSION\s*=\s*(\d+)", source)
+    assert match is not None, "ConfigPrefsSync.SCHEMA_VERSION not found"
+    return int(match.group(1))
+
+
 class CellularAcceptanceMatrixTest(unittest.TestCase):
 
     def test_python_payload_version_is_pinned_to_writer_contract(self):
-        source = (
-            Path(__file__).resolve().parents[1]
-            / "app/src/main/java/name/caiyao/fakegps/config/ConfigPrefsSync.kt"
-        ).read_text(encoding="utf-8")
-        match = re.search(r"const val SCHEMA_VERSION\s*=\s*(\d+)", source)
-        self.assertIsNotNone(match)
-        self.assertEqual(int(match.group(1)), matrix.payload_for("full-rscp", SESSION_ID)["schemaVersion"])
+        self.assertEqual(
+            _writer_schema_version(),
+            matrix.payload_for("full-rscp", SESSION_ID)["schemaVersion"],
+        )
 
     def test_two_scenarios_cover_wcdma_power_aliases_without_ambiguity(self):
         self.assertEqual(
@@ -40,14 +54,19 @@ class CellularAcceptanceMatrixTest(unittest.TestCase):
             set(rssi.fields).difference({"wcdma_rssi"}),
         )
 
-    def test_payload_is_canonical_schema_v3_and_preserves_nr_long_width(self):
+    def test_payload_is_canonical_schema_and_preserves_nr_long_width(self):
         payload = matrix.payload_for("full-rscp", SESSION_ID)
 
         self.assertEqual(
             ["acceptanceSessionId", "fields", "mode", "schemaVersion", "unavailable"],
             sorted(payload),
         )
-        self.assertEqual(3, payload["schemaVersion"])
+        # PR #62 P1-4: this assertion used to HARDCODE 3 while its sibling test
+        # pinned the version to the Kotlin writer contract — the two could not
+        # both hold once the writer moved to 4, and the hardcoded one won by
+        # accident of ordering. There is exactly ONE source of truth for the
+        # version (ConfigPrefsSync.SCHEMA_VERSION); both tests now read it.
+        self.assertEqual(_writer_schema_version(), payload["schemaVersion"])
         self.assertEqual([], payload["unavailable"])
         self.assertEqual(SESSION_ID, payload["acceptanceSessionId"])
         self.assertEqual("always_on", payload["mode"])

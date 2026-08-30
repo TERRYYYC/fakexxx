@@ -292,20 +292,40 @@ install_debug_apk_if_changed() {
     local_sha=$(shasum -a 256 "$APK" 2>/dev/null | awk '{print $1}')
     [ -n "$local_sha" ] ||
         { echo "HARNESS_ERROR could not fingerprint debug APK" >&2; return 2; }
-    installed_path=$(adb shell pm path "$BENCH_PACKAGE" 2>/dev/null |
-        sed -n 's/^package://p' | tr -d '\r' | head -1)
+    # §4.2-1 requires `pm path` to return EXACTLY one base.apk. The previous
+    # `head -1` silently discarded extra lines, so a split install
+    # (base.apk + split_config.*.apk) could pass the byte check on the base
+    # while the device actually runs bytes the single-APK build never produced
+    # (PR #62 review P1-5). Capture ALL lines and assert cardinality; only the
+    # empty case (not installed) may fall through to the install branch.
+    installed_paths=$(adb shell pm path "$BENCH_PACKAGE" 2>/dev/null |
+        sed -n 's/^package://p' | tr -d '\r')
+    path_count=$(printf '%s' "$installed_paths" | grep -c .)
+    if [ "$path_count" -gt 1 ]; then
+        echo "HARNESS_ERROR pm path returned $path_count APK entries for $BENCH_PACKAGE — §4.2 requires exactly one base.apk (split install is not the built artifact). Paths:" >&2
+        printf '%s\n' "$installed_paths" >&2
+        return 2
+    fi
     installed_sha=""
-    if [ -n "$installed_path" ]; then
+    if [ "$path_count" -eq 1 ]; then
+        installed_path=$installed_paths
+        case "$installed_path" in
+            */base.apk) ;;
+            *)
+                echo "HARNESS_ERROR sole installed path is not a base.apk: $installed_path" >&2
+                return 2
+                ;;
+        esac
         installed_sha=$(root_shell "sha256sum $installed_path" 2>/dev/null |
             awk '{print $1}' | tr -d '\r')
     fi
     if [ "$installed_sha" = "$local_sha" ]; then
         echo "[install] identical debug APK already installed"
-        # G2 §5.G / §4.2: the acceptance report must BIND the installed APK's
-        # raw bytes, not merely assert package identity via dumpsys. Emit the
-        # SHA-256 of the on-device base.apk (already computed above) so the run
-        # evidence carries the exact installed artifact fingerprint.
-        echo "VERIFIED install.apk sha256=$installed_sha (device base.apk bytes == built debug APK; §4.2/§5.G installed identity)"
+        # §4.2 installed identity, claimed narrowly: this line asserts BYTE
+        # IDENTITY of the sole on-device base.apk against the built debug APK
+        # (path cardinality proven above). Signer/applicationId legs stay with
+        # their own §4.2 steps — this echo does not claim them.
+        echo "VERIFIED install.apk sha256=$installed_sha (sole base.apk bytes == built debug APK)"
         return 0
     fi
 

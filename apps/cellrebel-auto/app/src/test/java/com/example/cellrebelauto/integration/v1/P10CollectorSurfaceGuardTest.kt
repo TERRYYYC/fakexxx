@@ -271,24 +271,34 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
-     * GAP⑤ — the A-block trust predicate (TrustPolicy) compares the provider's
-     * observed effective coordinates against the Auto-side task target. If the
-     * plan seeder drops coordinates, every trusted-completion check fails the
-     * haversine leg — a harness-induced false red on all 10 journeys. The seeder
-     * MUST carry latitude/longitude into the task rows.
+     * KB-8 (PR #62 review P1-1) — canonical spec v1.62 freezes coordinate
+     * ownership with the provider: Auto does not import/hold/assert
+     * coordinates (§2.2; KB-8 permanent limit). The plan seeder must
+     * therefore consume ONLY {order, journeyCaseId, requiredSuccesses} and
+     * must never copy fixture coordinates into the legacy LocationTask
+     * columns — importing them recreates the second coordinate holder the
+     * operator's A adjudication eliminated. (An earlier revision of this
+     * guard asserted the OPPOSITE, reading the drifted product TrustPolicy
+     * as spec intent; the spec is the truth source, not the drift.)
      */
     @Test
-    fun gap5_planSeedCarriesTrustTargetCoordinates() {
+    fun kb8_planSeedDoesNotImportFixtureCoordinates() {
         val seedLogic = File(debugSourceDir, "APlus10APlanSeed.kt")
         assertTrue("APlus10APlanSeed.kt must exist in the debug source set", seedLogic.isFile)
         val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == seedLogic }.second
-        assertTrue(
-            "the plan seeder must carry latitude into LocationTask — it is the trust target",
-            Regex("""latitude\s*=\s*item\.latitude""").containsMatchIn(code),
+        assertEquals(
+            "the plan seeder must NOT read fixture coordinates (KB-8: provider-owned)",
+            false,
+            Regex("""item\.(latitude|longitude)""").containsMatchIn(code),
+        )
+        assertEquals(
+            "the fixture parser must NOT extract coordinate fields (KB-8)",
+            false,
+            Regex("""getDouble\("(latitude|longitude)"\)""").containsMatchIn(code),
         )
         assertTrue(
-            "the plan seeder must carry longitude into LocationTask — it is the trust target",
-            Regex("""longitude\s*=\s*item\.longitude""").containsMatchIn(code),
+            "the legacy non-null task columns must carry the inert placeholder",
+            code.contains("COORDINATE_PLACEHOLDER"),
         )
     }
 

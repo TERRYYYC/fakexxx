@@ -37,6 +37,13 @@ object APlus10AFixtureSeed {
     const val EXPECTED_FIXTURE_ID = "FX-G2-10A"
     const val SCHEDULE_ITEM_PREFIX = "profile-"
 
+    // Registered-fixture structure (a-plus-10a-fixture.json, frozen 2026-08-26;
+    // registration: a-plus-device-matrix.md). PR #62 P1-2: the parser binds to
+    // these independently of the caller-supplied digest.
+    const val EXPECTED_ITEM_COUNT = 10
+    const val EXPECTED_TOTAL_REQUIRED_SUCCESSES = 17
+    val EXPECTED_SCHEDULE_ID: String = name.caiyao.fakegps.integration.v1.QwyScheduleStore.DEFAULT_SCHEDULE_ID
+
     /** One frozen fixture row — the full field set the two apps split between them. */
     data class FixtureItem(
         val fixtureIndex: Int,
@@ -89,11 +96,23 @@ object APlus10AFixtureSeed {
         require(fixtureId == EXPECTED_FIXTURE_ID) {
             "payload fixtureId must be '$EXPECTED_FIXTURE_ID', got '$fixtureId'"
         }
-        val itemsArr = root.optJSONArray("items")
-        require(itemsArr != null && itemsArr.length() > 0) {
-            "payload has no items — not a seedable fixture"
+        // PR #62 P1-2: the digest and the payload arrive from the SAME caller,
+        // so the digest alone cannot stop a hand-crafted "FX-G2-10A" with the
+        // wrong shape. The parser independently binds to the REGISTERED
+        // fixture's frozen structure: exactly 10 items, contiguous
+        // fixtureIndex 1..10 in array order, profile-N aligned to its index,
+        // the registered schedule id, and the quota sum (17, and equal to the
+        // payload's own declared total). A truncated, reordered, re-quota'd or
+        // re-targeted payload fails HERE, digest or no digest.
+        val scheduleId = root.optString("scheduleId", "")
+        require(scheduleId == EXPECTED_SCHEDULE_ID) {
+            "payload scheduleId must be '$EXPECTED_SCHEDULE_ID', got '$scheduleId'"
         }
-        return (0 until itemsArr.length()).map { i ->
+        val itemsArr = root.optJSONArray("items")
+        require(itemsArr != null && itemsArr.length() == EXPECTED_ITEM_COUNT) {
+            "fixture must carry exactly $EXPECTED_ITEM_COUNT items, got ${itemsArr?.length() ?: 0}"
+        }
+        val items = (0 until itemsArr.length()).map { i ->
             val o = itemsArr.getJSONObject(i)
             FixtureItem(
                 fixtureIndex = o.getInt("fixtureIndex"),
@@ -109,6 +128,24 @@ object APlus10AFixtureSeed {
                 wifiSsid = o.getString("wifiSsid"),
             )
         }
+        items.forEachIndexed { i, item ->
+            require(item.fixtureIndex == i + 1) {
+                "items must be in fixtureIndex order 1..$EXPECTED_ITEM_COUNT: position $i carries fixtureIndex ${item.fixtureIndex}"
+            }
+            require(item.expectedScheduleItemId == "$SCHEDULE_ITEM_PREFIX${i + 1}") {
+                "item ${i + 1} must target ${SCHEDULE_ITEM_PREFIX}${i + 1}, got '${item.expectedScheduleItemId}'"
+            }
+            require(item.requiredSuccesses >= 1) {
+                "item ${i + 1} requiredSuccesses must be >= 1"
+            }
+        }
+        val quotaSum = items.sumOf { it.requiredSuccesses }
+        val declaredTotal = root.optInt("totalRequiredSuccesses", -1)
+        require(quotaSum == declaredTotal && quotaSum == EXPECTED_TOTAL_REQUIRED_SUCCESSES) {
+            "quota sum $quotaSum must equal the payload's declared total ($declaredTotal) " +
+                "and the registered fixture total ($EXPECTED_TOTAL_REQUIRED_SUCCESSES)"
+        }
+        return items
     }
 
     /**

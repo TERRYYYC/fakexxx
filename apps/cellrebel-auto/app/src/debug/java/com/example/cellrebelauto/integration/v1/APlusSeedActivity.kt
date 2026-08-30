@@ -136,13 +136,31 @@ class APlusSeedActivity : Activity() {
             appendLine("REFUSED: plan $planId not found — seed it first with cmd=seed_plan")
             return
         }
-        // The SAME entry the product UI uses. If the accessibility service is not
-        // enabled/connected, startAutomation logs "Service not connected" and the
-        // run does not start — an operator precondition, reported not hidden.
+        // The SAME entry the product UI uses. startAutomation is a silent no-op
+        // when the accessibility service is not connected (it only logs), so a
+        // bare "start requested" would be a false green (PR #62 review P2).
+        // Poll the service's own isRunning StateFlow with a bounded timeout and
+        // report a DISTINCT verdict for each outcome.
         appendLine("[start_run] AutomationService.startAutomation(plan=$planId) — the product's own run entry.")
-        appendLine("(requires the CellRebel Auto accessibility service enabled; operator precondition)")
+        if (AutomationService.isRunning.value) {
+            appendLine("REFUSED: a run is already active (isRunning=true) — one run at a time; stop it first.")
+            return
+        }
         AutomationService.startAutomation(planId)
-        appendLine("start requested. Confirm with the ProviderRevokeCollector cmd=state (running attempts) and logcat.")
+        val deadline = System.currentTimeMillis() + START_CONFIRM_TIMEOUT_MS
+        var confirmed = false
+        while (System.currentTimeMillis() < deadline) {
+            if (AutomationService.isRunning.value) { confirmed = true; break }
+            Thread.sleep(START_CONFIRM_POLL_MS)
+        }
+        if (confirmed) {
+            appendLine("START_CONFIRMED isRunning=true within ${START_CONFIRM_TIMEOUT_MS}ms.")
+            appendLine("Observe attempts via ProviderRevokeCollector cmd=state; durable rows are the truth, not this line.")
+        } else {
+            appendLine("START_NOT_CONFIRMED: isRunning stayed false for ${START_CONFIRM_TIMEOUT_MS}ms after the call.")
+            appendLine("Most likely the CellRebel Auto accessibility service is not enabled/connected")
+            appendLine("(startAutomation is a silent no-op without it — operator precondition). Do NOT treat this as started.")
+        }
     }
 
     private fun sha256Hex(bytes: ByteArray): String =
@@ -150,7 +168,10 @@ class APlusSeedActivity : Activity() {
             .joinToString("") { "%02x".format(it) }
 
     private fun StringBuilder.usage() {
-        appendLine("seed_plan: --es cmd seed_plan --es $EXTRA_FIXTURE_PAYLOAD_B64 <base64> --es $EXTRA_FIXTURE_DIGEST <sha256> [--ei global_buffer_seconds 60]")
+        // Numeric extras are canonically --el (Long) per the runbook's frozen
+        // extra-type discipline; ExtraCoerce tolerates --ei/--es but the
+        // documented spelling must not teach the silent-default typo.
+        appendLine("seed_plan: --es cmd seed_plan --es $EXTRA_FIXTURE_PAYLOAD_B64 <base64> --es $EXTRA_FIXTURE_DIGEST <sha256> [--el global_buffer_seconds 60]")
         appendLine("start_run: --es cmd start_run --el plan_id <id>")
     }
 
@@ -162,5 +183,7 @@ class APlusSeedActivity : Activity() {
         const val EXTRA_FIXTURE_DIGEST = "fixture_digest"
         const val EXTRA_GLOBAL_BUFFER_SECONDS = "global_buffer_seconds"
         const val EXTRA_PLAN_ID = "plan_id"
+        const val START_CONFIRM_TIMEOUT_MS = 10_000L
+        const val START_CONFIRM_POLL_MS = 200L
     }
 }

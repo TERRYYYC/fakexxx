@@ -341,6 +341,15 @@ jobs:
         # selftest that exists but never runs is not a guard.
         run: ./scripts/selftest-test-hook-acceptance-readiness.sh
 
+      - name: hook-matrix-contract (python payload/verdict suites)
+        # PR #62 P1-4: these suites existed but were wired into NO gate, so
+        # the matrix tool emitted schemaVersion 3 for a writer contract at 4
+        # and every --cellular-matrix scenario would abort on-device before
+        # report_ready — §G unexecutable while all checks stayed green. The
+        # version pin reads ConfigPrefsSync.SCHEMA_VERSION from source, so a
+        # future writer bump red-fails HERE instead of on a device lease.
+        run: cd apps/qianwangyou && python3 -m unittest scripts.test_cellular_acceptance_matrix scripts.test_hook_verdict
+
   row2-exec:
     # G2 Row 2 execution plane (host-side lane of the PR #55 evidence
     # contract): runner + ROW2-EXEC-ACCESS-V2 classifier + executable

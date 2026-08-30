@@ -105,6 +105,34 @@ class ScheduleReinitPolicyTest {
      * the complement of M-AD-24: since the policy refuses to "reinit" without
      * a topology change, there is no same-topology clear to bump for.
      */
+    /**
+     * PR #62 P1-3 — the fresh-state reset leg of prepare_10a. A same-topology
+     * reseed is a NoOp by design (the test below), so the seeder clears the
+     * durable store first; this pins that a CLEARED store (scheduleId=null)
+     * with the SAME ten item ids takes Rule 1: fresh generation, pointer at
+     * profile-1, exhausted=false — a mid-run pointer or terminal
+     * exhausted=true from the previous run cannot survive into the new seed.
+     */
+    @Test
+    fun p13_clearedStoreWithSameTopologyFreshInitializesAtItemOne() {
+        val tenIds = (1..10).map { "profile-$it" }
+        val plan = ScheduleReinitPolicy.decide(
+            existing = ExistingState(
+                scheduleId = null, // the seeder cleared the store
+                scheduleVersion = 0L,
+                itemIds = emptyList(),
+                exhausted = false,
+            ),
+            newItemIds = tenIds,
+        )
+        val init = plan as? ScheduleReinitPolicy.ReinitPlan.Initialize
+            ?: error("cleared store must fresh-initialize, got $plan")
+        org.junit.Assert.assertEquals("profile-1", init.currentItemId)
+        org.junit.Assert.assertEquals(false, init.exhausted)
+        org.junit.Assert.assertEquals(1L, init.scheduleVersion)
+        org.junit.Assert.assertEquals(tenIds, init.itemIds)
+    }
+
     @Test
     fun sameTopologyReinitIsNoOp_exhaustedSurvives() {
         val items = listOf("profile-1", "profile-2")

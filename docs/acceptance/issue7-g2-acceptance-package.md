@@ -149,10 +149,14 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
    `totalRequiredSuccesses=17`）。**设备可达消费面已补**（harness backfill PR）：起草时
    fixture 无任何代码消费者、Auto 产品 run 从 shell 不可达（plan 仅文件选择器 `importCsv`、
    run 仅 `exported=false` 的 `AutomationService`）——这是 A/B/C 共享的缺口①。backfill 加
-   debug-only seed 面（qwy `prepare_10a` 显式 id=1..10；Auto `APlusSeedActivity` `seed_plan`/
-   `start_run`，坐标作 trust target），payload 即 fixture 文件本身、双侧 seeder 重算 digest 校验。
+   debug-only seed 面（qwy `prepare_10a` 显式 id=1..10、含 fresh-state schedule reset；Auto
+   `APlusSeedActivity` `seed_plan`/`start_run`——按 KB-8 只消费 {顺序, journeyCaseId,
+   requiredSuccesses}，**不导入坐标**，遗留 non-null 列种惰性占位），payload 即 fixture 文件
+   本身、双侧 seeder 重算 digest **并独立绑定注册结构**（10 项/序/profile-N/quota=17）。
    命令面见 `p10-collector-runbook.md` §5A seed 节。**这只是 host-green 的可达性**，不表示 A
-   块已在真机 PASS——真机 10 项旅程仍由 §5 block A 承重。
+   块已在真机 PASS——真机 10 项旅程仍由 §5 block A 承重，且当前存在已知 product/spec
+   drift（`TrustPolicy` 仍含 spec v1.62 L1757 退役的 Auto 侧 haversine 旧文形状）：该产品
+   修复（独立 PR，canonical fix owner）合入前，A 块无法产出 trusted completion。
 2. `docs/acceptance/matrix-evidence-device.json` 当前不存在。实际 device row 执行前必须按 canonical
    §10.1 schema 创建；Markdown 模板不是 executed evidence。
 3. ~~`apps/qianwangyou/scripts/test-hook.sh` 当前硬编码 `PKG=name.caiyao.fakegps`，但它构建并安装的
@@ -299,8 +303,9 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
   > `docs/acceptance/a-plus-device-matrix.md` §10.1 evidence-ledger 的泳道语汇
   > （`check-derived-counts.sh` 的 `CELL_KEYS` 含 `pr-6`；device-matrix `"lane":"device"`），
   > 起草时被误缝合成一个 CLI 参数。可执行等价物是最严档 `--stage full`（含
-  > acceptance-scenarios / matrix-coverage 等全部 gate）。此为纯文档修正，不改脚本、
-  > **不影响 candidate 字节**。
+  > acceptance-scenarios / matrix-coverage 等全部 gate）。此为纯文档修正，不改脚本；
+  > **不改任何 APK 构建产物字节**——但本提交与仓库任何提交一样会改变 candidate 的
+  > commit/tree SHA，candidate 冻结照常绑定包含本修正的 exact HEAD，不因"仅文档"豁免。
 - canonical device ledger 行与真实 raw report 一一绑定；没有“文档说跑过”或作者口头结论。
 - evidence-validity reviewer 先核 evidence carrier，再判 product behavior；证据坏时修证据，不改产品迎合。
 

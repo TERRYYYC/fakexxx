@@ -242,6 +242,72 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
+     * PR #62 P1-3 — seed lifecycle honesty. Three coupled false-greens:
+     *
+     *  (a) same-topology reseed: ScheduleReinitPolicy NO-OPs on an unchanged
+     *      item set (M-AD-24), so re-seeding profile-1..10 over an old run
+     *      preserves a mid-run pointer / exhausted=true. The seed path must
+     *      clear the durable schedule store so the next boot takes Rule 1
+     *      (fresh Initialize) — and the duplicated prefs literal must match
+     *      QwyScheduleStore's private PREFS_NAME (drift guard).
+     *  (b) the publish outcome (ConfigPrefsSync.sync) is load-bearing; its
+     *      boolean must gate the seed outcome, not be dropped.
+     *  (c) READY must be success-gated: the runbook predicate greps READY, so
+     *      an unconditional READY makes every failure a false green. The
+     *      failure path must emit SEED_FAILED instead.
+     */
+    @Test
+    fun p13_seedLifecycleClearsScheduleStoreAndGatesReady() {
+        val seam = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/MockProviderAcceptanceActivity.kt",
+        )
+        assertTrue("MockProviderAcceptanceActivity.kt must exist", seam.isFile)
+        val code = seam.readText()
+            .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+            .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
+
+        // (a) fresh-state reset + literal drift guard against production.
+        assertTrue(
+            "seed must clear the durable schedule store (fresh Initialize on next boot)",
+            code.contains("QWY_SCHEDULE_PREFS_NAME") && Regex("""edit\(\)\.clear\(\)\.commit\(\)""").containsMatchIn(code),
+        )
+        val storeSource = File(
+            moduleRoot,
+            "src/main/java/name/caiyao/fakegps/integration/v1/QwyScheduleStore.kt",
+        ).readText()
+        val literal = Regex("""QWY_SCHEDULE_PREFS_NAME\s*=\s*"([^"]+)"""").find(code)?.groupValues?.get(1)
+        assertTrue("QWY_SCHEDULE_PREFS_NAME literal must be present", literal != null)
+        assertTrue(
+            "duplicated schedule-prefs literal '$literal' must still match QwyScheduleStore's " +
+                "PREFS_NAME — if production moved the store, the reset silently clears the wrong file",
+            storeSource.contains("\"$literal\""),
+        )
+
+        // (b) sync outcome is checked, not dropped.
+        assertTrue(
+            "ConfigPrefsSync.sync's boolean must gate the seed outcome",
+            Regex("""val published = ConfigPrefsSync\.sync""").containsMatchIn(code) &&
+                code.contains("check(published)"),
+        )
+
+        // (c) READY only on success; failure emits the distinct marker.
+        assertEquals(
+            "READY for prepare_10a must be emitted from exactly one (success-gated) site",
+            1,
+            Regex("""complete\(COMMAND_PREPARE_10A\)""").findAll(code).count(),
+        )
+        assertTrue(
+            "the failure path must emit SEED_FAILED (and not READY)",
+            code.contains("SEED_FAILED command="),
+        )
+        assertTrue(
+            "success/failure must be branched (fold/onSuccess+onFailure), not linear",
+            code.contains("onSuccess") && code.contains("onFailure"),
+        )
+    }
+
+    /**
      * The qwy-side collector activity must be adb-reachable (exported, declared
      * in the debug manifest) — an entry that cannot be started by
      * `adb shell am start` is not a triggerable surface.
