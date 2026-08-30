@@ -1,13 +1,21 @@
 {
   "$schema": "a-plus-10a-fixture-v1",
   "fixtureId": "FX-G2-10A",
-  "fixtureVersion": 1,
+  "fixtureVersion": 2,
   "frozenOn": "2026-08-26",
   "commissionedBy": "docs/acceptance/issue7-g2-acceptance-package.md §3.3 readiness gap 1 / §5 block A",
   "scheduleId": "qwy-default-schedule",
   "isolation": "PROD=G3 — public test coordinates only; seeded into the isolated .bench debug package; production package name.caiyao.fakegps and production user data are never touched (G2 package §3.2)",
   "coordinateNote": "The numeric tuples below ARE the frozen mock input consumed by the provider. Landmark names exist only to demonstrate the locations are public; real-world survey accuracy is not load-bearing. tac and wifiSsid are synthetic bench values, not real-network claims.",
-  "autoSideConsumes": "order + journeyCaseId + requiredSuccesses only; coordinates never cross the boundary (canonical spec §6.7.1, KB-8)",
+  "autoSideConsumes": "order + journeyCaseId + requiredSuccesses + latitude/longitude. The coordinates are Auto's OWN stored trust target for the §6.4 System-Mock predicate; they still never cross the v1 WIRE — EnvironmentIntentV1 carries only profileRef/scheduleRef (canonical spec §6.7.1, KB-8), and the provider resolves apply coordinates from its own schedule item data.",
+  "v2ChangeLog": {
+    "changedOn": "2026-08-30",
+    "changedBy": "G2 harness backfill (gap⑤; opus5 verdict a — register, never silently rewrite)",
+    "scope": "PROSE-ONLY: the autoSideConsumes line and this changelog. ZERO changes to items, coordinates, quotas, ordering, ids, or any other value.",
+    "v1AutoSideConsumes": "order + journeyCaseId + requiredSuccesses only; coordinates never cross the boundary (canonical spec §6.7.1, KB-8)",
+    "whyV1WasWrong": "Wire semantics were written as consumption semantics. KB-8 / §6.7.1 remove coordinates from the v1 WIRE (EnvironmentIntentV1 carries only profileRef/scheduleRef; FullLoopProbeActivity comment: 'the provider resolves them from its own schedule item data'), but Auto's OWN stored task coordinates are the load-bearing trust target of the §6.4 predicate: TrustPolicy.kt:73 fail-closes on a non-finite target (!isFiniteGeo(context.targetLat, context.targetLng) → FAIL), TrustPolicy.kt:105 compares haversineMeters(obs.effectiveLat/Lng, context.targetLat/Lng) against the FROZEN tolerance, and AutomationEngine.kt:539 binds targetLat = task.latitude. Seeding placeholder coordinates per the v1 wording would have false-red'ed all 10 journeys — a harness-induced failure, not a product one. This is the product's independent-verification design: Auto holds the target itself precisely so it need not trust the provider's self-report.",
+    "v1Sha256": "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"
+  },
   "totalRequiredSuccesses": 17,
   "items": [
     {

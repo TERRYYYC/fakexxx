@@ -22,11 +22,11 @@ import org.junit.Test
  *   2. COORDINATE CARRY — the A-block trust predicate (TrustPolicy) compares the
  *      provider's observed effective coordinates against `task.latitude/longitude`.
  *      If the seeder drops coordinates, every trusted-completion check fails the
- *      haversine leg — a harness-induced false red on all 10 journeys. (This is
- *      gap⑤: the fixture's `autoSideConsumes` line reads as if coordinates never
- *      reach Auto, but the trust target is a stored Auto-side value — wire vs
- *      storage. The seeder consumes coordinates either way; the fixture wording
- *      is a doc-layer decision, not a code fork.)
+ *      haversine leg — a harness-induced false red on all 10 journeys. (This was
+ *      gap⑤: fixture v1's `autoSideConsumes` line read as if coordinates never
+ *      reach Auto — wire semantics written as consumption semantics. Fixture v2
+ *      corrected the wording, registered not silently rewritten; see the
+ *      fixture's `v2ChangeLog`. The seeder consumed coordinates either way.)
  *
  * Ordering is load-bearing too: Auto executes tasks in (priority, csvRow) order
  * and the provider advances profile-1..profile-10 in id order. Both are seeded
@@ -105,14 +105,14 @@ class APlus10APlanSeedTest {
             items = items,
             planId = 7L,
             taskIds = listOf(101L, 102L),
-            fixtureDigest = "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852",
+            fixtureDigest = "2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e",
         )
         assertTrue("must bind fixtureIndex 1 to its task id", report.contains("fixtureIndex=1"))
         assertTrue("must carry taskId for attribution", report.contains("taskId=101"))
         assertTrue("must carry journeyCaseId (LocationTask has no such field)", report.contains("J10A-01"))
         assertTrue("must carry planId", report.contains("planId=7"))
         assertTrue("must echo the frozen fixture digest",
-            report.contains("cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"))
+            report.contains("2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e"))
     }
 
     @Test

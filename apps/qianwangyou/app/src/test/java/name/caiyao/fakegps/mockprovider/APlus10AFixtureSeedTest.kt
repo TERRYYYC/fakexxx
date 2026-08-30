@@ -40,7 +40,7 @@ class APlus10AFixtureSeedTest {
         {
           "${'$'}schema": "a-plus-10a-fixture-v1",
           "fixtureId": "FX-G2-10A",
-          "fixtureVersion": 1,
+          "fixtureVersion": 2,
           "scheduleId": "qwy-default-schedule",
           "totalRequiredSuccesses": 3,
           "items": [
@@ -188,14 +188,14 @@ class APlus10AFixtureSeedTest {
         val report = APlus10AFixtureSeed.seedReport(
             items = items,
             insertedIds = listOf(1L, 2L),
-            fixtureDigest = "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852",
+            fixtureDigest = "2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e",
         )
         // Attribution: without an explicit map, a journey failure cannot be tied
         // back to a fixture row (LocationTask has no journeyCaseId field).
         assertTrue("report must map fixtureIndex 1 → its seeded row", report.contains("fixtureIndex=1"))
         assertTrue("report must carry journeyCaseId for attribution", report.contains("J10A-01"))
         assertTrue("report must carry the schedule item id", report.contains("profile-1"))
-        assertTrue("report must echo the frozen fixture digest", report.contains("cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"))
+        assertTrue("report must echo the frozen fixture digest", report.contains("2700aa32da88cbfb5fb1d3b9cdb6192f0e60dd9fc5d72e99f9a85d0dc5c58e4e"))
     }
 
     @Test
