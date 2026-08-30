@@ -44,6 +44,38 @@ object APlus10AFixtureSeed {
     const val EXPECTED_TOTAL_REQUIRED_SUCCESSES = 17
     val EXPECTED_SCHEDULE_ID: String = name.caiyao.fakegps.integration.v1.QwyScheduleStore.DEFAULT_SCHEDULE_ID
 
+    /**
+     * PR #62 P1-1: the registered digest of a-plus-10a-fixture.json (frozen
+     * 2026-08-26; registration: a-plus-device-matrix.md). The parser's
+     * structure bind above covers count/order/profile-N/schedule/quota-sum but
+     * NOT the per-item vector — a same-total quota swap, a coordinate / name /
+     * altitude edit, or a changed journeyCaseId all survive it. Only a
+     * byte-covering digest closes those, so both runtime seed paths pin to this
+     * constant instead of trusting a caller-supplied digest.
+     */
+    const val REGISTERED_FIXTURE_DIGEST =
+        "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"
+
+    /**
+     * PR #62 P1-1: pin BOTH the bytes-recomputed digest AND the caller-declared
+     * digest to [REGISTERED_FIXTURE_DIGEST]. The digest and the payload arrive
+     * from the same adb caller, so a fabricated payload with a self-consistent
+     * recomputed digest would pass a `computed == declared` check. Requiring the
+     * recomputed digest to equal the registered constant makes any byte edit
+     * fail; requiring the declared digest to equal it too forbids the caller
+     * from substituting its own registration.
+     */
+    fun requireRegisteredDigest(computedDigest: String, declaredDigest: String) {
+        require(computedDigest.equals(REGISTERED_FIXTURE_DIGEST, ignoreCase = true)) {
+            "seeded bytes hash to $computedDigest, not the registered fixture digest " +
+                "$REGISTERED_FIXTURE_DIGEST — the payload is not the frozen fixture"
+        }
+        require(declaredDigest.equals(REGISTERED_FIXTURE_DIGEST, ignoreCase = true)) {
+            "declared digest $declaredDigest must equal the registered fixture digest — " +
+                "the caller may not substitute its own"
+        }
+    }
+
     /** One frozen fixture row — the full field set the two apps split between them. */
     data class FixtureItem(
         val fixtureIndex: Int,

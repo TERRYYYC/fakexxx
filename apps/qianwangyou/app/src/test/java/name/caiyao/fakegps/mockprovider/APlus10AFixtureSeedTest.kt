@@ -221,4 +221,56 @@ class APlus10AFixtureSeedTest {
             // expected — AUTOINCREMENT drift must never render a green mapping
         }
     }
+
+    // ------------------------------------------------------------------
+    // PR #62 P1-1 — registered-digest pin (both runtime paths)
+    // ------------------------------------------------------------------
+
+    /** The registered fixture bytes hash to the pin — the positive anchor. */
+    @Test
+    fun requireRegisteredDigest_acceptsTheRegisteredPin() {
+        APlus10AFixtureSeed.requireRegisteredDigest(
+            APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST,
+            APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST,
+        )
+    }
+
+    /**
+     * changed-bytes: a fabricated payload (e.g. item-1 coordinate edit or a
+     * same-total quota swap) hashes to something OTHER than the pin. The
+     * structure bind would pass it; the digest pin must not.
+     */
+    @Test
+    fun requireRegisteredDigest_rejectsChangedBytes() {
+        val fabricatedHash = MessageDigest.getInstance("SHA-256")
+            .digest("fabricated FX-G2-10A payload with edited item-1 coords".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        try {
+            // recomputed-digest attack: caller supplies its OWN self-consistent
+            // digest, so computed == declared. A `computed == declared` check
+            // would pass; the pin must still reject.
+            APlus10AFixtureSeed.requireRegisteredDigest(fabricatedHash, fabricatedHash)
+            fail("a payload that does not hash to the registered digest must be rejected")
+        } catch (e: IllegalArgumentException) {
+            // expected — only the registered bytes pass
+        }
+    }
+
+    /**
+     * caller-substituted registration: the bytes are the real fixture
+     * (computed == pin) but the caller declares a different digest. The caller
+     * may not register its own value.
+     */
+    @Test
+    fun requireRegisteredDigest_rejectsCallerSubstitutedDeclaration() {
+        try {
+            APlus10AFixtureSeed.requireRegisteredDigest(
+                APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            fail("the caller may not substitute its own declared digest")
+        } catch (e: IllegalArgumentException) {
+            // expected — declared digest must also equal the registered pin
+        }
+    }
 }

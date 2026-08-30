@@ -57,6 +57,37 @@ object APlus10APlanSeed {
     const val SCHEDULE_ITEM_PREFIX = "profile-"
 
     /**
+     * PR #62 P1-1: the registered digest of a-plus-10a-fixture.json (frozen
+     * 2026-08-26; registration: a-plus-device-matrix.md). The parser's
+     * structure bind covers count/order/profile-N/schedule/quota-sum but NOT
+     * the per-item vector (coordinate / name / altitude / journeyCaseId), and a
+     * same-total quota swap survives it. Only a byte-covering digest closes
+     * those, so the seed path pins to this constant rather than trusting a
+     * caller-supplied digest.
+     */
+    const val REGISTERED_FIXTURE_DIGEST =
+        "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"
+
+    /**
+     * PR #62 P1-1: pin BOTH the bytes-recomputed digest AND the caller-declared
+     * digest to [REGISTERED_FIXTURE_DIGEST]. Digest and payload arrive from the
+     * same caller, so a `computed == declared` check passes a fabricated
+     * payload carrying its own recomputed digest. Pinning the recomputed digest
+     * makes any byte edit fail; pinning the declared digest forbids the caller
+     * from substituting its own registration.
+     */
+    fun requireRegisteredDigest(computedDigest: String, declaredDigest: String) {
+        require(computedDigest.equals(REGISTERED_FIXTURE_DIGEST, ignoreCase = true)) {
+            "seeded bytes hash to $computedDigest, not the registered fixture digest " +
+                "$REGISTERED_FIXTURE_DIGEST — the payload is not the frozen fixture"
+        }
+        require(declaredDigest.equals(REGISTERED_FIXTURE_DIGEST, ignoreCase = true)) {
+            "declared digest $declaredDigest must equal the registered fixture digest — " +
+                "the caller may not substitute its own"
+        }
+    }
+
+    /**
      * KB-8 sentinel for the legacy non-null coordinate columns.
      *
      * 999.0 is OUTSIDE the legal geographic domain on both axes

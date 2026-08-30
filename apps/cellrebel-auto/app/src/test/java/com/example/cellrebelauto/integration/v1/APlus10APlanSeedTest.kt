@@ -193,4 +193,44 @@ class APlus10APlanSeedTest {
             // expected
         }
     }
+
+    // ------------------------------------------------------------------
+    // PR #62 P1-1 — registered-digest pin (Auto runtime path)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun requireRegisteredDigest_acceptsTheRegisteredPin() {
+        APlus10APlanSeed.requireRegisteredDigest(
+            APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST,
+            APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST,
+        )
+    }
+
+    /** changed-bytes + recomputed self-consistent digest: still rejected by the pin. */
+    @Test
+    fun requireRegisteredDigest_rejectsChangedBytes() {
+        val fabricatedHash = MessageDigest.getInstance("SHA-256")
+            .digest("fabricated FX-G2-10A payload with a same-total quota swap".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        try {
+            APlus10APlanSeed.requireRegisteredDigest(fabricatedHash, fabricatedHash)
+            fail("a payload that does not hash to the registered digest must be rejected")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    /** caller-substituted registration: real bytes, foreign declared digest — rejected. */
+    @Test
+    fun requireRegisteredDigest_rejectsCallerSubstitutedDeclaration() {
+        try {
+            APlus10APlanSeed.requireRegisteredDigest(
+                APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            fail("the caller may not substitute its own declared digest")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
 }

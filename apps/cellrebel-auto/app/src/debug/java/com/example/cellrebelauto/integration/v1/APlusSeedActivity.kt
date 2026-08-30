@@ -96,10 +96,15 @@ class APlusSeedActivity : Activity() {
         }
         val decoded = Base64.decode(payloadB64, Base64.DEFAULT)
         val computed = sha256Hex(decoded)
-        // Byte-exactness: the decoded payload must hash to the executor's frozen
-        // fixture digest — otherwise what reached the device is not the fixture.
-        if (!computed.equals(declaredDigest, ignoreCase = true)) {
-            appendLine("REFUSED: payload digest $computed != declared $declaredDigest")
+        // PR #62 P1-1: pin to the REGISTERED digest, not a caller-supplied one.
+        // The recomputed digest must equal the frozen registration (any byte
+        // edit fails) AND the declared digest must equal it too (the caller may
+        // not register its own). Structure is still validated by parsePayload;
+        // the pin covers the per-item vector the structure bind cannot.
+        try {
+            APlus10APlanSeed.requireRegisteredDigest(computed, declaredDigest)
+        } catch (e: IllegalArgumentException) {
+            appendLine("REFUSED: ${e.message}")
             return
         }
         val globalBuffer = ExtraCoerce.longOf(intent.extras?.get(EXTRA_GLOBAL_BUFFER_SECONDS))?.toInt()
@@ -118,7 +123,8 @@ class APlusSeedActivity : Activity() {
             pid to tids
         }
         // seedReport throws if the inserted task count diverges — no green over a partial seed.
-        append(APlus10APlanSeed.seedReport(items, planId, taskIds, declaredDigest))
+        // PR #62 P1-1: emit only the independently verified REGISTERED digest.
+        append(APlus10APlanSeed.seedReport(items, planId, taskIds, APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST))
         appendLine()
         appendLine("NEXT: start the run with --es cmd start_run --el plan_id $planId (accessibility service must be enabled)")
     }

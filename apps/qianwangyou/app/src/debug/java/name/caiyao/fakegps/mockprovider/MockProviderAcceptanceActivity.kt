@@ -103,14 +103,13 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
 
         val decoded = Base64.decode(payloadB64, Base64.DEFAULT)
         val computedDigest = sha256Hex(decoded)
-        // Byte-exactness: the decoded payload must hash to the digest the
-        // executor froze over the fixture file. A mismatch means what reached
-        // the device is NOT the frozen fixture — refuse before touching the DB.
-        // (Structure is independently validated by parsePayload below — the
-        // digest and payload share a caller, so neither alone is trusted.)
-        require(computedDigest.equals(declaredDigest, ignoreCase = true)) {
-            "payload digest $computedDigest != declared $declaredDigest (the seeded bytes are not the frozen fixture)"
-        }
+        // PR #62 P1-1: pin to the REGISTERED digest, not a caller-supplied one.
+        // The recomputed digest must equal the frozen registration (any byte
+        // edit fails) AND the caller's declared digest must equal it too (the
+        // caller may not register its own). Structure is still independently
+        // validated by parsePayload below; the digest pin is what covers the
+        // per-item vector the structure bind cannot.
+        APlus10AFixtureSeed.requireRegisteredDigest(computedDigest, declaredDigest)
 
         val items = APlus10AFixtureSeed.parsePayload(String(decoded, Charsets.UTF_8))
         val rows = APlus10AFixtureSeed.toProfileRows(items)
@@ -154,7 +153,9 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
 
         // Throws (IllegalStateException) if any inserted id drifted from the
         // explicit fixture id — a green mapping over a mismatch is forbidden.
-        return APlus10AFixtureSeed.seedReport(items, insertedIds, declaredDigest) +
+        // PR #62 P1-1: the report emits only the independently verified
+        // REGISTERED digest, never the caller-declared value.
+        return APlus10AFixtureSeed.seedReport(items, insertedIds, APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST) +
             "schedule store cleared (fresh Initialize on next provider boot: pointer=profile-1, exhausted=false)\n" +
             "NEXT: force-stop $QWY_BENCH_HINT then bind; discover() must read back profile-1..profile-10 with currentItemId=profile-1"
     }
