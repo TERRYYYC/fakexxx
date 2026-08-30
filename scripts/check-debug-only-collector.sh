@@ -64,6 +64,9 @@ APP_SYMBOLS_CELLREBEL_AUTO=(
   "RevokeReadback"
   "AutoArmRecordCodec"
   "ExtraCoerce"
+  # G2 §5A seed/run surface (backfill): the seed Activity + its pure plan logic.
+  "APlusSeedActivity"
+  "APlus10APlanSeed"
 )
 APP_SYMBOLS_QIANWANGYOU=(
   "FaultCollectorActivity"
@@ -80,6 +83,8 @@ APP_SYMBOLS_QIANWANGYOU=(
   "QwyRevokeProof"
   "ArmRecordCodec"
   "ExtraCoerce"
+  # G2 §5A 10-address explicit-id fixture seeder (backfill).
+  "APlus10AFixtureSeed"
 )
 
 APP_DIR=""

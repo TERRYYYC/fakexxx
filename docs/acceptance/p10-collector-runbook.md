@@ -55,9 +55,19 @@ adb shell am start -n .../FaultCollectorActivity \
 # REVOKED lease 的 provider 内部自清理（独立命令）
 adb shell am start -n .../FaultCollectorActivity --es cmd cleanup_revoked
 
+# §8.4 EXPIRED 前置（M-LS-12）：确定性写 clean-shutdown marker。
+# onDestroy 不保证在 force-stop 时触发，此命令在 LIVE provider（如 hold_lease 窗口内）
+# 直接调 ProviderRuntime.recordCleanShutdown()，再 dump 回读确认 marker=true 再重启。
+# 无 provider 运行时（kvRef null）为 no-op，dump 会 loud 显示 marker 未置位。
+adb shell am start -n .../FaultCollectorActivity --es cmd mark_clean_shutdown
+
 # 取消 pending arm
 adb shell am start -n .../FaultCollectorActivity --es cmd disarm
 ```
+
+`cmd=dump` 现额外回读 `clean-shutdown marker set (§8.4 EXPIRED precondition): <bool>`
+（非破坏性读——`consume` 只在下次进程启动时清，dump 不清），供执行者在重启前确认
+EXPIRED 分支前置已成立、不盲跑。
 
 arm 全生命周期写 `filesDir/debug-collector/arm.log`（ARMED/FIRED/TIMEOUT/
 DISARMED/OUTCOME，`ArmRecordCodec` 行格式）。
@@ -92,6 +102,46 @@ adb shell am start -n .../FullLoopProbeActivity --es fault crash_after_apply
 adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es lease_id <id>
 ```
 
+## §5A seed 命令面（10-address backfill）
+
+§5A 十地址块的前置：Auto 产品 run 从 device shell 不可达（plan 只能 UI `importCsv`
+文件选择器；run 只能 `AutomationService`，`exported=false`+`BIND_ACCESSIBILITY_SERVICE`）。
+下列 debug seed 面关闭该缺口（A/B/C 共享的缺口①）。**seed 面是 seed，不是 §5B/§5C 故障注入。**
+
+payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.json`，digest
+`cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`）。执行者 host 侧
+`base64 < a-plus-10a-fixture.json` 生成 payload、`shasum -a 256` 记 digest；两侧 seeder
+各自对解码 payload 重算 SHA-256，与传入 digest 不等即 REFUSED——证明落设备的正是冻结 fixture。
+
+```
+# qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture）
+adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity \
+  --es command prepare_10a \
+  --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
+  --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
+#   判据：logcat MockProviderAcceptance 出 seed 映射（fixtureIndex↔scheduleItemId↔dbId↔
+#   journeyCaseId↔requiredSuccesses）+ READY command=prepare_10a。seed 后必须 force-stop
+#   name.caiyao.fakegps.bench 再 bind（schedule 在 QwyEnvironmentController 构造时从 temp
+#   表 id ASC 重建为 profile-1..profile-10；与 prepare_kyiv 的 6.0.1 进程重置同理）。
+
+# Auto：种 plan + 10 task（csvRow/priority=fixtureIndex → 执行序=fixture 序；坐标=trust target）
+adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity \
+  --es cmd seed_plan \
+  --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
+  --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852 \
+  [--ei global_buffer_seconds 60]
+#   判据：logcat ECAPlusSeed 出 fixtureIndex↔taskId↔journeyCaseId↔requiredSuccesses 映射
+#   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId。
+
+# Auto：启动 run（产品自身入口 AutomationService.startAutomation；无障碍服务须已启用）
+adb shell am start -n .../APlusSeedActivity --es cmd start_run --el plan_id <planId>
+```
+
+**跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider
+schedule item `profile-(i+1)` 必须同序——二者都按 fixture items[] 数组序 seed。trust 谓词
+比对 provider 报告的 effective 坐标 vs Auto task 坐标，两者同源同序才 PASS；错序 → haversine
+超容差 → 该项假红。qwy 显式 id=N、Auto csvRow/priority=fixtureIndex 共同锁死此序。
+
 ## 门控词表（冻结）
 
 | 侧 | token | 语义 |
@@ -103,6 +153,20 @@ adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es 
 
 fault 名（冻结）：`hold_lease` / `release_receipt_loss` / `crash_after_apply` /
 `rerelease_stuck`（恢复工具，非注入）。
+
+非注入 debug 命令（冻结）：qwy `mark_clean_shutdown`（§8.4 EXPIRED 前置写 marker）；
+seed 面 `prepare_10a`（qwy）/ `seed_plan` / `start_run`（Auto，§5A backfill，见上节）。
+它们改名同样重开矩阵。
+
+### §8.4 EXPIRED 注入（M-LS-12，clean-shutdown 分支）
+
+`self_kill` 的 `lease_active/acquiring/releasing` 覆盖 **unclean** 分支（→ RELEASE_INCOMPLETE，
+M-LS-07）。EXPIRED 是 **clean** 分支（ACTIVE + clean shutdown + generation 变更 → EXPIRED），
+需另一条 recipe：
+
+| 场景 | injection（触发与开火证据） | exit | direct-state | restore |
+|---|---|---|---|---|
+| `clean_shutdown → EXPIRED` | Auto `FullLoopProbeActivity --es fault hold_lease --el hold_ms <N>` 开 ACTIVE 窗口 → 窗口内 qwy `FaultCollectorActivity --es cmd mark_clean_shutdown`（须 LIVE provider，dump 回读 `clean-shutdown marker set: true`）→ `adb shell am force-stop name.caiyao.fakegps.bench` → 重新 bind（新 generation）。开火证据：mark 后 `Q-DUMP` marker=true，重启后 `Q-DUMP` 同 lease 落盘 `EXPIRED`（非 RELEASE_INCOMPLETE）。 | 无同步出口；clean-boot 后的 EXPIRED 保留态即出口。EXPIRED 继续阻挡新 apply，caller 可 release 收敛。 | mark 前/后、重启后三次 `Q-DUMP`（marker + lease state）；`MOCK-STATE`。 | EXPIRED 走 `rerelease_stuck`（release 接受 ACTIVE/EXPIRED/RELEASE_INCOMPLETE）；after `Q-DUMP` 无 blocking lease 且 `MOCK-STATE=0`。marker 未置位（dump=false）即前置不成立，停止，不当 EXPIRED 场跑。 |
 
 ## extra 类型纪律（R2 起）
 
@@ -216,4 +280,8 @@ durable readback 不在读时改写 qwy bytes、错误 principal 不会假绿、
   读回诚实性：`QwyDurableSnapshotTest`（未落盘必须读回缺失 + capture 不改
   durable 字节 + 目录漂移守卫）。
 - 纯度：`check-debug-only-collector.sh`（源 + APK 双查）+ 负矩阵
-  `selftest-debug-only-collector.sh`（6 case）。
+  `selftest-debug-only-collector.sh`（9 case，含新增 seed 符号）。
+- §5A seed backfill：`APlus10AFixtureSeedTest`（qwy，显式 id/parse/映射/digest）+
+  `APlus10APlanSeedTest`（Auto，坐标 carry/映射/totalRequiredSuccesses）——纯 JVM，钉死
+  autoGenerate 漂移与丢坐标假红两个病根。§8.4 EXPIRED：`QwyDurableSnapshotTest` 新增
+  clean-shutdown marker 由生产 `record()` 写、debug 非破坏性读回（含 literal drift 守卫）。

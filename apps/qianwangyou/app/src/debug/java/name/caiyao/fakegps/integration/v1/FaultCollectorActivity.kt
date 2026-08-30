@@ -90,8 +90,9 @@ class FaultCollectorActivity : Activity() {
             "arm" -> arm(intent)
             "disarm" -> disarm()
             "cleanup_revoked" -> cleanupRevoked()
+            "mark_clean_shutdown" -> markCleanShutdown()
             else -> {
-                appendLine("REFUSED: --es cmd must be one of dump | arm | disarm | cleanup_revoked")
+                appendLine("REFUSED: --es cmd must be one of dump | arm | disarm | cleanup_revoked | mark_clean_shutdown")
                 appendLine()
                 usage()
             }
@@ -268,6 +269,40 @@ class FaultCollectorActivity : Activity() {
         append(QwyDurableSnapshot.render(post))
     }
 
+    // ---- §8.4 EXPIRED precondition (M-LS-12) --------------------------------
+
+    /**
+     * §5B / §8.4 EXPIRED (M-LS-12) needs a DETERMINISTIC clean-shutdown marker.
+     * The only production writer is [EnvironmentControlService.onDestroy] →
+     * recordCleanShutdown(), and onDestroy is NOT guaranteed to run on
+     * `am force-stop` / process reap — so the clean branch (ACTIVE lease +
+     * clean shutdown + generation mismatch → EXPIRED, vs the unclean branch's
+     * RELEASE_INCOMPLETE) could never be entered on purpose. This command
+     * records the marker now, on a LIVE composed runtime, then reads it back so
+     * the executor confirms the precondition BEFORE restart instead of hoping
+     * onDestroy fired.
+     *
+     * Fires on the same durable kv the provider composed (ProviderRuntime
+     * kvRef); a no-op if no provider has been composed in this process (kvRef
+     * null) — the readback then shows the marker unset, loud, never a false
+     * "clean precondition met".
+     */
+    private fun StringBuilder.markCleanShutdown() {
+        appendLine("[mark_clean_shutdown] recording §8.4 clean-shutdown marker (ProviderRuntime.recordCleanShutdown)…")
+        appendLine("(onDestroy is not guaranteed on force-stop; this makes the M-LS-12 clean→EXPIRED path deterministic)")
+        ProviderRuntime.recordCleanShutdown()
+        val post = QwyDurableSnapshot.capture(QwyDurableSnapshot.durableDir(this@FaultCollectorActivity))
+        appendLine("durable readback:")
+        appendLine()
+        append(QwyDurableSnapshot.render(post))
+        if (!post.cleanShutdownMarkerSet) {
+            appendLine()
+            appendLine("WARNING: marker NOT set — no provider runtime was composed in this process")
+            appendLine("(recordCleanShutdown is a no-op without kvRef). Serve an apply first, e.g. inside a")
+            appendLine("hold_lease window, then re-run; do NOT treat this as a clean precondition.")
+        }
+    }
+
     // ---- helpers ---------------------------------------------------------
 
     private fun armLogFile(): File {
@@ -284,6 +319,7 @@ class FaultCollectorActivity : Activity() {
         appendLine("arm self-kill:   --es cmd arm --es action self_kill --es gate lease_active|lease_acquiring|lease_releasing [--es caller pkg] [--ei poll_ms 200] [--ei timeout_ms 600000]")
         appendLine("arm revoke:      --es cmd arm --es action revoke_caller --es caller pkg --es signer sha256 --es gate lease_active")
         appendLine("cleanup revoked: --es cmd cleanup_revoked")
+        appendLine("mark clean stop: --es cmd mark_clean_shutdown  (§8.4 EXPIRED precondition; live provider only)")
         appendLine("disarm:          --es cmd disarm")
     }
 

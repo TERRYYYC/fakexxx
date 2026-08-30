@@ -301,6 +301,11 @@ install_debug_apk_if_changed() {
     fi
     if [ "$installed_sha" = "$local_sha" ]; then
         echo "[install] identical debug APK already installed"
+        # G2 §5.G / §4.2: the acceptance report must BIND the installed APK's
+        # raw bytes, not merely assert package identity via dumpsys. Emit the
+        # SHA-256 of the on-device base.apk (already computed above) so the run
+        # evidence carries the exact installed artifact fingerprint.
+        echo "VERIFIED install.apk sha256=$installed_sha (device base.apk bytes == built debug APK; §4.2/§5.G installed identity)"
         return 0
     fi
 

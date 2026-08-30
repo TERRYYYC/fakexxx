@@ -24,5 +24,13 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:label="EC v1 P10 provider-revoke collector" />
+        <!-- G2 §5A: debug-only A+ 10-address seed/run surface — seeds the plan
+             (with trust-target coordinates) and starts a run via the product's
+             own AutomationService entry. src/debug only. -->
+        <activity
+            android:name="com.example.cellrebelauto.integration.v1.APlusSeedActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="EC v1 A+ §5A seed/run" />
     </application>
 </manifest>

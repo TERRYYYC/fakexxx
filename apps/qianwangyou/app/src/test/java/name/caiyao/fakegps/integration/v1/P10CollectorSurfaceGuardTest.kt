@@ -190,6 +190,58 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
+     * §8.4 EXPIRED (M-LS-12) needs a DETERMINISTIC clean-shutdown marker: the
+     * only production writer is EnvironmentControlService.onDestroy, which is
+     * not guaranteed on force-stop. The collector must expose a command that
+     * records the marker on a live runtime AND actually drive the production
+     * writer — a log-only stub would green a presence check while the clean→
+     * EXPIRED branch stays unreachable.
+     */
+    @Test
+    fun markCleanShutdownIsReachableAndDrivesTheProductionWriter() {
+        val fault = File(debugSourceDir, "FaultCollectorActivity.kt")
+        assertTrue("FaultCollectorActivity.kt must exist", fault.isFile)
+        val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == fault }.second
+        assertTrue(
+            "collector must freeze the mark_clean_shutdown command token",
+            code.contains("\"mark_clean_shutdown\""),
+        )
+        assertTrue(
+            "mark_clean_shutdown must call the production ProviderRuntime.recordCleanShutdown() — " +
+                "a log-only stub cannot set the §8.4 EXPIRED precondition",
+            code.contains("ProviderRuntime.recordCleanShutdown("),
+        )
+    }
+
+    /**
+     * §5A 10-address seed must be adb-reachable AND use the explicit-id seeder.
+     * MockProviderAcceptanceActivity is the shell-only seam; prepare_10a must
+     * route through [APlus10AFixtureSeed] (whose EXPLICIT ids defeat the
+     * autoGenerate/deleteAll drift that would silently misbind profile-N).
+     */
+    @Test
+    fun prepare10aSeedIsReachableAndUsesTheExplicitIdSeeder() {
+        val seam = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/MockProviderAcceptanceActivity.kt",
+        )
+        assertTrue("MockProviderAcceptanceActivity.kt must exist in the debug seam", seam.isFile)
+        val seamCode = seam.readText()
+            .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+            .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
+        assertTrue("seam must freeze the prepare_10a command", seamCode.contains("prepare_10a"))
+        assertTrue(
+            "prepare_10a must route through APlus10AFixtureSeed (explicit-id seeder)",
+            seamCode.contains("APlus10AFixtureSeed."),
+        )
+        val seeder = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AFixtureSeed.kt",
+        )
+        assertTrue("APlus10AFixtureSeed.kt must exist in the debug source set", seeder.isFile)
+    }
+
+    /**
      * The qwy-side collector activity must be adb-reachable (exported, declared
      * in the debug manifest) — an entry that cannot be started by
      * `adb shell am start` is not a triggerable surface.
@@ -225,6 +277,7 @@ class P10CollectorSurfaceGuardTest {
             collectorMarker,
             "lease_active",
             "lease_releasing",
+            "mark_clean_shutdown",
         ).forEach { symbol ->
             assertEquals(
                 "production main source must not contain '$symbol' — the P10 collector " +

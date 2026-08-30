@@ -138,6 +138,11 @@ dependencies {
 
     // Unit testing — config channel contract (Phase A, JVM-only, no device needed)
     testImplementation 'junit:junit:4.13.2'
+    // G2 §5A 10-address fixture seed: the seeder parses the frozen fixture JSON
+    // (a-plus-10a-fixture.json) on-device via org.json; this brings the SAME
+    // parser onto the JVM lane so payload parsing + explicit-id derivation are
+    // unit-tested, not only exercised on hardware. Test-only; production unchanged.
+    testImplementation 'org.json:json:20240303'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.room:room-testing:2.7.1'

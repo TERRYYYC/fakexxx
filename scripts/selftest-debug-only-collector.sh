@@ -83,8 +83,8 @@ EOF
 # The banned symbols each app's fixture must carry in src/debug to be
 # non-vacuous under the per-symbol arm (kept in sync with the guard's lists by
 # case 8, which fails when the guard's list and the fixture drift apart).
-CA_DEBUG_SYMBOLS=(FullLoopProbeActivity HandshakeProbeActivity ProviderRevokeCollectorActivity RevokeReadback AutoArmRecordCodec ExtraCoerce)
-QW_DEBUG_SYMBOLS=(FaultCollectorActivity MockProviderAcceptanceActivity PairingApprovalActivity HookAcceptanceActivity HookAcceptanceApplication HookAcceptancePayload HookAcceptanceRecovery HookAcceptanceRecoveryCoordinator HookAcceptanceStateMachine HookProbeRunner QwyDurableSnapshot QwyRevokeProof ArmRecordCodec ExtraCoerce)
+CA_DEBUG_SYMBOLS=(FullLoopProbeActivity HandshakeProbeActivity ProviderRevokeCollectorActivity RevokeReadback AutoArmRecordCodec ExtraCoerce APlusSeedActivity APlus10APlanSeed)
+QW_DEBUG_SYMBOLS=(FaultCollectorActivity MockProviderAcceptanceActivity PairingApprovalActivity HookAcceptanceActivity HookAcceptanceApplication HookAcceptancePayload HookAcceptanceRecovery HookAcceptanceRecoveryCoordinator HookAcceptanceStateMachine HookProbeRunner QwyDurableSnapshot QwyRevokeProof ArmRecordCodec ExtraCoerce APlus10AFixtureSeed)
 
 # ---- case 1: clean fixture passes -----------------------------------------
 F1="$WORK/cellrebel-auto/app-clean/app"

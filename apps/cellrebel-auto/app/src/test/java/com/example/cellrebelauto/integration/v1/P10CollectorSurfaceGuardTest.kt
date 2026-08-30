@@ -236,6 +236,74 @@ class P10CollectorSurfaceGuardTest {
     }
 
     // ------------------------------------------------------------------
+    // GAP① — Auto had no adb-reachable §5A seed/run (shared A/B/C root cause)
+    // ------------------------------------------------------------------
+
+    /**
+     * §5A needs Auto to seed a plan and start a run from a device shell, but a
+     * plan is created only by the file-picker importCsv and a run only by the
+     * `exported=false` accessibility service. The debug seed surface must exist
+     * and freeze the two command tokens the runbook drives.
+     */
+    @Test
+    fun gap1_seedRunSurfaceExistsAndVocabularyIsFrozen() {
+        val seed = File(debugSourceDir, "APlusSeedActivity.kt")
+        assertTrue("APlusSeedActivity.kt must exist in the debug source set", seed.isFile)
+        val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == seed }.second
+        assertTrue("seed surface must freeze the seed_plan command", code.contains("\"seed_plan\""))
+        assertTrue("seed surface must freeze the start_run command", code.contains("\"start_run\""))
+    }
+
+    /**
+     * start_run must drive the PRODUCT's own run entry
+     * ([AutomationService.startAutomation]) — not a debug reimplementation that
+     * could diverge from how a real run begins. A surface that starts a run some
+     * other way would prove nothing about the product path.
+     */
+    @Test
+    fun gap1_startRunDrivesTheProductRunEntry() {
+        val code = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "APlusSeedActivity.kt" }.second
+        assertTrue(
+            "start_run must call AutomationService.startAutomation — the same entry the UI uses",
+            code.contains("AutomationService.startAutomation("),
+        )
+    }
+
+    /**
+     * GAP⑤ — the A-block trust predicate (TrustPolicy) compares the provider's
+     * observed effective coordinates against the Auto-side task target. If the
+     * plan seeder drops coordinates, every trusted-completion check fails the
+     * haversine leg — a harness-induced false red on all 10 journeys. The seeder
+     * MUST carry latitude/longitude into the task rows.
+     */
+    @Test
+    fun gap5_planSeedCarriesTrustTargetCoordinates() {
+        val seedLogic = File(debugSourceDir, "APlus10APlanSeed.kt")
+        assertTrue("APlus10APlanSeed.kt must exist in the debug source set", seedLogic.isFile)
+        val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == seedLogic }.second
+        assertTrue(
+            "the plan seeder must carry latitude into LocationTask — it is the trust target",
+            Regex("""latitude\s*=\s*item\.latitude""").containsMatchIn(code),
+        )
+        assertTrue(
+            "the plan seeder must carry longitude into LocationTask — it is the trust target",
+            Regex("""longitude\s*=\s*item\.longitude""").containsMatchIn(code),
+        )
+    }
+
+    @Test
+    fun gap1_seedActivityIsDeclaredInDebugManifest() {
+        val manifest = File(moduleRoot, "src/debug/AndroidManifest.xml").readText()
+        val noComments = manifest.replace(Regex("<!--[\\s\\S]*?-->"), "")
+        assertTrue(
+            "src/debug/AndroidManifest.xml must declare APlusSeedActivity — otherwise §5A " +
+                "seed/run has no adb entry point",
+            Regex("""<activity\b[^>]*?APlusSeedActivity""").containsMatchIn(noComments),
+        )
+    }
+
+    // ------------------------------------------------------------------
     // Production purity
     // ------------------------------------------------------------------
 
@@ -244,6 +312,8 @@ class P10CollectorSurfaceGuardTest {
         val main = kotlinSourcesWithoutComments(mainSourceDir).joinToString("\n") { it.second }
         listOf(
             "ProviderRevokeCollectorActivity",
+            "APlusSeedActivity",
+            "APlus10APlanSeed",
             collectorMarker,
             "run_active",
             "attempt_state:",
@@ -251,6 +321,8 @@ class P10CollectorSurfaceGuardTest {
             "hold_lease",
             "release_receipt_loss",
             "crash_after_apply",
+            "seed_plan",
+            "start_run",
         ).forEach { symbol ->
             assertEquals(
                 "production main source must not contain '$symbol' — the P10 collector " +
