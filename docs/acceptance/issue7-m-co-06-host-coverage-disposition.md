@@ -136,7 +136,7 @@ acceptance must bind this exact document and retain both future-gate values;
 for example:
 
 ```text
-ACCEPT G2-MCO06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED
+ACCEPT G2-M-CO-06-HOST-COVERAGE-DISPOSITION; DOCUMENT=docs/acceptance/issue7-m-co-06-host-coverage-disposition.md; MCO06_HOST_COVERAGE=ACCEPTED; V2_GATE=NOT_APPLICABLE; MARKERLESS_SDK_DEVICE_GATE=REQUIRED
 ```
 
 Only that later exact acceptance may change this document from proposed to
