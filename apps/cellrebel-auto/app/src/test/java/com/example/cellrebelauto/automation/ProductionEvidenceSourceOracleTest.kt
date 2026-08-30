@@ -126,11 +126,12 @@ class ProductionEvidenceSourceOracleTest {
                 aplusAnchorScheduleId = "qwy-default-schedule"
             )
         )
-        // Approve the TRUSTED signer principal for the production provider app id.
+        // Approve the TRUSTED signer principal selected by this build. Debug/G2 is bench; the
+        // release variant selects production through the same ProviderPrincipal mapping.
         val trustedSigner = "sha256:trusted"
         val approvedId = db.providerPairingDao().insert(
             com.example.cellrebelauto.model.plan.ProviderPairingRecord(
-                applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                applicationId = ProviderPrincipal.selected,
                 currentSignerDigest = trustedSigner,
                 approvedAt = 1000L, revokedAt = null, approvedVersionCode = 1
             )

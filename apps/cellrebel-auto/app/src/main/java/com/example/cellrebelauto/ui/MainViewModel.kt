@@ -109,7 +109,7 @@ class MainViewModel @JvmOverloads constructor(
             // Trusted on a rotated-away principal.
             val hasActiveProvider = currentPrincipalActive(
                 entries,
-                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+                com.example.cellrebelauto.automation.ProviderPrincipal.selected
             )
             val crashed = attempts.firstOrNull {
                 it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
@@ -175,10 +175,7 @@ class MainViewModel @JvmOverloads constructor(
             val activePrincipals = rows.filter { it.revokedAt == null }
                 .map { it.applicationId to it.currentSignerDigest }.toSet()
             val pending = mutableListOf<ProviderEntry>()
-            for (appId in listOf(
-                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
-                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH
-            )) {
+            for (appId in com.example.cellrebelauto.automation.ProviderPrincipal.knownApplicationIds) {
                 val signer = resolveCurrentSigner(appId) ?: continue // not installed / unresolvable
                 if (appId to signer in activePrincipals) continue // the CURRENT signer IS approved
                 pending += ProviderEntry(
