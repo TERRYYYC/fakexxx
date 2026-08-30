@@ -164,8 +164,14 @@ apply → observe → CellRebel 可信完成周期。不作墙钟承诺，G2 包
    `profile-1..profile-10` 的完整有序列表且 `currentItemId = profile-1`，
    run log 记录种子后的 `scheduleVersion` 基线。任何不符 = **seed
    FAIL**：清空重种；**禁止**把旅程 case 重映射到意外的 item id 上。
-4. Auto 侧 plan 只消费 `{顺序, journeyCaseId, requiredSuccesses}`；
-   坐标不跨边界（canonical §6.7.1，KB-8）。
+4. Auto 侧 plan 消费 `{顺序, journeyCaseId, requiredSuccesses, latitude/longitude}`；
+   坐标是 Auto 侧存储的 §6.4 trust target，但仍**不跨 v1 wire**——
+   `EnvironmentIntentV1` 只带 profileRef/scheduleRef（canonical §6.7.1，KB-8）。
+   > 登记：本条原文为「Auto 侧 plan 只消费 `{顺序, journeyCaseId, requiredSuccesses}`；
+   > 坐标不跨边界（canonical §6.7.1，KB-8）」——与 fixture v1 `autoSideConsumes` 同一处
+   > wire-语义被写成消费语义的起草失准（gap⑤ 的第二份副本），2026-08-30 随 fixture v2
+   > 一并修正；完整依据见 fixture 内 `v2ChangeLog`（TrustPolicy.kt:73/:105、
+   > AutomationEngine.kt:539）。
 
 ### 同场伴随项
 
