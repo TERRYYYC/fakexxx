@@ -106,6 +106,11 @@ created: 2026-08-30
 ## 6. 平台缺陷清单（别当猫的问题）
 
 - typed settlement 反复 422/409；GitHub 双通道可能恒 0/0，**不得据此判「没人审」**。真 verdict 常只在 thread 正文。
+  **本仓「reviewer 是否已派」的真相源不是 GitHub**，而是 review lease / carrier：
+  `canonical review lease id + generation + carrier messageId + direct carrier threadId + terminal review_delivered@<exact HEAD>`。
+  实证：PR #63 在 GitHub 上 `/pulls/63/reviews` 与 `/issues/63/comments` 双 0，
+  而 Kimi 的 generation-2 carrier 已于 7 分钟前落地。只查 GitHub 会把「已派」报成「无主」，
+  进而诱发重复派单 → 冲突 lease。
 - review lease 可能绑旧 head，replace 锁死在 issuer 身份（非 thread）。**别为账本卡住审查。**
 - `cross_post_message` freshness gate 可能返回自相矛盾的 HELD（「0 unseen」却拦），且文档写明的 `acknowledgeHeld: true` 逃生门不兑现。改用 `post_message` + `targetCats`。
 - mission header 会传染：派实现 / review 必须显式写明「『只做编排不做 review』是调度线约束，**不约束你**」。
@@ -120,3 +125,26 @@ codex-sol 在 12:17 挡下 opus5 的错误派单（执行者不能给自己的�
 opus5 在 22:15 用同一把尺挡回 codex-sol。
 
 **判据在队伍里传递、互相校准，才算落地；只由一只猫记账，等于没有。**
+
+---
+
+## 8. 判据的**对象不对称**——比"不知道判据"更隐蔽
+
+§2 讲的是判据在**时间**上不对称（严拦新缺陷、从不复检旧阻塞）。
+当天又暴露出第二种，更难自查：**同一轮里，对结构相同的两个对象用了不同的尺。**
+
+**实证（2026-08-30 23:36Z 巡检）**：同一次 poll 里——
+
+| 对象 | 我怎么处理 |
+|------|-----------|
+| PR #55 双通道 0/0 | ✅ 正确标注「不是冷球，durable verdict 在 thread 正文」 |
+| PR #63 双通道 0/0 | ❌ 写成「零 reviewer」，未查 lease/carrier；实际 carrier 早 7 分钟已落地 |
+
+**两个对象结构完全相同，判据我自己写的，只用在了其中一个身上。**
+
+**自查方法**：巡检产出里若对同类对象给出了不同定性，
+**必须能说出「差异来自哪条可验证事实」**；说不出，就是尺不对称，不是对象不同。
+
+> 「知道判据」和「会对称地用判据」是两件事。
+> 前者写进文档就完成了，后者只能靠每轮自查——**产出里的每一处差异都要有证据出处。**
+
