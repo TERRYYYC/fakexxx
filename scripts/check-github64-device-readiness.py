@@ -16,13 +16,14 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import datetime as dt
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -34,6 +35,8 @@ SCHEMA_VERSION = 1
 PACKAGE_ID = "github64-exact-build-device-readiness"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+DEVICE_TRANSPORT_EXECUTABLES = frozenset({"adb", "fastboot"})
+NON_DEVICE_INSPECTOR_IDS = frozenset({"git", "aapt", "apksigner"})
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,47 @@ class InspectorPolicy:
 
 
 @dataclass(frozen=True)
+class PreparedInspector:
+    policy: InspectorPolicy
+    executable_path: Path
+    support_files: tuple[tuple[FrozenFile, Path], ...]
+    support_trees: tuple[tuple[FrozenTree, Path], ...]
+    arguments_prefix: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class FileSourceSeal:
+    source_path: Path
+    resolved_path: Path
+    device: int
+    inode: int
+    mode: int
+    links: int
+    uid: int
+    gid: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+    relative_path: str | None = None
+    descriptor: int | None = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class TreeSourceSeal:
+    source_path: Path
+    resolved_path: Path
+    device: int
+    inode: int
+    mode: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+    state_sha256: str
+
+
+@dataclass(frozen=True)
 class Policy:
     manifest_sha256: str
     candidate_head: str
@@ -85,9 +129,13 @@ class Policy:
 
 def production_policy() -> Policy:
     java_home = "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home"
+    git_home = (
+        "/Users/terry/.cache/codex-runtimes/"
+        "codex-primary-runtime/dependencies/native/git"
+    )
     common_env = (("LANG", "C"), ("LC_ALL", "C"))
     return Policy(
-        manifest_sha256="ef873b5d107a7a5f1d692e467d04783c828eb0278579fd4d07207586d06ddc10",
+        manifest_sha256="3129b3d9e0a733753e35b85e72ec726e5855cfe9f4395ab49da0cbf734cae43f",
         candidate_head="5002e0e005324c32ca3d36d10510180d1fafbf81",
         candidate_tree="ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1",
         base_head="9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d",
@@ -173,12 +221,19 @@ def production_policy() -> Policy:
             ),
             InspectorPolicy(
                 inspector_id="git",
-                version="git version 2.50.1 (Apple Git-155)",
+                version="git version 2.53.0 (Codex primary runtime)",
                 executable=FrozenFile(
                     role="executable",
-                    path=Path("/usr/bin/git"),
-                    sha256="b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+                    path=Path(f"{git_home}/bin/git"),
+                    sha256="ee73b116cc37f44ecdaa9e3fdfbc25ce827675859f5f966ec671112fd5caf074",
                     executable=True,
+                ),
+                support_trees=(
+                    FrozenTree(
+                        role="git-home",
+                        path=Path(git_home),
+                        sha256="a78b5118e8fd018ab1d7538109772cefa4098bb5afa54bd7fd10764486d08c1a",
+                    ),
                 ),
                 environment=common_env
                 + (
@@ -191,7 +246,9 @@ def production_policy() -> Policy:
                     ("GIT_OPTIONAL_LOCKS", "0"),
                     ("GIT_PAGER", ""),
                     ("GIT_TERMINAL_PROMPT", "0"),
-                    ("PATH", "/usr/bin:/bin"),
+                    ("GIT_EXEC_PATH", f"{git_home}/libexec/git-core"),
+                    ("GIT_TEMPLATE_DIR", f"{git_home}/share/git-core/templates"),
+                    ("PATH", f"{git_home}/bin:/usr/bin:/bin"),
                 ),
             ),
             InspectorPolicy(
@@ -273,11 +330,27 @@ def parse_args() -> argparse.Namespace:
 
 
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"not a regular file: {path}")
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
             digest.update(chunk)
-    return digest.hexdigest()
+            offset += len(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def sha256_tree(root: Path) -> str:
@@ -317,20 +390,416 @@ def sha256_tree(root: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_tree_state(root: Path) -> str:
+    """Hash entry identity and metadata so byte-identical replacement is visible."""
+    root = root.resolve()
+    if not root.is_dir():
+        raise ValueError(f"not a directory: {root}")
+    digest = hashlib.sha256()
+    digest.update(b"github64-frozen-tree-state-v1\0")
+    for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        base = Path(directory)
+        for name in sorted((*dirnames, *filenames)):
+            path = base / name
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                kind = b"L"
+                target = os.fsencode(os.readlink(path))
+            elif stat.S_ISDIR(metadata.st_mode):
+                kind = b"D"
+                target = b""
+            elif stat.S_ISREG(metadata.st_mode):
+                kind = b"F"
+                target = b""
+            else:
+                raise ValueError(f"unsupported entry in frozen tree: {path}")
+            fields = (
+                metadata.st_dev,
+                metadata.st_ino,
+                stat.S_IMODE(metadata.st_mode),
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+            )
+            digest.update(relative)
+            digest.update(b"\0")
+            digest.update(kind)
+            digest.update(b":".join(str(value).encode("ascii") for value in fields))
+            digest.update(b"\0")
+            digest.update(target)
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def file_stat_signature(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def tree_stat_signature(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def sha256_descriptor(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+def read_descriptor(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    return b"".join(chunks)
+
+
+def track_owned_descriptor(owner: Any | None, descriptor: int) -> None:
+    if owner is not None:
+        owner.track_descriptor(descriptor)
+
+
+def close_owned_descriptor(owner: Any | None, descriptor: int) -> None:
+    if owner is None:
+        os.close(descriptor)
+    else:
+        owner.close_descriptor(descriptor)
+
+
+def write_descriptor(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("short write to private snapshot")
+        offset += written
+
+
+def capture_open_file(
+    descriptor: int,
+    *,
+    source_path: Path,
+    resolved_path: Path,
+    destination: Path | None = None,
+    relative_path: str | None = None,
+    hold_open: bool = False,
+    require_single_link: bool = False,
+    descriptor_owner: Any | None = None,
+) -> FileSourceSeal:
+    track_owned_descriptor(descriptor_owner, descriptor)
+    source_descriptor: int | None = descriptor
+    destination_descriptor: int | None = None
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"not a regular file: {source_path}")
+        if require_single_link and before.st_nlink != 1:
+            raise ValueError(
+                f"source must have exactly one hard link: {source_path} has {before.st_nlink}"
+            )
+        if destination is not None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination_descriptor = os.open(
+                destination,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+            track_owned_descriptor(descriptor_owner, destination_descriptor)
+        digest = hashlib.sha256()
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            if destination_descriptor is not None:
+                write_descriptor(destination_descriptor, chunk)
+            offset += len(chunk)
+        after = os.fstat(descriptor)
+        if file_stat_signature(before) != file_stat_signature(after):
+            raise OSError(f"source changed while being read: {source_path}")
+        if destination_descriptor is not None:
+            os.fsync(destination_descriptor)
+            os.fchmod(destination_descriptor, stat.S_IMODE(before.st_mode))
+        seal = FileSourceSeal(
+            source_path=source_path,
+            resolved_path=resolved_path,
+            device=before.st_dev,
+            inode=before.st_ino,
+            mode=before.st_mode,
+            links=before.st_nlink,
+            uid=before.st_uid,
+            gid=before.st_gid,
+            size=before.st_size,
+            mtime_ns=before.st_mtime_ns,
+            ctime_ns=before.st_ctime_ns,
+            sha256=digest.hexdigest(),
+            relative_path=relative_path,
+            descriptor=descriptor if hold_open else None,
+        )
+        if destination_descriptor is not None:
+            close_owned_descriptor(descriptor_owner, destination_descriptor)
+            destination_descriptor = None
+        if not hold_open:
+            close_owned_descriptor(descriptor_owner, descriptor)
+            source_descriptor = None
+        return seal
+    except BaseException as primary:
+        cleanup_errors: list[str] = []
+        for label, owned in (
+            ("private destination", destination_descriptor),
+            ("source", source_descriptor),
+        ):
+            if owned is None:
+                continue
+            try:
+                close_owned_descriptor(descriptor_owner, owned)
+            except OSError as exc:
+                cleanup_errors.append(f"{label} fd {owned}: {exc}")
+        if cleanup_errors:
+            raise OSError(
+                f"{primary}; pre-registration cleanup failed: "
+                + "; ".join(cleanup_errors)
+            ) from primary
+        raise
+
+
+def capture_file_source(
+    source_path: Path,
+    destination: Path | None = None,
+    *,
+    hold_open: bool = False,
+    descriptor_owner: Any | None = None,
+) -> FileSourceSeal:
+    """Read one resolved regular-file generation, optionally retaining its fd."""
+    resolved = source_path.resolve(strict=True)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(resolved, flags)
+    track_owned_descriptor(descriptor_owner, descriptor)
+    return capture_open_file(
+        descriptor,
+        source_path=source_path,
+        resolved_path=resolved,
+        destination=destination,
+        hold_open=hold_open,
+        descriptor_owner=descriptor_owner,
+    )
+
+
+def open_repo_relative(
+    repo_descriptor: int,
+    raw: Any,
+    descriptor_owner: Any | None = None,
+) -> tuple[int, str]:
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise ValueError("path must be a non-empty string")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ValueError(f"path must remain repo-relative: {raw!r}")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    parent = os.dup(repo_descriptor)
+    track_owned_descriptor(descriptor_owner, parent)
+    try:
+        for component in relative.parts[:-1]:
+            child = os.open(component, directory_flags, dir_fd=parent)
+            track_owned_descriptor(descriptor_owner, child)
+            close_owned_descriptor(descriptor_owner, parent)
+            parent = child
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=parent)
+        track_owned_descriptor(descriptor_owner, descriptor)
+        return descriptor, relative.as_posix()
+    finally:
+        close_owned_descriptor(descriptor_owner, parent)
+
+
+def capture_repo_file(
+    repo: Path,
+    repo_descriptor: int,
+    raw: Any,
+    destination: Path | None = None,
+    *,
+    hold_open: bool = False,
+    descriptor_owner: Any | None = None,
+) -> FileSourceSeal:
+    descriptor, relative = open_repo_relative(
+        repo_descriptor, raw, descriptor_owner
+    )
+    source_path = repo / relative
+    return capture_open_file(
+        descriptor,
+        source_path=source_path,
+        resolved_path=source_path,
+        destination=destination,
+        relative_path=relative,
+        hold_open=hold_open,
+        require_single_link=True,
+        descriptor_owner=descriptor_owner,
+    )
+
+
+def open_unlinked_snapshot_readers(
+    path: Path,
+    count: int,
+    descriptor_owner: Any | None = None,
+) -> tuple[int, ...]:
+    """Open independent read-only descriptions, then remove the last pathname."""
+    descriptors: list[int] = []
+    try:
+        os.chmod(path, 0o400)
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise OSError("private snapshot must begin as one regular linked inode")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        for _ in range(count):
+            descriptor = os.open(path, flags)
+            track_owned_descriptor(descriptor_owner, descriptor)
+            metadata = os.fstat(descriptor)
+            if metadata.st_dev != before.st_dev or metadata.st_ino != before.st_ino:
+                close_owned_descriptor(descriptor_owner, descriptor)
+                raise OSError("private snapshot identity changed while opening readers")
+            descriptors.append(descriptor)
+        path.unlink()
+        if any(os.fstat(descriptor).st_nlink != 0 for descriptor in descriptors):
+            raise OSError("private snapshot pathname was not fully unlinked")
+        return tuple(descriptors)
+    except BaseException as primary:
+        cleanup_errors: list[str] = []
+        for descriptor in descriptors:
+            try:
+                close_owned_descriptor(descriptor_owner, descriptor)
+            except OSError as exc:
+                cleanup_errors.append(f"reader fd {descriptor}: {exc}")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_errors.append(f"private path: {exc}")
+        if cleanup_errors:
+            raise OSError(
+                f"{primary}; snapshot reader cleanup failed: "
+                + "; ".join(cleanup_errors)
+            ) from primary
+        raise
+
+
+def capture_tree_source(source_path: Path) -> TreeSourceSeal:
+    resolved = source_path.resolve(strict=True)
+    before = resolved.lstat()
+    if not stat.S_ISDIR(before.st_mode):
+        raise ValueError(f"not a directory: {resolved}")
+    state_before = sha256_tree_state(resolved)
+    digest = sha256_tree(resolved)
+    state_after = sha256_tree_state(resolved)
+    after = resolved.lstat()
+    if (
+        tree_stat_signature(before) != tree_stat_signature(after)
+        or state_before != state_after
+    ):
+        raise OSError(f"tree changed while being hashed: {source_path}")
+    return TreeSourceSeal(
+        source_path=source_path,
+        resolved_path=resolved,
+        device=before.st_dev,
+        inode=before.st_ino,
+        mode=stat.S_IMODE(before.st_mode),
+        mtime_ns=before.st_mtime_ns,
+        ctime_ns=before.st_ctime_ns,
+        sha256=digest,
+        state_sha256=state_after,
+    )
+
+
+def escaping_snapshot_symlinks(root: Path) -> list[str]:
+    root = root.resolve(strict=True)
+    errors: list[str] = []
+    for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        base = Path(directory)
+        for name in sorted((*dirnames, *filenames)):
+            path = base / name
+            if not path.is_symlink():
+                continue
+            try:
+                target = path.resolve(strict=True)
+                if not is_within(target, root):
+                    errors.append(f"{path.relative_to(root)} -> {os.readlink(path)}")
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append(f"{path.relative_to(root)} -> {exc}")
+    return errors
+
+
 def run(
     command: list[str],
     *,
     cwd: Path | None = None,
     environment: Mapping[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
+    pass_fds: tuple[int, ...] = (),
+) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         command,
         cwd=cwd,
         env=dict(environment) if environment is not None else None,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        pass_fds=pass_fds,
     )
 
 
@@ -507,6 +976,7 @@ def unsafe_output_reason(
 class Audit:
     def __init__(self) -> None:
         self.findings: list[dict[str, Any]] = []
+        self.commands: list[dict[str, Any]] = []
 
     def check(self, finding_id: str, condition: bool, expected: Any, actual: Any) -> bool:
         self.findings.append(
@@ -522,6 +992,246 @@ class Audit:
     @property
     def passed(self) -> bool:
         return all(item["status"] == "PASS" for item in self.findings)
+
+    def begin_command(
+        self,
+        inspector: PreparedInspector,
+        command: list[str],
+        evidence_arguments: list[str],
+    ) -> dict[str, Any]:
+        inspector_id = inspector.policy.inspector_id
+        executable_name = Path(command[0]).name.lower() if command else ""
+        if executable_name in DEVICE_TRANSPORT_EXECUTABLES:
+            classification = "DEVICE_TRANSPORT"
+        elif inspector_id in NON_DEVICE_INSPECTOR_IDS:
+            classification = "NON_DEVICE_INSPECTOR"
+        else:
+            classification = "UNCLASSIFIED"
+        record = {
+            "dispatchIndex": len(self.commands) + 1,
+            "inspectorId": inspector_id,
+            "executableRole": inspector.policy.executable.role,
+            "executableSha256": inspector.policy.executable.sha256,
+            "executionSource": "PRIVATE_VERIFIED_SNAPSHOT",
+            "arguments": evidence_arguments,
+            "classification": classification,
+            "deviceTransport": classification == "DEVICE_TRANSPORT",
+            "spawned": False,
+            "returnCode": None,
+            "outputUtf8": None,
+        }
+        self.commands.append(record)
+        return record
+
+    @staticmethod
+    def finish_command(
+        record: dict[str, Any],
+        completed: subprocess.CompletedProcess[Any],
+    ) -> None:
+        record["spawned"] = True
+        record["returnCode"] = completed.returncode
+
+    @property
+    def executed_device_commands(self) -> int:
+        return sum(
+            bool(command["spawned"] and command["deviceTransport"])
+            for command in self.commands
+        )
+
+
+class SourceSealRegistry:
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo.resolve(strict=True)
+        root_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        self.repo_descriptor = os.open(self.repo, root_flags)
+        self._repo_identity = os.fstat(self.repo_descriptor)
+        self._files: dict[str, list[FileSourceSeal]] = {}
+        self._trees: dict[str, list[TreeSourceSeal]] = {}
+        self._held_descriptors: set[int] = set()
+        self._repo_descriptor_closed = False
+        self._closed = False
+
+    def capture_file_source(
+        self,
+        source_path: Path,
+        destination: Path | None = None,
+    ) -> FileSourceSeal:
+        seal = capture_file_source(
+            source_path,
+            destination,
+            hold_open=True,
+            descriptor_owner=self,
+        )
+        if seal.descriptor is not None:
+            self._held_descriptors.add(seal.descriptor)
+        return seal
+
+    def capture_repo_file(
+        self,
+        raw: Any,
+        destination: Path | None = None,
+    ) -> FileSourceSeal:
+        seal = capture_repo_file(
+            self.repo,
+            self.repo_descriptor,
+            raw,
+            destination,
+            hold_open=True,
+            descriptor_owner=self,
+        )
+        if seal.descriptor is not None:
+            self._held_descriptors.add(seal.descriptor)
+        return seal
+
+    def register_file(self, finding_id: str, seal: FileSourceSeal) -> None:
+        self._files.setdefault(finding_id, []).append(seal)
+        if seal.descriptor is not None:
+            self._held_descriptors.add(seal.descriptor)
+
+    def register_tree(self, finding_id: str, seal: TreeSourceSeal) -> None:
+        self._trees.setdefault(finding_id, []).append(seal)
+
+    def track_descriptor(self, descriptor: int) -> None:
+        self._held_descriptors.add(descriptor)
+
+    def close_descriptor(self, descriptor: int) -> None:
+        os.close(descriptor)
+        self._held_descriptors.discard(descriptor)
+
+    def verify(self, audit: Audit) -> None:
+        try:
+            current_root = self.repo.resolve(strict=True).stat()
+            root_stable = (
+                current_root.st_dev == self._repo_identity.st_dev
+                and current_root.st_ino == self._repo_identity.st_ino
+                and stat.S_ISDIR(current_root.st_mode)
+            )
+            root_actual: Any = {
+                "device": current_root.st_dev,
+                "inode": current_root.st_ino,
+            }
+        except (OSError, RuntimeError, ValueError) as exc:
+            root_stable = False
+            root_actual = str(exc)
+        audit.check(
+            "source:repo-root-stable",
+            root_stable,
+            {
+                "device": self._repo_identity.st_dev,
+                "inode": self._repo_identity.st_ino,
+            },
+            root_actual,
+        )
+        finding_ids = sorted(set(self._files) | set(self._trees))
+        for finding_id in finding_ids:
+            details: list[dict[str, Any]] = []
+            stable = True
+            for opening in self._files.get(finding_id, []):
+                try:
+                    if opening.descriptor is None:
+                        raise OSError("opening source descriptor was not retained")
+                    held_metadata = os.fstat(opening.descriptor)
+                    held_stable = (
+                        file_stat_signature(held_metadata)
+                        == (
+                            opening.device,
+                            opening.inode,
+                            opening.mode,
+                            opening.links,
+                            opening.uid,
+                            opening.gid,
+                            opening.size,
+                            opening.mtime_ns,
+                            opening.ctime_ns,
+                        )
+                        and sha256_descriptor(opening.descriptor) == opening.sha256
+                    )
+                    current = (
+                        capture_repo_file(
+                            self.repo,
+                            self.repo_descriptor,
+                            opening.relative_path,
+                            descriptor_owner=self,
+                        )
+                        if opening.relative_path is not None
+                        else capture_file_source(
+                            opening.source_path, descriptor_owner=self
+                        )
+                    )
+                    item_stable = held_stable and current == opening
+                    actual: Any = {
+                        "path": str(current.resolved_path),
+                        "sha256": current.sha256,
+                        "size": current.size,
+                        "device": current.device,
+                        "inode": current.inode,
+                    }
+                except (OSError, RuntimeError, ValueError) as exc:
+                    item_stable = False
+                    actual = str(exc)
+                details.append(
+                    {
+                        "kind": "file",
+                        "source": str(opening.source_path),
+                        "stable": item_stable,
+                        "actual": actual,
+                    }
+                )
+                stable = stable and item_stable
+            for opening in self._trees.get(finding_id, []):
+                try:
+                    current = capture_tree_source(opening.source_path)
+                    item_stable = current == opening
+                    actual = {
+                        "path": str(current.resolved_path),
+                        "sha256": current.sha256,
+                        "device": current.device,
+                        "inode": current.inode,
+                    }
+                except (OSError, RuntimeError, ValueError) as exc:
+                    item_stable = False
+                    actual = str(exc)
+                details.append(
+                    {
+                        "kind": "tree",
+                        "source": str(opening.source_path),
+                        "stable": item_stable,
+                        "actual": actual,
+                    }
+                )
+                stable = stable and item_stable
+            audit.check(
+                finding_id,
+                stable,
+                "opening path identity, metadata and digest unchanged at final barrier",
+                details,
+            )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        errors: list[str] = []
+        for descriptor in tuple(self._held_descriptors):
+            try:
+                os.close(descriptor)
+                self._held_descriptors.discard(descriptor)
+            except OSError as exc:
+                errors.append(f"fd {descriptor}: {exc}")
+        if not self._repo_descriptor_closed:
+            try:
+                os.close(self.repo_descriptor)
+                self._repo_descriptor_closed = True
+            except OSError as exc:
+                errors.append(f"repo fd {self.repo_descriptor}: {exc}")
+        self._closed = not self._held_descriptors and self._repo_descriptor_closed
+        if errors:
+            raise OSError("; ".join(errors))
 
 
 def ids(entries: Any) -> tuple[set[str], bool]:
@@ -560,8 +1270,9 @@ def is_git_external_helper_key(key: str) -> bool:
 
 def validate_git_external_helper_policy(
     audit: Audit,
-    inspector: InspectorPolicy,
+    inspector: PreparedInspector,
     repo: Path,
+    finding_prefix: str = "source:git",
 ) -> bool:
     """Reject repository config capable of spawning a helper before worktree I/O."""
     completed = run_inspector(
@@ -581,11 +1292,11 @@ def validate_git_external_helper_policy(
             "--get-regexp",
             ".*",
         ],
-        "source:git:external-helper-config",
+        f"{finding_prefix}:external-helper-config",
     )
     if completed is None:
         audit.check(
-            "source:git:external-helper-policy",
+            f"{finding_prefix}:external-helper-policy",
             False,
             "no repository-configured external helpers",
             "pinned Git unavailable",
@@ -595,7 +1306,7 @@ def validate_git_external_helper_policy(
     dangerous = sorted({key for key in keys if is_git_external_helper_key(key)})
     ok = completed.returncode in {0, 1} and not dangerous
     audit.check(
-        "source:git:external-helper-policy",
+        f"{finding_prefix}:external-helper-policy",
         ok,
         "no repository-configured helper and no worktree-config extension",
         dangerous if dangerous else completed.stderr or "none",
@@ -603,7 +1314,11 @@ def validate_git_external_helper_policy(
     return ok
 
 
-def validate_git_grafts_policy(audit: Audit, repo: Path) -> bool:
+def validate_git_grafts_policy(
+    audit: Audit,
+    repo: Path,
+    finding_id: str = "source:git:grafts-policy",
+) -> bool:
     """Reject mutable fake-parent metadata before any Git graph operation."""
     try:
         metadata_roots = git_metadata_roots(repo)
@@ -618,7 +1333,7 @@ def validate_git_grafts_policy(audit: Audit, repo: Path) -> bool:
     ]
     ok = error is None and bool(metadata_roots) and not present
     audit.check(
-        "source:git:grafts-policy",
+        finding_id,
         ok,
         "info/grafts absent from per-worktree and common Git metadata",
         error or present or "absent",
@@ -628,7 +1343,7 @@ def validate_git_grafts_policy(audit: Audit, repo: Path) -> bool:
 
 def git_output(
     audit: Audit,
-    inspector: InspectorPolicy,
+    inspector: PreparedInspector,
     repo: Path,
     finding_suffix: str,
     *args: str,
@@ -661,7 +1376,7 @@ class GitTreeEntry:
 
 def git_tree_entries(
     audit: Audit,
-    inspector: InspectorPolicy,
+    inspector: PreparedInspector,
     repo: Path,
     revision: str,
     finding_suffix: str,
@@ -835,7 +1550,7 @@ def validate_source(
     repo: Path,
     candidate: Any,
     policy: Policy,
-    git_inspector: InspectorPolicy | None,
+    git_inspector: PreparedInspector | None,
     git_ready: bool,
 ) -> dict[str, Any]:
     snapshot: dict[str, Any] = {}
@@ -1082,11 +1797,113 @@ def validate_source(
     return snapshot
 
 
+def validate_checkout_final_barrier(
+    audit: Audit,
+    repo: Path,
+    policy: Policy,
+    git_inspector: PreparedInspector | None,
+    git_ready: bool,
+    expected_checkout_head: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    """Re-observe raw checkout state after all manifest-driven consumption."""
+    if not git_ready or git_inspector is None:
+        details = {"error": "frozen Git unavailable at final barrier"}
+        audit.check(
+            "source:checkout-final-barrier",
+            False,
+            "raw checkout equals HEAD at final barrier",
+            details,
+        )
+        return False, details
+    metadata_safe = validate_git_grafts_policy(
+        audit, repo, "source:git-final:grafts-policy"
+    )
+    helpers_safe = validate_git_external_helper_policy(
+        audit, git_inspector, repo, "source:git-final"
+    )
+    head_before, before_error, before_rc = git_output(
+        audit,
+        git_inspector,
+        repo,
+        "final-head-before",
+        "rev-parse",
+        "HEAD",
+    )
+    head_before_matches = (
+        isinstance(expected_checkout_head, str)
+        and bool(HEX40.fullmatch(expected_checkout_head))
+        and before_rc == 0
+        and head_before == expected_checkout_head
+    )
+    checkout_tree = git_tree_entries(
+        audit,
+        git_inspector,
+        repo,
+        expected_checkout_head or "INVALID_EXPECTED_HEAD",
+        "checkout-final-tree-entries",
+    )
+    if checkout_tree is None:
+        checkout_clean = False
+        checkout_details = {"error": "frozen checkout tree unavailable at final barrier"}
+    else:
+        checkout_clean, checkout_details = compare_checkout_to_tree(
+            repo, checkout_tree, policy.allowed_generated_roots
+        )
+    head_after, after_error, after_rc = git_output(
+        audit,
+        git_inspector,
+        repo,
+        "final-head-after",
+        "rev-parse",
+        "HEAD",
+    )
+    head_after_matches = (
+        after_rc == 0
+        and head_after == expected_checkout_head
+        and head_after == head_before
+    )
+    clean = (
+        metadata_safe
+        and helpers_safe
+        and head_before_matches
+        and checkout_clean
+        and head_after_matches
+    )
+    details = {
+        "expectedCheckoutHead": expected_checkout_head,
+        "headBefore": head_before or before_error or None,
+        "headAfter": head_after or after_error or None,
+        "metadataSafe": metadata_safe,
+        "helpersSafe": helpers_safe,
+        "checkout": checkout_details,
+    }
+    audit.check(
+        "source:checkout-final-barrier",
+        clean,
+        {
+            "tracked": "raw bytes/type/executable mode equal HEAD",
+            "untracked": "none outside frozen generated roots",
+            "observation": "after manifest-driven inspection",
+            "checkoutHead": expected_checkout_head,
+        },
+        details,
+    )
+    return clean, details
+
+
 def inspect_frozen_file(item: FrozenFile) -> tuple[bool, dict[str, Any]]:
-    path = item.path.resolve()
-    exists = path.is_file()
-    actual_sha = sha256_file(path) if exists else None
-    executable_ok = not item.executable or (exists and os.access(path, os.X_OK))
+    try:
+        path = item.path.resolve(strict=True)
+        exists = path.is_file()
+        actual_sha = sha256_file(path) if exists else None
+        executable_ok = not item.executable or (exists and os.access(path, os.X_OK))
+        error = None
+    except (OSError, RuntimeError, ValueError) as exc:
+        path = item.path
+        exists = False
+        actual_sha = None
+        executable_ok = False
+        error = str(exc)
     return (
         exists and actual_sha == item.sha256 and executable_ok,
         {
@@ -1095,16 +1912,18 @@ def inspect_frozen_file(item: FrozenFile) -> tuple[bool, dict[str, Any]]:
             "expectedSha256": item.sha256,
             "actualSha256": actual_sha,
             "executable": executable_ok,
+            "error": error,
         },
     )
 
 
 def inspect_frozen_tree(item: FrozenTree) -> tuple[bool, dict[str, Any]]:
-    path = item.path.resolve()
     try:
+        path = item.path.resolve(strict=True)
         actual_sha = sha256_tree(path)
         error = None
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
+        path = item.path
         actual_sha = None
         error = str(exc)
     return (
@@ -1119,12 +1938,53 @@ def inspect_frozen_tree(item: FrozenTree) -> tuple[bool, dict[str, Any]]:
     )
 
 
-def validate_inspectors(
+def mapped_tree_path(
+    source: Path,
+    tree_copies: Mapping[Path, Path],
+) -> Path | None:
+    for source_root, snapshot_root in sorted(
+        tree_copies.items(), key=lambda item: len(item[0].parts), reverse=True
+    ):
+        if source == source_root or is_within(source, source_root):
+            return snapshot_root / source.relative_to(source_root)
+    return None
+
+
+def remap_frozen_path(
+    raw: str,
+    tree_copies: Mapping[Path, Path],
+    file_copies: Mapping[Path, Path],
+    directory_copies: Mapping[Path, Path],
+) -> str:
+    path = Path(raw)
+    if not path.is_absolute():
+        return raw
+    resolved = path.resolve()
+    mapped = file_copies.get(resolved)
+    if mapped is None:
+        mapped = mapped_tree_path(resolved, tree_copies)
+    if mapped is None:
+        mapped = directory_copies.get(resolved)
+    return str(mapped) if mapped is not None else raw
+
+
+def prepare_inspectors(
     audit: Audit,
     inspectors: tuple[InspectorPolicy, ...],
-) -> tuple[bool, list[dict[str, Any]]]:
+    snapshot_root: Path,
+    source_seals: SourceSealRegistry,
+) -> tuple[bool, dict[str, PreparedInspector], list[dict[str, Any]]]:
     all_ok = True
     snapshots: list[dict[str, Any]] = []
+    snapshot_by_id: dict[str, dict[str, Any]] = {}
+    inspector_ids = [item.inspector_id for item in inspectors]
+    audit.check(
+        "tool:inspector-ids",
+        len(inspector_ids) == len(set(inspector_ids)),
+        "unique inspector ids",
+        inspector_ids,
+    )
+    all_ok = all_ok and len(inspector_ids) == len(set(inspector_ids))
     for inspector in inspectors:
         file_snapshots: list[dict[str, Any]] = []
         inspector_ok = True
@@ -1152,49 +2012,410 @@ def validate_inspectors(
                 snapshot["actualSha256"] or snapshot["error"],
             )
             inspector_ok = inspector_ok and ok
-        snapshots.append(
+        snapshot = {
+            "id": inspector.inspector_id,
+            "version": inspector.version,
+            "files": file_snapshots,
+            "trees": tree_snapshots,
+            "argumentsPrefix": list(inspector.arguments_prefix),
+            "environmentKeys": sorted(dict(inspector.environment)),
+            "policyStatus": "PASS" if inspector_ok else "FAIL",
+            "snapshotStatus": "NOT_CREATED_POLICY_INVALID",
+        }
+        snapshots.append(snapshot)
+        snapshot_by_id[inspector.inspector_id] = snapshot
+        all_ok = all_ok and inspector_ok
+    if not all_ok:
+        return False, {}, snapshots
+
+    tree_items: dict[Path, FrozenTree] = {}
+    tree_conflicts: list[str] = []
+    for inspector in inspectors:
+        for item in inspector.support_trees:
+            resolved = item.path.resolve(strict=True)
+            existing = tree_items.get(resolved)
+            if existing is not None and existing.sha256 != item.sha256:
+                tree_conflicts.append(str(resolved))
+            tree_items[resolved] = item
+    audit.check(
+        "tool-snapshot:tree-policy",
+        not tree_conflicts,
+        "one digest per frozen tree root",
+        tree_conflicts or "consistent",
+    )
+    if tree_conflicts:
+        return False, {}, snapshots
+
+    tree_copies: dict[Path, Path] = {}
+    tree_seals: dict[Path, TreeSourceSeal] = {}
+    closure_ok = True
+    trees_root = snapshot_root / "trees"
+    trees_root.mkdir(parents=True, exist_ok=True)
+    ordered_trees = sorted(
+        tree_items.items(), key=lambda item: (len(item[0].parts), str(item[0]))
+    )
+    for index, (resolved, item) in enumerate(ordered_trees):
+        try:
+            opening = capture_tree_source(item.path)
+            destination = mapped_tree_path(resolved, tree_copies)
+            if destination is None:
+                destination = trees_root / f"tree-{index:02d}"
+                shutil.copytree(
+                    opening.resolved_path,
+                    destination,
+                    symlinks=True,
+                    copy_function=shutil.copy2,
+                )
+            snapshot_sha = sha256_tree(destination)
+            escaping_links = escaping_snapshot_symlinks(destination)
+            copied = (
+                opening.sha256 == item.sha256
+                and snapshot_sha == item.sha256
+                and not escaping_links
+            )
+            actual: Any = {
+                "sourceSha256": opening.sha256,
+                "snapshotSha256": snapshot_sha,
+                "snapshotLocation": "PRIVATE_AUDIT_ROOT",
+                "escapingSymlinks": escaping_links,
+            }
+            if copied:
+                tree_copies[resolved] = destination
+                tree_seals[resolved] = opening
+        except (OSError, RuntimeError, ValueError) as exc:
+            copied = False
+            actual = str(exc)
+        audit.check(
+            f"tool-snapshot:tree:{index:02d}",
+            copied,
+            item.sha256,
+            actual,
+        )
+        closure_ok = closure_ok and copied
+
+    all_files: dict[Path, FrozenFile] = {}
+    file_conflicts: list[str] = []
+    for inspector in inspectors:
+        for item in (inspector.executable, *inspector.support_files):
+            resolved = item.path.resolve(strict=True)
+            existing = all_files.get(resolved)
+            if existing is not None and (
+                existing.sha256 != item.sha256 or existing.executable != item.executable
+            ):
+                file_conflicts.append(str(resolved))
+            all_files[resolved] = item
+    audit.check(
+        "tool-snapshot:file-policy",
+        not file_conflicts,
+        "one digest and executable policy per frozen file",
+        file_conflicts or "consistent",
+    )
+    if file_conflicts:
+        return False, {}, snapshots
+
+    standalone_parents = sorted(
+        {
+            resolved.parent
+            for resolved in all_files
+            if mapped_tree_path(resolved, tree_copies) is None
+        },
+        key=str,
+    )
+    directory_copies = {
+        parent: snapshot_root / "file-groups" / f"group-{index:02d}"
+        for index, parent in enumerate(standalone_parents)
+    }
+    for destination in directory_copies.values():
+        destination.mkdir(parents=True, exist_ok=True)
+    preserved_os_directories = {Path("/usr/bin").resolve(), Path("/bin").resolve()}
+    environment_directory_copies = {
+        source: destination
+        for source, destination in directory_copies.items()
+        if source not in preserved_os_directories
+    }
+
+    file_copies: dict[Path, Path] = {}
+    file_seals: dict[Path, FileSourceSeal] = {}
+    for index, (resolved, item) in enumerate(sorted(all_files.items(), key=lambda x: str(x[0]))):
+        destination = mapped_tree_path(resolved, tree_copies)
+        try:
+            if destination is None:
+                destination = directory_copies[resolved.parent] / resolved.name
+                opening = source_seals.capture_file_source(item.path, destination)
+            else:
+                opening = source_seals.capture_file_source(item.path)
+            snapshot_sha = sha256_file(destination)
+            executable_ok = not item.executable or os.access(destination, os.X_OK)
+            copied = (
+                opening.sha256 == item.sha256
+                and snapshot_sha == item.sha256
+                and executable_ok
+            )
+            actual = {
+                "sourceSha256": opening.sha256,
+                "snapshotSha256": snapshot_sha,
+                "snapshotLocation": "PRIVATE_AUDIT_ROOT",
+                "executable": executable_ok,
+            }
+            if copied:
+                file_copies[resolved] = destination
+                file_seals[resolved] = opening
+        except (OSError, RuntimeError, ValueError) as exc:
+            copied = False
+            actual = str(exc)
+        audit.check(
+            f"tool-snapshot:file:{index:02d}",
+            copied,
+            {"sha256": item.sha256, "executable": item.executable},
+            actual,
+        )
+        closure_ok = closure_ok and copied
+
+    if not closure_ok:
+        return False, {}, snapshots
+
+    prepared: dict[str, PreparedInspector] = {}
+    for inspector in inspectors:
+        executable_source = inspector.executable.path.resolve(strict=True)
+        support_files = tuple(
+            (item, file_copies[item.path.resolve(strict=True)])
+            for item in inspector.support_files
+        )
+        support_trees = tuple(
+            (item, tree_copies[item.path.resolve(strict=True)])
+            for item in inspector.support_trees
+        )
+        arguments_prefix = tuple(
+            remap_frozen_path(
+                argument, tree_copies, file_copies, directory_copies
+            )
+            for argument in inspector.arguments_prefix
+        )
+        environment_items: list[tuple[str, str]] = []
+        for key, value in inspector.environment:
+            if key == "PATH":
+                remapped = os.pathsep.join(
+                    remap_frozen_path(
+                        component,
+                        tree_copies,
+                        file_copies,
+                        environment_directory_copies,
+                    )
+                    for component in value.split(os.pathsep)
+                )
+            else:
+                remapped = remap_frozen_path(
+                    value,
+                    tree_copies,
+                    file_copies,
+                    environment_directory_copies,
+                )
+            environment_items.append((key, remapped))
+        prepared_item = PreparedInspector(
+            policy=inspector,
+            executable_path=file_copies[executable_source],
+            support_files=support_files,
+            support_trees=support_trees,
+            arguments_prefix=arguments_prefix,
+            environment=tuple(environment_items),
+        )
+        remapped_path_values = list(arguments_prefix)
+        for key, value in prepared_item.environment:
+            remapped_path_values.extend(
+                value.split(os.pathsep) if key == "PATH" else [value]
+            )
+        shared_references: list[str] = []
+        for value in remapped_path_values:
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                continue
+            resolved_candidate = candidate.resolve()
+            if resolved_candidate in all_files or any(
+                resolved_candidate == root or is_within(resolved_candidate, root)
+                for root in tree_items
+            ):
+                shared_references.append(value)
+        remap_ok = not shared_references
+        audit.check(
+            f"tool:{inspector.inspector_id}:snapshot-path-remap",
+            remap_ok,
+            "no argv/environment reference to a shared frozen file or tree",
+            shared_references or "private-or-explicit-OS-boundary",
+        )
+        closure_ok = closure_ok and remap_ok
+        prepared[inspector.inspector_id] = prepared_item
+        finding_id = f"tool:{inspector.inspector_id}:source-stable"
+        for item in (inspector.executable, *inspector.support_files):
+            source_seals.register_file(
+                finding_id, file_seals[item.path.resolve(strict=True)]
+            )
+        for item in inspector.support_trees:
+            source_seals.register_tree(
+                finding_id, tree_seals[item.path.resolve(strict=True)]
+            )
+        snapshot = snapshot_by_id[inspector.inspector_id]
+        bootstrap_only = inspector.inspector_id == "python-bootstrap"
+        snapshot.update(
             {
-                "id": inspector.inspector_id,
-                "version": inspector.version,
-                "files": file_snapshots,
-                "trees": tree_snapshots,
-                "argumentsPrefix": list(inspector.arguments_prefix),
-                "environmentKeys": sorted(dict(inspector.environment)),
-                "policyStatus": "PASS" if inspector_ok else "FAIL",
+                "snapshotStatus": "PASS",
+                "executionSource": (
+                    "SHARED_PINNED_BOOTSTRAP_PROCESS"
+                    if bootstrap_only
+                    else "PRIVATE_VERIFIED_SNAPSHOT"
+                ),
+                "snapshotPurpose": (
+                    "EVIDENCE_ONLY_NOT_REEXECUTED"
+                    if bootstrap_only
+                    else "EXECUTION_CLOSURE"
+                ),
+                "privateSupportFileCount": len(support_files),
+                "privateSupportTreeCount": len(support_trees),
+                "argumentsPrefixRemapped": arguments_prefix
+                != inspector.arguments_prefix,
+                "environmentRemappedKeys": sorted(
+                    key
+                    for (key, original), (_, remapped) in zip(
+                        inspector.environment, prepared_item.environment
+                    )
+                    if original != remapped
+                ),
             }
         )
-        all_ok = all_ok and inspector_ok
-    return all_ok, snapshots
+    return closure_ok, prepared if closure_ok else {}, snapshots
+
+
+def stable_snapshot_argument(inspector: PreparedInspector, argument: str) -> str:
+    """Describe a private argv path without persisting its ephemeral root."""
+    candidate = Path(argument)
+    if not candidate.is_absolute():
+        return argument
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return argument
+    executable = inspector.executable_path.resolve(strict=True)
+    if resolved == executable:
+        return "$TOOL_SNAPSHOT:executable"
+    for item, private_path in inspector.support_files:
+        if resolved == private_path.resolve(strict=True):
+            return f"$TOOL_SNAPSHOT:{item.role}"
+    for item, private_root in inspector.support_trees:
+        resolved_root = private_root.resolve(strict=True)
+        if resolved == resolved_root or is_within(resolved, resolved_root):
+            relative = resolved.relative_to(resolved_root).as_posix()
+            suffix = f"/{relative}" if relative != "." else ""
+            return f"$TOOL_SNAPSHOT:{item.role}{suffix}"
+    return argument
 
 
 def run_inspector(
     audit: Audit,
-    inspector: InspectorPolicy,
+    inspector: PreparedInspector,
     args: list[str],
     finding_id: str,
+    *,
+    pass_fds: tuple[int, ...] = (),
+    evidence_args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str] | None:
-    files_valid = all(
-        inspect_frozen_file(item)[0]
-        for item in (inspector.executable, *inspector.support_files)
-    )
-    trees_valid = all(inspect_frozen_tree(item)[0] for item in inspector.support_trees)
+    try:
+        files_valid = (
+            sha256_file(inspector.executable_path) == inspector.policy.executable.sha256
+            and (
+                not inspector.policy.executable.executable
+                or os.access(inspector.executable_path, os.X_OK)
+            )
+            and all(
+                sha256_file(path) == item.sha256
+                and (not item.executable or os.access(path, os.X_OK))
+                for item, path in inspector.support_files
+            )
+        )
+        trees_valid = all(
+            sha256_tree(path) == item.sha256 for item, path in inspector.support_trees
+        )
+        validation_error = None
+    except (OSError, RuntimeError, ValueError) as exc:
+        files_valid = False
+        trees_valid = False
+        validation_error = str(exc)
     still_valid = files_valid and trees_valid
     audit.check(
-        f"{finding_id}:pre-exec-policy",
+        f"{finding_id}:pre-exec-snapshot",
         still_valid,
-        "all pinned inspector files unchanged",
-        "unchanged" if still_valid else "drifted",
+        "all private inspector snapshot bytes unchanged",
+        "unchanged" if still_valid else validation_error or "drifted",
     )
     if not still_valid:
         return None
-    return run(
-        [
-            str(inspector.executable.path.resolve()),
-            *inspector.arguments_prefix,
-            *args,
-        ],
-        environment=dict(inspector.environment),
+    command = [
+        str(inspector.executable_path),
+        *inspector.arguments_prefix,
+        *args,
+    ]
+    recorded_arguments = [
+        *(
+            stable_snapshot_argument(inspector, argument)
+            for argument in inspector.arguments_prefix
+        ),
+        *(evidence_args if evidence_args is not None else args),
+    ]
+    record = audit.begin_command(inspector, command, recorded_arguments)
+    dispatch_allowed = record["classification"] == "NON_DEVICE_INSPECTOR"
+    audit.check(
+        f"{finding_id}:direct-command-classification",
+        dispatch_allowed,
+        "known pinned non-device inspector classification",
+        record["classification"],
     )
+    if not dispatch_allowed:
+        return None
+    try:
+        completed_raw = run(
+            command,
+            environment=dict(inspector.environment),
+            pass_fds=pass_fds,
+        )
+    except OSError as exc:
+        audit.check(
+            f"{finding_id}:spawn",
+            False,
+            "private inspector process spawned",
+            str(exc),
+        )
+        return None
+    audit.finish_command(record, completed_raw)
+    audit.check(
+        f"{finding_id}:spawn",
+        True,
+        "private inspector process spawned",
+        "spawned",
+    )
+    try:
+        stdout = completed_raw.stdout.decode("utf-8")
+        stderr = completed_raw.stderr.decode("utf-8")
+        record["outputUtf8"] = True
+    except UnicodeError as exc:
+        record["outputUtf8"] = False
+        audit.check(
+            f"{finding_id}:output-encoding",
+            False,
+            "strict UTF-8 inspector stdout/stderr",
+            str(exc),
+        )
+        return None
+    audit.check(
+        f"{finding_id}:output-encoding",
+        True,
+        "strict UTF-8 inspector stdout/stderr",
+        "valid",
+    )
+    completed = subprocess.CompletedProcess(
+        args=completed_raw.args,
+        returncode=completed_raw.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return completed
 
 
 def validate_artifacts(
@@ -1202,7 +2423,10 @@ def validate_artifacts(
     repo: Path,
     entries: Any,
     policy: Policy,
+    inspectors: Mapping[str, PreparedInspector],
     inspectors_ready: bool,
+    snapshot_root: Path,
+    source_seals: SourceSealRegistry,
 ) -> list[dict[str, Any]]:
     snapshots: list[dict[str, Any]] = []
     artifact_ids, unique = ids(entries)
@@ -1214,12 +2438,13 @@ def validate_artifacts(
     )
     if not isinstance(entries, list):
         return snapshots
-    inspectors = {item.inspector_id: item for item in policy.inspectors}
     aapt = inspectors.get("aapt")
     apksigner = inspectors.get("apksigner")
     can_inspect = inspectors_ready and aapt is not None and apksigner is not None
+    artifacts_root = snapshot_root / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
 
-    for entry in entries:
+    for index, entry in enumerate(entries):
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
         artifact_id = entry["id"]
@@ -1239,27 +2464,74 @@ def validate_artifacts(
             expected_signer,
         )
         try:
-            path = safe_relative(repo, entry.get("relativePath"))
+            safe_relative(repo, entry.get("relativePath"))
         except ValueError as exc:
             audit.check(
                 f"artifact:{artifact_id}:path", False, "safe repo-relative file", str(exc)
             )
             continue
-        exists = path.is_file()
-        audit.check(f"artifact:{artifact_id}:exists", exists, True, exists)
-        if not exists:
+        private_path = artifacts_root / f"artifact-{index:02d}.apk"
+        try:
+            opening = source_seals.capture_repo_file(
+                entry.get("relativePath"), private_path
+            )
+            source_seals.register_file(
+                f"artifact:{artifact_id}:source-stable", opening
+            )
+            audit.check(f"artifact:{artifact_id}:exists", True, True, True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            audit.check(f"artifact:{artifact_id}:exists", False, True, str(exc))
+            audit.check(
+                f"artifact:{artifact_id}:snapshot",
+                False,
+                "one unlinked private inode for every artifact observation",
+                str(exc),
+            )
             continue
-        actual_sha = sha256_file(path)
-        actual_size = path.stat().st_size
+        reader_fds: tuple[int, ...] = ()
+        try:
+            reader_fds = open_unlinked_snapshot_readers(
+                private_path, 3, source_seals
+            )
+            for descriptor in reader_fds:
+                source_seals.track_descriptor(descriptor)
+            snapshot_digests = [
+                sha256_descriptor(descriptor) for descriptor in reader_fds
+            ]
+            snapshot_sizes = [os.fstat(descriptor).st_size for descriptor in reader_fds]
+            snapshot_valid = (
+                snapshot_digests == [opening.sha256] * 3
+                and snapshot_sizes == [opening.size] * 3
+            )
+            snapshot_actual: Any = {
+                "sourceSha256": opening.sha256,
+                "sourceSize": opening.size,
+                "readerSha256": snapshot_digests,
+                "readerSize": snapshot_sizes,
+                "linkedNames": 0,
+            }
+        except (OSError, RuntimeError, ValueError) as exc:
+            snapshot_valid = False
+            snapshot_actual = str(exc)
+        audit.check(
+            f"artifact:{artifact_id}:snapshot",
+            snapshot_valid,
+            "one unlinked private inode for every artifact observation",
+            snapshot_actual,
+        )
+        actual_sha = opening.sha256
+        actual_size = opening.size
+        sha_matches = actual_sha == expected_sha
+        size_matches = isinstance(expected_size, int) and actual_size == expected_size
         audit.check(
             f"artifact:{artifact_id}:sha256",
-            actual_sha == expected_sha,
+            sha_matches,
             expected_sha,
             actual_sha,
         )
         audit.check(
             f"artifact:{artifact_id}:size",
-            isinstance(expected_size, int) and actual_size == expected_size,
+            size_matches,
             expected_size,
             actual_size,
         )
@@ -1270,12 +2542,27 @@ def validate_artifacts(
             "versionName": None,
         }
         signer: str | None = None
-        if can_inspect and aapt is not None and apksigner is not None:
+        if (
+            snapshot_valid
+            and sha_matches
+            and size_matches
+            and len(reader_fds) == 3
+            and can_inspect
+            and aapt is not None
+            and apksigner is not None
+        ):
+            _, aapt_fd, apksigner_fd = reader_fds
             inspected = run_inspector(
                 audit,
                 aapt,
-                ["dump", "badging", str(path)],
+                ["dump", "badging", f"/dev/fd/{aapt_fd}"],
                 f"artifact:{artifact_id}:aapt",
+                pass_fds=(aapt_fd,),
+                evidence_args=[
+                    "dump",
+                    "badging",
+                    f"$ARTIFACT_SNAPSHOT:{artifact_id}",
+                ],
             )
             if inspected is not None:
                 lines = inspected.stdout.splitlines()
@@ -1303,8 +2590,14 @@ def validate_artifacts(
             inspected = run_inspector(
                 audit,
                 apksigner,
-                ["verify", "--print-certs", str(path)],
+                ["verify", "--print-certs", f"/dev/fd/{apksigner_fd}"],
                 f"artifact:{artifact_id}:apksigner",
+                pass_fds=(apksigner_fd,),
+                evidence_args=[
+                    "verify",
+                    "--print-certs",
+                    f"$ARTIFACT_SNAPSHOT:{artifact_id}",
+                ],
             )
             if inspected is not None:
                 match = re.search(
@@ -1326,6 +2619,24 @@ def validate_artifacts(
                     signer,
                 )
 
+        try:
+            private_stable = bool(reader_fds) and all(
+                sha256_descriptor(descriptor) == actual_sha
+                and os.fstat(descriptor).st_size == actual_size
+                and os.fstat(descriptor).st_nlink == 0
+                for descriptor in reader_fds
+            )
+        except OSError:
+            private_stable = False
+        audit.check(
+            f"artifact:{artifact_id}:snapshot-stable",
+            private_stable,
+            {"sha256": actual_sha, "sizeBytes": actual_size},
+            "unchanged" if private_stable else "drifted",
+        )
+        for descriptor in reader_fds:
+            source_seals.close_descriptor(descriptor)
+
         snapshots.append(
             {
                 "id": artifact_id,
@@ -1344,6 +2655,7 @@ def validate_inputs(
     repo: Path,
     entries: Any,
     policy: Policy,
+    source_seals: SourceSealRegistry,
 ) -> list[dict[str, Any]]:
     snapshots: list[dict[str, Any]] = []
     input_ids, unique = ids(entries)
@@ -1367,17 +2679,33 @@ def validate_inputs(
             expected_sha,
         )
         try:
-            path = safe_relative(repo, entry.get("relativePath"))
+            safe_relative(repo, entry.get("relativePath"))
         except ValueError as exc:
             audit.check(
                 f"input:{input_id}:path", False, "safe repo-relative file", str(exc)
             )
             continue
-        exists = path.is_file()
-        audit.check(f"input:{input_id}:exists", exists, True, exists)
-        if not exists:
-            continue
-        actual_sha = sha256_file(path)
+        try:
+            opening = source_seals.capture_repo_file(entry.get("relativePath"))
+            actual_sha = opening.sha256
+            source_seals.register_file(f"input:{input_id}:source-stable", opening)
+            audit.check(f"input:{input_id}:exists", True, True, True)
+            stable_read = True
+            stable_actual: Any = {
+                "sha256": actual_sha,
+                "sizeBytes": opening.size,
+            }
+        except (OSError, RuntimeError, ValueError) as exc:
+            audit.check(f"input:{input_id}:exists", False, True, str(exc))
+            stable_read = False
+            stable_actual = str(exc)
+            actual_sha = None
+        audit.check(
+            f"input:{input_id}:stable-read",
+            stable_read,
+            "one stable regular-file generation",
+            stable_actual,
+        )
         audit.check(
             f"input:{input_id}:sha256",
             actual_sha == expected_sha,
@@ -1494,18 +2822,46 @@ def run_audit(
         )
         return 2
 
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_directory = tempfile.TemporaryDirectory(
+            prefix=".github64-audit-snapshots-",
+            dir=report_path.parent,
+        )
+        snapshot_root = Path(snapshot_directory.name).resolve(strict=True)
+        os.chmod(snapshot_root, 0o700)
+    except OSError as exc:
+        print(
+            f"check-github64-device-readiness: cannot create private snapshot root: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
     audit = Audit()
     manifest: dict[str, Any] = {}
     manifest_sha: str | None = None
+    source_seals: SourceSealRegistry | None = None
     try:
-        raw = manifest_path.read_bytes()
+        source_seals = SourceSealRegistry(source_repo)
+        if is_within(manifest_path, source_repo):
+            manifest_opening = source_seals.capture_repo_file(
+                manifest_path.relative_to(source_repo).as_posix()
+            )
+        else:
+            manifest_opening = source_seals.capture_file_source(manifest_path)
+        source_seals.register_file("manifest:source-stable", manifest_opening)
+        if manifest_opening.descriptor is None:
+            raise OSError("manifest source descriptor was not retained")
+        raw = read_descriptor(manifest_opening.descriptor)
         manifest_sha = hashlib.sha256(raw).hexdigest()
+        if manifest_sha != manifest_opening.sha256:
+            raise OSError("manifest changed between capture and decode")
         decoded = json.loads(raw)
         if isinstance(decoded, dict):
             manifest = decoded
         else:
             audit.check("manifest:root", False, "object", type(decoded).__name__)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
         audit.check("manifest:read", False, "readable JSON", str(exc))
 
     frozen_manifest = audit.check(
@@ -1526,25 +2882,111 @@ def run_audit(
         PACKAGE_ID,
         manifest.get("packageId"),
     )
-    inspectors_ready, inspector_snapshots = validate_inspectors(audit, policy.inspectors)
-    inspector_map = {item.inspector_id: item for item in policy.inspectors}
-    source_snapshot = validate_source(
-        audit,
-        source_repo,
-        manifest.get("candidate"),
-        policy,
-        inspector_map.get("git"),
-        inspectors_ready and frozen_manifest,
+
+    inspector_snapshots: list[dict[str, Any]] = []
+    source_snapshot: dict[str, Any] = {}
+    artifact_snapshots: list[dict[str, Any]] = []
+    input_snapshots: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    authorizations: list[str] = []
+    cleanup_errors: list[str] = []
+    try:
+        if source_seals is None:
+            raise RuntimeError("manifest/source seal registry unavailable")
+        inspectors_ready, inspector_map, inspector_snapshots = prepare_inspectors(
+            audit,
+            policy.inspectors,
+            snapshot_root,
+            source_seals,
+        )
+        audit.check(
+            "manifest:trusted-path-selection",
+            frozen_manifest,
+            "only the exact frozen manifest may select input or artifact paths",
+            "trusted" if frozen_manifest else "path consumption skipped",
+        )
+        if frozen_manifest:
+            input_snapshots = validate_inputs(
+                audit,
+                source_repo,
+                manifest.get("inputs"),
+                policy,
+                source_seals,
+            )
+        source_snapshot = validate_source(
+            audit,
+            source_repo,
+            manifest.get("candidate"),
+            policy,
+            inspector_map.get("git"),
+            inspectors_ready and frozen_manifest,
+        )
+        if frozen_manifest:
+            artifact_snapshots = validate_artifacts(
+                audit,
+                source_repo,
+                manifest.get("artifacts"),
+                policy,
+                inspector_map,
+                inspectors_ready,
+                snapshot_root,
+                source_seals,
+            )
+        blockers, authorizations = validate_readiness(
+            audit, manifest.get("readiness"), policy
+        )
+        final_checkout_clean, final_checkout_details = validate_checkout_final_barrier(
+            audit,
+            source_repo,
+            policy,
+            inspector_map.get("git"),
+            inspectors_ready and frozen_manifest,
+            source_snapshot.get("checkoutHead") if source_snapshot else None,
+        )
+        if source_snapshot:
+            source_snapshot["checkoutStatus"] = (
+                "clean-at-final-barrier"
+                if final_checkout_clean
+                else final_checkout_details
+            )
+        source_seals.verify(audit)
+    except Exception as exc:
+        audit.check(
+            "audit:fail-closed-execution",
+            False,
+            "all snapshot and validation phases completed",
+            f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        if source_seals is not None:
+            for attempt in (1, 2):
+                try:
+                    source_seals.close()
+                    break
+                except OSError as exc:
+                    cleanup_errors.append(
+                        f"source descriptors close attempt {attempt}: {exc}"
+                    )
+        try:
+            snapshot_directory.cleanup()
+        except OSError as exc:
+            cleanup_errors.append(f"private snapshot root: {exc}")
+    audit.check(
+        "snapshot:cleanup",
+        not cleanup_errors,
+        (
+            "private snapshot root and all registered retained/source-copy "
+            "descriptors closed before report creation"
+        ),
+        cleanup_errors or "complete",
     )
-    artifact_snapshots = validate_artifacts(
-        audit,
-        source_repo,
-        manifest.get("artifacts"),
-        policy,
-        inspectors_ready and frozen_manifest,
+    executed_device_commands = audit.executed_device_commands
+    audit.check(
+        "device:direct-command-count",
+        executed_device_commands == 0,
+        0,
+        executed_device_commands,
     )
-    input_snapshots = validate_inputs(audit, source_repo, manifest.get("inputs"), policy)
-    blockers, authorizations = validate_readiness(audit, manifest.get("readiness"), policy)
 
     host_status = "PASS" if audit.passed else "FAIL"
     overall_status = "BLOCKED" if audit.passed else "INVALID"
@@ -1561,8 +3003,17 @@ def run_audit(
         "hostTools": inspector_snapshots,
         "hostStatus": host_status,
         "overallStatus": overall_status,
-        "deviceAccess": "NOT_ATTEMPTED",
-        "executedDeviceCommands": 0,
+        "deviceAccess": (
+            "NO_DIRECT_DEVICE_TRANSPORT_DISPATCHED"
+            if executed_device_commands == 0
+            else "DIRECT_DEVICE_TRANSPORT_DISPATCHED"
+        ),
+        "executedDeviceCommands": executed_device_commands,
+        "directCommandEvidence": {
+            "scope": "DIRECT_CHECKER_SUBPROCESS_DISPATCH_ONLY",
+            "childProcessTracing": False,
+            "commands": audit.commands,
+        },
         "blockers": blockers,
         "operatorAuthorizationRequired": authorizations,
         "findings": audit.findings,
@@ -1581,7 +3032,7 @@ def run_audit(
     print(f"hostStatus={host_status} overallStatus={overall_status}")
     print(f"report={report_path}")
     print(f"reportSha256={hashlib.sha256(encoded).hexdigest()}")
-    print("executedDeviceCommands=0")
+    print(f"executedDeviceCommands={executed_device_commands}")
     if not audit.passed:
         return 1
     if fail_on_blocked:

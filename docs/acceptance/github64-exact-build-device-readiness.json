@@ -42,9 +42,15 @@
       },
       "git": {
         "externalHelperPolicy": "REJECT_REPOSITORY_HELPERS_AND_WORKTREE_CONFIG_DISABLE_GLOBAL_SYSTEM_LAZY_FETCH_AND_REPLACE_OBJECTS",
-        "path": "/usr/bin/git",
-        "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
-        "version": "git version 2.50.1 (Apple Git-155)"
+        "path": "/Users/terry/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/git/bin/git",
+        "sha256": "ee73b116cc37f44ecdaa9e3fdfbc25ce827675859f5f966ec671112fd5caf074",
+        "supportTrees": [
+          {
+            "path": "/Users/terry/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/git",
+            "sha256": "a78b5118e8fd018ab1d7538109772cefa4098bb5afa54bd7fd10764486d08c1a"
+          }
+        ],
+        "version": "git version 2.53.0 (Codex primary runtime)"
       },
       "aapt": {
         "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/aapt",

@@ -44,7 +44,7 @@ be clean relative to its HEAD; modified/untracked preparation files are rejected
 | Product HEAD | `5002e0e005324c32ca3d36d10510180d1fafbf81` |
 | Product tree | `ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1` |
 | Base HEAD | `9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d` |
-| Frozen manifest SHA-256 | `ef873b5d107a7a5f1d692e467d04783c828eb0278579fd4d07207586d06ddc10` |
+| Frozen manifest SHA-256 | `3129b3d9e0a733753e35b85e72ec726e5855cfe9f4395ab49da0cbf734cae43f` |
 | Contract SHA-256 | `c64dd132418493ba5918d86e481382d29b3d351867f3e3d3569577abb3d6f543` |
 | 10-address fixture SHA-256 | `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852` |
 | Canonical device ledger | empty `[]`, SHA-256 `37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570` |
@@ -76,7 +76,8 @@ binary and pinned JAR directly, without the mutable `apksigner` shell launcher.
 |---|---|
 | CommandLineTools Python 3.9.6 `bin/python3` | `bdea59019a38eb6600cc9e71e984a97fedadc406448431281e7657030f54987e` |
 | CommandLineTools Python 3.9 runtime tree | `9554093f9f3037f2de48bb897245a9ff54796d1c0952c1fc631d98b1fe714508` |
-| Apple Git 2.50.1 `/usr/bin/git` | `b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9` |
+| Codex runtime Git 2.53.0 `bin/git` | `ee73b116cc37f44ecdaa9e3fdfbc25ce827675859f5f966ec671112fd5caf074` |
+| Codex runtime Git 2.53.0 home tree | `a78b5118e8fd018ab1d7538109772cefa4098bb5afa54bd7fd10764486d08c1a` |
 | build-tools 36.1.0 `aapt` | `b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe` |
 | build-tools 36.1.0 `lib64/libc++.dylib` | `66499e49a1c5a9c73d2d4958f5d9f4dccec56c5eb8bba7ac4e29297ea3cf3fed` |
 | build-tools 36.1.0 tree | `71cca8b37798d10aaea1f94e502a8952ef77a0644c0449d773f1b3758a00f128` |
@@ -131,6 +132,69 @@ untracked paths, executable-mode drift, generated roots and symlinked-root
 escape. The finish line is a host `PASS` only when all five invariants hold;
 artifact byte/signature checks remain separate, and device state remains
 `BLOCKED`.
+
+## Immutable inspection-input Stateful Object Gate
+
+The second state gate covers every path that is validated and later consumed.
+Its finish line is: a host `PASS` is possible only when each executed inspector
+and each reported APK field comes from one private, digest-verified snapshot,
+and every shared source path still matches its opening seal at the final audit
+barrier. This does not add an operating-system sandbox or device run.
+
+| State object | Lifecycle owner | Allowed transition | Fail-closed event |
+|---|---|---|---|
+| Python bootstrap | operating system process loader | absolute isolated interpreter starts, then its on-disk binary/runtime are recorded as bootstrap evidence; they are not reopened as a child inspector | bootstrap path/runtime digest is not frozen |
+| inspector source file/tree | snapshot manager | shared source → private run snapshot with contained symlinks → final shared-source seal | copy races, snapshot digest mismatch, escaping/broken symlink, source inode/metadata/digest drift, or unsupported entry |
+| prepared inspector | command dispatcher | execute only its private executable, remapped support paths/environment and frozen arguments | any pre-exec snapshot recheck fails; a command still names a shared frozen path |
+| APK source | artifact snapshot manager | one lexical no-symlink source descriptor → one private APK inode → unlink its pathname → verify frozen hash/size → independent aapt/apksigner descriptors → final source seal | frozen bytes/size mismatch, atomic replace, in-place change, snapshot mutation, or source identity/digest drift |
+| manifest/contract/schedule/ledger input | manifest loader / input validator | one nonblocking held-descriptor read plus final shared-source seal; only the exact manifest may select paths | malformed/non-regular input, untrusted path selection, or source identity/digest drift |
+| raw checkout | source validator | opening HEAD identity/raw scan → final HEAD-before/raw-scan/HEAD-after barrier bound to that identity | tracked/untracked drift or a same-tree HEAD switch appears in either scan |
+| command evidence | audit recorder | record each direct dispatch using stable private-role tokens, spawn/return/decode outcome, classification and derived count | an unclassified/device-transport command is denied before dispatch, or child output is not strict UTF-8 |
+| retained/private resources | audit cleanup owner | own each retained source/copy/reader descriptor immediately on open → close registered descriptors → remove private snapshot root → encode report | any early/late registered-descriptor close or private-root removal failure |
+
+The gate adds these invariants:
+
+- `INV-SNAPSHOT-1`: validation and execution never reopen a shared inspector
+  executable or dependency after trust is established;
+- `INV-SNAPSHOT-2`: APK hash, size, package/version and signer all describe the
+  same immutable snapshot bytes, and parsers run only after frozen hash/size
+  equality;
+- `INV-SNAPSHOT-3`: every manifest/inspector/APK/input shared source is
+  revalidated at the final audit barrier; any drift makes the report `INVALID`;
+- `INV-SNAPSHOT-4`: inspector paths in argv and relevant environment values are
+  remapped into the private snapshot closure;
+- `INV-SNAPSHOT-5`: `executedDeviceCommands` is derived from recorded direct
+  command dispatches, not emitted as an unconditional literal;
+- `INV-SNAPSHOT-6`: the raw checkout is rescanned after all manifest-driven
+  inspection and `HEAD` must equal its opening value before and after that scan,
+  so late tracked/untracked drift or a same-tree commit switch is invalid;
+- `INV-SNAPSHOT-7`: ownership of retained source descriptors, private-copy
+  descriptors and APK reader descriptors begins at open; their close failures
+  and private-root removal failures are evidence failures and cannot be hidden
+  before registration or by discarding a still-open descriptor from cleanup
+  state. Other transient I/O close failures propagate as audit failures but are
+  not claimed by the `snapshot:cleanup` finding.
+
+The adversarial matrix includes byte-different and byte-identical atomic APK
+replacement after snapshot creation, executable/tree/support-file replacement
+after the private tool closure is prepared, and late input/manifest replacement
+before the final barrier. It also covers a digest-invalid manifest selecting a
+FIFO, late checkout drift, malformed manifest/inspector UTF-8 and a retryable
+descriptor-close failure, including failure before capture returns. A
+same-tree late `HEAD` switch is rejected independently of the raw bytes. A real
+remapped support-file argument is consumed
+from the private closure while a shared-source replacement marker remains
+untouched, and a command whose executable is classified as device transport is
+recorded but denied before spawn. Ordinary stable execution of both frozen
+artifacts is covered separately.
+
+Threat boundary: the private directory and unpredictable names remove normal
+concurrent Gradle/agent writes from the validation/use path. This is not a
+claim against a hostile same-UID process that discovers and tampers with the
+private directory, nor is direct-command recording syscall tracing of child
+processes. The report therefore states that the checker directly dispatched
+zero device-transport commands and records that proof boundary; stronger
+absence claims require an OS sandbox or syscall trace outside this package.
 
 ## What can run now, without a device
 

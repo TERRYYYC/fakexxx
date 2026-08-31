@@ -62,6 +62,7 @@ MANIFEST="$WORK/manifest.json"
 mkdir -p "$FIXTURE/apps/cellrebel-auto/app/build/outputs/apk/debug"
 mkdir -p "$FIXTURE/apps/qianwangyou/app/build/outputs/apk/debug" "$TOOLS" "$RUNTIME_TREE"
 printf 'fixture runtime dependency\n' > "$RUNTIME_TREE/dependency.bin"
+printf 'FIXTURE_SUPPORT_VALUE=trusted\n' > "$TOOLS/apksigner-support"
 
 git -C "$FIXTURE" init -q
 git -C "$FIXTURE" config user.email fixture@example.invalid
@@ -83,6 +84,10 @@ git -C "$FIXTURE" add candidate.txt contract.yaml schedule.json ledger.json .git
 git -C "$FIXTURE" commit -qm candidate
 PRODUCT_HEAD="$(git -C "$FIXTURE" rev-parse HEAD)"
 PRODUCT_TREE="$(git -C "$FIXTURE" rev-parse 'HEAD^{tree}')"
+ALTERNATE_SAME_TREE_HEAD="$(
+    printf 'fixture same-tree alternate head\n' |
+        git -C "$FIXTURE" commit-tree "$PRODUCT_TREE" -p "$PRODUCT_HEAD"
+)"
 
 AUTO_APK="$FIXTURE/apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk"
 QWY_APK="$FIXTURE/apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk"
@@ -91,9 +96,13 @@ printf 'fixture-qwy-apk\n' > "$QWY_APK"
 
 cat > "$TOOLS/aapt" <<'SH'
 #!/usr/bin/env bash
-case "$3" in
-  *cellrebel-auto*) printf "package: name='com.example.cellrebelauto' versionCode='1' versionName='1.0'\n" ;;
-  *qianwangyou*) printf "package: name='name.caiyao.fakegps.bench' versionCode='8' versionName='3.0.0'\n" ;;
+if [ -n "${ATOMIC_REPLACE_SOURCE:-}" ] && [ -n "${ATOMIC_REPLACEMENT_PAYLOAD:-}" ]; then
+  mv "$ATOMIC_REPLACEMENT_PAYLOAD" "$ATOMIC_REPLACE_SOURCE"
+fi
+payload="$(cat "$3")"
+case "$payload" in
+  fixture-auto-apk*) printf "package: name='com.example.cellrebelauto' versionCode='1' versionName='1.0'\n" ;;
+  fixture-qwy-apk*) printf "package: name='name.caiyao.fakegps.bench' versionCode='8' versionName='3.0.0'\n" ;;
   *) exit 2 ;;
 esac
 SH
@@ -101,8 +110,16 @@ SH
 cat > "$TOOLS/apksigner" <<'SH'
 #!/usr/bin/env bash
 [ "$1" = "--fixture-prefix" ] || exit 3
-shift
+[ -f "$2" ] || exit 4
+. "$2"
+[ "${FIXTURE_SUPPORT_VALUE:-}" = trusted ] || exit 5
+shift 2
 printf 'Signer #1 certificate SHA-256 digest: %s\n' "${FIXTURE_SIGNER_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+SH
+
+cat > "$TOOLS/git" <<'SH'
+#!/bin/sh
+exec /usr/bin/git "$@"
 SH
 
 cat > "$TOOLS/adb" <<'SH'
@@ -110,7 +127,7 @@ cat > "$TOOLS/adb" <<'SH'
 : > "${ADB_TRIPWIRE:?}"
 exit 99
 SH
-chmod +x "$TOOLS/aapt" "$TOOLS/apksigner" "$TOOLS/adb"
+chmod +x "$TOOLS/aapt" "$TOOLS/apksigner" "$TOOLS/git" "$TOOLS/adb"
 
 AUTO_SHA="$(shasum -a 256 "$AUTO_APK" | awk '{print $1}')"
 QWY_SHA="$(shasum -a 256 "$QWY_APK" | awk '{print $1}')"
@@ -119,8 +136,11 @@ SCHEDULE_SHA="$(shasum -a 256 "$FIXTURE/schedule.json" | awk '{print $1}')"
 LEDGER_SHA="$(shasum -a 256 "$FIXTURE/ledger.json" | awk '{print $1}')"
 AAPT_TOOL_SHA="$(shasum -a 256 "$TOOLS/aapt" | awk '{print $1}')"
 APKSIGNER_TOOL_SHA="$(shasum -a 256 "$TOOLS/apksigner" | awk '{print $1}')"
+APKSIGNER_SUPPORT_SHA="$(shasum -a 256 "$TOOLS/apksigner-support" | awk '{print $1}')"
+GIT_TOOL_SHA="$(shasum -a 256 "$TOOLS/git" | awk '{print $1}')"
 RUNTIME_TREE_SHA="$(python3 - "$PROD" "$RUNTIME_TREE" <<'PY'
 import importlib.util
+import os
 from pathlib import Path
 import sys
 
@@ -236,8 +256,11 @@ run_checker() {
         "$MANIFEST_SHA" "$PRODUCT_HEAD" "$PRODUCT_TREE" "$BASE_HEAD" \
         "$aapt_path" "$AAPT_TOOL_SHA" "$apksigner_path" "$APKSIGNER_TOOL_SHA" \
         "$signer_output" "$WORK/adb-called" "$TOOLS" "$LEDGER_SHA" \
-        "$RUNTIME_TREE" "$RUNTIME_TREE_SHA" <<'PY' >/dev/null 2>&1
+        "$RUNTIME_TREE" "$RUNTIME_TREE_SHA" "$TOOLS/git" "$GIT_TOOL_SHA" \
+        "$TOOLS/apksigner-support" "$APKSIGNER_SUPPORT_SHA" \
+        <<'PY' >/dev/null 2>&1
 import importlib.util
+import os
 from pathlib import Path
 import sys
 
@@ -247,8 +270,85 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
+race_source = os.environ.get("ATOMIC_REPLACE_TOOL_SOURCE")
+race_payload = os.environ.get("ATOMIC_REPLACE_TOOL_PAYLOAD")
+tree_race_source = os.environ.get("ATOMIC_REPLACE_TREE_SOURCE")
+tree_race_payload = os.environ.get("ATOMIC_REPLACE_TREE_PAYLOAD")
+support_race_source = os.environ.get("ATOMIC_REPLACE_SUPPORT_SOURCE")
+support_race_payload = os.environ.get("ATOMIC_REPLACE_SUPPORT_PAYLOAD")
+if (
+    (race_source and race_payload)
+    or (tree_race_source and tree_race_payload)
+    or (support_race_source and support_race_payload)
+):
+    original_run = module.run
+    race_fired = [False]
+
+    def run_with_atomic_tool_replacement(command, **kwargs):
+        if not race_fired[0] and "dump" in command and "badging" in command:
+            if race_source and race_payload:
+                os.replace(race_payload, race_source)
+            if tree_race_source and tree_race_payload:
+                os.replace(tree_race_payload, tree_race_source)
+            if support_race_source and support_race_payload:
+                os.replace(support_race_payload, support_race_source)
+            race_fired[0] = True
+        return original_run(command, **kwargs)
+
+    module.run = run_with_atomic_tool_replacement
+
+input_race_source = os.environ.get("ATOMIC_REPLACE_INPUT_SOURCE")
+input_race_payload = os.environ.get("ATOMIC_REPLACE_INPUT_PAYLOAD")
+if input_race_source and input_race_payload:
+    original_validate_inputs = module.validate_inputs
+
+    def validate_inputs_with_atomic_replacement(*args, **kwargs):
+        result = original_validate_inputs(*args, **kwargs)
+        os.replace(input_race_payload, input_race_source)
+        return result
+
+    module.validate_inputs = validate_inputs_with_atomic_replacement
+
+manifest_race_source = os.environ.get("ATOMIC_REPLACE_MANIFEST_SOURCE")
+manifest_race_payload = os.environ.get("ATOMIC_REPLACE_MANIFEST_PAYLOAD")
+late_checkout_drift = os.environ.get("LATE_CHECKOUT_DRIFT_PATH")
+late_head_repo = os.environ.get("LATE_CHECKOUT_HEAD_REPO")
+late_head_value = os.environ.get("LATE_CHECKOUT_HEAD_VALUE")
+if (
+    (manifest_race_source and manifest_race_payload)
+    or late_checkout_drift
+    or (late_head_repo and late_head_value)
+):
+    original_validate_readiness = module.validate_readiness
+
+    def validate_readiness_with_atomic_replacement(*args, **kwargs):
+        result = original_validate_readiness(*args, **kwargs)
+        if manifest_race_source and manifest_race_payload:
+            os.replace(manifest_race_payload, manifest_race_source)
+        if late_checkout_drift:
+            Path(late_checkout_drift).write_text("late checkout drift\n", encoding="utf-8")
+        if late_head_repo and late_head_value:
+            git_dir = Path(late_head_repo) / ".git"
+            head_marker = git_dir / "HEAD"
+            head_payload = head_marker.read_text(encoding="utf-8").strip()
+            if head_payload.startswith("ref: "):
+                ref_path = git_dir / head_payload.removeprefix("ref: ")
+            else:
+                ref_path = head_marker
+            replacement = ref_path.with_name(f".{ref_path.name}.late-switch")
+            replacement.parent.mkdir(parents=True, exist_ok=True)
+            replacement.write_text(f"{late_head_value}\n", encoding="ascii")
+            os.replace(replacement, ref_path)
+        return result
+
+    module.validate_readiness = validate_readiness_with_atomic_replacement
+
 tools = Path(sys.argv[16])
 common_env = (("LANG", "C"), ("LC_ALL", "C"), ("PATH", f"{tools}:/usr/bin:/bin"))
+aapt_env = common_env + (("ADB_TRIPWIRE", sys.argv[15]),)
+for key in ("ATOMIC_REPLACE_SOURCE", "ATOMIC_REPLACEMENT_PAYLOAD"):
+    if os.environ.get(key):
+        aapt_env += ((key, os.environ[key]),)
 policy = module.Policy(
     manifest_sha256=sys.argv[6],
     candidate_head=sys.argv[7],
@@ -297,11 +397,11 @@ policy = module.Policy(
     inspectors=(
         module.InspectorPolicy(
             inspector_id="git",
-            version="git version 2.50.1 (Apple Git-155)",
+            version="fixture Git proxy",
             executable=module.FrozenFile(
                 role="executable",
-                path=Path("/usr/bin/git"),
-                sha256="b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+                path=Path(sys.argv[20]),
+                sha256=sys.argv[21],
                 executable=True,
             ),
             environment=(("LANG", "C"), ("LC_ALL", "C"), ("GIT_ATTR_NOSYSTEM", "1"),
@@ -322,7 +422,7 @@ policy = module.Policy(
                     role="fixture-runtime", path=Path(sys.argv[18]), sha256=sys.argv[19]
                 ),
             ),
-            environment=common_env + (("ADB_TRIPWIRE", sys.argv[15]),),
+            environment=aapt_env,
         ),
         module.InspectorPolicy(
             inspector_id="apksigner",
@@ -330,7 +430,14 @@ policy = module.Policy(
             executable=module.FrozenFile(
                 role="executable", path=Path(sys.argv[12]), sha256=sys.argv[13], executable=True
             ),
-            arguments_prefix=("--fixture-prefix",),
+            support_files=(
+                module.FrozenFile(
+                    role="fixture-apksigner-support",
+                    path=Path(sys.argv[22]),
+                    sha256=sys.argv[23],
+                ),
+            ),
+            arguments_prefix=("--fixture-prefix", sys.argv[22]),
             environment=common_env + (("FIXTURE_SIGNER_SHA", sys.argv[14]),),
         ),
     ),
@@ -368,11 +475,126 @@ else
     bad "P1 valid host package" "audit mode returned non-zero"
 fi
 
+MANIFEST_SOURCE_BACKUP="$WORK/manifest-source.backup"
+MANIFEST_REPLACEMENT="$WORK/manifest-byte-identical-replacement.json"
+cp -p "$MANIFEST" "$MANIFEST_SOURCE_BACKUP"
+cp -p "$MANIFEST" "$MANIFEST_REPLACEMENT"
+if ATOMIC_REPLACE_MANIFEST_SOURCE="$MANIFEST" \
+   ATOMIC_REPLACE_MANIFEST_PAYLOAD="$MANIFEST_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/manifest-race-report.json" audit; then
+    bad "N0 late manifest atomic-replace race" \
+        "byte-identical new inode bypassed the final manifest seal"
+else
+    grep -q 'manifest:source-stable' "$WORK/manifest-race-report.json" &&
+        ok "N0 final barrier rejects byte-identical late manifest replacement" ||
+        bad "N0 late manifest atomic-replace race" \
+            "manifest source-stable finding is missing"
+fi
+cp -p "$MANIFEST_SOURCE_BACKUP" "$MANIFEST"
+
+MALFORMED_UTF8_MANIFEST="$WORK/malformed-utf8-manifest.json"
+printf '\377not-json\n' > "$MALFORMED_UTF8_MANIFEST"
+if run_checker "$MALFORMED_UTF8_MANIFEST" \
+    "$WORK/malformed-utf8-report.json" audit; then
+    bad "N0b malformed UTF-8 manifest" "invalid manifest returned zero"
+elif [ -f "$WORK/malformed-utf8-report.json" ] &&
+     [ -f "$WORK/malformed-utf8-report.json.sha256" ] &&
+     grep -q 'manifest:read' "$WORK/malformed-utf8-report.json" &&
+     (cd "$WORK" && shasum -a 256 -c malformed-utf8-report.json.sha256 >/dev/null 2>&1) &&
+     [ -z "$(find "$WORK" -maxdepth 1 -type d \
+         -name '.github64-audit-snapshots-*' -print -quit)" ]; then
+    ok "N0b malformed UTF-8 emits sealed INVALID evidence and cleans snapshots"
+else
+    bad "N0b malformed UTF-8 manifest" \
+        "sealed INVALID report, manifest finding, or cleanup proof is missing"
+fi
+
+LATE_CHECKOUT_DRIFT="$FIXTURE/late-untracked.txt"
+if LATE_CHECKOUT_DRIFT_PATH="$LATE_CHECKOUT_DRIFT" \
+   run_checker "$MANIFEST" "$WORK/late-checkout-report.json" audit; then
+    bad "N0c late checkout drift" "post-inspection untracked file produced host PASS"
+elif grep -q 'source:checkout-final-barrier' "$WORK/late-checkout-report.json" &&
+     [ "$(json_value "$WORK/late-checkout-report.json" source.checkoutStatus)" != \
+       clean-at-final-barrier ]; then
+    ok "N0c final checkout barrier rejects late source drift"
+else
+    bad "N0c late checkout drift" "final-barrier finding or status is missing"
+fi
+rm -f "$LATE_CHECKOUT_DRIFT"
+
+if LATE_CHECKOUT_HEAD_REPO="$FIXTURE" \
+   LATE_CHECKOUT_HEAD_VALUE="$ALTERNATE_SAME_TREE_HEAD" \
+   run_checker "$MANIFEST" "$WORK/late-head-switch-report.json" audit; then
+    bad "N0e late same-tree HEAD switch" \
+        "different checkout identity with identical tree produced host PASS"
+elif grep -q 'source:checkout-final-barrier' \
+        "$WORK/late-head-switch-report.json" &&
+     python3 - "$WORK/late-head-switch-report.json" \
+        "$PRODUCT_HEAD" "$ALTERNATE_SAME_TREE_HEAD" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+finding = next(
+    item for item in report["findings"]
+    if item["id"] == "source:checkout-final-barrier"
+)
+assert finding["status"] == "FAIL"
+assert finding["actual"]["expectedCheckoutHead"] == sys.argv[2]
+assert finding["actual"]["headBefore"] == sys.argv[3]
+assert finding["actual"]["headAfter"] == sys.argv[3]
+PY
+then
+    ok "N0e final checkout barrier remains bound to opening HEAD identity"
+else
+    bad "N0e late same-tree HEAD switch" \
+        "expected/opening/final HEAD evidence is missing"
+fi
+git -C "$FIXTURE" update-ref HEAD "$PRODUCT_HEAD"
+
+FIFO_PATH="$FIXTURE/apps/cellrebel-auto/app/build/manifest-selected.pipe"
+FIFO_MANIFEST="$WORK/fifo-selected-manifest.json"
+mkfifo "$FIFO_PATH"
+python3 - "$MANIFEST" "$FIFO_MANIFEST" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+d["artifacts"][0]["relativePath"] = (
+    "apps/cellrebel-auto/app/build/manifest-selected.pipe"
+)
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+FIFO_RC_FILE="$WORK/fifo-selected.rc"
+(
+    run_checker "$FIFO_MANIFEST" "$WORK/fifo-selected-report.json" audit
+    printf '%s\n' "$?" > "$FIFO_RC_FILE"
+) &
+FIFO_PID=$!
+FIFO_FINISHED=false
+for _ in {1..50}; do
+    if ! kill -0 "$FIFO_PID" 2>/dev/null; then
+        FIFO_FINISHED=true
+        break
+    fi
+    sleep 0.1
+done
+if [ "$FIFO_FINISHED" = false ]; then
+    kill "$FIFO_PID" 2>/dev/null || true
+fi
+wait "$FIFO_PID" 2>/dev/null || true
+if [ "$FIFO_FINISHED" = true ] && [ -f "$FIFO_RC_FILE" ] &&
+   [ "$(cat "$FIFO_RC_FILE")" = 1 ] &&
+   grep -q 'manifest:trusted-path-selection' "$WORK/fifo-selected-report.json" &&
+   ! grep -q 'artifact:auto:exists' "$WORK/fifo-selected-report.json"; then
+    ok "N0d untrusted manifest path selection is skipped without FIFO blocking"
+else
+    bad "N0d untrusted manifest FIFO path" \
+        "checker blocked or consumed a path from a digest-invalid manifest"
+fi
+rm -f "$FIFO_PATH"
+
 if python3 - "$REPO_ROOT/docs/acceptance/github64-exact-build-device-readiness.json" <<'PY'
 import json, sys
 import hashlib
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "ef873b5d107a7a5f1d692e467d04783c828eb0278579fd4d07207586d06ddc10"
+assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "3129b3d9e0a733753e35b85e72ec726e5855cfe9f4395ab49da0cbf734cae43f"
 assert d["candidate"] == {
     "allowedGeneratedRoots": [
         "acceptance/.gradle",
@@ -433,6 +655,10 @@ assert git_env["GIT_CONFIG_SYSTEM"] == "/dev/null"
 assert git_env["GIT_NO_LAZY_FETCH"] == "1"
 assert git_env["GIT_NO_REPLACE_OBJECTS"] == "1"
 assert git_env["GIT_PAGER"] == ""
+assert inspectors["git"].executable.path == Path(
+    "/Users/terry/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/git/bin/git"
+)
+assert git_env["GIT_EXEC_PATH"].endswith("/native/git/libexec/git-core")
 assert inspectors["apksigner"].executable.path == Path(
     "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin/java"
 )
@@ -455,11 +681,12 @@ trees = {
     for inspector in inspectors.values()
     for tree in inspector.support_trees
 }
-assert set(trees) == {"python-runtime", "build-tools-home", "java-home"}
+assert set(trees) == {"python-runtime", "git-home", "build-tools-home", "java-home"}
 assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in trees.values())
 assert manifest_policy["pythonBootstrap"]["runtimeTree"]["sha256"] == trees[
     "python-runtime"
 ]
+assert manifest_policy["git"]["supportTrees"][0]["sha256"] == trees["git-home"]
 assert manifest_policy["aapt"]["supportTrees"][0]["sha256"] == trees[
     "build-tools-home"
 ]
@@ -471,6 +698,36 @@ then
     ok "P1c production bootstrap, Git isolation and runtime closures are structurally pinned"
 else
     bad "P1c production trust-boundary structure" "bootstrap, Git or runtime pin drifted"
+fi
+
+if python3 - "$REPORT" <<'PY'
+import json, sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+evidence = report["directCommandEvidence"]
+commands = evidence["commands"]
+assert evidence["scope"] == "DIRECT_CHECKER_SUBPROCESS_DISPATCH_ONLY"
+assert evidence["childProcessTracing"] is False
+assert commands
+assert report["executedDeviceCommands"] == sum(
+    1 for command in commands if command["spawned"] and command["deviceTransport"]
+)
+assert all(command["executionSource"] == "PRIVATE_VERIFIED_SNAPSHOT" for command in commands)
+assert all(command["spawned"] and command["outputUtf8"] is True for command in commands)
+assert all(tool["snapshotStatus"] == "PASS" for tool in report["hostTools"])
+apksigner_commands = [command for command in commands if command["inspectorId"] == "apksigner"]
+assert apksigner_commands
+assert all(
+    command["arguments"][:2]
+    == ["--fixture-prefix", "$TOOL_SNAPSHOT:fixture-apksigner-support"]
+    for command in apksigner_commands
+)
+assert ".github64-audit-snapshots-" not in json.dumps(report)
+PY
+then
+    ok "P1d command count is derived and private snapshot paths are not persisted"
+else
+    bad "P1d command/snapshot evidence" "report overclaims or leaks an ephemeral path"
 fi
 
 if run_checker "$MANIFEST" "$WORK/required.json" fail-on-blocked; then
@@ -486,11 +743,51 @@ if run_checker "$MANIFEST" "$WORK/drift.json" audit; then
     bad "N1 artifact byte drift" "mutated APK was accepted"
 else
     if [ "$(json_value "$WORK/drift.json" hostStatus)" = FAIL ] &&
-       grep -q 'artifact:auto:sha256' "$WORK/drift.json"; then
-        ok "N1 artifact byte drift is rejected with the exact finding"
+       grep -q 'artifact:auto:sha256' "$WORK/drift.json" &&
+       python3 - "$WORK/drift.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+commands = report["directCommandEvidence"]["commands"]
+assert not any(
+    "$ARTIFACT_SNAPSHOT:auto" in command["arguments"] for command in commands
+)
+assert any(
+    "$ARTIFACT_SNAPSHOT:qwy" in command["arguments"] for command in commands
+)
+PY
+    then
+        ok "N1 artifact byte drift is rejected before its parsers dispatch"
     else
         bad "N1 artifact byte drift" "wrong or missing finding"
     fi
+fi
+printf 'fixture-auto-apk\n' > "$AUTO_APK"
+
+ATOMIC_REPLACEMENT="$WORK/atomic-auto-replacement.apk"
+printf 'fixture-auto-apkX' > "$ATOMIC_REPLACEMENT"
+if ATOMIC_REPLACE_SOURCE="$AUTO_APK" \
+   ATOMIC_REPLACEMENT_PAYLOAD="$ATOMIC_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/atomic-replace-report.json" audit; then
+    bad "N1b artifact atomic-replace race" \
+        "old hash plus metadata from replacement APK produced host PASS"
+else
+    grep -q 'artifact:auto:source-stable' "$WORK/atomic-replace-report.json" &&
+        ok "N1b atomic replacement invalidates the artifact source seal" ||
+        bad "N1b artifact atomic-replace race" "specific source-stable finding missing"
+fi
+printf 'fixture-auto-apk\n' > "$AUTO_APK"
+
+IDENTICAL_REPLACEMENT="$WORK/identical-auto-replacement.apk"
+cp -p "$AUTO_APK" "$IDENTICAL_REPLACEMENT"
+if ATOMIC_REPLACE_SOURCE="$AUTO_APK" \
+   ATOMIC_REPLACEMENT_PAYLOAD="$IDENTICAL_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/identical-replace-report.json" audit; then
+    bad "N1c byte-identical artifact replacement" \
+        "new inode with identical bytes bypassed the source identity seal"
+else
+    grep -q 'artifact:auto:source-stable' "$WORK/identical-replace-report.json" &&
+        ok "N1c byte-identical replacement invalidates the held source identity" ||
+        bad "N1c byte-identical artifact replacement" "identity finding missing"
 fi
 printf 'fixture-auto-apk\n' > "$AUTO_APK"
 
@@ -619,6 +916,19 @@ else
         bad "N5c canonical ledger bytes" "specific input digest finding missing"
 fi
 git -C "$FIXTURE" checkout -q -- ledger.json
+
+INPUT_REPLACEMENT="$WORK/contract-atomic-replacement.yaml"
+printf 'fixture-contract-replaced\n' > "$INPUT_REPLACEMENT"
+if ATOMIC_REPLACE_INPUT_SOURCE="$FIXTURE/contract.yaml" \
+   ATOMIC_REPLACE_INPUT_PAYLOAD="$INPUT_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/input-atomic-replace-report.json" audit; then
+    bad "N5d input atomic-replace race" "post-validation input drift produced host PASS"
+else
+    grep -q 'input:contract:source-stable' "$WORK/input-atomic-replace-report.json" &&
+        ok "N5d final barrier rejects input replacement after stable read" ||
+        bad "N5d input atomic-replace race" "specific source-stable finding missing"
+fi
+git -C "$FIXTURE" checkout -q -- contract.yaml
 
 IN_REPO_REPORT="$FIXTURE/new-report.json"
 if run_checker "$MANIFEST" "$IN_REPO_REPORT" audit; then
@@ -785,6 +1095,278 @@ else
         bad "N7a frozen runtime tree" "inspector ran or tree finding is missing"
 fi
 printf 'fixture runtime dependency\n' > "$RUNTIME_TREE/dependency.bin"
+
+TOOL_EXEC_TRIPWIRE="$WORK/atomic-tool-wrapper-called"
+TOOL_SOURCE_BACKUP="$WORK/aapt-source.backup"
+TOOL_REPLACEMENT="$WORK/aapt-atomic-replacement"
+cp -p "$TOOLS/aapt" "$TOOL_SOURCE_BACKUP"
+cat > "$TOOL_REPLACEMENT" <<SH
+#!/usr/bin/env bash
+: > "$TOOL_EXEC_TRIPWIRE"
+cp -p "$TOOL_SOURCE_BACKUP" "$WORK/aapt-restored"
+mv "$WORK/aapt-restored" "$TOOLS/aapt"
+payload="\$(cat "\$3")"
+case "\$payload" in
+  fixture-auto-apk*) printf "package: name='com.example.cellrebelauto' versionCode='1' versionName='1.0'\\n" ;;
+  fixture-qwy-apk*) printf "package: name='name.caiyao.fakegps.bench' versionCode='8' versionName='3.0.0'\\n" ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$TOOL_REPLACEMENT"
+if ATOMIC_REPLACE_TOOL_SOURCE="$TOOLS/aapt" \
+   ATOMIC_REPLACE_TOOL_PAYLOAD="$TOOL_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/atomic-tool-report.json" audit; then
+    TOOL_RACE_RC=0
+else
+    TOOL_RACE_RC=$?
+fi
+if [ "$TOOL_RACE_RC" -eq 0 ] && [ -e "$TOOL_EXEC_TRIPWIRE" ] &&
+   [ "$(json_value "$WORK/atomic-tool-report.json" executedDeviceCommands)" = 0 ]; then
+    bad "N7a2 inspector atomic-replace race" \
+        "replacement wrapper executed while report claimed zero device commands"
+elif [ "$TOOL_RACE_RC" -ne 0 ] && [ ! -e "$TOOL_EXEC_TRIPWIRE" ] &&
+     grep -q 'tool:aapt:source-stable' "$WORK/atomic-tool-report.json"; then
+    ok "N7a2 inspector executes its trusted snapshot and rejects source drift"
+else
+    bad "N7a2 inspector atomic-replace race" \
+        "expected fail-closed source drift with replacement wrapper untouched"
+fi
+cp -p "$TOOL_SOURCE_BACKUP" "$TOOLS/aapt"
+
+TREE_REPLACEMENT="$WORK/runtime-dependency-atomic-replacement"
+cp -p "$RUNTIME_TREE/dependency.bin" "$TREE_REPLACEMENT"
+if ATOMIC_REPLACE_TREE_SOURCE="$RUNTIME_TREE/dependency.bin" \
+   ATOMIC_REPLACE_TREE_PAYLOAD="$TREE_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/atomic-tree-report.json" audit; then
+    bad "N7a3 support-tree atomic-replace race" \
+        "byte-identical new inode bypassed the final tool-tree seal"
+else
+    grep -q 'tool:aapt:source-stable' "$WORK/atomic-tree-report.json" &&
+        ok "N7a3 private tool closure runs while final tree identity drift fails closed" ||
+        bad "N7a3 support-tree atomic-replace race" "source-stable finding missing"
+fi
+printf 'fixture runtime dependency\n' > "$RUNTIME_TREE/dependency.bin"
+
+SUPPORT_EXEC_TRIPWIRE="$WORK/atomic-support-file-called"
+SUPPORT_SOURCE_BACKUP="$WORK/apksigner-support.backup"
+SUPPORT_REPLACEMENT="$WORK/apksigner-support-atomic-replacement"
+cp -p "$TOOLS/apksigner-support" "$SUPPORT_SOURCE_BACKUP"
+cat > "$SUPPORT_REPLACEMENT" <<SH
+: > "$SUPPORT_EXEC_TRIPWIRE"
+FIXTURE_SUPPORT_VALUE=trusted
+SH
+if ATOMIC_REPLACE_SUPPORT_SOURCE="$TOOLS/apksigner-support" \
+   ATOMIC_REPLACE_SUPPORT_PAYLOAD="$SUPPORT_REPLACEMENT" \
+   run_checker "$MANIFEST" "$WORK/atomic-support-report.json" audit; then
+    bad "N7a4 support-file atomic-replace race" \
+        "shared replacement bypassed the final support-file seal"
+elif [ ! -e "$SUPPORT_EXEC_TRIPWIRE" ] &&
+     grep -q 'tool:apksigner:source-stable' "$WORK/atomic-support-report.json" &&
+     python3 - "$WORK/atomic-support-report.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+commands = [
+    command for command in report["directCommandEvidence"]["commands"]
+    if command["inspectorId"] == "apksigner"
+]
+assert commands
+assert all(command["spawned"] and command["returnCode"] == 0 for command in commands)
+assert all(
+    command["arguments"][:2]
+    == ["--fixture-prefix", "$TOOL_SNAPSHOT:fixture-apksigner-support"]
+    for command in commands
+)
+PY
+then
+    ok "N7a4 private support file is consumed while shared source drift fails closed"
+else
+    bad "N7a4 support-file atomic-replace race" \
+        "replacement ran, private dependency failed, or source-stable finding is missing"
+fi
+cp -p "$SUPPORT_SOURCE_BACKUP" "$TOOLS/apksigner-support"
+
+TRANSPORT_FIXTURE="$WORK/transport-fixture"
+TRANSPORT_TRIPWIRE="$WORK/transport-fixture-called"
+mkdir -p "$TRANSPORT_FIXTURE"
+cat > "$TRANSPORT_FIXTURE/adb" <<SH
+#!/bin/sh
+: > "$TRANSPORT_TRIPWIRE"
+SH
+chmod +x "$TRANSPORT_FIXTURE/adb"
+if python3 - "$PROD" "$TRANSPORT_FIXTURE/adb" "$TRANSPORT_TRIPWIRE" <<'PY'
+import hashlib
+import importlib.util
+from pathlib import Path
+import sys
+
+checker = Path(sys.argv[1])
+executable = Path(sys.argv[2])
+tripwire = Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("github64_transport_deny", checker)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+policy = module.InspectorPolicy(
+    inspector_id="aapt",
+    version="transport-deny-fixture",
+    executable=module.FrozenFile(
+        role="executable", path=executable, sha256=digest, executable=True
+    ),
+)
+prepared = module.PreparedInspector(
+    policy=policy,
+    executable_path=executable,
+    support_files=(),
+    support_trees=(),
+    arguments_prefix=(),
+    environment=(("PATH", "/usr/bin:/bin"),),
+)
+audit = module.Audit()
+assert module.run_inspector(audit, prepared, [], "fixture:transport-deny") is None
+assert not tripwire.exists()
+assert len(audit.commands) == 1
+assert audit.commands[0]["classification"] == "DEVICE_TRANSPORT"
+assert audit.commands[0]["spawned"] is False
+assert audit.executed_device_commands == 0
+assert audit.findings[-1]["status"] == "FAIL"
+PY
+then
+    ok "N7a5 device-transport classification denies dispatch before side effects"
+else
+    bad "N7a5 device-transport pre-dispatch deny" \
+        "transport-classified fixture ran or was not recorded as denied"
+fi
+
+UTF8_AAPT_BACKUP="$WORK/aapt-before-invalid-utf8"
+UTF8_AAPT_SHA="$AAPT_TOOL_SHA"
+cp -p "$TOOLS/aapt" "$UTF8_AAPT_BACKUP"
+cat > "$TOOLS/aapt" <<'SH'
+#!/bin/sh
+printf '\377'
+exit 0
+SH
+chmod +x "$TOOLS/aapt"
+AAPT_TOOL_SHA="$(shasum -a 256 "$TOOLS/aapt" | awk '{print $1}')"
+if run_checker "$MANIFEST" "$WORK/invalid-inspector-utf8.json" audit; then
+    bad "N7a6 invalid inspector UTF-8" "undecodable output produced host PASS"
+elif grep -q 'artifact:auto:aapt:output-encoding' \
+        "$WORK/invalid-inspector-utf8.json" &&
+     python3 - "$WORK/invalid-inspector-utf8.json" <<'PY'
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+commands = [
+    command for command in report["directCommandEvidence"]["commands"]
+    if command["inspectorId"] == "aapt"
+]
+assert commands
+assert all(command["spawned"] for command in commands)
+assert all(command["returnCode"] == 0 for command in commands)
+assert all(command["outputUtf8"] is False for command in commands)
+PY
+then
+    ok "N7a6 post-spawn decode failure remains truthfully recorded"
+else
+    bad "N7a6 invalid inspector UTF-8" \
+        "spawn/outcome evidence or encoding finding is missing"
+fi
+cp -p "$UTF8_AAPT_BACKUP" "$TOOLS/aapt"
+AAPT_TOOL_SHA="$UTF8_AAPT_SHA"
+
+if python3 - "$PROD" "$FIXTURE" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+checker = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("github64_cleanup_retry", checker)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+registry = module.SourceSealRegistry(repo)
+tracked = os.open(repo / "base.txt", os.O_RDONLY)
+registry.track_descriptor(tracked)
+original_close = module.os.close
+failed_once = False
+
+def close_with_one_failure(descriptor):
+    global failed_once
+    if descriptor == tracked and not failed_once:
+        failed_once = True
+        raise OSError("fixture close failure")
+    return original_close(descriptor)
+
+module.os.close = close_with_one_failure
+try:
+    try:
+        registry.close()
+    except OSError as exc:
+        assert "fixture close failure" in str(exc)
+    else:
+        raise AssertionError("close failure was swallowed")
+finally:
+    module.os.close = original_close
+assert tracked in registry._held_descriptors
+assert not registry._closed
+assert registry._repo_descriptor_closed
+registry.close()
+assert registry._closed
+assert not registry._held_descriptors
+PY
+then
+    ok "N7a7 descriptor cleanup failures propagate and remain retryable"
+else
+    bad "N7a7 descriptor cleanup evidence" \
+        "close failure was swallowed or failed descriptor was discarded"
+fi
+
+if python3 - "$PROD" "$FIXTURE" "$WORK/pre-registration-copy" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+checker = Path(sys.argv[1])
+repo = Path(sys.argv[2])
+destination = Path(sys.argv[3])
+spec = importlib.util.spec_from_file_location("github64_early_fd_owner", checker)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+registry = module.SourceSealRegistry(repo)
+original_close = module.os.close
+failed_descriptor = [None]
+
+def close_with_persistent_first_failure(descriptor):
+    if failed_descriptor[0] is None:
+        failed_descriptor[0] = descriptor
+    if descriptor == failed_descriptor[0]:
+        raise OSError("fixture pre-registration close failure")
+    return original_close(descriptor)
+
+module.os.close = close_with_persistent_first_failure
+try:
+    try:
+        registry.capture_file_source(repo / "base.txt", destination)
+    except OSError as exc:
+        assert "pre-registration close failure" in str(exc)
+    else:
+        raise AssertionError("pre-registration close failure was swallowed")
+finally:
+    module.os.close = original_close
+assert failed_descriptor[0] in registry._held_descriptors
+assert not registry._closed
+registry.close()
+assert registry._closed
+assert not registry._held_descriptors
+PY
+then
+    ok "N7a8 newly opened descriptors have cleanup ownership before capture"
+else
+    bad "N7a8 pre-registration descriptor ownership" \
+        "early close failure leaked outside retryable cleanup state"
+fi
 
 FSMONITOR_HELPER="$WORK/fsmonitor-tripwire.sh"
 FSMONITOR_TRIPWIRE="$WORK/fsmonitor-called"
