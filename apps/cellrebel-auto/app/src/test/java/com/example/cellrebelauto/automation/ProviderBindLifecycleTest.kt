@@ -6,7 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor
-import com.example.cellrebelauto.recovery.ProviderPackageTarget
+import com.example.cellrebelauto.automation.ProviderPrincipal
 import com.example.cellrebelauto.recovery.testApplyIntent
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import org.junit.Assert.assertEquals
@@ -64,11 +64,11 @@ class ProviderBindLifecycleTest {
     fun `provider build pairing selects bench for debug and production for release`() {
         assertEquals(
             ContractV1.PROVIDER_APPLICATION_ID_BENCH,
-            ProviderPackageTarget.forDebugBuild(true),
+            ProviderPrincipal.resolve(isDebugBuild = true),
         )
         assertEquals(
             ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
-            ProviderPackageTarget.forDebugBuild(false),
+            ProviderPrincipal.resolve(isDebugBuild = false),
         )
     }
 
