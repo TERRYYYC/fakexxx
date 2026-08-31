@@ -16,6 +16,18 @@ import java.io.File
 class AuthoritativeOracleProductionGuardTest {
 
     @Test
+    fun `producer and consumer require the exact same coverage mask`() {
+        assertEquals(
+            Android15OracleHookPlan.REQUIRED_COVERAGE_MASK,
+            AuthoritativeCoverageMask.REQUIRED_V1,
+        )
+        assertTrue(
+            AuthoritativeCoverageMask.REQUIRED_V1 and
+                Android15OracleHookPlan.COVERAGE_LOCATION_SEMANTIC_COORDINATE != 0L,
+        )
+    }
+
+    @Test
     fun `empty production fingerprint allowlist keeps every real build unattested`() {
         assertTrue(Android15OracleHookPlan.ATTESTED_FINGERPRINTS.isEmpty())
 
@@ -67,8 +79,13 @@ class AuthoritativeOracleProductionGuardTest {
             ),
         )
         assertTrue(providerRuntimeSource.contains("installSemanticWriters = true"))
-        assertTrue(providerRuntimeSource.contains("QwySemanticWriterRuntime.install("))
-        assertTrue(providerRuntimeSource.contains("tracker.isAuthoritativeCursorAcknowledged"))
+        assertTrue(providerRuntimeSource.contains("RetryingQwySemanticWriterReadiness"))
+        assertTrue(providerRuntimeSource.contains("installWithExclusivePreparation"))
+        assertTrue(
+            "FULL must be gated by a currently installed and healthy central writer lane",
+            readProductionSource("EnvironmentObserver.kt")
+                .contains("semanticWriterReadiness.ensureReadyFor"),
+        )
     }
 
     @Test

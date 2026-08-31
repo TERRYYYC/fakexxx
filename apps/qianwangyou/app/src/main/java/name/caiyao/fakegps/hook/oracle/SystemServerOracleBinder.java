@@ -15,9 +15,11 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import name.caiyao.fakegps.oracle.IAuthoritativeContinuityOracle;
@@ -35,6 +37,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     static final String KERNEL_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 
     private final Object lock = new Object();
+    private final Object endpointRefreshLock = new Object();
     private final String bootId;
     private final String oracleInstanceId = UUID.randomUUID().toString();
     private final String buildFingerprint;
@@ -51,14 +54,21 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     private String aggregateQwyMutationId;
     private String aggregateAfterDigest;
     private final Map<Long, Mutation> activeMutations = new HashMap<>();
+    /** Finite timeout tombstones; the finisher is permanently retired after their creation. */
+    private final Set<Long> discardedCoveredMutationTokens = new HashSet<>();
 
     private long installedCoverageMask;
     private boolean callbackPoisoned;
     private boolean invariantFailure;
     private boolean bridgeConnected;
+    private boolean bridgeConnectionInProgress;
+    private long bridgeConnectionGeneration = Long.MIN_VALUE;
+    private long retiredBridgeConnectionGeneration = Long.MIN_VALUE;
     private boolean qwySessionActive;
     private boolean qwySessionUncertain;
+    private boolean qwyGenerationLossAccounted = true;
     private Integer expectedQwyUid;
+    private Integer expectedQwyPid;
     private String expectedQwyPackage;
     private IBinder qwySessionToken;
     private IBinder.DeathRecipient qwySessionDeathRecipient;
@@ -74,13 +84,36 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     private static final class Mutation {
         final String mutationId;
         final String beforeDigest;
-        final IBinder clientDeathToken;
-        IBinder.DeathRecipient deathRecipient;
+        final boolean attributedToQwy;
 
-        Mutation(String mutationId, String beforeDigest, IBinder clientDeathToken) {
+        Mutation(String mutationId, String beforeDigest, boolean attributedToQwy) {
             this.mutationId = mutationId;
             this.beforeDigest = beforeDigest;
-            this.clientDeathToken = clientDeathToken;
+            this.attributedToQwy = attributedToQwy;
+        }
+    }
+
+    private static final class EndpointSample {
+        final Integer ownerUid;
+        final String ownerPackage;
+        final boolean gpsProviderEnabled;
+        final boolean networkProviderEnabled;
+        final boolean valid;
+        final Throwable failure;
+
+        EndpointSample(
+                Integer ownerUid,
+                String ownerPackage,
+                boolean gpsProviderEnabled,
+                boolean networkProviderEnabled,
+                boolean valid,
+                Throwable failure) {
+            this.ownerUid = ownerUid;
+            this.ownerPackage = ownerPackage;
+            this.gpsProviderEnabled = gpsProviderEnabled;
+            this.networkProviderEnabled = networkProviderEnabled;
+            this.valid = valid;
+            this.failure = failure;
         }
     }
 
@@ -134,35 +167,67 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     public void registerQwySession(String semanticDigest, IBinder clientDeathToken)
             throws RemoteException {
         enforceQwyCaller();
+        final int registeringPid = Binder.getCallingPid();
         if (semanticDigest == null || semanticDigest.trim().isEmpty()) {
             throw new IllegalArgumentException("QWY semantic digest is required");
         }
         if (clientDeathToken == null) {
             throw new IllegalArgumentException("QWY session death token is required");
         }
+        try {
+            // Retire every covered completion that was already enqueued by an old QWY call.
+            // The exact in-lock gate below rejects a callback that began but has not enqueued yet.
+            SystemServerOracleInstaller.awaitCoveredMutationFinisherBarrier();
+        } catch (RuntimeException barrierFailure) {
+            poisonCallback(barrierFailure);
+            throw barrierFailure;
+        }
         final SessionDeath candidate = new SessionDeath(clientDeathToken);
         IBinder.DeathRecipient recipient = candidate::binderDied;
         candidate.recipient = recipient;
         clientDeathToken.linkToDeath(recipient, 0);
 
-        IBinder oldToken;
-        IBinder.DeathRecipient oldRecipient;
+        IBinder oldToken = null;
+        IBinder.DeathRecipient oldRecipient = null;
+        boolean diedDuringRegistration;
+        boolean coveredMutationInFlight;
         synchronized (lock) {
-            if (candidate.died) {
-                clientDeathToken.unlinkToDeath(recipient, 0);
+            diedDuringRegistration = candidate.died;
+            coveredMutationInFlight = hasActiveCoveredMutationLocked();
+            if (!diedDuringRegistration && !coveredMutationInFlight) {
+                oldToken = qwySessionToken;
+                oldRecipient = qwySessionDeathRecipient;
+                // A distinct still-live token has an unreported generation loss:
+                // once replaced, its delayed death callback is intentionally ignored.
+                // Represent that loss before the new registration boundary so an
+                // intervening foreign +2 cannot counterfeit death + registration.
+                if (oldToken != null && oldToken != clientDeathToken) {
+                    markQwyGenerationLostLocked();
+                }
+                // Registration is its own +2 boundary. If generation loss retired
+                // an outstanding old-session mutation above, this publish remains
+                // separate and preserves the causal restart sequence.
+                boolean retiredMutation = retireActiveQwyMutationsLocked();
+                if (!retiredMutation) markDiscontinuityLocked();
+                qwySessionToken = clientDeathToken;
+                qwySessionDeathRecipient = recipient;
+                expectedQwyPid = registeringPid;
+                qwySessionActive = true;
+                qwySessionUncertain = false;
+                qwyGenerationLossAccounted = false;
+                qwySemanticDigest = semanticDigest;
+                installedCoverageMask |=
+                        Android15OracleHookPlan.COVERAGE_QWY_SERVICE_GENERATION
+                                | Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
+            }
+        }
+        if (diedDuringRegistration || coveredMutationInFlight) {
+            unlinkQuietly(clientDeathToken, recipient);
+            if (diedDuringRegistration) {
                 throw new RemoteException("QWY session binder died during registration");
             }
-            oldToken = qwySessionToken;
-            oldRecipient = qwySessionDeathRecipient;
-            markDiscontinuityLocked();
-            qwySessionToken = clientDeathToken;
-            qwySessionDeathRecipient = recipient;
-            qwySessionActive = true;
-            qwySessionUncertain = false;
-            qwySemanticDigest = semanticDigest;
-            installedCoverageMask |=
-                    Android15OracleHookPlan.COVERAGE_QWY_SERVICE_GENERATION
-                            | Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
+            throw new IllegalStateException(
+                    "covered platform mutation still active during QWY registration");
         }
         unlinkQuietly(oldToken, oldRecipient);
     }
@@ -183,30 +248,17 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
             throw new IllegalArgumentException("mutation death token is required");
         }
 
-        final Mutation mutation = new Mutation(mutationId, beforeDigest, clientDeathToken);
+        final Mutation mutation = new Mutation(mutationId, beforeDigest, true);
         final long token;
         synchronized (lock) {
-            if (!qwySessionActive || !beforeDigest.equals(qwySemanticDigest)) {
-                markDiscontinuityLocked();
+            if (!qwySessionActive || qwySessionToken != clientDeathToken
+                    || !beforeDigest.equals(qwySemanticDigest)) {
+                markQwyGenerationLostLocked();
                 qwySessionActive = false;
                 installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
                 throw new IllegalStateException("QWY session is absent or semantic baseline changed");
             }
             token = beginMutationLocked(mutation);
-        }
-
-        IBinder.DeathRecipient recipient = () -> onQwyMutationDeath(token);
-        mutation.deathRecipient = recipient;
-        try {
-            clientDeathToken.linkToDeath(recipient, 0);
-        } catch (RemoteException e) {
-            synchronized (lock) {
-                finishMutationLocked(token, true, true, null);
-                qwySessionActive = false;
-                qwySessionUncertain = true;
-                installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
-            }
-            throw e;
         }
         return token;
     }
@@ -218,9 +270,30 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
             boolean uncertain,
             String afterDigest) {
         enforceQwyCaller();
-        Mutation mutation;
+        try {
+            // Platform after-hooks enqueue their covered children before the guarded call returns.
+            // Drain those FIFO completions on this Binder thread before the parent QWY token can
+            // publish an even cursor. No platform callback or oracle state lock waits here.
+            SystemServerOracleInstaller.awaitCoveredMutationFinisherBarrier();
+        } catch (RuntimeException barrierFailure) {
+            synchronized (lock) {
+                callbackPoisoned = true;
+                Mutation mutation = activeMutations.get(token);
+                if (mutation == null || mutation.mutationId == null) {
+                    poisonInvariantLocked();
+                } else {
+                    finishMutationLocked(token, true, true, afterDigest);
+                    qwySessionActive = false;
+                    qwySessionUncertain = true;
+                    installedCoverageMask &=
+                            ~Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
+                }
+            }
+            throw new IllegalStateException(
+                    "covered-mutation completion barrier failed", barrierFailure);
+        }
         synchronized (lock) {
-            mutation = activeMutations.get(token);
+            Mutation mutation = activeMutations.get(token);
             if (mutation == null || mutation.mutationId == null) {
                 poisonInvariantLocked();
                 throw new IllegalStateException("unknown QWY mutation token");
@@ -237,21 +310,65 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
                 installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
             }
         }
-        unlinkQuietly(mutation.clientDeathToken, mutation.deathRecipient);
     }
 
     /** Called only by installed platform mutation callbacks inside system_server. */
-    long beginCoveredMutation() {
+    long beginCoveredMutation(
+            int callingUid,
+            int callingPid,
+            String callingPackage,
+            String attributionTag) {
         synchronized (lock) {
-            return beginMutationLocked(new Mutation(null, null, null));
+            boolean attributedToQwy = QwyCoveredMutationAttributionPolicy.isAttributed(
+                    expectedQwyUid,
+                    expectedQwyPid,
+                    expectedQwyPackage,
+                    callingUid,
+                    callingPid,
+                    callingPackage,
+                    attributionTag,
+                    qwySessionActive,
+                    hasActiveQwyMutationLocked());
+            return beginMutationLocked(new Mutation(null, null, attributedToQwy));
         }
     }
 
-    /** Platform calls are conservatively treated as changed; sample publication is never hooked. */
-    void finishCoveredMutation(long token, boolean uncertain) {
+    /**
+     * Platform calls are conservatively changed; the serialized final-exit
+     * sample is published before the token can expose an even sequence.
+     */
+    void finishCoveredMutation(long token, boolean uncertain, Context context) {
+        synchronized (endpointRefreshLock) {
+            if (context != null) refreshEndpointSerialized(context);
+            synchronized (lock) {
+                // A timeout may retire the token while this worker is blocked in endpoint
+                // sampling. Its eventual unwind is completion of the same accepted action, not
+                // a second invariant-significant finish.
+                if (discardedCoveredMutationTokens.remove(token)) return;
+                finishMutationLocked(token, true, uncertain, null);
+                if (uncertain) callbackPoisoned = true;
+            }
+        }
+    }
+
+    /** Fails closed without acquiring framework-manager locks on the guarded callback thread. */
+    void abandonCoveredMutation(long token, Throwable failure) {
         synchronized (lock) {
-            finishMutationLocked(token, true, uncertain, null);
-            if (uncertain) callbackPoisoned = true;
+            callbackPoisoned = true;
+            Mutation mutation = activeMutations.get(token);
+            // The worker may have completed the Binder retirement just before the timeout thread
+            // reached its discard callback. In that ordering there is nothing left to abandon.
+            if (mutation == null) return;
+            if (mutation.mutationId != null) {
+                poisonInvariantLocked();
+                return;
+            }
+            try {
+                finishMutationLocked(token, true, true, null);
+                discardedCoveredMutationTokens.add(token);
+            } catch (RuntimeException invariantFailure) {
+                poisonInvariantLocked();
+            }
         }
     }
 
@@ -273,33 +390,80 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
         }
     }
 
-    void onBridgeConnected(Context context) {
+    void onBridgeConnected(Context context, long connectionGeneration) {
         synchronized (lock) {
-            bridgeConnected = true;
-            installedCoverageMask |= Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION;
+            if (connectionGeneration <= retiredBridgeConnectionGeneration
+                    || connectionGeneration < bridgeConnectionGeneration) return;
+            bridgeConnectionGeneration = connectionGeneration;
+            bridgeConnectionInProgress = true;
+            bridgeConnected = false;
+            endpointSampleValid = false;
+            installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION;
         }
-        refreshEndpoint(context);
+        synchronized (endpointRefreshLock) {
+            EndpointSample sample = sampleEndpoint(context);
+            synchronized (lock) {
+                if (bridgeConnectionGeneration != connectionGeneration
+                        || !bridgeConnectionInProgress) return;
+                publishEndpointSampleLocked(sample);
+                bridgeConnectionInProgress = false;
+                bridgeConnected = true;
+                installedCoverageMask |= Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION;
+            }
+        }
     }
 
-    void onBridgeDisconnected() {
+    void onBridgeDisconnected(long connectionGeneration) {
         synchronized (lock) {
+            if (connectionGeneration < bridgeConnectionGeneration) return;
+            bridgeConnectionGeneration = connectionGeneration;
+            bridgeConnectionInProgress = false;
             bridgeConnected = false;
+            endpointSampleValid = false;
             qwySessionActive = false;
             qwySessionUncertain = true;
             installedCoverageMask &= ~(
                     Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION
                             | Android15OracleHookPlan.COVERAGE_QWY_SERVICE_GENERATION
                             | Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION);
-            markDiscontinuityLocked();
+            markQwyGenerationLostLocked();
         }
+    }
+
+    void onBridgeBindingDied(long connectionGeneration) {
+        synchronized (lock) {
+            if (connectionGeneration < bridgeConnectionGeneration) return;
+            retiredBridgeConnectionGeneration = Math.max(
+                    retiredBridgeConnectionGeneration, connectionGeneration);
+        }
+        onBridgeDisconnected(connectionGeneration);
     }
 
     /** Re-samples effective owner/provider truth after covered calls and bridge establishment. */
     void refreshEndpoint(Context context) {
+        synchronized (endpointRefreshLock) {
+            refreshEndpointSerialized(context);
+        }
+    }
+
+    private void refreshEndpointSerialized(Context context) {
+        EndpointSample sample = sampleEndpoint(context);
+        synchronized (lock) {
+            publishEndpointSampleLocked(sample);
+        }
+    }
+
+    /** Samples framework services without holding the oracle state lock. */
+    private EndpointSample sampleEndpoint(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            poisonCallback(new IllegalStateException(
-                    "effective AppOps sampling requires API 29 or newer"));
-            return;
+            return new EndpointSample(
+                    null,
+                    null,
+                    false,
+                    false,
+                    false,
+                    new IllegalStateException(
+                            "effective AppOps sampling requires API 29 or newer"));
         }
         try {
             AppOpsManager appOps = context.getSystemService(AppOpsManager.class);
@@ -328,22 +492,27 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
             }
             boolean gps = locations.isProviderEnabled(LocationManager.GPS_PROVIDER);
             boolean network = locations.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-            synchronized (lock) {
-                ownerUid = ambiguous ? null : uniqueUid;
-                ownerPackage = ambiguous ? null : uniquePackage;
-                gpsProviderEnabled = gps;
-                networkProviderEnabled = network;
-                endpointSampleValid = !ambiguous;
-            }
-        } catch (RuntimeException e) {
-            synchronized (lock) {
-                endpointSampleValid = false;
-                ownerUid = null;
-                ownerPackage = null;
-                gpsProviderEnabled = false;
-                networkProviderEnabled = false;
-            }
-            poisonCallback(e);
+            return new EndpointSample(
+                    ambiguous ? null : uniqueUid,
+                    ambiguous ? null : uniquePackage,
+                    gps,
+                    network,
+                    !ambiguous,
+                    null);
+        } catch (RuntimeException failure) {
+            return new EndpointSample(null, null, false, false, false, failure);
+        }
+    }
+
+    private void publishEndpointSampleLocked(EndpointSample sample) {
+        ownerUid = sample.ownerUid;
+        ownerPackage = sample.ownerPackage;
+        gpsProviderEnabled = sample.gpsProviderEnabled;
+        networkProviderEnabled = sample.networkProviderEnabled;
+        endpointSampleValid = sample.valid;
+        if (sample.failure != null) {
+            callbackPoisoned = true;
+            markDiscontinuityLocked();
         }
     }
 
@@ -410,7 +579,8 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
         }
         aggregateChanged |= changed || uncertain;
         aggregateUncertain |= uncertain;
-        if (mutation.mutationId == null && (changed || uncertain)) {
+        if (mutation.mutationId == null && !mutation.attributedToQwy &&
+                (changed || uncertain)) {
             aggregateForeignChanged = true;
         }
         if (mutation.mutationId != null) {
@@ -455,6 +625,37 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
         }
     }
 
+    private boolean hasActiveQwyMutationLocked() {
+        for (Mutation mutation : activeMutations.values()) {
+            if (mutation.mutationId != null) return true;
+        }
+        return false;
+    }
+
+    private boolean hasActiveCoveredMutationLocked() {
+        for (Mutation mutation : activeMutations.values()) {
+            if (mutation.mutationId == null) return true;
+        }
+        return false;
+    }
+
+    /** Retires QWY tokens only; covered platform tokens finish on their own callbacks. */
+    private boolean retireActiveQwyMutationsLocked() {
+        List<Long> abandoned = new ArrayList<>();
+        for (Map.Entry<Long, Mutation> entry : activeMutations.entrySet()) {
+            if (entry.getValue().mutationId != null) abandoned.add(entry.getKey());
+        }
+        for (Long token : abandoned) finishMutationLocked(token, true, true, null);
+        return !abandoned.isEmpty();
+    }
+
+    /** Session-token death and bridge disconnect are one process-generation loss. */
+    private void markQwyGenerationLostLocked() {
+        if (qwyGenerationLossAccounted) return;
+        qwyGenerationLossAccounted = true;
+        if (!retireActiveQwyMutationsLocked()) markDiscontinuityLocked();
+    }
+
     private void poisonInvariantLocked() {
         invariantFailure = true;
         callbackPoisoned = true;
@@ -483,25 +684,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
             installedCoverageMask &= ~(
                     Android15OracleHookPlan.COVERAGE_QWY_SERVICE_GENERATION
                             | Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION);
-            List<Long> abandoned = new ArrayList<>();
-            for (Map.Entry<Long, Mutation> entry : activeMutations.entrySet()) {
-                if (entry.getValue().clientDeathToken != null) abandoned.add(entry.getKey());
-            }
-            if (abandoned.isEmpty()) {
-                markDiscontinuityLocked();
-            } else {
-                for (Long token : abandoned) finishMutationLocked(token, true, true, null);
-            }
-        }
-    }
-
-    private void onQwyMutationDeath(long token) {
-        synchronized (lock) {
-            if (!activeMutations.containsKey(token)) return;
-            finishMutationLocked(token, true, true, null);
-            qwySessionActive = false;
-            qwySessionUncertain = true;
-            installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
+            markQwyGenerationLostLocked();
         }
     }
 

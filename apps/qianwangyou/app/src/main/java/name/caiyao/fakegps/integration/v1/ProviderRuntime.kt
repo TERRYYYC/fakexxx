@@ -146,6 +146,144 @@ class AndroidPackageIdentityResolver(context: Context) : PackageIdentityResolver
 }
 
 /**
+ * Production readiness gate for the process-global semantic writer lane.
+ *
+ * Installation is retryable because the system-server bridge can become
+ * healthy after the provider composition root has already started. A fresh
+ * session registration is published while fallback writers are excluded; on
+ * owner start it is folded into the already-new generation, while a later
+ * observation leaves the newer cursor for normal PRE/POST reconciliation to
+ * account before FULL can return.
+ */
+internal class RetryingQwySemanticWriterReadiness(
+    private val tracker: ContinuityTracker,
+    private val environment: QwyEnvironment,
+    private val authoritativeSource: AuthoritativeContinuitySource,
+    private val expectedOracleOwnerPackage: String,
+    private val expectedOracleOwnerUid: Int,
+    private val semanticCoordinator: QwySemanticMutationCoordinator,
+) : QwySemanticWriterReadiness, AutoCloseable {
+    private var installation: AutoCloseable? = null
+
+    @Synchronized
+    override fun ensureReadyFor(semanticDigest: String): Boolean =
+        ensureInstalled(semanticDigest, coalesceWithOwnerGeneration = false)
+
+    @Synchronized
+    fun installForOwnerStart(semanticDigest: String): Boolean =
+        ensureInstalled(semanticDigest, coalesceWithOwnerGeneration = true)
+
+    private fun ensureInstalled(
+        semanticDigest: String,
+        coalesceWithOwnerGeneration: Boolean,
+    ): Boolean {
+        if (semanticDigest.isBlank() ||
+            environment.authoritativeSemanticDigest(tracker.generation) != semanticDigest
+        ) {
+            return false
+        }
+        if (QwySemanticWriterRuntime.isInstalledAndHealthyFor(semanticDigest)) return true
+        if (QwySemanticWriterRuntime.canRepairExternalProjectionFor(semanticDigest)) {
+            // PRE must fail closed for B, but the still-healthy A lane must live
+            // long enough for FrameworkMockRefreshSession to fence B→A.
+            return false
+        }
+
+        // A lane that lost its endpoint/session stays fail-closed for callers,
+        // but this owner may retire and rebuild it at the next observation.
+        installation?.close()
+        installation = null
+
+        val installed = runCatching {
+            QwySemanticWriterRuntime.installWithExclusivePreparation(
+                coordinator = semanticCoordinator,
+                semanticDigestProvider = QwySemanticDigestProvider {
+                    environment.authoritativeSemanticDigest(tracker.generation)
+                },
+                sessionHealth = QwySemanticSessionHealth(::hasHealthySnapshotFor),
+                prepare = {
+                    check(
+                        environment.authoritativeSemanticDigest(tracker.generation) ==
+                            semanticDigest,
+                    ) { "canonical QWY digest changed before writer installation" }
+                    val before = checkNotNull(
+                        runCatching(authoritativeSource::snapshot).getOrNull(),
+                    ) { "authoritative oracle unavailable before writer installation" }
+                    val canAdopt = semanticCoordinator.isReadyFor(semanticDigest) &&
+                        before.isStableCompleteFor(
+                            expectedOracleOwnerPackage,
+                            expectedOracleOwnerUid,
+                        ) &&
+                        before.qwySemanticDigest == semanticDigest &&
+                        tracker.isAuthoritativeCursorAcknowledged(before)
+                    if (canAdopt) return@installWithExclusivePreparation
+
+                    check(before.isSemanticRegistrationBaselineFor(
+                        expectedOracleOwnerPackage,
+                        expectedOracleOwnerUid,
+                        semanticDigest,
+                    )) {
+                        "authoritative oracle is not a safe writer-registration baseline"
+                    }
+                    check(
+                        semanticCoordinator.registerCurrentSession(semanticDigest) is
+                            QwySemanticSessionRegistration.Registered,
+                    ) { "fresh QWY writer session registration failed" }
+                    val after = checkNotNull(
+                        runCatching(authoritativeSource::snapshot).getOrNull(),
+                    ) { "authoritative oracle unavailable after writer registration" }
+                    check(after.isStableCompleteFor(
+                        expectedOracleOwnerPackage,
+                        expectedOracleOwnerUid,
+                    ) &&
+                        after.bootId == before.bootId &&
+                        after.oracleInstanceId == before.oracleInstanceId &&
+                        after.sequence == before.sequence + 2L &&
+                        after.qwySemanticDigest == semanticDigest
+                    ) { "fresh QWY writer registration was not one exact boundary" }
+                    if (coalesceWithOwnerGeneration) {
+                        tracker.acknowledgeAuthoritativeOwnerGenerationBaseline(
+                            snapshot = after,
+                            expectedOwnerPackage = expectedOracleOwnerPackage,
+                            expectedOwnerUid = expectedOracleOwnerUid,
+                        )
+                    } else {
+                        tracker.acknowledgeAuthoritativeWriterRegistration(
+                            before = before,
+                            after = after,
+                            expectedSemanticDigest = semanticDigest,
+                            expectedOwnerPackage = expectedOracleOwnerPackage,
+                            expectedOwnerUid = expectedOracleOwnerUid,
+                        )
+                    }
+                    check(tracker.isAuthoritativeCursorAcknowledged(after)) {
+                        "writer lane cannot publish before its exact cursor is durable ACK"
+                    }
+                },
+            )
+        }.getOrNull() ?: return false
+        installation = installed
+        return QwySemanticWriterRuntime.isInstalledAndHealthyFor(semanticDigest)
+    }
+
+    private fun hasHealthySnapshotFor(expectedDigest: String): Boolean =
+        runCatching(authoritativeSource::snapshot).getOrNull()
+            ?.takeIf {
+                it.isStableCompleteFor(
+                    expectedOracleOwnerPackage,
+                    expectedOracleOwnerUid,
+                )
+            }
+            ?.qwySemanticDigest == expectedDigest
+
+    @Synchronized
+    override fun close() {
+        installation?.close()
+        installation = null
+    }
+}
+
+/**
  * Process-wide composition root.
  *
  * One handler per owner process: the lease machine, the continuity generation
@@ -159,8 +297,64 @@ class AndroidPackageIdentityResolver(context: Context) : PackageIdentityResolver
  */
 object ProviderRuntime {
 
+    /**
+     * One process-lifetime graph. Startup is retryable on this exact object so a durable failure
+     * after remote S+6 cannot manufacture another owner generation, Binder death token, endpoint
+     * wrapper, or framework projection owner.
+     */
+    internal class ProcessScope(
+        val kv: DurableKv,
+        val tracker: ContinuityTracker,
+        val handler: EnvironmentControlHandler,
+        private val environment: QwyEnvironment,
+        private val semanticWriterReadiness: QwySemanticWriterReadiness,
+    ) {
+        private var cleanlinessConsumed = false
+        private var retainedCleanliness = false
+        private var started = false
+        private var writerInstallation: AutoCloseable? = null
+
+        @Synchronized
+        fun start(): EnvironmentControlHandler {
+            if (started) return handler
+            if (!cleanlinessConsumed) {
+                retainedCleanliness = CleanShutdownMarker.consume(kv)
+                cleanlinessConsumed = true
+            }
+            handler.onOwnerProcessStart(cleanlinessProvable = retainedCleanliness)
+            val retryingReadiness = semanticWriterReadiness as?
+                RetryingQwySemanticWriterReadiness
+            if (retryingReadiness != null) {
+                environment.authoritativeSemanticDigest(tracker.generation)?.let {
+                    retryingReadiness.installForOwnerStart(it)
+                }
+                // Retain the retry owner even when this first attempt is safely unavailable.
+                writerInstallation = retryingReadiness
+            }
+            started = true
+            return handler
+        }
+
+        @Synchronized
+        fun currentWriterInstallation(): AutoCloseable? = writerInstallation
+
+        /** Only ephemeral/non-authoritative failed compositions may discard their graph. */
+        fun abortDiscardedStart(startupFailure: Throwable) {
+            if (tracker.activeAuthoritativeReservation() != null) return
+            runCatching { writerInstallation?.close() }
+            try {
+                environment.abortOwnerStart()
+            } catch (cleanupFailure: Throwable) {
+                startupFailure.addSuppressed(cleanupFailure)
+            }
+        }
+    }
+
     @Volatile
     private var handlerRef: EnvironmentControlHandler? = null
+
+    @Volatile
+    private var processScopeRef: ProcessScope? = null
 
     /** Kept so orderly teardown can leave clean-shutdown evidence. */
     @Volatile
@@ -179,12 +373,12 @@ object ProviderRuntime {
     }
 
     private fun build(appContext: Context): EnvironmentControlHandler {
-        // FileDurableKv, not SharedPreferences: §6.7.5 needs the pointer and the
-        // receipt to land or not land together, and a prefs-per-namespace store
-        // commits each write on its own. See FileDurableKv's header.
-        val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
-        val handler = compose(
-            kv = kv,
+        // Publish the process scope before starting it. If exact remote recovery reaches S+6 and
+        // the following durable finalize/marker clear fails, the next Binder entry resumes this
+        // same graph instead of constructing a new generation and aborting its live projection.
+        val scope = processScopeRef ?: createProcessScope(
+            // FileDurableKv, not SharedPreferences: §6.7.5 needs the pointer and receipt atomic.
+            kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1")),
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
             environment = QwyEnvironmentController(appContext),
@@ -196,11 +390,12 @@ object ProviderRuntime {
                 clientDeathTokenFactory = BinderQwySemanticClientDeathTokenFactory,
             ),
             installSemanticWriters = true,
-        )
-        // Publish the writer handle only after the whole owner graph has
-        // started successfully. A failed composition must not be discoverable
-        // by operator APIs while a retry constructs the replacement graph.
-        kvRef = kv
+        ).also {
+            processScopeRef = it
+            kvRef = it.kv
+        }
+        val handler = scope.start()
+        semanticWriterInstallation = scope.currentWriterInstallation()
         return handler
     }
 
@@ -229,12 +424,72 @@ object ProviderRuntime {
         semanticCoordinator: QwySemanticMutationCoordinator? = null,
         installSemanticWriters: Boolean = false,
     ): EnvironmentControlHandler {
+        val scope = createProcessScope(
+            kv = kv,
+            clock = clock,
+            resolver = resolver,
+            environment = environment,
+            authoritativeSource = authoritativeSource,
+            expectedOracleOwnerPackage = expectedOracleOwnerPackage,
+            expectedOracleOwnerUid = expectedOracleOwnerUid,
+            semanticCoordinator = semanticCoordinator,
+            installSemanticWriters = installSemanticWriters,
+        )
+        return try {
+            scope.start()
+        } catch (startupFailure: Throwable) {
+            // This convenience composition is used by isolated JVM wiring tests. Production keeps
+            // its ProcessScope in processScopeRef and retries it. A non-authoritative discarded
+            // graph is still retired; an active reservation is never aborted outside its bracket.
+            scope.abortDiscardedStart(startupFailure)
+            throw startupFailure
+        }
+    }
+
+    internal fun createProcessScope(
+        kv: DurableKv,
+        clock: MonotonicClock,
+        resolver: PackageIdentityResolver,
+        environment: QwyEnvironment,
+        authoritativeSource: AuthoritativeContinuitySource = AuthoritativeContinuitySource { null },
+        expectedOracleOwnerPackage: String = "",
+        expectedOracleOwnerUid: Int = -1,
+        semanticCoordinator: QwySemanticMutationCoordinator? = null,
+        installSemanticWriters: Boolean = false,
+    ): ProcessScope {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
         val tracker = ContinuityTracker(kv, clock)
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
+        val semanticWriterReadiness: QwySemanticWriterReadiness =
+            if (installSemanticWriters && semanticCoordinator != null &&
+                environment.authoritativeSemanticMutationEnabled()
+            ) {
+                RetryingQwySemanticWriterReadiness(
+                    tracker = tracker,
+                    environment = environment,
+                    authoritativeSource = authoritativeSource,
+                    expectedOracleOwnerPackage = expectedOracleOwnerPackage,
+                    expectedOracleOwnerUid = expectedOracleOwnerUid,
+                    semanticCoordinator = semanticCoordinator,
+                )
+            } else {
+                // JVM/custom compositions still model the same proof without
+                // installing a process-global production lane.
+                QwySemanticWriterReadiness { expectedDigest ->
+                    semanticCoordinator?.isReadyFor(expectedDigest) == true &&
+                        runCatching(authoritativeSource::snapshot).getOrNull()
+                            ?.takeIf {
+                                it.isStableCompleteFor(
+                                    expectedOracleOwnerPackage,
+                                    expectedOracleOwnerUid,
+                                )
+                            }
+                            ?.qwySemanticDigest == expectedDigest
+                }
+            }
         val observer = EnvironmentObserver(
             tracker,
             environment,
@@ -243,6 +498,7 @@ object ProviderRuntime {
             authoritativeSource,
             expectedOracleOwnerPackage,
             expectedOracleOwnerUid,
+            semanticWriterReadiness,
         )
 
         val handler = EnvironmentControlHandler(
@@ -262,72 +518,13 @@ object ProviderRuntime {
             semanticCoordinator = semanticCoordinator,
         )
 
-        // A provider process that starts without proof of a clean shutdown must
-        // say so (§8.4): unclean restart moves ACTIVE leases to
-        // RELEASE_INCOMPLETE rather than silently to EXPIRED, because the device
-        // environment is unknown, not known-clean.
-        //
-        // This call also wires the §6.4 relevant-change listener, because owner
-        // start is exactly when the revision owner must begin observing. An
-        // earlier version of this method wired it a SECOND time right here,
-        // which was redundant at best and, once the adapter is real, would
-        // replace the handler's own listener with an identical-looking one —
-        // two registrations racing to be the survivor. Composition's job is to
-        // call onOwnerProcessStart, not to re-do what it does.
-        var installedWriterLane: AutoCloseable? = null
-        try {
-            handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
-            if (installSemanticWriters && semanticCoordinator != null &&
-                environment.authoritativeSemanticMutationEnabled()
-            ) {
-                val digest = environment.authoritativeSemanticDigest(tracker.generation)
-                val snapshot = runCatching(authoritativeSource::snapshot).getOrNull()
-                val ready = digest != null && snapshot != null &&
-                    semanticCoordinator.isReadyFor(digest) &&
-                    snapshot.isStableCompleteFor(
-                        expectedOracleOwnerPackage,
-                        expectedOracleOwnerUid,
-                    ) &&
-                    snapshot.qwySemanticDigest == digest &&
-                    tracker.isAuthoritativeCursorAcknowledged(snapshot)
-                if (ready) {
-                    installedWriterLane = QwySemanticWriterRuntime.install(
-                        coordinator = semanticCoordinator,
-                        semanticDigestProvider = QwySemanticDigestProvider {
-                            environment.authoritativeSemanticDigest(tracker.generation)
-                        },
-                        sessionHealth = QwySemanticSessionHealth { expectedDigest ->
-                            runCatching(authoritativeSource::snapshot).getOrNull()
-                                ?.takeIf {
-                                    it.isStableCompleteFor(
-                                        expectedOracleOwnerPackage,
-                                        expectedOracleOwnerUid,
-                                    )
-                                }
-                                ?.qwySemanticDigest == expectedDigest
-                        },
-                    )
-                    semanticWriterInstallation = installedWriterLane
-                }
-            }
-        } catch (startupFailure: Throwable) {
-            runCatching { installedWriterLane?.close() }
-            if (semanticWriterInstallation === installedWriterLane) {
-                semanticWriterInstallation = null
-            }
-            // Startup may already have bound AppOps and started the framework
-            // refresh loop while converging a pending advance. The handler is
-            // not cacheable when this call throws, so explicitly retire that
-            // partial graph before the next Binder call retries composition.
-            try {
-                environment.abortOwnerStart()
-            } catch (cleanupFailure: Throwable) {
-                startupFailure.addSuppressed(cleanupFailure)
-            }
-            throw startupFailure
-        }
-
-        return handler
+        return ProcessScope(
+            kv = kv,
+            tracker = tracker,
+            handler = handler,
+            environment = environment,
+            semanticWriterReadiness = semanticWriterReadiness,
+        )
     }
 
     /**

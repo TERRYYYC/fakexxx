@@ -63,6 +63,33 @@ class AuthoritativeContinuityOracleTest {
     }
 
     @Test
+    fun `coalesced coordinate away then restore cannot alias the original stable sequence`() {
+        val initial = completeState().copy(qwySemanticDigest = "coordinate-a")
+        val oracle = oracle(initial)
+        val pre = oracle.snapshot()
+        val away = oracle.beginMutation()
+        val restore = oracle.beginMutation()
+
+        oracle.finishMutation(
+            token = away,
+            outcome = AuthoritativeMutationOutcome.CHANGED,
+            state = initial.copy(qwySemanticDigest = "coordinate-b"),
+        )
+        val post = oracle.finishMutation(
+            token = restore,
+            outcome = AuthoritativeMutationOutcome.CHANGED,
+            state = initial,
+        )
+
+        assertEquals(pre.sequence + 2L, post.sequence)
+        assertEquals(pre.qwySemanticDigest, post.qwySemanticDigest)
+        assertEquals(
+            AuthoritativeWindowVerdict.MUTATING_OR_CHANGED,
+            classifyAuthoritativeWindow(pre, post, QWY_PACKAGE, QWY_UID),
+        )
+    }
+
+    @Test
     fun `nested concurrent mutations expose one odd interval and publish one stable advance`() {
         val initial = completeState()
         val oracle = oracle(initial)
@@ -179,6 +206,7 @@ class AuthoritativeContinuityOracleTest {
         val stable = oracle(completeState()).snapshot()
         val invalidSnapshots = listOf(
             stable.copy(installedCoverageMask = stable.installedCoverageMask xor AuthoritativeCoverageMask.LOCATION_EFFECTIVE_ENABLED),
+            stable.copy(installedCoverageMask = stable.installedCoverageMask xor AuthoritativeCoverageMask.LOCATION_SEMANTIC_COORDINATE),
             stable.copy(installedCoverageMask = stable.installedCoverageMask or (1L shl 40)),
             stable.copy(requiredCoverageMask = stable.requiredCoverageMask or (1L shl 62)),
             stable.copy(health = AuthoritativeOracleHealth.HOOKS_INCOMPLETE),

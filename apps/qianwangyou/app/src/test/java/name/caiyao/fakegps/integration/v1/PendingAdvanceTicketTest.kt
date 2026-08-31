@@ -2,6 +2,7 @@ package name.caiyao.fakegps.integration.v1
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class PendingAdvanceTicketTest {
@@ -19,6 +20,7 @@ class PendingAdvanceTicketTest {
                 startingOracleInstanceId = "instance-a",
                 startingSequence = 8L,
                 startingSemanticDigest = "semantic-before",
+                ownerGenerationAtReservation = 17L,
             ),
         )
 
@@ -47,5 +49,28 @@ class PendingAdvanceTicketTest {
         )
         assertEquals(PendingAdvanceTicket.Legacy::class, decoded::class)
         assertEquals("oracle-v1", decoded.fromItemId)
+    }
+
+    @Test
+    fun `obsolete oracle v1 ticket is rejected instead of becoming unrecoverable`() {
+        val obsolete = DurableFieldCodec.encode(
+            listOf(
+                "oracle-v1",
+                "item-1",
+                "item-2",
+                "9",
+                "mutation-1",
+                "11",
+                "12",
+                "boot-a",
+                "instance-a",
+                "8",
+                "semantic-before",
+            ),
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            PendingAdvanceTicket.decode(obsolete)
+        }
     }
 }

@@ -21,7 +21,9 @@ import name.caiyao.fakegps.integration.v1.QwySemanticClientDeathToken
 import name.caiyao.fakegps.integration.v1.QwySemanticClientDeathTokenFactory
 import name.caiyao.fakegps.integration.v1.QwySemanticMutationCoordinator
 import name.caiyao.fakegps.integration.v1.QwySemanticMutationEndpointProvider
+import name.caiyao.fakegps.integration.v1.QwySemanticWriterReadiness
 import name.caiyao.fakegps.integration.v1.VerifiedObservationWatermarkStore
+import name.caiyao.fakegps.integration.v1.isStableCompleteFor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 
@@ -72,7 +74,8 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
         ownerUid = QWY_UID,
         ownerPackage = QWY_PACKAGE,
     )
-    val semanticEndpoint = FakeQwySemanticMutationEndpoint(authoritativeOracle)
+    var semanticEndpoint = FakeQwySemanticMutationEndpoint(authoritativeOracle)
+        private set
     lateinit var semanticCoordinator: QwySemanticMutationCoordinator
         private set
 
@@ -134,9 +137,16 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
         semanticCoordinator = QwySemanticMutationCoordinator(
             endpointProvider = QwySemanticMutationEndpointProvider { semanticEndpoint },
             clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
-                QwySemanticClientDeathToken { true }
+                object : QwySemanticClientDeathToken {
+                    override fun isAlive(): Boolean = true
+                }
             },
         )
+    }
+
+    /** Replaces only the Binder proxy object; the underlying oracle cursor is unchanged. */
+    fun replaceSemanticEndpointProxy() {
+        semanticEndpoint = FakeQwySemanticMutationEndpoint(authoritativeOracle)
     }
 
     private fun boot(cleanlinessProvable: Boolean, firstBoot: Boolean) {
@@ -154,6 +164,12 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
             authoritativeOracle,
             QWY_PACKAGE,
             QWY_UID,
+            QwySemanticWriterReadiness { expectedDigest ->
+                semanticCoordinator.isReadyFor(expectedDigest) &&
+                    authoritativeOracle.snapshot()
+                        ?.takeIf { it.isStableCompleteFor(QWY_PACKAGE, QWY_UID) }
+                        ?.qwySemanticDigest == expectedDigest
+            },
         )
         handler = EnvironmentControlHandler(
             authorizer = authorizer,
@@ -173,7 +189,8 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
             diagnostics = diagnostics,
         )
         val semanticDigest = env.authoritativeSemanticDigest(tracker.generation)
-        if (tracker.activeAuthoritativeReservation() == null &&
+        if (semanticDigest != null &&
+            tracker.activeAuthoritativeReservation() == null &&
             !semanticCoordinator.isReadyFor(semanticDigest)
         ) {
             semanticCoordinator.registerCurrentSession(semanticDigest)
@@ -191,10 +208,15 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
     }
 
     /** Owner process restart (new generation). Durable state = whatever is in [kv]. */
-    fun restart(cleanlinessProvable: Boolean, reboot: Boolean = false) {
+    fun restart(
+        cleanlinessProvable: Boolean,
+        reboot: Boolean = false,
+        afterOwnerDeath: () -> Unit = {},
+    ) {
         if (reboot) clock.simulateReboot()
         if (env.authoritativeSemanticMutations) {
             authoritativeOracle.ownerProcessDied()
+            afterOwnerDeath()
             if (reboot) authoritativeOracle.replaceOracle()
             rebuildSemanticCoordinator()
         }

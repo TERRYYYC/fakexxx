@@ -306,6 +306,30 @@ object ConfigPrefsSync {
         PayloadRead.ReadError("${t.javaClass.simpleName}: ${t.message}")
     }
 
+    /**
+     * Reads the active profile identity from the same durable pointer contract
+     * used by publication. Before the private state has been initialized this
+     * resolves the legacy transported pointer; any preferences/migration read
+     * failure remains distinguishable so continuity authority can fail closed.
+     */
+    @JvmStatic
+    fun readSemanticPublicationIdentity(
+        context: Context,
+    ): SemanticPublicationIdentityRead = try {
+        val state = context.getSharedPreferences(PUBLISH_STATE_PREFS, Context.MODE_PRIVATE)
+        val initialized = state.getBoolean(KEY_STATE_INITIALIZED, false)
+        val storedActive = state.getLong(KEY_ACTIVE_PROFILE_ID, 0L).takeIf { it > 0L }
+        val active = if (initialized) {
+            storedActive
+        } else {
+            legacyActiveProfileId(acquireTransport(context).prefs)
+        }
+        SemanticPublicationIdentityRead.Known(active)
+    } catch (t: Throwable) {
+        Log.e(TAG, "could not read semantic publication identity; failing closed", t)
+        SemanticPublicationIdentityRead.ReadError("${t.javaClass.simpleName}: ${t.message}")
+    }
+
     /** Wall-clock time of the last VERIFIED publish, or null if never published / not recorded. */
     @JvmStatic
     fun readPublishedAt(context: Context): Long? = readPublishState(context).publishedAtMs

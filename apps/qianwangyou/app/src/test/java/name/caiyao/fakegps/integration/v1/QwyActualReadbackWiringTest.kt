@@ -37,6 +37,14 @@ class QwyActualReadbackWiringTest {
         readProductionSource("QwyScheduleStore.kt")
     }
 
+    private val serviceSource: String by lazy {
+        val relative = "src/main/java/name/caiyao/fakegps/mockprovider/MockProviderService.kt"
+        sequenceOf(File(relative), File("app/$relative"))
+            .firstOrNull(File::isFile)
+            ?.readText()
+            ?: error("cannot locate MockProviderService.kt")
+    }
+
     @Test
     fun `apply receipt projects actual provider readback rather than desired coordinates`() {
         val body = methodBody("override fun applyEnvironment(")
@@ -63,8 +71,37 @@ class QwyActualReadbackWiringTest {
     }
 
     @Test
+    fun `authoritative digest binds actual provider projection not desired coordinates`() {
+        val body = methodBody(
+            "override fun authoritativeSemanticDigest(ownerGeneration: Long): String?",
+        )
+
+        assertTrue(body.contains("systemMockTrustPolicy ?: return null"))
+        assertTrue(body.contains("trustPolicy.evaluate("))
+        assertTrue(body.contains("effectiveLatitude = actualProjection?.latitude"))
+        assertTrue(body.contains("effectiveLongitude = actualProjection?.longitude"))
+        assertTrue(body.contains("actualProjection?.fingerprint ?: \"system-mock:inactive\""))
+        assertTrue(body.contains("!refreshSession.isProvablyInactive ||"))
+        assertFalse(body.contains("effectiveLatitude = applied?.latitude"))
+        assertFalse(body.contains("effectiveLongitude = applied?.longitude"))
+    }
+
+    @Test
     fun `framework cache readback also checks each required provider is enabled`() {
         assertTrue(readerSource.contains("locationManager.isProviderEnabled(source)"))
+    }
+
+    @Test
+    fun `service refresh and canonical digest share exact provider projection ownership`() {
+        val digest = methodBody(
+            "override fun authoritativeSemanticDigest(ownerGeneration: Long): String?",
+        )
+        assertTrue(digest.contains("ProcessMockProviderOwnership.projectionOwnershipSnapshot()"))
+        assertTrue(controllerSource.contains("MockProviderStartupProjectionReconciler("))
+        assertTrue(controllerSource.contains("override fun reconcileProjectionOnOwnerStart()"))
+        assertTrue(serviceSource.contains("SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))"))
+        assertTrue(serviceSource.contains("projectionMatchesExactly = { config ->"))
+        assertTrue(serviceSource.contains("matchesExactTargetProjection"))
     }
 
     @Test
@@ -136,6 +173,14 @@ class QwyActualReadbackWiringTest {
         assertTrue(observe.contains("scheduleStore.postAdvanceProjectionFor(schedule)"))
         assertTrue(observe.contains("refreshSession.startOrReconfigure("))
         assertTrue(observe.contains("purpose = ProjectionPurpose.POST_ADVANCE"))
+        val rehydrateMutation = braceDelimitedBlock(
+            source = observe,
+            anchor = "QwySemanticWriterRuntime.mutate(",
+        )
+        assertTrue(rehydrateMutation.contains("refreshSession.startOrReconfigure("))
+        assertTrue(rehydrateMutation.contains("ConfigPrefsSync.sync("))
+        assertTrue(rehydrateMutation.contains("scheduleStore.recordLastApplied("))
+        assertTrue(rehydrateMutation.contains("appliedCommand = scheduleStore.getLastApplied()"))
         assertFalse(
             "reconstruction heartbeat must not manufacture complete continuity",
             observe.contains("ContinuityEvidenceCapability.COMPLETE"),
@@ -174,5 +219,23 @@ class QwyActualReadbackWiringTest {
             }
         }
         error("unbalanced method body: $anchor")
+    }
+
+    private fun braceDelimitedBlock(source: String, anchor: String): String {
+        val declaration = source.indexOf(anchor)
+        assertTrue("declaration not found: $anchor", declaration >= 0)
+        val openBrace = source.indexOf('{', declaration)
+        assertTrue("body not found: $anchor", openBrace >= 0)
+        var depth = 0
+        for (index in openBrace until source.length) {
+            when (source[index]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return source.substring(openBrace, index + 1)
+                }
+            }
+        }
+        error("unbalanced body: $anchor")
     }
 }

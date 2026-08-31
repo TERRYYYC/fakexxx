@@ -82,9 +82,14 @@ class EnvironmentControlHandler(
         val completedSnapshot: AuthoritativeContinuitySnapshot? = null,
     )
 
+    private var ownerStartAttempted = false
+    private var ownerStartCleanliness = false
+    private var ownerStartSourceBound = false
+    private var ownerStartCompleted = false
+
     fun discover(callingUid: Int): CapabilitySnapshotV1 = withOwnerFence {
         authorizer.authorize(callingUid)
-        val snap = tracker.snapshot()
+        val snap = observer.continuitySnapshotForClaim()
         val schedule = environment.scheduleSnapshot()
         CapabilitySnapshotV1(
             protocolVersion = ContractV1.PROTOCOL_VERSION,
@@ -109,7 +114,7 @@ class EnvironmentControlHandler(
     fun preflight(callingUid: Int, request: PreflightRequestV1): PreflightReportV1 = withOwnerFence {
         authorizer.authorize(callingUid)
         val intentHash = CanonicalIntentDigestV1.compute(request.intent)
-        val snap = tracker.snapshot()
+        val snap = observer.continuitySnapshotForClaim()
         val schedule = environment.scheduleSnapshot()
         val scheduleDecision = environment.scheduleDecisionWire(request.intent.scheduleRef)
 
@@ -707,7 +712,10 @@ class EnvironmentControlHandler(
         }
     }
 
-    fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
+    fun completeAndAdvance(
+        callingUid: Int,
+        request: CompleteAndAdvanceRequestV1,
+    ): AdvanceReceiptV1 = withOwnerFence {
         // §6.7.4b frozen judgment order (v1.42, amended through v1.76):
         //   safety(+recompute digest) → idempotency → proof →
         //   attribution(8) → schedule(17→16→14→15) → lease(7) → mutation
@@ -909,10 +917,47 @@ class EnvironmentControlHandler(
                 idempotencyKey = request.idempotencyKey,
                 requestDigest = recomputedDigest,
             )
+            val runtimeLaneInstalled = QwySemanticWriterRuntime.hasInstalledLane()
+            val authoritativeSemantics = environment.authoritativeSemanticMutationEnabled()
             val semanticBefore = environment.authoritativeSemanticDigest(tracker.generation)
-            val authoritativeBaseline = runCatching(authoritativeSource::snapshot).getOrNull()
+            var authoritativeBaseline = runCatching(authoritativeSource::snapshot).getOrNull()
+            if (runtimeLaneInstalled) {
+                check(authoritativeSemantics) {
+                    "installed QWY writer lane cannot create a legacy advance ticket"
+                }
+                val requiredDigest = checkNotNull(semanticBefore) {
+                    "installed QWY writer lane lost its canonical digest before advance"
+                }
+                val coordinator = checkNotNull(semanticCoordinator) {
+                    "installed QWY writer lane has no advance coordinator"
+                }
+                val completedCentralCursor = checkNotNull(authoritativeBaseline) {
+                    "installed QWY writer lane has no stable advance baseline"
+                }
+                check(
+                    QwySemanticWriterRuntime.isInstalledAndHealthyFor(requiredDigest) &&
+                        completedCentralCursor.isStableCompleteFor(
+                            expectedOracleOwnerPackage,
+                            expectedOracleOwnerUid,
+                        ) &&
+                        completedCentralCursor.qwySemanticDigest == requiredDigest &&
+                        coordinator.isReadyFor(requiredDigest),
+                ) { "installed QWY writer lane is not healthy before advance" }
+                if (!tracker.isAuthoritativeCursorAcknowledged(completedCentralCursor)) {
+                    tracker.acknowledgeStableAuthoritativeCursorBeforeMutation(
+                        snapshot = completedCentralCursor,
+                        expectedSemanticDigest = requiredDigest,
+                        expectedOwnerPackage = expectedOracleOwnerPackage,
+                        expectedOwnerUid = expectedOracleOwnerUid,
+                    )
+                }
+                authoritativeBaseline = runCatching(authoritativeSource::snapshot).getOrNull()
+                check(authoritativeBaseline == completedCentralCursor &&
+                    tracker.isAuthoritativeCursorAcknowledged(completedCentralCursor)
+                ) { "authoritative advance baseline moved during lane selection" }
+            }
             val reservation = if (
-                environment.authoritativeSemanticMutationEnabled() && semanticBefore != null &&
+                authoritativeSemantics && semanticBefore != null &&
                 authoritativeBaseline?.qwySemanticDigest == semanticBefore &&
                 semanticCoordinator?.isReadyFor(semanticBefore) == true
             ) {
@@ -924,6 +969,9 @@ class EnvironmentControlHandler(
                 )
             } else {
                 null
+            }
+            check(!runtimeLaneInstalled || reservation != null) {
+                "installed QWY writer lane cannot fall back to a legacy advance ticket"
             }
 
             // The authoritative lane names a future R+1 without exposing it;
@@ -1023,6 +1071,15 @@ class EnvironmentControlHandler(
         // this window is finished by settlePendingAdvance() at the next fenced
         // entry or owner startup.
         settlePendingAdvance()
+        val originalMutationId = deterministicMutationId(
+            operation = "advance",
+            caller = caller,
+            idempotencyKey = request.idempotencyKey,
+            requestDigest = recomputedDigest,
+        )
+        check(!tracker.isAuthoritativeMutationQuarantined(originalMutationId)) {
+            "authoritative advance receipt is quarantined after uncorrelated recovery"
+        }
         committed
     }
 
@@ -1097,9 +1154,8 @@ class EnvironmentControlHandler(
                 check(tracker.activeAuthoritativeReservation() == ticket.reservation) {
                     "pending authoritative ticket does not match durable reservation"
                 }
-                val currentBeforeDigest = checkNotNull(
-                    environment.authoritativeSemanticDigest(tracker.generation),
-                ) { "pending authoritative advance has no current semantic digest" }
+                val localBeforeDigest =
+                    environment.authoritativeSemanticDigest(tracker.generation)
                 val snapshotAtEntry = runCatching(authoritativeSource::snapshot).getOrNull()
                 val normallyCompleted = snapshotAtEntry?.takeIf {
                     it.lastCompletedQwyMutationId == ticket.reservation.mutationId &&
@@ -1107,23 +1163,153 @@ class EnvironmentControlHandler(
                         it.oracleInstanceId == ticket.reservation.startingOracleInstanceId &&
                         it.sequence == ticket.reservation.startingSequence + 2L
                 }
-                val recoveryRequested = normallyCompleted == null &&
-                    (allowOwnerGenerationRecovery || authoritativeAdvanceNeedsRebaseline)
-                val recoveringOwnerGeneration = recoveryRequested &&
-                    currentBeforeDigest != ticket.reservation.startingSemanticDigest
-                if (recoveringOwnerGeneration) {
+                val recoveredCompletedAtEntry = snapshotAtEntry?.takeIf {
+                    it.lastCompletedQwyMutationId == ticket.reservation.mutationId &&
+                        it.bootId == ticket.reservation.startingBootId &&
+                        it.oracleInstanceId == ticket.reservation.startingOracleInstanceId &&
+                        it.sequence == ticket.reservation.startingSequence + 6L
+                }
+                val completedAtEntry = normallyCompleted ?: recoveredCompletedAtEntry
+                val projectionNeedsStartupReconciliation = localBeforeDigest == null &&
+                    completedAtEntry == null &&
+                    allowOwnerGenerationRecovery &&
+                    isExactInactiveProjectionReplayBaseline(
+                        reservation = ticket.reservation,
+                        snapshot = snapshotAtEntry,
+                        expectedSequence = ticket.reservation.startingSequence + 4L,
+                    )
+                val currentBeforeDigest = localBeforeDigest
+                    ?: ticket.reservation.startingSemanticDigest.takeIf {
+                        projectionNeedsStartupReconciliation
+                    }
+                    ?: error("pending authoritative advance has no current semantic digest")
+                val oracleIdentityChangedAtEntry = snapshotAtEntry != null &&
+                    (snapshotAtEntry.bootId != ticket.reservation.startingBootId ||
+                        snapshotAtEntry.oracleInstanceId !=
+                        ticket.reservation.startingOracleInstanceId)
+                val unexpectedCursorAtEntry = snapshotAtEntry != null &&
+                    snapshotAtEntry.sequence != ticket.reservation.startingSequence
+                val semanticSessionUnavailableAtEntry =
+                    semanticCoordinator?.isReadyFor(currentBeforeDigest) != true
+                val correlationRecoveryEligible =
+                    allowOwnerGenerationRecovery ||
+                        authoritativeAdvanceNeedsRebaseline ||
+                        oracleIdentityChangedAtEntry ||
+                        recoveredCompletedAtEntry != null
+                val exactKnownRecoveryCursorAtEntry = snapshotAtEntry != null &&
+                    correlationRecoveryEligible &&
+                    !oracleIdentityChangedAtEntry &&
+                    snapshotAtEntry.sequence == ticket.reservation.startingSequence + 2L
+                val exactRegisteredOwnerRecoveryCursorAtEntry = snapshotAtEntry != null &&
+                    allowOwnerGenerationRecovery &&
+                    !oracleIdentityChangedAtEntry &&
+                    snapshotAtEntry.sequence == ticket.reservation.startingSequence + 4L &&
+                    semanticCoordinator?.isReadyFor(currentBeforeDigest) == true
+                if (completedAtEntry == null &&
+                    unexpectedCursorAtEntry &&
+                    !oracleIdentityChangedAtEntry &&
+                    !exactKnownRecoveryCursorAtEntry &&
+                    !exactRegisteredOwnerRecoveryCursorAtEntry
+                ) {
+                    val entry = checkNotNull(snapshotAtEntry)
+                    val snapshotForQuarantine = if (entry.isStableCompleteFor(
+                            expectedOracleOwnerPackage,
+                            expectedOracleOwnerUid,
+                        )
+                    ) {
+                        entry
+                    } else {
+                        // An uncertain partial mutation leaves a real newer
+                        // cursor but revokes session health. Re-register the
+                        // same process generation solely to obtain an attestable
+                        // current cursor; never replay the stale reservation.
+                        check(entry.isSemanticRegistrationBaselineFor(
+                            expectedOracleOwnerPackage,
+                            expectedOracleOwnerUid,
+                            currentBeforeDigest,
+                        )) {
+                            "unrelated pending cursor is not a safe quarantine baseline"
+                        }
+                        val coordinator = checkNotNull(semanticCoordinator) {
+                            "authoritative quarantine has no semantic coordinator"
+                        }
+                        check(
+                            coordinator.registerCurrentSession(currentBeforeDigest) is
+                                QwySemanticSessionRegistration.Registered,
+                        ) { "authoritative quarantine session registration failed" }
+                        checkNotNull(runCatching(authoritativeSource::snapshot).getOrNull()) {
+                            "authoritative oracle unavailable after quarantine registration"
+                        }.also { registered ->
+                            check(registered.isStableCompleteFor(
+                                expectedOracleOwnerPackage,
+                                expectedOracleOwnerUid,
+                            ) &&
+                                registered.bootId == entry.bootId &&
+                                registered.oracleInstanceId == entry.oracleInstanceId &&
+                                registered.sequence == entry.sequence + 2L &&
+                                registered.qwySemanticDigest == currentBeforeDigest
+                            ) {
+                                "quarantine registration was not one exact boundary"
+                            }
+                        }
+                    }
+                    tracker.quarantineAuthoritativeReservation(
+                        reservation = ticket.reservation,
+                        currentSnapshot = snapshotForQuarantine,
+                        expectedCurrentSemanticDigest = currentBeforeDigest,
+                        expectedOwnerPackage = expectedOracleOwnerPackage,
+                        expectedOwnerUid = expectedOracleOwnerUid,
+                        commitSideEffects = {
+                            storage.write(
+                                ADVANCE_PENDING_NAMESPACE,
+                                ADVANCE_PENDING_KEY,
+                                "",
+                            )
+                        },
+                    )
+                    authoritativeAdvanceNeedsRebaseline = false
+                    return true
+                }
+                val recoveryRequested = completedAtEntry == null &&
+                    (correlationRecoveryEligible ||
+                        semanticSessionUnavailableAtEntry ||
+                        unexpectedCursorAtEntry)
+                val recoveringOwnerGeneration = recoveryRequested ||
+                    recoveredCompletedAtEntry != null
+                if (recoveryRequested) {
                     val coordinator = checkNotNull(semanticCoordinator) {
                         "authoritative recovery has no semantic coordinator"
                     }
-                    if (!coordinator.isReadyFor(currentBeforeDigest)) {
+                    if (oracleIdentityChangedAtEntry ||
+                        !coordinator.isReadyFor(currentBeforeDigest)
+                    ) {
                         val beforeRegistration = checkNotNull(snapshotAtEntry) {
                             "authoritative oracle unavailable before recovery registration"
                         }
-                        check(beforeRegistration.bootId == ticket.reservation.startingBootId &&
-                            beforeRegistration.oracleInstanceId ==
-                            ticket.reservation.startingOracleInstanceId &&
-                            beforeRegistration.sequence ==
-                            ticket.reservation.startingSequence + 2L
+                        val exactKnownRecoveryCursor =
+                            beforeRegistration.bootId == ticket.reservation.startingBootId &&
+                                beforeRegistration.oracleInstanceId ==
+                                ticket.reservation.startingOracleInstanceId &&
+                                beforeRegistration.sequence ==
+                                ticket.reservation.startingSequence + 2L
+                        val stableReplacementCursor = oracleIdentityChangedAtEntry &&
+                            beforeRegistration.isStableCompleteFor(
+                                expectedOracleOwnerPackage,
+                                expectedOracleOwnerUid,
+                            ) &&
+                            beforeRegistration.qwySemanticDigest == currentBeforeDigest
+                        val stableSameCursorRebind =
+                            semanticSessionUnavailableAtEntry &&
+                                !oracleIdentityChangedAtEntry &&
+                                beforeRegistration.sequence ==
+                                ticket.reservation.startingSequence &&
+                                beforeRegistration.isStableCompleteFor(
+                                    expectedOracleOwnerPackage,
+                                    expectedOracleOwnerUid,
+                                ) &&
+                                beforeRegistration.qwySemanticDigest == currentBeforeDigest
+                        check(exactKnownRecoveryCursor || stableReplacementCursor
+                            || stableSameCursorRebind
                         ) {
                             "authoritative recovery registration saw an unrelated oracle cursor"
                         }
@@ -1138,7 +1324,10 @@ class EnvironmentControlHandler(
                 } else {
                     ticket.reservation.startingSemanticDigest
                 }
-                val alreadyCompleted = normallyCompleted ?:
+                // Terminal S+2/S+6 correlation is consumed before any session
+                // registration. Re-registering first would hide a completed
+                // remote commit behind a new cursor and strand the reservation.
+                val alreadyCompleted = completedAtEntry ?:
                     runCatching(authoritativeSource::snapshot).getOrNull()
                     ?.takeIf {
                         it.lastCompletedQwyMutationId == ticket.reservation.mutationId
@@ -1161,6 +1350,13 @@ class EnvironmentControlHandler(
                             beforeDigest = mutationBeforeDigest,
                         ) {
                             try {
+                                if (projectionNeedsStartupReconciliation) {
+                                    // Covered provider removals are attributed
+                                    // children of this reserved QWY token. The
+                                    // cleanup and replay therefore publish one
+                                    // stable +2 and preserve S+6 recovery.
+                                    environment.reconcileProjectionOnOwnerStart()
+                                }
                                 applyCommittedAdvance(
                                     ticket.fromItemId,
                                     ticket.toItemId,
@@ -1243,7 +1439,8 @@ class EnvironmentControlHandler(
                         completedSnapshot.lastCompletedQwyMutationId ==
                         ticket.reservation.mutationId
                 val exactRecoveryCorrelation =
-                    completedSnapshot.bootId == ticket.reservation.startingBootId &&
+                    correlationRecoveryEligible &&
+                        completedSnapshot.bootId == ticket.reservation.startingBootId &&
                         completedSnapshot.oracleInstanceId ==
                         ticket.reservation.startingOracleInstanceId &&
                         completedSnapshot.sequence ==
@@ -1297,19 +1494,62 @@ class EnvironmentControlHandler(
      * state-aware lease recovery (§8.4 recovery table). Invoked by the service
      * on create and by tests via harness restart.
      */
-    fun onOwnerProcessStart(cleanlinessProvable: Boolean): Unit = synchronized(ownerLock) {
+    fun onOwnerProcessStart(cleanlinessProvable: Boolean): Unit = withSelectedOwnerLock {
+        if (ownerStartCompleted) return@withSelectedOwnerLock
+        if (!ownerStartAttempted) {
+            ownerStartAttempted = true
+            ownerStartCleanliness = cleanlinessProvable
+        }
+        val retainedCleanliness = ownerStartCleanliness
+        val pendingAuthoritativeReservation = tracker.activeAuthoritativeReservation()
         // Bind the OS source before pending convergence: production projection
         // proof checks current AppOps ownership through this monitor. Binding
         // later makes every real restart convergence fail while the fake passes.
         // ownerLock serializes any immediately delivered callback with startup.
-        environment.setRelevantChangeListener(::recordRelevantChange)
+        if (!ownerStartSourceBound) {
+            environment.setRelevantChangeListener(::recordRelevantChange)
+            ownerStartSourceBound = true
+        }
 
-        val pendingAuthoritativeReservation = tracker.activeAuthoritativeReservation()
+        if (pendingAuthoritativeReservation == null) {
+            // Ordinary cold start establishes inactive before its fresh
+            // registration baseline. A reserved advance must defer this cleanup
+            // into that exact replay bracket; doing it here would add an
+            // unrelated stable cursor and destroy the frozen S+6 correlation.
+            environment.reconcileProjectionOnOwnerStart()
+        }
         if (environment.authoritativeSemanticMutationEnabled()) {
-            val semanticDigest = environment.authoritativeSemanticDigest(tracker.generation)
+            var semanticDigest = environment.authoritativeSemanticDigest(tracker.generation)
+            if (semanticDigest == null && pendingAuthoritativeReservation != null) {
+                val marker = storage.read(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY)
+                val ticket = marker?.takeIf(String::isNotEmpty)
+                    ?.let(PendingAdvanceTicket::decode) as? PendingAdvanceTicket.Authoritative
+                val snapshot = runCatching(authoritativeSource::snapshot).getOrNull()
+                if (ticket?.reservation == pendingAuthoritativeReservation) {
+                    semanticDigest = adoptExactTerminalInactiveProjection(
+                        ticket = ticket,
+                        schedule = environment.scheduleSnapshot(),
+                        snapshot = snapshot,
+                    )
+                }
+                if (semanticDigest == null &&
+                    isExactInactiveProjectionReplayBaseline(
+                        reservation = pendingAuthoritativeReservation,
+                        snapshot = snapshot,
+                        expectedSequence =
+                            pendingAuthoritativeReservation.startingSequence + 2L,
+                    )
+                ) {
+                    semanticDigest = pendingAuthoritativeReservation.startingSemanticDigest
+                }
+            }
             val coordinator = semanticCoordinator
             if (semanticDigest != null && coordinator != null &&
-                !coordinator.isReadyFor(semanticDigest)
+                !coordinator.isReadyFor(semanticDigest) &&
+                canRegisterPendingOwnerRecovery(
+                    reservation = pendingAuthoritativeReservation,
+                    snapshot = runCatching(authoritativeSource::snapshot).getOrNull(),
+                )
             ) {
                 val registration = coordinator.registerCurrentSession(semanticDigest)
                 if (registration is QwySemanticSessionRegistration.Registered &&
@@ -1342,11 +1582,29 @@ class EnvironmentControlHandler(
 
         // Tracker already allocated a new generation in its init block.
         // Now do state-aware lease recovery.
-        val recoveredProviderCleanup = leaseStore.recoverAfterRestart(
-            tracker.generation,
-            cleanlinessProvable,
-            environment,
-        )
+        val restartLease = leaseStore.blockingLease()
+        val restartCleanupExpected = restartLease?.state == LeaseState.RELEASING
+        val recoveredCleanupMutation = if (restartCleanupExpected) {
+            executeSemanticMutation(
+                mutationId = "owner-restart-cleanup:${tracker.generation}:" +
+                    checkNotNull(restartLease).leaseId,
+            ) {
+                leaseStore.recoverAfterRestart(
+                    tracker.generation,
+                    retainedCleanliness,
+                    environment,
+                )
+            }
+        } else {
+            SemanticMutationExecution(
+                leaseStore.recoverAfterRestart(
+                    tracker.generation,
+                    retainedCleanliness,
+                    environment,
+                ),
+            )
+        }
+        val recoveredProviderCleanup = recoveredCleanupMutation.value
 
         storage.transaction {
             recoveredProviderCleanup?.let { attempt ->
@@ -1362,9 +1620,125 @@ class EnvironmentControlHandler(
             // terminal above are one durable publication.
             if (!coalescedAuthoritativeAdvance) {
                 tracker.bump(RevisionBumpReason.GENERATION_DISCONTINUITY)
+            } else if (restartCleanupExpected) {
+                tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+            }
+            recoveredCleanupMutation.completedSnapshot?.let { completedSnapshot ->
+                tracker.acknowledgeAccountedAuthoritativeMutation(
+                    completedSnapshot = completedSnapshot,
+                    expectedMutationId = checkNotNull(recoveredCleanupMutation.mutationId),
+                    expectedAfterSemanticDigest = checkNotNull(
+                        recoveredCleanupMutation.afterDigest,
+                    ),
+                    expectedOwnerPackage = expectedOracleOwnerPackage,
+                    expectedOwnerUid = expectedOracleOwnerUid,
+                )
             }
         }
 
+        ownerStartCompleted = true
+
+    }
+
+    /**
+     * A completed S+4/ID cursor still names the old process generation. Before registration can
+     * publish S+6, recompute the *current physical projection* with that retained generation and
+     * require byte-exact digest equality. Exact same-coordinate heartbeats are intentionally
+     * journal no-ops, while API-35 coordinate-bit changes are covered under the provider lock.
+     * Equality remains an independent recovery guard against pre-existing or unavailable-hook
+     * physical drift being folded into reserved R+1. Other shapes retain dedicated predicates.
+     */
+    private fun canRegisterPendingOwnerRecovery(
+        reservation: AuthoritativeRevisionReservation?,
+        snapshot: AuthoritativeContinuitySnapshot?,
+    ): Boolean {
+        if (reservation == null) return true
+        val retained = snapshot ?: return false
+        val isCompletedOwnerDeathCursor =
+            retained.bootId == reservation.startingBootId &&
+                retained.oracleInstanceId == reservation.startingOracleInstanceId &&
+                retained.sequence == reservation.startingSequence + 4L &&
+                retained.lastCompletedQwyMutationId == reservation.mutationId
+        if (!isCompletedOwnerDeathCursor) return true
+        val ownerGeneration = reservation.ownerGenerationAtReservation
+        val recomputedRetainedGenerationDigest =
+            environment.authoritativeSemanticDigest(ownerGeneration) ?: return false
+        return retained.qwySemanticDigest == recomputedRetainedGenerationDigest
+    }
+
+    /**
+     * Proves that the sole unreadable component is the inherited framework
+     * projection. The retained old-generation digest must recompute exactly as
+     * inactive; a generic null/read failure never earns the starting-digest
+     * fallback or consumes a registration boundary.
+     */
+    private fun isExactInactiveProjectionReplayBaseline(
+        reservation: AuthoritativeRevisionReservation,
+        snapshot: AuthoritativeContinuitySnapshot?,
+        expectedSequence: Long,
+    ): Boolean {
+        val ownerGeneration = reservation.ownerGenerationAtReservation
+        if (!environment.canReconcileAuthoritativeProjectionOnOwnerStart()) return false
+        if (environment.authoritativeSemanticDigestAssumingInactiveProjection(ownerGeneration) !=
+            reservation.startingSemanticDigest
+        ) {
+            return false
+        }
+        val baseline = snapshot ?: return false
+        return baseline.bootId == reservation.startingBootId &&
+            baseline.oracleInstanceId == reservation.startingOracleInstanceId &&
+            baseline.sequence == expectedSequence &&
+            baseline.lastCompletedQwyMutationId != reservation.mutationId &&
+            baseline.isSemanticRegistrationBaselineFor(
+                expectedOracleOwnerPackage,
+                expectedOracleOwnerUid,
+                reservation.startingSemanticDigest,
+            )
+    }
+
+    /**
+     * A terminal completed mutation cannot replay after its exact S+4 cursor.
+     * Adopt inactivity only when the durable exhausted schedule and the
+     * retained old-generation digest independently describe that same state.
+     * Active or unreadable terminal projections therefore defer safely.
+     */
+    private fun adoptExactTerminalInactiveProjection(
+        ticket: PendingAdvanceTicket.Authoritative,
+        schedule: ScheduleSnapshot?,
+        snapshot: AuthoritativeContinuitySnapshot?,
+    ): String? {
+        val reservation = ticket.reservation
+        val ownerGeneration = reservation.ownerGenerationAtReservation
+        if (ticket.toItemId != null || schedule == null || !schedule.exhausted ||
+            schedule.currentItemId != ticket.fromItemId ||
+            schedule.scheduleVersion != ticket.versionAfter
+        ) {
+            return null
+        }
+        val retained = snapshot ?: return null
+        val inactiveOldDigest = environment
+            .authoritativeSemanticDigestAssumingInactiveProjection(ownerGeneration)
+            ?: return null
+        if (retained.bootId != reservation.startingBootId ||
+            retained.oracleInstanceId != reservation.startingOracleInstanceId ||
+            retained.sequence != reservation.startingSequence + 4L ||
+            retained.lastCompletedQwyMutationId != reservation.mutationId ||
+            !retained.isSemanticRegistrationBaselineFor(
+                expectedOracleOwnerPackage,
+                expectedOracleOwnerUid,
+                inactiveOldDigest,
+            )
+        ) {
+            return null
+        }
+        val expectedCurrentDigest = environment
+            .authoritativeSemanticDigestAssumingInactiveProjection(tracker.generation)
+            ?: return null
+        return runCatching {
+            environment.adoptAuthoritativeInactiveProjectionOnOwnerStart()
+            checkNotNull(environment.authoritativeSemanticDigest(tracker.generation))
+                .also { check(it == expectedCurrentDigest) }
+        }.getOrNull()
     }
 
     /**
@@ -1399,11 +1773,27 @@ class EnvironmentControlHandler(
      * RELEASED itself. No post-revoke capability is granted to the caller.
      */
     fun runRevokedLeaseCleanup(): Unit = withOwnerFence {
-        val attempt = leaseStore.runProviderCleanupForRevoked(environment)
+        val cleanupOwner = leaseStore.blockingLease()
+        val cleanupMutation = executeSemanticMutation(
+            mutationId = "provider-revoked-cleanup:${tracker.generation}:" +
+                (cleanupOwner?.leaseId ?: "none"),
+        ) {
+            leaseStore.runProviderCleanupForRevoked(environment)
+        }
+        val attempt = cleanupMutation.value
             ?: return@withOwnerFence
         storage.transaction {
             val terminal = leaseStore.finalizeProviderCleanup(attempt)
             tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+            cleanupMutation.completedSnapshot?.let { completedSnapshot ->
+                tracker.acknowledgeAccountedAuthoritativeMutation(
+                    completedSnapshot = completedSnapshot,
+                    expectedMutationId = checkNotNull(cleanupMutation.mutationId),
+                    expectedAfterSemanticDigest = checkNotNull(cleanupMutation.afterDigest),
+                    expectedOwnerPackage = expectedOracleOwnerPackage,
+                    expectedOwnerUid = expectedOracleOwnerUid,
+                )
+            }
             audit.append(
                 event = "provider_revoked_cleanup",
                 callerApplicationId = terminal.callerApplicationId,
@@ -1494,22 +1884,28 @@ class EnvironmentControlHandler(
      * observation's revision snapshot.
      */
     private fun recordRelevantChange(reason: RevisionBumpReason) {
+        // Runtime-selected writers already have an exact oracle bracket. This
+        // fast path also prevents their synchronous framework callback from
+        // inverting writer-lock -> ownerLock against a handler request.
+        if (QwySemanticWriterRuntime.isAuthoritativeMutationInFlightOnCurrentThread()) return
         synchronized(ownerLock) {
-            val semanticDigest = environment.authoritativeSemanticDigest(tracker.generation)
-            val authoritativeOwnsChange = authoritativeMutationInFlight ||
-                QwySemanticWriterRuntime.isAuthoritativeMutationInFlight() ||
-                (environment.authoritativeSemanticMutationEnabled() &&
-                    semanticCoordinator?.isReadyFor(semanticDigest.orEmpty()) == true &&
-                    runCatching(authoritativeSource::snapshot).getOrNull()
-                        ?.isStableCompleteFor(
-                            expectedOracleOwnerPackage,
-                            expectedOracleOwnerUid,
-                        ) == true)
+            // A durable reservation owns exactly baseRevision -> R+1. Moving
+            // the base here would make finalize, recovery, and quarantine all
+            // permanently impossible. A public callback also carries no
+            // mutation/session correlation, so it may revoke coverage but can
+            // never authorize the pending mutation's owner-recovery path.
+            if (tracker.activeAuthoritativeReservation() != null) {
+                tracker.invalidateCoverageForPendingReservation()
+                return@synchronized
+            }
+            val authoritativeOwnsChange = authoritativeMutationInFlight
             if (authoritativeOwnsChange) return@synchronized
             if (reason == RevisionBumpReason.OBSERVER_GAP) {
                 tracker.reportObserverGap(ContinuityCoverageV1.PARTIAL)
             } else {
-                tracker.bump(reason)
+                // A delivered relevant change invalidates the old continuity
+                // interval even when the Binder authority is unavailable.
+                tracker.reportObserverGap(ContinuityCoverageV1.NONE)
             }
         }
     }
@@ -1524,70 +1920,119 @@ class EnvironmentControlHandler(
         mutationId: String,
         operation: () -> T,
     ): SemanticMutationExecution<T> {
-        val coordinator = semanticCoordinator
-            ?: return SemanticMutationExecution(operation())
         if (!environment.authoritativeSemanticMutationEnabled()) {
+            // The legacy lane cannot correlate an external mutation with a
+            // journal cursor. Revoke any old FULL claim before the operation,
+            // because a throw may occur after the environment already changed
+            // and before the normal revision publication can commit.
+            tracker.invalidateCoverage()
+            return SemanticMutationExecution(operation())
+        }
+        val runtimeLaneInstalled = QwySemanticWriterRuntime.hasInstalledLane()
+        val coordinator = semanticCoordinator ?: run {
+            tracker.invalidateCoverage()
+            check(!runtimeLaneInstalled) {
+                "installed QWY writer lane has no handler semantic coordinator"
+            }
             return SemanticMutationExecution(operation())
         }
         val beforeDigest = environment.authoritativeSemanticDigest(tracker.generation)
-            ?: return SemanticMutationExecution(operation())
-        val pre = runCatching(authoritativeSource::snapshot).getOrNull()
+            ?: run {
+                tracker.invalidateCoverage()
+                check(!runtimeLaneInstalled) {
+                    "installed QWY writer lane lost its canonical semantic digest"
+                }
+                return SemanticMutationExecution(operation())
+            }
+        var pre = runCatching(authoritativeSource::snapshot).getOrNull()
+        val runtimeLaneHealthy = runtimeLaneInstalled &&
+            QwySemanticWriterRuntime.isInstalledAndHealthyFor(beforeDigest)
+        if (runtimeLaneHealthy && pre != null &&
+            pre.isStableCompleteFor(expectedOracleOwnerPackage, expectedOracleOwnerUid) &&
+            pre.qwySemanticDigest == beforeDigest &&
+            coordinator.isReadyFor(beforeDigest) &&
+            !tracker.isAuthoritativeCursorAcknowledged(pre)
+        ) {
+            tracker.acknowledgeStableAuthoritativeCursorBeforeMutation(
+                snapshot = pre,
+                expectedSemanticDigest = beforeDigest,
+                expectedOwnerPackage = expectedOracleOwnerPackage,
+                expectedOwnerUid = expectedOracleOwnerUid,
+            )
+            pre = runCatching(authoritativeSource::snapshot).getOrNull()
+        }
         val authoritativeReady = pre != null &&
             pre.isStableCompleteFor(expectedOracleOwnerPackage, expectedOracleOwnerUid) &&
             pre.qwySemanticDigest == beforeDigest &&
             tracker.isAuthoritativeCursorAcknowledged(pre) &&
             coordinator.isReadyFor(beforeDigest)
-        if (!authoritativeReady) return SemanticMutationExecution(operation())
-
-        val result = try {
-            authoritativeMutationInFlight = true
-            coordinator.runMutation(mutationId, beforeDigest) {
-                val value = operation()
-                val afterDigest = environment.authoritativeSemanticDigest(tracker.generation)
-                    ?: return@runMutation QwySemanticMutationWork.Uncertain()
-                if (afterDigest == beforeDigest) {
-                    QwySemanticMutationWork.ProvedNoOp(value, afterDigest)
-                } else {
-                    QwySemanticMutationWork.Changed(value, afterDigest)
-                }
+        if (!authoritativeReady) {
+            tracker.invalidateCoverage()
+            check(!runtimeLaneInstalled) {
+                "installed QWY writer lane cannot fall back to a raw handler mutation"
             }
-        } finally {
-            authoritativeMutationInFlight = false
+            return SemanticMutationExecution(operation())
         }
-        return when (result) {
-            is QwySemanticMutationResult.ProvedNoOp -> {
-                val post = runCatching(authoritativeSource::snapshot).getOrNull()
-                check(post == pre) {
-                    "proved QWY no-op did not preserve the authoritative snapshot"
+
+        return try {
+            val result = try {
+                authoritativeMutationInFlight = true
+                coordinator.runMutation(mutationId, beforeDigest) {
+                    val value = operation()
+                    val afterDigest = environment.authoritativeSemanticDigest(tracker.generation)
+                        ?: return@runMutation QwySemanticMutationWork.Uncertain()
+                    if (afterDigest == beforeDigest) {
+                        QwySemanticMutationWork.ProvedNoOp(value, afterDigest)
+                    } else {
+                        QwySemanticMutationWork.Changed(value, afterDigest)
+                    }
                 }
-                SemanticMutationExecution(result.value)
+            } finally {
+                authoritativeMutationInFlight = false
             }
 
-            is QwySemanticMutationResult.Changed -> {
-                val post = checkNotNull(
-                    runCatching(authoritativeSource::snapshot).getOrNull(),
-                ) { "authoritative oracle unavailable after QWY mutation" }
-                check(post.isStableCompleteFor(
-                    expectedOracleOwnerPackage,
-                    expectedOracleOwnerUid,
-                )) { "authoritative oracle unhealthy after QWY mutation" }
-                check(post.bootId == pre.bootId &&
-                    post.oracleInstanceId == pre.oracleInstanceId &&
-                    post.sequence == pre.sequence + 2L &&
-                    post.lastCompletedQwyMutationId == mutationId &&
-                    post.qwySemanticDigest == result.afterDigest
-                ) { "authoritative QWY mutation completion did not match its bracket" }
-                SemanticMutationExecution(
-                    value = result.value,
-                    mutationId = mutationId,
-                    afterDigest = result.afterDigest,
-                    completedSnapshot = post,
+            when (result) {
+                is QwySemanticMutationResult.ProvedNoOp -> {
+                    val post = runCatching(authoritativeSource::snapshot).getOrNull()
+                    check(post == pre) {
+                        "proved QWY no-op did not preserve the authoritative snapshot"
+                    }
+                    SemanticMutationExecution(result.value)
+                }
+
+                is QwySemanticMutationResult.Changed -> {
+                    val post = checkNotNull(
+                        runCatching(authoritativeSource::snapshot).getOrNull(),
+                    ) { "authoritative oracle unavailable after QWY mutation" }
+                    check(post.isStableCompleteFor(
+                        expectedOracleOwnerPackage,
+                        expectedOracleOwnerUid,
+                    )) { "authoritative oracle unhealthy after QWY mutation" }
+                    check(post.bootId == pre.bootId &&
+                        post.oracleInstanceId == pre.oracleInstanceId &&
+                        post.sequence == pre.sequence + 2L &&
+                        post.lastCompletedQwyMutationId == mutationId &&
+                        post.qwySemanticDigest == result.afterDigest
+                    ) { "authoritative QWY mutation completion did not match its bracket" }
+                    SemanticMutationExecution(
+                        value = result.value,
+                        mutationId = mutationId,
+                        afterDigest = result.afterDigest,
+                        completedSnapshot = post,
+                    )
+                }
+
+                is QwySemanticMutationResult.Uncertain -> throw IllegalStateException(
+                    "authoritative QWY mutation became uncertain: ${result.reason}",
                 )
             }
-
-            is QwySemanticMutationResult.Uncertain -> throw IllegalStateException(
-                "authoritative QWY mutation became uncertain: ${result.reason}",
-            )
+        } catch (failure: Throwable) {
+            try {
+                tracker.invalidateCoverage()
+            } catch (invalidationFailure: Throwable) {
+                failure.addSuppressed(invalidationFailure)
+            }
+            throw failure
         }
     }
 
@@ -1688,7 +2133,12 @@ class EnvironmentControlHandler(
      * Settling FIRST means no entry — write, read, or replay — is served while
      * a committed advance is unreflected in the external schedule.
      */
-    private inline fun <T> withOwnerFence(block: () -> T): T = synchronized(ownerLock) {
+    private fun <T> withSelectedOwnerLock(block: () -> T): T =
+        QwySemanticWriterRuntime.serializeSelection {
+            synchronized(ownerLock, block)
+        }
+
+    private fun <T> withOwnerFence(block: () -> T): T = withSelectedOwnerLock {
         settlePendingAdvance()
         block()
     }

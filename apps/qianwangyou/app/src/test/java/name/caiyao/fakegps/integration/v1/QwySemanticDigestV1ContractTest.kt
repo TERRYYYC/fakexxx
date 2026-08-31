@@ -58,6 +58,9 @@ class QwySemanticDigestV1ContractTest {
                 ),
             ),
             "projection active" to baseline.copy(projectionActive = false),
+            "effective provider projection" to baseline.copy(
+                effectiveProjectionFingerprint = "system-mock:gps=B|network=B",
+            ),
         )
 
         mutations.forEach { (field, changed) ->
@@ -67,6 +70,20 @@ class QwySemanticDigestV1ContractTest {
                 digest(changed),
             )
         }
+    }
+
+    @Test
+    fun `identical published payloads under different active profile identities do not alias`() {
+        val baseline = baselineInputs()
+        val otherIdentity = baseline.copy(activeProfileRef = "profile-2")
+
+        assertEquals(baseline.publishedConfigDigest, otherIdentity.publishedConfigDigest)
+        assertEquals(baseline.schedule, otherIdentity.schedule)
+        assertNotEquals(
+            "the durable active-profile identity is semantic even when its payload is identical",
+            digest(baseline),
+            digest(otherIdentity),
+        )
     }
 
     @Test
@@ -135,6 +152,7 @@ class QwySemanticDigestV1ContractTest {
         effectiveLatitude = inputs.effectiveLatitude,
         effectiveLongitude = inputs.effectiveLongitude,
         projectionActive = inputs.projectionActive,
+        effectiveProjectionFingerprint = inputs.effectiveProjectionFingerprint,
         publishedConfigDigest = inputs.publishedConfigDigest,
     )
 
@@ -152,6 +170,7 @@ class QwySemanticDigestV1ContractTest {
         effectiveLatitude = 50.450001,
         effectiveLongitude = 30.523333,
         projectionActive = true,
+        effectiveProjectionFingerprint = "system-mock:gps=A|network=A",
         publishedConfigDigest = "published-profile-a",
     )
 
@@ -163,6 +182,7 @@ class QwySemanticDigestV1ContractTest {
         val effectiveLatitude: Double,
         val effectiveLongitude: Double,
         val projectionActive: Boolean,
+        val effectiveProjectionFingerprint: String?,
         val publishedConfigDigest: String?,
     )
 }

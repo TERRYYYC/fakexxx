@@ -21,6 +21,7 @@ object AuthoritativeCoverageMask {
     const val QWY_SEMANTIC_MUTATION = 1L shl 6
     const val BRIDGE_SESSION = 1L shl 7
     const val BUILD_ATTESTATION = 1L shl 8
+    const val LOCATION_SEMANTIC_COORDINATE = 1L shl 9
 
     const val REQUIRED_V1 =
         APP_OPS_CHECKING_SERVICE_WRAPPER or
@@ -31,7 +32,8 @@ object AuthoritativeCoverageMask {
             QWY_SERVICE_GENERATION or
             QWY_SEMANTIC_MUTATION or
             BRIDGE_SESSION or
-            BUILD_ATTESTATION
+            BUILD_ATTESTATION or
+            LOCATION_SEMANTIC_COORDINATE
 }
 
 /** Only [HEALTHY] may participate in a complete continuity proof. */
@@ -113,6 +115,44 @@ fun AuthoritativeContinuitySnapshot.isStableCompleteFor(
     if (qwySemanticDigest.isNullOrBlank()) return false
     if (lastCompletedQwyMutationId != null && lastCompletedQwyMutationId.isBlank()) return false
     return true
+}
+
+/**
+ * Exact even cursor from which registering the QWY semantic session is safe.
+ *
+ * A bridge/session loss necessarily removes the two session-owned coverage
+ * bits before registration can restore them, so requiring HEALTHY here creates
+ * a permanent catch-22. Every non-session hook, build attestation, bridge,
+ * effective owner/provider fact, and the durable semantic digest must still be
+ * intact; only the registration-owned bits/health may be absent.
+ */
+fun AuthoritativeContinuitySnapshot.isSemanticRegistrationBaselineFor(
+    expectedPackage: String,
+    expectedUid: Int,
+    expectedSemanticDigest: String,
+): Boolean {
+    if (protocolVersion != AuthoritativeContinuityProtocol.VERSION) return false
+    if (bootId.isBlank() || oracleInstanceId.isBlank()) return false
+    if (sequence < 0L || sequence and 1L != 0L) return false
+    if (requiredCoverageMask != AuthoritativeCoverageMask.REQUIRED_V1) return false
+    val sessionOwnedCoverage = AuthoritativeCoverageMask.QWY_SERVICE_GENERATION or
+        AuthoritativeCoverageMask.QWY_SEMANTIC_MUTATION
+    val independentlyRequired = requiredCoverageMask and sessionOwnedCoverage.inv()
+    if (installedCoverageMask and independentlyRequired != independentlyRequired) return false
+    if (installedCoverageMask and requiredCoverageMask.inv() != 0L) return false
+    if (ownerUid != expectedUid || ownerPackage != expectedPackage) return false
+    if (!gpsProviderEnabled || !networkProviderEnabled) return false
+    if (expectedSemanticDigest.isBlank() || qwySemanticDigest != expectedSemanticDigest) return false
+    if (lastCompletedQwyMutationId != null && lastCompletedQwyMutationId.isBlank()) return false
+    return when (health) {
+        AuthoritativeOracleHealth.HEALTHY,
+        AuthoritativeOracleHealth.HOOKS_INCOMPLETE,
+        AuthoritativeOracleHealth.SESSION_UNAVAILABLE,
+        AuthoritativeOracleHealth.SESSION_UNCERTAIN,
+        -> true
+
+        else -> false
+    }
 }
 
 /**

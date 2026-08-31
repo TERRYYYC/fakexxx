@@ -2,8 +2,19 @@ package name.caiyao.fakegps.mockprovider
 
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.data.LocationDeliveryMode
+import name.caiyao.fakegps.integration.v1.QwySemanticClientDeathToken
+import name.caiyao.fakegps.integration.v1.QwySemanticClientDeathTokenFactory
+import name.caiyao.fakegps.integration.v1.QwySemanticDigestProvider
+import name.caiyao.fakegps.integration.v1.QwySemanticMutationCoordinator
+import name.caiyao.fakegps.integration.v1.QwySemanticMutationEndpoint
+import name.caiyao.fakegps.integration.v1.QwySemanticMutationEndpointProvider
+import name.caiyao.fakegps.integration.v1.QwySemanticSessionHealth
+import name.caiyao.fakegps.integration.v1.QwySemanticSessionRegistration
+import name.caiyao.fakegps.integration.v1.QwySemanticWriterAmbiguityException
+import name.caiyao.fakegps.integration.v1.QwySemanticWriterRuntime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -365,6 +376,228 @@ class LocationDeliveryOrchestratorTest {
     }
 
     @Test
+    fun `same desired config uses semantic repair when exact OS projection drifted`() {
+        var projectionMatches = true
+        val repairKinds = mutableListOf<String>()
+        val fixture = Fixture(
+            projectionMatchesExactly = { projectionMatches },
+            semanticProjectionRepair = { kind, operation ->
+                repairKinds += kind
+                operation()
+                true
+            },
+        )
+        fixture.orchestrator.enable()
+        fixture.events.clear()
+
+        projectionMatches = false
+        val result = fixture.orchestrator.refresh()
+
+        assertTrue(result is MockProviderState.Running)
+        assertEquals(listOf("mock-provider-refresh-coordinate-repair"), repairKinds)
+        assertEquals(listOf("provider:publish"), fixture.events)
+    }
+
+    @Test
+    fun `drift repair publish failure cleans provider inside the repair interval`() {
+        var projectionMatches = true
+        val ownership = InProcessMockProviderOwnership()
+        val repairEvents = mutableListOf<String>()
+        val fixture = Fixture(
+            ownership = ownership,
+            publishFailureCalls = setOf(2),
+            projectionMatchesExactly = { projectionMatches },
+            semanticProjectionRepair = { _, operation ->
+                repairEvents += "repair:begin"
+                try {
+                    operation()
+                } finally {
+                    repairEvents +=
+                        "repair:end:${ownership.projectionOwnershipSnapshot()::class.simpleName}"
+                }
+                true
+            },
+        )
+        fixture.orchestrator.enable()
+        fixture.events.clear()
+        projectionMatches = false
+
+        assertThrows(IllegalStateException::class.java) {
+            fixture.orchestrator.refresh()
+        }
+
+        assertEquals(
+            listOf("provider:publish", "provider:remove"),
+            fixture.events,
+        )
+        assertEquals(
+            listOf("repair:begin", "repair:end:ProvablyInactive"),
+            repairEvents,
+        )
+        assertEquals(
+            MockProviderProjectionOwnership.ProvablyInactive,
+            ownership.projectionOwnershipSnapshot(),
+        )
+        assertTrue(fixture.controller.state is MockProviderState.Failed)
+    }
+
+    @Test
+    fun `exact tick failure enters oracle only before semantic cleanup`() {
+        val trace = mutableListOf<String>()
+        var semanticDigest = "digest-a"
+        var removeCount = 0
+        val endpoint = RecordingSemanticEndpoint(trace)
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider { endpoint },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            coordinator.registerCurrentSession("digest-a"),
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { semanticDigest },
+            sessionHealth = QwySemanticSessionHealth { it == semanticDigest },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val fixture = Fixture(
+                publishFailureCalls = setOf(2),
+                ownership = InProcessMockProviderOwnership(),
+                eventSink = trace,
+                onProviderRemove = {
+                    removeCount += 1
+                    if (removeCount > 1) semanticDigest = "digest-inactive"
+                },
+                semanticMutation = QwySemanticWriterRuntime::mutate,
+                projectionMatchesExactly = { true },
+                semanticProjectionRepair =
+                    QwySemanticWriterRuntime::repairExternalProjection,
+            )
+            fixture.orchestrator.enable()
+            trace.clear()
+
+            val result = fixture.orchestrator.refresh()
+
+            assertEquals(
+                listOf(
+                    "provider:publish",
+                    "begin:test-mock-provider-refresh-failure-cleanup:digest-a",
+                    "provider:remove",
+                    "finish:2:true:false:digest-inactive",
+                ),
+                trace,
+            )
+            assertTrue(result is MockProviderState.Failed)
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `exact tick publishes raw without semantic begin`() {
+        val trace = mutableListOf<String>()
+        val endpoint = RecordingSemanticEndpoint(trace)
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider { endpoint },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            coordinator.registerCurrentSession("digest-a"),
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { "digest-a" },
+            sessionHealth = QwySemanticSessionHealth { it == "digest-a" },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val fixture = Fixture(
+                ownership = InProcessMockProviderOwnership(),
+                eventSink = trace,
+                semanticMutation = QwySemanticWriterRuntime::mutate,
+                projectionMatchesExactly = { true },
+                semanticProjectionRepair =
+                    QwySemanticWriterRuntime::repairExternalProjection,
+            )
+            fixture.orchestrator.enable()
+            trace.clear()
+
+            val result = fixture.orchestrator.refresh()
+
+            assertTrue(result is MockProviderState.Running)
+            assertEquals(
+                listOf(
+                    "provider:publish",
+                ),
+                trace,
+            )
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `integration handback makes stale running service perform ordinary semantic restart`() {
+        val mutationKinds = mutableListOf<String>()
+        val repairKinds = mutableListOf<String>()
+        val ownership = InProcessMockProviderOwnership()
+        val fixture = Fixture(
+            ownership = ownership,
+            projectionMatchesExactly = { false },
+            semanticMutation = { kind, operation ->
+                mutationKinds += kind
+                operation(false)
+            },
+            semanticProjectionRepair = { kind, operation ->
+                repairKinds += kind
+                operation()
+                true
+            },
+        )
+        try {
+            fixture.orchestrator.enable()
+            assertTrue(fixture.controller.state is MockProviderState.Running)
+            assertTrue(
+                ownership.projectionOwnershipSnapshot() is
+                    MockProviderProjectionOwnership.ServiceActive,
+            )
+
+            val claim = ownership.claimIntegration()
+            ownership.releaseIntegration(claim) {
+                fixture.events += "integration:remove"
+            }
+            fixture.events.clear()
+            mutationKinds.clear()
+
+            val result = fixture.orchestrator.refresh()
+
+            assertTrue(result is MockProviderState.Running)
+            assertEquals(listOf("mock-provider-refresh-reconfigure"), mutationKinds)
+            assertTrue(repairKinds.isEmpty())
+            assertEquals(
+                listOf("provider:remove", "provider:replace", "provider:publish"),
+                fixture.events,
+            )
+            assertEquals(
+                MockProviderProjectionOwnership.ServiceActive(
+                    (result as MockProviderState.Running).config,
+                ),
+                ownership.projectionOwnershipSnapshot(),
+            )
+        } finally {
+            val cleanup = ownership.claimIntegration()
+            ownership.releaseIntegration(cleanup) {}
+        }
+    }
+
+    @Test
     fun `refresh after persisted hook switch disables runtime instead of restarting provider`() {
         val fixture = Fixture(initialMode = LocationDeliveryMode.HOOK)
 
@@ -508,13 +741,28 @@ class LocationDeliveryOrchestratorTest {
         private val cleanupResults: ArrayDeque<Boolean> = ArrayDeque(listOf(true, true, true)),
         private val providerFailure: String? = null,
         private val providerFailureThrowable: Throwable? = null,
+        private val publishFailureCalls: Set<Int> = emptySet(),
         private val removeFailureCalls: Set<Int> = emptySet(),
         readPublished: () -> PublishedConfig? = { published(50.4501, 30.5234) },
+        ownership: MockProviderOwnership = FixtureOwnership(),
+        semanticMutation: (
+            String,
+            (Boolean) -> MockProviderState,
+        ) -> MockProviderState = { _, operation -> operation(false) },
+        projectionMatchesExactly: (MockLocationConfig) -> Boolean = { true },
+        semanticProjectionRepair: (String, () -> Unit) -> Boolean = { _, operation ->
+            operation()
+            true
+        },
+        eventSink: MutableList<String> = mutableListOf(),
+        private val onProviderPublishFailure: () -> Unit = {},
+        private val onProviderRemove: () -> Unit = {},
     ) {
-        val events = mutableListOf<String>()
+        val events = eventSink
         var mode = initialMode
         var cleanupRequired = initialCleanupRequired
         private var removeCallCount = 0
+        private var publishCallCount = 0
         private val gateway = object : MockProviderGateway {
             override fun replaceGpsProvider() {
                 events += "provider:replace"
@@ -524,8 +772,14 @@ class LocationDeliveryOrchestratorTest {
             }
             override fun publish(config: MockLocationConfig) {
                 events += "provider:publish"
+                publishCallCount += 1
                 if (providerFailure == "publish") {
+                    onProviderPublishFailure()
                     throw providerFailureThrowable ?: error("publish failed")
+                }
+                if (publishCallCount in publishFailureCalls) {
+                    onProviderPublishFailure()
+                    error("publish $publishCallCount failed")
                 }
             }
             override fun removeGpsProvider() {
@@ -535,10 +789,12 @@ class LocationDeliveryOrchestratorTest {
                     throw providerFailureThrowable ?: error("remove failed")
                 }
                 if (removeCallCount in removeFailureCalls) error("remove $removeCallCount failed")
+                onProviderRemove()
             }
         }
+        val controller = MockProviderSessionController(gateway, ownership = ownership)
         val orchestrator = LocationDeliveryOrchestrator(
-            controller = MockProviderSessionController(gateway),
+            controller = controller,
             readPublished = readPublished,
             readMode = { mode },
             readCleanupRequired = { cleanupRequired },
@@ -558,7 +814,89 @@ class LocationDeliveryOrchestratorTest {
                 if (result) cleanupRequired = it
                 result
             },
+            ownership = ownership,
+            semanticMutation = semanticMutation,
+            projectionMatchesExactly = projectionMatchesExactly,
+            semanticProjectionRepair = semanticProjectionRepair,
         )
+    }
+
+    private class RecordingSemanticEndpoint(
+        private val trace: MutableList<String>,
+    ) : QwySemanticMutationEndpoint {
+        private var nextToken = 0L
+
+        override fun registerCurrentSession(
+            semanticDigest: String,
+            clientDeathToken: QwySemanticClientDeathToken,
+        ) {
+            trace += "register:$semanticDigest"
+        }
+
+        override fun beginMutation(
+            mutationId: String,
+            beforeDigest: String,
+            clientDeathToken: QwySemanticClientDeathToken,
+        ): Long {
+            trace += "begin:$mutationId:$beforeDigest"
+            return ++nextToken
+        }
+
+        override fun finishMutation(
+            token: Long,
+            changed: Boolean,
+            uncertain: Boolean,
+            afterDigest: String?,
+        ) {
+            trace += "finish:$token:$changed:$uncertain:${afterDigest.orEmpty()}"
+        }
+    }
+
+    private class FixtureOwnership : MockProviderOwnership {
+        private var nextClaim = 0L
+        private var integrationClaim: Long? = null
+        private var projection: MockProviderProjectionOwnership =
+            MockProviderProjectionOwnership.ProvablyInactive
+
+        override fun claimIntegration(): Long = (++nextClaim).also {
+            integrationClaim = it
+            projection = MockProviderProjectionOwnership.IntegrationActive(it)
+        }
+
+        override fun runAsIntegration(claim: Long, operation: () -> Unit): Boolean {
+            if (integrationClaim != claim) return false
+            operation()
+            return true
+        }
+
+        override fun releaseIntegration(claim: Long, operation: () -> Unit): Boolean {
+            if (integrationClaim != claim) return false
+            projection = MockProviderProjectionOwnership.Uncertain
+            operation()
+            integrationClaim = null
+            projection = MockProviderProjectionOwnership.ProvablyInactive
+            return true
+        }
+
+        override fun runAsService(operation: () -> Unit): Boolean {
+            if (integrationClaim != null) return false
+            operation()
+            return true
+        }
+
+        override fun markServiceProjectionUncertain() {
+            projection = MockProviderProjectionOwnership.Uncertain
+        }
+
+        override fun markServiceProjectionActive(config: MockLocationConfig) {
+            projection = MockProviderProjectionOwnership.ServiceActive(config)
+        }
+
+        override fun markServiceProjectionInactive() {
+            projection = MockProviderProjectionOwnership.ProvablyInactive
+        }
+
+        override fun projectionOwnershipSnapshot(): MockProviderProjectionOwnership = projection
     }
 
     companion object {

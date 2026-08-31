@@ -23,6 +23,7 @@ object QwySemanticDigestV1 {
         effectiveLatitude: Double?,
         effectiveLongitude: Double?,
         projectionActive: Boolean,
+        effectiveProjectionFingerprint: String? = null,
         publishedConfigDigest: String? = null,
     ): String {
         val framed = DurableFieldCodec.encode(
@@ -38,6 +39,7 @@ object QwySemanticDigestV1 {
                 effectiveLatitude?.toBits()?.toString(),
                 effectiveLongitude?.toBits()?.toString(),
                 projectionActive.toString(),
+                effectiveProjectionFingerprint,
                 publishedConfigDigest,
             ),
         )

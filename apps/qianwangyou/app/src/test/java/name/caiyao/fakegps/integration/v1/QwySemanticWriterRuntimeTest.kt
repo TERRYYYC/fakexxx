@@ -81,6 +81,99 @@ class QwySemanticWriterRuntimeTest {
     }
 
     @Test
+    fun `external projection repair executes legacy refresh when no lane is installed`() {
+        assertFalse(QwySemanticWriterRuntime.hasInstalledLane())
+        var published = false
+
+        val repaired = QwySemanticWriterRuntime.repairExternalProjection(
+            "legacy-coordinate-repair",
+        ) {
+            published = true
+        }
+
+        assertTrue(repaired)
+        assertTrue(published)
+        assertFalse(QwySemanticWriterRuntime.hasInstalledLane())
+    }
+
+    @Test
+    fun `external projection repair defers before work when installed lane is unhealthy`() {
+        val fixture = Fixture()
+        fixture.registerAndInstall()
+        try {
+            fixture.acceptedHealthDigest = "digest-a"
+            fixture.digest = "digest-b"
+            fixture.healthy = false
+            var published = false
+
+            val repaired = QwySemanticWriterRuntime.repairExternalProjection(
+                "unhealthy-coordinate-repair",
+            ) {
+                published = true
+            }
+
+            assertFalse(repaired)
+            assertFalse(published)
+            assertEquals(listOf("register:digest-a"), fixture.endpoint.calls)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `external projection drift is fenced as changed while restoring registered digest`() {
+        val fixture = Fixture()
+        fixture.registerAndInstall()
+        try {
+            fixture.acceptedHealthDigest = "digest-a"
+            fixture.digest = "digest-b"
+
+            val repaired = QwySemanticWriterRuntime.repairExternalProjection(
+                "coordinate-repair",
+            ) {
+                fixture.digest = "digest-a"
+            }
+
+            assertTrue(repaired)
+            assertEquals(
+                listOf(
+                    "register:digest-a",
+                    "begin:writer-coordinate-repair-1:digest-a",
+                    "finish:1:true:false:digest-a",
+                ),
+                fixture.endpoint.calls,
+            )
+            assertTrue(QwySemanticWriterRuntime.isInstalledAndHealthyFor("digest-a"))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `missing projection readback is fenced and republished from registered digest`() {
+        val fixture = Fixture()
+        fixture.registerAndInstall()
+        try {
+            fixture.acceptedHealthDigest = "digest-a"
+            fixture.digest = null
+
+            val repaired = QwySemanticWriterRuntime.repairExternalProjection(
+                "missing-coordinate-repair",
+            ) {
+                fixture.digest = "digest-a"
+            }
+
+            assertTrue(repaired)
+            assertEquals(
+                "finish:1:true:false:digest-a",
+                fixture.endpoint.calls.last(),
+            )
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun `central publication joins an existing coordinator bracket without a second mutation id`() {
         val fixture = Fixture()
         fixture.registerAndInstall()
@@ -257,6 +350,101 @@ class QwySemanticWriterRuntimeTest {
         }
     }
 
+    @Test
+    fun `handler coordinator reentry cannot deadlock with an external writer`() {
+        val fixture = Fixture()
+        fixture.registerAndInstall()
+        val executor = Executors.newFixedThreadPool(2)
+        val handlerInsideCoordinator = CountDownLatch(1)
+        val externalWriterOwnsSelection = CountDownLatch(1)
+        try {
+            fixture.onDigestRead = { externalWriterOwnsSelection.countDown() }
+            val handler = executor.submit<QwySemanticMutationResult<String>> {
+                fixture.coordinator.runMutation("handler-apply", "digest-a") {
+                    handlerInsideCoordinator.countDown()
+                    check(externalWriterOwnsSelection.await(5, TimeUnit.SECONDS))
+                    val joined = QwySemanticWriterRuntime.mutate("nested-publication") {
+                        selected ->
+                        assertTrue(selected)
+                        fixture.digest = "digest-b"
+                        "joined"
+                    }
+                    QwySemanticMutationWork.Changed(joined, "digest-b")
+                }
+            }
+            assertTrue(handlerInsideCoordinator.await(5, TimeUnit.SECONDS))
+            val external = executor.submit<Throwable?> {
+                runCatching {
+                    QwySemanticWriterRuntime.mutate("external-writer") { "external" }
+                }.exceptionOrNull()
+            }
+
+            assertEquals(
+                QwySemanticMutationResult.Changed("joined", "digest-b"),
+                handler.get(5, TimeUnit.SECONDS),
+            )
+            assertTrue(
+                "the external writer selected the old digest and must fail closed after the join",
+                external.get(5, TimeUnit.SECONDS) is QwySemanticWriterAmbiguityException,
+            )
+        } finally {
+            externalWriterOwnsSelection.countDown()
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `installation cannot overtake an unbracketed writer selected before publication`() {
+        val fixture = Fixture()
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            fixture.coordinator.registerCurrentSession("digest-a"),
+        )
+        val executor = Executors.newFixedThreadPool(2)
+        val writerInsideFallback = CountDownLatch(1)
+        val releaseWriter = CountDownLatch(1)
+        val installFinished = CountDownLatch(1)
+        try {
+            val writer = executor.submit<String> {
+                QwySemanticWriterRuntime.mutate("pre-install-writer") { selected ->
+                    assertFalse(selected)
+                    writerInsideFallback.countDown()
+                    check(releaseWriter.await(5, TimeUnit.SECONDS))
+                    fixture.digest = "digest-b"
+                    "written"
+                }
+            }
+            assertTrue(writerInsideFallback.await(5, TimeUnit.SECONDS))
+            val installation = executor.submit<Throwable?> {
+                try {
+                    runCatching { fixture.install() }.exceptionOrNull()
+                } finally {
+                    installFinished.countDown()
+                }
+            }
+
+            assertFalse(
+                "installation must wait until the already-selected fallback writer finishes",
+                installFinished.await(150, TimeUnit.MILLISECONDS),
+            )
+            releaseWriter.countDown()
+            assertEquals("written", writer.get(5, TimeUnit.SECONDS))
+            val failure = installation.get(5, TimeUnit.SECONDS)
+            assertTrue(failure is IllegalStateException)
+
+            var selectedAfterFailedInstall = true
+            QwySemanticWriterRuntime.mutate("after-failed-install") { selected ->
+                selectedAfterFailedInstall = selected
+            }
+            assertFalse(selectedAfterFailedInstall)
+        } finally {
+            releaseWriter.countDown()
+            executor.shutdownNow()
+            fixture.close()
+        }
+    }
+
     private class Fixture {
         val endpoint = FakeEndpoint()
         val coordinator = QwySemanticMutationCoordinator(
@@ -270,8 +458,10 @@ class QwySemanticWriterRuntimeTest {
         @Volatile
         var digest: String? = "digest-a"
         var healthy = true
+        var acceptedHealthDigest: String? = null
         var endpointAvailable = true
         var endpointAlive = true
+        var onDigestRead: (() -> Unit)? = null
         private var installation: AutoCloseable? = null
         private var nextId = 0
 
@@ -286,9 +476,12 @@ class QwySemanticWriterRuntimeTest {
         fun install() {
             installation = QwySemanticWriterRuntime.install(
                 coordinator = coordinator,
-                semanticDigestProvider = QwySemanticDigestProvider { digest },
+                semanticDigestProvider = QwySemanticDigestProvider {
+                    onDigestRead?.invoke()
+                    digest
+                },
                 sessionHealth = QwySemanticSessionHealth { expected ->
-                    healthy && expected == digest
+                    healthy && expected == (acceptedHealthDigest ?: digest)
                 },
                 mutationIdFactory = { kind -> "writer-$kind-${++nextId}" },
             )

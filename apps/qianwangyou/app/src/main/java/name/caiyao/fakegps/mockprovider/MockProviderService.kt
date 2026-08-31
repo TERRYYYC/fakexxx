@@ -25,6 +25,8 @@ import name.caiyao.fakegps.R
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.integration.v1.AndroidSystemMockLocationReader
+import name.caiyao.fakegps.integration.v1.SystemMockTrustPolicy
 import name.caiyao.fakegps.ui.ComposeActivity
 
 class MockProviderService : Service() {
@@ -44,20 +46,22 @@ class MockProviderService : Service() {
         createNotificationChannel()
         val manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val gateway = CoordinatedMockProviderGateway(
-            framework = AndroidMockProviderGateway(manager),
+            framework = AndroidMockProviderGateway(this),
             fused = GooglePlayServicesFusedMockProviderGateway(
                 LocationServices.getFusedLocationProviderClient(this),
             ),
         )
         controller = MockProviderSessionController(
-            gateway,
-            MockProviderStatusStore::publish,
+            gateway = gateway,
+            ownership = ProcessMockProviderOwnership,
+            onStateChanged = MockProviderStatusStore::publish,
         )
         sessionRunner = MockProviderSessionRunner(
             worker = commandExecutor,
             completion = Executor(handler::post),
         )
         val settings = SpoofSettings.getInstance(this)
+        val trustPolicy = SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))
         orchestrator = LocationDeliveryOrchestrator(
             controller = controller,
             readPublished = {
@@ -68,6 +72,14 @@ class MockProviderService : Service() {
             persistMode = settings::setLocationDeliveryMode,
             publishConfig = { ConfigPrefsSync.sync(this) },
             persistCleanupRequired = settings::setMockProviderCleanupRequired,
+            ownership = ProcessMockProviderOwnership,
+            projectionMatchesExactly = { config ->
+                trustPolicy.evaluate(
+                    targetLatitude = config.latitude,
+                    targetLongitude = config.longitude,
+                    publishNotBeforeElapsedRealtimeMs = 0L,
+                ).matchesExactTargetProjection
+            },
         )
     }
 

@@ -5,6 +5,7 @@ import name.caiyao.fakegps.integration.v1.support.FakeMonotonicClock
 import name.caiyao.fakegps.integration.v1.support.InMemoryDurableKv
 import name.caiyao.fakegps.integration.v1.support.SimulatedWriteCrash
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -466,6 +467,39 @@ class AuthoritativeContinuityReconciliationTest {
     }
 
     @Test
+    fun `quarantine refuses same or regressed cursor from the starting oracle`() {
+        val fixture = fixture()
+        val starting = snapshot(sequence = 4L)
+        fixture.establish(starting)
+        val reservation = fixture.tracker.reserveAuthoritativeMutation(
+            mutationId = "quarantine-cursor-monotonicity",
+            startingSnapshot = starting,
+        )
+        var committedSideEffects = 0
+
+        listOf(4L, 2L).forEach { invalidSequence ->
+            val invalid = snapshot(
+                sequence = invalidSequence,
+                semanticDigest = "semantic-invalid-$invalidSequence",
+            )
+            assertThrows(IllegalStateException::class.java) {
+                fixture.tracker.quarantineAuthoritativeReservation(
+                    reservation = reservation,
+                    currentSnapshot = invalid,
+                    expectedCurrentSemanticDigest = checkNotNull(invalid.qwySemanticDigest),
+                    expectedOwnerPackage = QWY_PACKAGE,
+                    expectedOwnerUid = QWY_UID,
+                    commitSideEffects = { committedSideEffects++ },
+                )
+            }
+            assertEquals(reservation.baseRevision, fixture.tracker.snapshot().revision)
+            assertEquals(reservation, fixture.tracker.activeAuthoritativeReservation())
+            assertFalse(fixture.tracker.isAuthoritativeMutationQuarantined(reservation.mutationId))
+            assertEquals(0, committedSideEffects)
+        }
+    }
+
+    @Test
     fun `uncorrelated healthy epoch quarantines receipt and recovers after one fenced window`() {
         val fixture = fixture()
         val starting = snapshot(sequence = 0L)
@@ -502,6 +536,156 @@ class AuthoritativeContinuityReconciliationTest {
         val secondWindow = fixture.reconcile(current)
         assertEquals(quarantined.revision, secondWindow.revision)
         assertEquals(ContinuityCoverageV1.FULL.wire, secondWindow.coverageWire)
+    }
+
+    @Test
+    fun `newer sequence cannot bypass an outstanding recovery fence`() {
+        val fixture = fixture()
+        val starting = snapshot(sequence = 0L)
+        fixture.establish(starting)
+        val reservation = fixture.tracker.reserveAuthoritativeMutation(
+            mutationId = "quarantine-fence-newer-sequence",
+            startingSnapshot = starting,
+        )
+        val quarantinedCursor = snapshot(
+            sequence = 2L,
+            semanticDigest = "semantic-quarantined-cursor",
+        ).copy(lastCompletedQwyMutationId = reservation.mutationId)
+        val quarantined = fixture.tracker.quarantineAuthoritativeReservation(
+            reservation = reservation,
+            currentSnapshot = quarantinedCursor,
+            expectedCurrentSemanticDigest = checkNotNull(quarantinedCursor.qwySemanticDigest),
+            expectedOwnerPackage = QWY_PACKAGE,
+            expectedOwnerUid = QWY_UID,
+        )
+        val newer = snapshot(
+            sequence = 4L,
+            semanticDigest = "semantic-after-newer-change",
+        )
+
+        val firstWindow = fixture.reconcile(newer)
+
+        assertEquals(quarantined.revision + 1L, firstWindow.revision)
+        assertEquals(ContinuityCoverageV1.NONE.wire, firstWindow.coverageWire)
+        fixture.clock.advance(50L)
+        val secondWindow = fixture.reconcile(newer)
+        assertEquals(firstWindow.revision, secondWindow.revision)
+        assertEquals(ContinuityCoverageV1.FULL.wire, secondWindow.coverageWire)
+    }
+
+    @Test
+    fun `accounted mutation cannot consume a recovery fence before observation`() {
+        val fixture = fixture()
+        val starting = snapshot(sequence = 0L)
+        fixture.establish(starting)
+        val reservation = fixture.tracker.reserveAuthoritativeMutation(
+            mutationId = "quarantine-fence-accounted-mutation",
+            startingSnapshot = starting,
+        )
+        val quarantinedCursor = snapshot(
+            sequence = 2L,
+            semanticDigest = "semantic-quarantined-before-accounted",
+        ).copy(lastCompletedQwyMutationId = reservation.mutationId)
+        fixture.tracker.quarantineAuthoritativeReservation(
+            reservation = reservation,
+            currentSnapshot = quarantinedCursor,
+            expectedCurrentSemanticDigest = checkNotNull(quarantinedCursor.qwySemanticDigest),
+            expectedOwnerPackage = QWY_PACKAGE,
+            expectedOwnerUid = QWY_UID,
+        )
+        val accounted = snapshot(
+            sequence = 4L,
+            semanticDigest = "semantic-accounted-after-quarantine",
+        ).copy(lastCompletedQwyMutationId = "accounted-after-quarantine")
+
+        fixture.tracker.acknowledgeAccountedAuthoritativeMutation(
+            completedSnapshot = accounted,
+            expectedMutationId = "accounted-after-quarantine",
+            expectedAfterSemanticDigest = checkNotNull(accounted.qwySemanticDigest),
+            expectedOwnerPackage = QWY_PACKAGE,
+            expectedOwnerUid = QWY_UID,
+        )
+
+        val firstWindow = fixture.reconcile(accounted)
+        assertEquals(ContinuityCoverageV1.NONE.wire, firstWindow.coverageWire)
+        fixture.clock.advance(50L)
+        val secondWindow = fixture.reconcile(accounted)
+        assertEquals(firstWindow.revision, secondWindow.revision)
+        assertEquals(ContinuityCoverageV1.FULL.wire, secondWindow.coverageWire)
+    }
+
+    @Test
+    fun `same sequence unhealthy evidence remains poisoned after endpoint restore`() {
+        val fixture = fixture()
+        val healthy = snapshot(sequence = 2L)
+        fixture.establish(healthy)
+        val unhealthy = healthy.copy(gpsProviderEnabled = false)
+
+        val rejected = fixture.tracker.reconcileAuthoritativeWindow(
+            AuthoritativeObservationWindow(
+                pre = unhealthy,
+                post = unhealthy,
+                windowStartElapsedRealtimeMs = fixture.clock.elapsedRealtimeMs(),
+            ),
+            QWY_PACKAGE,
+            QWY_UID,
+        )
+        assertEquals(ContinuityCoverageV1.NONE.wire, rejected.coverageWire)
+
+        fixture.clock.advance(50L)
+        val restoredWithoutSequence = fixture.reconcile(healthy)
+        assertEquals(
+            "restoring old endpoint bytes cannot erase proof that the producer missed a mutation",
+            ContinuityCoverageV1.NONE.wire,
+            restoredWithoutSequence.coverageWire,
+        )
+
+        fixture.clock.advance(50L)
+        val advanced = fixture.reconcile(snapshot(sequence = 4L))
+        assertEquals(ContinuityCoverageV1.FULL.wire, advanced.coverageWire)
+    }
+
+    @Test
+    fun `owner baseline cannot lower a same instance durable ACK`() {
+        val fixture = fixture()
+        val acknowledged = snapshot(sequence = 10L)
+        fixture.establish(acknowledged)
+        val revisionBefore = fixture.tracker.snapshot().revision
+
+        val rejected = fixture.tracker.acknowledgeAuthoritativeOwnerGenerationBaseline(
+            snapshot = snapshot(sequence = 6L),
+            expectedOwnerPackage = QWY_PACKAGE,
+            expectedOwnerUid = QWY_UID,
+        )
+
+        assertEquals(revisionBefore + 1L, rejected.revision)
+        assertEquals(ContinuityCoverageV1.NONE.wire, rejected.coverageWire)
+        fixture.clock.advance(50L)
+        val oldAck = fixture.reconcile(acknowledged)
+        assertEquals(
+            "the higher ACK must remain sticky after a regressed registration",
+            ContinuityCoverageV1.NONE.wire,
+            oldAck.coverageWire,
+        )
+        fixture.clock.advance(50L)
+        val recovered = fixture.reconcile(snapshot(sequence = 12L))
+        assertEquals(ContinuityCoverageV1.FULL.wire, recovered.coverageWire)
+    }
+
+    @Test
+    fun `bare revision bump always invalidates prior FULL coverage`() {
+        val fixture = fixture()
+        fixture.establish(snapshot(sequence = 2L))
+        val before = fixture.tracker.snapshot()
+        assertEquals(ContinuityCoverageV1.FULL.wire, before.coverageWire)
+
+        val revision = fixture.tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+
+        val after = fixture.tracker.snapshot()
+        assertEquals(before.revision + 1L, revision)
+        assertEquals(revision, after.revision)
+        assertEquals(ContinuityCoverageV1.NONE.wire, after.coverageWire)
+        assertNull(after.continuitySinceElapsedRealtimeMs)
     }
 
     private data class Fixture(

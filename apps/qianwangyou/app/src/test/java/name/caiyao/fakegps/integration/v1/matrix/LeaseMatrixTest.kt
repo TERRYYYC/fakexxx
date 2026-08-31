@@ -108,6 +108,9 @@ class LeaseMatrixTest {
     fun providerDrivenCleanupPublishesTerminalRevisionAndAudit() {
         val h = pairedHarness()
         val receipt = h.apply(key = "ls04-cleanup-evidence-apply")
+        val fullBeforeCleanup = h.handler.discover(AUTO_UID)
+        assertEquals(ContinuityCoverageV1.FULL.wire, fullBeforeCleanup.continuityCoverageWire)
+        assertNotNull(h.tracker.snapshot().continuitySinceElapsedRealtimeMs)
         h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
         val revisionBefore = h.tracker.snapshot().revision
         val auditCountBefore = h.audit.all().size
@@ -121,6 +124,29 @@ class LeaseMatrixTest {
         assertEquals("provider_revoked_cleanup", cleanupAudit.event)
         assertEquals(AUTO_PKG, cleanupAudit.callerApplicationId)
         assertEquals(receipt.leaseId, cleanupAudit.leaseId)
+        assertEquals(ContinuityCoverageV1.NONE.wire, h.tracker.snapshot().coverageWire)
+        assertNull(h.tracker.snapshot().continuitySinceElapsedRealtimeMs)
+    }
+
+    @Test
+    fun providerCleanupMutationFailureRevokesFullBeforeFinalize() {
+        val h = pairedHarness()
+        val receipt = h.apply(key = "ls04-cleanup-mutation-failure-apply")
+        val fullBeforeCleanup = h.handler.discover(AUTO_UID)
+        assertEquals(ContinuityCoverageV1.FULL.wire, fullBeforeCleanup.continuityCoverageWire)
+        assertNotNull(h.tracker.snapshot().continuitySinceElapsedRealtimeMs)
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        h.env.afterCleanupEnvironmentMutation = {
+            throw IllegalStateException("cleanup mutated then failed")
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            h.handler.runRevokedLeaseCleanup()
+        }
+
+        assertEquals(LeaseState.RELEASING, h.leases.get(receipt.leaseId)?.state)
+        assertEquals(ContinuityCoverageV1.NONE.wire, h.tracker.snapshot().coverageWire)
+        assertNull(h.tracker.snapshot().continuitySinceElapsedRealtimeMs)
     }
 
     @Test

@@ -204,7 +204,7 @@ Owner: `QwySemanticMutationCoordinator`; token is remote and carries a client-de
 
 1. Write RED tests for client death/exception, identical semantic no-op, profile/mode/schedule/effective-coordinate mutation, central writer coverage, normal reserved advance, crash roll-forward reuse, exact owner recovery, and uncorrelatable reboot/interleaving quarantine.
 2. Run coordinator and targeted advance cases; record expected failures.
-3. Implement synchronous/suspending coordinator wrappers and one central writer runtime. Route authoritative settings, profile repository, config publication, and environment apply/converge/cleanup through it; nested calls join the outer correlation and refresh cadence/sample publication stays excluded.
+3. Implement synchronous/suspending coordinator wrappers and one central writer runtime. Route authoritative settings, profile repository, config publication, and environment apply/converge/cleanup through it; nested calls join the outer correlation. Keep exact same-coordinate cadence publications excluded, but journal coordinate-bit changes at the API-35 provider-lock boundary.
 4. Extend the pending advance marker with backward-compatible base/reserved revisions, mutation ID, and starting oracle identity. Replace the receipt-time bump with a reservation. Accept only same-identity `start+2` normal or `start+6` owner-recovery correlation for `R+1`; otherwise, for a healthy uncorrelatable current cursor, atomically retire at `R+2`, ACK it, quarantine the stale receipt ID, clear pending, and install the recovery fence. Missing/unhealthy proof remains pending and fail closed.
 5. Re-run coordinator, advance, apply/release, settings, profile repository, and refresh tests; expect PASS and unchanged refresh sequence.
 

@@ -166,6 +166,9 @@ class FakeAuthoritativeOracleSource(
     ownerUid: Int,
     ownerPackage: String,
 ) : AuthoritativeContinuitySource {
+    private var activeSemanticClient: QwySemanticClientDeathToken? = null
+    private var qwyMutationActive = false
+    private var foreignChangedDuringQwyMutation = false
     private var state = AuthoritativeContinuityState(
         ownerUid = ownerUid,
         ownerPackage = ownerPackage,
@@ -206,7 +209,21 @@ class FakeAuthoritativeOracleSource(
 
     fun currentState(): AuthoritativeContinuityState = state
 
-    fun registerSemanticSession(semanticDigest: String) {
+    fun registerSemanticSession(
+        semanticDigest: String,
+        clientDeathToken: QwySemanticClientDeathToken,
+    ) {
+        val priorClient = activeSemanticClient
+        if (priorClient != null && priorClient !== clientDeathToken) {
+            // Fidelity with SystemServerOracleBinder: replacing a distinct live
+            // token first accounts the unreported generation loss (+2), then
+            // publishes the new registration boundary (+2).
+            changed(
+                semanticDigest = state.qwySemanticDigest,
+                mutationId = state.lastCompletedQwyMutationId,
+            )
+        }
+        activeSemanticClient = clientDeathToken
         val next = state.copy(qwySemanticDigest = semanticDigest)
         state = next
         if (oracle.snapshot().health == AuthoritativeOracleHealth.SESSION_UNCERTAIN) {
@@ -219,6 +236,7 @@ class FakeAuthoritativeOracleSource(
 
     /** Mirrors the remote QWY session death discontinuity before a new owner registers. */
     fun ownerProcessDied() {
+        activeSemanticClient = null
         changed(
             semanticDigest = state.qwySemanticDigest,
             mutationId = state.lastCompletedQwyMutationId,
@@ -243,6 +261,7 @@ class FakeAuthoritativeOracleSource(
         uncertain: Boolean,
         afterDigest: String?,
     ) {
+        val correlationSurvived = !foreignChangedDuringQwyMutation
         val next = if (!changed && !uncertain) {
             // A proved no-op changes journal sequence only. Semantic state and
             // the most recent completed correlation remain byte-for-byte stable.
@@ -250,7 +269,9 @@ class FakeAuthoritativeOracleSource(
         } else {
             state.copy(
                 qwySemanticDigest = afterDigest ?: state.qwySemanticDigest,
-                lastCompletedQwyMutationId = if (changed && !uncertain) mutationId else null,
+                lastCompletedQwyMutationId = if (
+                    changed && !uncertain && correlationSurvived
+                ) mutationId else null,
             )
         }
         state = next
@@ -263,6 +284,15 @@ class FakeAuthoritativeOracleSource(
             },
             state = next,
         )
+        qwyMutationActive = false
+        foreignChangedDuringQwyMutation = false
+    }
+
+    fun beginSemanticMutation(): AuthoritativeMutationToken {
+        check(!qwyMutationActive) { "fake QWY mutation already active" }
+        qwyMutationActive = true
+        foreignChangedDuringQwyMutation = false
+        return oracle.beginMutation()
     }
 
     fun changed(
@@ -273,6 +303,7 @@ class FakeAuthoritativeOracleSource(
         semanticDigest: String? = state.qwySemanticDigest,
         mutationId: String? = null,
     ) {
+        if (qwyMutationActive) foreignChangedDuringQwyMutation = true
         val next = state.copy(
             ownerUid = ownerUid,
             ownerPackage = ownerPackage,
@@ -283,6 +314,19 @@ class FakeAuthoritativeOracleSource(
         )
         val token = oracle.beginMutation()
         state = next
+        oracle.finishMutation(token, AuthoritativeMutationOutcome.CHANGED, next)
+    }
+
+    /** A covered platform child caused by the active QWY Binder call. */
+    fun changedByQwyCoveredOperation() {
+        check(qwyMutationActive) {
+            "covered QWY operation must run inside its semantic mutation"
+        }
+        val next = state.copy(lastCompletedQwyMutationId = null)
+        val token = oracle.beginMutation()
+        state = next
+        // Do not mark foreignChangedDuringQwyMutation: production attributes
+        // same-UID covered calls while a QWY token is active.
         oracle.finishMutation(token, AuthoritativeMutationOutcome.CHANGED, next)
     }
 }
@@ -302,13 +346,16 @@ class FakeQwySemanticMutationEndpoint(
         private set
     var finishCount = 0
         private set
+    var registrationCount = 0
+        private set
 
     override fun registerCurrentSession(
         semanticDigest: String,
         clientDeathToken: QwySemanticClientDeathToken,
     ) {
         check(clientDeathToken.isAlive())
-        source.registerSemanticSession(semanticDigest)
+        registrationCount += 1
+        source.registerSemanticSession(semanticDigest, clientDeathToken)
     }
 
     override fun beginMutation(
@@ -319,7 +366,7 @@ class FakeQwySemanticMutationEndpoint(
         check(clientDeathToken.isAlive())
         check(source.currentState().qwySemanticDigest == beforeDigest)
         val wireToken = nextToken++
-        active[wireToken] = Active(mutationId, source.oracle.beginMutation())
+        active[wireToken] = Active(mutationId, source.beginSemanticMutation())
         beginCount += 1
         return wireToken
     }
@@ -376,6 +423,14 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var beforeCleanup: (() -> Unit)? = null
     /** Runs after cleanup mutated the fake environment but before it returns. */
     var afterCleanupEnvironmentMutation: (() -> Unit)? = null
+    /** Cold-process provider cleanup seam used by startup/recovery tests. */
+    var onProjectionStartupReconciliation: (() -> Unit)? = null
+    var projectionStartupReconciliationCount: Int = 0
+    var abortOwnerStartCount: Int = 0
+    var abortOwnerStartClearsProjection: Boolean = false
+    var semanticDigestUnavailableUntilProjectionReconciled: Boolean = false
+    var projectionStartupReconciliationRequired: Boolean = false
+    private var projectionStartupReconciled: Boolean = false
     /**
      * Explicit raw OS-sample seam for freshness regressions. Null keeps older
      * matrix scenarios independent by modeling a live source that advances on
@@ -413,6 +468,12 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var beforeAdvancePointer: (() -> Unit)? = null
     var effectiveLatitude: Double? = null
     var effectiveLongitude: Double? = null
+    /** Independent framework-cache projection used by continuity-oracle tests. */
+    var authoritativeProjectionOverride: Pair<Double?, Double?>? = null
+    /** Models refreshNow changing a drifted framework cache back to the desired projection. */
+    var refreshAuthoritativeProjectionOnObserve: Boolean = false
+    /** Models the selective system-server coordinate hook for that refresh publication. */
+    var afterAuthoritativeProjectionRefresh: (() -> Unit)? = null
 
     private var relevantChangeListener: ((RevisionBumpReason) -> Unit)? = null
 
@@ -593,6 +654,12 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     override fun observeEffective(): EffectiveEnvironment {
         beforeObserveEffective?.invoke()
+        if (refreshAuthoritativeProjectionOnObserve) {
+            authoritativeProjectionOverride = effectiveLatitude to effectiveLongitude
+            afterAuthoritativeProjectionRefresh?.invoke()
+        }
+        val observedProjection = authoritativeProjectionOverride
+            ?: (effectiveLatitude to effectiveLongitude)
         // R4 P3 (C5 cross-surface): the fake publish outcome must drive BOTH
         // surfaces. Production: applyEnvironment records the publish result
         // (recordLastApplied(verified)); observeEffective reads it back. So a
@@ -612,8 +679,8 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             )
         }
         return EffectiveEnvironment(
-            latitude = effectiveLatitude,
-            longitude = effectiveLongitude,
+            latitude = observedProjection.first,
+            longitude = observedProjection.second,
             isMock = if (verified) isMock else false,
             deliveryModeWire = if (verified) DeliveryModeV1.SYSTEM_MOCK.wire else null,
             verificationLevelWire = level,
@@ -642,25 +709,62 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
         continuityCapability
 
-    override fun authoritativeSemanticDigest(ownerGeneration: Long): String =
-        QwySemanticDigestV1.compute(
+    override fun authoritativeSemanticDigest(ownerGeneration: Long): String? {
+        if (semanticDigestUnavailableUntilProjectionReconciled &&
+            !projectionStartupReconciled
+        ) return null
+        val latitude = authoritativeProjectionOverride?.first ?: effectiveLatitude
+        val longitude = authoritativeProjectionOverride?.second ?: effectiveLongitude
+        return computeAuthoritativeSemanticDigest(ownerGeneration, latitude, longitude)
+    }
+
+    override fun authoritativeSemanticDigestAssumingInactiveProjection(
+        ownerGeneration: Long,
+    ): String = computeAuthoritativeSemanticDigest(ownerGeneration, null, null)
+
+    override fun canReconcileAuthoritativeProjectionOnOwnerStart(): Boolean =
+        projectionStartupReconciliationRequired && !projectionStartupReconciled
+
+    override fun adoptAuthoritativeInactiveProjectionOnOwnerStart() {
+        check(canReconcileAuthoritativeProjectionOnOwnerStart())
+        projectionStartupReconciled = true
+    }
+
+    private fun computeAuthoritativeSemanticDigest(
+        ownerGeneration: Long,
+        latitude: Double?,
+        longitude: Double?,
+    ): String {
+        return QwySemanticDigestV1.compute(
             ownerGeneration = ownerGeneration,
             activeMode = "always_on",
             activeProfileRef = currentItemId,
             schedule = scheduleSnapshot(),
-            effectiveLatitude = effectiveLatitude,
-            effectiveLongitude = effectiveLongitude,
-            projectionActive = effectiveLatitude != null && effectiveLongitude != null,
+            effectiveLatitude = latitude,
+            effectiveLongitude = longitude,
+            projectionActive = latitude != null && longitude != null,
         )
+    }
 
     override fun authoritativeSemanticMutationEnabled(): Boolean =
         authoritativeSemanticMutations
+
+    override fun reconcileProjectionOnOwnerStart() {
+        projectionStartupReconciliationCount += 1
+        onProjectionStartupReconciliation?.invoke()
+        projectionStartupReconciled = true
+    }
 
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
         relevantChangeListener = listener
     }
 
     override fun abortOwnerStart() {
+        abortOwnerStartCount += 1
+        if (abortOwnerStartClearsProjection) {
+            effectiveLatitude = null
+            effectiveLongitude = null
+        }
         relevantChangeListener = null
     }
 

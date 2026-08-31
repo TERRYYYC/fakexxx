@@ -54,18 +54,29 @@ class Android15OracleHookPlanTest {
     }
 
     @Test
-    fun `plan covers provider state and effective enabled recomputation but not refresh samples`() {
+    fun `plan covers provider state enabled state and the lock held coordinate setter`() {
         assertEquals(
             setOf("onStateChanged", "onEnabledChanged"),
             Android15OracleHookPlan.LOCATION_MUTATION_METHODS.toSet(),
         )
-        assertFalse(Android15OracleHookPlan.LOCATION_MUTATION_METHODS.contains("setMockProviderLocation"))
+        assertEquals(
+            "com.android.server.location.provider.MockLocationProvider",
+            Android15OracleHookPlan.LOCATION_MOCK_PROVIDER_CLASS,
+        )
+        assertEquals(
+            "setProviderLocation",
+            Android15OracleHookPlan.LOCATION_SEMANTIC_MUTATION_METHOD,
+        )
+        assertEquals(
+            "setTestProviderLocation",
+            Android15OracleHookPlan.LOCATION_QWY_PROVENANCE_ENTRY_METHOD,
+        )
     }
 
     @Test
     fun `required mask is exact and distinguishes wrapper from delegate`() {
         assertTrue(Android15OracleHookPlan.COVERAGE_APP_OPS_WRAPPER != Android15OracleHookPlan.COVERAGE_ACCESS_CHECKING_DELEGATE)
-        assertEquals(0x1ffL, Android15OracleHookPlan.REQUIRED_COVERAGE_MASK)
+        assertEquals(0x3ffL, Android15OracleHookPlan.REQUIRED_COVERAGE_MASK)
     }
 
     @Test

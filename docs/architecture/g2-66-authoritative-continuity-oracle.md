@@ -47,9 +47,11 @@ Under one oracle lock:
 Required system mutation coverage bits are:
 
 - AppOps API 35: checking-service wrapper methods, the selected Access Checking `AppOpService.setUidMode`, `setPackageMode`, `removePackage`, and `removeUid`, plus exact Access Checking package/user lifecycle removal paths that mutate policy state directly. The wrapper and runtime delegate are separate mask bits; the legacy `AppOpsCheckingServiceImpl` is not accepted as the API-35 delegate.
-- Location: provider state change and effective-enabled recomputation.
+- Location: provider state change, effective-enabled recomputation, and one selective coordinate-history bit. The outer `LocationManagerService#setTestProviderLocation` hook carries Binder provenance only; the inner `MockLocationProvider#setProviderLocation` hook compares exact latitude/longitude bits under the platform provider locks and opens a mutation only when they differ or cannot prove valid equality.
 - QWY: service generation and explicit semantic mutation session.
 - Bridge/build: live registered Binder session and exact-build attestation.
+
+The API-35 producer and consumer therefore require mask `0x3ff`; omission of the coordinate-history bit is `HOOKS_INCOMPLETE`, never a degraded healthy mode.
 
 ## Observation algorithm
 
@@ -104,7 +106,7 @@ Canonical semantic input includes:
 - schedule ID, version, item, and exhausted state;
 - effective-coordinate value and whether the mock projection is active.
 
-One central writer runtime covers the semantic settings, profile repository, config publication, and handler apply/converge/cleanup entry points. Nested writers join the outer mutation instead of creating a second correlation ID. The runtime enters the remote mutation before the authoritative QWY owner changes any covered value and finishes only after durable/local commit; publication failure is uncertain rather than a proved no-op. It supplies a Binder death token, and a client death with an outstanding token invalidates session health until the restarted owner explicitly registers and reconciles its current digest. The runtime is installed only after a healthy exact snapshot and matching durable ACK prove that the authoritative lane is ready. Identical periodic sample publication and refresh cadence are excluded.
+One central writer runtime covers the semantic settings, profile repository, config publication, and handler apply/converge/cleanup entry points. Nested writers join the outer mutation instead of creating a second correlation ID. The runtime enters the remote mutation before the authoritative QWY owner changes any covered value and finishes only after durable/local commit; publication failure is uncertain rather than a proved no-op. It supplies a Binder death token, and a client death with an outstanding token invalidates session health until the restarted owner explicitly registers and reconciles its current digest. The runtime is installed only after a healthy exact snapshot and matching durable ACK prove that the authoritative lane is ready. Identical periodic coordinate publication and refresh cadence are excluded; coordinate-bit changes are selectively journaled inside the API-35 mock-provider lock domain.
 
 ## Production health gate
 

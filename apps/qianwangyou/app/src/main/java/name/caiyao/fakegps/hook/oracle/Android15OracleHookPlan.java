@@ -19,8 +19,14 @@ public final class Android15OracleHookPlan {
             "com.android.server.permission.access.AccessCheckingService";
     public static final String LOCATION_PROVIDER_MANAGER_CLASS =
             "com.android.server.location.provider.LocationProviderManager";
+    public static final String LOCATION_MOCK_PROVIDER_CLASS =
+            "com.android.server.location.provider.MockLocationProvider";
+    public static final String LOCATION_MANAGER_SERVICE_CLASS =
+            "com.android.server.location.LocationManagerService";
     public static final String SYSTEM_SERVICE_MANAGER_CLASS =
             "com.android.server.SystemServiceManager";
+    public static final String QWY_MUTATION_ATTRIBUTION_TAG =
+            "qwy_authoritative_continuity";
 
     public static final String[] APP_OPS_WRAPPER_MUTATION_METHODS = {
             "setUidMode", "setPackageMode", "removePackage", "removeUid", "clearAllModes"
@@ -34,6 +40,13 @@ public final class Android15OracleHookPlan {
     public static final String[] LOCATION_MUTATION_METHODS = {
             "onStateChanged", "onEnabledChanged"
     };
+    public static final String[] LOCATION_QWY_MUTATION_ENTRY_METHODS = {
+            "addTestProvider", "removeTestProvider", "setTestProviderEnabled"
+    };
+    public static final String LOCATION_QWY_PROVENANCE_ENTRY_METHOD =
+            "setTestProviderLocation";
+    public static final String LOCATION_SEMANTIC_MUTATION_METHOD =
+            "setProviderLocation";
 
     public static final long COVERAGE_APP_OPS_WRAPPER = 1L << 0;
     public static final long COVERAGE_ACCESS_CHECKING_DELEGATE = 1L << 1;
@@ -44,7 +57,8 @@ public final class Android15OracleHookPlan {
     public static final long COVERAGE_QWY_SEMANTIC_SESSION = 1L << 6;
     public static final long COVERAGE_BRIDGE_SESSION = 1L << 7;
     public static final long COVERAGE_BUILD_ATTESTED = 1L << 8;
-    public static final long REQUIRED_COVERAGE_MASK = 0x1ffL;
+    public static final long COVERAGE_LOCATION_SEMANTIC_COORDINATE = 1L << 9;
+    public static final long REQUIRED_COVERAGE_MASK = 0x3ffL;
 
     /** Populated only by a separately reviewed exact-build evidence change. */
     public static final Set<String> ATTESTED_FINGERPRINTS = Collections.emptySet();

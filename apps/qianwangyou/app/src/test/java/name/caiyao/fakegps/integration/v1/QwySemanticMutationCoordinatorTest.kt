@@ -21,6 +21,27 @@ class QwySemanticMutationCoordinatorTest {
     }
 
     @Test
+    fun `re-registration on one live endpoint reuses client generation token`() {
+        val fixture = fixture()
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            fixture.coordinator.registerCurrentSession("digest-a"),
+        )
+
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            fixture.coordinator.registerCurrentSession("digest-a"),
+        )
+
+        assertEquals(
+            "a fresh Binder token would manufacture generation-loss plus registration",
+            1,
+            fixture.deathTokenFactoryCalls,
+        )
+        assertSame(fixture.deathToken, fixture.endpoint.registeredDeathToken)
+    }
+
+    @Test
     fun `missing throwing or rejecting registration endpoint fails closed`() {
         val missing = fixture(endpointAvailable = false)
         assertEquals(
@@ -232,6 +253,88 @@ class QwySemanticMutationCoordinatorTest {
     }
 
     @Test
+    fun `post-work endpoint loss compensates before uncertain finish`() {
+        val fixture = registeredFixture()
+
+        val result = fixture.coordinator.runMutation("mutation-compensate", "digest-a") {
+            fixture.coordinator.registerUncertainCompensationOnCurrentThread {
+                fixture.endpoint.calls += "compensate"
+            }
+            fixture.endpoint.calls += "work"
+            fixture.endpointAvailable = false
+            QwySemanticMutationWork.Changed("value", "digest-b")
+        }
+
+        assertEquals(
+            QwySemanticMutationResult.Uncertain(
+                QwySemanticMutationFailure.ENDPOINT_UNAVAILABLE,
+            ),
+            result,
+        )
+        val uncertain = result as QwySemanticMutationResult.Uncertain
+        assertTrue(uncertain.remoteMutationBegan)
+        assertTrue(uncertain.localWorkStarted)
+        assertEquals(
+            listOf(
+                "register:digest-a",
+                "begin:mutation-compensate:digest-a",
+                "work",
+                "compensate",
+                "finish:41:false:true:null",
+            ),
+            fixture.endpoint.calls,
+        )
+    }
+
+    @Test
+    fun `failed changed finish compensates before uncertain finish retry`() {
+        val fixture = registeredFixture().apply {
+            endpoint.failFinishCalls = setOf(1)
+        }
+
+        val result = fixture.coordinator.runMutation("mutation-finish-compensate", "digest-a") {
+            fixture.coordinator.registerUncertainCompensationOnCurrentThread {
+                fixture.endpoint.calls += "compensate"
+            }
+            QwySemanticMutationWork.Changed("value", "digest-b")
+        }
+
+        assertEquals(
+            QwySemanticMutationResult.Uncertain(QwySemanticMutationFailure.FINISH_FAILED),
+            result,
+        )
+        assertEquals(
+            listOf(
+                "register:digest-a",
+                "begin:mutation-finish-compensate:digest-a",
+                "finish:41:true:false:digest-b",
+                "compensate",
+                "finish:41:false:true:null",
+            ),
+            fixture.endpoint.calls,
+        )
+    }
+
+    @Test
+    fun `death after begin reports remote token without local work`() {
+        val fixture = registeredFixture()
+        fixture.endpoint.afterBegin = { fixture.deathToken.alive = false }
+        var localWorkStarted = false
+
+        val result = fixture.coordinator.runMutation("mutation-pre-work-death", "digest-a") {
+            localWorkStarted = true
+            QwySemanticMutationWork.Changed(Unit, "digest-b")
+        }
+
+        val uncertain = result as QwySemanticMutationResult.Uncertain
+        assertEquals(QwySemanticMutationFailure.CLIENT_DIED, uncertain.reason)
+        assertTrue(uncertain.remoteMutationBegan)
+        assertFalse(uncertain.localWorkStarted)
+        assertFalse(localWorkStarted)
+        assertEquals("finish:41:false:true:null", fixture.endpoint.calls.last())
+    }
+
+    @Test
     fun `digest mismatch and unproved no-op are uncertain`() {
         val mismatch = registeredFixture()
         assertEquals(
@@ -272,6 +375,7 @@ class QwySemanticMutationCoordinatorTest {
         var endpointAvailable = initialEndpointAvailable
         var providerThrows = false
         var deathTokenFactoryThrows = false
+        var deathTokenFactoryCalls = 0
 
         val coordinator = QwySemanticMutationCoordinator(
             endpointProvider = QwySemanticMutationEndpointProvider {
@@ -280,6 +384,7 @@ class QwySemanticMutationCoordinatorTest {
             },
             clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
                 if (deathTokenFactoryThrows) error("death token allocation failed")
+                deathTokenFactoryCalls += 1
                 deathToken
             },
         )
@@ -291,6 +396,9 @@ class QwySemanticMutationCoordinatorTest {
         var failRegister = false
         var failBegin = false
         var failFinish = false
+        var failFinishCalls: Set<Int> = emptySet()
+        var afterBegin: () -> Unit = {}
+        private var finishCallCount = 0
 
         override fun registerCurrentSession(
             semanticDigest: String,
@@ -309,6 +417,7 @@ class QwySemanticMutationCoordinatorTest {
             if (failBegin) error("begin failed")
             assertSame(registeredDeathToken, clientDeathToken)
             calls += "begin:$mutationId:$beforeDigest"
+            afterBegin()
             return 41L
         }
 
@@ -318,8 +427,9 @@ class QwySemanticMutationCoordinatorTest {
             uncertain: Boolean,
             afterDigest: String?,
         ) {
-            if (failFinish) error("finish failed")
+            finishCallCount += 1
             calls += "finish:$token:$changed:$uncertain:$afterDigest"
+            if (failFinish || finishCallCount in failFinishCalls) error("finish failed")
         }
     }
 

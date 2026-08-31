@@ -19,13 +19,17 @@ internal sealed interface PendingAdvanceTicket {
     ) : PendingAdvanceTicket
 
     companion object {
-        private const val AUTHORITATIVE_V1 = "oracle-v1"
+        // The pre-review oracle-v1 draft omitted the retained owner generation. It was never
+        // reachable in a distributable build because production attestation stayed empty; reject
+        // that dead format rather than decoding a reservation that cannot be recovered safely.
+        private const val AUTHORITATIVE_V2 = "oracle-v2"
 
         fun decode(encoded: String): PendingAdvanceTicket {
             val fields = DurableFieldCodec.decode(encoded)
             // Check the total field count before the tag: legacy item IDs are
-            // free strings and may themselves equal "oracle-v1".
-            if (fields.size == 11 && fields[0] == AUTHORITATIVE_V1) {
+            // free strings and may themselves equal an oracle schema tag.
+            val authoritativeV2 = fields.size == 12 && fields[0] == AUTHORITATIVE_V2
+            if (authoritativeV2) {
                 return Authoritative(
                     fromItemId = checkNotNull(fields[1]),
                     toItemId = fields[2],
@@ -38,6 +42,7 @@ internal sealed interface PendingAdvanceTicket {
                         startingOracleInstanceId = checkNotNull(fields[8]),
                         startingSequence = checkNotNull(fields[9]).toLong(),
                         startingSemanticDigest = checkNotNull(fields[10]),
+                        ownerGenerationAtReservation = checkNotNull(fields[11]).toLong(),
                     ),
                 ).also { ticket ->
                     check(ticket.fromItemId.isNotBlank()) { "pending advance from item is blank" }
@@ -76,7 +81,7 @@ internal sealed interface PendingAdvanceTicket {
 
             is Authoritative -> DurableFieldCodec.encode(
                 listOf(
-                    AUTHORITATIVE_V1,
+                    AUTHORITATIVE_V2,
                     ticket.fromItemId,
                     ticket.toItemId,
                     ticket.versionAfter.toString(),
@@ -87,6 +92,7 @@ internal sealed interface PendingAdvanceTicket {
                     ticket.reservation.startingOracleInstanceId,
                     ticket.reservation.startingSequence.toString(),
                     ticket.reservation.startingSemanticDigest,
+                    ticket.reservation.ownerGenerationAtReservation.toString(),
                 ),
             )
         }

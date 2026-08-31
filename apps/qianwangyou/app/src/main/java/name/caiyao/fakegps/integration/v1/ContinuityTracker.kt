@@ -16,6 +16,8 @@ data class AuthoritativeRevisionReservation(
     val startingOracleInstanceId: String,
     val startingSequence: Long,
     val startingSemanticDigest: String,
+    /** Exact generation whose semantic digest was frozen at reservation time. */
+    val ownerGenerationAtReservation: Long,
 )
 
 /**
@@ -101,6 +103,16 @@ class ContinuityTracker(
         val current = storage.read(REVISION_NAMESPACE, KEY_REVISION)?.toLong() ?: 0L
         val next = current + 1L
         storage.write(REVISION_NAMESPACE, KEY_REVISION, next.toString())
+        // Every revision reason names a continuity-relevant transition. The
+        // new state needs a fresh authoritative observation window; retaining
+        // an earlier FULL/since claim across the bump would publish stale
+        // continuity through discover/preflight before that window exists.
+        storage.write(
+            REVISION_NAMESPACE,
+            KEY_COVERAGE,
+            ContinuityCoverageV1.NONE.wire.toString(),
+        )
+        storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE, "")
         next
     }
 
@@ -135,6 +147,25 @@ class ContinuityTracker(
             // start: that would make a null proof look continuous in audits.
             storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE, "")
         }
+    }
+
+    /**
+     * A callback delivered while an authoritative reservation owns the next
+     * revision cannot consume that reservation's base CAS. It must still revoke
+     * any previously published FULL claim immediately.
+     */
+    fun invalidateCoverageForPendingReservation() {
+        storage.transaction {
+            check(activeAuthoritativeReservationLocked() != null) {
+                "coverage-only invalidation requires an active reservation"
+            }
+            invalidateCoverageLocked()
+        }
+    }
+
+    /** Revokes a stale proof without manufacturing a second revision event. */
+    fun invalidateCoverage() = storage.transaction {
+        invalidateCoverageLocked()
     }
 
     /** Mark that full-coverage continuity is established from now (window start). */
@@ -173,6 +204,7 @@ class ContinuityTracker(
             startingOracleInstanceId = startingSnapshot.oracleInstanceId,
             startingSequence = startingSnapshot.sequence,
             startingSemanticDigest = checkNotNull(startingSnapshot.qwySemanticDigest),
+            ownerGenerationAtReservation = _generation,
         )
         val existing = activeAuthoritativeReservationLocked()
         if (existing != null) {
@@ -271,6 +303,122 @@ class ContinuityTracker(
         check(snapshot.isStableCompleteFor(expectedOwnerPackage, expectedOwnerUid)) {
             "owner-generation oracle baseline is not healthy and complete"
         }
+        val evidence = authoritativeEvidenceDigest(snapshot)
+        val ackBoot = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_BOOT_ID)
+        val ackInstance = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_INSTANCE_ID)
+        val ackSequence = storage.read(
+            REVISION_NAMESPACE,
+            ORACLE_ACK_SEQUENCE_KEY,
+        )?.toLongOrNull()
+        val ackEvidence = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_EVIDENCE)
+        if (ackBoot == snapshot.bootId && ackInstance == snapshot.oracleInstanceId &&
+            ackSequence != null && snapshot.sequence <= ackSequence
+        ) {
+            when {
+                snapshot.sequence < ackSequence -> poisonOnce(
+                    "owner-baseline-regression:${snapshot.bootId}:" +
+                        "${snapshot.oracleInstanceId}:$ackSequence>${snapshot.sequence}",
+                )
+
+                ackEvidence != evidence -> poisonOnce(
+                    "owner-baseline-unsequenced:${snapshot.bootId}:" +
+                        "${snapshot.oracleInstanceId}:${snapshot.sequence}:$evidence",
+                )
+
+                else -> writeCoverage(ContinuityCoverageV1.NONE, null)
+            }
+            return@transaction snapshotLocked()
+        }
+        writeOracleAck(snapshot, evidence)
+        clearOracleFailureMarkers()
+        writeCoverage(ContinuityCoverageV1.NONE, null)
+        snapshotLocked()
+    }
+
+    /**
+     * Accounts a live-process semantic-session registration before the global
+     * writer lane becomes visible. The registration itself is one exact +2
+     * boundary; any earlier unseen session-loss cursor is coalesced into this
+     * one conservative discontinuity, and FULL stays revoked until a later
+     * stable raw-read window.
+     */
+    fun acknowledgeAuthoritativeWriterRegistration(
+        before: AuthoritativeContinuitySnapshot,
+        after: AuthoritativeContinuitySnapshot,
+        expectedSemanticDigest: String,
+        expectedOwnerPackage: String,
+        expectedOwnerUid: Int,
+    ): RevisionSnapshot = storage.transaction {
+        check(activeAuthoritativeReservationLocked() == null) {
+            "writer registration cannot account across an active reservation"
+        }
+        check(before.isSemanticRegistrationBaselineFor(
+            expectedOwnerPackage,
+            expectedOwnerUid,
+            expectedSemanticDigest,
+        )) { "writer registration did not start from a safe semantic baseline" }
+        check(after.isStableCompleteFor(expectedOwnerPackage, expectedOwnerUid)) {
+            "writer registration did not finish healthy and complete"
+        }
+        check(after.bootId == before.bootId &&
+            after.oracleInstanceId == before.oracleInstanceId &&
+            after.sequence == before.sequence + 2L &&
+            after.qwySemanticDigest == expectedSemanticDigest
+        ) { "writer registration was not one exact same-oracle boundary" }
+
+        val ackBoot = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_BOOT_ID)
+        val ackInstance = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_INSTANCE_ID)
+        val ackSequence = storage.read(
+            REVISION_NAMESPACE,
+            ORACLE_ACK_SEQUENCE_KEY,
+        )?.toLongOrNull()
+        val sameOracle = ackBoot == before.bootId && ackInstance == before.oracleInstanceId
+        check(!sameOracle || ackSequence == null || ackSequence <= before.sequence) {
+            "writer registration baseline regressed behind the durable ACK"
+        }
+        if (sameOracle && ackSequence == before.sequence) {
+            check(storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_EVIDENCE) ==
+                authoritativeEvidenceDigest(before)
+            ) { "writer registration baseline did not match durable ACK evidence" }
+        }
+
+        bumpLocked()
+        writeOracleAck(after, authoritativeEvidenceDigest(after))
+        clearOracleFailureMarkers()
+        writeCoverage(ContinuityCoverageV1.NONE, null)
+        snapshotLocked()
+    }
+
+    /**
+     * Accounts a completed central writer observed immediately before a
+     * handler mutation. This is not a continuity observation: it advances the
+     * durable revision/ACK once and retains NONE, solely so the handler can
+     * open its own next exact bracket instead of falling back to a raw write.
+     */
+    fun acknowledgeStableAuthoritativeCursorBeforeMutation(
+        snapshot: AuthoritativeContinuitySnapshot,
+        expectedSemanticDigest: String,
+        expectedOwnerPackage: String,
+        expectedOwnerUid: Int,
+    ): RevisionSnapshot = storage.transaction {
+        check(activeAuthoritativeReservationLocked() == null) {
+            "central writer cursor cannot be accounted across an active reservation"
+        }
+        check(snapshot.isStableCompleteFor(expectedOwnerPackage, expectedOwnerUid) &&
+            snapshot.qwySemanticDigest == expectedSemanticDigest
+        ) { "central writer cursor is not healthy for the current semantic digest" }
+        val ackBoot = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_BOOT_ID)
+        val ackInstance = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_INSTANCE_ID)
+        val ackSequence = storage.read(
+            REVISION_NAMESPACE,
+            ORACLE_ACK_SEQUENCE_KEY,
+        )?.toLongOrNull()
+        check(ackBoot == snapshot.bootId &&
+            ackInstance == snapshot.oracleInstanceId &&
+            ackSequence != null && snapshot.sequence > ackSequence
+        ) { "central writer cursor is not newer than the same-oracle durable ACK" }
+
+        bumpLocked()
         writeOracleAck(snapshot, authoritativeEvidenceDigest(snapshot))
         clearOracleFailureMarkers()
         writeCoverage(ContinuityCoverageV1.NONE, null)
@@ -452,6 +600,14 @@ class ContinuityTracker(
         check(currentSnapshot.isStableCompleteFor(expectedOwnerPackage, expectedOwnerUid)) {
             "authoritative quarantine requires a healthy current cursor"
         }
+        val sameStartingOracle =
+            currentSnapshot.bootId == reservation.startingBootId &&
+                currentSnapshot.oracleInstanceId == reservation.startingOracleInstanceId
+        check(!sameStartingOracle ||
+            currentSnapshot.sequence > reservation.startingSequence
+        ) {
+            "authoritative quarantine cannot ACK a regressed or aliased cursor"
+        }
         check(currentSnapshot.qwySemanticDigest == expectedCurrentSemanticDigest) {
             "authoritative quarantine semantic digest mismatch"
         }
@@ -523,8 +679,14 @@ class ContinuityTracker(
             AuthoritativeWindowVerdict.SEQUENCE_REGRESSION ->
                 poisonOnce(invalidWindowDigest(verdict, window))
 
-            AuthoritativeWindowVerdict.UNHEALTHY ->
-                degradeOnce(invalidWindowDigest(verdict, window))
+            AuthoritativeWindowVerdict.UNHEALTHY -> {
+                val invalid = invalidWindowDigest(verdict, window)
+                if (hasUnsequencedAcknowledgedEvidence(window)) {
+                    poisonOnce("unsequenced-unhealthy:$invalid")
+                } else {
+                    degradeOnce(invalid)
+                }
+            }
         }
         snapshotLocked()
     }
@@ -548,7 +710,8 @@ class ContinuityTracker(
             // window proves continuity from a known boundary.
             writeOracleAck(snapshot, evidence)
             clearOracleFailureMarkers()
-            if (currentCoverage() != ContinuityCoverageV1.FULL) {
+            val recoveryFence = consumeOracleRecoveryFence()
+            if (recoveryFence || currentCoverage() != ContinuityCoverageV1.FULL) {
                 writeCoverage(ContinuityCoverageV1.NONE, null)
             }
             return
@@ -558,6 +721,7 @@ class ContinuityTracker(
             bumpLocked()
             writeOracleAck(snapshot, evidence)
             clearOracleFailureMarkers()
+            consumeOracleRecoveryFence()
             writeCoverage(ContinuityCoverageV1.NONE, null)
             return
         }
@@ -583,12 +747,7 @@ class ContinuityTracker(
 
             snapshot.sequence == ackSequence -> {
                 storage.write(REVISION_NAMESPACE, KEY_ORACLE_LAST_INVALID, "")
-                if (storage.read(
-                        REVISION_NAMESPACE,
-                        KEY_ORACLE_RECOVERY_FENCE,
-                    ) == "1"
-                ) {
-                    storage.write(REVISION_NAMESPACE, KEY_ORACLE_RECOVERY_FENCE, "")
+                if (consumeOracleRecoveryFence()) {
                     writeCoverage(ContinuityCoverageV1.NONE, null)
                 } else if (currentCoverage() != ContinuityCoverageV1.FULL) {
                     writeCoverage(
@@ -604,11 +763,16 @@ class ContinuityTracker(
                 // read, so bump+ACK and establish from PRE in one commit.
                 bumpLocked()
                 writeOracleAck(snapshot, evidence)
+                val recoveryFence = consumeOracleRecoveryFence()
                 clearOracleFailureMarkers()
-                writeCoverage(
-                    ContinuityCoverageV1.FULL,
-                    windowStartElapsedRealtimeMs,
-                )
+                if (recoveryFence) {
+                    writeCoverage(ContinuityCoverageV1.NONE, null)
+                } else {
+                    writeCoverage(
+                        ContinuityCoverageV1.FULL,
+                        windowStartElapsedRealtimeMs,
+                    )
+                }
             }
         }
     }
@@ -675,7 +839,44 @@ class ContinuityTracker(
     private fun clearOracleFailureMarkers() {
         storage.write(REVISION_NAMESPACE, KEY_ORACLE_POISON, "")
         storage.write(REVISION_NAMESPACE, KEY_ORACLE_LAST_INVALID, "")
+    }
+
+    /** The recovery fence belongs only to the first valid observation window. */
+    private fun consumeOracleRecoveryFence(): Boolean {
+        if (storage.read(REVISION_NAMESPACE, KEY_ORACLE_RECOVERY_FENCE) != "1") {
+            return false
+        }
         storage.write(REVISION_NAMESPACE, KEY_ORACLE_RECOVERY_FENCE, "")
+        return true
+    }
+
+    /**
+     * An unhealthy endpoint at the already-ACKed cursor is direct evidence
+     * that covered state changed without the mandatory sequence transition.
+     * Missing Binder reads have no comparable cursor and remain recoverable;
+     * concrete same-cursor evidence is sticky until a newer sequence/instance.
+     */
+    private fun hasUnsequencedAcknowledgedEvidence(
+        window: AuthoritativeObservationWindow,
+    ): Boolean {
+        val ackBoot = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_BOOT_ID)
+            ?: return false
+        val ackInstance = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_INSTANCE_ID)
+            ?: return false
+        val ackSequence = storage.read(
+            REVISION_NAMESPACE,
+            ORACLE_ACK_SEQUENCE_KEY,
+        )?.toLongOrNull() ?: return false
+        val ackEvidence = storage.read(REVISION_NAMESPACE, KEY_ORACLE_ACK_EVIDENCE)
+            ?: return false
+        return sequenceOf(window.pre, window.post)
+            .filterNotNull()
+            .any { observed ->
+                observed.bootId == ackBoot &&
+                    observed.oracleInstanceId == ackInstance &&
+                    observed.sequence == ackSequence &&
+                    authoritativeEvidenceDigest(observed) != ackEvidence
+            }
     }
 
     private fun bumpLocked(): Long {
@@ -689,6 +890,10 @@ class ContinuityTracker(
         val wire = storage.read(REVISION_NAMESPACE, KEY_COVERAGE)?.toIntOrNull()
             ?: ContinuityCoverageV1.NONE.wire
         return ContinuityCoverageV1.fromWire(wire) ?: ContinuityCoverageV1.NONE
+    }
+
+    private fun invalidateCoverageLocked() {
+        writeCoverage(ContinuityCoverageV1.NONE, null)
     }
 
     private fun writeCoverage(
@@ -718,7 +923,7 @@ class ContinuityTracker(
         val encoded = storage.read(REVISION_NAMESPACE, KEY_ORACLE_RESERVATION)
             ?.takeIf(String::isNotEmpty) ?: return null
         val fields = DurableFieldCodec.decodeNonNull(encoded)
-        check(fields.size == 7) { "invalid authoritative reservation field count" }
+        check(fields.size == 8) { "invalid authoritative reservation field count" }
         return AuthoritativeRevisionReservation(
             mutationId = fields[0].also {
                 check(it.isNotBlank()) { "invalid authoritative reservation mutation id" }
@@ -735,6 +940,7 @@ class ContinuityTracker(
             startingSemanticDigest = fields[6].also {
                 check(it.isNotBlank()) { "invalid authoritative reservation semantic digest" }
             },
+            ownerGenerationAtReservation = fields[7].toLong(),
         ).also {
             check(it.baseRevision >= 0L && it.reservedRevision == it.baseRevision + 1L) {
                 "invalid authoritative reservation revision range"
@@ -765,6 +971,7 @@ class ContinuityTracker(
                 reservation.startingOracleInstanceId,
                 reservation.startingSequence.toString(),
                 reservation.startingSemanticDigest,
+                reservation.ownerGenerationAtReservation.toString(),
             ),
         )
 

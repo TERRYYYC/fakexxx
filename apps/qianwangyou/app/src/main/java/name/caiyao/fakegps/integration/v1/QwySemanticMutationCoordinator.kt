@@ -70,7 +70,11 @@ sealed interface QwySemanticMutationResult<out T> {
     data class Changed<T>(val value: T, val afterDigest: String) : QwySemanticMutationResult<T>
     data class ProvedNoOp<T>(val value: T, val afterDigest: String) : QwySemanticMutationResult<T>
     data class Uncertain(val reason: QwySemanticMutationFailure) :
-        QwySemanticMutationResult<Nothing>
+        QwySemanticMutationResult<Nothing> {
+        /** Diagnostic phase bits deliberately excluded from data-class equality. */
+        internal var remoteMutationBegan: Boolean = false
+        internal var localWorkStarted: Boolean = false
+    }
 }
 
 /**
@@ -83,6 +87,26 @@ class QwySemanticMutationCoordinator(
     private val clientDeathTokenFactory: QwySemanticClientDeathTokenFactory,
 ) {
     private val currentThreadMutationDepth = ThreadLocal.withInitial { 0 }
+    private val currentThreadMutationContext = ThreadLocal<MutationContext>()
+
+    private class MutationContext {
+        private val uncertainCompensations = mutableListOf<() -> Unit>()
+        private var compensationAttempted = false
+
+        fun register(operation: () -> Unit) {
+            uncertainCompensations += operation
+        }
+
+        /** Returns true when a compensation existed, even if it itself failed. */
+        fun compensate(): Boolean {
+            if (compensationAttempted) return uncertainCompensations.isNotEmpty()
+            compensationAttempted = true
+            uncertainCompensations.asReversed().forEach { compensation ->
+                runCatching(compensation)
+            }
+            return uncertainCompensations.isNotEmpty()
+        }
+    }
 
     private data class Session(
         val endpoint: QwySemanticMutationEndpoint,
@@ -91,6 +115,8 @@ class QwySemanticMutationCoordinator(
     )
 
     private var session: Session? = null
+    /** Process-generation identity survives a locally invalidated remote session. */
+    private var reusableDeathToken: QwySemanticClientDeathToken? = null
 
     /** Read-only lane selection check; no session is created implicitly. */
     @Synchronized
@@ -101,6 +127,15 @@ class QwySemanticMutationCoordinator(
         return currentEndpoint() === active.endpoint
     }
 
+    /** Exact digest of the one still-live registered client generation. */
+    @Synchronized
+    fun registeredSemanticDigest(): String? {
+        val active = session ?: return null
+        if (!isAlive(active.deathToken)) return null
+        if (currentEndpoint() !== active.endpoint) return null
+        return active.semanticDigest
+    }
+
     /**
      * True only while this coordinator is executing local work on this thread.
      * Central writers use it to join a handler-owned outer bracket instead of
@@ -108,6 +143,13 @@ class QwySemanticMutationCoordinator(
      */
     fun isMutationInFlightOnCurrentThread(): Boolean =
         (currentThreadMutationDepth.get() ?: 0) > 0
+
+    /** Adds one idempotent cleanup to the currently executing local work phase. */
+    fun registerUncertainCompensationOnCurrentThread(operation: () -> Unit): Boolean {
+        val context = currentThreadMutationContext.get() ?: return false
+        context.register(operation)
+        return true
+    }
 
     @Synchronized
     fun registerCurrentSession(semanticDigest: String): QwySemanticSessionRegistration {
@@ -122,14 +164,21 @@ class QwySemanticMutationCoordinator(
             ?: return QwySemanticSessionRegistration.Failed(
                 QwySemanticMutationFailure.ENDPOINT_UNAVAILABLE,
             )
-        val deathToken = try {
-            clientDeathTokenFactory.create()
-        } catch (_: Exception) {
-            return QwySemanticSessionRegistration.Failed(
-                QwySemanticMutationFailure.CLIENT_DEATH_TOKEN_FAILED,
-            )
-        }
+        // Re-registration of one live process must retain its Binder identity.
+        // A distinct token makes system_server account generation loss (+2)
+        // before the registration boundary (+2), which is correct only for a
+        // genuinely replaced process generation.
+        val deathToken = reusableDeathToken
+            ?.takeIf(::isAlive)
+            ?: try {
+                clientDeathTokenFactory.create()
+            } catch (_: Exception) {
+                return QwySemanticSessionRegistration.Failed(
+                    QwySemanticMutationFailure.CLIENT_DEATH_TOKEN_FAILED,
+                )
+            }
         if (!isAlive(deathToken)) {
+            if (reusableDeathToken === deathToken) reusableDeathToken = null
             return QwySemanticSessionRegistration.Failed(
                 QwySemanticMutationFailure.CLIENT_DIED,
             )
@@ -158,6 +207,7 @@ class QwySemanticMutationCoordinator(
             )
         }
 
+        reusableDeathToken = deathToken
         session = Session(endpoint, deathToken, semanticDigest)
         return QwySemanticSessionRegistration.Registered(semanticDigest)
     }
@@ -224,86 +274,107 @@ class QwySemanticMutationCoordinator(
                 remoteToken,
                 afterDigest = null,
                 reason = QwySemanticMutationFailure.CLIENT_DIED,
+                localWorkStarted = false,
             )
         }
 
-        val work = try {
-            currentThreadMutationDepth.set((currentThreadMutationDepth.get() ?: 0) + 1)
-            try {
+        val context = MutationContext()
+        currentThreadMutationContext.set(context)
+        currentThreadMutationDepth.set((currentThreadMutationDepth.get() ?: 0) + 1)
+        return try {
+            val work = try {
                 operation()
-            } finally {
-                val remaining = (currentThreadMutationDepth.get() ?: 1) - 1
-                if (remaining == 0) currentThreadMutationDepth.remove()
-                else currentThreadMutationDepth.set(remaining)
+            } catch (_: Exception) {
+                context.compensate()
+                return finishUncertain(
+                    active,
+                    remoteToken,
+                    afterDigest = null,
+                    reason = QwySemanticMutationFailure.OPERATION_FAILED,
+                    localWorkStarted = true,
+                )
             }
-        } catch (_: Exception) {
-            return finishUncertain(
-                active,
-                remoteToken,
-                afterDigest = null,
-                reason = QwySemanticMutationFailure.OPERATION_FAILED,
-            )
-        }
 
-        val endpointAfterWork = currentEndpoint()
-        if (endpointAfterWork == null) {
-            return finishUncertain(
-                active,
-                remoteToken,
-                afterDigest = null,
-                reason = QwySemanticMutationFailure.ENDPOINT_UNAVAILABLE,
-            )
-        }
-        if (endpointAfterWork !== active.endpoint) {
-            return finishUncertain(
-                active,
-                remoteToken,
-                afterDigest = null,
-                reason = QwySemanticMutationFailure.ENDPOINT_CHANGED,
-            )
-        }
-        if (!isAlive(active.deathToken)) {
-            return finishUncertain(
-                active,
-                remoteToken,
-                afterDigest = null,
-                reason = QwySemanticMutationFailure.CLIENT_DIED,
-            )
-        }
+            val endpointAfterWork = currentEndpoint()
+            if (endpointAfterWork == null) {
+                context.compensate()
+                return finishUncertain(
+                    active,
+                    remoteToken,
+                    afterDigest = null,
+                    reason = QwySemanticMutationFailure.ENDPOINT_UNAVAILABLE,
+                    localWorkStarted = true,
+                )
+            }
+            if (endpointAfterWork !== active.endpoint) {
+                context.compensate()
+                return finishUncertain(
+                    active,
+                    remoteToken,
+                    afterDigest = null,
+                    reason = QwySemanticMutationFailure.ENDPOINT_CHANGED,
+                    localWorkStarted = true,
+                )
+            }
+            if (!isAlive(active.deathToken)) {
+                context.compensate()
+                return finishUncertain(
+                    active,
+                    remoteToken,
+                    afterDigest = null,
+                    reason = QwySemanticMutationFailure.CLIENT_DIED,
+                    localWorkStarted = true,
+                )
+            }
 
-        return when (work) {
-            is QwySemanticMutationWork.Changed -> {
-                if (work.afterDigest.isBlank()) {
+            when (work) {
+                is QwySemanticMutationWork.Changed -> {
+                    if (work.afterDigest.isBlank()) {
+                        context.compensate()
+                        finishUncertain(
+                            active,
+                            remoteToken,
+                            afterDigest = null,
+                            reason = QwySemanticMutationFailure.OUTCOME_UNPROVEN,
+                            localWorkStarted = true,
+                        )
+                    } else {
+                        finishChanged(active, remoteToken, work, context)
+                    }
+                }
+
+                is QwySemanticMutationWork.ProvedNoOp -> {
+                    if (work.afterDigest != beforeDigest || work.afterDigest.isBlank()) {
+                        val compensated = context.compensate()
+                        finishUncertain(
+                            active,
+                            remoteToken,
+                            afterDigest = work.afterDigest
+                                .takeIf { it.isNotBlank() && !compensated },
+                            reason = QwySemanticMutationFailure.OUTCOME_UNPROVEN,
+                            localWorkStarted = true,
+                        )
+                    } else {
+                        finishNoOp(active, remoteToken, work, context)
+                    }
+                }
+
+                is QwySemanticMutationWork.Uncertain -> {
+                    val compensated = context.compensate()
                     finishUncertain(
                         active,
                         remoteToken,
-                        afterDigest = null,
-                        reason = QwySemanticMutationFailure.OUTCOME_UNPROVEN,
+                        afterDigest = work.afterDigest.takeUnless { compensated },
+                        reason = QwySemanticMutationFailure.EXPLICIT_UNCERTAIN,
+                        localWorkStarted = true,
                     )
-                } else {
-                    finishChanged(active, remoteToken, work)
                 }
             }
-
-            is QwySemanticMutationWork.ProvedNoOp -> {
-                if (work.afterDigest != beforeDigest || work.afterDigest.isBlank()) {
-                    finishUncertain(
-                        active,
-                        remoteToken,
-                        afterDigest = work.afterDigest.takeIf { it.isNotBlank() },
-                        reason = QwySemanticMutationFailure.OUTCOME_UNPROVEN,
-                    )
-                } else {
-                    finishNoOp(active, remoteToken, work)
-                }
-            }
-
-            is QwySemanticMutationWork.Uncertain -> finishUncertain(
-                active,
-                remoteToken,
-                afterDigest = work.afterDigest,
-                reason = QwySemanticMutationFailure.EXPLICIT_UNCERTAIN,
-            )
+        } finally {
+            currentThreadMutationContext.remove()
+            val remaining = (currentThreadMutationDepth.get() ?: 1) - 1
+            if (remaining == 0) currentThreadMutationDepth.remove()
+            else currentThreadMutationDepth.set(remaining)
         }
     }
 
@@ -311,6 +382,7 @@ class QwySemanticMutationCoordinator(
         active: Session,
         remoteToken: Long,
         work: QwySemanticMutationWork.Changed<T>,
+        context: MutationContext,
     ): QwySemanticMutationResult<T> {
         try {
             active.endpoint.finishMutation(
@@ -320,15 +392,22 @@ class QwySemanticMutationCoordinator(
                 afterDigest = work.afterDigest,
             )
         } catch (_: Exception) {
+            context.compensate()
             session = null
-            return QwySemanticMutationResult.Uncertain(
-                QwySemanticMutationFailure.FINISH_FAILED,
+            tryFinishUncertainAfterFailedFinish(active, remoteToken)
+            return uncertain(
+                reason = QwySemanticMutationFailure.FINISH_FAILED,
+                remoteMutationBegan = true,
+                localWorkStarted = true,
             )
         }
         if (!authoritySurvived(active)) {
+            context.compensate()
             session = null
-            return QwySemanticMutationResult.Uncertain(
-                QwySemanticMutationFailure.CLIENT_DIED,
+            return uncertain(
+                reason = QwySemanticMutationFailure.CLIENT_DIED,
+                remoteMutationBegan = true,
+                localWorkStarted = true,
             )
         }
         session = active.copy(semanticDigest = work.afterDigest)
@@ -339,6 +418,7 @@ class QwySemanticMutationCoordinator(
         active: Session,
         remoteToken: Long,
         work: QwySemanticMutationWork.ProvedNoOp<T>,
+        context: MutationContext,
     ): QwySemanticMutationResult<T> {
         try {
             active.endpoint.finishMutation(
@@ -348,15 +428,22 @@ class QwySemanticMutationCoordinator(
                 afterDigest = work.afterDigest,
             )
         } catch (_: Exception) {
+            context.compensate()
             session = null
-            return QwySemanticMutationResult.Uncertain(
-                QwySemanticMutationFailure.FINISH_FAILED,
+            tryFinishUncertainAfterFailedFinish(active, remoteToken)
+            return uncertain(
+                reason = QwySemanticMutationFailure.FINISH_FAILED,
+                remoteMutationBegan = true,
+                localWorkStarted = true,
             )
         }
         if (!authoritySurvived(active)) {
+            context.compensate()
             session = null
-            return QwySemanticMutationResult.Uncertain(
-                QwySemanticMutationFailure.CLIENT_DIED,
+            return uncertain(
+                reason = QwySemanticMutationFailure.CLIENT_DIED,
+                remoteMutationBegan = true,
+                localWorkStarted = true,
             )
         }
         session = active.copy(semanticDigest = work.afterDigest)
@@ -368,6 +455,7 @@ class QwySemanticMutationCoordinator(
         remoteToken: Long,
         afterDigest: String?,
         reason: QwySemanticMutationFailure,
+        localWorkStarted: Boolean,
     ): QwySemanticMutationResult.Uncertain {
         session = null
         try {
@@ -381,8 +469,35 @@ class QwySemanticMutationCoordinator(
             // The original ambiguity remains the stronger diagnosis. Either
             // way, no trusted value or live local session escapes this method.
         }
-        return QwySemanticMutationResult.Uncertain(reason)
+        return uncertain(
+            reason = reason,
+            remoteMutationBegan = true,
+            localWorkStarted = localWorkStarted,
+        )
     }
+
+    private fun tryFinishUncertainAfterFailedFinish(active: Session, remoteToken: Long) {
+        try {
+            active.endpoint.finishMutation(
+                remoteToken,
+                changed = false,
+                uncertain = true,
+                afterDigest = null,
+            )
+        } catch (_: Exception) {
+            // The failed finish is already ambiguous and the session is dead.
+        }
+    }
+
+    private fun uncertain(
+        reason: QwySemanticMutationFailure,
+        remoteMutationBegan: Boolean = false,
+        localWorkStarted: Boolean = false,
+    ): QwySemanticMutationResult.Uncertain =
+        QwySemanticMutationResult.Uncertain(reason).also {
+            it.remoteMutationBegan = remoteMutationBegan
+            it.localWorkStarted = localWorkStarted
+        }
 
     private fun authoritySurvived(active: Session): Boolean =
         isAlive(active.deathToken) && currentEndpoint() === active.endpoint

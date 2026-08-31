@@ -21,7 +21,7 @@ Public AppOps/provider callbacks stay installed for diagnostics and conservative
 4. Fail-closed handling for absence, Binder death, odd/mismatched snapshots, boot change, same-boot regression, incomplete mask, unhealthy state, ambiguous/non-QWY owner, or disabled provider.
 5. A system-server integration shell that resolves exact Android 15 AOSP symbols, reports an installed mask, and refuses health on an unattested build.
 6. Tests for every issue #66 acceptance case, including the negative assertion that same-coordinate refresh does not mutate the oracle.
-7. One central writer runtime covering settings, profiles, config publication, and handler apply/converge/cleanup mutations; nested writer calls share the outer correlation, while refresh cadence/sample publication stays outside the semantic boundary.
+7. One central writer runtime covering settings, profiles, config publication, and handler apply/converge/cleanup mutations; nested writer calls share the outer correlation. Exact same-coordinate refreshes stay outside the boundary, while the API-35 provider-lock hook journals coordinate-bit changes.
 
 ## Stronger production architecture
 
@@ -37,7 +37,7 @@ After system services are ready, the module binds explicitly to QWY's exported r
 
 - Polling observes endpoints, not history; away→restore aliases unchanged.
 - Public AppOps callbacks have no replay, order, sequence, or drain contract.
-- Mock refresh proves sample freshness only; treating a tick as continuity creates false history.
+- Mock refresh proves sample freshness only; an exact A→A tick is not continuity, while a real coordinate-bit change must be journaled independently.
 - A QWY-local counter cannot see system mutations that happen while its process is paused or dead.
 - Hook-installed-without-attestation confuses “method name resolved” with “all device mutation paths covered.”
 
