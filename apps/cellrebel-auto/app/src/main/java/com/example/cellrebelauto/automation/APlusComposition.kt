@@ -50,8 +50,9 @@ object APlusComposition {
 
     /**
      * Wire the A+ evidence source (pre/post observation + classified completion evidence) from the
-     * backend. Target coordinates and the locally-recomputed intent hash are NEVER supplied here —
-     * they are assembled by the engine from the persisted attempt intent (INV-23).
+     * backend. Qianwangyou exclusively owns target coordinates and distance validation (KB-8);
+     * Auto receives only provider-reported effective coordinates for structural/audit checks. The
+     * locally-recomputed intent hash is assembled by the engine from persisted owner identity (INV-23).
      */
     fun completionEvidenceSource(backend: APlusBackend): APlusEvidenceSource = backend.evidenceSource
 
@@ -154,6 +155,10 @@ object APlusComposition {
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
             db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
         )
+        // Single storage authority for immutable PRE/POST carriers. The evidence source commits
+        // before return; the engine's phase-boundary call replays through the same repository and
+        // therefore validates exact equality instead of issuing a second independent INSERT.
+        val durableEvidenceRepository = com.example.cellrebelauto.repository.PlanRepository(db)
         return object : APlusBackend {
             override val executor: ExternalApplyExecutor = binderExecutor
             override val recoveryLog: DurableRecoveryLog = roomLog
@@ -189,21 +194,6 @@ object APlusComposition {
                     providerSignerDigest
                 )
 
-                fun snapshotFromDurable(r: com.example.cellrebelauto.model.ledger.DurableObservationRecord) =
-                    com.example.cellrebelauto.environment.ObservationSnapshot(
-                        leaseId = r.leaseId, acceptedIntentHash = r.acceptedIntentHash,
-                        coverage = r.coverage, verificationLevel = r.verificationLevel,
-                        deliveryMode = r.deliveryMode, isMock = r.isMock,
-                        scheduleDecision = r.scheduleDecision,
-                        effectiveLat = r.effectiveLat, effectiveLng = r.effectiveLng,
-                        environmentRevision = r.environmentRevision,
-                        environmentFingerprint = r.environmentFingerprint,
-                        observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
-                        observedAtEpochMs = r.observedAtEpochMs,
-                        continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
-                        evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
-                    )
-
                 suspend fun observeLive(phase: String, attemptId: Long, runSessionId: Long):
                     com.example.cellrebelauto.environment.ObservationSnapshot? {
                     // §6.5.3 gate FIRST: untrusted current signer ⇒ no artifacts enter the trust path.
@@ -238,37 +228,20 @@ object APlusComposition {
                         )
                     val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null
                     val snapshot = com.example.cellrebelauto.environment.ObservationWireAdapter.toSnapshot(wire)
-                    // Persist BEFORE returning: a crash mid-decision re-reads durability (F3 pattern).
-                    db.durableObservationDao().insert(
-                        com.example.cellrebelauto.model.ledger.DurableObservationRecord(
-                            attemptId = attemptId, phase = phase,
-                            leaseId = snapshot.leaseId, acceptedIntentHash = snapshot.acceptedIntentHash,
-                            coverage = snapshot.coverage, verificationLevel = snapshot.verificationLevel,
-                            deliveryMode = snapshot.deliveryMode, isMock = snapshot.isMock,
-                            scheduleDecision = snapshot.scheduleDecision,
-                            effectiveLat = snapshot.effectiveLat, effectiveLng = snapshot.effectiveLng,
-                            environmentRevision = snapshot.environmentRevision,
-                            environmentFingerprint = snapshot.environmentFingerprint,
-                            observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
-                            observedAtEpochMs = snapshot.observedAtEpochMs,
-                            continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
-                            continuitySinceEpochMs = null,
-                            evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
-                            evidenceRefs = snapshot.evidenceRefs.joinToString(";")
-                        )
-                    )
-                    return snapshot
+                    // Persist BEFORE returning through the one immutable storage authority. A race
+                    // winner with any different payload is rejected fail-closed, never overwritten.
+                    return durableEvidenceRepository.persistObservation(attemptId, phase, snapshot)
                 }
 
                 override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) =
                     kotlinx.coroutines.runBlocking {
                         // Durable first (crash replay); live observe is the FIRST writer on a fresh run.
-                        db.durableObservationDao().forAttemptPhase(attemptId, "PRE")?.let { snapshotFromDurable(it) }
+                        durableEvidenceRepository.getObservationSnapshot(attemptId, "PRE")
                             ?: observeLive("PRE", attemptId, runSessionId)
                     }
                 override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) =
                     kotlinx.coroutines.runBlocking {
-                        db.durableObservationDao().forAttemptPhase(attemptId, "POST")?.let { snapshotFromDurable(it) }
+                        durableEvidenceRepository.getObservationSnapshot(attemptId, "POST")
                             ?: observeLive("POST", attemptId, runSessionId)
                     }
                 override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? {

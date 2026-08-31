@@ -257,7 +257,7 @@ class CrashMatrixTest {
 
     /** Seed a durable observation record in the DB (R37: recovery reads from here, NOT from a live source). */
     private suspend fun seedDurableObservation(attemptId: Long, phase: String, snapshot: ObservationSnapshot) {
-        db.durableObservationDao().insert(
+        db.durableObservationDao().insertIfAbsent(
             DurableObservationRecord(
                 attemptId = attemptId, phase = phase,
                 leaseId = snapshot.leaseId,
@@ -283,7 +283,7 @@ class CrashMatrixTest {
 
     /** Seed a durable completion receipt in the DB (R37: recovery reads acceptedIntentHash from here). */
     private suspend fun seedDurableReceipt(attemptId: Long, wire: Int, intentHash: String, leaseId: String) {
-        db.durableCompletionReceiptDao().insert(
+        db.durableCompletionReceiptDao().insertIfAbsent(
             DurableCompletionReceipt(
                 attemptId = attemptId, completionEvidenceWire = wire,
                 acceptedIntentHash = intentHash, leaseId = leaseId

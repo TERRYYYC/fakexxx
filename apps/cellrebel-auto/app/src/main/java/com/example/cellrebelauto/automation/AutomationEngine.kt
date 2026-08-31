@@ -432,11 +432,12 @@ class AutomationEngine(
                         aplusPause("pre-observation unavailable for attempt $attemptId")
                         return@coroutineScope
                     }
+                    // The shipped source commits before returning. Replaying through PlanRepository
+                    // is an exact immutable assertion (or the first write for a test/source adapter),
+                    // never an independent second INSERT or an overwrite.
+                    planRepository.persistObservation(attemptId, "PRE", preObservation)
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.PRE_OBSERVATION_OK) ?: aplusState
                     planRepository.markAplusState(attemptId, "PRE_OBSERVED")
-                    // R37 (Sol R36 P1-1): persist pre-observation to durable storage BEFORE CellRebel start
-                    // so crash recovery re-decides from durable data, not a stale live source.
-                    planRepository.persistObservation(attemptId, "PRE", preObservation)
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.START_CELLREBEL) ?: aplusState
                     planRepository.markAplusState(attemptId, "CELLREBEL_START_PENDING")
                     // R37 (Sol R36 P1-2): persist current executionId BEFORE external start (§8.1 START).
@@ -507,9 +508,10 @@ class AutomationEngine(
                                 aplusPause("post-observation unavailable for attempt $attemptId")
                                 return@coroutineScope
                             }
-                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.POST_OBSERVATION_OK) ?: aplusState
-                            // R37 (Sol R36 P1-1): persist post-observation to durable storage BEFORE DECIDING.
+                            // As with PRE, this converges on the repository's one immutable carrier;
+                            // a conflicting replay fails closed before DECIDING.
                             planRepository.persistObservation(attemptId, "POST", postObservation)
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.POST_OBSERVATION_OK) ?: aplusState
                             // §8.1: POST_OBSERVATION_OK → DECIDING is persisted right after the observation succeeds
                             // (Sol round-23 P1-1).
                             planRepository.markAplusState(attemptId, "DECIDING")
@@ -971,8 +973,7 @@ class AutomationEngine(
                     "PRE_OBSERVED" -> {
                         val pre = src.acquirePreObservation(crashed.id, crashed.runSessionId)
                         if (pre != null) {
-                            // Persist the re-acquired pre-observation durably, then advance the phase
-                            // (the next phase START_CELLREBEL re-runs the external start).
+                            // Idempotently assert/persist the one immutable carrier before advancing.
                             planRepository.persistObservation(crashed.id, "PRE", pre)
                             attemptDriver?.driveTransition(crashed.id, AttemptState.PRE_OBSERVED, AttemptEvent.START_CELLREBEL)
                             planRepository.markAplusState(crashed.id, "CELLREBEL_START_PENDING")
@@ -983,8 +984,7 @@ class AutomationEngine(
                     "POST_OBSERVE_PENDING" -> {
                         val post = src.acquirePostObservation(crashed.id, crashed.runSessionId)
                         if (post != null) {
-                            // Persist the re-acquired post-observation durably, then advance into
-                            // DECIDING and run the trust decision over the durable bundle.
+                            // Idempotently assert/persist the one immutable carrier before deciding.
                             planRepository.persistObservation(crashed.id, "POST", post)
                             attemptDriver?.driveTransition(crashed.id, AttemptState.POST_OBSERVE_PENDING, AttemptEvent.POST_OBSERVATION_OK)
                             planRepository.markAplusState(crashed.id, "DECIDING")

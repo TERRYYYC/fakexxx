@@ -286,29 +286,48 @@ class PlanRepository(private val db: AppDatabase) {
         db.testAttemptDao().getCurrentExecutionId(attemptId)
 
     // # R37 (Sol R36 P1-1): durable observation + receipt persist/read
-    suspend fun persistObservation(attemptId: Long, phase: String, snapshot: com.example.cellrebelauto.environment.ObservationSnapshot) =
-        db.durableObservationDao().insert(
-            com.example.cellrebelauto.model.ledger.DurableObservationRecord(
-                attemptId = attemptId, phase = phase,
-                leaseId = snapshot.leaseId,
-                acceptedIntentHash = snapshot.acceptedIntentHash,
-                coverage = snapshot.coverage,
-                verificationLevel = snapshot.verificationLevel,
-                deliveryMode = snapshot.deliveryMode,
-                isMock = snapshot.isMock,
-                scheduleDecision = snapshot.scheduleDecision,
-                effectiveLat = snapshot.effectiveLat,
-                effectiveLng = snapshot.effectiveLng,
-                environmentRevision = snapshot.environmentRevision,
-                environmentFingerprint = snapshot.environmentFingerprint,
-                observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
-                observedAtEpochMs = snapshot.observedAtEpochMs,
-                continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
-                continuitySinceEpochMs = null,
-                evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
-                evidenceRefs = snapshot.evidenceRefs.joinToString(";")
-            )
+    // One immutable storage authority: source-first persistence and the engine phase-boundary replay
+    // both converge here. INSERT IGNORE alone would create two truths (live vs durable), so every
+    // replay reads the winning row back and requires exact snapshot equality.
+    suspend fun persistObservation(
+        attemptId: Long,
+        phase: String,
+        snapshot: com.example.cellrebelauto.environment.ObservationSnapshot
+    ): com.example.cellrebelauto.environment.ObservationSnapshot = db.withTransaction {
+        val candidate = com.example.cellrebelauto.model.ledger.DurableObservationRecord(
+            attemptId = attemptId, phase = phase,
+            leaseId = snapshot.leaseId,
+            acceptedIntentHash = snapshot.acceptedIntentHash,
+            coverage = snapshot.coverage,
+            verificationLevel = snapshot.verificationLevel,
+            deliveryMode = snapshot.deliveryMode,
+            isMock = snapshot.isMock,
+            scheduleDecision = snapshot.scheduleDecision,
+            effectiveLat = snapshot.effectiveLat,
+            effectiveLng = snapshot.effectiveLng,
+            environmentRevision = snapshot.environmentRevision,
+            environmentFingerprint = snapshot.environmentFingerprint,
+            observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
+            observedAtEpochMs = snapshot.observedAtEpochMs,
+            continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
+            continuitySinceEpochMs = null,
+            evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
+            evidenceRefs = snapshot.evidenceRefs.joinToString(";")
         )
+        db.durableObservationDao().insertIfAbsent(candidate)
+        val winner = db.durableObservationDao().forAttemptPhase(attemptId, phase)
+            ?: throw IllegalStateException(
+                "DURABLE_OBSERVATION_MISSING: no row after insert for attempt=$attemptId phase=$phase"
+            )
+        val durableSnapshot = observationSnapshotFromRecord(winner)
+        if (durableSnapshot != snapshot) {
+            throw IllegalStateException(
+                "DURABLE_OBSERVATION_CONFLICT: immutable replay mismatch for " +
+                    "attempt=$attemptId phase=$phase"
+            )
+        }
+        durableSnapshot
+    }
 
     suspend fun getObservation(attemptId: Long, phase: String): com.example.cellrebelauto.model.ledger.DurableObservationRecord? =
         db.durableObservationDao().forAttemptPhase(attemptId, phase)
@@ -318,8 +337,12 @@ class PlanRepository(private val db: AppDatabase) {
      * the crash-recovery re-decide reads observations from HERE, never from a live source.
      * `evidenceRefs` is parsed back from the JSON array column (round-trippable).
      */
-    suspend fun getObservationSnapshot(attemptId: Long, phase: String): com.example.cellrebelauto.environment.ObservationSnapshot? {
-        val r = db.durableObservationDao().forAttemptPhase(attemptId, phase) ?: return null
+    suspend fun getObservationSnapshot(attemptId: Long, phase: String): com.example.cellrebelauto.environment.ObservationSnapshot? =
+        db.durableObservationDao().forAttemptPhase(attemptId, phase)?.let(::observationSnapshotFromRecord)
+
+    private fun observationSnapshotFromRecord(
+        r: com.example.cellrebelauto.model.ledger.DurableObservationRecord
+    ): com.example.cellrebelauto.environment.ObservationSnapshot {
         val refs = try {
             val arr = org.json.JSONArray(r.evidenceRefsJson)
             (0 until arr.length()).map { arr.getString(it) }
@@ -346,13 +369,29 @@ class PlanRepository(private val db: AppDatabase) {
         )
     }
 
-    suspend fun persistCompletionReceipt(attemptId: Long, wire: Int, acceptedIntentHash: String, leaseId: String) =
-        db.durableCompletionReceiptDao().insert(
-            com.example.cellrebelauto.model.ledger.DurableCompletionReceipt(
-                attemptId = attemptId, completionEvidenceWire = wire,
-                acceptedIntentHash = acceptedIntentHash, leaseId = leaseId
-            )
+    /** Same immutable replay rule as observations; a conflicting receipt is an invariant break. */
+    suspend fun persistCompletionReceipt(
+        attemptId: Long,
+        wire: Int,
+        acceptedIntentHash: String,
+        leaseId: String
+    ): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt = db.withTransaction {
+        val candidate = com.example.cellrebelauto.model.ledger.DurableCompletionReceipt(
+            attemptId = attemptId, completionEvidenceWire = wire,
+            acceptedIntentHash = acceptedIntentHash, leaseId = leaseId
         )
+        db.durableCompletionReceiptDao().insertIfAbsent(candidate)
+        val winner = db.durableCompletionReceiptDao().forAttempt(attemptId)
+            ?: throw IllegalStateException(
+                "DURABLE_COMPLETION_RECEIPT_MISSING: no row after insert for attempt=$attemptId"
+            )
+        if (winner.copy(id = 0) != candidate) {
+            throw IllegalStateException(
+                "DURABLE_COMPLETION_RECEIPT_CONFLICT: immutable replay mismatch for attempt=$attemptId"
+            )
+        }
+        winner
+    }
 
     suspend fun getCompletionReceipt(attemptId: Long): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt? =
         db.durableCompletionReceiptDao().forAttempt(attemptId)

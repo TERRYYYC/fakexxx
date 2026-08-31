@@ -248,7 +248,7 @@ class AdvanceMatrixTest {
 
     private suspend fun seedDurableObservation(attemptId: Long, phase: String, intentHash: String) {
         val observedAt = if (phase == "PRE") PRE_OBSERVED_AT_ELAPSED else POST_OBSERVED_AT_ELAPSED
-        db.durableObservationDao().insert(
+        db.durableObservationDao().insertIfAbsent(
             DurableObservationRecord(
                 attemptId = attemptId, phase = phase,
                 leaseId = "lease-$attemptId",
@@ -271,7 +271,7 @@ class AdvanceMatrixTest {
     }
 
     private suspend fun seedDurableReceipt(attemptId: Long, intentHash: String) {
-        db.durableCompletionReceiptDao().insert(
+        db.durableCompletionReceiptDao().insertIfAbsent(
             DurableCompletionReceipt(
                 attemptId = attemptId,
                 completionEvidenceWire = WIRE_VERIFIED,

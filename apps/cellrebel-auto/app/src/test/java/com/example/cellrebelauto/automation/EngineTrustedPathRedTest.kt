@@ -404,6 +404,100 @@ class EngineTrustedPathRedTest {
         assertEquals(0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
     }
 
+    @Test
+    fun `R10-F1 production backend - one durable observation writer reaches KB-8 trust and mint`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val trustedSigner = "sha256:production-path-test"
+        db.providerPairingDao().insert(
+            com.example.cellrebelauto.model.plan.ProviderPairingRecord(
+                applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                currentSignerDigest = trustedSigner,
+                approvedAt = 1_000L,
+                revokedAt = null,
+                approvedVersionCode = 1
+            )
+        )
+
+        val provider = RecordingExternalApplyExecutor()
+        var observationOrdinal = 0
+        provider.observeAnswers = { leaseId, _, expectedIntentHash ->
+            val observedAtElapsed = if (observationOrdinal++ == 0) 500L else 14_000L
+            io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1(
+                leaseId = leaseId,
+                acceptedIntentHash = expectedIntentHash,
+                observedAtEpochMs = observedAtElapsed,
+                observedAtElapsedRealtimeMs = observedAtElapsed,
+                environmentRevision = REVISION,
+                environmentFingerprint = FINGERPRINT,
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                continuitySinceEpochMs = 100L,
+                continuitySinceElapsedRealtimeMs = 100L,
+                deliveryModeWire = io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire,
+                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                // The shipped composition must honor KB-8 too: QWY owns this valid coordinate,
+                // which is deliberately far from the legacy Auto plan coordinate (39.9, 116.4).
+                effectiveLatitude = 50.4501,
+                effectiveLongitude = 30.5234,
+                isMock = true,
+                scheduleDecisionWire = io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire,
+                evidenceRefs = listOf("qwy:store:production-path"),
+                scheduleItemId = "item-1",
+                scheduleVersion = 1L
+            )
+        }
+        val journeyExecutor = object : ExternalApplyExecutor by provider {
+            override fun apply(
+                attemptId: Long,
+                intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+                idempotencyKey: String,
+                requestDigest: String,
+                now: Long
+            ) = provider.apply(attemptId, intent, idempotencyKey, requestDigest, now).copy(
+                operationId = "op-$attemptId",
+                acceptedIntentHash = requestDigest,
+                appliedAtEpochMs = now,
+                environmentRevision = REVISION,
+                verificationLevelWire = WIRE_VERIFIED
+            )
+        }
+        val backend = APlusComposition.productionBackend(
+            ApplicationProvider.getApplicationContext(),
+            db,
+            providerSignerDigest = { trustedSigner },
+            attemptValidityTimeoutMs = 90_000L,
+            serviceLifecycleExecutor = journeyExecutor
+        )
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                clock.now = 2_000L
+                onRunningObserved(clock.now)
+                clock.now = 13_000L
+                return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = backend
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("the shipped production composition must reach trusted terminal success", "succeeded", attempt.status)
+        assertNotNull("the shipped production composition must mint trusted quota", db.trustedQuotaDao().getByAttempt(attempt.id))
+        assertEquals("PRE has exactly one immutable durable carrier", 1, db.durableObservationDao().forAttempt(attempt.id).count { it.phase == "PRE" })
+        assertEquals("POST has exactly one immutable durable carrier", 1, db.durableObservationDao().forAttempt(attempt.id).count { it.phase == "POST" })
+        assertEquals("both live provider observations were consumed", 2, observationOrdinal)
+    }
+
     // ---- R44 (Sol GREEN-review-3 F3): the persisted execution evidence binds the ELAPSED domain ----
 
     @Test

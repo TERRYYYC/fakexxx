@@ -453,7 +453,7 @@ class EngineQuotaRecoveryRedTest {
             )
         )
         // PRE observation (carrier 3)
-        db.durableObservationDao().insert(
+        db.durableObservationDao().insertIfAbsent(
             DurableObservationRecord(
                 attemptId = attemptId, phase = "PRE",
                 leaseId = "lease-$attemptId", acceptedIntentHash = intentDigest,
@@ -469,7 +469,7 @@ class EngineQuotaRecoveryRedTest {
             )
         )
         // POST observation (carrier 4)
-        db.durableObservationDao().insert(
+        db.durableObservationDao().insertIfAbsent(
             DurableObservationRecord(
                 attemptId = attemptId, phase = "POST",
                 leaseId = "lease-$attemptId", acceptedIntentHash = intentDigest,
@@ -485,7 +485,7 @@ class EngineQuotaRecoveryRedTest {
             )
         )
         // Completion receipt (carrier 5)
-        db.durableCompletionReceiptDao().insert(
+        db.durableCompletionReceiptDao().insertIfAbsent(
             DurableCompletionReceipt(
                 attemptId = attemptId, completionEvidenceWire = 1,
                 acceptedIntentHash = intentDigest, leaseId = "lease-$attemptId"
