@@ -30,26 +30,55 @@
     "apksigner": "0.9 (build-tools 36.1.0)",
     "gradle": "9.3.1",
     "inspectionPolicy": {
+      "pythonBootstrap": {
+        "isolated": true,
+        "path": "/Library/Developer/CommandLineTools/usr/bin/python3",
+        "runtimeTree": {
+          "path": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9",
+          "sha256": "9554093f9f3037f2de48bb897245a9ff54796d1c0952c1fc631d98b1fe714508"
+        },
+        "sha256": "bdea59019a38eb6600cc9e71e984a97fedadc406448431281e7657030f54987e",
+        "version": "Python 3.9.6"
+      },
       "git": {
+        "externalHelperPolicy": "REJECT_REPOSITORY_HELPERS_DISABLE_GLOBAL_SYSTEM_AND_LAZY_FETCH",
         "path": "/usr/bin/git",
         "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
         "version": "git version 2.50.1 (Apple Git-155)"
       },
       "aapt": {
         "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/aapt",
-        "sha256": "b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe"
+        "sha256": "b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe",
+        "supportFiles": [
+          {
+            "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib64/libc++.dylib",
+            "sha256": "66499e49a1c5a9c73d2d4958f5d9f4dccec56c5eb8bba7ac4e29297ea3cf3fed"
+          }
+        ],
+        "supportTrees": [
+          {
+            "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0",
+            "sha256": "71cca8b37798d10aaea1f94e502a8952ef77a0644c0449d773f1b3758a00f128"
+          }
+        ]
       },
       "apksigner": {
-        "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/apksigner",
-        "sha256": "b47549e373b895ce6ca620d0c7887e674d9615ffa837a86ac601dcfd04adb0f0",
+        "argumentsPrefix": [
+          "-jar",
+          "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib/apksigner.jar"
+        ],
+        "path": "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin/java",
+        "sha256": "77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192",
         "supportFiles": [
           {
             "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib/apksigner.jar",
             "sha256": "71e18adf733f5e112d1f062dbe6b0c2eb439a4d7c773d083c42a703c66f56df1"
-          },
+          }
+        ],
+        "supportTrees": [
           {
-            "path": "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin/java",
-            "sha256": "77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192"
+            "path": "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home",
+            "sha256": "cec57e31b8945654d0d463138bd55bec881f3283a458fda5cb65f0e9263f1e36"
           }
         ]
       }

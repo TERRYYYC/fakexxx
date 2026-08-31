@@ -44,7 +44,7 @@ be clean relative to its HEAD; modified/untracked preparation files are rejected
 | Product HEAD | `5002e0e005324c32ca3d36d10510180d1fafbf81` |
 | Product tree | `ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1` |
 | Base HEAD | `9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d` |
-| Frozen manifest SHA-256 | `459648d13750c3fad3cec17de1a7c4145f736bea054b456a6b7813973b446ac1` |
+| Frozen manifest SHA-256 | `4cbed538821b603250ebfb5633b77454948631c3f09047abebc5ee1028c1c4af` |
 | Contract SHA-256 | `c64dd132418493ba5918d86e481382d29b3d351867f3e3d3569577abb3d6f543` |
 | 10-address fixture SHA-256 | `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852` |
 | Canonical device ledger | empty `[]`, SHA-256 `37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570` |
@@ -56,18 +56,28 @@ The selected APK bytes are two fresh, clean Java 17 builds:
 | Auto debug | `com.example.cellrebelauto` | `1` / `1.0` | 11,413,622 | `7bd07b07fde483cf1252722f2c29880c0030d47e52638761f19fa2d0dc4a3f1b` | `7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41` |
 | QWY bench debug | `name.caiyao.fakegps.bench` | `8` / `3.0.0` | 23,194,413 | `bb5be7db762a0e38218465e321b582eddb62c3f9110b714ac1c18076a151a161` | `7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41` |
 
-The production checker has no caller-selected manifest or inspector seam. It
-pins and records these host-only tool files before execution, rechecks them
-immediately before each use, and supplies a minimal environment with no Android
-device transport on `PATH`:
+The production checker has no caller-selected manifest or inspector seam. Its
+absolute CommandLineTools Python shebang uses isolated mode, so neither a
+`python3` earlier on `PATH` nor user `sitecustomize` is loaded. It pins and
+records the host-only executables, direct support files and user-writable
+runtime trees below, rechecks them immediately before each use, and supplies a
+minimal environment with no Android device transport on `PATH`. Git global and
+system config, pagers and lazy fetch are disabled; repository-configured
+fsmonitor, filter, diff, hook or pager helpers are rejected before the first
+worktree inspection. APK signature inspection invokes the pinned Java binary
+and pinned JAR directly, without the mutable `apksigner` shell launcher.
 
-| Tool file | SHA-256 |
+| Tool file or frozen tree | SHA-256 |
 |---|---|
+| CommandLineTools Python 3.9.6 `bin/python3` | `bdea59019a38eb6600cc9e71e984a97fedadc406448431281e7657030f54987e` |
+| CommandLineTools Python 3.9 runtime tree | `9554093f9f3037f2de48bb897245a9ff54796d1c0952c1fc631d98b1fe714508` |
 | Apple Git 2.50.1 `/usr/bin/git` | `b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9` |
 | build-tools 36.1.0 `aapt` | `b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe` |
-| build-tools 36.1.0 `apksigner` launcher | `b47549e373b895ce6ca620d0c7887e674d9615ffa837a86ac601dcfd04adb0f0` |
+| build-tools 36.1.0 `lib64/libc++.dylib` | `66499e49a1c5a9c73d2d4958f5d9f4dccec56c5eb8bba7ac4e29297ea3cf3fed` |
+| build-tools 36.1.0 tree | `71cca8b37798d10aaea1f94e502a8952ef77a0644c0449d773f1b3758a00f128` |
 | build-tools 36.1.0 `lib/apksigner.jar` | `71e18adf733f5e112d1f062dbe6b0c2eb439a4d7c773d083c42a703c66f56df1` |
 | OpenJDK 17.0.20 `bin/java` | `77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192` |
+| OpenJDK 17.0.20 home tree | `cec57e31b8945654d0d463138bd55bec881f3283a458fda5cb65f0e9263f1e36` |
 
 Both bytesets repeated across two Java 17 clean builds. That is a bounded local
 reproducibility observation, not a claim that source HEAD uniquely determines
@@ -85,10 +95,12 @@ no earlier device verdict.
 
 ## What can run now, without a device
 
-Use an evidence directory outside the source checkout. The checker mechanically
-rejects the report and sidecar if either resolves inside the source tree. The
-audit command writes an atomic JSON report and a sibling `.sha256` sidecar. It
-reads Git state, APK files and the pinned Android build tools only.
+Use an evidence directory outside the source checkout. Before inspection, the
+checker rejects report/sidecar aliases and collisions with the source tree,
+manifest, linked-worktree/common Git metadata, pinned tool files or frozen
+runtime trees. Both outputs are staged before replacement, and a failed replace
+restores prior bytes. The audit reads Git state, APK files and the pinned host
+tools only.
 
 ```bash
 EVIDENCE_ROOT="$(mktemp -d)"

@@ -29,14 +29,39 @@ if [ ! -x "$PROD" ]; then
     exit 1
 fi
 
+BOOTSTRAP_TOOLS="$(mktemp -d)"
+BOOTSTRAP_SITE="$(mktemp -d)"
+BOOTSTRAP_PATH_MARKER="$BOOTSTRAP_TOOLS/path-python-called"
+BOOTSTRAP_SITE_MARKER="$BOOTSTRAP_SITE/sitecustomize-called"
+cat > "$BOOTSTRAP_TOOLS/python3" <<SH
+#!/bin/sh
+: > "$BOOTSTRAP_PATH_MARKER"
+exec /usr/bin/python3 "\$@"
+SH
+cat > "$BOOTSTRAP_SITE/sitecustomize.py" <<PY
+from pathlib import Path
+Path("$BOOTSTRAP_SITE_MARKER").touch()
+PY
+chmod +x "$BOOTSTRAP_TOOLS/python3"
+if PATH="$BOOTSTRAP_TOOLS:/usr/bin:/bin" PYTHONPATH="$BOOTSTRAP_SITE" \
+    "$PROD" --help >/dev/null 2>&1 &&
+    [ ! -e "$BOOTSTRAP_PATH_MARKER" ] && [ ! -e "$BOOTSTRAP_SITE_MARKER" ]; then
+    ok "P0 production bootstrap ignores PATH python and user sitecustomize"
+else
+    bad "P0 production bootstrap isolation" "PATH python or sitecustomize executed"
+fi
+rm -rf "$BOOTSTRAP_TOOLS" "$BOOTSTRAP_SITE"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FIXTURE="$WORK/repo"
 TOOLS="$WORK/tools"
+RUNTIME_TREE="$WORK/runtime-tree"
 REPORT="$WORK/report.json"
 MANIFEST="$WORK/manifest.json"
 mkdir -p "$FIXTURE/apps/cellrebel-auto/app/build/outputs/apk/debug"
-mkdir -p "$FIXTURE/apps/qianwangyou/app/build/outputs/apk/debug" "$TOOLS"
+mkdir -p "$FIXTURE/apps/qianwangyou/app/build/outputs/apk/debug" "$TOOLS" "$RUNTIME_TREE"
+printf 'fixture runtime dependency\n' > "$RUNTIME_TREE/dependency.bin"
 
 git -C "$FIXTURE" init -q
 git -C "$FIXTURE" config user.email fixture@example.invalid
@@ -71,6 +96,8 @@ SH
 
 cat > "$TOOLS/apksigner" <<'SH'
 #!/usr/bin/env bash
+[ "$1" = "--fixture-prefix" ] || exit 3
+shift
 printf 'Signer #1 certificate SHA-256 digest: %s\n' "${FIXTURE_SIGNER_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
 SH
 
@@ -88,6 +115,18 @@ SCHEDULE_SHA="$(shasum -a 256 "$FIXTURE/schedule.json" | awk '{print $1}')"
 LEDGER_SHA="$(shasum -a 256 "$FIXTURE/ledger.json" | awk '{print $1}')"
 AAPT_TOOL_SHA="$(shasum -a 256 "$TOOLS/aapt" | awk '{print $1}')"
 APKSIGNER_TOOL_SHA="$(shasum -a 256 "$TOOLS/apksigner" | awk '{print $1}')"
+RUNTIME_TREE_SHA="$(python3 - "$PROD" "$RUNTIME_TREE" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("github64_tree_digest", Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(module.sha256_tree(Path(sys.argv[2])))
+PY
+)"
 AUTO_SIZE="$(stat -f '%z' "$AUTO_APK" 2>/dev/null || stat -c '%s' "$AUTO_APK")"
 QWY_SIZE="$(stat -f '%z' "$QWY_APK" 2>/dev/null || stat -c '%s' "$QWY_APK")"
 
@@ -184,10 +223,12 @@ run_checker() {
     local aapt_path=${4:-$TOOLS/aapt}
     local apksigner_path=${5:-$TOOLS/apksigner}
     local signer_output=${6:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
-    python3 - "$PROD" "$manifest" "$FIXTURE" "$report" "$mode" \
+    local source_repo=${7:-$FIXTURE}
+    python3 - "$PROD" "$manifest" "$source_repo" "$report" "$mode" \
         "$MANIFEST_SHA" "$PRODUCT_HEAD" "$PRODUCT_TREE" "$BASE_HEAD" \
         "$aapt_path" "$AAPT_TOOL_SHA" "$apksigner_path" "$APKSIGNER_TOOL_SHA" \
-        "$signer_output" "$WORK/adb-called" "$TOOLS" "$LEDGER_SHA" <<'PY' >/dev/null 2>&1
+        "$signer_output" "$WORK/adb-called" "$TOOLS" "$LEDGER_SHA" \
+        "$RUNTIME_TREE" "$RUNTIME_TREE_SHA" <<'PY' >/dev/null 2>&1
 import importlib.util
 from pathlib import Path
 import sys
@@ -251,8 +292,10 @@ policy = module.Policy(
                 sha256="b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
                 executable=True,
             ),
-            environment=(("LANG", "C"), ("LC_ALL", "C"), ("GIT_CONFIG_NOSYSTEM", "1"),
-                         ("GIT_OPTIONAL_LOCKS", "0"), ("GIT_PAGER", "cat"),
+            environment=(("LANG", "C"), ("LC_ALL", "C"), ("GIT_ATTR_NOSYSTEM", "1"),
+                         ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1"),
+                         ("GIT_CONFIG_SYSTEM", "/dev/null"), ("GIT_NO_LAZY_FETCH", "1"),
+                         ("GIT_OPTIONAL_LOCKS", "0"), ("GIT_PAGER", ""),
                          ("GIT_TERMINAL_PROMPT", "0"), ("PATH", "/usr/bin:/bin")),
         ),
         module.InspectorPolicy(
@@ -260,6 +303,11 @@ policy = module.Policy(
             version="fixture-aapt-v1",
             executable=module.FrozenFile(
                 role="executable", path=Path(sys.argv[10]), sha256=sys.argv[11], executable=True
+            ),
+            support_trees=(
+                module.FrozenTree(
+                    role="fixture-runtime", path=Path(sys.argv[18]), sha256=sys.argv[19]
+                ),
             ),
             environment=common_env + (("ADB_TRIPWIRE", sys.argv[15]),),
         ),
@@ -269,6 +317,7 @@ policy = module.Policy(
             executable=module.FrozenFile(
                 role="executable", path=Path(sys.argv[12]), sha256=sys.argv[13], executable=True
             ),
+            arguments_prefix=("--fixture-prefix",),
             environment=common_env + (("FIXTURE_SIGNER_SHA", sys.argv[14]),),
         ),
     ),
@@ -310,7 +359,7 @@ if python3 - "$REPO_ROOT/docs/acceptance/github64-exact-build-device-readiness.j
 import json, sys
 import hashlib
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "459648d13750c3fad3cec17de1a7c4145f736bea054b456a6b7813973b446ac1"
+assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "4cbed538821b603250ebfb5633b77454948631c3f09047abebc5ee1028c1c4af"
 assert d["candidate"] == {
     "allowedPreparationDelta": [
         "docs/acceptance/github64-exact-build-device-readiness.json",
@@ -332,6 +381,70 @@ then
     ok "P1b production manifest remains pinned to the reviewed candidate and APK bytes"
 else
     bad "P1b frozen production manifest" "candidate or APK pin drifted"
+fi
+
+if python3 - "$PROD" "$REPO_ROOT/docs/acceptance/github64-exact-build-device-readiness.json" <<'PY'
+import importlib.util
+import json
+from pathlib import Path
+import re
+import sys
+
+checker = Path(sys.argv[1])
+assert checker.read_text(encoding="utf-8").splitlines()[0] == (
+    "#!/Library/Developer/CommandLineTools/usr/bin/python3 -I"
+)
+spec = importlib.util.spec_from_file_location("github64_production_policy", checker)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+inspectors = {item.inspector_id: item for item in module.production_policy().inspectors}
+manifest_policy = json.load(open(sys.argv[2], encoding="utf-8"))["buildEnvironment"][
+    "inspectionPolicy"
+]
+git_env = dict(inspectors["git"].environment)
+assert git_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+assert git_env["GIT_CONFIG_SYSTEM"] == "/dev/null"
+assert git_env["GIT_NO_LAZY_FETCH"] == "1"
+assert git_env["GIT_PAGER"] == ""
+assert inspectors["apksigner"].executable.path == Path(
+    "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin/java"
+)
+assert inspectors["apksigner"].arguments_prefix == (
+    "-jar",
+    "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib/apksigner.jar",
+)
+assert inspectors["python-bootstrap"].executable.path == Path(
+    "/Library/Developer/CommandLineTools/usr/bin/python3"
+)
+assert manifest_policy["pythonBootstrap"]["sha256"] == inspectors[
+    "python-bootstrap"
+].executable.sha256
+assert manifest_policy["aapt"]["sha256"] == inspectors["aapt"].executable.sha256
+assert manifest_policy["apksigner"]["sha256"] == inspectors[
+    "apksigner"
+].executable.sha256
+trees = {
+    tree.role: tree.sha256
+    for inspector in inspectors.values()
+    for tree in inspector.support_trees
+}
+assert set(trees) == {"python-runtime", "build-tools-home", "java-home"}
+assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in trees.values())
+assert manifest_policy["pythonBootstrap"]["runtimeTree"]["sha256"] == trees[
+    "python-runtime"
+]
+assert manifest_policy["aapt"]["supportTrees"][0]["sha256"] == trees[
+    "build-tools-home"
+]
+assert manifest_policy["apksigner"]["supportTrees"][0]["sha256"] == trees[
+    "java-home"
+]
+PY
+then
+    ok "P1c production bootstrap, Git isolation and runtime closures are structurally pinned"
+else
+    bad "P1c production trust-boundary structure" "bootstrap, Git or runtime pin drifted"
 fi
 
 if run_checker "$MANIFEST" "$WORK/required.json" fail-on-blocked; then
@@ -503,6 +616,120 @@ fi
 git -C "$FIXTURE" checkout -q -- contract.yaml
 rm -f "$FIXTURE/contract.yaml.sha256"
 
+cp -p "$MANIFEST" "$WORK/manifest.backup"
+MANIFEST_BEFORE="$(shasum -a 256 "$MANIFEST" | awk '{print $1}')"
+if run_checker "$MANIFEST" "$MANIFEST" audit; then
+    MANIFEST_COLLISION_RC=0
+else
+    MANIFEST_COLLISION_RC=$?
+fi
+MANIFEST_AFTER="$(shasum -a 256 "$MANIFEST" | awk '{print $1}')"
+if [ "$MANIFEST_COLLISION_RC" -eq 2 ] && [ "$MANIFEST_AFTER" = "$MANIFEST_BEFORE" ]; then
+    ok "N6b2 external manifest/report collision is rejected with bytes unchanged"
+else
+    bad "N6b2 external manifest/report collision" \
+        "rc=$MANIFEST_COLLISION_RC before=$MANIFEST_BEFORE after=$MANIFEST_AFTER"
+fi
+cp -p "$WORK/manifest.backup" "$MANIFEST"
+rm -f "$MANIFEST.sha256"
+
+cp -p "$TOOLS/aapt" "$WORK/aapt.backup"
+AAPT_BEFORE="$(shasum -a 256 "$TOOLS/aapt" | awk '{print $1}')"
+if run_checker "$MANIFEST" "$TOOLS/aapt" audit; then
+    TOOL_COLLISION_RC=0
+else
+    TOOL_COLLISION_RC=$?
+fi
+AAPT_AFTER="$(shasum -a 256 "$TOOLS/aapt" | awk '{print $1}')"
+if [ "$TOOL_COLLISION_RC" -eq 2 ] && [ "$AAPT_AFTER" = "$AAPT_BEFORE" ]; then
+    ok "N6c report/pinned-tool collision is rejected with tool bytes unchanged"
+else
+    bad "N6c report/pinned-tool collision" \
+        "rc=$TOOL_COLLISION_RC before=$AAPT_BEFORE after=$AAPT_AFTER"
+fi
+cp -p "$WORK/aapt.backup" "$TOOLS/aapt"
+rm -f "$TOOLS/aapt.sha256"
+
+HARDLINK_REPORT="$WORK/aapt-hardlink-report"
+ln "$TOOLS/aapt" "$HARDLINK_REPORT"
+HARDLINK_BEFORE="$(shasum -a 256 "$HARDLINK_REPORT" | awk '{print $1}')"
+if run_checker "$MANIFEST" "$HARDLINK_REPORT" audit; then
+    HARDLINK_RC=0
+else
+    HARDLINK_RC=$?
+fi
+HARDLINK_AFTER="$(shasum -a 256 "$HARDLINK_REPORT" | awk '{print $1}')"
+if [ "$HARDLINK_RC" -eq 2 ] && [ "$HARDLINK_AFTER" = "$HARDLINK_BEFORE" ]; then
+    ok "N6c2 hard-linked report/tool alias is rejected by file identity"
+else
+    bad "N6c2 hard-linked report/tool alias" \
+        "rc=$HARDLINK_RC before=$HARDLINK_BEFORE after=$HARDLINK_AFTER"
+fi
+rm -f "$HARDLINK_REPORT" "$HARDLINK_REPORT.sha256"
+
+ALIAS_REPORT="$WORK/alias-report.json"
+printf 'sentinel report\n' > "$ALIAS_REPORT"
+ln -s "$ALIAS_REPORT" "$ALIAS_REPORT.sha256"
+ALIAS_BEFORE="$(shasum -a 256 "$ALIAS_REPORT" | awk '{print $1}')"
+if run_checker "$MANIFEST" "$ALIAS_REPORT" audit; then
+    SIDECAR_ALIAS_RC=0
+else
+    SIDECAR_ALIAS_RC=$?
+fi
+ALIAS_AFTER="$(shasum -a 256 "$ALIAS_REPORT" | awk '{print $1}')"
+if [ "$SIDECAR_ALIAS_RC" -eq 2 ] && [ "$ALIAS_AFTER" = "$ALIAS_BEFORE" ]; then
+    ok "N6d report/sidecar alias is rejected with report bytes unchanged"
+else
+    bad "N6d report/sidecar alias" \
+        "rc=$SIDECAR_ALIAS_RC before=$ALIAS_BEFORE after=$ALIAS_AFTER"
+fi
+rm -f "$ALIAS_REPORT.sha256" "$ALIAS_REPORT"
+
+LINKED_REPO="$WORK/linked-worktree"
+git -C "$FIXTURE" worktree add --detach -q "$LINKED_REPO" "$PRODUCT_HEAD"
+LINKED_GITDIR="$(git -C "$LINKED_REPO" rev-parse --absolute-git-dir)"
+LINKED_INDEX="$LINKED_GITDIR/index"
+LINKED_INDEX_BEFORE="$(shasum -a 256 "$LINKED_INDEX" | awk '{print $1}')"
+if run_checker "$MANIFEST" "$LINKED_INDEX" audit "$TOOLS/aapt" "$TOOLS/apksigner" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$LINKED_REPO"; then
+    GIT_METADATA_RC=0
+else
+    GIT_METADATA_RC=$?
+fi
+LINKED_INDEX_AFTER="$(shasum -a 256 "$LINKED_INDEX" | awk '{print $1}')"
+if [ "$GIT_METADATA_RC" -eq 2 ] && [ "$LINKED_INDEX_AFTER" = "$LINKED_INDEX_BEFORE" ]; then
+    ok "N6e out-of-tree linked-worktree metadata is protected"
+else
+    bad "N6e linked-worktree metadata collision" \
+        "rc=$GIT_METADATA_RC before=$LINKED_INDEX_BEFORE after=$LINKED_INDEX_AFTER"
+fi
+git -C "$FIXTURE" worktree remove --force "$LINKED_REPO"
+
+UNICODE_REPORT="$WORK/réport.json"
+if run_checker "$MANIFEST" "$UNICODE_REPORT" audit; then
+    if (cd "$WORK" && shasum -a 256 -c "$(basename "$UNICODE_REPORT").sha256" >/dev/null 2>&1); then
+        ok "N6f non-ASCII report filename receives a verifiable sidecar"
+    else
+        bad "N6f non-ASCII report filename" "sidecar verification failed"
+    fi
+else
+    bad "N6f non-ASCII report filename" "valid output path left a partial result"
+fi
+
+NEWLINE_REPORT="$WORK/line
+break.json"
+if run_checker "$MANIFEST" "$NEWLINE_REPORT" audit; then
+    NEWLINE_RC=0
+else
+    NEWLINE_RC=$?
+fi
+if [ "$NEWLINE_RC" -eq 2 ] && [ ! -e "$NEWLINE_REPORT" ]; then
+    ok "N6g newline-bearing report filename is rejected before writing"
+else
+    bad "N6g newline-bearing report filename" "rc=$NEWLINE_RC or output was created"
+fi
+rm -f "$NEWLINE_REPORT" "$NEWLINE_REPORT.sha256"
+
 rm -f "$WORK/adb-called"
 cat > "$TOOLS/device-touching-aapt" <<'SH'
 #!/usr/bin/env bash
@@ -521,6 +748,53 @@ else
         ok "N7 untrusted inspector is rejected before execution" ||
         bad "N7 untrusted inspector" "wrapper reached the adb tripwire before rejection"
 fi
+
+printf 'runtime drift\n' >> "$RUNTIME_TREE/dependency.bin"
+if run_checker "$MANIFEST" "$WORK/runtime-tree-drift.json" audit; then
+    bad "N7a frozen runtime tree" "mutated support tree was accepted"
+else
+    [ ! -e "$WORK/adb-called" ] &&
+        grep -q 'tool:aapt:fixture-runtime:tree-sha256' "$WORK/runtime-tree-drift.json" &&
+        ok "N7a runtime-tree drift is rejected before inspector execution" ||
+        bad "N7a frozen runtime tree" "inspector ran or tree finding is missing"
+fi
+printf 'fixture runtime dependency\n' > "$RUNTIME_TREE/dependency.bin"
+
+FSMONITOR_HELPER="$WORK/fsmonitor-tripwire.sh"
+FSMONITOR_TRIPWIRE="$WORK/fsmonitor-called"
+printf '#!/bin/sh\n: > "%s"\nexit 0\n' "$FSMONITOR_TRIPWIRE" > "$FSMONITOR_HELPER"
+chmod +x "$FSMONITOR_HELPER"
+git -C "$FIXTURE" config core.fsmonitor "$FSMONITOR_HELPER"
+if run_checker "$MANIFEST" "$WORK/fsmonitor-report.json" audit; then
+    bad "N7b Git fsmonitor helper policy" "repository helper config was accepted"
+else
+    [ ! -e "$FSMONITOR_TRIPWIRE" ] &&
+        grep -q 'source:git:external-helper-policy' "$WORK/fsmonitor-report.json" &&
+        ok "N7b repository fsmonitor helper is rejected before execution" ||
+        bad "N7b Git fsmonitor helper policy" "helper ran or policy finding is missing"
+fi
+git -C "$FIXTURE" config --unset core.fsmonitor
+
+FILTER_HELPER="$WORK/filter-tripwire.sh"
+FILTER_TRIPWIRE="$WORK/filter-called"
+printf '#!/bin/sh\n: > "%s"\n/bin/cat\n' "$FILTER_TRIPWIRE" > "$FILTER_HELPER"
+chmod +x "$FILTER_HELPER"
+printf 'candidate.txt filter=tripwire\n' > "$FIXTURE/.git/info/attributes"
+git -C "$FIXTURE" config filter.tripwire.clean "$FILTER_HELPER"
+git -C "$FIXTURE" config filter.tripwire.required true
+printf 'force worktree hashing\n' >> "$FIXTURE/candidate.txt"
+if run_checker "$MANIFEST" "$WORK/filter-report.json" audit; then
+    bad "N7c Git clean-filter helper policy" "repository helper config was accepted"
+else
+    [ ! -e "$FILTER_TRIPWIRE" ] &&
+        grep -q 'source:git:external-helper-policy' "$WORK/filter-report.json" &&
+        ok "N7c repository clean filter is rejected before execution" ||
+        bad "N7c Git clean-filter helper policy" "helper ran or policy finding is missing"
+fi
+git -C "$FIXTURE" config --unset-all filter.tripwire.clean
+git -C "$FIXTURE" config --unset-all filter.tripwire.required
+rm -f "$FIXTURE/.git/info/attributes"
+git -C "$FIXTURE" checkout -q -- candidate.txt
 
 printf 'alternate candidate\n' > "$FIXTURE/alternate.txt"
 git -C "$FIXTURE" add alternate.txt

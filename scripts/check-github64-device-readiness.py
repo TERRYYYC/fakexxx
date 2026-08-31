@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Library/Developer/CommandLineTools/usr/bin/python3 -I
 """Seal the frozen, host-only readiness report for GitHub issue #64.
 
 The production CLI has one immutable policy: one checked-in manifest digest,
@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -44,11 +45,20 @@ class FrozenFile:
 
 
 @dataclass(frozen=True)
+class FrozenTree:
+    role: str
+    path: Path
+    sha256: str
+
+
+@dataclass(frozen=True)
 class InspectorPolicy:
     inspector_id: str
     version: str
     executable: FrozenFile
     support_files: tuple[FrozenFile, ...] = ()
+    support_trees: tuple[FrozenTree, ...] = ()
+    arguments_prefix: tuple[str, ...] = ()
     environment: tuple[tuple[str, str], ...] = ()
 
 
@@ -76,7 +86,7 @@ def production_policy() -> Policy:
     java_home = "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home"
     common_env = (("LANG", "C"), ("LC_ALL", "C"))
     return Policy(
-        manifest_sha256="459648d13750c3fad3cec17de1a7c4145f736bea054b456a6b7813973b446ac1",
+        manifest_sha256="4cbed538821b603250ebfb5633b77454948631c3f09047abebc5ee1028c1c4af",
         candidate_head="5002e0e005324c32ca3d36d10510180d1fafbf81",
         candidate_tree="ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1",
         base_head="9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d",
@@ -126,6 +136,27 @@ def production_policy() -> Policy:
         go_no_go="NO_GO_DEVICE_EXECUTION",
         inspectors=(
             InspectorPolicy(
+                inspector_id="python-bootstrap",
+                version="Python 3.9.6 isolated mode (CommandLineTools)",
+                executable=FrozenFile(
+                    role="executable",
+                    path=Path("/Library/Developer/CommandLineTools/usr/bin/python3"),
+                    sha256="bdea59019a38eb6600cc9e71e984a97fedadc406448431281e7657030f54987e",
+                    executable=True,
+                ),
+                support_trees=(
+                    FrozenTree(
+                        role="python-runtime",
+                        path=Path(
+                            "/Library/Developer/CommandLineTools/Library/Frameworks/"
+                            "Python3.framework/Versions/3.9"
+                        ),
+                        sha256="9554093f9f3037f2de48bb897245a9ff54796d1c0952c1fc631d98b1fe714508",
+                    ),
+                ),
+                environment=common_env,
+            ),
+            InspectorPolicy(
                 inspector_id="git",
                 version="git version 2.50.1 (Apple Git-155)",
                 executable=FrozenFile(
@@ -136,9 +167,13 @@ def production_policy() -> Policy:
                 ),
                 environment=common_env
                 + (
+                    ("GIT_ATTR_NOSYSTEM", "1"),
+                    ("GIT_CONFIG_GLOBAL", "/dev/null"),
                     ("GIT_CONFIG_NOSYSTEM", "1"),
+                    ("GIT_CONFIG_SYSTEM", "/dev/null"),
+                    ("GIT_NO_LAZY_FETCH", "1"),
                     ("GIT_OPTIONAL_LOCKS", "0"),
-                    ("GIT_PAGER", "cat"),
+                    ("GIT_PAGER", ""),
                     ("GIT_TERMINAL_PROMPT", "0"),
                     ("PATH", "/usr/bin:/bin"),
                 ),
@@ -152,29 +187,53 @@ def production_policy() -> Policy:
                     sha256="b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe",
                     executable=True,
                 ),
+                support_files=(
+                    FrozenFile(
+                        role="aapt-libc++",
+                        path=Path(
+                            "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib64/libc++.dylib"
+                        ),
+                        sha256="66499e49a1c5a9c73d2d4958f5d9f4dccec56c5eb8bba7ac4e29297ea3cf3fed",
+                    ),
+                ),
+                support_trees=(
+                    FrozenTree(
+                        role="build-tools-home",
+                        path=Path("/Users/terry/Library/Android/sdk/build-tools/36.1.0"),
+                        sha256="71cca8b37798d10aaea1f94e502a8952ef77a0644c0449d773f1b3758a00f128",
+                    ),
+                ),
                 environment=common_env + (("PATH", "/usr/bin:/bin"),),
             ),
             InspectorPolicy(
                 inspector_id="apksigner",
-                version="0.9 (build-tools 36.1.0)",
+                version="0.9 JAR (build-tools 36.1.0) via OpenJDK 17.0.20",
                 executable=FrozenFile(
                     role="executable",
-                    path=Path("/Users/terry/Library/Android/sdk/build-tools/36.1.0/apksigner"),
-                    sha256="b47549e373b895ce6ca620d0c7887e674d9615ffa837a86ac601dcfd04adb0f0",
+                    path=Path(f"{java_home}/bin/java"),
+                    sha256="77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192",
                     executable=True,
                 ),
                 support_files=(
                     FrozenFile(
                         role="apksigner-jar",
-                        path=Path("/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib/apksigner.jar"),
+                        path=Path(
+                            "/Users/terry/Library/Android/sdk/build-tools/36.1.0/"
+                            "lib/apksigner.jar"
+                        ),
                         sha256="71e18adf733f5e112d1f062dbe6b0c2eb439a4d7c773d083c42a703c66f56df1",
                     ),
-                    FrozenFile(
-                        role="java-runtime",
-                        path=Path(f"{java_home}/bin/java"),
-                        sha256="77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192",
-                        executable=True,
+                ),
+                support_trees=(
+                    FrozenTree(
+                        role="java-home",
+                        path=Path(java_home),
+                        sha256="cec57e31b8945654d0d463138bd55bec881f3283a458fda5cb65f0e9263f1e36",
                     ),
+                ),
+                arguments_prefix=(
+                    "-jar",
+                    "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib/apksigner.jar",
                 ),
                 environment=common_env
                 + (
@@ -202,6 +261,43 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_tree(root: Path) -> str:
+    """Hash a directory's names, kinds, modes, symlink targets and file bytes."""
+    root = root.resolve()
+    if not root.is_dir():
+        raise ValueError(f"not a directory: {root}")
+    digest = hashlib.sha256()
+    digest.update(b"github64-frozen-tree-v1\0")
+    for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        base = Path(directory)
+        for name in sorted((*dirnames, *filenames)):
+            path = base / name
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            metadata = path.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISLNK(metadata.st_mode):
+                kind = b"L"
+                payload = os.readlink(path).encode("utf-8")
+            elif stat.S_ISDIR(metadata.st_mode):
+                kind = b"D"
+                payload = b""
+            elif stat.S_ISREG(metadata.st_mode):
+                kind = b"F"
+                payload = bytes.fromhex(sha256_file(path))
+            else:
+                raise ValueError(f"unsupported entry in frozen tree: {path}")
+            digest.update(relative)
+            digest.update(b"\0")
+            digest.update(kind)
+            digest.update(f"{mode:o}".encode("ascii"))
+            digest.update(b"\0")
+            digest.update(payload)
+            digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -244,21 +340,152 @@ def is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def atomic_write(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+def atomic_write_pair(
+    report_path: Path,
+    report_data: bytes,
+    sidecar_path: Path,
+    sidecar_data: bytes,
+) -> None:
+    """Stage both outputs and restore previous bytes if either replace fails."""
+    if report_path.parent != sidecar_path.parent:
+        raise OSError("report and sidecar must share one resolved directory")
+    parent = report_path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    targets = ((report_path, report_data), (sidecar_path, sidecar_data))
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    existed = {target: target.exists() for target, _ in targets}
     try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temporary, path)
+        for target, data in targets:
+            if existed[target] and not target.is_file():
+                raise OSError(f"output target is not a regular file: {target}")
+            fd, raw_temporary = tempfile.mkstemp(prefix=f".{target.name}.stage.", dir=parent)
+            temporary = Path(raw_temporary)
+            staged[target] = temporary
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+        for target, _ in targets:
+            if existed[target]:
+                fd, raw_backup = tempfile.mkstemp(prefix=f".{target.name}.backup.", dir=parent)
+                os.close(fd)
+                backup = Path(raw_backup)
+                backup.unlink()
+                os.link(target, backup)
+                backups[target] = backup
+        for target, _ in targets:
+            os.replace(staged.pop(target), target)
     except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        for target, _ in reversed(targets):
+            backup = backups.pop(target, None)
+            try:
+                if backup is not None and backup.exists():
+                    os.replace(backup, target)
+                elif not existed[target] and target.exists():
+                    target.unlink()
+            except OSError:
+                pass
         raise
+    finally:
+        for temporary in (*staged.values(), *backups.values()):
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def paths_alias(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        return left.exists() and right.exists() and os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def git_metadata_roots(repo: Path) -> tuple[Path, ...]:
+    """Resolve the per-worktree and common Git metadata roots without running Git."""
+    marker = repo / ".git"
+    if marker.is_dir():
+        return (marker.resolve(),)
+    if not marker.is_file():
+        return ()
+    try:
+        first_line = marker.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError, UnicodeError) as exc:
+        raise ValueError(f"cannot resolve Git metadata pointer: {exc}") from exc
+    if not first_line.startswith("gitdir: "):
+        raise ValueError("invalid Git metadata pointer")
+    raw_gitdir = Path(first_line.removeprefix("gitdir: "))
+    gitdir = (
+        (marker.parent / raw_gitdir).resolve()
+        if not raw_gitdir.is_absolute()
+        else raw_gitdir.resolve()
+    )
+    roots = [gitdir]
+    common_marker = gitdir / "commondir"
+    if common_marker.is_file():
+        try:
+            raw_common = Path(common_marker.read_text(encoding="utf-8").strip())
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"cannot resolve common Git metadata root: {exc}") from exc
+        common = (
+            (gitdir / raw_common).resolve()
+            if not raw_common.is_absolute()
+            else raw_common.resolve()
+        )
+        roots.append(common)
+    return tuple(dict.fromkeys(roots))
+
+
+def unsafe_output_reason(
+    policy: Policy,
+    source_repo: Path,
+    manifest_path: Path,
+    report_path: Path,
+    sidecar_path: Path,
+) -> str | None:
+    outputs = (("report", report_path), ("sidecar", sidecar_path))
+    if any("\n" in path.name or "\r" in path.name for _, path in outputs):
+        return "report and sidecar filenames must not contain CR or LF"
+    if any(is_within(path, source_repo) for _, path in outputs):
+        return "report and sidecar must be outside the source repository"
+    if paths_alias(report_path, sidecar_path):
+        return "report and sidecar must not resolve to the same file"
+    if report_path.parent != sidecar_path.parent:
+        return "report and sidecar must share one resolved directory"
+
+    protected_files = [("manifest", manifest_path)]
+    protected_trees: list[tuple[str, Path]] = []
+    for inspector in policy.inspectors:
+        for frozen in (inspector.executable, *inspector.support_files):
+            protected_files.append(
+                (f"tool:{inspector.inspector_id}:{frozen.role}", frozen.path.resolve())
+            )
+        for frozen_tree in inspector.support_trees:
+            protected_trees.append(
+                (
+                    f"tool-tree:{inspector.inspector_id}:{frozen_tree.role}",
+                    frozen_tree.path.resolve(),
+                )
+            )
+    try:
+        protected_trees.extend(
+            (f"git-metadata:{index}", root)
+            for index, root in enumerate(git_metadata_roots(source_repo), start=1)
+        )
+    except ValueError as exc:
+        return str(exc)
+
+    for output_name, output in outputs:
+        for protected_name, protected in protected_files:
+            if paths_alias(output, protected):
+                return f"{output_name} collides with protected file {protected_name}"
+        for protected_name, protected_root in protected_trees:
+            if is_within(output, protected_root):
+                return f"{output_name} is inside protected tree {protected_name}"
+    return None
 
 
 class Audit:
@@ -292,6 +519,69 @@ def ids(entries: Any) -> tuple[set[str], bool]:
     return set(values), len(values) == len(set(values))
 
 
+def is_git_external_helper_key(key: str) -> bool:
+    normalized = key.lower()
+    if normalized in {"core.fsmonitor", "core.hookspath", "diff.external"}:
+        return True
+    if normalized.startswith("pager.") or normalized == "core.pager":
+        return True
+    parts = normalized.split(".")
+    return (
+        len(parts) >= 3
+        and parts[0] == "filter"
+        and parts[-1] in {"clean", "smudge", "process"}
+    ) or (
+        len(parts) >= 3
+        and parts[0] == "diff"
+        and parts[-1] in {"command", "textconv"}
+    )
+
+
+def validate_git_external_helper_policy(
+    audit: Audit,
+    inspector: InspectorPolicy,
+    repo: Path,
+) -> bool:
+    """Reject repository config capable of spawning a helper before worktree I/O."""
+    completed = run_inspector(
+        audit,
+        inspector,
+        [
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(repo),
+            "config",
+            "--local",
+            "--includes",
+            "--name-only",
+            "--get-regexp",
+            ".*",
+        ],
+        "source:git:external-helper-config",
+    )
+    if completed is None:
+        audit.check(
+            "source:git:external-helper-policy",
+            False,
+            "no repository-configured external helpers",
+            "pinned Git unavailable",
+        )
+        return False
+    keys = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    dangerous = sorted({key for key in keys if is_git_external_helper_key(key)})
+    ok = completed.returncode in {0, 1} and not dangerous
+    audit.check(
+        "source:git:external-helper-policy",
+        ok,
+        "no repository-configured fsmonitor, filter, diff, hook or pager helper",
+        dangerous if dangerous else completed.stderr or "none",
+    )
+    return ok
+
+
 def git_output(
     audit: Audit,
     inspector: InspectorPolicy,
@@ -302,7 +592,15 @@ def git_output(
     completed = run_inspector(
         audit,
         inspector,
-        ["-C", str(repo), *args],
+        [
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(repo),
+            *args,
+        ],
         f"source:git:{finding_suffix}",
     )
     if completed is None:
@@ -391,6 +689,19 @@ def validate_source(
             False,
             "frozen Git executable and trust root validated before source inspection",
             "unavailable",
+        )
+        return snapshot
+
+    if not validate_git_external_helper_policy(audit, git_inspector, repo):
+        snapshot.update(
+            {
+                "productHead": product_head,
+                "productTree": None,
+                "baseHead": None,
+                "checkoutHead": None,
+                "checkoutStatus": "NOT_INSPECTED_UNSAFE_GIT_CONFIG",
+                "preparationDelta": [],
+            }
         )
         return snapshot
 
@@ -529,6 +840,26 @@ def inspect_frozen_file(item: FrozenFile) -> tuple[bool, dict[str, Any]]:
     )
 
 
+def inspect_frozen_tree(item: FrozenTree) -> tuple[bool, dict[str, Any]]:
+    path = item.path.resolve()
+    try:
+        actual_sha = sha256_tree(path)
+        error = None
+    except (OSError, ValueError) as exc:
+        actual_sha = None
+        error = str(exc)
+    return (
+        actual_sha == item.sha256,
+        {
+            "role": item.role,
+            "path": str(path),
+            "expectedSha256": item.sha256,
+            "actualSha256": actual_sha,
+            "error": error,
+        },
+    )
+
+
 def validate_inspectors(
     audit: Audit,
     inspectors: tuple[InspectorPolicy, ...],
@@ -551,11 +882,24 @@ def validate_inspectors(
                 },
             )
             inspector_ok = inspector_ok and ok
+        tree_snapshots: list[dict[str, Any]] = []
+        for frozen_tree in inspector.support_trees:
+            ok, snapshot = inspect_frozen_tree(frozen_tree)
+            tree_snapshots.append(snapshot)
+            audit.check(
+                f"tool:{inspector.inspector_id}:{frozen_tree.role}:tree-sha256",
+                ok,
+                frozen_tree.sha256,
+                snapshot["actualSha256"] or snapshot["error"],
+            )
+            inspector_ok = inspector_ok and ok
         snapshots.append(
             {
                 "id": inspector.inspector_id,
                 "version": inspector.version,
                 "files": file_snapshots,
+                "trees": tree_snapshots,
+                "argumentsPrefix": list(inspector.arguments_prefix),
                 "environmentKeys": sorted(dict(inspector.environment)),
                 "policyStatus": "PASS" if inspector_ok else "FAIL",
             }
@@ -570,7 +914,12 @@ def run_inspector(
     args: list[str],
     finding_id: str,
 ) -> subprocess.CompletedProcess[str] | None:
-    still_valid = all(inspect_frozen_file(item)[0] for item in (inspector.executable, *inspector.support_files))
+    files_valid = all(
+        inspect_frozen_file(item)[0]
+        for item in (inspector.executable, *inspector.support_files)
+    )
+    trees_valid = all(inspect_frozen_tree(item)[0] for item in inspector.support_trees)
+    still_valid = files_valid and trees_valid
     audit.check(
         f"{finding_id}:pre-exec-policy",
         still_valid,
@@ -580,7 +929,11 @@ def run_inspector(
     if not still_valid:
         return None
     return run(
-        [str(inspector.executable.path.resolve()), *args],
+        [
+            str(inspector.executable.path.resolve()),
+            *inspector.arguments_prefix,
+            *args,
+        ],
         environment=dict(inspector.environment),
     )
 
@@ -868,9 +1221,16 @@ def run_audit(
     manifest_path = manifest_path.resolve()
     report_path = report_path.resolve()
     sidecar_path = Path(f"{report_path}.sha256").resolve()
-    if is_within(report_path, source_repo) or is_within(sidecar_path, source_repo):
+    output_error = unsafe_output_reason(
+        policy,
+        source_repo,
+        manifest_path,
+        report_path,
+        sidecar_path,
+    )
+    if output_error is not None:
         print(
-            "check-github64-device-readiness: report and sidecar must be outside the source repository",
+            f"check-github64-device-readiness: unsafe output path: {output_error}",
             file=sys.stderr,
         )
         return 2
@@ -952,10 +1312,9 @@ def run_audit(
         "utf-8"
     )
     try:
-        atomic_write(report_path, encoded)
         report_sha = hashlib.sha256(encoded).hexdigest()
-        sidecar = f"{report_sha}  {report_path.name}\n".encode("ascii")
-        atomic_write(sidecar_path, sidecar)
+        sidecar = f"{report_sha}  {report_path.name}\n".encode("utf-8")
+        atomic_write_pair(report_path, encoded, sidecar_path, sidecar)
     except OSError as exc:
         print(f"check-github64-device-readiness: cannot write report: {exc}", file=sys.stderr)
         return 2
