@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.example.cellrebelauto.automation.ProviderPrincipal
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1
@@ -29,8 +30,10 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  */
 class BinderExternalApplyExecutor(
     private val context: Context,
-    private val providerApplicationId: String = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+    providerApplicationId: String = ProviderPrincipal.selected
 ) : ExternalApplyExecutor {
+
+    val targetApplicationId: String = providerApplicationId
 
     @Volatile
     private var remote: IEnvironmentControlV1? = null
@@ -39,7 +42,7 @@ class BinderExternalApplyExecutor(
     fun bind(): Boolean {
         if (remote != null) return true
         val intent = Intent().setComponent(
-            ComponentName(providerApplicationId, ContractV1.SERVICE_CLASS_NAME)
+            ComponentName(targetApplicationId, ContractV1.SERVICE_CLASS_NAME)
         )
         return try {
             context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
