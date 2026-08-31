@@ -261,6 +261,27 @@ class RecoveryCoordinator(
         }
         return null
     }
+
+    /**
+     * Read-only proof for the engine's durable `RELEASED` checkpoint. At that checkpoint the
+     * provider effect and both receipt indexes must already exist, so recovery may verify the exact
+     * tuple but must not dispatch release again or append a second release audit event.
+     */
+    fun exactDurableReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String
+    ): RecordedReleaseReceipt? {
+        val byKey = log.releaseReceiptForKey(idempotencyKey)
+        val byLease = log.releaseReceiptFor(leaseId)
+        if (byKey == null || byLease == null || byKey != byLease) return null
+        return byKey.takeIf {
+            it.idempotencyKey == idempotencyKey &&
+                it.leaseId == leaseId &&
+                it.releaseDigest == releaseDigest &&
+                it.resultOutcome == "RELEASED"
+        }
+    }
 }
 
 /**

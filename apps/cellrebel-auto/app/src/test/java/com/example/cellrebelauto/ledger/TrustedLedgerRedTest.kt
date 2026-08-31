@@ -589,6 +589,22 @@ class TrustedLedgerRedTest {
                 evidencePayloadDigest = DISTINCTIVE_DIGEST
             )
         )
+        // Production reaches this entrypoint only after the immutable execution, PRE/POST and
+        // completion receipt have atomically published the DECIDING owner. Seed that complete
+        // durable boundary so the attribution assertion cannot mint through a live-context shortcut.
+        db.testAttemptDao().markAplusState(aggregate.attemptId, "POST_OBSERVE_PENDING")
+        db.testAttemptDao().markCurrentExecutionId(
+            aggregate.attemptId, ctx.execution.executionId
+        )
+        db.attemptExecutionDao().insert(ctx.execution)
+        repo.persistObservation(aggregate.attemptId, "PRE", ctx.preObservation)
+        repo.persistDecisionBundleAndEnterDeciding(
+            attemptId = aggregate.attemptId,
+            postObservation = ctx.postObservation,
+            completionEvidenceWire = ctx.completionEvidenceWire,
+            acceptedIntentHash = ctx.applyReceiptIntentHash,
+            leaseId = ctx.applyReceiptLease
+        )
 
         val decision = repo.recordTrustedCompletion(ctx, REPO_COMMIT_CLOCK)
         assertEquals("a §6.4-positive completion must report PASS", TrustDecision.PASS, decision)

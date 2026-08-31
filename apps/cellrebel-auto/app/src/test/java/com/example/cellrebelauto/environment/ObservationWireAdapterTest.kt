@@ -59,6 +59,7 @@ class ObservationWireAdapterTest {
         assertEquals("intent-h", snapshot.acceptedIntentHash)
         assertEquals(listOf("qwy:store:abc"), snapshot.evidenceRefs)
         assertEquals(7L, snapshot.environmentRevision)
+        assertEquals("audit continuity wall clock must round-trip verbatim", 800L, snapshot.continuitySinceEpochMs)
         assertEquals(500L, snapshot.continuitySinceElapsedRealtimeMs)
     }
 

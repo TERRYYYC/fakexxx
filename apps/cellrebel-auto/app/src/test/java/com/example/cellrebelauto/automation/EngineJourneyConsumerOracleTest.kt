@@ -247,6 +247,8 @@ class EngineJourneyConsumerOracleTest {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
             journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
         )
+        var elapsedRead = 0
+        val elapsedWindow = longArrayOf(2000L, 2100L, 13000L)
         return AutomationEngine(
             planId = planId, planRepository = repo,
             cellRebelRunner = object : CellRebelRunner {
@@ -264,7 +266,8 @@ class EngineJourneyConsumerOracleTest {
             attemptDriver = driver,
             recoveryCoordinator = coordinator,
             completionEvidenceSource = evidenceSource,
-            elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
+            elapsedClockMs = { elapsedWindow[(elapsedRead++ % elapsedWindow.size)] },
+            commitClockMs = { 99999L }
         )
     }
 

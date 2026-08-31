@@ -33,6 +33,8 @@ class RecordingExternalApplyExecutor(
     private val appliedDigests = mutableMapOf<String, String>()
     private val effectCounts = mutableMapOf<Long, Int>()
     private val invocationCounts = mutableMapOf<String, Int>()
+    /** Cross-operation ordering oracle used to prove old release precedes any fresh apply. */
+    val lifecycleEvents = mutableListOf<String>()
 
     override fun apply(
         attemptId: Long,
@@ -41,6 +43,7 @@ class RecordingExternalApplyExecutor(
         requestDigest: String,
         now: Long
     ): ApplyOutcome {
+        lifecycleEvents += "apply:$attemptId"
         invocationCounts[idempotencyKey] = (invocationCounts[idempotencyKey] ?: 0) + 1
         val priorDigest = appliedDigests[idempotencyKey]
         if (priorDigest != null && priorDigest != requestDigest) {
@@ -79,6 +82,7 @@ class RecordingExternalApplyExecutor(
         releaseDigest: String,
         now: Long
     ): ApplyOutcome {
+        lifecycleEvents += "release:$attemptId:$leaseId"
         releaseInvocationCounts[idempotencyKey] = (releaseInvocationCounts[idempotencyKey] ?: 0) + 1
         releaseCalls += ReleaseCall(attemptId, idempotencyKey, leaseId, releaseDigest)
         releaseEvents += "release:$leaseId"

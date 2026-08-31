@@ -48,9 +48,8 @@ interface APlusBackend {
 interface APlusEvidenceSource {
     /**
      * The §6.4 pre-observation for [attemptId], or null when observation is unavailable. A non-null
-     * result means the shipped source committed the immutable `(attemptId, PRE)` carrier before
-     * return. Callers replay it through the same repository authority, which accepts exact equality
-     * and fails closed on any conflicting payload.
+     * result is either a durable replay or a live candidate. AutomationEngine owns the transaction
+     * that commits the immutable carrier together with its owner phase.
      * R43 GREEN: [runSessionId] is the attempt's REAL owner session — the source recomputes the
      * INV-23 intent hash from the same owner identity the engine uses, so the three-way digest can
      * actually agree.
@@ -58,8 +57,8 @@ interface APlusEvidenceSource {
     suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot?
 
     /**
-     * The §6.4 post-observation for [attemptId], or null when unavailable. As with PRE, non-null
-     * guarantees that the immutable `(attemptId, POST)` carrier is already durable in production.
+     * The §6.4 post-observation for [attemptId], or null when unavailable. As with PRE, a non-null
+     * value may be a durable replay or a live candidate for the engine-owned decision transaction.
      */
     suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot?
 

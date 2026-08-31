@@ -155,9 +155,9 @@ object APlusComposition {
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
             db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
         )
-        // Single storage authority for immutable PRE/POST carriers. The evidence source commits
-        // before return; the engine's phase-boundary call replays through the same repository and
-        // therefore validates exact equality instead of issuing a second independent INSERT.
+        // Single storage authority for immutable PRE/POST carriers. The source reads durable-first
+        // and otherwise returns a live candidate; AutomationEngine alone commits carrier + owner
+        // phase (or the complete POST decision bundle) through PlanRepository.
         val durableEvidenceRepository = com.example.cellrebelauto.repository.PlanRepository(db)
         return object : APlusBackend {
             override val executor: ExternalApplyExecutor = binderExecutor
@@ -184,17 +184,17 @@ object APlusComposition {
             }
             override val evidenceSource: APlusEvidenceSource = object : APlusEvidenceSource {
                 // R44 (Sol GREEN-review-3 F1): the production evidence source is a LIVE Binder
-                // collector with durable replay. A fresh attempt has NO durable observation, so the
-                // FIRST writer of every phase evidence is executor.observe() over the frozen
-                // contract; the result is persisted to durable_observation_records BEFORE being
-                // returned (crash = re-read durability). The §6.5.3 reverse-authorization gate runs
-                // FIRST: an untrusted provider's artifacts never enter the trust path.
+                // collector with durable replay. A fresh attempt has NO durable observation, so
+                // executor.observe() supplies the live snapshot; AutomationEngine then commits the
+                // carrier and §8.1 owner phase in ONE PlanRepository transaction. The §6.5.3
+                // reverse-authorization gate runs FIRST: an untrusted provider's artifacts never
+                // enter the trust path.
                 val trustGate = com.example.cellrebelauto.environment.ProviderTrustGate(
                     com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()),
                     providerSignerDigest
                 )
 
-                suspend fun observeLive(phase: String, attemptId: Long, runSessionId: Long):
+                suspend fun observeLive(attemptId: Long, runSessionId: Long):
                     com.example.cellrebelauto.environment.ObservationSnapshot? {
                     // §6.5.3 gate FIRST: untrusted current signer ⇒ no artifacts enter the trust path.
                     if (!trustGate.isCurrentSignerTrusted(providerApplicationId)) return null
@@ -227,22 +227,20 @@ object APlusComposition {
                             )
                         )
                     val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null
-                    val snapshot = com.example.cellrebelauto.environment.ObservationWireAdapter.toSnapshot(wire)
-                    // Persist BEFORE returning through the one immutable storage authority. A race
-                    // winner with any different payload is rejected fail-closed, never overwritten.
-                    return durableEvidenceRepository.persistObservation(attemptId, phase, snapshot)
+                    return com.example.cellrebelauto.environment.ObservationWireAdapter.toSnapshot(wire)
                 }
 
                 override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) =
                     kotlinx.coroutines.runBlocking {
-                        // Durable first (crash replay); live observe is the FIRST writer on a fresh run.
+                        // Durable first (crash replay); otherwise return a live candidate to the
+                        // engine-owned carrier+phase transaction.
                         durableEvidenceRepository.getObservationSnapshot(attemptId, "PRE")
-                            ?: observeLive("PRE", attemptId, runSessionId)
+                            ?: observeLive(attemptId, runSessionId)
                     }
                 override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) =
                     kotlinx.coroutines.runBlocking {
                         durableEvidenceRepository.getObservationSnapshot(attemptId, "POST")
-                            ?: observeLive("POST", attemptId, runSessionId)
+                            ?: observeLive(attemptId, runSessionId)
                     }
                 override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? {
                     // R44 F1: completion evidence is ASSEMBLED from the durable carriers the normal

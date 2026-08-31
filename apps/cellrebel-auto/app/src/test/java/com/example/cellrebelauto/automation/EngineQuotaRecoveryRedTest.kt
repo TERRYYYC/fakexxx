@@ -58,6 +58,8 @@ class EngineQuotaRecoveryRedTest {
     private val anchorVersion = 12L
 
     private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
+    private var applyInvocations = 0
+    private var releaseInvocations = 0
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = "item-after-9z",
         scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-quota-recovery",
@@ -65,10 +67,14 @@ class EngineQuotaRecoveryRedTest {
     )
 
     private val journeyExecutor = object : ExternalApplyExecutor {
-        override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome =
-            ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
-        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome =
-            ApplyOutcome("RELEASED", false)
+        override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
+            applyInvocations += 1
+            return ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
+        }
+        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome {
+            releaseInvocations += 1
+            return ApplyOutcome("RELEASED", false)
+        }
         override fun discover(): CapabilitySnapshotV1? = CapabilitySnapshotV1(
             serviceVersion = "fake-1.0",
             supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
@@ -122,6 +128,9 @@ class EngineQuotaRecoveryRedTest {
 
     @Before
     fun setUp() {
+        advanceReplays.clear()
+        applyInvocations = 0
+        releaseInvocations = 0
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
@@ -176,6 +185,22 @@ class EngineQuotaRecoveryRedTest {
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
         )
+        if (phase == "RELEASED") {
+            // RELEASED is only a valid crash checkpoint after the exact dual-index durable receipt
+            // was committed; recovery verifies this read-only and must not release/audit twice.
+            val leaseId = "lease-$attemptId"
+            db.releaseReceiptDao().insertIfAbsent(
+                com.example.cellrebelauto.recovery.ReleaseReceiptRow(
+                    idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .releaseIdempotencyKey(attemptId),
+                    leaseId = leaseId,
+                    releaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .releaseDigest(leaseId),
+                    resultOutcome = "RELEASED",
+                    createdAt = 1001L
+                )
+            )
+        }
         return planId to task.id
     }
 
@@ -206,6 +231,222 @@ class EngineQuotaRecoveryRedTest {
             completionEvidenceSource = minimalEvidenceSource,
             elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
         )
+    }
+
+    private enum class DecisionCarrierSeed {
+        OPPOSING_UNVERIFIED,
+        BOTH
+    }
+
+    /**
+     * Seeds the complete durable DECIDING bundle consumed by [AutomationEngine] recovery. The
+     * bundle itself evaluates PASS; [carrierSeed] plants either the opposing negative carrier or
+     * both mutually-exclusive carriers to exercise the repository's DECISION_CARRIER_CONFLICT.
+     */
+    private suspend fun seedDecidingCarrierConflict(carrierSeed: DecisionCarrierSeed): Pair<Long, Long> {
+        val attemptId = 31L
+        val planId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "carrier-conflict.csv",
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 1,
+                totalRequiredSuccesses = 2
+            ),
+            listOf(
+                LocationTask(
+                    planId = 0,
+                    csvRow = 1,
+                    longitude = 116.4,
+                    latitude = 39.9,
+                    priority = 1,
+                    requiredSuccesses = 2
+                )
+            )
+        )
+        val task = db.locationTaskDao().getTasksForPlan(planId).first()
+        val sessionId = db.runSessionDao().insert(
+            RunSession(startedAt = 500L, planId = planId, status = "running")
+        )
+        val startedAt = 600L
+        val leaseId = "lease-$attemptId"
+        val executionId = "exec-$attemptId"
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = attemptId,
+                taskId = task.id,
+                runSessionId = sessionId,
+                attemptOrdinal = 1,
+                successOrdinal = null,
+                startedAt = startedAt,
+                runningObservedAt = null,
+                endedAt = null,
+                status = "running",
+                failureReason = null,
+                webBrowsingScore = null,
+                videoStreamingScore = null,
+                latitude = 39.9,
+                longitude = 116.4,
+                aplusState = "DECIDING",
+                aplusLeaseId = leaseId,
+                currentExecutionId = executionId,
+                aplusAnchorScheduleId = anchorScheduleId,
+                aplusAnchorItemId = anchorItemId,
+                aplusAnchorVersion = anchorVersion
+            )
+        )
+
+        val intentDigest = APlusOperationIdentity.requestDigest(
+            APlusOperationIdentity.intent(
+                sessionId,
+                attemptId,
+                planId,
+                anchorScheduleId,
+                startedAt,
+                startedAt + 90_000L
+            )
+        )
+        val evidenceDigest = "ev-$attemptId"
+        db.attemptExecutionDao().insert(
+            CellRebelExecution(
+                executionId = executionId,
+                attemptId = attemptId,
+                completionEvidenceWire = 1,
+                evidencePayloadDigest = evidenceDigest,
+                startedAt = 1000L,
+                classifiedAt = 1100L,
+                startedAtElapsed = 2000L,
+                runningConfirmedAtElapsed = 2100L,
+                completedAtElapsed = 13000L,
+                baselineRunningState = "IDLE",
+                runningMarkerText = "RUNNING",
+                runningDurationMs = 10900L,
+                webBrowsingScore = 8.0,
+                videoStreamingScore = 7.0,
+                roundTimestampsElapsed = "2000;13000"
+            )
+        )
+        fun observation(phase: String, observedElapsed: Long, observedEpoch: Long) =
+            DurableObservationRecord(
+                attemptId = attemptId,
+                phase = phase,
+                leaseId = leaseId,
+                acceptedIntentHash = intentDigest,
+                coverage = "FULL",
+                verificationLevel = "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED",
+                deliveryMode = "SYSTEM_MOCK",
+                isMock = true,
+                scheduleDecision = "ALLOWED_NOW",
+                effectiveLat = 39.9,
+                effectiveLng = 116.4,
+                environmentRevision = 7L,
+                environmentFingerprint = "fp",
+                observedAtElapsedRealtimeMs = observedElapsed,
+                observedAtEpochMs = observedEpoch,
+                continuitySinceElapsedRealtimeMs = 500L,
+                continuitySinceEpochMs = 400L,
+                evidenceRefsJson = JSONArray(listOf("qwy:store:carrier-conflict")).toString(),
+                evidenceRefs = "qwy:store:carrier-conflict"
+            )
+        db.durableObservationDao().insertIfAbsent(observation("PRE", 1000L, 900L))
+        db.durableObservationDao().insertIfAbsent(observation("POST", 14000L, 6500L))
+        db.durableCompletionReceiptDao().insertIfAbsent(
+            DurableCompletionReceipt(
+                attemptId = attemptId,
+                completionEvidenceWire = 1,
+                acceptedIntentHash = intentDigest,
+                leaseId = leaseId
+            )
+        )
+
+        db.unverifiedAttemptRecordDao().insert(
+            com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord(
+                attemptId = attemptId,
+                reason = "UNTRUSTED",
+                evidenceDigest = evidenceDigest
+            )
+        )
+        if (carrierSeed == DecisionCarrierSeed.BOTH) {
+            db.trustedQuotaDao().insert(
+                com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+                    attemptId = attemptId,
+                    taskId = task.id,
+                    evidenceDigest = evidenceDigest,
+                    committedAt = 9000L
+                )
+            )
+        }
+        return planId to sessionId
+    }
+
+    private suspend fun assertDecisionCarrierConflictConvergesAcrossTwoRestarts(
+        carrierSeed: DecisionCarrierSeed
+    ) {
+        val (planId, sessionId) = seedDecidingCarrierConflict(carrierSeed)
+        val trustedBefore = db.trustedQuotaDao().countAll()
+        val unverifiedBefore = db.unverifiedAttemptRecordDao().countAll()
+
+        repeat(2) { restartIndex ->
+            val engine = buildEngine(planId, VClock())
+            engine.run()
+
+            val attempt = db.testAttemptDao().getAttemptById(31L)!!
+            assertEquals(
+                "restart ${restartIndex + 1}: a DECISION_CARRIER_CONFLICT must durably converge " +
+                    "the owner instead of leaving DECIDING to throw again",
+                "RECOVERY_REQUIRED",
+                attempt.aplusState
+            )
+            assertTrue(
+                "restart ${restartIndex + 1}: the durable failure reason must preserve the typed conflict",
+                attempt.failureReason?.startsWith("DECISION_CARRIER_CONFLICT") == true
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: recovery must remain visibly paused",
+                "PAUSED",
+                engine.state.value.name
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: the reused durable owner session must remain paused",
+                "paused",
+                db.runSessionDao().getById(sessionId)!!.status
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: fail-closed recovery must not mint a new trusted carrier",
+                trustedBefore,
+                db.trustedQuotaDao().countAll()
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: fail-closed recovery must not add an unverified carrier",
+                unverifiedBefore,
+                db.unverifiedAttemptRecordDao().countAll()
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: a conflicting decision owner must not release its lease",
+                0,
+                releaseInvocations
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: recovery must not progress into a new apply",
+                0,
+                applyInvocations
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: recovery must not advance the schedule",
+                0,
+                advanceReplays.size
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: the conflicted owner must remain non-terminal for operator recovery",
+                "running",
+                attempt.status
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: fail-closed convergence must not fabricate a terminal timestamp",
+                null,
+                attempt.endedAt
+            )
+        }
     }
 
     // ---- QUOTA_COMMITTED crash + quota REACHED → advance MUST be dispatched ----
@@ -541,5 +782,17 @@ class EngineQuotaRecoveryRedTest {
                 "of insertIfAbsent() ⇒ SQLiteConstraintException rolls back recovery)",
             "succeeded", attempt.status
         )
+    }
+
+    @Test
+    fun `DECIDING full bundle with opposing carrier converges typed and remains paused across two restarts`() = runTest {
+        assertDecisionCarrierConflictConvergesAcrossTwoRestarts(
+            DecisionCarrierSeed.OPPOSING_UNVERIFIED
+        )
+    }
+
+    @Test
+    fun `DECIDING full bundle with both carriers converges typed and remains paused across two restarts`() = runTest {
+        assertDecisionCarrierConflictConvergesAcrossTwoRestarts(DecisionCarrierSeed.BOTH)
     }
 }

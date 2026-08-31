@@ -74,7 +74,7 @@ class TrustPolicy {
         if (obs.isMock != true) return false // null ("unknown") cannot stand for "verified"
         if (obs.scheduleDecision != SCHEDULE_ALLOWED_NOW) return false
         if (obs.evidenceRefs.isEmpty()) return false // empty + VERIFIED ⇒ unverifiable
-        if (obs.effectiveLat == null || obs.effectiveLng == null) return false
+        if (!obs.hasStructurallyValidEffectiveCoordinates()) return false
 
         // INV-07: each observation is bound to the RECEIPT's lease — not merely to each other
         // (R6-F1 un-bound-lease false oracle).
@@ -83,17 +83,8 @@ class TrustPolicy {
         // INV-23: each observation's intent hash matches the receipt (both sides, R6-F1 POST residual).
         if (obs.acceptedIntentHash != context.applyReceiptIntentHash) return false
 
-        // §6.4.1 / KB-8: provider coordinates are a structural predicate on the Auto side. Non-finite
-        // or out-of-range values contradict the claimed verified observation and fail closed. The
-        // target and distance comparison remain exclusively inside Qianwangyou.
-        if (!isFiniteGeo(obs.effectiveLat!!, obs.effectiveLng!!)) return false
-
         return true
     }
-
-    /** Finite AND within valid geographic ranges (lat ∈ [-90,90], lng ∈ [-180,180]) — Sol GREEN-review P1-3. */
-    private fun isFiniteGeo(lat: Double, lng: Double): Boolean =
-        lat.isFinite() && lng.isFinite() && lat in -90.0..90.0 && lng in -180.0..180.0
 
     companion object {
         /** §8.6.2 VERIFIED_NEW_COMPLETION wire code — the only wire that may mint. */

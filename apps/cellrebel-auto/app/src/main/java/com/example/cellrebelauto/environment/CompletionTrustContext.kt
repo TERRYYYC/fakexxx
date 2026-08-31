@@ -43,6 +43,8 @@ data class ObservationSnapshot(
     val observedAtElapsedRealtimeMs: Long,
     /** Audit-only wall clock (§6.4.2); NEVER enters a trust predicate. */
     val observedAtEpochMs: Long,
+    /** Audit-only wall-clock continuity origin; preserved verbatim but never used for trust. */
+    val continuitySinceEpochMs: Long? = null,
     /**
      * §6.4.2 monotonic continuity-window start. Nullable so the §6.4.1 continuitySince=null 矛盾 tuple
      * is representable. pre/post must both be non-null, EQUAL, and <= pre.observedAtElapsedRealtimeMs.
@@ -51,6 +53,17 @@ data class ObservationSnapshot(
     /** Structural evidence refs (`qwy:<store>:<id>`); non-empty required (§6.4.1 — empty + VERIFIED ⇒ fail). */
     val evidenceRefs: List<String>
 )
+
+/**
+ * The storage boundary and [TrustPolicy] share this structural coordinate predicate. Keeping one
+ * definition prevents the pre/post phase guard from drifting away from the final trust decision.
+ * Target ownership and distance comparison remain exclusively in Qianwangyou (KB-8).
+ */
+internal fun ObservationSnapshot.hasStructurallyValidEffectiveCoordinates(): Boolean {
+    val lat = effectiveLat ?: return false
+    val lng = effectiveLng ?: return false
+    return lat.isFinite() && lng.isFinite() && lat in -90.0..90.0 && lng in -180.0..180.0
+}
 
 /**
  * The full input bundle [TrustPolicy] evaluates to decide whether a classified CellRebel completion

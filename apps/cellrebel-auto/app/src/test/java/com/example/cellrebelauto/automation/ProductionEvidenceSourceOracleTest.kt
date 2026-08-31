@@ -32,7 +32,7 @@ import org.robolectric.RobolectricTestRunner
  * with a fake executor injected at the widened INTERFACE seam:
  *
  *  1. observeLive consumes executor.observe (untrusted signer / null observe / wrong-tuple → null);
- *  2. the trusted result is PERSISTED to the durable carrier before returning;
+ *  2. the trusted result remains live until the engine's PlanRepository phase-boundary transaction;
  *  3. acquireCompletionEvidence assembles from the durable owner row + verbatim receipt.
  *
  * KILLING MUTATIONS (each verified to FAIL a test below):
@@ -177,7 +177,7 @@ class ProductionEvidenceSourceOracleTest {
     }
 
     @Test
-    fun `the production evidence source CONSUMES executor-observe and persists the durable carrier`() = runBlocking {
+    fun `the production evidence source returns live data and the engine boundary atomically persists carrier plus phase`() = runBlocking {
         val evidence = backend().evidenceSource
         val pre = evidence.acquirePreObservation(77L, 5L)
 
@@ -187,12 +187,20 @@ class ProductionEvidenceSourceOracleTest {
         assertEquals("the observe tuple binds the durable receipt lease", "lease-77", observeCalls[0].first)
         assertEquals("the observe tuple binds the durable receipt operationId", "op-77", observeCalls[0].second)
         assertEquals("the expected hash is the owner recompute (§6.3.1 preimage)", expectedHash(), observeCalls[0].third)
-        // (b) The observation was adapted AND persisted to the durable carrier BEFORE returning.
+        // (b) The source adapts but does not independently persist. The engine owns the ONE write
+        //     transaction that couples the carrier to the §8.1 owner phase.
         assertNotNull("the §6.4 snapshot came back for the trusted provider", pre)
+        assertNull("the source must not create a second storage authority",
+            db.durableObservationDao().forAttemptPhase(77L, "PRE"))
+        com.example.cellrebelauto.repository.PlanRepository(db)
+            .persistObservationAndMarkAplusState(77L, "PRE", pre!!, "PRE_OBSERVED")
         val durable = db.durableObservationDao().forAttemptPhase(77L, "PRE")
         assertNotNull("the trusted observation is PERSISTED to durable_observation_records", durable)
         assertEquals("adapted verification level", "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED", durable!!.verificationLevel)
         assertEquals("adapted coverage", "FULL", durable.coverage)
+        assertEquals("audit-only continuity wall clock is preserved verbatim", 800L, durable.continuitySinceEpochMs)
+        assertEquals("carrier and owner phase commit together", "PRE_OBSERVED",
+            db.testAttemptDao().getAttemptById(77L)!!.aplusState)
         // (c) The SECOND acquisition replays from durability — no second provider call.
         val pre2 = evidence.acquirePreObservation(77L, 5L)
         assertEquals("durable replay: no second observe call", 1, observeCalls.size)
