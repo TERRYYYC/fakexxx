@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import stat
 import subprocess
@@ -37,6 +38,12 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 DEVICE_TRANSPORT_EXECUTABLES = frozenset({"adb", "fastboot"})
 NON_DEVICE_INSPECTOR_IDS = frozenset({"git", "aapt", "apksigner"})
+CHECKOUT_FD_SOFT_LIMIT = 16_384
+CHECKOUT_OBSERVATION_CONTRACT: dict[str, Any] = {
+    "scope": "DESCRIPTOR_BOUND_SEQUENTIAL_OBSERVATION",
+    "requiresQuiescentCheckout": True,
+    "atomicFilesystemSnapshot": False,
+}
 
 
 @dataclass(frozen=True)
@@ -932,8 +939,8 @@ def unsafe_output_reason(
     sidecar_path: Path,
 ) -> str | None:
     outputs = (("report", report_path), ("sidecar", sidecar_path))
-    if any("\n" in path.name or "\r" in path.name for _, path in outputs):
-        return "report and sidecar filenames must not contain CR or LF"
+    if any("\n" in str(path) or "\r" in str(path) for _, path in outputs):
+        return "report and sidecar paths must not contain CR or LF"
     if any(is_within(path, source_repo) for _, path in outputs):
         return "report and sidecar must be outside the source repository"
     if paths_alias(report_path, sidecar_path):
@@ -1374,6 +1381,36 @@ class GitTreeEntry:
     object_id: str
 
 
+@dataclass(frozen=True)
+class CheckoutDirectorySeal:
+    relative_path: str
+    descriptor: int
+    parent_descriptor: int | None
+    name: str | None
+    signature: tuple[int, ...]
+    names: tuple[str, ...] | None
+    generated_root: bool = False
+
+
+@dataclass(frozen=True)
+class CheckoutFileSeal:
+    relative_path: str
+    descriptor: int
+    parent_descriptor: int
+    name: str
+    signature: tuple[int, ...]
+    object_id: str
+
+
+@dataclass(frozen=True)
+class CheckoutSymlinkSeal:
+    relative_path: str
+    parent_descriptor: int
+    name: str
+    signature: tuple[int, ...]
+    target: bytes
+
+
 def git_tree_entries(
     audit: Audit,
     inspector: PreparedInspector,
@@ -1451,81 +1488,375 @@ def compare_checkout_to_tree(
     expected: Mapping[str, GitTreeEntry],
     generated_roots: frozenset[str],
 ) -> tuple[bool, dict[str, Any]]:
-    """Compare raw filesystem state to a commit tree without consulting Git's index."""
+    """Compare one checkout-wide retained observation to a commit tree."""
     seen: set[str] = set()
     mismatched: list[str] = []
     unexpected: list[str] = []
     errors: list[str] = []
     present_generated_roots: list[str] = []
+    directories: list[CheckoutDirectorySeal] = []
+    files: list[CheckoutFileSeal] = []
+    symlinks: list[CheckoutSymlinkSeal] = []
+    retained_descriptors: list[int] = []
+    original_fd_limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+    fd_limit_raised = False
 
     for tracked in expected:
-        if any(tracked == root or tracked.startswith(f"{root}/") for root in generated_roots):
+        if any(
+            tracked == root or tracked.startswith(f"{root}/")
+            for root in generated_roots
+        ):
             errors.append(f"tracked path overlaps generated root: {tracked}")
 
-    pending: list[tuple[Path, str]] = [(repo, "")]
-    while pending:
-        directory, prefix = pending.pop()
-        try:
-            with os.scandir(directory) as iterator:
-                children = sorted(iterator, key=lambda item: os.fsencode(item.name))
-        except OSError as exc:
-            errors.append(f"cannot scan {prefix or '.'}: {exc}")
-            continue
-        for child in children:
-            relative = f"{prefix}/{child.name}" if prefix else child.name
-            if not prefix and child.name == ".git":
-                continue
-            try:
-                metadata = child.stat(follow_symlinks=False)
-            except OSError as exc:
-                errors.append(f"cannot stat {display_filesystem_path(relative)}: {exc}")
-                continue
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
 
-            if relative in generated_roots:
-                if stat.S_ISDIR(metadata.st_mode):
-                    present_generated_roots.append(relative)
-                else:
-                    mismatched.append(relative)
+    def retain(descriptor: int) -> int:
+        retained_descriptors.append(descriptor)
+        return descriptor
+
+    def add_mismatch(relative: str) -> None:
+        if relative not in mismatched:
+            mismatched.append(relative)
+
+    def entry_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+        return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
+
+    def child_metadata(directory_descriptor: int, name: str) -> os.stat_result:
+        return os.stat(
+            name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+
+    def directory_names(directory_descriptor: int) -> tuple[str, ...]:
+        with os.scandir(directory_descriptor) as iterator:
+            return tuple(sorted((child.name for child in iterator), key=os.fsencode))
+
+    root_descriptor: int | None = None
+    try:
+        original_soft_limit, hard_limit = original_fd_limits
+        permitted_limit = (
+            CHECKOUT_FD_SOFT_LIMIT
+            if hard_limit == resource.RLIM_INFINITY
+            else min(CHECKOUT_FD_SOFT_LIMIT, hard_limit)
+        )
+        if original_soft_limit < permitted_limit:
+            resource.setrlimit(
+                resource.RLIMIT_NOFILE,
+                (permitted_limit, hard_limit),
+            )
+            fd_limit_raised = True
+        root_before = repo.lstat()
+        if not stat.S_ISDIR(root_before.st_mode):
+            raise OSError("repository root is not a real directory")
+        root_descriptor = retain(os.open(repo, directory_flags))
+        root_signature = file_stat_signature(root_before)
+        if file_stat_signature(os.fstat(root_descriptor)) != root_signature:
+            raise OSError("repository root identity changed before scan")
+
+        tasks: list[tuple[str, Any, Any, Any]] = [
+            ("directory", "", root_descriptor, (None, None, root_signature))
+        ]
+        while tasks:
+            task_type, prefix, task_descriptor, task_value = tasks.pop()
+            if task_type == "directory":
+                parent_descriptor, name, opening_signature = task_value
+                directory_descriptor = task_descriptor
+                try:
+                    opened = os.fstat(directory_descriptor)
+                    names = directory_names(directory_descriptor)
+                    after = os.fstat(directory_descriptor)
+                    current = (
+                        child_metadata(parent_descriptor, name)
+                        if parent_descriptor is not None and name is not None
+                        else repo.lstat()
+                    )
+                    if (
+                        file_stat_signature(opened) != opening_signature
+                        or file_stat_signature(after) != opening_signature
+                        or file_stat_signature(current) != opening_signature
+                    ):
+                        raise OSError("directory changed during opening observation")
+                    directories.append(
+                        CheckoutDirectorySeal(
+                            relative_path=prefix,
+                            descriptor=directory_descriptor,
+                            parent_descriptor=parent_descriptor,
+                            name=name,
+                            signature=opening_signature,
+                            names=names,
+                        )
+                    )
+                    for child_name in reversed(names):
+                        if not prefix and child_name == ".git":
+                            continue
+                        tasks.append(
+                            ("entry", prefix, directory_descriptor, child_name)
+                        )
+                except OSError as exc:
                     errors.append(
-                        f"generated root is not a real directory: "
-                        f"{display_filesystem_path(relative)}"
+                        f"cannot scan {display_filesystem_path(prefix or '.')}: {exc}"
                     )
                 continue
 
-            tree_entry = expected.get(relative)
-            if stat.S_ISDIR(metadata.st_mode):
-                if tree_entry is not None:
-                    seen.add(relative)
-                    mismatched.append(relative)
-                else:
-                    pending.append((Path(child.path), relative))
-                continue
-
-            if tree_entry is None:
-                unexpected.append(relative)
-                continue
-            seen.add(relative)
-
-            actual_mode: str | None = None
-            actual_oid: str | None = None
+            parent_descriptor = task_descriptor
+            name = task_value
+            relative = f"{prefix}/{name}" if prefix else name
             try:
+                metadata = child_metadata(parent_descriptor, name)
+
+                if relative in generated_roots:
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        add_mismatch(relative)
+                        raise OSError("generated root is not a real directory")
+                    descriptor = retain(
+                        os.open(name, directory_flags, dir_fd=parent_descriptor)
+                    )
+                    identity = entry_identity(metadata)
+                    if (
+                        entry_identity(os.fstat(descriptor)) != identity
+                        or entry_identity(child_metadata(parent_descriptor, name))
+                        != identity
+                    ):
+                        raise OSError(
+                            "generated-root identity changed during observation"
+                        )
+                    directories.append(
+                        CheckoutDirectorySeal(
+                            relative_path=relative,
+                            descriptor=descriptor,
+                            parent_descriptor=parent_descriptor,
+                            name=name,
+                            signature=file_stat_signature(metadata),
+                            names=None,
+                            generated_root=True,
+                        )
+                    )
+                    present_generated_roots.append(relative)
+                    continue
+
+                tree_entry = expected.get(relative)
+                if stat.S_ISDIR(metadata.st_mode):
+                    if tree_entry is not None:
+                        seen.add(relative)
+                        add_mismatch(relative)
+                    else:
+                        descriptor = retain(
+                            os.open(name, directory_flags, dir_fd=parent_descriptor)
+                        )
+                        signature = file_stat_signature(metadata)
+                        if (
+                            file_stat_signature(os.fstat(descriptor)) != signature
+                            or file_stat_signature(
+                                child_metadata(parent_descriptor, name)
+                            )
+                            != signature
+                        ):
+                            raise OSError(
+                                "directory identity changed before traversal"
+                            )
+                        tasks.append(
+                            (
+                                "directory",
+                                relative,
+                                descriptor,
+                                (parent_descriptor, name, signature),
+                            )
+                        )
+                    continue
+
+                if tree_entry is None:
+                    unexpected.append(relative)
+                    continue
+                seen.add(relative)
+
+                actual_mode: str | None = None
+                actual_oid: str | None = None
                 if stat.S_ISREG(metadata.st_mode):
                     actual_mode = (
                         "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
                     )
-                    actual_oid = git_blob_oid(Path(child.path).read_bytes())
+                    descriptor = retain(
+                        os.open(name, file_flags, dir_fd=parent_descriptor)
+                    )
+                    signature = file_stat_signature(metadata)
+                    if file_stat_signature(os.fstat(descriptor)) != signature:
+                        raise OSError("file identity changed before read")
+                    payload = read_descriptor(descriptor)
+                    if (
+                        file_stat_signature(os.fstat(descriptor)) != signature
+                        or file_stat_signature(
+                            child_metadata(parent_descriptor, name)
+                        )
+                        != signature
+                    ):
+                        raise OSError("file changed during read")
+                    actual_oid = git_blob_oid(payload)
+                    files.append(
+                        CheckoutFileSeal(
+                            relative_path=relative,
+                            descriptor=descriptor,
+                            parent_descriptor=parent_descriptor,
+                            name=name,
+                            signature=signature,
+                            object_id=actual_oid,
+                        )
+                    )
                 elif stat.S_ISLNK(metadata.st_mode):
                     actual_mode = "120000"
-                    actual_oid = git_blob_oid(os.fsencode(os.readlink(child.path)))
+                    signature = file_stat_signature(metadata)
+                    target = os.fsencode(
+                        os.readlink(name, dir_fd=parent_descriptor)
+                    )
+                    if (
+                        file_stat_signature(
+                            child_metadata(parent_descriptor, name)
+                        )
+                        != signature
+                    ):
+                        raise OSError("symlink changed during read")
+                    actual_oid = git_blob_oid(target)
+                    symlinks.append(
+                        CheckoutSymlinkSeal(
+                            relative_path=relative,
+                            parent_descriptor=parent_descriptor,
+                            name=name,
+                            signature=signature,
+                            target=target,
+                        )
+                    )
+
+                if (
+                    tree_entry.object_type != "blob"
+                    or tree_entry.mode not in {"100644", "100755", "120000"}
+                    or actual_mode != tree_entry.mode
+                    or actual_oid != tree_entry.object_id
+                ):
+                    add_mismatch(relative)
             except OSError as exc:
-                errors.append(f"cannot read {display_filesystem_path(relative)}: {exc}")
-            if (
-                tree_entry.object_type != "blob"
-                or tree_entry.mode not in {"100644", "100755", "120000"}
-                or actual_mode != tree_entry.mode
-                or actual_oid != tree_entry.object_id
-            ):
-                mismatched.append(relative)
+                if expected.get(relative) is not None or relative in generated_roots:
+                    add_mismatch(relative)
+                errors.append(
+                    f"cannot observe {display_filesystem_path(relative)}: {exc}"
+                )
+
+        for seal in files:
+            try:
+                held_before = os.fstat(seal.descriptor)
+                held_oid = git_blob_oid(read_descriptor(seal.descriptor))
+                held_after = os.fstat(seal.descriptor)
+                current = child_metadata(seal.parent_descriptor, seal.name)
+                if (
+                    file_stat_signature(held_before) != seal.signature
+                    or file_stat_signature(held_after) != seal.signature
+                    or file_stat_signature(current) != seal.signature
+                    or held_oid != seal.object_id
+                ):
+                    raise OSError("file changed before checkout-wide barrier")
+            except OSError as exc:
+                add_mismatch(seal.relative_path)
+                errors.append(
+                    f"cannot verify {display_filesystem_path(seal.relative_path)}: {exc}"
+                )
+
+        for seal in symlinks:
+            try:
+                current = child_metadata(seal.parent_descriptor, seal.name)
+                target = os.fsencode(
+                    os.readlink(seal.name, dir_fd=seal.parent_descriptor)
+                )
+                rebound = child_metadata(seal.parent_descriptor, seal.name)
+                if (
+                    file_stat_signature(current) != seal.signature
+                    or file_stat_signature(rebound) != seal.signature
+                    or target != seal.target
+                ):
+                    raise OSError("symlink changed before checkout-wide barrier")
+            except OSError as exc:
+                add_mismatch(seal.relative_path)
+                errors.append(
+                    f"cannot verify {display_filesystem_path(seal.relative_path)}: {exc}"
+                )
+
+        for seal in reversed(directories):
+            try:
+                held_before = os.fstat(seal.descriptor)
+                current = (
+                    child_metadata(seal.parent_descriptor, seal.name)
+                    if seal.parent_descriptor is not None and seal.name is not None
+                    else repo.lstat()
+                )
+                if seal.generated_root:
+                    opening_identity = (
+                        seal.signature[0],
+                        seal.signature[1],
+                        stat.S_IFMT(seal.signature[2]),
+                    )
+                    if (
+                        entry_identity(held_before) != opening_identity
+                        or entry_identity(current) != opening_identity
+                    ):
+                        raise OSError(
+                            "generated-root changed before checkout-wide barrier"
+                        )
+                    continue
+                names = directory_names(seal.descriptor)
+                held_after = os.fstat(seal.descriptor)
+                if (
+                    file_stat_signature(held_before) != seal.signature
+                    or file_stat_signature(held_after) != seal.signature
+                    or file_stat_signature(current) != seal.signature
+                    or names != seal.names
+                ):
+                    raise OSError("directory changed before checkout-wide barrier")
+            except OSError as exc:
+                if seal.generated_root:
+                    add_mismatch(seal.relative_path)
+                errors.append(
+                    f"cannot verify directory "
+                    f"{display_filesystem_path(seal.relative_path or '.')}: {exc}"
+                )
+
+        for seal in files:
+            try:
+                if (
+                    file_stat_signature(os.fstat(seal.descriptor)) != seal.signature
+                    or file_stat_signature(
+                        child_metadata(seal.parent_descriptor, seal.name)
+                    )
+                    != seal.signature
+                ):
+                    raise OSError("file changed during final directory verification")
+            except OSError as exc:
+                add_mismatch(seal.relative_path)
+                errors.append(
+                    f"cannot reverify {display_filesystem_path(seal.relative_path)}: {exc}"
+                )
+    except (OSError, ValueError) as exc:
+        errors.append(f"cannot bind repository root: {exc}")
+    finally:
+        for descriptor in reversed(retained_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                errors.append(f"cannot close checkout descriptor {descriptor}: {exc}")
+        if fd_limit_raised:
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, original_fd_limits)
+            except (OSError, ValueError) as exc:
+                errors.append(f"cannot restore checkout descriptor limit: {exc}")
 
     missing = sorted(set(expected) - seen)
     unsupported = sorted(
@@ -1553,7 +1884,9 @@ def validate_source(
     git_inspector: PreparedInspector | None,
     git_ready: bool,
 ) -> dict[str, Any]:
-    snapshot: dict[str, Any] = {}
+    snapshot: dict[str, Any] = {
+        "checkoutObservation": dict(CHECKOUT_OBSERVATION_CONTRACT)
+    }
     if not isinstance(candidate, dict):
         audit.check("manifest:candidate", False, "object", type(candidate).__name__)
         return snapshot
@@ -1875,6 +2208,7 @@ def validate_checkout_final_barrier(
         "headAfter": head_after or after_error or None,
         "metadataSafe": metadata_safe,
         "helpersSafe": helpers_safe,
+        "observationContract": dict(CHECKOUT_OBSERVATION_CONTRACT),
         "checkout": checkout_details,
     }
     audit.check(
@@ -1884,6 +2218,7 @@ def validate_checkout_final_barrier(
             "tracked": "raw bytes/type/executable mode equal HEAD",
             "untracked": "none outside frozen generated roots",
             "observation": "after manifest-driven inspection",
+            "observationContract": dict(CHECKOUT_OBSERVATION_CONTRACT),
             "checkoutHead": expected_checkout_head,
         },
         details,

@@ -109,10 +109,10 @@ worktree-scoped helper becoming invisible to one Git command.
 |---|---|---|
 | effective Git configuration | checker-pinned system/global isolation plus repository config with no external helper and no `extensions.worktreeConfig` | common/worktree config enables a filter, fsmonitor, diff, pager or hook helper; config scope becomes ambiguous |
 | HEAD tree | immutable commit objects resolved by pinned Git with lazy fetch and replace objects disabled and no `info/grafts` file | HEAD/product/base/tree changes, fake-parent metadata appears, an object cannot be read, or a gitlink/unsupported tree entry appears |
-| tracked filesystem | raw file/symlink bytes, type and executable bit equal the HEAD tree | content/type/mode drift, missing path, `assume-unchanged` or `skip-worktree` attempts to hide drift |
+| tracked filesystem | descriptor-bound raw file/symlink bytes, type and executable bit equal the HEAD tree; entry identity and directory membership remain stable across the observation | content/type/mode drift, missing path, a post-stat pathname replacement, concurrent directory membership drift, or `assume-unchanged` / `skip-worktree` attempts to hide drift |
 | untracked filesystem | no extra non-directory entry outside the frozen generated-root allowlist; empty directories are inert because Git does not version them | `.git/info/exclude`, global excludes or ignore rules attempt to hide an extra entry; an allowlisted root is replaced by a symlink |
 | generated build roots | only the exact manifest-pinned roots; each may be absent or a real directory, and contents may change because APKs are separately byte-pinned | caller widens the roots, a root escapes the repository, or a non-directory occupies a root |
-| report + sidecar | external, non-aliasing, atomically replaced pair | either output collides with source, Git metadata, manifest, tools, runtime trees or the other output |
+| report + sidecar | external, non-aliasing, atomically replaced pair whose full resolved paths contain no CR or LF | either output path can inject a line-oriented record, or collides with source, Git metadata, manifest, tools, runtime trees or the other output |
 
 The resulting invariants are:
 
@@ -128,10 +128,10 @@ The resulting invariants are:
 
 The regression matrix covers normal checkout, common helper config,
 worktree-scoped helper config, `assume-unchanged`, `skip-worktree`, hidden
-untracked paths, executable-mode drift, generated roots and symlinked-root
-escape. The finish line is a host `PASS` only when all five invariants hold;
-artifact byte/signature checks remain separate, and device state remains
-`BLOCKED`.
+untracked paths, executable-mode drift, generated roots, symlinked-root escape,
+late drift in an already visited subtree and deep inert directory chains. The
+finish line is a host `PASS` only when all five invariants hold; artifact
+byte/signature checks remain separate, and device state remains `BLOCKED`.
 
 ## Immutable inspection-input Stateful Object Gate
 
@@ -148,9 +148,14 @@ barrier. This does not add an operating-system sandbox or device run.
 | prepared inspector | command dispatcher | execute only its private executable, remapped support paths/environment and frozen arguments | any pre-exec snapshot recheck fails; a command still names a shared frozen path |
 | APK source | artifact snapshot manager | one lexical no-symlink source descriptor → one private APK inode → unlink its pathname → verify frozen hash/size → independent aapt/apksigner descriptors → final source seal | frozen bytes/size mismatch, atomic replace, in-place change, snapshot mutation, or source identity/digest drift |
 | manifest/contract/schedule/ledger input | manifest loader / input validator | one nonblocking held-descriptor read plus final shared-source seal; only the exact manifest may select paths | malformed/non-regular input, untrusted path selection, or source identity/digest drift |
-| raw checkout | source validator | opening HEAD identity/raw scan → final HEAD-before/raw-scan/HEAD-after barrier bound to that identity | tracked/untracked drift or a same-tree HEAD switch appears in either scan |
+| raw checkout | source validator | opening HEAD identity/raw scan → final HEAD-before/iterative descriptor-bound scan/checkout-wide seal verification/reverse descriptor close/HEAD-after barrier | tracked/untracked drift, post-stat type replacement, late drift in an already visited subtree, descriptor cleanup failure, or a same-tree HEAD switch appears in either scan |
 | command evidence | audit recorder | record each direct dispatch using stable private-role tokens, spawn/return/decode outcome, classification and derived count | an unclassified/device-transport command is denied before dispatch, or child output is not strict UTF-8 |
 | retained/private resources | audit cleanup owner | own each retained source/copy/reader descriptor immediately on open → close registered descriptors → remove private snapshot root → encode report | any early/late registered-descriptor close or private-root removal failure |
+
+The checkout scan may temporarily raise only its own process soft
+`RLIMIT_NOFILE` to at most 16,384 and never above the existing hard limit. It
+closes the retained checkout descriptors and restores the original soft limit
+before returning; either cleanup or restoration failure invalidates the audit.
 
 The gate adds these invariants:
 
@@ -167,7 +172,10 @@ The gate adds these invariants:
   command dispatches, not emitted as an unconditional literal;
 - `INV-SNAPSHOT-6`: the raw checkout is rescanned after all manifest-driven
   inspection and `HEAD` must equal its opening value before and after that scan,
-  so late tracked/untracked drift or a same-tree commit switch is invalid;
+  while every visited directory and tracked regular-file descriptor remains
+  held through one checkout-wide membership/identity recheck. Late
+  tracked/untracked drift, generated-root replacement or a same-tree commit
+  switch is invalid;
 - `INV-SNAPSHOT-7`: ownership of retained source descriptors, private-copy
   descriptors and APK reader descriptors begins at open; their close failures
   and private-root removal failures are evidence failures and cannot be hidden
@@ -196,14 +204,24 @@ processes. The report therefore states that the checker directly dispatched
 zero device-transport commands and records that proof boundary; stronger
 absence claims require an OS sandbox or syscall trace outside this package.
 
+The shared source checkout must be quiescent for each raw-tree observation:
+do not run a build, checkout, formatter or other writer against it concurrently.
+The checker retains every visited directory and tracked-file binding through a
+checkout-wide recheck, so ordinary drift observed during traversal fails
+closed, but POSIX traversal is not an atomic filesystem snapshot. It does not
+claim to defeat a same-UID writer deliberately scheduled after an individual
+entry's final recheck. That stronger guarantee requires an OS/filesystem
+snapshot or write-denying sandbox outside this package.
+
 ## What can run now, without a device
 
 Use an evidence directory outside the source checkout. Before inspection, the
 checker rejects report/sidecar aliases and collisions with the source tree,
 manifest, linked-worktree/common Git metadata, pinned tool files or frozen
-runtime trees. Both outputs are staged before replacement, and a failed replace
-restores prior bytes. The audit reads Git state, APK files and the pinned host
-tools only.
+runtime trees. It also rejects CR or LF anywhere in either resolved output path
+before creating output state. Both outputs are staged before replacement, and
+a failed replace restores prior bytes. The audit reads Git state, APK files and
+the pinned host tools only.
 
 ```bash
 EVIDENCE_ROOT="$(mktemp -d)"

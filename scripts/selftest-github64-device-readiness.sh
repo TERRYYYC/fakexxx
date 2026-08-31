@@ -252,13 +252,14 @@ run_checker() {
     local apksigner_path=${5:-$TOOLS/apksigner}
     local signer_output=${6:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
     local source_repo=${7:-$FIXTURE}
+    local output_capture=${CHECKER_OUTPUT_CAPTURE:-/dev/null}
     python3 - "$PROD" "$manifest" "$source_repo" "$report" "$mode" \
         "$MANIFEST_SHA" "$PRODUCT_HEAD" "$PRODUCT_TREE" "$BASE_HEAD" \
         "$aapt_path" "$AAPT_TOOL_SHA" "$apksigner_path" "$APKSIGNER_TOOL_SHA" \
         "$signer_output" "$WORK/adb-called" "$TOOLS" "$LEDGER_SHA" \
         "$RUNTIME_TREE" "$RUNTIME_TREE_SHA" "$TOOLS/git" "$GIT_TOOL_SHA" \
         "$TOOLS/apksigner-support" "$APKSIGNER_SUPPORT_SHA" \
-        <<'PY' >/dev/null 2>&1
+        <<'PY' >"$output_capture" 2>&1
 import importlib.util
 import os
 from pathlib import Path
@@ -466,6 +467,12 @@ if run_checker "$MANIFEST" "$REPORT" audit; then
     if [ "$(json_value "$REPORT" hostStatus)" = PASS ] &&
        [ "$(json_value "$REPORT" overallStatus)" = BLOCKED ] &&
        [ "$(json_value "$REPORT" executedDeviceCommands)" = 0 ] &&
+       [ "$(json_value "$REPORT" source.checkoutObservation.scope)" = \
+         DESCRIPTOR_BOUND_SEQUENTIAL_OBSERVATION ] &&
+       [ "$(json_value "$REPORT" source.checkoutObservation.requiresQuiescentCheckout)" = \
+         True ] &&
+       [ "$(json_value "$REPORT" source.checkoutObservation.atomicFilesystemSnapshot)" = \
+         False ] &&
        (cd "$(dirname "$REPORT")" && shasum -a 256 -c "$(basename "$REPORT").sha256" >/dev/null 2>&1); then
         ok "P1 valid host package emits a sealed BLOCKED report"
     else
@@ -1066,6 +1073,103 @@ else
 fi
 rm -f "$NEWLINE_REPORT" "$NEWLINE_REPORT.sha256"
 
+NEWLINE_PARENT="$WORK/parent
+forgedKey=forgedValue"
+mkdir -p "$NEWLINE_PARENT"
+NEWLINE_PARENT_REPORT="$NEWLINE_PARENT/report.json"
+NEWLINE_PARENT_OUTPUT="$WORK/newline-parent-output.txt"
+if CHECKER_OUTPUT_CAPTURE="$NEWLINE_PARENT_OUTPUT" \
+   run_checker "$MANIFEST" "$NEWLINE_PARENT_REPORT" audit; then
+    NEWLINE_PARENT_RC=0
+else
+    NEWLINE_PARENT_RC=$?
+fi
+if [ "$NEWLINE_PARENT_RC" -eq 2 ] &&
+   [ ! -e "$NEWLINE_PARENT_REPORT" ] &&
+   [ ! -e "$NEWLINE_PARENT_REPORT.sha256" ] &&
+   ! grep -q 'forgedKey=forgedValue' "$NEWLINE_PARENT_OUTPUT"; then
+    ok "N6h newline-bearing report parent is rejected before writing"
+else
+    bad "N6h newline-bearing report parent" \
+        "rc=$NEWLINE_PARENT_RC, output was created, or a forged line escaped"
+fi
+
+RETURN_PARENT="$WORK/parent"$'\r'"forgedKey=carriage"
+mkdir -p "$RETURN_PARENT"
+RETURN_PARENT_REPORT="$RETURN_PARENT/report.json"
+RETURN_PARENT_OUTPUT="$WORK/return-parent-output.txt"
+if CHECKER_OUTPUT_CAPTURE="$RETURN_PARENT_OUTPUT" \
+   run_checker "$MANIFEST" "$RETURN_PARENT_REPORT" audit; then
+    RETURN_PARENT_RC=0
+else
+    RETURN_PARENT_RC=$?
+fi
+if [ "$RETURN_PARENT_RC" -eq 2 ] &&
+   [ ! -e "$RETURN_PARENT_REPORT" ] &&
+   [ ! -e "$RETURN_PARENT_REPORT.sha256" ] &&
+   python3 - "$RETURN_PARENT_OUTPUT" <<'PY'
+from pathlib import Path
+import sys
+assert b"\r" not in Path(sys.argv[1]).read_bytes()
+PY
+then
+    ok "N6i carriage-return report parent is rejected before writing"
+else
+    bad "N6i carriage-return report parent" \
+        "rc=$RETURN_PARENT_RC, output was created, or CR escaped"
+fi
+
+RESOLVED_NEWLINE_PARENT="$WORK/resolved
+forgedKey=resolvedValue"
+SAFE_PARENT_LINK="$WORK/safe-parent-link"
+mkdir -p "$RESOLVED_NEWLINE_PARENT"
+ln -s "$RESOLVED_NEWLINE_PARENT" "$SAFE_PARENT_LINK"
+RESOLVED_NEWLINE_REPORT="$SAFE_PARENT_LINK/report.json"
+RESOLVED_NEWLINE_OUTPUT="$WORK/resolved-newline-output.txt"
+if CHECKER_OUTPUT_CAPTURE="$RESOLVED_NEWLINE_OUTPUT" \
+   run_checker "$MANIFEST" "$RESOLVED_NEWLINE_REPORT" audit; then
+    RESOLVED_NEWLINE_RC=0
+else
+    RESOLVED_NEWLINE_RC=$?
+fi
+if [ "$RESOLVED_NEWLINE_RC" -eq 2 ] &&
+   [ ! -e "$RESOLVED_NEWLINE_REPORT" ] &&
+   [ ! -e "$RESOLVED_NEWLINE_REPORT.sha256" ] &&
+   ! grep -q 'forgedKey=resolvedValue' "$RESOLVED_NEWLINE_OUTPUT"; then
+    ok "N6j resolved newline-bearing report parent is rejected"
+else
+    bad "N6j resolved newline-bearing report parent" \
+        "rc=$RESOLVED_NEWLINE_RC, output was created, or a forged line escaped"
+fi
+
+SIDECAR_NEWLINE_PARENT="$WORK/sidecar
+forgedKey=sidecarValue"
+SIDECAR_SAFE_REPORT="$WORK/sidecar-safe-report.json"
+SIDECAR_LINK="$SIDECAR_SAFE_REPORT.sha256"
+SIDECAR_TARGET="$SIDECAR_NEWLINE_PARENT/original.sha256"
+SIDECAR_OUTPUT="$WORK/sidecar-newline-output.txt"
+mkdir -p "$SIDECAR_NEWLINE_PARENT"
+printf 'preserve sidecar target\n' > "$SIDECAR_TARGET"
+SIDECAR_TARGET_BEFORE="$(shasum -a 256 "$SIDECAR_TARGET" | awk '{print $1}')"
+ln -s "$SIDECAR_TARGET" "$SIDECAR_LINK"
+if CHECKER_OUTPUT_CAPTURE="$SIDECAR_OUTPUT" \
+   run_checker "$MANIFEST" "$SIDECAR_SAFE_REPORT" audit; then
+    SIDECAR_NEWLINE_RC=0
+else
+    SIDECAR_NEWLINE_RC=$?
+fi
+SIDECAR_TARGET_AFTER="$(shasum -a 256 "$SIDECAR_TARGET" | awk '{print $1}')"
+if [ "$SIDECAR_NEWLINE_RC" -eq 2 ] &&
+   [ ! -e "$SIDECAR_SAFE_REPORT" ] &&
+   [ -L "$SIDECAR_LINK" ] &&
+   [ "$SIDECAR_TARGET_BEFORE" = "$SIDECAR_TARGET_AFTER" ] &&
+   ! grep -q 'forgedKey=sidecarValue' "$SIDECAR_OUTPUT"; then
+    ok "N6k resolved newline-bearing sidecar path is rejected without mutation"
+else
+    bad "N6k resolved newline-bearing sidecar path" \
+        "rc=$SIDECAR_NEWLINE_RC, output changed, or a forged line escaped"
+fi
+
 rm -f "$WORK/adb-called"
 cat > "$TOOLS/device-touching-aapt" <<'SH'
 #!/usr/bin/env bash
@@ -1593,6 +1697,203 @@ then
     ok "N7p gitlinks are unsupported and fail closed"
 else
     bad "N7p gitlink policy" "synthetic 160000 entry was not rejected"
+fi
+
+if python3 - "$PROD" "$WORK/checkout-entry-swap-fixture" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("github64_checkout_swap_test", Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+root.mkdir()
+tracked = root / "tracked.txt"
+replacement_target = root.parent / "checkout-entry-same-bytes.txt"
+payload = b"expected bytes\n"
+tracked.write_bytes(payload)
+replacement_target.write_bytes(payload)
+expected = {
+    "tracked.txt": module.GitTreeEntry(
+        "100644", "blob", module.git_blob_oid(payload)
+    )
+}
+original_is_regular = module.stat.S_ISREG
+race_fired = [False]
+
+def is_regular_with_type_swap(mode):
+    result = original_is_regular(mode)
+    if result and not race_fired[0]:
+        tracked.unlink()
+        tracked.symlink_to(replacement_target)
+        race_fired[0] = True
+    return result
+
+module.stat.S_ISREG = is_regular_with_type_swap
+fd_root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+fd_count_before = len(os.listdir(fd_root))
+try:
+    clean, details = module.compare_checkout_to_tree(root, expected, frozenset())
+finally:
+    module.stat.S_ISREG = original_is_regular
+fd_count_after = len(os.listdir(fd_root))
+assert race_fired[0]
+assert tracked.is_symlink()
+assert not clean
+assert details["mismatched"]["paths"] == ["tracked.txt"]
+assert fd_count_after == fd_count_before
+PY
+then
+    ok "N7q descriptor-bound checkout scan rejects a post-stat type swap"
+else
+    bad "N7q checkout entry type-swap race" \
+        "a post-stat symlink replacement still matched the HEAD tree"
+fi
+
+if python3 - "$PROD" "$WORK/checkout-late-seal-fixture" <<'PY'
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("github64_checkout_late_seal_test", Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+fixture = Path(sys.argv[2])
+fixture.mkdir()
+
+def expected_file(payload):
+    return module.GitTreeEntry("100644", "blob", module.git_blob_oid(payload))
+
+def run_race(root, expected, generated_roots, trigger_payload, mutation):
+    original_git_blob_oid = module.git_blob_oid
+    race_fired = [False]
+
+    def git_blob_oid_with_late_mutation(payload):
+        result = original_git_blob_oid(payload)
+        if payload == trigger_payload and not race_fired[0]:
+            mutation()
+            race_fired[0] = True
+        return result
+
+    module.git_blob_oid = git_blob_oid_with_late_mutation
+    try:
+        clean, details = module.compare_checkout_to_tree(
+            root, expected, frozenset(generated_roots)
+        )
+    finally:
+        module.git_blob_oid = original_git_blob_oid
+    assert race_fired[0]
+    return clean, details
+
+tracked_root = fixture / "tracked"
+tracked_root.mkdir()
+early_payload = b"early bytes\n"
+late_payload = b"late trigger\n"
+(tracked_root / "a.txt").write_bytes(early_payload)
+(tracked_root / "z.txt").write_bytes(late_payload)
+tracked_clean, tracked_details = run_race(
+    tracked_root,
+    {
+        "a.txt": expected_file(early_payload),
+        "z.txt": expected_file(late_payload),
+    },
+    (),
+    late_payload,
+    lambda: (tracked_root / "a.txt").write_bytes(b"changed after local seal\n"),
+)
+
+untracked_root = fixture / "untracked"
+(untracked_root / "a").mkdir(parents=True)
+(untracked_root / "z.txt").write_bytes(late_payload)
+untracked_clean, untracked_details = run_race(
+    untracked_root,
+    {"z.txt": expected_file(late_payload)},
+    (),
+    late_payload,
+    lambda: (untracked_root / "a" / "late-untracked.txt").write_text(
+        "late untracked\n", encoding="utf-8"
+    ),
+)
+
+generated_root = fixture / "generated"
+(generated_root / "a" / "build").mkdir(parents=True)
+(generated_root / "z.txt").write_bytes(late_payload)
+external = fixture / "external-generated-target"
+external.mkdir()
+
+def replace_generated_root():
+    selected = generated_root / "a" / "build"
+    selected.rmdir()
+    selected.symlink_to(external, target_is_directory=True)
+
+generated_clean, generated_details = run_race(
+    generated_root,
+    {"z.txt": expected_file(late_payload)},
+    ("a/build",),
+    late_payload,
+    replace_generated_root,
+)
+
+assert not tracked_clean, json.dumps(tracked_details, sort_keys=True)
+assert not untracked_clean, json.dumps(untracked_details, sort_keys=True)
+assert not generated_clean, json.dumps(generated_details, sort_keys=True)
+PY
+then
+    ok "N7r checkout-wide final seals reject late drift in an earlier subtree"
+else
+    bad "N7r checkout-wide final seals" \
+        "late tracked, untracked, or generated-root drift escaped local seals"
+fi
+
+if python3 - "$PROD" "$WORK/deep-empty-checkout-fixture" <<'PY'
+import importlib.util
+import json
+import os
+from pathlib import Path
+import resource
+import sys
+
+spec = importlib.util.spec_from_file_location("github64_deep_checkout_test", Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+root.mkdir()
+directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+descriptor = os.open(root, directory_flags)
+try:
+    for _ in range(1100):
+        os.mkdir("d", dir_fd=descriptor)
+        child = os.open("d", directory_flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = child
+finally:
+    os.close(descriptor)
+fd_root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+original_limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (128, original_limits[1]))
+try:
+    fd_count_before = len(os.listdir(fd_root))
+    clean, details = module.compare_checkout_to_tree(root, {}, frozenset())
+    fd_count_after = len(os.listdir(fd_root))
+    restored_soft_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+finally:
+    resource.setrlimit(resource.RLIMIT_NOFILE, original_limits)
+assert clean, json.dumps(details, sort_keys=True)
+assert fd_count_after == fd_count_before
+assert restored_soft_limit == 128
+PY
+then
+    ok "N7s iterative checkout scan keeps deep empty directories inert"
+else
+    bad "N7s deep empty-directory checkout" \
+        "valid empty directories exceeded recursion or descriptor bounds"
 fi
 
 printf 'alternate candidate\n' > "$FIXTURE/alternate.txt"
