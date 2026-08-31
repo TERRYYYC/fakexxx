@@ -53,6 +53,8 @@ class EngineAdvanceRecoveryOracleTest {
     private val anchorVersion = 12L
 
     private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
+    private var applyCalls = 0
+    private var releaseCalls = 0
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = "item-recovery-3b", advancedToItemId = "item-after-9z",
         scheduleVersionAfter = 13L, effectiveIntentHash = "eff-recovery",
@@ -60,10 +62,14 @@ class EngineAdvanceRecoveryOracleTest {
     )
 
     private val journeyExecutor = object : ExternalApplyExecutor {
-        override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome =
-            ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
-        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome =
-            ApplyOutcome("RELEASED", false)
+        override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
+            applyCalls += 1
+            return ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
+        }
+        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome {
+            releaseCalls += 1
+            return ApplyOutcome("RELEASED", false)
+        }
         override fun discover(): CapabilitySnapshotV1? = CapabilitySnapshotV1(
             serviceVersion = "fake-1.0",
             supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
@@ -117,6 +123,21 @@ class EngineAdvanceRecoveryOracleTest {
         override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long) = null
     }
 
+    private class CountingNullEvidenceSource : com.example.cellrebelauto.automation.aplus.APlusEvidenceSource {
+        var preCalls = 0
+        var postCalls = 0
+        var completionCalls = 0
+
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) =
+            null.also { preCalls += 1 }
+
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) =
+            null.also { postCalls += 1 }
+
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long) =
+            null.also { completionCalls += 1 }
+    }
+
     @Before
     fun setUp() {
         db = Room.inMemoryDatabaseBuilder(
@@ -137,9 +158,15 @@ class EngineAdvanceRecoveryOracleTest {
         val delayMs: suspend (Long) -> Unit = { now += it }
     }
 
+    private enum class ReleaseProof { EXACT, MISSING, CONFLICTING }
+
     /** Seeds a plan/task plus a crashed attempt at [phase] with the full durable advance state:
-     *  anchor triple, trusted mint, persisted lease, Room apply receipt (operationId leg). */
-    private suspend fun seedCrashedAt(phase: String): Pair<Long, Long> {
+     *  anchor triple, trusted mint, persisted lease, Room apply receipt (operationId leg), and the
+     *  exact release receipt that MUST precede every ADVANCE_* checkpoint. */
+    private suspend fun seedCrashedAt(
+        phase: String,
+        releaseProof: ReleaseProof = ReleaseProof.EXACT
+    ): Pair<Long, Long> {
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(sourceFileName = "r.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1))
@@ -171,10 +198,68 @@ class EngineAdvanceRecoveryOracleTest {
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
         )
+        if (releaseProof != ReleaseProof.MISSING) {
+            val leaseId = "lease-$attemptId"
+            db.releaseReceiptDao().insertIfAbsent(
+                com.example.cellrebelauto.recovery.ReleaseReceiptRow(
+                    idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .releaseIdempotencyKey(attemptId),
+                    leaseId = leaseId,
+                    releaseDigest = if (releaseProof == ReleaseProof.EXACT) {
+                        com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                            .releaseDigest(leaseId)
+                    } else {
+                        "conflicting-release-digest"
+                    },
+                    resultOutcome = "RELEASED",
+                    createdAt = 1001L
+                )
+            )
+        }
         return planId to task.id
     }
 
-    private fun buildEngine(planId: Long, clock: VClock): AutomationEngine {
+    private suspend fun seedSingleTaskPlan(source: String): Pair<Long, Long> {
+        val planId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = source,
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 1,
+                totalRequiredSuccesses = 1
+            ),
+            listOf(
+                LocationTask(
+                    planId = 0,
+                    csvRow = 1,
+                    longitude = 116.4,
+                    latitude = 39.9,
+                    priority = 1,
+                    requiredSuccesses = 1
+                )
+            )
+        )
+        return planId to db.locationTaskDao().getTasksForPlan(planId).single().id
+    }
+
+    private fun installReleasePendingCrashTrigger(name: String) {
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER $name
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN NEW.aplusState = 'RELEASE_PENDING'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected crash before RELEASE_PENDING owner commit');
+            END
+            """.trimIndent()
+        )
+    }
+
+    private fun buildEngine(
+        planId: Long,
+        clock: VClock,
+        evidenceSource: com.example.cellrebelauto.automation.aplus.APlusEvidenceSource = minimalEvidenceSource
+    ): AutomationEngine {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
             journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
         )
@@ -194,7 +279,7 @@ class EngineAdvanceRecoveryOracleTest {
             nowMs = clock.nowMs, delayMs = clock.delayMs,
             attemptDriver = com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao()),
             recoveryCoordinator = coordinator,
-            completionEvidenceSource = minimalEvidenceSource,
+            completionEvidenceSource = evidenceSource,
             elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
         )
     }
@@ -241,6 +326,63 @@ class EngineAdvanceRecoveryOracleTest {
         assertEquals("no trusted terminal projection from an unproven advance", "running", attempt.status)
     }
 
+    private suspend fun assertAdvanceRecoveryRejectsReleaseProof(
+        phase: String,
+        releaseProof: ReleaseProof
+    ) {
+        val (planId, _) = seedCrashedAt(phase, releaseProof)
+
+        buildEngine(planId, VClock()).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "$phase must prove release-first from the exact durable tuple before any advance replay",
+            "RECOVERY_REQUIRED",
+            attempt.aplusState
+        )
+        assertEquals(
+            "$phase must retain the typed release-proof invariant failure",
+            "RELEASED_RECEIPT_MISSING_OR_CONFLICT",
+            attempt.failureReason
+        )
+        assertEquals("an unproven release checkpoint must remain non-terminal", "running", attempt.status)
+        assertEquals("an unproven release checkpoint must not close", null, attempt.endedAt)
+        assertEquals("release proof is a precondition: no advance may be dispatched", 0, advanceReplays.size)
+        assertEquals("recovery must not fresh-apply while proving release-first", 0, applyCalls)
+        assertEquals("recovery must not repair historical release proof by releasing again", 0, releaseCalls)
+        assertEquals("the owner session must pause on provenance failure", "paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `ADVANCE_PENDING with a missing release receipt pauses before replay`() = runTest {
+        assertAdvanceRecoveryRejectsReleaseProof("ADVANCE_PENDING", ReleaseProof.MISSING)
+    }
+
+    @Test
+    fun `ADVANCE_PENDING with a conflicting release receipt pauses before replay`() = runTest {
+        assertAdvanceRecoveryRejectsReleaseProof("ADVANCE_PENDING", ReleaseProof.CONFLICTING)
+    }
+
+    @Test
+    fun `ADVANCE_OBSERVING with a missing release receipt pauses before replay`() = runTest {
+        assertAdvanceRecoveryRejectsReleaseProof("ADVANCE_OBSERVING", ReleaseProof.MISSING)
+    }
+
+    @Test
+    fun `ADVANCE_OBSERVING with a conflicting release receipt pauses before replay`() = runTest {
+        assertAdvanceRecoveryRejectsReleaseProof("ADVANCE_OBSERVING", ReleaseProof.CONFLICTING)
+    }
+
+    @Test
+    fun `ADVANCE_STATE_READBACK with a missing release receipt pauses before replay`() = runTest {
+        assertAdvanceRecoveryRejectsReleaseProof("ADVANCE_STATE_READBACK", ReleaseProof.MISSING)
+    }
+
+    @Test
+    fun `ADVANCE_STATE_READBACK with a conflicting release receipt pauses before replay`() = runTest {
+        assertAdvanceRecoveryRejectsReleaseProof("ADVANCE_STATE_READBACK", ReleaseProof.CONFLICTING)
+    }
+
     @Test
     fun `a FORGED receipt digest fail-closes the recovery (R46 P1-2)`() = runTest {
         // The provider returns a receipt whose receiptDigest does NOT bind this request — the
@@ -282,6 +424,242 @@ class EngineAdvanceRecoveryOracleTest {
             "a receipt that does not bind this request is not a receipt — fail-closed (killing mutation: digest check removed ⇒ succeeded)",
             "RECOVERY_REQUIRED", attempt.aplusState
         )
+    }
+
+    @Test
+    fun `normal UNTRUSTED failure survives a crash after RELEASED without a fresh apply`() = runTest {
+        val (planId, taskId) = seedSingleTaskPlan("failure-continuation.csv")
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER abort_normal_failure_close
+            BEFORE UPDATE OF status ON test_attempts
+            WHEN NEW.aplusState = 'CLOSED' AND NEW.status = 'failed'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected crash between RELEASED and closeAplusFailure');
+            END
+            """.trimIndent()
+        )
+
+        // The null PRE from minimalEvidenceSource takes the real normal UNTRUSTED path. The trigger
+        // aborts only the atomic terminal projection; release + its exact receipt remain committed.
+        buildEngine(planId, VClock()).run()
+
+        val crashed = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("the injected crash boundary must be the post-release checkpoint", "RELEASED", crashed.aplusState)
+        assertEquals("the terminal transaction must have rolled back", "starting", crashed.status)
+        assertEquals("the terminal transaction must have rolled back", null, crashed.endedAt)
+        val durableContinuationReasonAtCrash = crashed.failureReason
+        assertNotNull(
+            "the exact release tuple must already be durable before terminal projection",
+            db.releaseReceiptDao().byLease(crashed.aplusLeaseId!!)
+        )
+        assertEquals("one normal apply reached the crash boundary", 1, applyCalls)
+        assertEquals("one normal release reached the crash boundary", 1, releaseCalls)
+
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER abort_normal_failure_close")
+
+        // Process restart: recover the same owner. Its typed continuation is safety state, so the
+        // engine must close it as UNTRUSTED and remain PAUSED — never reinterpret it as an ordinary
+        // interrupted retry and never enter the main loop to dispatch a fresh apply.
+        buildEngine(planId, VClock()).run()
+
+        val attemptsAfterRestart = db.testAttemptDao().getAttemptsForTask(crashed.taskId)
+        assertEquals("recovery must not mint a fresh attempt for a released typed failure", 1, attemptsAfterRestart.size)
+        assertEquals(
+            "the typed continuation must be durable before the terminal transaction starts",
+            "UNTRUSTED",
+            durableContinuationReasonAtCrash
+        )
+        val recovered = attemptsAfterRestart.single()
+        assertEquals("the original owner must close atomically", "CLOSED", recovered.aplusState)
+        assertEquals("the original failure remains a failure, never interrupted", "failed", recovered.status)
+        assertEquals("the original typed continuation reason must survive restart", "UNTRUSTED", recovered.failureReason)
+        assertEquals("restart must not fresh-apply", 1, applyCalls)
+        assertEquals("restart must not release the historical lease twice", 1, releaseCalls)
+        assertEquals("typed failure recovery remains fail-closed", "paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `normal typed failure crash before RELEASE_PENDING converges without evidence replay or fresh apply`() = runTest {
+        val (planId, taskId) = seedSingleTaskPlan("normal-pre-release-continuation.csv")
+        val source = CountingNullEvidenceSource()
+        installReleasePendingCrashTrigger("abort_normal_release_pending_owner")
+
+        // Null PRE enters the real normal UNTRUSTED branch. The trigger rejects the single
+        // failureReason + RELEASE_PENDING publication statement, so both fields must roll back.
+        buildEngine(planId, VClock(), source).run()
+
+        val checkpoint = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("the owner phase update was the injected crash point", "ENV_APPLIED", checkpoint.aplusState)
+        assertEquals(
+            "typed continuation and RELEASE_PENDING are one atomic boundary",
+            null,
+            checkpoint.failureReason
+        )
+        assertEquals("the owner remains non-terminal at the crash point", "starting", checkpoint.status)
+        assertEquals("release was not dispatched before its owner phase committed", 0, releaseCalls)
+        assertEquals("normal execution acquired PRE exactly once", 1, source.preCalls)
+        assertEquals("the original normal attempt applied once", 1, applyCalls)
+        assertEquals(null, db.releaseReceiptDao().byLease(checkpoint.aplusLeaseId!!))
+
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER abort_normal_release_pending_owner")
+
+        // Compatibility fixture for a split row produced by the previous build. New production
+        // writes cannot create it, but an upgrade must consume it before phase-shaped recovery.
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE test_attempts SET failureReason = 'UNTRUSTED' WHERE id = ${checkpoint.id}"
+        )
+
+        // Restart must consume the durable continuation before phase-shaped recovery. It may
+        // release and close this owner, but it may not reacquire evidence, mint another attempt,
+        // or return to the main loop for a fresh apply.
+        buildEngine(planId, VClock(), source).run()
+
+        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
+        assertEquals("restart must converge the same attempt", 1, attempts.size)
+        assertEquals("typed continuation bypasses PRE reacquisition", 1, source.preCalls)
+        assertEquals("typed continuation never requests POST", 0, source.postCalls)
+        assertEquals("typed continuation never requests completion evidence", 0, source.completionCalls)
+        assertEquals("restart must not fresh-apply", 1, applyCalls)
+        assertEquals("the historical lease is released exactly once", 1, releaseCalls)
+        assertEquals("typed failure must never mint quota", 0, db.trustedQuotaDao().trustedCountForTask(taskId))
+        val recovered = attempts.single()
+        assertEquals("CLOSED", recovered.aplusState)
+        assertEquals("failed", recovered.status)
+        assertEquals("UNTRUSTED", recovered.failureReason)
+        assertEquals("typed failure recovery remains paused", "paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `recovery typed failure crash before RELEASE_PENDING converges without reacquiring evidence`() = runTest {
+        val (planId, taskId) = seedSingleTaskPlan("recovery-pre-release-continuation.csv")
+        val sessionId = db.runSessionDao().insert(
+            RunSession(startedAt = 500L, planId = planId, status = "running")
+        )
+        val attemptId = 71L
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = attemptId,
+                taskId = taskId,
+                runSessionId = sessionId,
+                attemptOrdinal = 1,
+                successOrdinal = null,
+                startedAt = 600L,
+                runningObservedAt = null,
+                endedAt = null,
+                status = "starting",
+                failureReason = null,
+                webBrowsingScore = null,
+                videoStreamingScore = null,
+                latitude = 39.9,
+                longitude = 116.4,
+                aplusState = "ENV_APPLIED",
+                aplusLeaseId = "lease-$attemptId"
+            )
+        )
+        val source = CountingNullEvidenceSource()
+        installReleasePendingCrashTrigger("abort_recovery_release_pending_owner")
+
+        // ENV_APPLIED recovery classifies the unavailable PRE as UNTRUSTED. The trigger rejects
+        // the atomic continuation + RELEASE_PENDING publication, so neither field may leak.
+        buildEngine(planId, VClock(), source).run()
+
+        val checkpoint = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals("ENV_APPLIED", checkpoint.aplusState)
+        assertEquals(
+            "closeRecoveredAfterRelease must roll back both boundary fields together",
+            null,
+            checkpoint.failureReason
+        )
+        assertEquals("starting", checkpoint.status)
+        assertEquals("the first recovery acquired PRE once to classify the continuation", 1, source.preCalls)
+        assertEquals("release cannot run before RELEASE_PENDING commits", 0, releaseCalls)
+        assertEquals("a recovery attempt must not call apply", 0, applyCalls)
+
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER abort_recovery_release_pending_owner")
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE test_attempts SET failureReason = 'UNTRUSTED' WHERE id = $attemptId"
+        )
+
+        buildEngine(planId, VClock(), source).run()
+
+        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
+        assertEquals("second restart must converge the same recovery owner", 1, attempts.size)
+        assertEquals("durable continuation prevents a second PRE acquisition", 1, source.preCalls)
+        assertEquals("no POST evidence is needed", 0, source.postCalls)
+        assertEquals("no completion evidence is needed", 0, source.completionCalls)
+        assertEquals("recovery must never fall into a fresh normal apply", 0, applyCalls)
+        assertEquals("the old lease is released exactly once", 1, releaseCalls)
+        assertEquals("typed recovery failure must never mint quota", 0, db.trustedQuotaDao().trustedCountForTask(taskId))
+        val recovered = attempts.single()
+        assertEquals("CLOSED", recovered.aplusState)
+        assertEquals("failed", recovered.status)
+        assertEquals("UNTRUSTED", recovered.failureReason)
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `DECIDING anchor-missing pre-release failure stays sticky across two restarts`() = runTest {
+        val (planId, taskId) = seedSingleTaskPlan("deciding-anchor-sticky.csv")
+        val sessionId = db.runSessionDao().insert(
+            RunSession(startedAt = 500L, planId = planId, status = "running")
+        )
+        val attemptId = 81L
+        val anchorFailure = "ANCHOR_MISSING_QUOTA_MET:phase=DECIDING"
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = attemptId,
+                taskId = taskId,
+                runSessionId = sessionId,
+                attemptOrdinal = 1,
+                successOrdinal = null,
+                startedAt = 600L,
+                runningObservedAt = null,
+                endedAt = null,
+                status = "running",
+                failureReason = anchorFailure,
+                webBrowsingScore = null,
+                videoStreamingScore = null,
+                latitude = 39.9,
+                longitude = 116.4,
+                aplusState = "RECOVERY_REQUIRED",
+                aplusLeaseId = "lease-$attemptId"
+            )
+        )
+        db.trustedQuotaDao().insert(
+            com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+                attemptId = attemptId,
+                taskId = taskId,
+                evidenceDigest = "trusted-before-anchor-check",
+                committedAt = 9000L
+            )
+        )
+        val source = CountingNullEvidenceSource()
+
+        buildEngine(planId, VClock(), source).run()
+        val afterFirstRestart = db.testAttemptDao().getAttemptById(attemptId)!!
+        val firstReason = afterFirstRestart.failureReason
+
+        buildEngine(planId, VClock(), source).run()
+        val afterSecondRestart = db.testAttemptDao().getAttemptById(attemptId)!!
+
+        assertEquals("first restart must preserve the release-before anchor reason", anchorFailure, firstReason)
+        assertEquals("second restart must preserve the same reason", anchorFailure, afterSecondRestart.failureReason)
+        assertEquals("the invariant remains operator-owned and non-terminal", "RECOVERY_REQUIRED", afterSecondRestart.aplusState)
+        assertEquals("running", afterSecondRestart.status)
+        assertEquals(null, afterSecondRestart.endedAt)
+        assertEquals("a pre-release invariant must never call release", 0, releaseCalls)
+        assertEquals("a pre-release invariant must never call apply", 0, applyCalls)
+        assertEquals("a pre-release invariant must never dispatch advance", 0, advanceReplays.size)
+        assertEquals("a sticky invariant must not reacquire PRE", 0, source.preCalls)
+        assertEquals("a sticky invariant must not reacquire POST", 0, source.postCalls)
+        assertEquals("a sticky invariant must not reacquire completion", 0, source.completionCalls)
+        assertEquals("no release receipt may be synthesized", null, db.releaseReceiptDao().byLease("lease-$attemptId"))
+        val releaseAudit = db.auditEventDao().forAttempt(attemptId).filter {
+            it.eventType == "BEGIN_RELEASE" || it.eventType == "RELEASE_RECEIPT"
+        }
+        assertTrue("no release provenance may be synthesized", releaseAudit.isEmpty())
+        assertEquals("both restarts remain paused", "paused", db.runSessionDao().getLatest()!!.status)
     }
 
     // ====================================================================================

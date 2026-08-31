@@ -566,6 +566,139 @@ class CrashMatrixTest {
     }
 
     @Test
+    fun `RELEASE_PENDING with durable receipt and audit converges without duplicating release provenance`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASE_PENDING",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = 1L,
+                attemptId = 77L,
+                correlationRef = null,
+                eventType = "RELEASE_RECEIPT",
+                payloadDigest = "RELEASE_PENDING->CLOSED",
+                recordedAt = 900L
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val expectedReleaseDigest = APlusOperationIdentity.releaseDigest(LEASE_ID)
+        log.seedReleaseReceipt(
+            idempotencyKey = releaseKey(77L),
+            leaseId = LEASE_ID,
+            releaseDigest = expectedReleaseDigest,
+            outcome = "RELEASED",
+            createdAt = 900L
+        )
+
+        // Kill point: the provider receipt and release audit are durable, but the owner checkpoint
+        // write did not reach RELEASED. Restart must recognize that exact historical proof and
+        // converge the checkpoint/terminal projection without manufacturing a second release edge.
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource()),
+            attemptDriver = APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("the proven release must converge the owner", "CLOSED", recovered.aplusState)
+        assertEquals("the durable negative carrier still owns terminal truth", "failed", recovered.status)
+        assertEquals(
+            "recovery of an already-proven release must stay provider-free",
+            0,
+            executor.releaseInvocationCount(releaseKey(77L))
+        )
+        assertEquals(
+            "the exact historical release tuple must remain unchanged",
+            com.example.cellrebelauto.recovery.RecordedReleaseReceipt(
+                releaseKey(77L), LEASE_ID, expectedReleaseDigest, "RELEASED", 900L
+            ),
+            log.releaseReceiptFor(LEASE_ID)
+        )
+        val releaseAudits = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        assertEquals(
+            "receipt plus release audit already proves the transition; restart must not append a duplicate",
+            1,
+            releaseAudits.size
+        )
+        assertEquals("RELEASE_PENDING->CLOSED", releaseAudits.single().payloadDigest)
+    }
+
+    @Test
+    fun `release receipt audit rolls back when RELEASED owner checkpoint is ignored`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASE_PENDING",
+            aplusLeaseId = LEASE_ID
+        )
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER ignore_released_owner_checkpoint
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN OLD.id = 77 AND NEW.aplusState = 'RELEASED'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END
+            """.trimIndent()
+        )
+
+        // RAISE(IGNORE) makes the owner update affect zero rows without surfacing a SQLite error.
+        // The repository must detect that failed checkpoint and abort its Room transaction, so the
+        // audit inserted earlier in the same transaction cannot escape on its own.
+        var checkpointFailure: Throwable? = null
+        try {
+            repo.commitReleaseReceiptCheckpoint(77L, recordedAt = 900L)
+        } catch (failure: Throwable) {
+            checkpointFailure = failure
+        }
+        val phaseAfterInjectedFailure = db.testAttemptDao().getAttemptById(77L)!!.aplusState
+        val auditsAfterInjectedFailure = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER ignore_released_owner_checkpoint")
+        repo.commitReleaseReceiptCheckpoint(77L, recordedAt = 901L)
+
+        assertEquals(
+            "the ignored owner update must leave the owner at the pre-transaction phase",
+            "RELEASE_PENDING",
+            phaseAfterInjectedFailure
+        )
+        assertEquals(
+            "the audit insert and owner checkpoint are one transaction; both must roll back",
+            emptyList<AutoAuditEvent>(),
+            auditsAfterInjectedFailure
+        )
+        assertNotNull(
+            "a zero-row RELEASED checkpoint must abort instead of reporting a successful commit",
+            checkpointFailure
+        )
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("after removing the fault the owner checkpoint may commit", "RELEASED", recovered.aplusState)
+        val finalReleaseAudits = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        assertEquals("the successful retry writes exactly one release audit", 1, finalReleaseAudits.size)
+        assertEquals("RELEASE_PENDING->CLOSED", finalReleaseAudits.single().payloadDigest)
+        assertEquals("the rolled-back timestamp must not leak", 901L, finalReleaseAudits.single().recordedAt)
+    }
+
+    @Test
     fun `RELEASED recovery verifies the exact durable receipt without replaying release audit`() = runTest {
         val planId = seedPlan(taskId = 42L)
         seedAttempt(

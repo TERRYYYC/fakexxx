@@ -146,6 +146,24 @@ interface TestAttemptDao {
     @Query("UPDATE test_attempts SET aplusState = 'RECOVERY_REQUIRED', failureReason = :reason WHERE id = :attemptId")
     suspend fun markRecoveryRequired(attemptId: Long, reason: String)
 
+    /**
+     * Publish a terminal-failure continuation and its RELEASE_PENDING owner boundary together.
+     * A process may observe neither field or both fields, never a typed reason on an older phase.
+     */
+    @Query(
+        "UPDATE test_attempts SET failureReason = :reason, aplusState = 'RELEASE_PENDING' " +
+            "WHERE id = :attemptId AND status IN ('starting','running') " +
+            "AND aplusState NOT IN ('RELEASED','CLOSED','ADVANCE_PENDING','ADVANCE_OBSERVING','ADVANCE_STATE_READBACK')"
+    )
+    suspend fun markFailureContinuationAndReleasePending(attemptId: Long, reason: String): Int
+
+    /** RELEASE_PENDING → RELEASED CAS used by the atomic audit/checkpoint transaction. */
+    @Query(
+        "UPDATE test_attempts SET aplusState = 'RELEASED' " +
+            "WHERE id = :attemptId AND aplusState = 'RELEASE_PENDING'"
+    )
+    suspend fun markReleasedFromPending(attemptId: Long): Int
+
     /** Persist the provider-returned lease id (NOT derivable — must be durable, Sol round-8 P1-4). */
     @Query("UPDATE test_attempts SET aplusLeaseId = :leaseId WHERE id = :attemptId")
     suspend fun markAplusLease(attemptId: Long, leaseId: String)

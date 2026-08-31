@@ -9,6 +9,7 @@ import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.environment.hasStructurallyValidEffectiveCoordinates
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
@@ -256,6 +257,56 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markRecoveryRequired(attemptId: Long, reason: String) =
         db.testAttemptDao().markRecoveryRequired(attemptId, reason)
 
+    /**
+     * Persist the terminal intent before release. If the process dies after RELEASED but before the
+     * terminal projection, recovery can still close with the original typed reason instead of
+     * silently downgrading it to interrupted.
+     */
+    suspend fun markFailureContinuationAndReleasePending(attemptId: Long, reason: String) {
+        val updated = db.testAttemptDao().markFailureContinuationAndReleasePending(attemptId, reason)
+        check(updated == 1) {
+            "FAILURE_RELEASE_BOUNDARY_OWNER_INVALID: attempt=$attemptId"
+        }
+    }
+
+    /**
+     * Publish the RELEASE_RECEIPT audit edge and RELEASED owner checkpoint in one Room transaction.
+     * An old crash window may already contain the exact audit while the owner is RELEASE_PENDING;
+     * that exact legacy replay is repaired without appending a duplicate. Any divergent/duplicate
+     * provenance is an invariant break.
+     */
+    suspend fun commitReleaseReceiptCheckpoint(attemptId: Long, recordedAt: Long) = db.withTransaction {
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)
+            ?: throw IllegalStateException("RELEASE_CHECKPOINT_ATTEMPT_MISSING: attempt=$attemptId")
+        if (attempt.aplusState != "RELEASE_PENDING") {
+            throw IllegalStateException(
+                "RELEASE_CHECKPOINT_OWNER_INVALID: attempt=$attemptId phase=${attempt.aplusState}"
+            )
+        }
+        val expectedPayload = "RELEASE_PENDING->CLOSED"
+        val existing = db.auditEventDao().forAttempt(attemptId)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        when {
+            existing.isEmpty() -> db.auditEventDao().insert(
+                AutoAuditEvent(
+                    seq = db.auditEventDao().count().toLong() + 1L,
+                    attemptId = attemptId,
+                    correlationRef = null,
+                    eventType = "RELEASE_RECEIPT",
+                    payloadDigest = expectedPayload,
+                    recordedAt = recordedAt
+                )
+            )
+            existing.size == 1 && existing.single().payloadDigest == expectedPayload -> Unit
+            else -> throw IllegalStateException(
+                "RELEASE_CHECKPOINT_AUDIT_CONFLICT: attempt=$attemptId count=${existing.size}"
+            )
+        }
+        check(db.testAttemptDao().markReleasedFromPending(attemptId) == 1) {
+            "RELEASE_CHECKPOINT_OWNER_UPDATE_FAILED: attempt=$attemptId"
+        }
+    }
+
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
         db.testAttemptDao().markAplusLease(attemptId, leaseId)
 
@@ -310,6 +361,23 @@ class PlanRepository(private val db: AppDatabase) {
         snapshot: com.example.cellrebelauto.environment.ObservationSnapshot,
         aplusState: String
     ): com.example.cellrebelauto.environment.ObservationSnapshot = db.withTransaction {
+        val (requiredOwnerState, requiredNextState) = when (phase) {
+            "PRE" -> "ENV_APPLIED" to "PRE_OBSERVED"
+            else -> throw IllegalStateException(
+                "OBSERVATION_OWNER_PHASE_UNSUPPORTED: attempt=$attemptId phase=$phase"
+            )
+        }
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)
+            ?: throw IllegalStateException(
+                "OBSERVATION_OWNER_ATTEMPT_MISSING: attempt=$attemptId phase=$phase"
+            )
+        if (attempt.aplusState != requiredOwnerState || aplusState != requiredNextState) {
+            throw IllegalStateException(
+                "OBSERVATION_OWNER_STATE_INVALID: attempt=$attemptId phase=$phase " +
+                    "owner=${attempt.aplusState} required=$requiredOwnerState next=$aplusState " +
+                    "requiredNext=$requiredNextState"
+            )
+        }
         val durable = persistObservationInTransaction(attemptId, phase, snapshot)
         db.testAttemptDao().markAplusState(attemptId, aplusState)
         durable
@@ -335,6 +403,10 @@ class PlanRepository(private val db: AppDatabase) {
             attemptId,
             allowedPhases = setOf("POST_OBSERVE_PENDING", "DECIDING")
         )
+        db.durableObservationDao().forAttemptPhase(attemptId, "PRE")
+            ?: throw IllegalStateException(
+                "DECISION_PRE_MISSING: attempt=$attemptId cannot enter DECIDING"
+            )
         val durablePost = persistObservationInTransaction(attemptId, "POST", postObservation)
         val durableReceipt = persistCompletionReceiptInTransaction(
             attemptId, completionEvidenceWire, acceptedIntentHash, leaseId

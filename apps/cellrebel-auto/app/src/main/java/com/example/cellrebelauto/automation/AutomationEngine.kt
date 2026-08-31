@@ -131,7 +131,9 @@ class AutomationEngine(
         // # 单步操作失败后的最大重试次数
         private const val MAX_STEP_RETRIES = 3
         private const val RELEASED_RECEIPT_FAILURE = "RELEASED_RECEIPT_MISSING_OR_CONFLICT"
+        private const val RELEASE_CHECKPOINT_FAILURE = "RELEASE_CHECKPOINT_AUDIT_CONFLICT"
         private const val DECISION_CARRIER_FAILURE = "DECISION_CARRIER_CONFLICT"
+        private const val DECIDING_ANCHOR_FAILURE = "ANCHOR_MISSING_QUOTA_MET:phase=DECIDING"
     }
 
     // # 当前状态
@@ -910,6 +912,56 @@ class AutomationEngine(
             )
             return false
         }
+        if (crashed.aplusState == "RECOVERY_REQUIRED" &&
+            crashed.failureReason == RELEASE_CHECKPOINT_FAILURE
+        ) {
+            aplusPause(
+                "release checkpoint audit conflict remains unresolved for attempt ${crashed.id}"
+            )
+            return false
+        }
+        if (crashed.aplusState == "RECOVERY_REQUIRED" &&
+            crashed.failureReason == DECIDING_ANCHOR_FAILURE
+        ) {
+            aplusPause(
+                "pre-release DECIDING anchor invariant remains unresolved for attempt ${crashed.id}"
+            )
+            return false
+        }
+        if (crashed.aplusState == "RECOVERY_REQUIRED" &&
+            isPostReleaseAdvanceFailure(crashed.failureReason)
+        ) {
+            if (!hasExactDurableReleaseReceipt(crashed.id, coordinator)) {
+                planRepository.markRecoveryRequired(crashed.id, RELEASED_RECEIPT_FAILURE)
+                aplusPause(
+                    "post-release advance failure lacks exact release proof for attempt ${crashed.id}"
+                )
+                return false
+            }
+            aplusPause(
+                "post-release advance failure remains operator-visible for attempt ${crashed.id}: " +
+                    crashed.failureReason
+            )
+            return false
+        }
+
+        // Compatibility for a crash produced by an older build between its standalone typed
+        // continuation write and RELEASE_PENDING owner write. New writes commit those two fields
+        // in one SQL statement, but an already-durable split row must still converge without
+        // reacquiring evidence, re-deciding, or returning to the main loop for a fresh apply.
+        if (isTerminalFailureContinuation(crashed.failureReason) &&
+            crashed.aplusState in setOf(
+                "APPLY_PENDING", "ENV_APPLIED", "PRE_OBSERVED", "CELLREBEL_START_PENDING",
+                "CELLREBEL_RUNNING", "POST_OBSERVE_PENDING", "DECIDING", "RECOVERY_REQUIRED"
+            )
+        ) {
+            return closeRecoveredAfterRelease(
+                crashed,
+                AttemptState.valueOf(crashed.aplusState!!),
+                AttemptEvent.RECONCILE,
+                crashed.failureReason
+            )
+        }
 
         // ==================== DECIDING: re-decide from DURABLE DB carriers (M-CR-06, R43 GREEN) ====================
         // The §8.1 TRUST_POLICY_PASS transaction crashed before commit. At DECIDING the durable
@@ -952,12 +1004,37 @@ class AutomationEngine(
             // verification + receipt-digest binding. The provider's idempotency returns the
             // STORED receipt for the same key; a crash never pushes a second advance.
             "ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK" -> {
-                if (planRepository.getTrustedEntry(crashed.id) == null) {
+                if (!hasExactDurableReleaseReceipt(crashed.id, coordinator)) {
+                    planRepository.markRecoveryRequired(crashed.id, RELEASED_RECEIPT_FAILURE)
+                    aplusPause(
+                        "ADVANCE_* recovery lacks exact durable release proof for attempt ${crashed.id}"
+                    )
+                    return false
+                }
+                val advanceTrusted = planRepository.getTrustedEntry(crashed.id)
+                val advanceUnverified = planRepository.getUnverifiedRecord(crashed.id)
+                if (advanceTrusted != null && advanceUnverified != null) {
+                    return failPostReleaseAdvance(
+                        crashed.id,
+                        "ADVANCE_DECISION_CARRIER_CONFLICT",
+                        "ADVANCE_* crash has conflicting trusted + unverified carriers for attempt ${crashed.id}"
+                    )
+                }
+                if (advanceTrusted == null) {
                     // The advance only ever runs quota-reached — a missing mint here is an
                     // invariant break, fail-closed (never advance without the ledger authority).
-                    planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
-                    aplusPause("ADVANCE_* crash without a durable trusted mint for attempt ${crashed.id} — invariant break")
-                    return false
+                    return failPostReleaseAdvance(
+                        crashed.id,
+                        "ADVANCE_TRUSTED_CARRIER_MISSING",
+                        "ADVANCE_* crash without a durable trusted mint for attempt ${crashed.id} — invariant break"
+                    )
+                }
+                if (advanceTrusted.taskId != crashed.taskId) {
+                    return failPostReleaseAdvance(
+                        crashed.id,
+                        "ADVANCE_TRUSTED_CARRIER_TASK_MISMATCH",
+                        "ADVANCE_* trusted carrier task mismatch for attempt ${crashed.id}"
+                    )
                 }
                 // INV-23: the intent digest recompute from the persisted attempt owner state —
                 // the same inputs the original apply digested.
@@ -966,10 +1043,11 @@ class AutomationEngine(
                 // null at ADVANCE_* is an invariant break (anchor is set before apply).
                 val anchorScheduleRef = crashed.aplusAnchorScheduleId
                     ?: run {
-                        planRepository.markRecoveryRequired(crashed.id,
-                            "ANCHOR_MISSING_QUOTA_MET:phase=${crashed.aplusState}")
-                        aplusPause("ADVANCE_* recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed")
-                        return false
+                        return failPostReleaseAdvance(
+                            crashed.id,
+                            "ADVANCE_ANCHOR_SCHEDULE_REF_MISSING",
+                            "ADVANCE_* recovery: attempt ${crashed.id} has no anchored scheduleRef — fail-closed"
+                        )
                     }
                 val intentDigest = APlusOperationIdentity.requestDigest(
                     APlusOperationIdentity.intent(
@@ -1091,15 +1169,7 @@ class AutomationEngine(
             // RELEASE_RECEIPT/CLOSED audit edge. The typed RECOVERY_REQUIRED result stays on this
             // same read-only path on every later restart, so a missing historical receipt can never
             // be "repaired" by invoking the provider and fabricating a new one.
-            val leaseId = planRepository.getAplusLeaseId(crashed.id)
-            val exactReceipt = leaseId?.let {
-                coordinator.exactDurableReleaseReceipt(
-                    APlusOperationIdentity.releaseIdempotencyKey(crashed.id),
-                    it,
-                    APlusOperationIdentity.releaseDigest(it)
-                )
-            }
-            if (exactReceipt == null) {
+            if (!hasExactDurableReleaseReceipt(crashed.id, coordinator)) {
                 planRepository.markRecoveryRequired(crashed.id, RELEASED_RECEIPT_FAILURE)
                 aplusPause(
                     "RELEASED checkpoint lacks its exact durable receipt for attempt ${crashed.id}"
@@ -1165,10 +1235,24 @@ class AutomationEngine(
         releaseEvent: AttemptEvent,
         failureReason: String?
     ): Boolean {
-        if (!aplusReleaseLease(crashed.id, sourceState, releaseEvent)) return false
+        if (failureReason != null) {
+            if (sourceState != AttemptState.RELEASE_PENDING) {
+                attemptDriver?.driveTransition(crashed.id, sourceState, releaseEvent)
+            }
+            planRepository.markFailureContinuationAndReleasePending(crashed.id, failureReason)
+            if (!aplusReleaseLease(crashed.id, AttemptState.RELEASE_PENDING)) return false
+        } else if (!aplusReleaseLease(crashed.id, sourceState, releaseEvent)) {
+            return false
+        }
         planRepository.closeRecoveredAttempt(crashed.id, nowMs(), failureReason)
         val projection = if (failureReason == null) "interrupted for clean retry" else "failed:$failureReason"
         log("A+ recovery: attempt ${crashed.id} durably released + CLOSED ($projection)")
+        if (failureReason != null) {
+            aplusPause(
+                "recovered typed failure for attempt ${crashed.id}: $failureReason"
+            )
+            return false
+        }
         return true
     }
 
@@ -1387,9 +1471,11 @@ class AutomationEngine(
         // Conflicting append-only truths (both a trusted mint AND an unverified record) are a fail-closed
         // invariant break (§8.1 PASS/FAIL are mutually exclusive), never silently promoted to trusted.
         if (trusted != null && unverified != null) {
-            planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
-            aplusPause("conflicting trusted + unverified carriers for attempt ${crashed.id}")
-            return false
+            return failPostReleaseAdvance(
+                crashed.id,
+                "ADVANCE_DECISION_CARRIER_CONFLICT",
+                "conflicting trusted + unverified carriers for attempt ${crashed.id}"
+            )
         }
         when {
             trusted != null && trusted.taskId == crashed.taskId -> {
@@ -1408,9 +1494,11 @@ class AutomationEngine(
                 // is unreachable without a lifecycle violation. Fail-closed unconditionally.
                 val task = planRepository.getTask(crashed.taskId)
                 if (task == null) {
-                    planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
-                    aplusPause("trusted recovery: task ${crashed.taskId} not found for attempt ${crashed.id} — invariant break")
-                    return false
+                    return failPostReleaseAdvance(
+                        crashed.id,
+                        "ADVANCE_TASK_MISSING",
+                        "trusted recovery: task ${crashed.taskId} not found for attempt ${crashed.id} — invariant break"
+                    )
                 }
                 val trustedCount = planRepository.trustedCountForTaskPublic(crashed.taskId)
                 val anchor = planRepository.getAplusAdvanceAnchor(crashed.id)
@@ -1420,10 +1508,11 @@ class AutomationEngine(
                     // exists but scheduleId column null = structural inconsistency.
                     val anchorScheduleRef = crashed.aplusAnchorScheduleId
                         ?: run {
-                            planRepository.markRecoveryRequired(crashed.id,
-                                "ANCHOR_MISSING_QUOTA_MET:phase=${crashed.aplusState}")
-                            aplusPause("TRUSTED recovery: attempt ${crashed.id} has quota-met + anchor but no scheduleRef — invariant break")
-                            return false
+                            return failPostReleaseAdvance(
+                                crashed.id,
+                                "ADVANCE_ANCHOR_SCHEDULE_REF_MISSING",
+                                "TRUSTED recovery: attempt ${crashed.id} has quota-met + anchor but no scheduleRef — invariant break"
+                            )
                         }
                     val intentDigest = APlusOperationIdentity.requestDigest(
                         APlusOperationIdentity.intent(
@@ -1443,22 +1532,39 @@ class AutomationEngine(
                     // reads DECIDING. The normal path sets anchor BEFORE trust evaluation
                     // (L355-L375), so trustedCount>=required with anchor=null is unreachable
                     // without a lifecycle violation. Fail-closed unconditionally.
-                    planRepository.markRecoveryRequired(crashed.id,
-                        "ANCHOR_MISSING_QUOTA_MET:phase=${crashed.aplusState}")
-                    aplusPause("trusted recovery: anchor missing with quota met for attempt ${crashed.id} (snapshot phase=${crashed.aplusState}) — invariant break")
-                    return false
+                    return failPostReleaseAdvance(
+                        crashed.id,
+                        "ADVANCE_ANCHOR_MISSING",
+                        "trusted recovery: anchor missing with quota met for attempt ${crashed.id} (snapshot phase=${crashed.aplusState}) — invariant break"
+                    )
                 }
                 planRepository.closeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
             }
             trusted != null && trusted.taskId != crashed.taskId -> {
                 // A wrong-task carrier violates §7.1 attempt+task binding → fail-closed, never succeeded.
-                planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
-                aplusPause("trusted carrier taskId mismatch for attempt ${crashed.id} (${trusted.taskId} != ${crashed.taskId})")
-                return false
+                return failPostReleaseAdvance(
+                    crashed.id,
+                    "ADVANCE_TRUSTED_CARRIER_TASK_MISMATCH",
+                    "trusted carrier taskId mismatch for attempt ${crashed.id} (${trusted.taskId} != ${crashed.taskId})"
+                )
             }
             unverified != null ->
                 planRepository.closeAplusFailure(crashed.id, FailureReason.UNTRUSTED.name, nowMs())
-            else -> planRepository.closeRecoveredAttempt(crashed.id, nowMs(), failureReason = null)
+            else -> {
+                // A RELEASED owner without a decision carrier can only be a normal/recovery
+                // failure that persisted its typed terminal intent before release. Preserve that
+                // public reason verbatim; an implementation-only prefix would corrupt the durable
+                // failure projection visible during the crash window.
+                val continuation = crashed.failureReason
+                if (continuation != null) {
+                    planRepository.closeAplusFailure(crashed.id, continuation, nowMs())
+                    aplusPause(
+                        "recovered typed failure continuation for attempt ${crashed.id}: $continuation"
+                    )
+                    return false
+                }
+                planRepository.closeRecoveredAttempt(crashed.id, nowMs(), failureReason = null)
+            }
         }
         // Sol R2 P1-1: remove scheduleAdvanced gate from recovery. The gate was designed for
         // the NORMAL path ("should we take the next address?") — its TrustedQuotaAcquirer checks
@@ -1493,7 +1599,19 @@ class AutomationEngine(
         webScore: Double?,
         videoScore: Double?
     ): Boolean {
-        if (!aplusReleaseLease(attemptId, releaseFromState)) return false
+        if (!success) {
+            if (releaseFromState != AttemptState.RELEASE_PENDING) {
+                attemptDriver?.driveTransition(
+                    attemptId, releaseFromState, AttemptEvent.BEGIN_RELEASE
+                )
+            }
+            planRepository.markFailureContinuationAndReleasePending(
+                attemptId, reason ?: FailureReason.UNTRUSTED.name
+            )
+            if (!aplusReleaseLease(attemptId, AttemptState.RELEASE_PENDING)) return false
+        } else if (!aplusReleaseLease(attemptId, releaseFromState)) {
+            return false
+        }
         if (success) {
             planRepository.closeAplusSuccess(attemptId, taskId, endedAt, webScore, videoScore)
         } else {
@@ -1524,23 +1642,30 @@ class AutomationEngine(
         intentDigest: String
     ): Boolean {
         val coordinator = recoveryCoordinator ?: run {
-            aplusPause("no coordinator to advance attempt $attemptId")
-            return false
+            return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_COORDINATOR_MISSING",
+                "no coordinator to advance attempt $attemptId"
+            )
         }
         val task = planRepository.getTask(taskId)
         if (task == null) {
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("task $taskId missing for attempt $attemptId — cannot build the advance proof")
-            return false
+            return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_TASK_MISSING",
+                "task $taskId missing for attempt $attemptId — cannot build the advance proof"
+            )
         }
         // R45 (Sol R45 P1-3): the CAS triple is REPLAYED byte-for-byte from the attempt-open
         // anchor — never re-discovered here — and requestDigest is the canonical ADVANCE framing
         // (CanonicalAdvanceDigestV1), NOT the apply intent digest.
         val anchor = planRepository.getAplusAdvanceAnchor(attemptId)
         if (anchor == null) {
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("advance anchor missing for attempt $attemptId — cannot build the CAS request (fail-closed)")
-            return false
+            return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_ANCHOR_MISSING",
+                "advance anchor missing for attempt $attemptId — cannot build the CAS request (fail-closed)"
+            )
         }
         // §6.7.4a: the lease field is the HISTORICAL reference to where the quota was earned
         // (the release already made it RELEASED before the advance was first dispatched).
@@ -1569,9 +1694,11 @@ class AutomationEngine(
         if (advanceReceipt == null) {
             // Fail-closed: the provider could not prove the advance — the quota is committed
             // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("completeAndAdvance not proven for attempt $attemptId — schedule did not advance")
-            return false
+            return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_NOT_PROVEN",
+                "completeAndAdvance not proven for attempt $attemptId — schedule did not advance"
+            )
         }
         // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
         // (requestDigest, idempotencyKey) together with the outcome the provider claims.
@@ -1579,9 +1706,11 @@ class AutomationEngine(
             advanceReceipt, advanceRequest.requestDigest, advanceRequest.idempotencyKey
         )
         if (advanceReceipt.receiptDigest != expectedReceiptDigest) {
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("advance receipt digest mismatch for attempt $attemptId — the receipt does not bind this request")
-            return false
+            return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_RECEIPT_DIGEST_MISMATCH",
+                "advance receipt digest mismatch for attempt $attemptId — the receipt does not bind this request"
+            )
         }
         // R45 (Sol R45 P1-5 / §6.7.5): the receipt is the provider's SELF-DESCRIPTION, not proof
         // the environment moved. Independent verification is mandatory — non-terminal: observe()
@@ -1595,9 +1724,11 @@ class AutomationEngine(
             // recovery-shaped fallback.
             val operationId = verbatimOperationId ?: planRepository.getApplyOperationId(attemptId)
             if (operationId == null) {
-                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-                aplusPause("apply operationId missing for attempt $attemptId — cannot observe the new environment")
-                return false
+                return failPostReleaseAdvance(
+                    attemptId,
+                    "ADVANCE_OPERATION_ID_MISSING",
+                    "apply operationId missing for attempt $attemptId — cannot observe the new environment"
+                )
             }
             val observed = coordinator.executorBackend().observe(
                 advanceLease, operationId, advanceReceipt.effectiveIntentHash
@@ -1614,9 +1745,11 @@ class AutomationEngine(
                 else -> null
             }
             if (mismatchLeg != null) {
-                planRepository.markRecoveryRequired(attemptId, "OBSERVED_TUPLE_MISMATCH:$mismatchLeg")
-                aplusPause("post-advance observe mismatch for attempt $attemptId — leg $mismatchLeg does not match receipt (OBSERVED_TUPLE_MISMATCH)")
-                return false
+                return failPostReleaseAdvance(
+                    attemptId,
+                    "OBSERVED_TUPLE_MISMATCH:$mismatchLeg",
+                    "post-advance observe mismatch for attempt $attemptId — leg $mismatchLeg does not match receipt (OBSERVED_TUPLE_MISMATCH)"
+                )
             }
         } else {
             planRepository.markAplusState(attemptId, "ADVANCE_STATE_READBACK")
@@ -1635,12 +1768,45 @@ class AutomationEngine(
                 else -> null
             }
             if (readbackMismatchLeg != null) {
-                planRepository.markRecoveryRequired(attemptId, "READBACK_TUPLE_MISMATCH:$readbackMismatchLeg")
-                aplusPause("exhausted readback mismatch for attempt $attemptId — leg $readbackMismatchLeg (READBACK_TUPLE_MISMATCH)")
-                return false
+                return failPostReleaseAdvance(
+                    attemptId,
+                    "READBACK_TUPLE_MISMATCH:$readbackMismatchLeg",
+                    "exhausted readback mismatch for attempt $attemptId — leg $readbackMismatchLeg (READBACK_TUPLE_MISMATCH)"
+                )
             }
         }
         return true
+    }
+
+    private fun isPostReleaseAdvanceFailure(reason: String?): Boolean = reason?.let {
+        it.startsWith("ADVANCE_") ||
+            it.startsWith("OBSERVED_TUPLE_MISMATCH:") ||
+            it.startsWith("READBACK_TUPLE_MISMATCH:")
+    } == true
+
+    private fun isTerminalFailureContinuation(reason: String?): Boolean =
+        reason != null && FailureReason.values().any { it.name == reason }
+
+    private suspend fun failPostReleaseAdvance(
+        attemptId: Long,
+        reason: String,
+        message: String
+    ): Boolean {
+        planRepository.markRecoveryRequired(attemptId, reason)
+        aplusPause(message)
+        return false
+    }
+
+    private suspend fun hasExactDurableReleaseReceipt(
+        attemptId: Long,
+        coordinator: RecoveryCoordinator
+    ): Boolean {
+        val leaseId = planRepository.getAplusLeaseId(attemptId) ?: return false
+        return coordinator.exactDurableReleaseReceipt(
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+            leaseId,
+            APlusOperationIdentity.releaseDigest(leaseId)
+        ) != null
     }
 
     /**
@@ -1681,8 +1847,13 @@ class AutomationEngine(
             aplusPause("release receipt not durable for attempt $attemptId")
             return false
         }
-        attemptDriver?.driveTransition(attemptId, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_RECEIPT)
-        planRepository.markAplusState(attemptId, "RELEASED")
+        try {
+            planRepository.commitReleaseReceiptCheckpoint(attemptId, nowMs())
+        } catch (e: IllegalStateException) {
+            planRepository.markRecoveryRequired(attemptId, RELEASE_CHECKPOINT_FAILURE)
+            aplusPause("release audit/checkpoint conflict for attempt $attemptId: ${e.message}")
+            return false
+        }
         return true
     }
 

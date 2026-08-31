@@ -7,6 +7,7 @@ import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
 import com.example.cellrebelauto.model.ledger.DurableObservationRecord
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
@@ -60,6 +61,7 @@ class EngineQuotaRecoveryRedTest {
     private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
     private var applyInvocations = 0
     private var releaseInvocations = 0
+    private var observedScheduleItemOverride: String? = null
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = "item-after-9z",
         scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-quota-recovery",
@@ -108,7 +110,8 @@ class EngineQuotaRecoveryRedTest {
                 effectiveLatitude = null, effectiveLongitude = null, isMock = true,
                 scheduleDecisionWire = ScheduleDecisionV1.ALLOWED_NOW.wire,
                 evidenceRefs = emptyList(),
-                scheduleItemId = r.advancedToItemId!!, scheduleVersion = r.scheduleVersionAfter
+                scheduleItemId = observedScheduleItemOverride ?: r.advancedToItemId!!,
+                scheduleVersion = r.scheduleVersionAfter
             )
         }
         override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
@@ -131,6 +134,7 @@ class EngineQuotaRecoveryRedTest {
         advanceReplays.clear()
         applyInvocations = 0
         releaseInvocations = 0
+        observedScheduleItemOverride = null
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
@@ -230,6 +234,149 @@ class EngineQuotaRecoveryRedTest {
             recoveryCoordinator = coordinator,
             completionEvidenceSource = minimalEvidenceSource,
             elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
+        )
+    }
+
+    private data class AdvanceCarrierRecoverySnapshot(
+        val phase: String?,
+        val reason: String?,
+        val status: String,
+        val endedAt: Long?,
+        val attemptCount: Int
+    )
+
+    private suspend fun assertSeededAdvanceInvariantStaysSticky(
+        planId: Long,
+        ownerTaskId: Long,
+        phase: String,
+        expectedReason: String
+    ) {
+        db.testAttemptDao().markAplusState(31L, phase)
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = 1L,
+                attemptId = 31L,
+                correlationRef = null,
+                eventType = "RELEASE_RECEIPT",
+                payloadDigest = "RELEASE_PENDING->CLOSED",
+                recordedAt = 1001L
+            )
+        )
+        val auditBeforeRestart = db.auditEventDao().forAttempt(31L)
+        val snapshots = mutableListOf<AdvanceCarrierRecoverySnapshot>()
+
+        repeat(2) {
+            buildEngine(planId, VClock()).run()
+            val owner = db.testAttemptDao().getAttemptById(31L)!!
+            snapshots += AdvanceCarrierRecoverySnapshot(
+                phase = owner.aplusState,
+                reason = owner.failureReason,
+                status = owner.status,
+                endedAt = owner.endedAt,
+                attemptCount = db.testAttemptDao().getAttemptsForTask(ownerTaskId).size
+            )
+        }
+
+        assertEquals(
+            "$phase invariant must stay RECOVERY_REQUIRED on the first and second restart",
+            listOf("RECOVERY_REQUIRED", "RECOVERY_REQUIRED"),
+            snapshots.map { it.phase }
+        )
+        assertEquals(
+            "$phase invariant must retain one typed reason across restarts",
+            listOf(expectedReason, expectedReason),
+            snapshots.map { it.reason }
+        )
+        assertEquals(
+            "$phase invariant must never terminalize or close the owner",
+            listOf("running", "running"),
+            snapshots.map { it.status }
+        )
+        assertEquals(listOf(null, null), snapshots.map { it.endedAt })
+        assertEquals(
+            "$phase invariant must never let recovery create a fresh attempt",
+            listOf(1, 1),
+            snapshots.map { it.attemptCount }
+        )
+        assertEquals("release proof is read-only; provider release must remain zero", 0, releaseInvocations)
+        assertEquals("advance invariant must stop before any fresh apply", 0, applyInvocations)
+        assertEquals("advance invariant must stop before any advance replay", 0, advanceReplays.size)
+        assertEquals(
+            "$phase invariant must not append synthetic release provenance",
+            auditBeforeRestart,
+            db.auditEventDao().forAttempt(31L)
+        )
+    }
+
+    private suspend fun assertAdvanceCarrierFailureStaysSticky(
+        phase: String,
+        wrongTaskCarrier: Boolean = false
+    ) {
+        val (planId, ownerTaskId) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
+        db.openHelper.writableDatabase.execSQL(
+            "DELETE FROM trusted_quota_entries WHERE attemptId = 31"
+        )
+        val expectedReason = if (wrongTaskCarrier) {
+            val wrongTaskId = db.planDao().insertTasks(
+                listOf(
+                    LocationTask(
+                        planId = planId,
+                        csvRow = 2,
+                        longitude = 117.0,
+                        latitude = 40.0,
+                        priority = 2,
+                        requiredSuccesses = 1
+                    )
+                )
+            ).single()
+            db.trustedQuotaDao().insert(
+                com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+                    attemptId = 31L,
+                    taskId = wrongTaskId,
+                    evidenceDigest = "wrong-task-carrier",
+                    committedAt = 9000L
+                )
+            )
+            "ADVANCE_TRUSTED_CARRIER_TASK_MISMATCH"
+        } else {
+            "ADVANCE_TRUSTED_CARRIER_MISSING"
+        }
+        assertSeededAdvanceInvariantStaysSticky(planId, ownerTaskId, phase, expectedReason)
+    }
+
+    private suspend fun assertAdvanceDecisionCarrierConflictStaysSticky(phase: String) {
+        val (planId, ownerTaskId) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
+        db.unverifiedAttemptRecordDao().insert(
+            com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord(
+                attemptId = 31L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "opposing-unverified-carrier"
+            )
+        )
+
+        assertSeededAdvanceInvariantStaysSticky(
+            planId,
+            ownerTaskId,
+            phase,
+            expectedReason = "ADVANCE_DECISION_CARRIER_CONFLICT"
+        )
+    }
+
+    private suspend fun assertAdvanceScheduleRefMissingStaysSticky(phase: String) {
+        val (planId, ownerTaskId) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE test_attempts SET aplusAnchorScheduleId = NULL WHERE id = 31"
+        )
+        val seededOwner = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("the item leg remains durable", anchorItemId, seededOwner.aplusAnchorItemId)
+        assertEquals("the version leg remains durable", anchorVersion, seededOwner.aplusAnchorVersion)
+        assertEquals("only the scheduleRef leg is missing", null, seededOwner.aplusAnchorScheduleId)
+
+        assertSeededAdvanceInvariantStaysSticky(
+            planId,
+            ownerTaskId,
+            phase,
+            expectedReason = "ADVANCE_ANCHOR_SCHEDULE_REF_MISSING"
         )
     }
 
@@ -481,6 +628,110 @@ class EngineQuotaRecoveryRedTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("the crashed attempt must close as succeeded", "succeeded", attempt.status)
         assertEquals("CLOSED", attempt.aplusState)
+    }
+
+    @Test
+    fun `ADVANCE_PENDING missing trusted carrier stays sticky across two restarts`() = runTest {
+        assertAdvanceCarrierFailureStaysSticky("ADVANCE_PENDING")
+    }
+
+    @Test
+    fun `ADVANCE_OBSERVING missing trusted carrier stays sticky across two restarts`() = runTest {
+        assertAdvanceCarrierFailureStaysSticky("ADVANCE_OBSERVING")
+    }
+
+    @Test
+    fun `ADVANCE_STATE_READBACK missing trusted carrier stays sticky across two restarts`() = runTest {
+        assertAdvanceCarrierFailureStaysSticky("ADVANCE_STATE_READBACK")
+    }
+
+    @Test
+    fun `ADVANCE_PENDING wrong-task trusted carrier stays sticky across two restarts`() = runTest {
+        assertAdvanceCarrierFailureStaysSticky("ADVANCE_PENDING", wrongTaskCarrier = true)
+    }
+
+    @Test
+    fun `ADVANCE_PENDING opposing decision carriers stay sticky across two restarts`() = runTest {
+        assertAdvanceDecisionCarrierConflictStaysSticky("ADVANCE_PENDING")
+    }
+
+    @Test
+    fun `ADVANCE_OBSERVING opposing decision carriers stay sticky across two restarts`() = runTest {
+        assertAdvanceDecisionCarrierConflictStaysSticky("ADVANCE_OBSERVING")
+    }
+
+    @Test
+    fun `ADVANCE_STATE_READBACK opposing decision carriers stay sticky across two restarts`() = runTest {
+        assertAdvanceDecisionCarrierConflictStaysSticky("ADVANCE_STATE_READBACK")
+    }
+
+    @Test
+    fun `ADVANCE_PENDING missing scheduleRef stays sticky across two restarts`() = runTest {
+        assertAdvanceScheduleRefMissingStaysSticky("ADVANCE_PENDING")
+    }
+
+    @Test
+    fun `ADVANCE_OBSERVING missing scheduleRef stays sticky across two restarts`() = runTest {
+        assertAdvanceScheduleRefMissingStaysSticky("ADVANCE_OBSERVING")
+    }
+
+    @Test
+    fun `ADVANCE_STATE_READBACK missing scheduleRef stays sticky across two restarts`() = runTest {
+        assertAdvanceScheduleRefMissingStaysSticky("ADVANCE_STATE_READBACK")
+    }
+
+    @Test
+    fun `post-release advance failure stays read-only across repeated restarts`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = 1L,
+                attemptId = 31L,
+                correlationRef = null,
+                eventType = "RELEASE_RECEIPT",
+                payloadDigest = "RELEASE_PENDING->CLOSED",
+                recordedAt = 1001L
+            )
+        )
+        observedScheduleItemOverride = "item-conflicting-readback"
+
+        // The release is already proven. Independent advance observation now fails and persists a
+        // typed RECOVERY_REQUIRED marker. That marker owns post-release provenance; subsequent
+        // restarts may not reinterpret it as permission to run the release state machine again.
+        buildEngine(planId, VClock()).run()
+
+        val afterFailure = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", afterFailure.aplusState)
+        assertEquals("OBSERVED_TUPLE_MISMATCH:scheduleItemId", afterFailure.failureReason)
+        val auditAfterFailure = db.auditEventDao().forAttempt(31L)
+        assertEquals("the RELEASED checkpoint must be verified without a provider release", 0, releaseInvocations)
+
+        repeat(2) { restartIndex ->
+            buildEngine(planId, VClock()).run()
+
+            val recovered = db.testAttemptDao().getAttemptById(31L)!!
+            assertEquals(
+                "restart ${restartIndex + 1}: the post-release advance failure must stay sticky",
+                "RECOVERY_REQUIRED",
+                recovered.aplusState
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: the original advance-verification provenance must survive",
+                "OBSERVED_TUPLE_MISMATCH:scheduleItemId",
+                recovered.failureReason
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: a proven release must remain provider-free",
+                0,
+                releaseInvocations
+            )
+            assertEquals(
+                "restart ${restartIndex + 1}: recovery must not append synthetic " +
+                    "RECOVERY_REQUIRED->RELEASE_PENDING->RELEASED history",
+                auditAfterFailure,
+                db.auditEventDao().forAttempt(31L)
+            )
+        }
     }
 
     // ====================================================================================

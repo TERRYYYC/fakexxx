@@ -122,7 +122,7 @@ class ProductionEvidenceSourceOracleTest {
                 status = "starting", failureReason = null,
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
-                aplusState = "PRE_OBSERVED", aplusLeaseId = "lease-77", currentExecutionId = "exec-77",
+                aplusState = "ENV_APPLIED", aplusLeaseId = "lease-77", currentExecutionId = "exec-77",
                 aplusAnchorScheduleId = "qwy-default-schedule"
             )
         )

@@ -322,6 +322,49 @@ class DurableEvidenceReplayTest {
     }
 
     @Test
+    fun `phase-bound observation for a missing attempt rejects and rolls back the orphan carrier`() = runTest {
+        val missingAttemptId = 999L
+
+        val failure = runCatching {
+            repo.persistObservationAndMarkAplusState(
+                attemptId = missingAttemptId,
+                phase = "PRE",
+                snapshot = observation(),
+                aplusState = "PRE_OBSERVED"
+            )
+        }.exceptionOrNull()
+        val orphan = db.durableObservationDao().forAttemptPhase(missingAttemptId, "PRE")
+
+        assertTrue(
+            "a phase-bound carrier requires an existing attempt owner and must roll back as a unit; " +
+                "failure=${failure?.javaClass?.simpleName} orphan=$orphan",
+            failure is IllegalStateException && orphan == null
+        )
+    }
+
+    @Test
+    fun `phase-bound observation from the wrong current phase rejects and rolls back both writes`() = runTest {
+        seedPostPendingAttempt()
+
+        val failure = runCatching {
+            repo.persistObservationAndMarkAplusState(
+                attemptId = 77L,
+                phase = "PRE",
+                snapshot = observation(),
+                aplusState = "PRE_OBSERVED"
+            )
+        }.exceptionOrNull()
+        val carrier = db.durableObservationDao().forAttemptPhase(77L, "PRE")
+        val ownerPhase = db.testAttemptDao().getAttemptById(77L)!!.aplusState
+
+        assertTrue(
+            "PRE may only publish from its expected owner phase; failure=" +
+                "${failure?.javaClass?.simpleName} carrier=$carrier ownerPhase=$ownerPhase",
+            failure is IllegalStateException && carrier == null && ownerPhase == "POST_OBSERVE_PENDING"
+        )
+    }
+
+    @Test
     fun `raw durable audit columns participate in immutable replay comparison`() = runTest {
         val mutations = listOf(
             "continuitySinceEpochMs" to rawRecord(400L, continuitySinceEpochMs = 999L),
@@ -371,8 +414,19 @@ class DurableEvidenceReplayTest {
     }
 
     @Test
+    fun `decision bundle without durable PRE fails and rolls back POST receipt and state`() = runTest {
+        seedPostPendingAttempt()
+
+        val failure = decisionBundleFailure()
+
+        assertTrue("DECIDING requires the same attempt's durable PRE", failure is IllegalStateException)
+        assertDecisionBundleRolledBack()
+    }
+
+    @Test
     fun `decision bundle publishes POST receipt and DECIDING atomically`() = runTest {
         seedPostPendingAttempt()
+        repo.persistObservation(77L, "PRE", observation())
 
         val (post, receipt) = repo.persistDecisionBundleAndEnterDeciding(
             attemptId = 77L,
@@ -385,13 +439,14 @@ class DurableEvidenceReplayTest {
         assertEquals(observation(), post)
         assertEquals(1, receipt.completionEvidenceWire)
         assertEquals("DECIDING", db.testAttemptDao().getAttemptById(77L)!!.aplusState)
-        assertEquals(1, db.durableObservationDao().countForAttempt(77L))
+        assertEquals(2, db.durableObservationDao().countForAttempt(77L))
         assertEquals("intent-77", db.durableCompletionReceiptDao().forAttempt(77L)!!.acceptedIntentHash)
     }
 
     @Test
     fun `decision bundle conflict rolls back POST and leaves owner POST pending`() = runTest {
         seedPostPendingAttempt()
+        repo.persistObservation(77L, "PRE", observation())
         repo.persistCompletionReceipt(77L, 1, "intent-first", "lease-77")
 
         val failure = runCatching {
