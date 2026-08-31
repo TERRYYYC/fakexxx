@@ -36,13 +36,15 @@ contains no device serial and none of its executable checks invoke `adb`.
 The machine-readable truth source is
 `docs/acceptance/github64-exact-build-device-readiness.json`. Its host checker
 accepts the exact product commit itself or a checkout whose only delta from that
-commit is this four-file readiness package.
+commit is this committed four-file readiness package. The checkout itself must
+be clean relative to its HEAD; modified/untracked preparation files are rejected.
 
 | Fact | Frozen value |
 |---|---|
 | Product HEAD | `5002e0e005324c32ca3d36d10510180d1fafbf81` |
 | Product tree | `ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1` |
 | Base HEAD | `9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d` |
+| Frozen manifest SHA-256 | `459648d13750c3fad3cec17de1a7c4145f736bea054b456a6b7813973b446ac1` |
 | Contract SHA-256 | `c64dd132418493ba5918d86e481382d29b3d351867f3e3d3569577abb3d6f543` |
 | 10-address fixture SHA-256 | `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852` |
 | Canonical device ledger | empty `[]`, SHA-256 `37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570` |
@@ -53,6 +55,19 @@ The selected APK bytes are two fresh, clean Java 17 builds:
 |---|---|---:|---:|---|---|
 | Auto debug | `com.example.cellrebelauto` | `1` / `1.0` | 11,413,622 | `7bd07b07fde483cf1252722f2c29880c0030d47e52638761f19fa2d0dc4a3f1b` | `7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41` |
 | QWY bench debug | `name.caiyao.fakegps.bench` | `8` / `3.0.0` | 23,194,413 | `bb5be7db762a0e38218465e321b582eddb62c3f9110b714ac1c18076a151a161` | `7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41` |
+
+The production checker has no caller-selected manifest or inspector seam. It
+pins and records these host-only tool files before execution, rechecks them
+immediately before each use, and supplies a minimal environment with no Android
+device transport on `PATH`:
+
+| Tool file | SHA-256 |
+|---|---|
+| Apple Git 2.50.1 `/usr/bin/git` | `b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9` |
+| build-tools 36.1.0 `aapt` | `b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe` |
+| build-tools 36.1.0 `apksigner` launcher | `b47549e373b895ce6ca620d0c7887e674d9615ffa837a86ac601dcfd04adb0f0` |
+| build-tools 36.1.0 `lib/apksigner.jar` | `71e18adf733f5e112d1f062dbe6b0c2eb439a4d7c773d083c42a703c66f56df1` |
+| OpenJDK 17.0.20 `bin/java` | `77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192` |
 
 Both bytesets repeated across two Java 17 clean builds. That is a bounded local
 reproducibility observation, not a claim that source HEAD uniquely determines
@@ -70,29 +85,26 @@ no earlier device verdict.
 
 ## What can run now, without a device
 
-Use an evidence directory outside the source checkout. The audit command writes
-an atomic JSON report and a sibling `.sha256` sidecar. It reads Git state, APK
-files and Android build tools only.
+Use an evidence directory outside the source checkout. The checker mechanically
+rejects the report and sidecar if either resolves inside the source tree. The
+audit command writes an atomic JSON report and a sibling `.sha256` sidecar. It
+reads Git state, APK files and the pinned Android build tools only.
 
 ```bash
 EVIDENCE_ROOT="$(mktemp -d)"
 
 ./scripts/selftest-github64-device-readiness.sh
 
-env \
-  JAVA_HOME=/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home \
-  ANDROID_HOME=/Users/terry/Library/Android/sdk \
-  PATH=/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin:$PATH \
-  ./scripts/check-github64-device-readiness.py \
-    --report "$EVIDENCE_ROOT/host-readiness.json" \
-    --aapt /Users/terry/Library/Android/sdk/build-tools/36.1.0/aapt \
-    --apksigner /Users/terry/Library/Android/sdk/build-tools/36.1.0/apksigner
+./scripts/check-github64-device-readiness.py \
+  --report "$EVIDENCE_ROOT/host-readiness.json"
 ```
 
 Expected audit result is `hostStatus=PASS overallStatus=BLOCKED` and
 `executedDeviceCommands=0`. Exit 0 means the **BLOCKED report is internally
 valid**; it does not mean device-ready or G2-pass. For a scheduling gate, append
-`--require-device-ready`; the current truthful exit code is 3.
+`--fail-on-blocked`; the current truthful exit code is 3. This is a frozen
+snapshot gate, not a mutable readiness state machine: it is intentionally
+incapable of turning this old candidate green after external work changes.
 
 The two exact artifact builds are also device-free:
 
@@ -248,8 +260,10 @@ after these gates are satisfied:
 2. Cut one new convergence candidate containing those changes. Re-run complete
    host tests and CI, then freeze new APK bytes/signers. PR #63, #62 and #65
    being independently green is not proof of their merged tree.
-3. Run the device-free readiness checker and its mutations. `--require-device-ready`
-   must return 0 before requesting a phone lease.
+3. Cut a new readiness manifest/checker package for that convergence candidate;
+   do not edit this snapshot's blocker list or expect its `--fail-on-blocked`
+   result to turn green. The successor package must pass its own device-free
+   mutations before requesting a phone lease.
 4. Obtain the explicit operator authorization packet above.
 5. Execute exact-build installed-byte preflight, then G, C, B and A in separate
    recoverable sessions. Stop on any safety or evidence failure; do not continue

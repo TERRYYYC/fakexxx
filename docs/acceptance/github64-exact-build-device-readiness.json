@@ -29,6 +29,31 @@
     "aapt": "Android Asset Packaging Tool v0.2-14042983 (build-tools 36.1.0)",
     "apksigner": "0.9 (build-tools 36.1.0)",
     "gradle": "9.3.1",
+    "inspectionPolicy": {
+      "git": {
+        "path": "/usr/bin/git",
+        "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+        "version": "git version 2.50.1 (Apple Git-155)"
+      },
+      "aapt": {
+        "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/aapt",
+        "sha256": "b08d65ee8f8ee6c8a2e9d5ed6b7881873df83e60c44800b951c30d4ff80d9efe"
+      },
+      "apksigner": {
+        "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/apksigner",
+        "sha256": "b47549e373b895ce6ca620d0c7887e674d9615ffa837a86ac601dcfd04adb0f0",
+        "supportFiles": [
+          {
+            "path": "/Users/terry/Library/Android/sdk/build-tools/36.1.0/lib/apksigner.jar",
+            "sha256": "71e18adf733f5e112d1f062dbe6b0c2eb439a4d7c773d083c42a703c66f56df1"
+          },
+          {
+            "path": "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin/java",
+            "sha256": "77ddcbc036c6f6261d2583725018a6a45a2385d5339deea14e53cb8d91086192"
+          }
+        ]
+      }
+    },
     "java": "OpenJDK 17.0.20+0",
     "os": "Mac OS X 26.6.2 aarch64",
     "repeatCleanBuildsWithSameBytes": 2
@@ -57,6 +82,11 @@
       "relativePath": "docs/acceptance/a-plus-10a-fixture.json",
       "requiredTrustedSuccesses": 17,
       "sha256": "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"
+    },
+    {
+      "id": "device-ledger",
+      "relativePath": "docs/acceptance/matrix-evidence-device.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
     }
   ],
   "observedAt": "2026-08-31T08:53:09Z",
