@@ -134,8 +134,14 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
 #   写 V+1 + pointer=profile-1 + exhausted=false（单原子 commit）、再回读校验。
 #   ⚠️ 不是 clear()——clear 会让下次 boot 重置回 version 1（回滚），违反 M-AD-24/spec
 #   L1895-2056「每次 reinit 必须 V→V+1」，旧 (schedule,item,version) 身份会与新 run 撞车。
-#   下次 boot initFromProfileIds 见同拓扑+已有 scheduleId 走 NoOp，保留这个 V+1 generation。
-#   报告发 SCHEDULE_GENERATION versionBefore=.. versionAfter=..。seed 后须 force-stop
+#   ⚠️ owner-quiescence 三点前置（R4/R5 P1，写 store 在 owner fence 外）：owner service 必须
+#   down（liveness unknown = fail-closed）、无非 converged lease（仅 absent/RELEASED 放行，
+#   REVOKED/RELEASE_INCOMPLETE/EXPIRED 拒）、durable ADVANCE_PENDING slot 必须为空（否则已
+#   commit 的 advance 会在下次 fenced entry/boot 回放到新 seed 上）。整个 seed（reset+profile
+#   重写+publish）以 owner 的 durable audit seq 为见证收尾：seed 前后 audit seq 不变 + 最终
+#   schedule 再回读一致，才算证明无 fenced owner 写穿插（观测式计时不能消 TOCTOU）。
+#   前置不满足即 SEED_FAILED——执行者须先 force-stop bench 让 owner 静默、并确认无 pending advance。
+#   报告发 SCHEDULE_GENERATION priorState=.. versionAfter=..。seed 后须 force-stop
 #   name.caiyao.fakegps.bench 再 bind，随后 discover() 回读 currentItemId=profile-1 +
 #   scheduleVersion（可执行子集）——完整有序 profile-1..10 list 回读依赖 profileRefs
 #   projection scope 决定（见 §5A 末「已知 product/spec 缺口」）。
@@ -157,11 +163,13 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 # Auto：启动 run（产品自身入口 AutomationService.startAutomation；无障碍服务须已启用）
 adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity --es cmd start_run --el plan_id <planId>
 #   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
-#   （sourceFileName=FX-G2-10A / 10 行 / quota 和 17 / csvRow 1..10 / 坐标列仍是 KB-8 占位），
-#   拓扑不符（外来 CSV import、错 id）即 REFUSED（P2）。
-#   判据：START_CONFIRMED（isRunning 在 10s 内变 true）才算启动；START_NOT_CONFIRMED =
-#   无障碍服务未连接（startAutomation 静默 no-op），不得当作已启动。真相在
-#   ProviderRevokeCollector cmd=state 的 durable attempt 行，不在这行输出。
+#   （sourceFileName=FX-G2-10A / 10 行 / quota 冻结向量 [2,1,3,1,2,1,1,3,1,2] / csvRow 1..10 /
+#   坐标列仍是 KB-8 占位），拓扑不符（外来 CSV import、错 id、同总额再分配）即 REFUSED（P2/P4）。
+#   判据（R5 P2 更新 token）：REQUEST_ACCEPTED（isRunning 10s 内 true）只证【服务接受了请求】，
+#   **非 durable start**（isRunning 在 plan load 前同步置位）；REQUEST_NOT_ACCEPTED = 无障碍
+#   服务未连接（startAutomation 静默 no-op）。durable 真相 = ProviderRevokeCollector cmd=state
+#   的 running attempt 行**显示 planId=<本 planId>**（state 现把每个 running attempt 解析到其
+#   durable plan）；绑到别的 planId = 陈旧/外来 run，不是本请求。
 ```
 
 **跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider

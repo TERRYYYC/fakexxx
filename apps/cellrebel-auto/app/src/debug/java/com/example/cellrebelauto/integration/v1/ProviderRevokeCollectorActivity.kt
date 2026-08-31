@@ -115,9 +115,20 @@ class ProviderRevokeCollectorActivity : Activity() {
     private fun StringBuilder.state() {
         val snap = snapshot()
         val db = runBlocking { AppDatabase.getInstance(applicationContext).providerPairingDao().all() }
+        // R5 P2 (plan-bound readback): resolve each RUNNING attempt to its
+        // durable plan so a start verdict can be attributed to the REQUESTED
+        // plan — a global isRunning/attempt count cannot distinguish plan X
+        // from a stale plan Y run.
+        val runningPlanBindings = runBlocking {
+            val d = AppDatabase.getInstance(applicationContext)
+            d.testAttemptDao().getAllAttempts()
+                .filter { it.status == "starting" || it.status == "running" }
+                .map { a -> "attempt=${a.id} taskId=${a.taskId} planId=${d.locationTaskDao().getTaskById(a.taskId)?.planId ?: "?"}" }
+        }
         appendLine("[state] durable readback (Room):")
         appendLine("running attempts: ${snap.runningAttemptCount} " +
             "aplusStates=${snap.runningAplusStates.distinct().ifEmpty { listOf("—") }}")
+        runningPlanBindings.forEach { appendLine("  running $it") }
         appendLine("trusted quota entries (total): ${snap.trustedCountTotal}")
         appendLine("provider pairing rows: ${db.size}")
         db.forEach {

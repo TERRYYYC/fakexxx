@@ -133,10 +133,36 @@ printf '%s\n' "$SCENARIO_FN" | awk '/timed out waiting for report_ready/{seen=1}
 printf '%s\n' "$SCENARIO_FN" | grep -B4 "timed out waiting for report_ready" | grep -q try_capture_report &&
     report ok "c7 timeout branch captures report before return" ||
     report fail "c7 timeout branch captures report before return" "no try_capture_report before the timeout return"
-# The success path must reuse the SAME idempotent capture (no second copy).
-printf '%s\n' "$SCENARIO_FN" | grep -q "report_captured" &&
-    report ok "c7 capture is idempotent (report_captured guard)" ||
-    report fail "c7 capture is idempotent" "no idempotency guard"
+# The capture is a TOP-LEVEL idempotent function driven by CURRENT_* globals
+# (R5 P1) so the EXIT/signal cleanup can reuse it for an interrupted scenario.
+CAPTURE_FN="$(sed -n '/^try_capture_report()/,/^}/p' "$TEST_HOOK")"
+[ -n "$CAPTURE_FN" ] && printf '%s\n' "$CAPTURE_FN" | grep -q "REPORT_CAPTURED" &&
+    report ok "c7 capture is top-level and idempotent (REPORT_CAPTURED guard)" ||
+    report fail "c7 capture is top-level and idempotent" "missing top-level try_capture_report or guard"
+printf '%s\n' "$SCENARIO_FN" | grep -q "CURRENT_SESSION=" &&
+    report ok "c7 run_scenario registers the in-flight session for salvage" ||
+    report fail "c7 run_scenario registers the in-flight session" "no CURRENT_SESSION registration"
+
+# ---- c8: EXIT/signal salvage (R5 P1) ---------------------------------------
+# A SIGINT/SIGTERM after report_ready but before the poll captured it must not
+# let the TEMP_ROOT removal destroy the only local copy: cleanup_transaction
+# must invoke the salvage BEFORE any restore/removal work.
+CLEANUP_FN="$(sed -n '/^cleanup_transaction()/,/^}/p' "$TEST_HOOK")"
+printf '%s\n' "$CLEANUP_FN" | grep -q "try_capture_report" &&
+    report ok "c8 cleanup salvages an uncaptured report_ready report" ||
+    report fail "c8 cleanup salvages an uncaptured report" "cleanup_transaction never calls try_capture_report"
+# Ordering: the salvage call must appear BEFORE the TEMP_ROOT rm in the function body.
+SALVAGE_LINE=$(printf '%s\n' "$CLEANUP_FN" | grep -n "try_capture_report" | head -1 | cut -d: -f1)
+RM_LINE=$(printf '%s\n' "$CLEANUP_FN" | grep -n 'rm -rf' | head -1 | cut -d: -f1)
+[ -n "$SALVAGE_LINE" ] && [ -n "$RM_LINE" ] && [ "$SALVAGE_LINE" -lt "$RM_LINE" ] &&
+    report ok "c8 salvage precedes TEMP_ROOT removal" ||
+    report fail "c8 salvage precedes TEMP_ROOT removal" "salvage=$SALVAGE_LINE rm=$RM_LINE"
+
+# ---- c9: report sha must be 64-hex, not merely non-empty (R5 P2) -----------
+PRESERVE_FN2="$(sed -n '/^preserve_report()/,/^}/p' "$TEST_HOOK")"
+printf '%s\n' "$PRESERVE_FN2" | grep 'report_sha"' | grep -q 'grep -Eq' &&
+    report ok "c9 report sha bound to 64-hex (not just non-empty)" ||
+    report fail "c9 report sha bound to 64-hex" "preserve_report lacks the 64-hex report_sha check"
 
 printf 'test-hook evidence-carrier selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

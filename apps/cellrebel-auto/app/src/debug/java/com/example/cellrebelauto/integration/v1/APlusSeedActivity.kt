@@ -177,7 +177,9 @@ class APlusSeedActivity : Activity() {
             // durable-start gate is the ProviderRevokeCollector cmd=state rows.
             appendLine("REQUEST_ACCEPTED isRunning=true within ${START_CONFIRM_TIMEOUT_MS}ms — the service took the request.")
             appendLine("This is NOT a durable start. Confirm the durable run via ProviderRevokeCollector cmd=state:")
-            appendLine("a running test_attempts row for this plan is the truth; isRunning alone is set before plan load.")
+            appendLine("the truth is a running attempt line showing planId=$planId (state now resolves each running")
+            appendLine("attempt to its durable plan) — a running row bound to ANOTHER planId is a stale/foreign run,")
+            appendLine("not this request. isRunning alone is set before plan load and proves nothing plan-specific.")
         } else {
             appendLine("REQUEST_NOT_ACCEPTED: isRunning stayed false for ${START_CONFIRM_TIMEOUT_MS}ms after the call.")
             appendLine("Most likely the CellRebel Auto accessibility service is not enabled/connected")

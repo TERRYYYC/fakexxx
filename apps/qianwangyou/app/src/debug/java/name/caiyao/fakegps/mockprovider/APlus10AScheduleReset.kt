@@ -100,22 +100,52 @@ object APlus10AScheduleReset {
     }
 
     /**
-     * Owner-fence quiescence (R4 P1-2). Returns null iff the production owner
-     * PROVABLY cannot write the schedule store concurrently; else the reason.
+     * Owner-fence quiescence (R4 P1-2; R5 hardened). Returns null iff the
+     * production owner PROVABLY cannot write the schedule store concurrently
+     * AND no committed-but-unsettled advance can replay onto the new seed.
+     *
+     * R5 changes:
+     *  - `ownerServiceRunning` is THREE-state: null = liveness UNKNOWN (the
+     *    ActivityManager probe failed) and refuses — unknown was previously
+     *    fail-open.
+     *  - `advancePendingPresent`: a non-empty durable ADVANCE_PENDING slot is
+     *    a committed advance whose external mutation has not finished; the
+     *    next fenced entry / owner boot REPLAYS it — over a fresh seed too.
+     *  - Only a CONVERGED lease state (absent or RELEASED) passes. REVOKED /
+     *    RELEASE_INCOMPLETE / EXPIRED still block new applies, reference the
+     *    OLD generation's identities, and are mutated by boot recovery —
+     *    seeding over them is refused (previously waved through as "at rest").
      */
-    fun quiescenceMismatch(blockingLeaseState: String?, ownerServiceRunning: Boolean): String? {
-        if (ownerServiceRunning) {
-            return "owner service is running ($OWNER_SERVICE_FQCN) — it can reinit/advance the " +
+    fun quiescenceMismatch(
+        blockingLeaseState: String?,
+        ownerServiceRunning: Boolean?,
+        advancePendingPresent: Boolean,
+    ): String? {
+        when (ownerServiceRunning) {
+            null -> return "owner service liveness is unknown (probe failed) — fail closed, " +
+                "never assume quiescence from a failed check"
+            true -> return "owner service is running ($OWNER_SERVICE_FQCN) — it can reinit/advance the " +
                 "schedule concurrently; force-stop and seed in a fresh process"
+            false -> { /* provably down */ }
         }
-        if (blockingLeaseState in IN_FLIGHT_LEASE_STATES) {
-            return "in-flight lease state $blockingLeaseState — completeAndAdvance may bump the " +
-                "schedule version concurrently; resolve the lease before seeding"
+        if (advancePendingPresent) {
+            return "durable ADVANCE_PENDING slot is non-empty — a committed advance would replay " +
+                "onto the new seed at the next fenced entry/boot; let the owner settle it first"
+        }
+        if (blockingLeaseState != null && blockingLeaseState !in CONVERGED_LEASE_STATES) {
+            return "lease state $blockingLeaseState is not converged (only absent or RELEASED is " +
+                "seedable) — it blocks applies, references the old generation, and boot recovery mutates it"
         }
         return null
     }
 
-    private val IN_FLIGHT_LEASE_STATES = setOf("ACQUIRING", "ACTIVE", "RELEASING")
+    private val CONVERGED_LEASE_STATES = setOf("RELEASED")
+
+    /**
+     * R5 P2 overflow runway: a full A-block run performs up to 10 advances
+     * AFTER the seed's own +1 — the whole runway must fit without wrapping.
+     */
+    const val POST_SEED_HOP_RUNWAY = 10L
 
     /** The full generation the seeder writes and must read back verbatim. */
     data class ResetPlan(
@@ -140,8 +170,11 @@ object APlus10AScheduleReset {
                 require(prior.version >= 1L) {
                     "a COMPLETE store must carry version >= 1, got ${prior.version} — corrupt, refusing"
                 }
-                require(prior.version < Long.MAX_VALUE) {
-                    "stored version is Long.MAX_VALUE — +1 would wrap negative; fail closed"
+                // R5 P2: reserve the WHOLE post-seed runway (+1 for this seed,
+                // +POST_SEED_HOP_RUNWAY for the run's advances) — not just +1.
+                require(prior.version <= Long.MAX_VALUE - 1 - POST_SEED_HOP_RUNWAY) {
+                    "stored version ${prior.version} leaves no 10-hop overflow runway " +
+                        "(need seed+${POST_SEED_HOP_RUNWAY} bumps below Long.MAX_VALUE); fail closed"
                 }
                 prior.version + 1
             }

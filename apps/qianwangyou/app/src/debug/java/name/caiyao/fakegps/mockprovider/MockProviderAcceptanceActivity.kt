@@ -138,8 +138,9 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         val schedulePrefs = applicationContext
             .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
 
-        // Quiescence BEFORE: refuse if the owner could write concurrently.
-        quiescenceOrThrow("before write")
+        // Quiescence BEFORE + witness capture: the owner's monotonic audit seq
+        // is the durable trace every fenced mutation must leave (R5 P1).
+        val auditSeqBefore = quiescenceOrThrow("before write")
 
         // Classify the prior state from durable keys — an absent version key
         // over surviving keys is Partial (corrupt), not "version 0".
@@ -168,27 +169,11 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
             .commit()
         check(committed) { "schedule generation write did not commit — stale generation would survive" }
         // Readback through a fresh handle: what is durably stored, not the editor's echo.
-        val readBack = applicationContext
-            .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
-            .let { p ->
-                val id = p.getString(APlus10AScheduleReset.KEY_SCHEDULE_ID, null)
-                val item = p.getString(APlus10AScheduleReset.KEY_CURRENT_ITEM_ID, null)
-                val encoded = p.getString(APlus10AScheduleReset.KEY_ITEM_IDS, null)
-                if (id == null || item == null || encoded == null) null
-                else APlus10AScheduleReset.ResetPlan(
-                    scheduleId = id,
-                    scheduleVersion = p.getLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, -1L),
-                    itemIds = org.json.JSONArray(encoded).let { arr -> (0 until arr.length()).map { arr.getString(it) } },
-                    currentItemId = item,
-                    exhausted = p.getBoolean(APlus10AScheduleReset.KEY_EXHAUSTED, true),
-                    advanceCount = p.getLong(APlus10AScheduleReset.KEY_ADVANCE_COUNT, -1L),
-                )
-            }
+        val readBack = readBackSchedule()
         APlus10AScheduleReset.verifyReadback(readBack, resetPlan)?.let { mismatch ->
             throw IllegalStateException("schedule generation readback mismatch — $mismatch")
         }
-        // Quiescence AFTER: if a fence went live mid-write (owner started, or a
-        // lease was acquired), our version could already be stale — fail closed.
+        // Quiescence AFTER the schedule write (mid-bracket).
         quiescenceOrThrow("after write")
 
         // Isolated .bench data only (same seam as prepare_kyiv): clear then insert
@@ -212,6 +197,26 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         val published = ConfigPrefsSync.sync(applicationContext, profileId = insertedIds.firstOrNull())
         check(published) { "ConfigPrefsSync.sync returned false — seeded profile not published to the hook transport" }
 
+        // R5 P1 — END-OF-SEED fail-closed bracket over the WHOLE transaction
+        // (reset + profile rewrite + publish). Observational timing checks
+        // cannot eliminate TOCTOU; these are the owner's own DURABLE side
+        // effects, which a racing fenced write cannot avoid leaving:
+        //   1. audit seq unchanged  → no fenced owner op (apply/release/
+        //      advance/revoke all append) ran anywhere inside the seed;
+        //   2. quiescence still holds (service down, lease converged,
+        //      ADVANCE_PENDING still empty) → nothing is queued to replay;
+        //   3. schedule generation still reads back EXACTLY as planned → no
+        //      boot-reinit rewrote it (e.g. off a mid-rewrite profile table).
+        // Any mutation between "before write" and here trips at least one.
+        val auditSeqEnd = quiescenceOrThrow("end of seed")
+        check(auditSeqEnd == auditSeqBefore) {
+            "owner audit seq moved ($auditSeqBefore → $auditSeqEnd) during the seed — a fenced " +
+                "owner mutation interleaved; the seeded generation cannot be trusted"
+        }
+        APlus10AScheduleReset.verifyReadback(readBackSchedule(), resetPlan)?.let { mismatch ->
+            throw IllegalStateException("end-of-seed schedule drift — $mismatch")
+        }
+
         // Throws (IllegalStateException) if any inserted id drifted from the
         // explicit fixture id — a green mapping over a mismatch is forbidden.
         // PR #62 P1-1: the report emits only the independently verified
@@ -226,40 +231,69 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
     }
 
     /**
-     * R4 P1-2 quiescence gate: the seed writes the schedule store outside the
-     * production owner fence, so refuse unless the owner PROVABLY cannot write
-     * concurrently — no live owner service AND no in-flight lease. Reads the
-     * durable lease state through QwyDurableSnapshot (fresh FileDurableKv, no
-     * runtime boot). Throws IllegalStateException on any mismatch so the seed
-     * fails closed with SEED_FAILED.
+     * R4 P1-2 + R5 P1 quiescence gate. The seed writes the schedule store
+     * outside the production owner fence, so it may only run when the owner
+     * PROVABLY cannot write concurrently AND no committed advance can replay:
+     * owner service down (three-state — an UNKNOWN probe fails closed), no
+     * non-converged lease (only absent/RELEASED pass), and an EMPTY durable
+     * ADVANCE_PENDING slot. Reads everything durably via QwyDurableSnapshot
+     * (fresh FileDurableKv, no runtime boot). Returns the owner's monotonic
+     * audit seq as the durable WITNESS: every fenced owner mutation appends an
+     * audit row, so the caller can prove "no fenced write interleaved" by
+     * comparing the witness across the whole seed — the racing writer cannot
+     * avoid leaving this trace (this is what makes the bracket fail-closed
+     * rather than a timing observation).
      */
-    private fun quiescenceOrThrow(phase: String) {
-        val ownerRunning = isOwnerServiceRunning()
-        val leaseState = name.caiyao.fakegps.integration.v1.QwyDurableSnapshot
+    private fun quiescenceOrThrow(phase: String): Long {
+        val ownerRunning: Boolean? = ownerServiceLiveness()
+        val snap = name.caiyao.fakegps.integration.v1.QwyDurableSnapshot
             .capture(name.caiyao.fakegps.integration.v1.QwyDurableSnapshot.durableDir(applicationContext))
-            .lease.leaseState
-        APlus10AScheduleReset.quiescenceMismatch(leaseState, ownerRunning)?.let { reason ->
+        APlus10AScheduleReset.quiescenceMismatch(
+            blockingLeaseState = snap.lease.leaseState,
+            ownerServiceRunning = ownerRunning,
+            advancePendingPresent = snap.advancePendingRaw != null,
+        )?.let { reason ->
             throw IllegalStateException("schedule reset refused ($phase): $reason")
         }
+        return snap.maxAuditSeq
     }
 
     /**
-     * True if the Environment Control owner service has a live process record.
-     * ActivityManager.getRunningServices is deprecated for third parties but
-     * still returns this app's OWN services, which is all we need — and this is
-     * debug-only. FQCN duplicated in APlus10AScheduleReset (drift-guarded).
+     * Owner service liveness, THREE-state (R5 P2): true / false / null=UNKNOWN.
+     * A failed ActivityManager probe must not read as "not running" — the
+     * caller fails closed on null. getRunningServices is deprecated for third
+     * parties but still returns this app's OWN services; debug-only.
      */
     @Suppress("DEPRECATION")
-    private fun isOwnerServiceRunning(): Boolean {
+    private fun ownerServiceLiveness(): Boolean? {
         val am = getSystemService(android.content.Context.ACTIVITY_SERVICE)
-            as? android.app.ActivityManager ?: return false
+            as? android.app.ActivityManager ?: return null
         return runCatching {
             am.getRunningServices(Int.MAX_VALUE)
                 .any { it.service.className == APlus10AScheduleReset.OWNER_SERVICE_FQCN }
-        }.getOrDefault(false)
+        }.getOrNull()
     }
 
-    private fun sha256Hex(bytes: ByteArray): String =
+    /** Re-read the durable schedule generation through a fresh handle. */
+    private fun readBackSchedule(): APlus10AScheduleReset.ResetPlan? =
+        applicationContext
+            .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
+            .let { p ->
+                val id = p.getString(APlus10AScheduleReset.KEY_SCHEDULE_ID, null)
+                val item = p.getString(APlus10AScheduleReset.KEY_CURRENT_ITEM_ID, null)
+                val encoded = p.getString(APlus10AScheduleReset.KEY_ITEM_IDS, null)
+                if (id == null || item == null || encoded == null) null
+                else APlus10AScheduleReset.ResetPlan(
+                    scheduleId = id,
+                    scheduleVersion = p.getLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, -1L),
+                    itemIds = org.json.JSONArray(encoded).let { arr -> (0 until arr.length()).map { arr.getString(it) } },
+                    currentItemId = item,
+                    exhausted = p.getBoolean(APlus10AScheduleReset.KEY_EXHAUSTED, true),
+                    advanceCount = p.getLong(APlus10AScheduleReset.KEY_ADVANCE_COUNT, -1L),
+                )
+            }
+
+        private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it) }
 

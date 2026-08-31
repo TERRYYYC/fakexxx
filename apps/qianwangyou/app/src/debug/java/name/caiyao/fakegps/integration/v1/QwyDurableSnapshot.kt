@@ -45,6 +45,17 @@ data class QwyCollectorSnapshot(
      * generation-mismatch → EXPIRED branch is entered on purpose, not blind.
      */
     val cleanShutdownMarkerSet: Boolean,
+    /**
+     * R5 P1 durable witnesses for the seed's owner-quiescence bracket:
+     * a non-empty ADVANCE_PENDING slot is a committed advance the next fenced
+     * entry/boot will REPLAY (refuse to seed over it); maxAuditSeq is the
+     * owner's own monotonic side-effect counter — every fenced mutation
+     * (apply/release/advance/revoke) appends an audit row, so an unchanged
+     * maxAuditSeq across the whole seed proves no fenced owner write
+     * interleaved (the racing writer cannot avoid self-incriminating).
+     */
+    val advancePendingRaw: String?,
+    val maxAuditSeq: Long,
 )
 
 object QwyDurableSnapshot {
@@ -107,6 +118,14 @@ object QwyDurableSnapshot {
         // corrupt the very EXPIRED precondition it reports.
         val cleanMarkerSet = kv.read(CLEAN_SHUTDOWN_NS, CLEAN_SHUTDOWN_KEY) == "1"
 
+        // R5 P1 witnesses. ADVANCE_PENDING namespace/key are PUBLIC handler
+        // consts — referenced directly, no drift-prone literal duplication.
+        val advancePendingRaw = kv.read(
+            EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+            EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+        )?.takeIf { it.isNotEmpty() }
+        val maxAuditSeq = audit.maxOfOrNull { it.seq } ?: 0L
+
         val stillActive = if (appId != null && signer != null) {
             pairing.findActive(appId, signer) != null
         } else null
@@ -127,6 +146,8 @@ object QwyDurableSnapshot {
             auditTail = audit.takeLast(auditTailLimit),
             revokeAudited = revokedAudited,
             cleanShutdownMarkerSet = cleanMarkerSet,
+            advancePendingRaw = advancePendingRaw,
+            maxAuditSeq = maxAuditSeq,
         )
     }
 
@@ -141,6 +162,8 @@ object QwyDurableSnapshot {
             appendLine("caller_revoked audit row present: ${snapshot.revokeAudited}")
         }
         appendLine("clean-shutdown marker set (§8.4 EXPIRED precondition): ${snapshot.cleanShutdownMarkerSet}")
+        appendLine("advance-pending slot: ${snapshot.advancePendingRaw ?: "—"}")
+        appendLine("max audit seq: ${snapshot.maxAuditSeq}")
         appendLine("pending callers: ${snapshot.pendingCallers.size}")
         snapshot.auditTail.lastOrNull()?.let {
             appendLine("audit tail (last of ${snapshot.auditTail.size}): seq=${it.seq} ${it.event} ${it.callerApplicationId ?: ""}")

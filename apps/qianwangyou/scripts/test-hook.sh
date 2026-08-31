@@ -67,6 +67,14 @@ TEMP_ROOT=""
 # c5-evidence/ tree.
 EVIDENCE_DIR=""
 INSTALLED_APK_SHA=""
+# In-flight scenario coordinates (R5 P1): set by run_scenario so the EXIT/
+# signal cleanup can SALVAGE a report_ready report that was not yet captured —
+# previously a SIGINT/SIGTERM between report_ready and the poll's capture
+# deleted TEMP_ROOT (the only local copy) via the EXIT trap.
+CURRENT_SESSION=""
+CURRENT_REMOTE_REPORT=""
+CURRENT_LOCAL_REPORT=""
+REPORT_CAPTURED=0
 TRANSACTION_ACTIVE=0
 DB_BEFORE=""
 PREFS_BEFORE=""
@@ -211,6 +219,15 @@ restore_database_payload() {
 cleanup_transaction() {
     rc=$?
     trap - EXIT INT TERM
+
+    # R5 P1: salvage BEFORE anything else — a SIGINT/SIGTERM (or any exit)
+    # after report_ready but before the poll captured it must not let the
+    # TEMP_ROOT removal below destroy the only local copy. Best-effort; never
+    # masks the exit code.
+    if [ "$TRANSACTION_ACTIVE" -eq 1 ] && [ -n "$CURRENT_SESSION" ] && [ "$REPORT_CAPTURED" -eq 0 ]; then
+        try_capture_report ||
+            echo "HARNESS_ERROR salvage on exit failed for $CURRENT_SESSION (primary rc=$rc preserved)" >&2
+    fi
 
     if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
         if ! restore_database_payload; then
@@ -587,11 +604,30 @@ preserve_report() { # session local_report
         return 2
     }
     report_sha=$(shasum -a 256 "$preserved" 2>/dev/null | awk '{print $1}')
-    [ -n "$report_sha" ] || {
-        echo "HARNESS_ERROR could not fingerprint preserved report for $session" >&2
+    # R5 P2: 64-hex, not merely non-empty — a mangled shasum output line would
+    # otherwise bind garbage into the EVIDENCE line and stay green.
+    printf '%s' "$report_sha" | grep -Eq '^[0-9a-f]{64}$' || {
+        echo "HARNESS_ERROR could not fingerprint preserved report for $session (got '$report_sha')" >&2
         return 2
     }
     echo "EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=$INSTALLED_APK_SHA"
+}
+
+# §5.G evidence carrier (R4 P1-4 + R5 P1): whenever report_ready is observed,
+# fetch + preserve the on-device bytes BEFORE any failure/exit path can drop
+# them. Idempotent; driven off the CURRENT_* globals so the EXIT/signal
+# cleanup can invoke the SAME capture for an interrupted scenario.
+try_capture_report() {
+    [ "$REPORT_CAPTURED" -eq 1 ] && return 0
+    [ -n "$CURRENT_SESSION" ] || return 0
+    has_state "$CURRENT_SESSION" "report_ready" || return 0
+    root_shell "cat $CURRENT_REMOTE_REPORT" >"$CURRENT_LOCAL_REPORT" 2>/dev/null || {
+        echo "HARNESS_ERROR report_ready seen but could not read on-device report for $CURRENT_SESSION" >&2
+        return 2
+    }
+    preserve_report "$CURRENT_SESSION" "$CURRENT_LOCAL_REPORT" || return $?
+    REPORT_CAPTURED=1
+    return 0
 }
 
 run_scenario() {
@@ -607,6 +643,11 @@ run_scenario() {
         'import base64,os; print(base64.urlsafe_b64encode(os.environ["PAYLOAD"].encode()).decode().rstrip("="))')
     remote_report="/data/user/0/$BENCH_PACKAGE/cache/hook-acceptance-$session.json"
     local_report="$TEMP_ROOT/$session.json"
+    # Register the in-flight scenario for the EXIT/signal salvage path (R5 P1).
+    CURRENT_SESSION="$session"
+    CURRENT_REMOTE_REPORT="$remote_report"
+    CURRENT_LOCAL_REPORT="$local_report"
+    REPORT_CAPTURED=0
 
     echo "[scenario] $scenario session=$session"
     adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
@@ -616,29 +657,6 @@ run_scenario() {
         >/dev/null || {
         echo "HARNESS_ERROR acceptance activity failed to start for $session" >&2
         return 2
-    }
-
-    # §5.G evidence carrier (PR #62 R4 P1-4): the acceptance Activity logs
-    # report_ready BEFORE restoreAndFinish can log restore_failed
-    # (HookAcceptanceActivity onCreate writes+logs the report, then restore
-    # runs). So a restore_failed / restore-timeout run can have a raw report
-    # ON DEVICE while the previous ordering returned the primary failure
-    # FIRST and lost the only host carrier. Fix: whenever report_ready is
-    # observed, fetch + preserve the bytes BEFORE returning ANY failure.
-    #
-    # try_capture_report: idempotent — pulls the on-device report and
-    # preserves it once. Safe to call on both the failure and success paths.
-    report_captured=0
-    try_capture_report() {
-        [ "$report_captured" -eq 1 ] && return 0
-        has_state "$session" "report_ready" || return 0
-        root_shell "cat $remote_report" >"$local_report" 2>/dev/null || {
-            echo "HARNESS_ERROR report_ready seen but could not read on-device report for $session" >&2
-            return 2
-        }
-        preserve_report "$session" "$local_report" || return $?
-        report_captured=1
-        return 0
     }
 
     attempt=0

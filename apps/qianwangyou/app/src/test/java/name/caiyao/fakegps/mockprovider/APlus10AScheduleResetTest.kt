@@ -128,14 +128,25 @@ class APlus10AScheduleResetTest {
     }
 
     @Test
-    fun maxValueVersion_failsClosedNotWraps() {
-        // R4 P2: Long.MAX_VALUE + 1 wraps negative — fail closed instead.
+    fun overflowRunway_reservesTenHops_failsClosedNotWraps() {
+        // R5 P2: +1 alone is not enough headroom — a full A-block run performs
+        // up to 10 advances AFTER the seed, each bumping the version. The seed
+        // must guarantee the whole 10-hop runway cannot wrap.
         try {
             APlus10AScheduleReset.plan(PriorState.Complete(Long.MAX_VALUE), tenIds)
             fail("Long.MAX_VALUE must fail closed, not wrap negative")
         } catch (e: IllegalArgumentException) {
             // expected
         }
+        try {
+            APlus10AScheduleReset.plan(PriorState.Complete(Long.MAX_VALUE - 5), tenIds)
+            fail("a version without full 10-hop runway must fail closed")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("runway"))
+        }
+        // The largest version WITH a full runway still plans normally.
+        val edge = Long.MAX_VALUE - 1 - APlus10AScheduleReset.POST_SEED_HOP_RUNWAY
+        assertEquals(edge + 1, APlus10AScheduleReset.plan(PriorState.Complete(edge), tenIds).scheduleVersion)
     }
 
     @Test
@@ -149,31 +160,70 @@ class APlus10AScheduleResetTest {
     }
 
     // ------------------------------------------------------------------
-    // quiescenceMismatch — the owner-fence precondition (R4 P1-2)
+    // quiescenceMismatch — the owner-fence precondition (R4 P1-2, R5 hardened)
     // ------------------------------------------------------------------
 
     @Test
     fun quiescence_serviceRunning_isMismatch() {
-        val m = APlus10AScheduleReset.quiescenceMismatch(blockingLeaseState = null, ownerServiceRunning = true)
+        val m = APlus10AScheduleReset.quiescenceMismatch(
+            blockingLeaseState = null, ownerServiceRunning = true, advancePendingPresent = false)
         assertNotNull("a live owner service can reinit/advance concurrently — must refuse", m)
         assertTrue(m!!.contains("service"))
     }
 
     @Test
+    fun quiescence_serviceLivenessUnknown_isMismatch_failClosed() {
+        // R5 P2: an UNKNOWN liveness (ActivityManager threw) previously mapped
+        // to false = fail-OPEN. Unknown must refuse.
+        val m = APlus10AScheduleReset.quiescenceMismatch(
+            blockingLeaseState = null, ownerServiceRunning = null, advancePendingPresent = false)
+        assertNotNull("unknown owner liveness must fail closed, never be treated as quiescent", m)
+        assertTrue(m!!.contains("unknown"))
+    }
+
+    @Test
     fun quiescence_inFlightLease_isMismatch() {
         listOf("ACQUIRING", "ACTIVE", "RELEASING").forEach { state ->
-            val m = APlus10AScheduleReset.quiescenceMismatch(blockingLeaseState = state, ownerServiceRunning = false)
+            val m = APlus10AScheduleReset.quiescenceMismatch(
+                blockingLeaseState = state, ownerServiceRunning = false, advancePendingPresent = false)
             assertNotNull("in-flight lease $state means the owner may advance concurrently", m)
             assertTrue(m!!.contains(state))
         }
     }
 
     @Test
-    fun quiescence_atRestStates_pass() {
-        listOf(null, "RELEASED", "EXPIRED", "REVOKED", "RELEASE_INCOMPLETE").forEach { state ->
+    fun quiescence_nonReleasedBlockingStates_areMismatch_failClosed() {
+        // R5 P2: REVOKED / RELEASE_INCOMPLETE / EXPIRED were waved through as
+        // "at rest". They still BLOCK new applies and reference the OLD
+        // generation identities; boot recovery also mutates them. Only a fully
+        // converged store (no lease, or RELEASED) may be seeded over.
+        listOf("REVOKED", "RELEASE_INCOMPLETE", "EXPIRED").forEach { state ->
+            val m = APlus10AScheduleReset.quiescenceMismatch(
+                blockingLeaseState = state, ownerServiceRunning = false, advancePendingPresent = false)
+            assertNotNull("non-RELEASED blocking state $state must refuse the seed", m)
+            assertTrue(m!!.contains(state))
+        }
+    }
+
+    @Test
+    fun quiescence_advancePendingSlot_isMismatch() {
+        // R5 P1: a durable ADVANCE_PENDING slot is a committed advance whose
+        // external mutation has not finished — the next fenced entry/boot
+        // REPLAYS it on top of whatever schedule exists, including a fresh
+        // seed. Must refuse until the owner settles it.
+        val m = APlus10AScheduleReset.quiescenceMismatch(
+            blockingLeaseState = null, ownerServiceRunning = false, advancePendingPresent = true)
+        assertNotNull("a durable pending advance would replay onto the new seed — must refuse", m)
+        assertTrue(m!!.contains("ADVANCE_PENDING"))
+    }
+
+    @Test
+    fun quiescence_convergedStates_pass() {
+        listOf(null, "RELEASED").forEach { state ->
             assertNull(
-                "at-rest lease state $state cannot drive a concurrent schedule write",
-                APlus10AScheduleReset.quiescenceMismatch(blockingLeaseState = state, ownerServiceRunning = false),
+                "a converged lease state ($state) with owner down and no pending advance is seedable",
+                APlus10AScheduleReset.quiescenceMismatch(
+                    blockingLeaseState = state, ownerServiceRunning = false, advancePendingPresent = false),
             )
         }
     }

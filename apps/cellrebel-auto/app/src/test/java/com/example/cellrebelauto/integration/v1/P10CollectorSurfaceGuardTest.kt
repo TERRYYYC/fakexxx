@@ -107,6 +107,13 @@ class P10CollectorSurfaceGuardTest {
             "debug collector must implement the run_active gate token",
             debug.contains("run_active"),
         )
+        // R5 P2: cmd=state must resolve running attempts to their durable plan
+        // so a start verdict is plan-bound (a global count can't tell plan X
+        // from a stale plan Y run).
+        assertTrue(
+            "cmd=state must bind each running attempt to its planId (getTaskById → planId)",
+            debug.contains("getTaskById(") && Regex("""planId=\$\{?""").containsMatchIn(debug),
+        )
         assertTrue(
             "debug collector must implement the attempt_state:<STATE> gate prefix",
             debug.contains("attempt_state:"),

@@ -294,6 +294,26 @@ class P10CollectorSurfaceGuardTest {
             "quiescence must be checked AFTER the write (a fence that went live mid-seed is stale)",
             code.contains("quiescenceOrThrow(\"after write\")"),
         )
+        // R5 P1: the bracket must extend over the WHOLE seed (reset + profile
+        // rewrite + publish) and close on the owner's DURABLE witnesses — the
+        // audit seq a fenced mutation cannot avoid bumping, plus a final
+        // schedule re-verify. Observational timing alone cannot close TOCTOU.
+        assertTrue(
+            "an end-of-seed quiescence bracket must exist",
+            code.contains("quiescenceOrThrow(\"end of seed\")"),
+        )
+        assertTrue(
+            "the audit-seq witness must be compared across the whole seed",
+            code.contains("auditSeqEnd == auditSeqBefore"),
+        )
+        assertTrue(
+            "the durable ADVANCE_PENDING slot must be consulted (a committed advance replays onto a fresh seed)",
+            code.contains("advancePendingPresent = snap.advancePendingRaw != null"),
+        )
+        assertTrue(
+            "owner liveness must be three-state (null = unknown fails closed)",
+            code.contains("ownerServiceLiveness(): Boolean?") || code.contains("val ownerRunning: Boolean?"),
+        )
         assertTrue(
             "quiescence must consult APlus10AScheduleReset.quiescenceMismatch",
             code.contains("APlus10AScheduleReset.quiescenceMismatch("),
