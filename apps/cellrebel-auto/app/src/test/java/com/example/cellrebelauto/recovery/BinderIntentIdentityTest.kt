@@ -2,6 +2,7 @@ package com.example.cellrebelauto.recovery
 
 import android.content.ComponentName
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.ProviderPrincipal
 import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import io.github.terryyyc.fakexxx.contract.v1.ApplyReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
@@ -67,7 +68,7 @@ class BinderIntentIdentityTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val service = FakeProviderService()
         Shadows.shadowOf(app).setComponentNameAndServiceForBindService(
-            ComponentName(ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION, ContractV1.SERVICE_CLASS_NAME),
+            ComponentName(ProviderPrincipal.selected, ContractV1.SERVICE_CLASS_NAME),
             service
         )
         val executor = BinderExternalApplyExecutor(app)
