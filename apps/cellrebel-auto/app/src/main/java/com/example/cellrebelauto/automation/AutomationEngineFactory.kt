@@ -23,6 +23,26 @@ import com.example.cellrebelauto.model.plan.StageToggles
  */
 object AutomationEngineFactory {
 
+    internal fun requireProductionCoordinator(
+        coordinator: com.example.cellrebelauto.recovery.RecoveryCoordinator,
+    ) {
+        val providerApplicationId = requireNotNull(coordinator.targetApplicationId) {
+            "production engine requires a provider-scoped recovery coordinator"
+        }
+        ProviderPrincipal.requireKnownApplicationId(
+            providerApplicationId
+        )
+        requireNotNull(coordinator.targetSignerDigest) {
+            "production engine requires a registry-issued provider signer owner"
+        }
+        require(coordinator.hasDurableProviderPrincipalPreflight) {
+            "production engine requires a Room-backed durable provider principal preflight"
+        }
+        require(coordinator.hasRegistryIssuedProviderExecutorCapability) {
+            "production engine requires a live registry-issued provider executor acquisition"
+        }
+    }
+
     /**
      * THE production commit-clock source — monotonic elapsedRealtime. Referenced by
      * [productionEngine]'s default AND asserted by the factory-wiring test: a mutation that reverts
@@ -43,7 +63,7 @@ object AutomationEngineFactory {
      * Android-bound deps (db, handlers, config, bridge); the clock defaults live HERE, in
      * production code, observable by tests.
      */
-    fun productionEngine(
+    internal fun productionEngine(
         planId: Long,
         planRepository: com.example.cellrebelauto.repository.PlanRepository,
         cellRebelRunner: com.example.cellrebelauto.automation.CellRebelRunner,
@@ -62,22 +82,25 @@ object AutomationEngineFactory {
         // R44 (Sol GREEN-review-3 F3): the execution-evidence elapsed clock — same production default
         // wiring, observable by tests through the same factory path.
         elapsedClockMs: () -> Long = productionElapsedClockMs
-    ): AutomationEngine = AutomationEngine(
-        planId = planId,
-        planRepository = planRepository,
-        cellRebelRunner = cellRebelRunner,
-        gpsSetter = gpsSetter,
-        bufferGate = BufferGate(globalBufferSeconds) { nowMs() },
-        testTimeoutMs = testTimeoutMs,
-        gpsSettleMs = gpsSettleMs,
-        stageToggles = stageToggles,
-        bridge = bridge,
-        attemptDriver = APlusAttemptDriver(auditDao),
-        recoveryCoordinator = aplusCoordinator,
-        completionEvidenceSource = aplusEvidence,
-        nowMs = nowMs,
-        delayMs = delayMs,
-        commitClockMs = commitClockMs,
-        elapsedClockMs = elapsedClockMs
-    )
+    ): AutomationEngine {
+        requireProductionCoordinator(aplusCoordinator)
+        return AutomationEngine(
+            planId = planId,
+            planRepository = planRepository,
+            cellRebelRunner = cellRebelRunner,
+            gpsSetter = gpsSetter,
+            bufferGate = BufferGate(globalBufferSeconds) { nowMs() },
+            testTimeoutMs = testTimeoutMs,
+            gpsSettleMs = gpsSettleMs,
+            stageToggles = stageToggles,
+            bridge = bridge,
+            attemptDriver = APlusAttemptDriver(auditDao),
+            recoveryCoordinator = aplusCoordinator,
+            completionEvidenceSource = aplusEvidence,
+            nowMs = nowMs,
+            delayMs = delayMs,
+            commitClockMs = commitClockMs,
+            elapsedClockMs = elapsedClockMs,
+        )
+    }
 }

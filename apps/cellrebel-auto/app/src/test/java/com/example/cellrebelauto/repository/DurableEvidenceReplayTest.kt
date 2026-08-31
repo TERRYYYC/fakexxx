@@ -3,6 +3,7 @@ package com.example.cellrebelauto.repository
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.environment.TrustDecision
@@ -14,6 +15,8 @@ import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.recovery.OperationReceiptRow
+import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -30,6 +33,9 @@ import org.robolectric.RobolectricTestRunner
  */
 @RunWith(RobolectricTestRunner::class)
 class DurableEvidenceReplayTest {
+
+    private val providerSigner =
+        "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
 
     private lateinit var db: AppDatabase
     private lateinit var repo: PlanRepository
@@ -141,7 +147,9 @@ class DurableEvidenceReplayTest {
     private suspend fun seedPostPendingAttempt(
         attemptId: Long = 77L,
         currentExecutionId: String? = "exec-$attemptId",
-        executionOwnerAttemptId: Long? = attemptId
+        executionOwnerAttemptId: Long? = attemptId,
+        providerApplicationId: String? = null,
+        providerSignerDigest: String? = null,
     ) {
         val planId = db.planDao().insertPlan(
             LocationPlan(
@@ -149,7 +157,8 @@ class DurableEvidenceReplayTest {
                 importedAt = 1_000L,
                 globalBufferSeconds = 0,
                 totalRows = 1,
-                totalRequiredSuccesses = 1
+                totalRequiredSuccesses = 1,
+                providerApplicationId = providerApplicationId,
             )
         )
         db.planDao().insertTasks(
@@ -185,7 +194,9 @@ class DurableEvidenceReplayTest {
                 latitude = 50.4501,
                 longitude = 30.5234,
                 aplusState = "POST_OBSERVE_PENDING",
-                aplusLeaseId = "lease-77"
+                aplusLeaseId = "lease-77",
+                providerApplicationId = providerApplicationId,
+                providerSignerDigest = providerSignerDigest,
             )
         )
         if (currentExecutionId != null) {
@@ -562,6 +573,141 @@ class DurableEvidenceReplayTest {
         assertTrue(
             "lease split-brain must leave a durable negative decision carrier",
             db.unverifiedAttemptRecordDao().getByAttempt(77L) != null
+        )
+    }
+
+    @Test
+    fun `DECIDING rejects a legacy operation receipt before mint`() = runTest {
+        val providerApplicationId = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        val ownedExecution = execution("exec-77", 77L)
+        val ctx = trustedContext(ownedExecution)
+        com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()).approve(
+            providerApplicationId,
+            providerSigner,
+            versionCode = 1,
+            approvedAt = 1L,
+        )
+        seedPostPendingAttempt(
+            providerApplicationId = providerApplicationId,
+            providerSignerDigest = providerSigner,
+        )
+        enterDecidingWithDurableBundle(ctx)
+        db.operationReceiptDao().insertIfAbsent(
+            OperationReceiptRow(
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(77L),
+                requestDigest = "intent-77",
+                resultOutcome = "APPLIED",
+                createdAt = 1_000L,
+                leaseId = "lease-77",
+                providerApplicationId = null,
+            )
+        )
+
+        val failure = runCatching {
+            repo.recordTrustedCompletionForProvider(
+                ctx,
+                commitClockMs = 99_000L,
+                providerApplicationId = providerApplicationId,
+                providerSignerDigest = providerSigner,
+            )
+        }.exceptionOrNull()
+
+        assertTrue(
+            "attempt and operation receipt principals must join before DECIDING can mint",
+            failure is IllegalStateException &&
+                failure.message.orEmpty().startsWith("PROVIDER_PRINCIPAL_"),
+        )
+        assertNull("legacy receipt principal can never mint trusted quota",
+            db.trustedQuotaDao().getByAttempt(77L))
+    }
+
+    @Test
+    fun `production DECIDING rejects a missing attempt before persisting an orphan execution`() = runTest {
+        val missingAttemptId = 404L
+        val orphan = execution("exec-missing", missingAttemptId)
+
+        val failure = runCatching {
+            repo.recordTrustedCompletionForProvider(
+                trustedContext(orphan),
+                commitClockMs = 99_000L,
+                providerApplicationId = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                providerSignerDigest = providerSigner,
+            )
+        }.exceptionOrNull()
+
+        assertTrue(
+            "a production decision without its durable attempt owner must fail as unknown",
+            failure is IllegalStateException &&
+                failure.message.orEmpty().startsWith("PROVIDER_PRINCIPAL_UNKNOWN:"),
+        )
+        assertNull(
+            "principal validation must happen before any orphan execution is persisted",
+            db.attemptExecutionDao().byExecutionId(orphan.executionId),
+        )
+    }
+
+    private suspend fun assertSignerReceiptRejectedBeforeDecisionMutation(
+        recordedSigner: String?,
+        expectedReason: String,
+    ) {
+        val providerApplicationId = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()).approve(
+            providerApplicationId,
+            providerSigner,
+            versionCode = 1,
+            approvedAt = 1L,
+        )
+        seedPostPendingAttempt(
+            currentExecutionId = null,
+            executionOwnerAttemptId = null,
+            providerApplicationId = providerApplicationId,
+            providerSignerDigest = providerSigner,
+        )
+        db.operationReceiptDao().insertIfAbsent(
+            OperationReceiptRow(
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(77L),
+                requestDigest = "intent-77",
+                resultOutcome = "APPLIED",
+                createdAt = 1_000L,
+                leaseId = "lease-77",
+                providerApplicationId = providerApplicationId,
+                providerSignerDigest = recordedSigner,
+            )
+        )
+        val candidate = execution("exec-signer-boundary", 77L)
+
+        val failure = runCatching {
+            repo.recordTrustedCompletionForProvider(
+                trustedContext(candidate),
+                commitClockMs = 99_000L,
+                providerApplicationId = providerApplicationId,
+                providerSignerDigest = providerSigner,
+            )
+        }.exceptionOrNull()
+
+        assertTrue(
+            failure is IllegalStateException &&
+                failure.message.orEmpty().startsWith("$expectedReason:"),
+        )
+        assertNull(db.attemptExecutionDao().byExecutionId(candidate.executionId))
+        assertNull(db.trustedQuotaDao().getByAttempt(77L))
+        assertNull(db.unverifiedAttemptRecordDao().getByAttempt(77L))
+    }
+
+    @Test
+    fun `DECIDING rejects null signer operation proof before carrier or mint`() = runTest {
+        assertSignerReceiptRejectedBeforeDecisionMutation(
+            recordedSigner = null,
+            expectedReason = "PROVIDER_SIGNER_OWNER_UNKNOWN",
+        )
+    }
+
+    @Test
+    fun `DECIDING rejects foreign signer operation proof before carrier or mint`() = runTest {
+        assertSignerReceiptRejectedBeforeDecisionMutation(
+            recordedSigner =
+                "sha256:3b20b06be2531a128426fcf6d873eb2ce27f086b7a0e6ef0f20586076e5f3cd3",
+            expectedReason = "PROVIDER_SIGNER_OWNER_CONFLICT",
         )
     }
 

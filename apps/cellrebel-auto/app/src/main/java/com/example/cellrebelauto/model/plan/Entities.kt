@@ -27,7 +27,9 @@ data class LocationPlan(
     // # CSV 数据行总数
     val totalRows: Int,
     // # 全部位置所需成功总数
-    val totalRequiredSuccesses: Int
+    val totalRequiredSuccesses: Int,
+    // §6.1: selected provider frozen with the plan snapshot. Null is legacy/unknown and unusable.
+    val providerApplicationId: String? = null,
 )
 
 /**
@@ -116,7 +118,12 @@ data class TestAttempt(
     // # （§6.7.3 v1.72 / M-AD-28）。null = 尚未锚定（未进入 A+ 外部执行）。
     val aplusAnchorScheduleId: String? = null,
     val aplusAnchorItemId: String? = null,
-    val aplusAnchorVersion: Long? = null
+    val aplusAnchorVersion: Long? = null,
+    // Exact copy of the owning plan principal before any external attempt work. Null = legacy.
+    val providerApplicationId: String? = null,
+    // Exact signer owner copied from the registry-issued acquisition before the first journey call.
+    // Null is legacy/unknown and can never be inferred from the package currently installed.
+    val providerSignerDigest: String? = null,
 )
 
 /**

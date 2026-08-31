@@ -25,8 +25,10 @@ import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 class ProviderTrustStore(private val dao: ProviderPairingDao) {
 
     /** Active = the exact (applicationId, currentSignerDigest) principal with revokedAt IS NULL. */
-    suspend fun findActive(applicationId: String, signerDigest: String): ProviderPairingRecord? =
-        dao.activeFor(applicationId, signerDigest)
+    suspend fun findActive(applicationId: String, signerDigest: String): ProviderPairingRecord? {
+        val canonicalSigner = ProviderSignerDigest.normalizeOrNull(signerDigest) ?: return null
+        return dao.activeFor(applicationId, canonicalSigner)
+    }
 
     /**
      * Operator-approved pairing: insert a fresh active record for the principal and return it.
@@ -40,11 +42,12 @@ class ProviderTrustStore(private val dao: ProviderPairingDao) {
         versionCode: Int,
         approvedAt: Long
     ): ProviderPairingRecord {
-        dao.activeFor(applicationId, signerDigest)?.let { return it }
+        val canonicalSigner = ProviderSignerDigest.requireCanonical(signerDigest)
+        dao.activeFor(applicationId, canonicalSigner)?.let { return it }
         val id = dao.insert(
             ProviderPairingRecord(
                 applicationId = applicationId,
-                currentSignerDigest = signerDigest,
+                currentSignerDigest = canonicalSigner,
                 approvedAt = approvedAt,
                 revokedAt = null,
                 approvedVersionCode = versionCode
@@ -53,7 +56,7 @@ class ProviderTrustStore(private val dao: ProviderPairingDao) {
         return ProviderPairingRecord(
             id = id,
             applicationId = applicationId,
-            currentSignerDigest = signerDigest,
+            currentSignerDigest = canonicalSigner,
             approvedAt = approvedAt,
             revokedAt = null,
             approvedVersionCode = versionCode
@@ -61,6 +64,8 @@ class ProviderTrustStore(private val dao: ProviderPairingDao) {
     }
 
     /** Revoke (state transition): set revokedAt on the ACTIVE record of the exact principal. */
-    suspend fun revoke(applicationId: String, signerDigest: String, revokedAt: Long): Boolean =
-        dao.revoke(applicationId, signerDigest, revokedAt) > 0
+    suspend fun revoke(applicationId: String, signerDigest: String, revokedAt: Long): Boolean {
+        val canonicalSigner = ProviderSignerDigest.normalizeOrNull(signerDigest) ?: return false
+        return dao.revoke(applicationId, canonicalSigner, revokedAt) > 0
+    }
 }

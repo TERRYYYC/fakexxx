@@ -284,16 +284,18 @@ class EngineJourneyConsumerOracleTest {
     }
 
     @Test
-    fun `the engine CONSUMES discover at run start - an incompatible provider pauses before any attempt`() = runTest {
+    fun `the engine CONSUMES attempt-scoped discover after durable owner readback`() = runTest {
         val (planId, taskId) = seedPlan()
         discoverAnswer = null // the incompatible/unavailable provider
         val clock = VClock()
         buildEngine(planId, clock, null).run()
 
         assertTrue("the discover gate was consulted", discoverCalls.isNotEmpty())
-        assertEquals(
-            "an unavailable provider pauses BEFORE any attempt is created (killing mutation: consumer removed ⇒ attempts exist)",
-            0, db.testAttemptDao().getAttemptsForTask(taskId).size
+        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
+        assertEquals("attempt ownership is durable before discover", 1, attempts.size)
+        assertTrue(
+            "an unavailable provider dispatches no preflight or apply after the attempt-scoped discover",
+            preflightCalls.isEmpty() && events.none { it == "apply" },
         )
         assertEquals("no session activity beyond the pause", 0, db.trustedQuotaDao().countAll())
     }
@@ -453,8 +455,8 @@ class EngineJourneyConsumerOracleTest {
         val attempt = db.testAttemptDao().getAttemptsForTask(taskId).first()
         assertEquals("healthy exhausted readback ⇒ CLOSED", "CLOSED", db.testAttemptDao().getAttemptById(attempt.id)!!.aplusState)
         assertTrue(
-            "a fresh discover() readback happened after the terminal advance (run-start + anchor + readback)",
-            discoverCalls.size >= 3
+            "a fresh discover() readback happened after the terminal advance (anchor + readback)",
+            discoverCalls.size >= 2
         )
 
         // Killing mutation: the readback's exhausted leg is FALSE — the receipt is internally

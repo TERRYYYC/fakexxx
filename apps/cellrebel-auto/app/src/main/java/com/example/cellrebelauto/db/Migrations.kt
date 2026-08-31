@@ -302,3 +302,24 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
         // Intentionally empty — see the chronicle above.
     }
 }
+
+/**
+ * v6 → v7: freeze the selected applicationId P on the plan and recovery chain, plus immutable
+ * signer owner S on attempt/lease-scoped rows. Every column is nullable with NO SQL default and NO
+ * backfill: an old row cannot borrow P or S from the build/package that happens to open it. The plan
+ * intentionally remains P-only so an approved rotation may own a future attempt while old leases
+ * stay bound to their original S. Legacy in-flight rows remain explicit unknown and fail closed.
+ */
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN providerApplicationId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN providerApplicationId TEXT")
+        db.execSQL("ALTER TABLE operation_receipts ADD COLUMN providerApplicationId TEXT")
+        db.execSQL("ALTER TABLE recovery_checkpoints ADD COLUMN providerApplicationId TEXT")
+        db.execSQL("ALTER TABLE release_receipts ADD COLUMN providerApplicationId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN providerSignerDigest TEXT")
+        db.execSQL("ALTER TABLE operation_receipts ADD COLUMN providerSignerDigest TEXT")
+        db.execSQL("ALTER TABLE recovery_checkpoints ADD COLUMN providerSignerDigest TEXT")
+        db.execSQL("ALTER TABLE release_receipts ADD COLUMN providerSignerDigest TEXT")
+    }
+}

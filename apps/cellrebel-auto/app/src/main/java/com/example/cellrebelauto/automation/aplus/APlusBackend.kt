@@ -3,8 +3,10 @@ package com.example.cellrebelauto.automation.aplus
 import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.recovery.DurableRecoveryLog
+import com.example.cellrebelauto.recovery.DurableProviderPrincipalPreflight
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.ObserveIntentAcquirer
+import com.example.cellrebelauto.recovery.ProviderExecutorAcquisition
 import com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer
 import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 
@@ -21,12 +23,24 @@ import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
  *
  * # A+ 后端 seam 束：contract/GREEN 绑定的外部依赖单一组合点；pre-freeze 生产 = null（纯 legacy）
  */
-interface APlusBackend {
+internal interface APlusBackend {
     /** The external provider operation call (apply + release), idempotent at the provider (§6.3.4). */
     val executor: ExternalApplyExecutor
 
     /** Auto-local durable receipt/checkpoint store (§7.1 RecoveryCheckpoint owner; Room binding is GREEN). */
     val recoveryLog: DurableRecoveryLog
+
+    /** Durable plan/attempt/proof resolver. Production must override the test-only default. */
+    val providerPrincipalPreflight: DurableProviderPrincipalPreflight
+        get() = DurableProviderPrincipalPreflight.TEST_ONLY_UNCHECKED
+
+    /** Non-null only for the registry-issued, exact-bound production composition. */
+    val productionProviderAcquisition: ProviderExecutorAcquisition?
+        get() = null
+
+    /** Immutable attempt/lease signer owner; null only for explicit non-production fixtures. */
+    val providerSignerDigest: String?
+        get() = null
 
     val observeIntent: ObserveIntentAcquirer
     val receiptRevision: ReceiptRevisionAcquirer

@@ -55,12 +55,16 @@ import java.util.concurrent.atomic.AtomicReference
  * exactly who they are talking to.
  *
  * The provider's debug build carries an `applicationIdSuffix ".bench"`, so the
- * package name differs between debug and release. This client binds only the
- * principal selected by the Auto build: falling back to the sibling package
- * would let diagnostics report success against a different identity than the
- * engine's trust gate and Binder executor.
+ * package name differs between debug and release. The caller selects exactly one
+ * identity before constructing this client. A failed selected bind is reported as
+ * such; trying the sibling would silently change principals and is forbidden.
  */
-class EnvironmentControlClient(private val context: Context) {
+class EnvironmentControlClient(
+    private val context: Context,
+    providerApplicationId: String = ProviderPrincipal.selected,
+) {
+    val targetApplicationId: String =
+        ProviderPrincipal.requireKnownApplicationId(providerApplicationId)
 
     /**
      * Every way this call can end, named. A boolean would collapse "provider is
@@ -89,8 +93,9 @@ class EnvironmentControlClient(private val context: Context) {
         data class Refused(val providerPackage: String, val cause: Throwable) : HandshakeResult
     }
 
-    fun handshake(timeoutMs: Long = 5_000L): HandshakeResult =
-        tryPackage(PROVIDER_PACKAGE, timeoutMs)
+    fun handshake(timeoutMs: Long = 5_000L): HandshakeResult {
+        return tryPackage(targetApplicationId, timeoutMs)
+    }
 
     private fun tryPackage(providerPackage: String, timeoutMs: Long): HandshakeResult {
         val latch = CountDownLatch(1)
@@ -102,11 +107,13 @@ class EnvironmentControlClient(private val context: Context) {
 
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                if (name != ComponentName(providerPackage, PROVIDER_SERVICE_CLASS)) return
                 binderRef.set(service)
                 latch.countDown()
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
+                if (name != ComponentName(providerPackage, PROVIDER_SERVICE_CLASS)) return
                 binderRef.set(null)
                 latch.countDown()
             }
@@ -115,11 +122,13 @@ class EnvironmentControlClient(private val context: Context) {
             // rather than waiting out the timeout keeps a crash distinguishable
             // from a hang.
             override fun onBindingDied(name: ComponentName?) {
+                if (name != ComponentName(providerPackage, PROVIDER_SERVICE_CLASS)) return
                 binderRef.set(null)
                 latch.countDown()
             }
 
             override fun onNullBinding(name: ComponentName?) {
+                if (name != ComponentName(providerPackage, PROVIDER_SERVICE_CLASS)) return
                 binderRef.set(null)
                 latch.countDown()
             }
@@ -137,7 +146,8 @@ class EnvironmentControlClient(private val context: Context) {
         }
 
         if (!bindRequested) {
-            context.unbindService(connection)
+            // Android does not require (and may reject) unbinding a connection whose bind request
+            // returned false. Keep this typed failure path stable across platform implementations.
             return HandshakeResult.NotBindable(listOf(providerPackage))
         }
 

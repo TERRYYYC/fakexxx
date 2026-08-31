@@ -27,9 +27,11 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * R44 (DSF review P1-1): the PRODUCTION evidence-source oracle — drives
- * [APlusComposition.productionBackend]'s evidenceSource through its REAL live-observation chain
- * with a fake executor injected at the widened INTERFACE seam:
+ * R44 (DSF review P1-1): the production-adapter evidence-source oracle — drives the shared
+ * backend builder's evidenceSource through its real trust/Room/live-observation chain using the
+ * explicit [APlusComposition.testOnlyBackend] executor seam. Registry provenance and the actual
+ * production factory route are proved separately by ProviderPrincipalRoutingRedTest and
+ * ProductionCommitClockFactoryTest:
  *
  *  1. observeLive consumes executor.observe (untrusted signer / null observe / wrong-tuple → null);
  *  2. the trusted result remains live until the engine's PlanRepository phase-boundary transaction;
@@ -48,6 +50,8 @@ class ProductionEvidenceSourceOracleTest {
     private lateinit var db: AppDatabase
     private var signerTrusted: Boolean = true
     private val observeCalls = mutableListOf<Triple<String, String, String>>()
+    private var rawReleaseCalls: Int = 0
+    private var rawAdvanceCalls: Int = 0
     private var observeResult: EnvironmentObservationV1? = null
 
     /** The fake journey executor: records observe calls, returns the programmed observation. */
@@ -63,20 +67,26 @@ class ProductionEvidenceSourceOracleTest {
                 acceptedIntentHash = expectedHash(), appliedAtEpochMs = 1000L,
                 environmentRevision = 7L,
                 verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire)
-        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome =
-            ApplyOutcome("RELEASED", false)
+        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome {
+            rawReleaseCalls++
+            return ApplyOutcome("RELEASED", false)
+        }
         override fun discover(): CapabilitySnapshotV1? = null
         override fun preflight(intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): PreflightReportV1? = null
         override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
             observeCalls += Triple(leaseId, operationId, expectedIntentHash)
             return observeResult
         }
-        override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? = null
+        override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+            rawAdvanceCalls++
+            return null
+        }
     }
 
     // The REAL owner identity captured during seed (DB-assigned plan/task ids).
     private var seededPlanId: Long = 0L
     private var seededTaskId: Long = 0L
+    private var seededSessionId: Long = 0L
 
     // R45 (Sol R45 P1-1): the attempt validity window width — the SAME value handed to the
     // production backend. The owner recompute MUST use (attempt.startedAt → startedAt + timeout):
@@ -91,15 +101,53 @@ class ProductionEvidenceSourceOracleTest {
             )
         )
 
-    private fun backend() = APlusComposition.productionBackend(
+    private fun backend() = APlusComposition.testOnlyBackend(
         ApplicationProvider.getApplicationContext(),
         db,
-        providerSignerDigest = { if (signerTrusted) "sha256:trusted" else "sha256:other" },
-        providerApplicationId =
+        providerExecutor = com.example.cellrebelauto.recovery.ProviderScopedExternalApplyExecutor.wrap(
             io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+            fakeExecutor,
+        ),
+        providerSignerDigest = { if (signerTrusted) "sha256:a9a089195c68d2adeee23beaa2c3a93b1d4cdf09046e7a9e520b3b166dff3e6a" else "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa" },
         attemptValidityTimeoutMs = attemptTimeoutMs,
-        serviceLifecycleExecutor = fakeExecutor
     )
+
+    private fun recoveryEngine(): AutomationEngine {
+        val backend = backend()
+        val (coordinator, evidence) = APlusComposition.engineAplusParams(backend)
+        return testOnlyAutomationEngine(
+            planId = seededPlanId,
+            planRepository = com.example.cellrebelauto.repository.PlanRepository(db),
+            cellRebelRunner = object : CellRebelRunner {
+                override suspend fun runTest(
+                    startedAt: Long,
+                    testTimeoutMs: Long,
+                    onRunningObserved: suspend (Long) -> Unit,
+                ): AttemptOutcome = error("manual signer recovery cannot start a new test")
+            },
+            gpsSetter = object : GpsLocationSetter {
+                override suspend fun setLocation(lat: Double, lng: Double): GpsOutcome =
+                    error("manual signer recovery cannot set a new location")
+            },
+            globalBufferSeconds = 0,
+            testTimeoutMs = attemptTimeoutMs,
+            gpsSettleMs = 0L,
+            stageToggles = {
+                com.example.cellrebelauto.model.plan.StageToggles(
+                    locationStageEnabled = true,
+                    testStageEnabled = true,
+                )
+            },
+            auditDao = db.auditEventDao(),
+            aplusCoordinator = coordinator,
+            aplusEvidence = evidence,
+            bridge = null,
+            nowMs = { 2_000L },
+            delayMs = {},
+            commitClockMs = { 2_000L },
+            elapsedClockMs = { 2_000L },
+        )
+    }
 
     @Before
     fun setUp() = kotlinx.coroutines.runBlocking {
@@ -110,13 +158,22 @@ class ProductionEvidenceSourceOracleTest {
         // Seed: plan→task→session→attempt (77), an approved (appId, signer) principal, an apply
         // receipt carrying lease+operationId+intent hash, and the owner execution row.
         val planId = db.planDao().insertPlanWithTasks(
-            LocationPlan(sourceFileName = "p.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
+            LocationPlan(
+                sourceFileName = "p.csv",
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 1,
+                totalRequiredSuccesses = 1,
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
+            ),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1))
         )
         seededPlanId = planId
         val task = db.locationTaskDao().getTasksForPlan(planId).first()
         seededTaskId = task.id
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
+        seededSessionId = sessionId
         db.testAttemptDao().insert(
             TestAttempt(
                 id = 77L, taskId = task.id, runSessionId = sessionId, attemptOrdinal = 1,
@@ -125,14 +182,13 @@ class ProductionEvidenceSourceOracleTest {
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
                 aplusState = "ENV_APPLIED", aplusLeaseId = "lease-77", currentExecutionId = "exec-77",
-                aplusAnchorScheduleId = "qwy-default-schedule"
+                aplusAnchorScheduleId = "qwy-default-schedule",
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
             )
         )
-        // Approve the TRUSTED signer principal UNDER TEST. This oracle exercises the production
-        // principal path (backend() injects it explicitly), so the approved pairing must bind the
-        // same injected identity — never the build-selected one — keeping every leg on ONE
-        // principal (the ProviderPrincipal single-truth-source contract from #63).
-        val trustedSigner = "sha256:trusted"
+        // Approve the TRUSTED signer principal for the production provider app id.
+        val trustedSigner = "sha256:a9a089195c68d2adeee23beaa2c3a93b1d4cdf09046e7a9e520b3b166dff3e6a"
         val approvedId = db.providerPairingDao().insert(
             com.example.cellrebelauto.model.plan.ProviderPairingRecord(
                 applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
@@ -148,7 +204,9 @@ class ProductionEvidenceSourceOracleTest {
                 requestDigest = expectedHash(), resultOutcome = "APPLIED", createdAt = 1000L,
                 leaseId = "lease-77", operationId = "op-77", acceptedIntentHash = expectedHash(),
                 appliedAtEpochMs = 1000L, environmentRevision = 7L,
-                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
             )
         )
         // The owner execution row (written at COMPLETION_OBSERVED in production).
@@ -223,25 +281,74 @@ class ProductionEvidenceSourceOracleTest {
     }
 
     @Test
-    fun `release is EXEMPT from the trust gate - lease cleanup passes through (R46 P1-3)`() = runBlocking {
-        signerTrusted = false // revoked / rotated away mid-run
-        val executor = backend().executor
-        // §6.5.4: the in-flight attempt ENTERS the release/recovery path after a revoke — the
-        // existing lease must still be releasable, or the lease is stranded forever.
-        assertEquals(
-            "release passes through for an untrusted signer (killing mutation: release gated ⇒ PROVIDER_SIGNER_UNTRUSTED)",
-            "RELEASED", executor.release(77L, "rel-key-77", "lease-77", "rel-digest", 0L).outcome
-        )
-        // NEW trusted work stays gated — the exemption is cleanup-only.
-        assertNull("discover stays gated", executor.discover())
+    fun `signer rotation from approved A to untrusted B blocks raw release and every durable effect`() = runBlocking {
+        signerTrusted = false // durable approval is signer A; current package now resolves to signer B
+        val releaseKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+            .releaseIdempotencyKey(77L)
+        db.testAttemptDao().markAplusState(77L, "RELEASE_PENDING")
+
+        val firstEngine = recoveryEngine()
+        firstEngine.run()
+
+        val firstDurable = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("untrusted release is a durable manual-recovery stop", "RECOVERY_REQUIRED", firstDurable.aplusState)
+        assertEquals("the release outcome remains typed across process death", "PROVIDER_SIGNER_UNTRUSTED", firstDurable.failureReason)
+        assertEquals(com.example.cellrebelauto.model.AutomationState.PAUSED, firstEngine.state.value)
+        val firstSessionStatus = db.openHelper.readableDatabase.query(
+            "SELECT status FROM run_sessions WHERE id = $seededSessionId"
+        ).use { cursor ->
+            cursor.moveToFirst()
+            cursor.getString(0)
+        }
+        assertEquals("paused", firstSessionStatus)
+        assertEquals("rotated signer B receives zero raw release", 0, rawReleaseCalls)
+        assertEquals("rotation cannot persist a release receipt", null, db.releaseReceiptDao().byKey(releaseKey))
+        assertEquals("rotation cannot advance a checkpoint", null, db.recoveryCheckpointRoomDao().byAttempt(77L))
+        assertEquals("rotation cannot mint quota", 0, db.trustedQuotaDao().countAll())
+        assertEquals("rotation cannot advance the provider schedule", 0, rawAdvanceCalls)
+
+        val untrustedExecutor = backend().executor
+        // Every other journey leg remains closed while B is untrusted.
+        assertNull("discover stays gated", untrustedExecutor.discover())
         val probeIntent = io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1(
             runId = "5", attemptId = "77", profileRef = "p", scheduleRef = "s",
             requiredVerificationWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
             notBeforeEpochMs = 0L, deadlineEpochMs = 1L
         )
-        assertNull("preflight stays gated", executor.preflight(probeIntent, "key", "digest"))
-        val applyOutcome = executor.apply(77L, probeIntent, "key", "digest", 0L)
+        assertNull("preflight stays gated", untrustedExecutor.preflight(probeIntent, "key", "digest"))
+        val applyOutcome = untrustedExecutor.apply(77L, probeIntent, "key", "digest", 0L)
         assertEquals("apply stays gated — no new trusted work", "PROVIDER_SIGNER_UNTRUSTED", applyOutcome.outcome)
+
+        // Even if B is subsequently approved, that does not prove B owns A's outstanding lease.
+        // Only an explicit manual-resolution flow may clear this sticky durable reason.
+        db.providerPairingDao().insert(
+            com.example.cellrebelauto.model.plan.ProviderPairingRecord(
+                applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
+                currentSignerDigest = "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa",
+                approvedAt = 2_100L,
+                revokedAt = null,
+                approvedVersionCode = 2,
+            )
+        )
+        assertEquals(
+            "the sticky reason must stop Service before registry acquire/bind",
+            "PROVIDER_SIGNER_UNTRUSTED",
+            com.example.cellrebelauto.repository.PlanRepository(db)
+                .recoveryProviderPrincipalFailure(
+                    seededPlanId,
+                    io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                        .PROVIDER_APPLICATION_ID_PRODUCTION,
+                    "sha256:d9298a10d1b0735837dc4bd85dac641b0f3cef27a47e5d53a54f2f3f5b2fcffa",
+                ),
+        )
+        val restartedEngine = recoveryEngine()
+        restartedEngine.run()
+        assertEquals(com.example.cellrebelauto.model.AutomationState.PAUSED, restartedEngine.state.value)
+        assertEquals("later approval cannot release A's lease through B", 0, rawReleaseCalls)
+        assertNull(db.releaseReceiptDao().byKey(releaseKey))
+        assertNull(db.recoveryCheckpointRoomDao().byAttempt(77L))
+        assertEquals(0, rawAdvanceCalls)
     }
 
     @Test

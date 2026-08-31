@@ -1,5 +1,21 @@
 package com.example.cellrebelauto.recovery
 
+import com.example.cellrebelauto.automation.ProviderPrincipal
+
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+
+/** Typed release result retained until the engine persists a manual-recovery reason. */
+internal data class ReleaseLeaseResult(
+    val receipt: RecordedReleaseReceipt? = null,
+    val failureReason: String? = null,
+) {
+    init {
+        require((receipt == null) != (failureReason == null)) {
+            "release result must carry exactly one of receipt or failure reason"
+        }
+    }
+}
+
 /**
  * Reconciles an attempt left non-terminal after a crash or an interrupted external call (§8.1
  * RECOVERY_REQUIRED, §10 crash/recovery matrix), and answers the schedule-advance consumer gate
@@ -28,7 +44,7 @@ package com.example.cellrebelauto.recovery
  *
  * # 恢复协调器骨架（RED）：恒 INSUFFICIENT / NOT_ADVANCED，忽略 executor+log；GREEN 编排执行器与 receipt
  */
-class RecoveryCoordinator(
+internal class RecoveryCoordinator(
     private val executor: ExternalApplyExecutor,
     private val log: DurableRecoveryLog,
     // R6-F2（§11.7）：三个 reader 是协调器**构造期拥有**的依赖，不再逐调用注入。
@@ -37,8 +53,114 @@ class RecoveryCoordinator(
     // scheduleAdvanced 的生产/测试构造必传真实 reader。这彻底消除了 R5 残留的"闭包答案仍由调用方注入"。
     private val observe: ObserveIntentAcquirer = ObserveIntentAcquirer { _ -> false },
     private val receiptRevision: ReceiptRevisionAcquirer = ReceiptRevisionAcquirer { _, _ -> false },
-    private val trustedQuota: TrustedQuotaAcquirer = TrustedQuotaAcquirer { _ -> false }
+    private val trustedQuota: TrustedQuotaAcquirer = TrustedQuotaAcquirer { _ -> false },
+    private val providerPrincipalPreflight: DurableProviderPrincipalPreflight =
+        DurableProviderPrincipalPreflight.TEST_ONLY_UNCHECKED,
+    private val productionProviderAcquisition: ProviderExecutorAcquisition? = null,
+    providerSignerDigest: String? = null,
 ) {
+
+    /** Null only for legacy unit-test executors that do not enter production composition. */
+    val targetApplicationId: String? =
+        (executor as? ProviderScopedExternalApplyExecutor)?.targetApplicationId
+
+    /** Null only for explicit non-production coordinator fixtures. */
+    val targetSignerDigest: String? = providerSignerDigest?.let {
+        com.example.cellrebelauto.environment.ProviderSignerDigest.requireCanonical(it)
+    }
+
+    private val scopedPrincipalKnown: Boolean
+        get() = targetApplicationId == null ||
+            ProviderPrincipal.isKnownApplicationId(targetApplicationId)
+
+    val hasDurableProviderPrincipalPreflight: Boolean
+        get() = providerPrincipalPreflight is RoomDurableProviderPrincipalPreflight
+
+    val hasRegistryIssuedProviderExecutorCapability: Boolean
+        get() = productionProviderAcquisition
+            ?.ownsRegistryBoundProductionExecutor(executor) == true &&
+            productionProviderAcquisition.providerSignerDigest == targetSignerDigest
+
+    private fun principalMatches(recordedApplicationId: String?): Boolean =
+        targetApplicationId == null || recordedApplicationId == targetApplicationId
+
+    private fun classifyPrincipal(recordedApplicationId: String?): String? {
+        val target = targetApplicationId ?: return null
+        return when {
+            !ProviderPrincipal.isKnownApplicationId(target) -> "PROVIDER_PRINCIPAL_UNKNOWN"
+            !ProviderPrincipal.isKnownApplicationId(recordedApplicationId) ->
+                "PROVIDER_PRINCIPAL_UNKNOWN"
+            recordedApplicationId != target -> "PROVIDER_PRINCIPAL_CONFLICT"
+            else -> null
+        }
+    }
+
+    /**
+     * Production release identity is derived from the durable attempt/lease, never selected by a
+     * caller. Historical coordinator-only tests keep their explicit keys through the unchecked
+     * seam; the production factory rejects that seam for a scoped executor.
+     */
+    private fun releaseIdentityIsCanonical(
+        attemptId: Long,
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+    ): Boolean = providerPrincipalPreflight !is RoomDurableProviderPrincipalPreflight ||
+        (idempotencyKey == APlusOperationIdentity.releaseIdempotencyKey(attemptId) &&
+            releaseDigest == APlusOperationIdentity.releaseDigest(leaseId))
+
+    /**
+     * Read-only attempt-wide ownership preflight. Every existing durable proof associated with the
+     * attempt must carry the executor target. Later phases additionally require the apply receipt
+     * and its lease before any provider call, acquisition, mint, or advance.
+     */
+    fun providerPrincipalBoundaryFailure(
+        attemptId: Long,
+        expectedLeaseId: String? = null,
+        requireApplyReceipt: Boolean = false,
+        applyReceiptKey: String = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+    ): String? {
+        if (targetApplicationId == null) return null // legacy non-production test seam
+        if (!scopedPrincipalKnown) return "PROVIDER_PRINCIPAL_UNKNOWN"
+
+        providerPrincipalPreflight.attemptFailure(
+            attemptId = attemptId,
+            executorApplicationId = targetApplicationId,
+            expectedLeaseId = expectedLeaseId,
+            requireApplyReceipt = requireApplyReceipt,
+            applyReceiptKey = applyReceiptKey,
+        )?.let { return it }
+
+        log.checkpointFor(attemptId)?.let { checkpoint ->
+            classifyPrincipal(checkpoint.providerApplicationId)?.let { return it }
+        }
+
+        val applyReceipt = log.receiptFor(applyReceiptKey)
+        if (applyReceipt == null) {
+            if (requireApplyReceipt) return "PROVIDER_PRINCIPAL_UNKNOWN"
+        } else {
+            classifyPrincipal(applyReceipt.providerApplicationId)?.let { return it }
+            if (expectedLeaseId != null && applyReceipt.leaseId != expectedLeaseId) {
+                return "PROVIDER_PRINCIPAL_CONFLICT"
+            }
+        }
+
+        log.releaseReceiptForKey(
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+        )?.let { releaseReceipt ->
+            classifyPrincipal(releaseReceipt.providerApplicationId)?.let { return it }
+            if (expectedLeaseId != null && releaseReceipt.leaseId != expectedLeaseId) {
+                return "PROVIDER_PRINCIPAL_CONFLICT"
+            }
+        }
+        return null
+    }
+
+    fun planProviderPrincipalBoundaryFailure(planId: Long): String? {
+        val target = targetApplicationId ?: return null
+        if (!scopedPrincipalKnown) return "PROVIDER_PRINCIPAL_UNKNOWN"
+        return providerPrincipalPreflight.planFailure(planId, target)
+    }
 
     /** Number of [reconcile] invocations — the engine must NOT reconcile a non-APPLY_PENDING phase
      *  (Sol round-23 P1-3): an illegal reconcile is observable through this counter. */
@@ -50,7 +172,46 @@ class RecoveryCoordinator(
      * completeAndAdvance consumers go through the SAME executor the coordinator drives for
      * apply/release (single wiring point; the executor is a constructor-owned dependency).
      */
-    fun executorBackend(): ExternalApplyExecutor = executor
+    fun discoverForAttempt(attemptId: Long): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? =
+        if (providerPrincipalBoundaryFailure(attemptId) == null) executor.discover() else null
+
+    fun preflightForAttempt(
+        attemptId: Long,
+        intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+        idempotencyKey: String,
+        requestDigest: String,
+    ): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1? =
+        if (providerPrincipalBoundaryFailure(
+                attemptId = attemptId,
+                applyReceiptKey = idempotencyKey,
+            ) == null
+        ) executor.preflight(intent, idempotencyKey, requestDigest) else null
+
+    fun observeForAttempt(
+        attemptId: Long,
+        leaseId: String,
+        operationId: String,
+        expectedIntentHash: String,
+    ): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? =
+        if (providerPrincipalBoundaryFailure(
+                attemptId = attemptId,
+                expectedLeaseId = leaseId,
+                requireApplyReceipt = true,
+            ) == null
+        ) executor.observe(leaseId, operationId, expectedIntentHash) else null
+
+    fun completeAndAdvanceForAttempt(
+        attemptId: Long,
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String,
+    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? =
+        if (providerPrincipalBoundaryFailure(
+                attemptId = attemptId,
+                expectedLeaseId = request.leaseId,
+                requireApplyReceipt = true,
+                applyReceiptKey = request.idempotencyKey,
+            ) == null
+        ) executor.completeAndAdvance(request, expectedIntentHash) else null
 
     /**
      * Reconcile a non-terminal attempt after crash/restart (§8.1 RECOVERY_REQUIRED). Returns a TYPED
@@ -79,16 +240,48 @@ class RecoveryCoordinator(
         requestDigest: String,
         now: Long
     ): ReconcileResult {
+        if (!scopedPrincipalKnown) {
+            return ReconcileResult.ProviderFailure(
+                ProviderPrincipalFailureReason.PRINCIPAL_UNKNOWN
+            )
+        }
+        providerPrincipalBoundaryFailure(
+            attemptId = attemptId,
+            applyReceiptKey = idempotencyKey,
+        )?.let { durableCode ->
+            return ReconcileResult.ProviderFailure(
+                ProviderPrincipalFailureReason.fromDurableCode(durableCode)
+                    ?: ProviderPrincipalFailureReason.PRINCIPAL_UNKNOWN
+            )
+        }
         reconcileInvocationCount++
         val prior = log.receiptFor(idempotencyKey)
         if (prior != null) {
+            if (!principalMatches(prior.providerApplicationId)) {
+                return ReconcileResult.ProviderFailure(
+                    ProviderPrincipalFailureReason.PRINCIPAL_CONFLICT
+                )
+            }
             if (prior.requestDigest != requestDigest) {
                 // Same key + different canonical digest ⇒ INV-13 conflict; NO executor call, prior preserved.
                 return ReconcileResult.IdempotencyConflict
             }
             // Same key + same digest ⇒ idempotent replay: NO executor call (at-most-once). Repair the
             // window-c checkpoint if the prior process crashed after the receipt but before it (R5-F2).
-            log.recordCheckpoint(attemptId, "RECONCILED_REPLAY", prior.idempotencyKey, now)
+            val repaired = log.recordCheckpoint(
+                attemptId,
+                "RECONCILED_REPLAY",
+                prior.idempotencyKey,
+                now,
+                targetApplicationId,
+            ) ?: return ReconcileResult.ProviderFailure(
+                ProviderPrincipalFailureReason.PRINCIPAL_CONFLICT
+            )
+            if (!principalMatches(repaired.providerApplicationId)) {
+                return ReconcileResult.ProviderFailure(
+                    ProviderPrincipalFailureReason.PRINCIPAL_CONFLICT
+                )
+            }
             return ReconcileResult.ReplayedApply(prior, prior.leaseId)
         }
         // No durable receipt ⇒ M-CR-02 window (b): re-invoke the executor (the provider idempotently
@@ -107,13 +300,32 @@ class RecoveryCoordinator(
             acceptedIntentHash = outcome.acceptedIntentHash,
             appliedAtEpochMs = outcome.appliedAtEpochMs,
             environmentRevision = outcome.environmentRevision,
-            verificationLevelWire = outcome.verificationLevelWire
+            verificationLevelWire = outcome.verificationLevelWire,
+            providerApplicationId = targetApplicationId,
         ) ?: return ReconcileResult.InsufficientEvidence // receipt not durable ⇒ apply unproven
+        if (!principalMatches(receipt.providerApplicationId)) {
+            return ReconcileResult.ProviderFailure(
+                ProviderPrincipalFailureReason.PRINCIPAL_CONFLICT
+            )
+        }
         if (!receipt.matchesProviderOutcome(outcome)) {
             return ReconcileResult.InsufficientEvidence
         }
         val durableLease = receipt.leaseId ?: return ReconcileResult.InsufficientEvidence
-        log.recordCheckpoint(attemptId, "ADVANCED_TO_RELEASE", receipt.idempotencyKey, now)
+        val checkpoint = log.recordCheckpoint(
+            attemptId,
+            "ADVANCED_TO_RELEASE",
+            receipt.idempotencyKey,
+            now,
+            targetApplicationId,
+        ) ?: return ReconcileResult.ProviderFailure(
+            ProviderPrincipalFailureReason.PRINCIPAL_CONFLICT
+        )
+        if (!principalMatches(checkpoint.providerApplicationId)) {
+            return ReconcileResult.ProviderFailure(
+                ProviderPrincipalFailureReason.PRINCIPAL_CONFLICT
+            )
+        }
         return ReconcileResult.AdvancedToRelease(receipt, durableLease)
     }
 
@@ -156,9 +368,17 @@ class RecoveryCoordinator(
         idempotencyKey: String,
         now: Long
     ): ScheduleAdvanceState {
+        if (!scopedPrincipalKnown) return ScheduleAdvanceState.NOT_ADVANCED
+        if (providerPrincipalBoundaryFailure(
+                attemptId = attemptId,
+                requireApplyReceipt = true,
+                applyReceiptKey = idempotencyKey,
+            ) != null
+        ) return ScheduleAdvanceState.NOT_ADVANCED
         // Receipt FIRST (§5 boundary): without a durable receipt Auto never assumes the schedule
         // advanced — regardless of any acquired fact.
         val receipt = log.receiptFor(idempotencyKey) ?: return ScheduleAdvanceState.NOT_ADVANCED
+        if (!principalMatches(receipt.providerApplicationId)) return ScheduleAdvanceState.NOT_ADVANCED
         // Acquire each fact INSIDE the gate from the coordinator-owned readers, forwarding the REAL
         // owned identity — never caller-supplied booleans (R6-F2). All three are acquired unconditionally
         // (no short-circuit): each reader call is itself part of the observable contract.
@@ -167,8 +387,18 @@ class RecoveryCoordinator(
         val quotaHasCapacity = trustedQuota.hasCapacity(attemptId)
         return if (observeMatch && revisionFresh && quotaHasCapacity) {
             // Window-c checkpoint bound to the advanced receipt (R5-F2 durable half).
-            log.recordCheckpoint(attemptId, "SCHEDULE_ADVANCED", receipt.idempotencyKey, now)
-            ScheduleAdvanceState.ADVANCED
+            val checkpoint = log.recordCheckpoint(
+                attemptId,
+                "SCHEDULE_ADVANCED",
+                receipt.idempotencyKey,
+                now,
+                targetApplicationId,
+            )
+            if (checkpoint != null && principalMatches(checkpoint.providerApplicationId)) {
+                ScheduleAdvanceState.ADVANCED
+            } else {
+                ScheduleAdvanceState.NOT_ADVANCED
+            }
         } else {
             ScheduleAdvanceState.NOT_ADVANCED
         }
@@ -193,11 +423,36 @@ class RecoveryCoordinator(
         requestDigest: String,
         now: Long
     ): ApplyOutcome {
+        if (!scopedPrincipalKnown) {
+            return ApplyOutcome(
+                outcome = "PROVIDER_PRINCIPAL_UNKNOWN",
+                providerHadAlreadyApplied = false,
+                leaseId = null,
+            )
+        }
+        val principalFailure = providerPrincipalBoundaryFailure(
+            attemptId = attemptId,
+            applyReceiptKey = idempotencyKey,
+        )
+        if (principalFailure != null) {
+            return ApplyOutcome(
+                outcome = principalFailure,
+                providerHadAlreadyApplied = false,
+                leaseId = null,
+            )
+        }
         // INV-13 conflict preflight (Sol round-14 P1-1 / round-15 P2-3): a known conflicting receipt
         // (same key + different digest) MUST fail-closed BEFORE the provider call with the canonical
         // IDEMPOTENCY_CONFLICT outcome — zero external effect, no lease.
         val prior = log.receiptFor(idempotencyKey)
         if (prior != null) {
+            if (!principalMatches(prior.providerApplicationId)) {
+                return ApplyOutcome(
+                    outcome = "PROVIDER_PRINCIPAL_CONFLICT",
+                    providerHadAlreadyApplied = false,
+                    leaseId = null,
+                )
+            }
             if (prior.requestDigest != requestDigest) {
                 return ApplyOutcome(outcome = "IDEMPOTENCY_CONFLICT", providerHadAlreadyApplied = false, leaseId = null)
             }
@@ -218,7 +473,8 @@ class RecoveryCoordinator(
                 acceptedIntentHash = outcome.acceptedIntentHash,
                 appliedAtEpochMs = outcome.appliedAtEpochMs,
                 environmentRevision = outcome.environmentRevision,
-                verificationLevelWire = outcome.verificationLevelWire
+                verificationLevelWire = outcome.verificationLevelWire,
+                providerApplicationId = targetApplicationId,
             )
             if (receipt == null) {
                 // Receipt not durable (storage failed) → fail-closed: the apply is NOT proven, no lease.
@@ -229,6 +485,13 @@ class RecoveryCoordinator(
                     outcome = "RECEIPT_PROOF_CONFLICT",
                     providerHadAlreadyApplied = false,
                     leaseId = null
+                )
+            }
+            if (!principalMatches(receipt.providerApplicationId)) {
+                return ApplyOutcome(
+                    outcome = "PROVIDER_PRINCIPAL_CONFLICT",
+                    providerHadAlreadyApplied = false,
+                    leaseId = null,
                 )
             }
             // INSERT IGNORE may lose a concurrent same-key/same-digest race. Always return the
@@ -276,13 +539,45 @@ class RecoveryCoordinator(
         leaseId: String,
         releaseDigest: String,
         now: Long
-    ): RecordedReleaseReceipt? {
+    ): RecordedReleaseReceipt? = releaseLeaseResult(
+        attemptId,
+        idempotencyKey,
+        leaseId,
+        releaseDigest,
+        now,
+    ).receipt
+
+    /** Same convergence operation with the typed local/provider failure needed for durable pause. */
+    fun releaseLeaseResult(
+        attemptId: Long,
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        now: Long,
+    ): ReleaseLeaseResult {
+        if (!scopedPrincipalKnown) {
+            return ReleaseLeaseResult(failureReason = "PROVIDER_PRINCIPAL_UNKNOWN")
+        }
+        if (!releaseIdentityIsCanonical(attemptId, idempotencyKey, leaseId, releaseDigest)) {
+            return ReleaseLeaseResult(failureReason = "RELEASE_IDENTITY_CONFLICT")
+        }
+        providerPrincipalBoundaryFailure(
+                attemptId = attemptId,
+                expectedLeaseId = leaseId,
+                requireApplyReceipt = true,
+            )?.let { return ReleaseLeaseResult(failureReason = it) }
         // INV-13 conflict preflight (Sol round-14 P1-2): any existing receipt is authoritative. Replay
         // ONLY the exact tuple (key + lease + digest) with a RELEASED outcome; any mismatch (same key /
         // different lease-or-digest, same lease / different key-or-digest, or FAILED) is fail-closed with
         // ZERO provider call and the prior receipt preserved.
         val byKey = log.releaseReceiptForKey(idempotencyKey)
-        val byLease = log.releaseReceiptFor(leaseId)
+        if (byKey != null && !principalMatches(byKey.providerApplicationId)) {
+            return ReleaseLeaseResult(failureReason = "PROVIDER_PRINCIPAL_CONFLICT")
+        }
+        val byLease = log.releaseReceiptFor(leaseId, targetApplicationId)
+        if (byLease != null && !principalMatches(byLease.providerApplicationId)) {
+            return ReleaseLeaseResult(failureReason = "PROVIDER_PRINCIPAL_CONFLICT")
+        }
         // Dual-index consistency (Sol round-15 P1-2 / round-16 P1-4): a PARTIAL (key-only or lease-only) or
         // DIVERGENT index is fail-closed; only "both null" (no receipt) proceeds to a fresh provider call,
         // and "both non-null + equal" replays when the exact tuple + RELEASED hold.
@@ -290,28 +585,36 @@ class RecoveryCoordinator(
             val releaseOutcome = executor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
             if (releaseOutcome.outcome != "RELEASED") {
                 // Release incomplete / failed → fail-closed (§8.1 RELEASE_INCOMPLETE → RECOVERY_REQUIRED).
-                return null
+                return ReleaseLeaseResult(failureReason = releaseOutcome.outcome)
             }
             val durable = log.recordReleaseReceipt(
-                idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now
-            ) ?: return null
+                idempotencyKey,
+                leaseId,
+                releaseDigest,
+                releaseOutcome.outcome,
+                now,
+                targetApplicationId,
+            ) ?: return ReleaseLeaseResult(failureReason = "RELEASE_RECEIPT_CONFLICT")
             // The durable winner, not the live response, is authoritative after an INSERT-IGNORE
             // race. A same-identity FAILED winner must never be promoted to RELEASED merely because
             // this caller's provider invocation succeeded.
-            return durable.takeIf {
+            val exact = durable.takeIf {
                 it.idempotencyKey == idempotencyKey &&
+                    principalMatches(it.providerApplicationId) &&
                     it.leaseId == leaseId &&
                     it.releaseDigest == releaseDigest &&
                     it.resultOutcome == "RELEASED"
             }
+            return exact?.let { ReleaseLeaseResult(receipt = it) }
+                ?: ReleaseLeaseResult(failureReason = "RELEASE_RECEIPT_CONFLICT")
         }
         if (byKey == null || byLease == null || byKey != byLease) {
-            return null
+            return ReleaseLeaseResult(failureReason = "RELEASE_RECEIPT_CONFLICT")
         }
         if (byKey.leaseId == leaseId && byKey.releaseDigest == releaseDigest && byKey.resultOutcome == "RELEASED") {
-            return byKey
+            return ReleaseLeaseResult(receipt = byKey)
         }
-        return null
+        return ReleaseLeaseResult(failureReason = "RELEASE_RECEIPT_CONFLICT")
     }
 
     /**
@@ -320,15 +623,29 @@ class RecoveryCoordinator(
      * tuple but must not dispatch release again or append a second release audit event.
      */
     fun exactDurableReleaseReceipt(
+        attemptId: Long,
         idempotencyKey: String,
         leaseId: String,
         releaseDigest: String
     ): RecordedReleaseReceipt? {
+        if (!scopedPrincipalKnown) return null
+        if (!releaseIdentityIsCanonical(attemptId, idempotencyKey, leaseId, releaseDigest)) {
+            return null
+        }
+        if (providerPrincipalBoundaryFailure(
+                attemptId = attemptId,
+                expectedLeaseId = leaseId,
+                requireApplyReceipt = true,
+            ) != null
+        ) return null
         val byKey = log.releaseReceiptForKey(idempotencyKey)
-        val byLease = log.releaseReceiptFor(leaseId)
+        if (byKey != null && !principalMatches(byKey.providerApplicationId)) return null
+        val byLease = log.releaseReceiptFor(leaseId, targetApplicationId)
+        if (byLease != null && !principalMatches(byLease.providerApplicationId)) return null
         if (byKey == null || byLease == null || byKey != byLease) return null
         return byKey.takeIf {
             it.idempotencyKey == idempotencyKey &&
+                principalMatches(it.providerApplicationId) &&
                 it.leaseId == leaseId &&
                 it.releaseDigest == releaseDigest &&
                 it.resultOutcome == "RELEASED"
@@ -340,7 +657,7 @@ class RecoveryCoordinator(
  * Typed result of a recovery reconcile (Sol round-9 P1-3): carries the durable apply receipt + provider
  * lease the engine must persist — the lease comes back from the (idempotent) apply, never pre-seeded.
  */
-sealed class ReconcileResult {
+internal sealed class ReconcileResult {
     /** A fresh apply recovered: the executor applied + receipt recorded; [leaseId] is the acquired lease. */
     data class AdvancedToRelease(val applyReceipt: RecordedReceipt, val leaseId: String) : ReconcileResult()
 
@@ -353,6 +670,11 @@ sealed class ReconcileResult {
 
     /** Same idempotency key, different canonical request digest (INV-13). */
     object IdempotencyConflict : ReconcileResult()
+
+    /** Exact typed owner failure; the engine persists [reason.durableCode] without remapping. */
+    data class ProviderFailure(
+        val reason: ProviderPrincipalFailureReason,
+    ) : ReconcileResult()
 
     /** Not enough evidence to reconcile (fail-closed). */
     object InsufficientEvidence : ReconcileResult()

@@ -34,6 +34,9 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class APlusTemplateRedTest {
 
+    private val testProviderSigner =
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
     // ---- AREA 5a: terminal bypass / lease gate (AttemptGuard) ----
 
     @Test
@@ -115,30 +118,30 @@ class APlusTemplateRedTest {
     fun `an unseen provider is not trusted`() = runTest {
         val store = ProviderTrustStore(db.providerPairingDao())
         // GREEN-from-skeleton: an unseen applicationId has no active pairing — no silent TOFU.
-        assertNull(store.findActive("com.cellrebel.app", "sha256:abc"))
+        assertNull(store.findActive("com.cellrebel.app", testProviderSigner))
         assertEquals(0, db.providerPairingDao().count())
     }
 
     @Test
     fun `operator approval makes a provider active`() = runTest {
         val store = ProviderTrustStore(db.providerPairingDao())
-        val approved = store.approve("com.cellrebel.app", signerDigest = "sha256:abc", versionCode = 10, approvedAt = 1000L)
+        val approved = store.approve("com.cellrebel.app", signerDigest = testProviderSigner, versionCode = 10, approvedAt = 1000L)
         // RED: skeleton.approve returns null and findActive stays null → both fail until GREEN.
         assertNotNull("approve must persist and return the active record", approved)
-        val active = store.findActive("com.cellrebel.app", "sha256:abc")
+        val active = store.findActive("com.cellrebel.app", testProviderSigner)
         assertNotNull("an approved provider must be findActive", active)
-        assertEquals("sha256:abc", active?.currentSignerDigest)
+        assertEquals(testProviderSigner, active?.currentSignerDigest)
         assertEquals(10, active?.approvedVersionCode)
     }
 
     @Test
     fun `revocation is a state transition not a delete`() = runTest {
         val store = ProviderTrustStore(db.providerPairingDao())
-        store.approve("com.cellrebel.app", "sha256:abc", 10, 1000L)
-        val revoked = store.revoke("com.cellrebel.app", "sha256:abc", revokedAt = 2000L)
+        store.approve("com.cellrebel.app", testProviderSigner, 10, 1000L)
+        val revoked = store.revoke("com.cellrebel.app", testProviderSigner, revokedAt = 2000L)
         // RED: skeleton.revoke returns false (no-op). GREEN must set revokedAt and stop findActive.
         assertTrue("revoke must return true on an active record", revoked)
-        assertNull("a revoked provider must not be findActive", store.findActive("com.cellrebel.app", "sha256:abc"))
+        assertNull("a revoked provider must not be findActive", store.findActive("com.cellrebel.app", testProviderSigner))
         // The row is retained (revokedAt set), not deleted — revocation provenance is preserved
         // (§6.5.3: revocation is a state transition, never a hard delete).
         assertTrue(

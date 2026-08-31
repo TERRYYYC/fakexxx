@@ -19,6 +19,12 @@ import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.ReconcileResult
 import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.ScheduleAdvanceState
+import com.example.cellrebelauto.recovery.PROVIDER_PRINCIPAL_CONFLICT_FAILURE
+import com.example.cellrebelauto.recovery.PROVIDER_PRINCIPAL_UNKNOWN_FAILURE
+import com.example.cellrebelauto.recovery.PROVIDER_SIGNER_UNTRUSTED_RELEASE_FAILURE
+import com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_CONFLICT_FAILURE
+import com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE
+import com.example.cellrebelauto.recovery.ProviderPrincipalFailureException
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -89,7 +95,7 @@ data class LastFailureInfo(
  * # 缓冲门禁 → GPS 稳定/落点（失败即停、不占配额）→ 已验证测试 →
  * # 单事务成功收尾 / 类型化失败记录 → 配额完成推进
  */
-class AutomationEngine(
+class AutomationEngine internal constructor(
     private val planId: Long,
     private val planRepository: PlanRepository,
     private val cellRebelRunner: CellRebelRunner,
@@ -175,6 +181,14 @@ class AutomationEngine(
      */
     suspend fun run() = coroutineScope {
         try {
+            // Principal ownership must be known before any recovery/executor entry point. Reading
+            // the plan is side-effect free; legacy null is never replaced with the current build.
+            val plan = planRepository.getPlan(planId)
+            if (plan == null) {
+                log("ERROR: plan #$planId not found")
+                updateState(AutomationState.ERROR)
+                return@coroutineScope
+            }
             // ==================== Step 0a: A+ reconcile BEFORE the blind sweep (§8.2 RECOVERING) ====
             // # R9（Sol round-8 P1-3/P1-4/P1-6）：恢复分支于持久的"当前操作"（aplusState），身份从 owner
             // # 态重算（APlusOperationIdentity），release 是 lease-bound + durable（typed receipt）；崩溃
@@ -188,7 +202,48 @@ class AutomationEngine(
                     runSessionId = existingSession.id
                     planRepository.markSessionStatus(runSessionId, "recovering")
                     updateState(AutomationState.RECOVERING)
+                }
+                val executorPrincipal = aplusCoordinator.targetApplicationId
+                if (executorPrincipal != null) {
+                    val failure = aplusCoordinator.planProviderPrincipalBoundaryFailure(planId)
+                        ?: when {
+                        !ProviderPrincipal
+                            .isKnownApplicationId(executorPrincipal) ->
+                            PROVIDER_PRINCIPAL_UNKNOWN_FAILURE
+                        !ProviderPrincipal
+                            .isKnownApplicationId(plan.providerApplicationId) ->
+                            PROVIDER_PRINCIPAL_UNKNOWN_FAILURE
+                        plan.providerApplicationId != executorPrincipal ->
+                            PROVIDER_PRINCIPAL_CONFLICT_FAILURE
+                            else -> null
+                        }
+                    if (failure != null) {
+                        for (attempt in planRepository.findAPlusRecoverableAttempts(planId)) {
+                            planRepository.markRecoveryRequired(attempt.id, failure)
+                        }
+                        aplusPause(
+                            "durable provider principal is unavailable or mismatched for plan #$planId"
+                        )
+                        return@coroutineScope
+                    }
+                }
+                if (existingSession != null) {
                     for (crashed in planRepository.findAPlusRecoverableAttempts(planId)) {
+                        if (executorPrincipal != null &&
+                            crashed.providerApplicationId != plan.providerApplicationId
+                        ) {
+                            planRepository.markRecoveryRequired(
+                                crashed.id,
+                                if (ProviderPrincipal
+                                        .isKnownApplicationId(crashed.providerApplicationId)
+                                ) PROVIDER_PRINCIPAL_CONFLICT_FAILURE
+                                else PROVIDER_PRINCIPAL_UNKNOWN_FAILURE
+                            )
+                            aplusPause(
+                                "attempt ${crashed.id} provider principal does not match its plan"
+                            )
+                            return@coroutineScope
+                        }
                         if (!recoverCrashedAttempt(crashed, aplusCoordinator)) {
                             return@coroutineScope
                         }
@@ -226,32 +281,12 @@ class AutomationEngine(
                 return@coroutineScope
             }
 
-            val plan = planRepository.getPlan(planId)
-            if (plan == null) {
-                log("ERROR: plan #$planId not found")
-                updateState(AutomationState.ERROR)
-                return@coroutineScope
-            }
-
             // # A+ 模式下 session 已在恢复段创建（recovering→running）；legacy 在此创建
             if (runSessionId == 0L) {
                 runSessionId = planRepository.createSession(planId, nowMs())
             }
             _cycleCount.value = 0
             log("=== Plan run started (plan #$planId, session #$runSessionId) ===")
-
-            // R44 (DSF review P1-2): DISCOVER — §6.1's capability handshake at run start. The
-            // provider must advertise the frozen protocol version before any A+ attempt runs; an
-            // unavailable/discover-failed provider fail-closes the plan BEFORE the first apply.
-            recoveryCoordinator?.let { coord ->
-                val capabilities = coord.executorBackend().discover()
-                if (capabilities == null ||
-                    capabilities.protocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
-                ) {
-                    aplusPause("provider discover failed or protocol incompatible (v1 required)")
-                    return@coroutineScope
-                }
-            }
 
             // ==================== Step 2+: plan loop ====================
             // # M-MG-02 GREEN：选择走 trusted 投影（count(trusted) >= required 才算完成），绝不读
@@ -329,7 +364,9 @@ class AutomationEngine(
                         videoStreamingScore = null,
                         latitude = task.latitude,
                         longitude = task.longitude,
-                        stageNotes = stageNotes
+                        stageNotes = stageNotes,
+                        providerApplicationId = plan.providerApplicationId,
+                        providerSignerDigest = recoveryCoordinator?.targetSignerDigest,
                     )
                 )
                 currentAttemptId = attemptId
@@ -353,6 +390,15 @@ class AutomationEngine(
                 val aplusEvidenceSrc = completionEvidenceSource
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
                     var aplusState = AttemptState.CREATED
+                    val insertedPrincipalFailure = aplusCoord.providerPrincipalBoundaryFailure(attemptId)
+                    if (insertedPrincipalFailure != null) {
+                        planRepository.markRecoveryRequired(attemptId, insertedPrincipalFailure)
+                        aplusPause(
+                            "durable provider principal failed readback before external work for " +
+                                "attempt $attemptId: $insertedPrincipalFailure"
+                        )
+                        return@coroutineScope
+                    }
                     // R45 (Sol R45 P1-3 / spec §4.3 step 1): ANCHOR — the advance CAS triple
                     // (expectedScheduleId, expectedCurrentItemId, expectedScheduleVersion) is taken
                     // from a discover() projection group NOW and persisted to the attempt's durable
@@ -362,9 +408,10 @@ class AutomationEngine(
                     // would push a previous generation's completion onto a NEW schedule).
                     // F12: discover MUST precede intent construction — the provider's currentScheduleId
                     // feeds into scheduleRef (the intent digest preimage), not Auto's task PK.
-                    val anchorDiscover = aplusCoord.executorBackend()?.discover()
+                    val anchorDiscover = aplusCoord.discoverForAttempt(attemptId)
                     val anchorProjection = anchorDiscover?.takeIf {
-                        it.currentScheduleId != null && it.currentItemId != null && it.scheduleVersion != null
+                        it.protocolVersion == io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION &&
+                            it.currentScheduleId != null && it.currentItemId != null && it.scheduleVersion != null
                     }
                     if (anchorProjection == null) {
                         // v1.55 group invariant: a partial-null projection is illegal — fail-closed
@@ -400,8 +447,11 @@ class AutomationEngine(
                     // would add a second, weaker denial path without adding safety. Soft-logging
                     // achievable=NONE divergences later would be an observability change, not a
                     // trust change.
-                    val preflight = aplusCoord.executorBackend()?.preflight(
-                        applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest
+                    val preflight = aplusCoord.preflightForAttempt(
+                        attemptId,
+                        applyIntent,
+                        APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                        intentDigest,
                     )
                     if (preflight == null || preflight.scheduleDecisionWire !=
                         io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire
@@ -429,6 +479,9 @@ class AutomationEngine(
                     aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.APPLY_RECEIPT) ?: aplusState
                     planRepository.markAplusState(attemptId, "ENV_APPLIED")
                     // # OBSERVE_PRE（§8.1 禁止：没 observe 就启动 CellRebel）
+                    if (!providerPrincipalAllowsExternalEvidence(attemptId, leaseId)) {
+                        return@coroutineScope
+                    }
                     val acquiredPreObservation = aplusEvidenceSrc.acquirePreObservation(attemptId, runSessionId)
                     if (acquiredPreObservation == null ||
                         !acquiredPreObservation.hasStructurallyValidEffectiveCoordinates()
@@ -539,6 +592,9 @@ class AutomationEngine(
                             // call (Sol round-23 P1-1): a crash in the post-observe call must recover as
                             // POST_OBSERVE_PENDING, not CELLREBEL_RUNNING.
                             planRepository.markAplusState(attemptId, "POST_OBSERVE_PENDING")
+                            if (!providerPrincipalAllowsExternalEvidence(attemptId, leaseId)) {
+                                return@coroutineScope
+                            }
                             val acquiredPostObservation = aplusEvidenceSrc.acquirePostObservation(attemptId, runSessionId)
                             if (acquiredPostObservation == null ||
                                 !acquiredPostObservation.hasStructurallyValidEffectiveCoordinates()
@@ -552,6 +608,9 @@ class AutomationEngine(
                             }
                             // # DECIDE：ctx 由持久 intent 的本地重算 hash + 后端 artifact 组装（INV-23）。
                             // # KB-8：目标坐标与距离比较独占归 provider，不进入 Auto trust context。
+                            if (!providerPrincipalAllowsExternalEvidence(attemptId, leaseId)) {
+                                return@coroutineScope
+                            }
                             val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId, runSessionId)
                             if (evidence == null) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
@@ -587,7 +646,16 @@ class AutomationEngine(
                                 preObservation = preObservation,
                                 postObservation = postObservation
                             )
-                            val decision = planRepository.recordTrustedCompletion(trustCtx, commitClockMs())
+                            val decision = try {
+                                recordTrustedCompletionAtProviderBoundary(trustCtx)
+                            } catch (e: ProviderPrincipalFailureException) {
+                                planRepository.markProviderRecoveryRequired(attemptId, e.reason)
+                                aplusPause(
+                                    "provider principal proof failed before decision for attempt " +
+                                        "$attemptId: ${e.reason.durableCode}"
+                                )
+                                return@coroutineScope
+                            }
                             val trusted = decision == TrustDecision.PASS
                             if (trusted) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_PASS) ?: aplusState
@@ -936,6 +1004,36 @@ class AutomationEngine(
      * @return true to continue the plan; false = fail-closed PAUSED (caller returns).
      */
     private suspend fun recoverCrashedAttempt(crashed: TestAttempt, coordinator: RecoveryCoordinator): Boolean {
+        if (crashed.aplusState == "RECOVERY_REQUIRED" &&
+            crashed.failureReason in setOf(
+                PROVIDER_PRINCIPAL_UNKNOWN_FAILURE,
+                PROVIDER_PRINCIPAL_CONFLICT_FAILURE,
+                PROVIDER_SIGNER_UNTRUSTED_RELEASE_FAILURE,
+                PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE,
+                PROVIDER_SIGNER_OWNER_CONFLICT_FAILURE,
+            )
+        ) {
+            aplusPause(
+                "provider principal recovery remains manual for attempt ${crashed.id}: " +
+                    crashed.failureReason
+            )
+            return false
+        }
+        val phaseRequiresApplyReceipt = crashed.aplusLeaseId != null ||
+            crashed.aplusState !in setOf(null, "CREATED", "APPLY_PENDING")
+        val principalBoundaryFailure = coordinator.providerPrincipalBoundaryFailure(
+            attemptId = crashed.id,
+            expectedLeaseId = crashed.aplusLeaseId,
+            requireApplyReceipt = phaseRequiresApplyReceipt,
+        )
+        if (principalBoundaryFailure != null) {
+            planRepository.markRecoveryRequired(crashed.id, principalBoundaryFailure)
+            aplusPause(
+                "provider principal proof failed before recovery work for attempt " +
+                    "${crashed.id}: $principalBoundaryFailure"
+            )
+            return false
+        }
         // Some RECOVERY_REQUIRED reasons are immutable-provenance failures, not permission to retry
         // an external leg. In particular, an opposing decision carrier can never be repaired by
         // release/reconcile. Keep it sticky across every restart instead of letting the generic
@@ -1133,7 +1231,13 @@ class AutomationEngine(
                 when (sourceState) {
                     AttemptState.ENV_APPLIED -> {
                         val pre = planRepository.getObservationSnapshot(crashed.id, "PRE")
-                            ?: src.acquirePreObservation(crashed.id, crashed.runSessionId)
+                            ?: run {
+                                val lease = crashed.aplusLeaseId ?: return false
+                                if (!providerPrincipalAllowsExternalEvidence(crashed.id, lease)) {
+                                    return false
+                                }
+                                src.acquirePreObservation(crashed.id, crashed.runSessionId)
+                            }
                         if (pre != null && pre.hasStructurallyValidEffectiveCoordinates()) {
                             planRepository.persistObservation(crashed.id, "PRE", pre)
                             log("A+ recovery: ENV_APPLIED attempt ${crashed.id} re-prechecked; closing old owner before retry")
@@ -1148,7 +1252,13 @@ class AutomationEngine(
                     }
                     AttemptState.PRE_OBSERVED -> {
                         val pre = planRepository.getObservationSnapshot(crashed.id, "PRE")
-                            ?: src.acquirePreObservation(crashed.id, crashed.runSessionId)
+                            ?: run {
+                                val lease = crashed.aplusLeaseId ?: return false
+                                if (!providerPrincipalAllowsExternalEvidence(crashed.id, lease)) {
+                                    return false
+                                }
+                                src.acquirePreObservation(crashed.id, crashed.runSessionId)
+                            }
                         if (pre != null && pre.hasStructurallyValidEffectiveCoordinates()) {
                             planRepository.persistObservation(crashed.id, "PRE", pre)
                             log("A+ recovery: PRE_OBSERVED attempt ${crashed.id} re-prechecked; closing old owner before retry")
@@ -1209,6 +1319,11 @@ class AutomationEngine(
             )
             val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
             val result = coordinator.reconcile(crashed.id, applyIntent, applyKey, intentDigest, nowMs())
+            if (result is ReconcileResult.ProviderFailure) {
+                planRepository.markProviderRecoveryRequired(crashed.id, result.reason)
+                aplusPause("provider principal proof failed for attempt ${crashed.id}: $result")
+                return false
+            }
             val leaseId = when (result) {
                 is ReconcileResult.AdvancedToRelease -> result.leaseId
                 is ReconcileResult.ReplayedApply -> result.leaseId
@@ -1335,6 +1450,8 @@ class AutomationEngine(
                 applyReceiptLease = durableReceipt.leaseId
             )
         }
+        val lease = crashed.aplusLeaseId ?: return null
+        if (!providerPrincipalAllowsExternalEvidence(crashed.id, lease)) return null
         return source.acquireCompletionEvidence(crashed.id, crashed.runSessionId)
     }
 
@@ -1374,7 +1491,11 @@ class AutomationEngine(
         acquiredCompletion: APlusCompletionEvidence? = null
     ): Boolean {
         val post = planRepository.getObservationSnapshot(crashed.id, "POST")
-            ?: source.acquirePostObservation(crashed.id, crashed.runSessionId)
+            ?: run {
+                val lease = crashed.aplusLeaseId ?: return false
+                if (!providerPrincipalAllowsExternalEvidence(crashed.id, lease)) return false
+                source.acquirePostObservation(crashed.id, crashed.runSessionId)
+            }
         val completion = acquiredCompletion ?: completionEvidenceForRecovery(crashed, source)
         val ownerExecutionId = planRepository.getCurrentExecutionId(crashed.id)
         val ownerExecution = ownerExecutionId?.let { planRepository.getExecutionByExecutionId(it) }
@@ -1501,7 +1622,14 @@ class AutomationEngine(
             postObservation = post
         )
         val decision = try {
-            planRepository.recordTrustedCompletion(trustCtx, commitClockMs())
+            recordTrustedCompletionAtProviderBoundary(trustCtx)
+        } catch (e: ProviderPrincipalFailureException) {
+            planRepository.markProviderRecoveryRequired(crashed.id, e.reason)
+            aplusPause(
+                "provider principal proof failed before recovery decision for attempt " +
+                    "${crashed.id}: ${e.reason.durableCode}"
+            )
+            return RedecideResult.RECOVERY_REQUIRED
         } catch (e: IllegalStateException) {
             if (!e.message.orEmpty().startsWith("DECISION_CARRIER_CONFLICT:")) throw e
             planRepository.markRecoveryRequired(crashed.id, DECISION_CARRIER_FAILURE)
@@ -1522,6 +1650,45 @@ class AutomationEngine(
             log("A+ recovery: re-decided attempt ${crashed.id} = FAIL (unverified record written)")
         }
         return RedecideResult.DECIDED
+    }
+
+    /** Re-read the complete Room owner/proof join immediately before a live evidence acquisition. */
+    private suspend fun providerPrincipalAllowsExternalEvidence(
+        attemptId: Long,
+        expectedLeaseId: String,
+    ): Boolean {
+        val coordinator = recoveryCoordinator ?: return true
+        val failure = coordinator.providerPrincipalBoundaryFailure(
+            attemptId = attemptId,
+            expectedLeaseId = expectedLeaseId,
+            requireApplyReceipt = true,
+        ) ?: return true
+        planRepository.markRecoveryRequired(attemptId, failure)
+        aplusPause(
+            "provider principal proof failed before evidence acquisition for attempt " +
+                "$attemptId: $failure"
+        )
+        return false
+    }
+
+    private suspend fun recordTrustedCompletionAtProviderBoundary(
+        trustContext: CompletionTrustContext,
+    ): TrustDecision {
+        val providerApplicationId = recoveryCoordinator?.targetApplicationId
+        val providerSignerDigest = recoveryCoordinator?.targetSignerDigest
+        return if (providerApplicationId == null || providerSignerDigest == null) {
+            // Explicit compatibility seam for pre-principal unit backends. Service construction is
+            // guarded to always compose a ProviderScopedExternalApplyExecutor, so production never
+            // reaches this branch.
+            planRepository.recordTrustedCompletion(trustContext, commitClockMs())
+        } else {
+            planRepository.recordTrustedCompletionForProvider(
+                trustContext,
+                commitClockMs(),
+                providerApplicationId,
+                providerSignerDigest,
+            )
+        }
     }
 
     /** After a durable release receipt, project the terminal truth from the append-only carrier, then gate resume. */
@@ -1732,6 +1899,19 @@ class AutomationEngine(
         // §6.7.4a: the lease field is the HISTORICAL reference to where the quota was earned
         // (the release already made it RELEASED before the advance was first dispatched).
         val advanceLease = leaseIdForAttempt(attemptId)
+        val principalFailure = coordinator.providerPrincipalBoundaryFailure(
+            attemptId = attemptId,
+            expectedLeaseId = advanceLease,
+            requireApplyReceipt = true,
+        )
+        if (principalFailure != null) {
+            planRepository.markRecoveryRequired(attemptId, principalFailure)
+            aplusPause(
+                "provider principal proof failed before advance for attempt " +
+                    "$attemptId: $principalFailure"
+            )
+            return false
+        }
         val baseAdvanceRequest = io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
             leaseId = advanceLease,
             idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
@@ -1752,7 +1932,11 @@ class AutomationEngine(
             requestDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1.compute(baseAdvanceRequest)
         )
         planRepository.markAplusState(attemptId, "ADVANCE_PENDING")
-        val advanceReceipt = coordinator.executorBackend().completeAndAdvance(advanceRequest, intentDigest)
+        val advanceReceipt = coordinator.completeAndAdvanceForAttempt(
+            attemptId,
+            advanceRequest,
+            intentDigest,
+        )
         if (advanceReceipt == null) {
             // Fail-closed: the provider could not prove the advance — the quota is committed
             // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
@@ -1813,8 +1997,11 @@ class AutomationEngine(
                     "apply operationId missing for attempt $attemptId — cannot observe the new environment"
                 )
             }
-            val observed = coordinator.executorBackend().observe(
-                advanceLease, operationId, advanceReceipt.effectiveIntentHash
+            val observed = coordinator.observeForAttempt(
+                attemptId,
+                advanceLease,
+                operationId,
+                advanceReceipt.effectiveIntentHash,
             )
             // P1-3 (Sol Issue #19/#20 R2): typed reason identifies WHICH leg failed independently.
             // Each leg is verified separately so the failure reason names the exact mismatch —
@@ -1836,7 +2023,7 @@ class AutomationEngine(
             }
         } else {
             planRepository.markAplusState(attemptId, "ADVANCE_STATE_READBACK")
-            val readback = coordinator.executorBackend().discover()
+            val readback = coordinator.discoverForAttempt(attemptId)
             // P1-3 (Sol Issue #19/#20 R2): typed reason for exhausted readback mismatch.
             val readbackMismatchLeg: String? = when {
                 readback == null -> "READBACK_NULL"
@@ -1886,6 +2073,7 @@ class AutomationEngine(
     ): Boolean {
         val leaseId = planRepository.getAplusLeaseId(attemptId) ?: return false
         return coordinator.exactDurableReleaseReceipt(
+            attemptId,
             APlusOperationIdentity.releaseIdempotencyKey(attemptId),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId)
@@ -1915,18 +2103,34 @@ class AutomationEngine(
             aplusPause("no durable leaseId to release for attempt $attemptId")
             return false
         }
-        val receipt = recoveryCoordinator?.releaseLease(
+        val releaseResult = recoveryCoordinator?.releaseLeaseResult(
             attemptId,
             APlusOperationIdentity.releaseIdempotencyKey(attemptId),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId),
             nowMs()
         )
+        val receipt = releaseResult?.receipt
         if (receipt == null) {
             // RELEASE_INCOMPLETE → RECOVERY_REQUIRED (§8.1): the release failed, the lease is unresolved —
             // persist the phase, never silently advance (Sol round-13 P1-4).
             attemptDriver?.driveTransition(attemptId, AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_INCOMPLETE)
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+            if (releaseResult?.failureReason in setOf(
+                    PROVIDER_SIGNER_UNTRUSTED_RELEASE_FAILURE,
+                    PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE,
+                    PROVIDER_SIGNER_OWNER_CONFLICT_FAILURE,
+                )
+            ) {
+                // A Boolean trust miss cannot tell operator revoke from signer rotation. Persist a
+                // sticky manual-recovery reason before pausing: later approval of the replacement
+                // signer is not proof that it owns this older signer's outstanding lease.
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    requireNotNull(releaseResult?.failureReason),
+                )
+            } else {
+                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+            }
             aplusPause("release receipt not durable for attempt $attemptId")
             return false
         }

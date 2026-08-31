@@ -19,7 +19,9 @@ data class ProviderEntry(
     val applicationId: String,
     val signerDigest: String,
     val approvedVersionCode: Int?,
-    val isApproved: Boolean
+    val isApproved: Boolean,
+    /** True only for the PackageManager signer measured during the latest refresh. */
+    val isCurrent: Boolean = false,
 )
 
 /**

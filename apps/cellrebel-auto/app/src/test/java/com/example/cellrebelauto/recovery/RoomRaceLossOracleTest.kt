@@ -159,6 +159,7 @@ class RoomRaceLossOracleTest {
             assertNull(
                 "an ambiguous lease must never satisfy exact durable release readback",
                 coordinator.exactDurableReleaseReceipt(
+                    if (exactFirst) 71L else 72L,
                     exact.idempotencyKey,
                     exact.leaseId,
                     exact.releaseDigest
@@ -191,7 +192,8 @@ class RoomRaceLossOracleTest {
                 leaseId: String,
                 releaseDigest: String,
                 outcome: String,
-                now: Long
+                now: Long,
+                providerApplicationId: String?,
             ): RecordedReleaseReceipt? {
                 // Deterministic window: coordinator preflight saw both indexes empty and the provider
                 // returned RELEASED, but another writer wins INSERT IGNORE with the same identity and
@@ -203,12 +205,18 @@ class RoomRaceLossOracleTest {
                             leaseId = leaseId,
                             releaseDigest = releaseDigest,
                             resultOutcome = "FAILED",
-                            createdAt = now - 1L
+                            createdAt = now - 1L,
+                            providerApplicationId = providerApplicationId,
                         )
                     )
                 }
                 return log.recordReleaseReceipt(
-                    idempotencyKey, leaseId, releaseDigest, outcome, now
+                    idempotencyKey,
+                    leaseId,
+                    releaseDigest,
+                    outcome,
+                    now,
+                    providerApplicationId,
                 )
             }
         }

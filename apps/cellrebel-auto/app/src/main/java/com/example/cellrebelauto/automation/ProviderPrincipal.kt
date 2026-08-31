@@ -23,4 +23,12 @@ internal object ProviderPrincipal {
     /** All pairable identities, with this build's selected principal first for the approval UI. */
     val knownApplicationIds: List<String> =
         listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
+
+    fun isKnownApplicationId(applicationId: String?): Boolean =
+        applicationId != null && applicationId in knownApplicationIds
+
+    fun requireKnownApplicationId(applicationId: String?): String =
+        requireNotNull(applicationId).also {
+            require(isKnownApplicationId(it)) { "unknown provider applicationId: $it" }
+        }
 }
