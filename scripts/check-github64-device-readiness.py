@@ -69,6 +69,7 @@ class Policy:
     candidate_tree: str
     base_head: str
     allowed_preparation_delta: frozenset[str]
+    allowed_generated_roots: frozenset[str]
     artifact_ids: frozenset[str]
     input_ids: frozenset[str]
     required_authorizations: frozenset[str]
@@ -86,7 +87,7 @@ def production_policy() -> Policy:
     java_home = "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home"
     common_env = (("LANG", "C"), ("LC_ALL", "C"))
     return Policy(
-        manifest_sha256="4cbed538821b603250ebfb5633b77454948631c3f09047abebc5ee1028c1c4af",
+        manifest_sha256="ef873b5d107a7a5f1d692e467d04783c828eb0278579fd4d07207586d06ddc10",
         candidate_head="5002e0e005324c32ca3d36d10510180d1fafbf81",
         candidate_tree="ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1",
         base_head="9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d",
@@ -96,6 +97,20 @@ def production_policy() -> Policy:
                 "docs/acceptance/github64-exact-build-device-readiness.md",
                 "scripts/check-github64-device-readiness.py",
                 "scripts/selftest-github64-device-readiness.sh",
+            }
+        ),
+        allowed_generated_roots=frozenset(
+            {
+                "acceptance/.gradle",
+                "acceptance/build",
+                "acceptance/fake-qwy/build",
+                "acceptance/scenarios/build",
+                "apps/cellrebel-auto/.gradle",
+                "apps/cellrebel-auto/app/build",
+                "apps/cellrebel-auto/build",
+                "apps/qianwangyou/.gradle",
+                "apps/qianwangyou/app/build",
+                "apps/qianwangyou/build",
             }
         ),
         artifact_ids=frozenset({"auto", "qwy"}),
@@ -172,6 +187,7 @@ def production_policy() -> Policy:
                     ("GIT_CONFIG_NOSYSTEM", "1"),
                     ("GIT_CONFIG_SYSTEM", "/dev/null"),
                     ("GIT_NO_LAZY_FETCH", "1"),
+                    ("GIT_NO_REPLACE_OBJECTS", "1"),
                     ("GIT_OPTIONAL_LOCKS", "0"),
                     ("GIT_PAGER", ""),
                     ("GIT_TERMINAL_PROMPT", "0"),
@@ -521,7 +537,12 @@ def ids(entries: Any) -> tuple[set[str], bool]:
 
 def is_git_external_helper_key(key: str) -> bool:
     normalized = key.lower()
-    if normalized in {"core.fsmonitor", "core.hookspath", "diff.external"}:
+    if normalized in {
+        "core.fsmonitor",
+        "core.hookspath",
+        "diff.external",
+        "extensions.worktreeconfig",
+    }:
         return True
     if normalized.startswith("pager.") or normalized == "core.pager":
         return True
@@ -576,8 +597,31 @@ def validate_git_external_helper_policy(
     audit.check(
         "source:git:external-helper-policy",
         ok,
-        "no repository-configured fsmonitor, filter, diff, hook or pager helper",
+        "no repository-configured helper and no worktree-config extension",
         dangerous if dangerous else completed.stderr or "none",
+    )
+    return ok
+
+
+def validate_git_grafts_policy(audit: Audit, repo: Path) -> bool:
+    """Reject mutable fake-parent metadata before any Git graph operation."""
+    try:
+        metadata_roots = git_metadata_roots(repo)
+        error = None
+    except ValueError as exc:
+        metadata_roots = ()
+        error = str(exc)
+    present = [
+        str(root / "info/grafts")
+        for root in metadata_roots
+        if os.path.lexists(root / "info/grafts")
+    ]
+    ok = error is None and bool(metadata_roots) and not present
+    audit.check(
+        "source:git:grafts-policy",
+        ok,
+        "info/grafts absent from per-worktree and common Git metadata",
+        error or present or "absent",
     )
     return ok
 
@@ -608,6 +652,184 @@ def git_output(
     return completed.stdout.strip(), completed.stderr.strip(), completed.returncode
 
 
+@dataclass(frozen=True)
+class GitTreeEntry:
+    mode: str
+    object_type: str
+    object_id: str
+
+
+def git_tree_entries(
+    audit: Audit,
+    inspector: InspectorPolicy,
+    repo: Path,
+    revision: str,
+    finding_suffix: str,
+) -> dict[str, GitTreeEntry] | None:
+    output, error, returncode = git_output(
+        audit,
+        inspector,
+        repo,
+        finding_suffix,
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        revision,
+    )
+    parsed: dict[str, GitTreeEntry] = {}
+    parse_errors: list[str] = []
+    if returncode == 0:
+        for record in output.split("\0"):
+            if not record:
+                continue
+            try:
+                header, relative = record.split("\t", 1)
+                mode, object_type, object_id = header.split(" ", 2)
+            except ValueError:
+                parse_errors.append(repr(record[:160]))
+                continue
+            path = Path(relative)
+            well_formed = (
+                relative
+                and not path.is_absolute()
+                and ".." not in path.parts
+                and relative not in parsed
+                and bool(re.fullmatch(r"[0-7]{6}", mode))
+                and object_type in {"blob", "commit"}
+                and bool(HEX40.fullmatch(object_id))
+            )
+            if not well_formed:
+                parse_errors.append(repr(relative))
+                continue
+            parsed[relative] = GitTreeEntry(mode, object_type, object_id)
+    ok = returncode == 0 and not parse_errors
+    audit.check(
+        f"source:git:{finding_suffix}:format",
+        ok,
+        "complete NUL-delimited Git tree",
+        error or parse_errors or f"{len(parsed)} entries",
+    )
+    return parsed if ok else None
+
+
+def git_blob_oid(payload: bytes) -> str:
+    header = f"blob {len(payload)}\0".encode("ascii")
+    return hashlib.sha1(header + payload).hexdigest()
+
+
+def display_filesystem_path(value: str) -> str:
+    return os.fsencode(value).decode("utf-8", "backslashreplace")
+
+
+def bounded_paths(values: list[str], limit: int = 100) -> dict[str, Any]:
+    rendered = sorted(display_filesystem_path(value) for value in values)
+    return {
+        "count": len(rendered),
+        "paths": rendered[:limit],
+        "omitted": max(0, len(rendered) - limit),
+    }
+
+
+def compare_checkout_to_tree(
+    repo: Path,
+    expected: Mapping[str, GitTreeEntry],
+    generated_roots: frozenset[str],
+) -> tuple[bool, dict[str, Any]]:
+    """Compare raw filesystem state to a commit tree without consulting Git's index."""
+    seen: set[str] = set()
+    mismatched: list[str] = []
+    unexpected: list[str] = []
+    errors: list[str] = []
+    present_generated_roots: list[str] = []
+
+    for tracked in expected:
+        if any(tracked == root or tracked.startswith(f"{root}/") for root in generated_roots):
+            errors.append(f"tracked path overlaps generated root: {tracked}")
+
+    pending: list[tuple[Path, str]] = [(repo, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda item: os.fsencode(item.name))
+        except OSError as exc:
+            errors.append(f"cannot scan {prefix or '.'}: {exc}")
+            continue
+        for child in children:
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            if not prefix and child.name == ".git":
+                continue
+            try:
+                metadata = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                errors.append(f"cannot stat {display_filesystem_path(relative)}: {exc}")
+                continue
+
+            if relative in generated_roots:
+                if stat.S_ISDIR(metadata.st_mode):
+                    present_generated_roots.append(relative)
+                else:
+                    mismatched.append(relative)
+                    errors.append(
+                        f"generated root is not a real directory: "
+                        f"{display_filesystem_path(relative)}"
+                    )
+                continue
+
+            tree_entry = expected.get(relative)
+            if stat.S_ISDIR(metadata.st_mode):
+                if tree_entry is not None:
+                    seen.add(relative)
+                    mismatched.append(relative)
+                else:
+                    pending.append((Path(child.path), relative))
+                continue
+
+            if tree_entry is None:
+                unexpected.append(relative)
+                continue
+            seen.add(relative)
+
+            actual_mode: str | None = None
+            actual_oid: str | None = None
+            try:
+                if stat.S_ISREG(metadata.st_mode):
+                    actual_mode = (
+                        "100755" if metadata.st_mode & stat.S_IXUSR else "100644"
+                    )
+                    actual_oid = git_blob_oid(Path(child.path).read_bytes())
+                elif stat.S_ISLNK(metadata.st_mode):
+                    actual_mode = "120000"
+                    actual_oid = git_blob_oid(os.fsencode(os.readlink(child.path)))
+            except OSError as exc:
+                errors.append(f"cannot read {display_filesystem_path(relative)}: {exc}")
+            if (
+                tree_entry.object_type != "blob"
+                or tree_entry.mode not in {"100644", "100755", "120000"}
+                or actual_mode != tree_entry.mode
+                or actual_oid != tree_entry.object_id
+            ):
+                mismatched.append(relative)
+
+    missing = sorted(set(expected) - seen)
+    unsupported = sorted(
+        relative
+        for relative, entry in expected.items()
+        if entry.object_type != "blob" or entry.mode not in {"100644", "100755", "120000"}
+    )
+    clean = not (mismatched or unexpected or missing or unsupported or errors)
+    return clean, {
+        "mismatched": bounded_paths(mismatched),
+        "missing": bounded_paths(missing),
+        "unexpected": bounded_paths(unexpected),
+        "unsupported": bounded_paths(unsupported),
+        "errors": errors[:100],
+        "errorCount": len(errors),
+        "presentGeneratedRoots": sorted(present_generated_roots),
+    }
+
+
 def validate_source(
     audit: Audit,
     repo: Path,
@@ -625,6 +847,7 @@ def validate_source(
     product_tree = candidate.get("productTree")
     base_head = candidate.get("baseHead")
     allowed = candidate.get("allowedPreparationDelta")
+    generated = candidate.get("allowedGeneratedRoots")
     actual_identity = {
         "productHead": product_head,
         "productTree": product_tree,
@@ -661,7 +884,6 @@ def validate_source(
     )
     allowed_well_formed = (
         isinstance(allowed, list)
-        and len(allowed) == len(set(allowed))
         and all(
             isinstance(item, str)
             and item
@@ -669,6 +891,7 @@ def validate_source(
             and ".." not in Path(item).parts
             for item in allowed
         )
+        and len(allowed) == len(set(allowed))
     )
     allowed_ok = allowed_well_formed and set(allowed) == policy.allowed_preparation_delta
     audit.check(
@@ -676,6 +899,26 @@ def validate_source(
         allowed_ok,
         sorted(policy.allowed_preparation_delta),
         sorted(allowed) if isinstance(allowed, list) else allowed,
+    )
+    generated_well_formed = (
+        isinstance(generated, list)
+        and all(
+            isinstance(item, str)
+            and item
+            and not Path(item).is_absolute()
+            and ".." not in Path(item).parts
+            for item in generated
+        )
+        and len(generated) == len(set(generated))
+    )
+    generated_ok = (
+        generated_well_formed and set(generated) == policy.allowed_generated_roots
+    )
+    audit.check(
+        "candidate:allowed-generated-roots",
+        generated_ok,
+        sorted(policy.allowed_generated_roots),
+        sorted(generated) if isinstance(generated, list) else generated,
     )
     if not all(
         isinstance(value, str) and HEX40.fullmatch(value)
@@ -689,6 +932,19 @@ def validate_source(
             False,
             "frozen Git executable and trust root validated before source inspection",
             "unavailable",
+        )
+        return snapshot
+
+    if not validate_git_grafts_policy(audit, repo):
+        snapshot.update(
+            {
+                "productHead": product_head,
+                "productTree": None,
+                "baseHead": None,
+                "checkoutHead": None,
+                "checkoutStatus": "NOT_INSPECTED_UNSAFE_GIT_METADATA",
+                "preparationDelta": [],
+            }
         )
         return snapshot
 
@@ -761,53 +1017,56 @@ def validate_source(
         ancestor_err or f"rc={ancestor_rc}",
     )
 
-    delta_out, delta_err, delta_rc = git_output(
-        audit,
-        git_inspector,
-        repo,
-        "delta",
-        "diff",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--name-only",
-        product_head,
-        "--",
+    checkout_tree = git_tree_entries(
+        audit, git_inspector, repo, "HEAD", "checkout-tree-entries"
     )
-    untracked_out, untracked_err, untracked_rc = git_output(
-        audit,
-        git_inspector,
-        repo,
-        "untracked",
-        "ls-files",
-        "--others",
-        "--exclude-standard",
+    product_entries = git_tree_entries(
+        audit, git_inspector, repo, product_head, "product-tree-entries"
     )
-    status_out, status_err, status_rc = git_output(
-        audit,
-        git_inspector,
-        repo,
-        "checkout-status",
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
+    if checkout_tree is None:
+        checkout_clean = False
+        checkout_details: dict[str, Any] = {"error": "HEAD tree unavailable"}
+    else:
+        checkout_clean, checkout_details = compare_checkout_to_tree(
+            repo, checkout_tree, policy.allowed_generated_roots
+        )
+    audit.check(
+        "source:checkout-tree",
+        checkout_clean,
+        {
+            "tracked": "raw bytes/type/executable mode equal HEAD",
+            "untracked": "none outside frozen generated roots",
+        },
+        checkout_details,
     )
     audit.check(
         "source:checkout-clean",
-        status_rc == 0 and not status_out,
-        "no tracked or untracked checkout delta relative to HEAD",
-        status_out or status_err or "clean",
+        checkout_clean,
+        "raw checkout equals HEAD independent of index flags and ignore metadata",
+        "clean" if checkout_clean else checkout_details,
     )
-    delta = {line for line in delta_out.splitlines() if line}
-    delta.update(line for line in untracked_out.splitlines() if line)
+    if checkout_tree is not None and product_entries is not None:
+        delta = {
+            relative
+            for relative in set(checkout_tree) | set(product_entries)
+            if checkout_tree.get(relative) != product_entries.get(relative)
+        }
+        delta_ready = True
+    else:
+        delta = set()
+        delta_ready = False
     unexpected = sorted(delta - policy.allowed_preparation_delta)
     audit.check(
         "source:working-tree-delta",
-        delta_rc == 0 and untracked_rc == 0 and not unexpected,
-        {"onlyAllowed": sorted(policy.allowed_preparation_delta)},
+        delta_ready and checkout_clean and not unexpected,
         {
-            "allDelta": sorted(delta),
+            "checkout": "raw-clean",
+            "onlyCommittedPreparationDelta": sorted(policy.allowed_preparation_delta),
+        },
+        {
+            "committedPreparationDelta": sorted(delta),
             "unexpected": unexpected,
-            "errors": [delta_err, untracked_err],
+            "checkout": checkout_details,
         },
     )
     snapshot.update(
@@ -816,7 +1075,7 @@ def validate_source(
             "productTree": actual_tree if tree_rc == 0 else None,
             "baseHead": actual_base if base_rc == 0 else None,
             "checkoutHead": current_head if current_rc == 0 else None,
-            "checkoutStatus": status_out or "clean",
+            "checkoutStatus": "clean" if checkout_clean else checkout_details,
             "preparationDelta": sorted(delta),
         }
     )

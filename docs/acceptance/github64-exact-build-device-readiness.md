@@ -44,7 +44,7 @@ be clean relative to its HEAD; modified/untracked preparation files are rejected
 | Product HEAD | `5002e0e005324c32ca3d36d10510180d1fafbf81` |
 | Product tree | `ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1` |
 | Base HEAD | `9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d` |
-| Frozen manifest SHA-256 | `4cbed538821b603250ebfb5633b77454948631c3f09047abebc5ee1028c1c4af` |
+| Frozen manifest SHA-256 | `ef873b5d107a7a5f1d692e467d04783c828eb0278579fd4d07207586d06ddc10` |
 | Contract SHA-256 | `c64dd132418493ba5918d86e481382d29b3d351867f3e3d3569577abb3d6f543` |
 | 10-address fixture SHA-256 | `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852` |
 | Canonical device ledger | empty `[]`, SHA-256 `37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570` |
@@ -62,10 +62,15 @@ absolute CommandLineTools Python shebang uses isolated mode, so neither a
 records the host-only executables, direct support files and user-writable
 runtime trees below, rechecks them immediately before each use, and supplies a
 minimal environment with no Android device transport on `PATH`. Git global and
-system config, pagers and lazy fetch are disabled; repository-configured
-fsmonitor, filter, diff, hook or pager helpers are rejected before the first
-worktree inspection. APK signature inspection invokes the pinned Java binary
-and pinned JAR directly, without the mutable `apksigner` shell launcher.
+system config, pagers, lazy fetch and replacement objects are disabled, and
+legacy `info/grafts` fake-parent metadata must be absent;
+repository-configured fsmonitor, filter, diff, hook or pager helpers and the
+worktree-config extension are rejected before source inspection. Git is used
+only to read immutable commit/tree metadata. A separate filesystem walk checks
+raw tracked bytes, type and executable mode and finds extra paths without using
+the index or ignore rules. Only the ten manifest-pinned Gradle/build roots may
+contain generated files. APK signature inspection invokes the pinned Java
+binary and pinned JAR directly, without the mutable `apksigner` shell launcher.
 
 | Tool file or frozen tree | SHA-256 |
 |---|---|
@@ -92,6 +97,40 @@ Therefore existing emulator evidence is reusable only when its recorded APK
 hash equals the APK under review. “Same Git SHA” is not an exact-byte binding.
 The selected Java 17 APKs above have not been installed on a phone and inherit
 no earlier device verdict.
+
+## Source checkout Stateful Object Gate
+
+The host gate treats the checkout as a set of independently mutable state
+objects. A clean verdict must not depend on Git index flags, ignore rules or a
+worktree-scoped helper becoming invisible to one Git command.
+
+| State object | Owner / allowed state | Events that must fail closed |
+|---|---|---|
+| effective Git configuration | checker-pinned system/global isolation plus repository config with no external helper and no `extensions.worktreeConfig` | common/worktree config enables a filter, fsmonitor, diff, pager or hook helper; config scope becomes ambiguous |
+| HEAD tree | immutable commit objects resolved by pinned Git with lazy fetch and replace objects disabled and no `info/grafts` file | HEAD/product/base/tree changes, fake-parent metadata appears, an object cannot be read, or a gitlink/unsupported tree entry appears |
+| tracked filesystem | raw file/symlink bytes, type and executable bit equal the HEAD tree | content/type/mode drift, missing path, `assume-unchanged` or `skip-worktree` attempts to hide drift |
+| untracked filesystem | no extra non-directory entry outside the frozen generated-root allowlist; empty directories are inert because Git does not version them | `.git/info/exclude`, global excludes or ignore rules attempt to hide an extra entry; an allowlisted root is replaced by a symlink |
+| generated build roots | only the exact manifest-pinned roots; each may be absent or a real directory, and contents may change because APKs are separately byte-pinned | caller widens the roots, a root escapes the repository, or a non-directory occupies a root |
+| report + sidecar | external, non-aliasing, atomically replaced pair | either output collides with source, Git metadata, manifest, tools, runtime trees or the other output |
+
+The resulting invariants are:
+
+- `INV-GIT-1`: no effective Git configuration scope can launch a helper during
+  source inspection;
+- `INV-GIT-2`: every tracked path has the HEAD tree's raw bytes, entry type and
+  executable mode;
+- `INV-GIT-3`: every non-directory filesystem entry outside Git metadata is
+  tracked or beneath one frozen, real-directory generated root;
+- `INV-GIT-4`: index flags and ignore metadata cannot change the verdict;
+- `INV-GIT-5`: lazy object fetching and replacement-object substitution are
+  disabled, and fake-parent graft metadata is absent.
+
+The regression matrix covers normal checkout, common helper config,
+worktree-scoped helper config, `assume-unchanged`, `skip-worktree`, hidden
+untracked paths, executable-mode drift, generated roots and symlinked-root
+escape. The finish line is a host `PASS` only when all five invariants hold;
+artifact byte/signature checks remain separate, and device state remains
+`BLOCKED`.
 
 ## What can run now, without a device
 

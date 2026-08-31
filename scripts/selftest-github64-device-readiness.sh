@@ -75,7 +75,11 @@ printf 'fixture-contract\n' > "$FIXTURE/contract.yaml"
 printf 'fixture-schedule\n' > "$FIXTURE/schedule.json"
 printf '[]\n' > "$FIXTURE/ledger.json"
 printf '**/build/\n' > "$FIXTURE/.gitignore"
-git -C "$FIXTURE" add candidate.txt contract.yaml schedule.json ledger.json .gitignore
+printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/tracked-executable"
+chmod 755 "$FIXTURE/tracked-executable"
+ln -s base.txt "$FIXTURE/tracked-link"
+git -C "$FIXTURE" add candidate.txt contract.yaml schedule.json ledger.json .gitignore \
+    tracked-executable tracked-link
 git -C "$FIXTURE" commit -qm candidate
 PRODUCT_HEAD="$(git -C "$FIXTURE" rev-parse HEAD)"
 PRODUCT_TREE="$(git -C "$FIXTURE" rev-parse 'HEAD^{tree}')"
@@ -142,6 +146,10 @@ manifest = {
         "productHead": os.environ["PRODUCT_HEAD"],
         "productTree": os.environ["PRODUCT_TREE"],
         "baseHead": os.environ["BASE_HEAD"],
+        "allowedGeneratedRoots": [
+            "apps/cellrebel-auto/app/build",
+            "apps/qianwangyou/app/build",
+        ],
         "allowedPreparationDelta": [
             "docs/acceptance/github64-exact-build-device-readiness.json",
             "docs/acceptance/github64-exact-build-device-readiness.md",
@@ -252,6 +260,10 @@ policy = module.Policy(
         "scripts/check-github64-device-readiness.py",
         "scripts/selftest-github64-device-readiness.sh",
     }),
+    allowed_generated_roots=frozenset({
+        "apps/cellrebel-auto/app/build",
+        "apps/qianwangyou/app/build",
+    }),
     artifact_ids=frozenset({"auto", "qwy"}),
     input_ids=frozenset({"contract", "schedule", "device-ledger"}),
     required_authorizations=frozenset({
@@ -295,6 +307,7 @@ policy = module.Policy(
             environment=(("LANG", "C"), ("LC_ALL", "C"), ("GIT_ATTR_NOSYSTEM", "1"),
                          ("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1"),
                          ("GIT_CONFIG_SYSTEM", "/dev/null"), ("GIT_NO_LAZY_FETCH", "1"),
+                         ("GIT_NO_REPLACE_OBJECTS", "1"),
                          ("GIT_OPTIONAL_LOCKS", "0"), ("GIT_PAGER", ""),
                          ("GIT_TERMINAL_PROMPT", "0"), ("PATH", "/usr/bin:/bin")),
         ),
@@ -359,8 +372,20 @@ if python3 - "$REPO_ROOT/docs/acceptance/github64-exact-build-device-readiness.j
 import json, sys
 import hashlib
 d = json.load(open(sys.argv[1], encoding="utf-8"))
-assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "4cbed538821b603250ebfb5633b77454948631c3f09047abebc5ee1028c1c4af"
+assert hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest() == "ef873b5d107a7a5f1d692e467d04783c828eb0278579fd4d07207586d06ddc10"
 assert d["candidate"] == {
+    "allowedGeneratedRoots": [
+        "acceptance/.gradle",
+        "acceptance/build",
+        "acceptance/fake-qwy/build",
+        "acceptance/scenarios/build",
+        "apps/cellrebel-auto/.gradle",
+        "apps/cellrebel-auto/app/build",
+        "apps/cellrebel-auto/build",
+        "apps/qianwangyou/.gradle",
+        "apps/qianwangyou/app/build",
+        "apps/qianwangyou/build",
+    ],
     "allowedPreparationDelta": [
         "docs/acceptance/github64-exact-build-device-readiness.json",
         "docs/acceptance/github64-exact-build-device-readiness.md",
@@ -406,6 +431,7 @@ git_env = dict(inspectors["git"].environment)
 assert git_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
 assert git_env["GIT_CONFIG_SYSTEM"] == "/dev/null"
 assert git_env["GIT_NO_LAZY_FETCH"] == "1"
+assert git_env["GIT_NO_REPLACE_OBJECTS"] == "1"
 assert git_env["GIT_PAGER"] == ""
 assert inspectors["apksigner"].executable.path == Path(
     "/opt/homebrew/Cellar/openjdk@17/17.0.20/libexec/openjdk.jdk/Contents/Home/bin/java"
@@ -795,6 +821,197 @@ git -C "$FIXTURE" config --unset-all filter.tripwire.clean
 git -C "$FIXTURE" config --unset-all filter.tripwire.required
 rm -f "$FIXTURE/.git/info/attributes"
 git -C "$FIXTURE" checkout -q -- candidate.txt
+
+git -C "$FIXTURE" update-index --assume-unchanged candidate.txt
+printf 'hidden by assume-unchanged\n' >> "$FIXTURE/candidate.txt"
+if run_checker "$MANIFEST" "$WORK/assume-unchanged-report.json" audit; then
+    bad "N7d assume-unchanged source drift" "index flag hid modified tracked bytes"
+else
+    grep -q 'source:checkout-tree' "$WORK/assume-unchanged-report.json" &&
+        ok "N7d raw tree comparison rejects assume-unchanged drift" ||
+        bad "N7d assume-unchanged source drift" "raw checkout-tree finding is missing"
+fi
+git -C "$FIXTURE" update-index --no-assume-unchanged candidate.txt
+git -C "$FIXTURE" checkout -q -- candidate.txt
+
+git -C "$FIXTURE" update-index --skip-worktree candidate.txt
+printf 'hidden by skip-worktree\n' >> "$FIXTURE/candidate.txt"
+if run_checker "$MANIFEST" "$WORK/skip-worktree-report.json" audit; then
+    bad "N7e skip-worktree source drift" "index flag hid modified tracked bytes"
+else
+    grep -q 'source:checkout-tree' "$WORK/skip-worktree-report.json" &&
+        ok "N7e raw tree comparison rejects skip-worktree drift" ||
+        bad "N7e skip-worktree source drift" "raw checkout-tree finding is missing"
+fi
+git -C "$FIXTURE" update-index --no-skip-worktree candidate.txt
+git -C "$FIXTURE" checkout -q -- candidate.txt
+
+INFO_EXCLUDE="$FIXTURE/.git/info/exclude"
+cp -p "$INFO_EXCLUDE" "$WORK/info-exclude.backup"
+printf '\nhidden-by-info-exclude.txt\n' >> "$INFO_EXCLUDE"
+printf 'untracked but ignored by repository metadata\n' > "$FIXTURE/hidden-by-info-exclude.txt"
+if run_checker "$MANIFEST" "$WORK/info-exclude-report.json" audit; then
+    bad "N7f info/exclude source drift" "repository exclude hid an untracked file"
+else
+    grep -q 'source:checkout-tree' "$WORK/info-exclude-report.json" &&
+        ok "N7f raw tree comparison ignores info/exclude and rejects extra files" ||
+        bad "N7f info/exclude source drift" "raw checkout-tree finding is missing"
+fi
+rm -f "$FIXTURE/hidden-by-info-exclude.txt"
+cp -p "$WORK/info-exclude.backup" "$INFO_EXCLUDE"
+
+printf '%s %s\n' "$PRODUCT_HEAD" "$BASE_HEAD" > "$FIXTURE/.git/info/grafts"
+if run_checker "$MANIFEST" "$WORK/grafts-report.json" audit; then
+    bad "N7g Git graft metadata" "mutable graft metadata was accepted"
+else
+    grep -q 'source:git:grafts-policy' "$WORK/grafts-report.json" &&
+        ok "N7g Git graft metadata fails closed before graph inspection" ||
+        bad "N7g Git graft metadata" "specific grafts-policy finding is missing"
+fi
+rm -f "$FIXTURE/.git/info/grafts"
+
+git -C "$FIXTURE" config core.fileMode false
+chmod 455 "$FIXTURE/tracked-executable"
+if run_checker "$MANIFEST" "$WORK/owner-executable-mode-report.json" audit; then
+    bad "N7h owner-executable mode drift" "group/other exec hid missing owner-exec"
+else
+    grep -q 'source:checkout-tree' "$WORK/owner-executable-mode-report.json" &&
+        ok "N7h Git executable semantics require the owner-exec bit" ||
+        bad "N7h owner-executable mode drift" "raw checkout-tree finding is missing"
+fi
+chmod 755 "$FIXTURE/tracked-executable"
+git -C "$FIXTURE" config core.fileMode true
+
+chmod +x "$FIXTURE/candidate.txt"
+if run_checker "$MANIFEST" "$WORK/executable-mode-report.json" audit; then
+    bad "N7i executable-mode drift" "filesystem mode no longer matched the HEAD tree"
+else
+    grep -q 'source:checkout-tree' "$WORK/executable-mode-report.json" &&
+        ok "N7i raw tree comparison rejects executable-mode drift" ||
+        bad "N7i executable-mode drift" "raw checkout-tree finding is missing"
+fi
+chmod -x "$FIXTURE/candidate.txt"
+
+rm "$FIXTURE/tracked-link"
+ln -s candidate.txt "$FIXTURE/tracked-link"
+if run_checker "$MANIFEST" "$WORK/symlink-target-report.json" audit; then
+    bad "N7j tracked symlink drift" "changed symlink payload matched the HEAD tree"
+else
+    grep -q 'source:checkout-tree' "$WORK/symlink-target-report.json" &&
+        ok "N7j raw tree comparison rejects tracked symlink-target drift" ||
+        bad "N7j tracked symlink drift" "raw checkout-tree finding is missing"
+fi
+rm "$FIXTURE/tracked-link"
+ln -s base.txt "$FIXTURE/tracked-link"
+
+printf 'mutable generated content\n' > \
+    "$FIXTURE/apps/cellrebel-auto/app/build/generated.tmp"
+if run_checker "$MANIFEST" "$WORK/generated-content-report.json" audit; then
+    ok "N7k content beneath an exact frozen generated root remains allowed"
+else
+    bad "N7k frozen generated root" "ordinary generated content invalidated the package"
+fi
+rm -f "$FIXTURE/apps/cellrebel-auto/app/build/generated.tmp"
+
+AUTO_BUILD_ROOT="$FIXTURE/apps/cellrebel-auto/app/build"
+ESCAPED_AUTO_BUILD="$WORK/escaped-auto-build"
+mv "$AUTO_BUILD_ROOT" "$WORK/auto-build.backup"
+mkdir -p "$ESCAPED_AUTO_BUILD/outputs/apk/debug"
+printf 'fixture-auto-apk\n' > "$ESCAPED_AUTO_BUILD/outputs/apk/debug/app-debug.apk"
+ln -s "$ESCAPED_AUTO_BUILD" "$AUTO_BUILD_ROOT"
+if run_checker "$MANIFEST" "$WORK/generated-root-symlink-report.json" audit; then
+    bad "N7l symlinked generated root" "generated root escaped the source repository"
+else
+    grep -q 'source:checkout-tree' "$WORK/generated-root-symlink-report.json" &&
+        ok "N7l a frozen generated root must be a real in-repo directory" ||
+        bad "N7l symlinked generated root" "raw checkout-tree finding is missing"
+fi
+rm "$AUTO_BUILD_ROOT"
+mv "$WORK/auto-build.backup" "$AUTO_BUILD_ROOT"
+
+python3 - "$MANIFEST" "$WORK/widened-generated-roots.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+d["candidate"]["allowedGeneratedRoots"].append("caller-selected-generated")
+json.dump(d, open(sys.argv[2], "w", encoding="utf-8"), indent=2, sort_keys=True)
+PY
+if run_checker "$WORK/widened-generated-roots.json" \
+    "$WORK/widened-generated-roots-report.json" audit; then
+    bad "N7m generated-root allowlist widening" "caller widened the frozen root set"
+else
+    grep -q 'candidate:allowed-generated-roots' \
+        "$WORK/widened-generated-roots-report.json" &&
+        ok "N7m generated-root allowlist cannot be widened" ||
+        bad "N7m generated-root allowlist widening" "specific policy finding is missing"
+fi
+
+git -C "$FIXTURE" config extensions.worktreeConfig true
+if run_checker "$MANIFEST" "$WORK/worktree-extension-report.json" audit; then
+    bad "N7n Git worktree-config extension" "ambiguous config scope was accepted"
+else
+    grep -q 'source:git:external-helper-policy' \
+        "$WORK/worktree-extension-report.json" &&
+        ok "N7n worktree-config extension fails closed before source inspection" ||
+        bad "N7n Git worktree-config extension" "specific policy finding is missing"
+fi
+git -C "$FIXTURE" config --unset extensions.worktreeConfig
+
+LINKED_CONFIG_REPO="$WORK/linked-config-worktree"
+git -C "$FIXTURE" config extensions.worktreeConfig true
+git -C "$FIXTURE" worktree add --detach -q "$LINKED_CONFIG_REPO" "$PRODUCT_HEAD"
+mkdir -p "$LINKED_CONFIG_REPO/apps/cellrebel-auto/app/build/outputs/apk/debug"
+mkdir -p "$LINKED_CONFIG_REPO/apps/qianwangyou/app/build/outputs/apk/debug"
+printf 'fixture-auto-apk\n' > \
+    "$LINKED_CONFIG_REPO/apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk"
+printf 'fixture-qwy-apk\n' > \
+    "$LINKED_CONFIG_REPO/apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk"
+LINKED_CONFIG_GITDIR="$(git -C "$LINKED_CONFIG_REPO" rev-parse --absolute-git-dir)"
+mkdir -p "$LINKED_CONFIG_GITDIR/info"
+printf 'candidate.txt filter=tripwire\n' > "$LINKED_CONFIG_GITDIR/info/attributes"
+git -C "$LINKED_CONFIG_REPO" config --worktree filter.tripwire.clean "$FILTER_HELPER"
+git -C "$LINKED_CONFIG_REPO" config --worktree filter.tripwire.required true
+printf 'force linked-worktree hashing\n' >> "$LINKED_CONFIG_REPO/candidate.txt"
+rm -f "$FILTER_TRIPWIRE"
+if run_checker "$MANIFEST" "$WORK/worktree-config-report.json" audit \
+    "$TOOLS/aapt" "$TOOLS/apksigner" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "$LINKED_CONFIG_REPO"; then
+    bad "N7o Git worktree-scoped helper policy" "worktree helper config was accepted"
+else
+    [ ! -e "$FILTER_TRIPWIRE" ] &&
+        grep -q 'source:git:external-helper-policy' "$WORK/worktree-config-report.json" &&
+        ok "N7o worktree config is rejected before its helper can execute" ||
+        bad "N7o Git worktree-scoped helper policy" "helper ran or policy finding is missing"
+fi
+git -C "$FIXTURE" worktree remove --force "$LINKED_CONFIG_REPO"
+git -C "$FIXTURE" config --unset extensions.worktreeConfig
+
+if python3 - "$PROD" "$WORK/gitlink-fixture" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+spec = importlib.util.spec_from_file_location("github64_gitlink_test", Path(sys.argv[1]))
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+root.mkdir()
+(root / "module").mkdir()
+clean, details = module.compare_checkout_to_tree(
+    root,
+    {"module": module.GitTreeEntry("160000", "commit", "0" * 40)},
+    frozenset(),
+)
+assert not clean
+assert details["unsupported"]["paths"] == ["module"]
+assert details["mismatched"]["paths"] == ["module"]
+PY
+then
+    ok "N7p gitlinks are unsupported and fail closed"
+else
+    bad "N7p gitlink policy" "synthetic 160000 entry was not rejected"
+fi
 
 printf 'alternate candidate\n' > "$FIXTURE/alternate.txt"
 git -C "$FIXTURE" add alternate.txt

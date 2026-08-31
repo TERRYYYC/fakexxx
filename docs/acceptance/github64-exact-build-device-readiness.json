@@ -41,7 +41,7 @@
         "version": "Python 3.9.6"
       },
       "git": {
-        "externalHelperPolicy": "REJECT_REPOSITORY_HELPERS_DISABLE_GLOBAL_SYSTEM_AND_LAZY_FETCH",
+        "externalHelperPolicy": "REJECT_REPOSITORY_HELPERS_AND_WORKTREE_CONFIG_DISABLE_GLOBAL_SYSTEM_LAZY_FETCH_AND_REPLACE_OBJECTS",
         "path": "/usr/bin/git",
         "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
         "version": "git version 2.50.1 (Apple Git-155)"
@@ -88,6 +88,18 @@
     "repeatCleanBuildsWithSameBytes": 2
   },
   "candidate": {
+    "allowedGeneratedRoots": [
+      "acceptance/.gradle",
+      "acceptance/build",
+      "acceptance/fake-qwy/build",
+      "acceptance/scenarios/build",
+      "apps/cellrebel-auto/.gradle",
+      "apps/cellrebel-auto/app/build",
+      "apps/cellrebel-auto/build",
+      "apps/qianwangyou/.gradle",
+      "apps/qianwangyou/app/build",
+      "apps/qianwangyou/build"
+    ],
     "allowedPreparationDelta": [
       "docs/acceptance/github64-exact-build-device-readiness.json",
       "docs/acceptance/github64-exact-build-device-readiness.md",
