@@ -701,9 +701,9 @@ class CrashMatrixTest {
     }
 
     @Test fun `M_CR_06_discriminator_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 coordinates discriminator", "effectiveLat/Lng ~20m off target (>1m tolerance)",
-            preOverride = { copy(effectiveLat = 39.9002) },
-            postOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 coordinates discriminator", "latitude outside the geographic range",
+            preOverride = { copy(effectiveLat = 91.0) },
+            postOverride = { copy(effectiveLat = 91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_evidence_refs`() = runTest {
@@ -794,23 +794,23 @@ class CrashMatrixTest {
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE lat off-target, POST canonical",
-            preOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE latitude out of range, POST canonical",
+            preOverride = { copy(effectiveLat = 91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_post_only_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST lat off-target, PRE canonical",
-            postOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST latitude out of range, PRE canonical",
+            postOverride = { copy(effectiveLat = -91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_lng`() = runTest {
-        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE lng off-target, POST canonical",
-            preOverride = { copy(effectiveLng = 116.4002) })
+        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE longitude out of range, POST canonical",
+            preOverride = { copy(effectiveLng = 181.0) })
     }
 
     @Test fun `M_CR_06_discriminator_post_only_lng`() = runTest {
-        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST lng off-target, PRE canonical",
-            postOverride = { copy(effectiveLng = 116.4002) })
+        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST longitude out of range, PRE canonical",
+            postOverride = { copy(effectiveLng = -181.0) })
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_evidence_refs`() = runTest {

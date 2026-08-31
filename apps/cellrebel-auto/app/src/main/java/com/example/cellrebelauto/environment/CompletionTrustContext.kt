@@ -25,7 +25,11 @@ data class ObservationSnapshot(
     val isMock: Boolean?,
     /** scheduleDecisionWire; must be ALLOWED_NOW (§6.4.1 — DENIED/WAIT_UNTIL + VERIFIED ⇒ fail). */
     val scheduleDecision: String,
-    /** Effective coords at observation time; non-null + within tolerance of intent (INV-23). */
+    /**
+     * Effective coords at observation time; non-null, finite, and geographically valid (§6.4.1).
+     * Qianwangyou owns the target and distance comparison (KB-8); Auto keeps these fields only as
+     * a structural predicate and audit projection.
+     */
     val effectiveLat: Double?,
     val effectiveLng: Double?,
     /** environmentRevision; pre must equal post (§6.4). */
@@ -62,7 +66,8 @@ data class ObservationSnapshot(
  *  - cross-obs: revision/fingerprint equal, continuitySince equal + non-null + <= pre.observedAt;
  *  - window: pre.observedAt < execution.startedAtElapsed < ... < completedAtElapsed < post.observedAt;
  *  - intent three-way: applyReceiptIntentHash == locallyRecomputedIntentHash == observation hash;
- *  - coords within [locationToleranceMeters] (= TRUSTED_LOCATION_TOLERANCE_METERS = 1.0 m).
+ *  - provider effective coordinates are present, finite, and geographically valid. KB-8 assigns
+ *    the target-coordinate distance comparison exclusively to Qianwangyou.
  * Every §6.4.1 矛盾 tuple is a distinct must-fail case.
  *
  * # 完成信任上下文：携带 §6.4 全部判别项，杜绝单字段/错 tuple 通过（反 false-oracle）
@@ -82,17 +87,6 @@ data class CompletionTrustContext(
      * `pre.leaseId == post.leaseId` is a false oracle (two observations can agree on the wrong lease).
      */
     val applyReceiptLease: String,
-    /** Target coordinates the attempt was dispatched to (INV-23). */
-    val targetLat: Double,
-    val targetLng: Double,
-    /**
-     * Location tolerance in meters (INV-23, TRUSTED_LOCATION_TOLERANCE_METERS = 1.0). R6-F1 (§11.7): this
-     * is a CALLER-supplied field; the GREEN predicate MUST gate on the FROZEN 1.0 m constant, NOT on this
-     * value — otherwise a caller injects its own pass threshold (Sol's round-5 caller-tolerance false-oracle).
-     * Kept on the context for audit/projection only; the `R6-F1 caller-injected loose tolerance` negative
-     * pins GREEN to the frozen bound by passing 50.0 here with coords ~20 m off.
-     */
-    val locationToleranceMeters: Double,
     val preObservation: ObservationSnapshot,
     val postObservation: ObservationSnapshot
 )
