@@ -91,8 +91,25 @@ class APlus10AFixtureSeedTest {
         assertEquals(10, items.size)
         assertEquals((1..10).map { "profile-$it" }, items.map { it.expectedScheduleItemId })
         assertEquals(17, items.sumOf { it.requiredSuccesses })
+        assertEquals("frozen quota vector", listOf(2, 1, 3, 1, 2, 1, 1, 3, 1, 2), items.map { it.requiredSuccesses })
         val rows = APlus10AFixtureSeed.toProfileRows(items)
         assertEquals((1L..10L).toList(), rows.map { it.id })
+    }
+
+    @Test
+    fun committedFileSha_feedsThroughRequireRegisteredDigest() {
+        // R4 P2: the previous test compared bytes to a DUPLICATED literal while
+        // the runtime-pin test passed REGISTERED_FIXTURE_DIGEST to itself —
+        // mutating only the runtime constant left both green. Feed the COMPUTED
+        // committed-file SHA through requireRegisteredDigest and require it to
+        // equal the runtime constant. If the constant drifts from the file,
+        // THIS goes red.
+        val bytes = repoFixtureFile().readBytes()
+        val computed = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        // Passes iff the committed-file SHA == REGISTERED_FIXTURE_DIGEST (both
+        // legs of the pin); throws otherwise.
+        APlus10AFixtureSeed.requireRegisteredDigest(computed, computed)
     }
 
     @Test
@@ -167,6 +184,19 @@ class APlus10AFixtureSeedTest {
     fun rejectsNonContiguousFixtureIndex() {
         val items = (1..10).map { itemJson(if (it == 5) 6 else it, frozenQuotas[it - 1]) }
         assertRejected("fixtureIndex 5 skipped", payload(items = items))
+    }
+
+    @Test
+    fun rejectsSameTotalQuotaRedistribution() {
+        // R4 P1-4: items 1 and 2 quotas swapped (2,1 → 1,2). Sum stays 17 and
+        // the declared total is still 17, so a sum-only check would pass — but
+        // per-address attribution would be wrong. The exact ordered vector
+        // must catch it.
+        val swapped = frozenQuotas.toMutableList().also { it[0] = frozenQuotas[1]; it[1] = frozenQuotas[0] }
+        assertRejected(
+            "items 1↔2 quota redistribution (same total 17)",
+            payload(items = (1..10).map { itemJson(it, swapped[it - 1]) }),
+        )
     }
 
     // ------------------------------------------------------------------

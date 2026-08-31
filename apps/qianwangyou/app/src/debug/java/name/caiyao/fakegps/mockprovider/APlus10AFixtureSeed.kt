@@ -42,6 +42,13 @@ object APlus10AFixtureSeed {
     // these independently of the caller-supplied digest.
     const val EXPECTED_ITEM_COUNT = 10
     const val EXPECTED_TOTAL_REQUIRED_SUCCESSES = 17
+
+    /**
+     * Frozen per-item quota VECTOR (a-plus-10a-fixture.json), fixtureIndex
+     * order. R4 P1-4: bind the exact ordered quota, not just the sum — a
+     * same-total redistribution otherwise seeds a mis-attributing schedule.
+     */
+    val EXPECTED_QUOTA_VECTOR: List<Int> = listOf(2, 1, 3, 1, 2, 1, 1, 3, 1, 2)
     val EXPECTED_SCHEDULE_ID: String = name.caiyao.fakegps.integration.v1.QwyScheduleStore.DEFAULT_SCHEDULE_ID
 
     /**
@@ -167,8 +174,11 @@ object APlus10AFixtureSeed {
             require(item.expectedScheduleItemId == "$SCHEDULE_ITEM_PREFIX${i + 1}") {
                 "item ${i + 1} must target ${SCHEDULE_ITEM_PREFIX}${i + 1}, got '${item.expectedScheduleItemId}'"
             }
-            require(item.requiredSuccesses >= 1) {
-                "item ${i + 1} requiredSuccesses must be >= 1"
+            // R4 P1-4: bind the EXACT ordered quota, not just >=1 — a same-total
+            // redistribution otherwise seeds a mis-attributing schedule.
+            require(item.requiredSuccesses == EXPECTED_QUOTA_VECTOR[i]) {
+                "item ${i + 1} requiredSuccesses ${item.requiredSuccesses} != registered ${EXPECTED_QUOTA_VECTOR[i]} " +
+                    "(the frozen quota vector is load-bearing — no same-total redistribution)"
             }
         }
         val quotaSum = items.sumOf { it.requiredSuccesses }

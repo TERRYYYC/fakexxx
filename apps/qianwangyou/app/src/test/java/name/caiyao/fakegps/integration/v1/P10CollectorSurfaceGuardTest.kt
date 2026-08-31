@@ -242,14 +242,14 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
-     * PR #62 P1-3 — seed lifecycle honesty. Three coupled false-greens:
+     * PR #62 P1-3 (R3) + P1-2 (R4) — seed lifecycle honesty. Coupled false-greens:
      *
-     *  (a) same-topology reseed: ScheduleReinitPolicy NO-OPs on an unchanged
-     *      item set (M-AD-24), so re-seeding profile-1..10 over an old run
-     *      preserves a mid-run pointer / exhausted=true. The seed path must
-     *      clear the durable schedule store so the next boot takes Rule 1
-     *      (fresh Initialize) — and the duplicated prefs literal must match
-     *      QwyScheduleStore's private PREFS_NAME (drift guard).
+     *  (a) MONOTONIC generation via APlus10AScheduleReset.plan + readback,
+     *      never wholesale clear() (R3: a clear re-Initializes at version 1).
+     *  (a2) OWNER QUIESCENCE brackets the write before AND after (R4: a
+     *      concurrent owner reinit/advance would otherwise reuse the version).
+     *  (a3) PRIOR STATE is CLASSIFIED so a partial store fails closed, never
+     *      laundered into V=1 (R4).
      *  (b) the publish outcome (ConfigPrefsSync.sync) is load-bearing; its
      *      boolean must gate the seed outcome, not be dropped.
      *  (c) READY must be success-gated: the runbook predicate greps READY, so
@@ -257,7 +257,7 @@ class P10CollectorSurfaceGuardTest {
      *      failure path must emit SEED_FAILED instead.
      */
     @Test
-    fun p13_seedLifecycleClearsScheduleStoreAndGatesReady() {
+    fun p13_p12_seedLifecycleIsMonotonicQuiescentAndReadyGated() {
         val seam = File(
             moduleRoot,
             "src/debug/java/name/caiyao/fakegps/mockprovider/MockProviderAcceptanceActivity.kt",
@@ -283,6 +283,38 @@ class P10CollectorSurfaceGuardTest {
             "the seed path must NOT wholesale-clear the schedule store (version rollback)",
             false,
             Regex("""edit\(\)\.clear\(\)""").containsMatchIn(code),
+        )
+        // (a2) R4 P1-2: owner-quiescence must bracket the write (before AND
+        // after) so a concurrent owner reinit/advance cannot reuse the version.
+        assertTrue(
+            "quiescence must be checked BEFORE the write",
+            code.contains("quiescenceOrThrow(\"before write\")"),
+        )
+        assertTrue(
+            "quiescence must be checked AFTER the write (a fence that went live mid-seed is stale)",
+            code.contains("quiescenceOrThrow(\"after write\")"),
+        )
+        assertTrue(
+            "quiescence must consult APlus10AScheduleReset.quiescenceMismatch",
+            code.contains("APlus10AScheduleReset.quiescenceMismatch("),
+        )
+        // (a3) R4 P1-2: prior state must be CLASSIFIED (partial fail-closed),
+        // never a raw getLong(..., 0L) default that launders a partial store.
+        assertTrue(
+            "the seed must classify the prior state via APlus10AScheduleReset.classifyPriorState",
+            code.contains("APlus10AScheduleReset.classifyPriorState("),
+        )
+        // Owner-service FQCN drift guard: the reset object's literal must match
+        // the production service class name (else quiescence checks a ghost).
+        val serviceManifest = File(moduleRoot, "src/main/AndroidManifest.xml").readText()
+        val resetSourceForFqcn = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AScheduleReset.kt",
+        ).readText()
+        assertTrue(
+            "OWNER_SERVICE_FQCN must reference the real EnvironmentControlService",
+            resetSourceForFqcn.contains("name.caiyao.fakegps.integration.v1.EnvironmentControlService") &&
+                serviceManifest.contains(".integration.v1.EnvironmentControlService"),
         )
         // Literal drift guard: every duplicated prefs key in the reset object
         // must still exist verbatim in QwyScheduleStore — if production moves
@@ -317,14 +349,26 @@ class P10CollectorSurfaceGuardTest {
                 code.contains("check(published)"),
         )
 
-        // (c) READY only on success; failure emits the distinct marker.
+        // (c) R4 P1-1 / gap⑦: prepare_10a must NOT emit the full-seed-PASS
+        // "READY" marker (a complete §3 seed PASS). The §3 contract's ordered
+        // discover() readback has no executable command today, so a READY here
+        // is the false green opus5 ruled blocks merge. The success path emits
+        // the honest split markers instead; the failure path emits SEED_FAILED.
         assertEquals(
-            "READY for prepare_10a must be emitted from exactly one (success-gated) site",
-            1,
-            Regex("""complete\(COMMAND_PREPARE_10A\)""").findAll(code).count(),
+            "prepare_10a must NOT call complete() (which emits the full-seed-PASS READY)",
+            false,
+            Regex("""complete\(COMMAND_PREPARE_10A\)""").containsMatchIn(code),
         )
         assertTrue(
-            "the failure path must emit SEED_FAILED (and not READY)",
+            "success path must emit SEED_LOCAL_VERIFIED (local legs) …",
+            code.contains("SEED_LOCAL_VERIFIED command="),
+        )
+        assertTrue(
+            "… AND SEED_CONTRACT_INCOMPLETE naming gap⑦ (ordered-readback unavailable)",
+            code.contains("SEED_CONTRACT_INCOMPLETE command=") && code.contains("gap=7"),
+        )
+        assertTrue(
+            "the failure path must emit SEED_FAILED (and no success marker)",
             code.contains("SEED_FAILED command="),
         )
         assertTrue(

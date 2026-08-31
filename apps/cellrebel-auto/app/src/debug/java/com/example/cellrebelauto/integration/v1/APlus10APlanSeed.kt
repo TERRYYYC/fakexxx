@@ -57,6 +57,15 @@ object APlus10APlanSeed {
     const val SCHEDULE_ITEM_PREFIX = "profile-"
 
     /**
+     * The frozen per-item quota VECTOR (a-plus-10a-fixture.json), in
+     * fixtureIndex order. R4 P1-4: binding only the sum (17) accepts a
+     * same-total redistribution (e.g. swapping items 1↔2 quotas), which starts
+     * a plan whose per-address acceptance attribution is wrong. Every ordered
+     * quota is bound to this vector.
+     */
+    val EXPECTED_QUOTA_VECTOR: List<Int> = listOf(2, 1, 3, 1, 2, 1, 1, 3, 1, 2)
+
+    /**
      * PR #62 P1-1: the registered digest of a-plus-10a-fixture.json (frozen
      * 2026-08-26; registration: a-plus-device-matrix.md). The parser's
      * structure bind covers count/order/profile-N/schedule/quota-sum but NOT
@@ -139,7 +148,12 @@ object APlus10APlanSeed {
             require(item.expectedScheduleItemId == "$SCHEDULE_ITEM_PREFIX${i + 1}") {
                 "item ${i + 1} must target $SCHEDULE_ITEM_PREFIX${i + 1}, got '${item.expectedScheduleItemId}'"
             }
-            require(item.requiredSuccesses >= 1) { "item ${i + 1} requiredSuccesses must be >= 1" }
+            // R4 P1-4: bind the EXACT ordered quota, not just >=1 — a same-total
+            // redistribution (items 1↔2 swapped) otherwise passes and mis-attributes.
+            require(item.requiredSuccesses == EXPECTED_QUOTA_VECTOR[i]) {
+                "item ${i + 1} requiredSuccesses ${item.requiredSuccesses} != registered ${EXPECTED_QUOTA_VECTOR[i]} " +
+                    "(the frozen quota vector is load-bearing — no same-total redistribution)"
+            }
         }
         val quotaSum = items.sumOf { it.requiredSuccesses }
         val declaredTotal = root.optInt("totalRequiredSuccesses", -1)
@@ -208,14 +222,16 @@ object APlus10APlanSeed {
         val byOrder = tasks.sortedWith(compareBy({ it.priority }, { it.csvRow }))
         byOrder.forEachIndexed { i, t ->
             if (t.csvRow != i + 1) return "task at order $i has csvRow ${t.csvRow}, expected ${i + 1}"
-            if (t.requiredSuccesses < 1) return "task csvRow ${t.csvRow} requiredSuccesses ${t.requiredSuccesses} < 1"
+            // R4 P1-4: bind the EXACT ordered quota, not >=1 or just the sum —
+            // a same-total redistribution otherwise starts a mis-attributing plan.
+            if (t.requiredSuccesses != EXPECTED_QUOTA_VECTOR[i]) {
+                return "task csvRow ${t.csvRow} requiredSuccesses ${t.requiredSuccesses} != " +
+                    "registered ${EXPECTED_QUOTA_VECTOR[i]} (no same-total redistribution)"
+            }
             if (t.latitude != COORDINATE_PLACEHOLDER || t.longitude != COORDINATE_PLACEHOLDER) {
                 return "task csvRow ${t.csvRow} carries real coordinates (${t.latitude},${t.longitude}) — " +
                     "not a KB-8 seed plan (looks like a CSV import)"
             }
-        }
-        if (byOrder.sumOf { it.requiredSuccesses } != EXPECTED_TOTAL_REQUIRED_SUCCESSES) {
-            return "task quota sum ${byOrder.sumOf { it.requiredSuccesses }} != $EXPECTED_TOTAL_REQUIRED_SUCCESSES"
         }
         return null
     }

@@ -569,6 +569,14 @@ run_acceptance_readiness() {
 preserve_report() { # session local_report
     session=$1
     local_report=$2
+    # §5.G requires the report BOUND to the installed APK SHA. An empty or
+    # non-64-hex apk sha means the install-identity step never ran (or its
+    # export was dropped) — the binding would be a lie ("apk_sha256=unknown").
+    # Fail closed BEFORE writing any copy we could not bind (R4 P2).
+    if ! printf '%s' "$INSTALLED_APK_SHA" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        echo "HARNESS_ERROR installed APK SHA not bound (got '${INSTALLED_APK_SHA:-<empty>}'); §5.G requires a 64-hex installed sha before preserving evidence" >&2
+        return 2
+    fi
     [ -n "$EVIDENCE_DIR" ] && [ -d "$EVIDENCE_DIR" ] || {
         echo "HARNESS_ERROR evidence directory missing; cannot preserve raw report for $session" >&2
         return 2
@@ -583,7 +591,7 @@ preserve_report() { # session local_report
         echo "HARNESS_ERROR could not fingerprint preserved report for $session" >&2
         return 2
     }
-    echo "EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=${INSTALLED_APK_SHA:-unknown}"
+    echo "EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=$INSTALLED_APK_SHA"
 }
 
 run_scenario() {
@@ -610,12 +618,37 @@ run_scenario() {
         return 2
     }
 
+    # §5.G evidence carrier (PR #62 R4 P1-4): the acceptance Activity logs
+    # report_ready BEFORE restoreAndFinish can log restore_failed
+    # (HookAcceptanceActivity onCreate writes+logs the report, then restore
+    # runs). So a restore_failed / restore-timeout run can have a raw report
+    # ON DEVICE while the previous ordering returned the primary failure
+    # FIRST and lost the only host carrier. Fix: whenever report_ready is
+    # observed, fetch + preserve the bytes BEFORE returning ANY failure.
+    #
+    # try_capture_report: idempotent — pulls the on-device report and
+    # preserves it once. Safe to call on both the failure and success paths.
+    report_captured=0
+    try_capture_report() {
+        [ "$report_captured" -eq 1 ] && return 0
+        has_state "$session" "report_ready" || return 0
+        root_shell "cat $remote_report" >"$local_report" 2>/dev/null || {
+            echo "HARNESS_ERROR report_ready seen but could not read on-device report for $session" >&2
+            return 2
+        }
+        preserve_report "$session" "$local_report" || return $?
+        report_captured=1
+        return 0
+    }
+
     attempt=0
     while [ "$attempt" -lt 35 ]; do
         if has_state "$session" "probe_failed" ||
             has_state "$session" "restore_failed" ||
             has_state "$session" "aborted"
         then
+            # Preserve any report_ready bytes BEFORE surfacing the failure.
+            try_capture_report || return $?
             echo "HARNESS_ERROR acceptance activity failed for $session" >&2
             read_acceptance_logs >&2
             return 1
@@ -632,19 +665,15 @@ run_scenario() {
     if ! has_state "$session" "report_ready" ||
         ! has_state "$session" "restored"
     then
+        # A report-ready/restore-timeout run may still have a device report.
+        try_capture_report || return $?
         echo "HARNESS_ERROR timed out waiting for report_ready + restored: $session" >&2
         read_acceptance_logs >&2
         return 1
     fi
 
-    root_shell "cat $remote_report" >"$local_report" 2>/dev/null || {
-        echo "HARNESS_ERROR could not read acceptance report for $session" >&2
-        return 2
-    }
-
-    # §5.G binding (P1-4): preserve the raw report BEFORE any verdict runs —
-    # a failed verdict must still leave its raw carrier behind.
-    preserve_report "$session" "$local_report" || return $?
+    # Success path: capture is idempotent (no-op if the failure path already ran).
+    try_capture_report || return $?
 
     control_args=()
     if [ "$scenario" = "unavailable" ]; then

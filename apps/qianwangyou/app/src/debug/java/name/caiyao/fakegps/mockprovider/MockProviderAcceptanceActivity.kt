@@ -77,17 +77,28 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
             val result = withContext(Dispatchers.IO) { runCatching { seed10a() } }
             result.fold(
                 onSuccess = { report ->
-                    // Full mapping to logcat for the evidence pack; READY marker
-                    // only on a PROVEN seed (parity with prepare_kyiv's predicate).
                     Log.i(TAG, report)
-                    complete(COMMAND_PREPARE_10A)
+                    // R4 P1-1 / gap⑦: this seed proves only its LOCAL legs
+                    // (digest pin, structure+quota vector, explicit id, monotonic
+                    // owner-quiescent generation, publish). The §3 seed contract
+                    // ALSO requires an ordered profile-1..10 discover() readback
+                    // that has NO executable command today
+                    // (EnvironmentControlHandler profileRefs=emptyList). So this
+                    // deliberately does NOT emit the full-seed-PASS "READY" marker
+                    // a complete seed would — a READY here would be the exact
+                    // false green opus5 ruled blocks merge pending operator scope.
+                    // Distinct markers: local legs proven, contract still open.
+                    Log.i(TAG, "SEED_LOCAL_VERIFIED command=$COMMAND_PREPARE_10A")
+                    Log.i(
+                        TAG,
+                        "SEED_CONTRACT_INCOMPLETE command=$COMMAND_PREPARE_10A gap=7 " +
+                            "reason=ordered-discover-readback-unavailable " +
+                            "(profileRefs=emptyList; needs authorized projection). NOT a full §3 seed PASS.",
+                    )
+                    finish()
                 },
                 onFailure = { e ->
-                    // PR #62 P1-3: a failed seed must NOT emit the READY marker —
-                    // the runbook's capture_step predicate greps for READY, so an
-                    // unconditional READY made every failure a false green. The
-                    // failure marker is loud and distinct; the step times out or
-                    // greps SEED_FAILED, never both.
+                    // P1-3: a failed seed must NOT emit any success marker.
                     Log.i(TAG, "SEED_FAILED command=$COMMAND_PREPARE_10A ${e::class.java.simpleName}: ${e.message}")
                     finish()
                 },
@@ -116,24 +127,31 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
 
         val db = AppDatabase.getInstance(applicationContext)
         val dao = db.profileDao()
-        // PR #62 R3 P1-2 — MONOTONIC generation reset (replaces the earlier
-        // clear(): clearing let the next boot re-Initialize at version 1, a
-        // rollback that lets old (schedule,item,version) identities collide
-        // with the new run — M-AD-24 / spec L1895-2056 require V → V+1 on
-        // every reinit, including a same-topology exhausted reset).
+        // PR #62 R3 P1-2 + R4 P1-2 — MONOTONIC, OWNER-QUIESCENT generation reset.
         //
-        // Read the CURRENT stored version, compute the pure V+1 plan, write
-        // every schedule field in ONE atomic commit (bump + pointer reset +
-        // exhausted clear ride the same write, the M-AD-24 pairing; stale
-        // last-applied projections are removed by the same commit), then READ
-        // BACK and fail the seed on any mismatch. On the next provider boot,
-        // initFromProfileIds sees the same item set + present scheduleId and
-        // NoOps — preserving this V+1 generation rather than fighting it.
+        // R3: never clear() (the next boot would re-Initialize at version 1 —
+        // a rollback violating M-AD-24 / spec L1895-2056).
+        // R4: the write is OUTSIDE EnvironmentControlHandler.withOwnerFence, so
+        // it may only run under PROVEN QUIESCENCE — no live owner service and no
+        // in-flight lease — bracketed BEFORE and AFTER the write; and a PARTIAL
+        // prior store is fail-closed instead of being laundered into V=1.
         val schedulePrefs = applicationContext
             .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
-        val versionBefore = schedulePrefs.getLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, 0L)
+
+        // Quiescence BEFORE: refuse if the owner could write concurrently.
+        quiescenceOrThrow("before write")
+
+        // Classify the prior state from durable keys — an absent version key
+        // over surviving keys is Partial (corrupt), not "version 0".
+        val presentKeys = APlus10AScheduleReset.GENERATION_KEYS
+            .filter { schedulePrefs.contains(it) }.toSet()
+        val storedVersion = if (schedulePrefs.contains(APlus10AScheduleReset.KEY_SCHEDULE_VERSION)) {
+            runCatching { schedulePrefs.getLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, Long.MIN_VALUE) }
+                .getOrNull()?.takeIf { it != Long.MIN_VALUE }
+        } else null
+        val priorState = APlus10AScheduleReset.classifyPriorState(presentKeys, storedVersion)
         val resetPlan = APlus10AScheduleReset.plan(
-            existingVersion = versionBefore,
+            prior = priorState,
             itemIds = rows.map { "${APlus10AFixtureSeed.SCHEDULE_ITEM_PREFIX}${it.id}" },
         )
         val committed = schedulePrefs.edit()
@@ -169,6 +187,9 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         APlus10AScheduleReset.verifyReadback(readBack, resetPlan)?.let { mismatch ->
             throw IllegalStateException("schedule generation readback mismatch — $mismatch")
         }
+        // Quiescence AFTER: if a fence went live mid-write (owner started, or a
+        // lease was acquired), our version could already be stale — fail closed.
+        quiescenceOrThrow("after write")
 
         // Isolated .bench data only (same seam as prepare_kyiv): clear then insert
         // with EXPLICIT ids so expectedScheduleItemId=profile-N stays byte-exact.
@@ -196,11 +217,46 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         // PR #62 P1-1: the report emits only the independently verified
         // REGISTERED digest, never the caller-declared value.
         return APlus10AFixtureSeed.seedReport(items, insertedIds, APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST) +
-            "SCHEDULE_GENERATION versionBefore=$versionBefore versionAfter=${resetPlan.scheduleVersion} " +
-            "pointer=${resetPlan.currentItemId} exhausted=${resetPlan.exhausted} (monotonic V+1, readback verified)\n" +
+            "SCHEDULE_GENERATION priorState=${priorState::class.simpleName} versionAfter=${resetPlan.scheduleVersion} " +
+            "pointer=${resetPlan.currentItemId} exhausted=${resetPlan.exhausted} " +
+            "(monotonic V+1, owner-quiescent, readback verified)\n" +
             "NEXT: force-stop $QWY_BENCH_HINT then bind; readback via discover(): currentItemId=profile-1 and " +
             "scheduleVersion=${resetPlan.scheduleVersion} (the executable subset — the full ordered profile-1..10 " +
-            "list readback awaits the P1-3 profileRefs projection scope decision)"
+            "list readback awaits the gap⑦ profileRefs projection scope decision)"
+    }
+
+    /**
+     * R4 P1-2 quiescence gate: the seed writes the schedule store outside the
+     * production owner fence, so refuse unless the owner PROVABLY cannot write
+     * concurrently — no live owner service AND no in-flight lease. Reads the
+     * durable lease state through QwyDurableSnapshot (fresh FileDurableKv, no
+     * runtime boot). Throws IllegalStateException on any mismatch so the seed
+     * fails closed with SEED_FAILED.
+     */
+    private fun quiescenceOrThrow(phase: String) {
+        val ownerRunning = isOwnerServiceRunning()
+        val leaseState = name.caiyao.fakegps.integration.v1.QwyDurableSnapshot
+            .capture(name.caiyao.fakegps.integration.v1.QwyDurableSnapshot.durableDir(applicationContext))
+            .lease.leaseState
+        APlus10AScheduleReset.quiescenceMismatch(leaseState, ownerRunning)?.let { reason ->
+            throw IllegalStateException("schedule reset refused ($phase): $reason")
+        }
+    }
+
+    /**
+     * True if the Environment Control owner service has a live process record.
+     * ActivityManager.getRunningServices is deprecated for third parties but
+     * still returns this app's OWN services, which is all we need — and this is
+     * debug-only. FQCN duplicated in APlus10AScheduleReset (drift-guarded).
+     */
+    @Suppress("DEPRECATION")
+    private fun isOwnerServiceRunning(): Boolean {
+        val am = getSystemService(android.content.Context.ACTIVITY_SERVICE)
+            as? android.app.ActivityManager ?: return false
+        return runCatching {
+            am.getRunningServices(Int.MAX_VALUE)
+                .any { it.service.className == APlus10AScheduleReset.OWNER_SERVICE_FQCN }
+        }.getOrDefault(false)
     }
 
     private fun sha256Hex(bytes: ByteArray): String =

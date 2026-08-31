@@ -170,10 +170,16 @@ class APlusSeedActivity : Activity() {
             Thread.sleep(START_CONFIRM_POLL_MS)
         }
         if (confirmed) {
-            appendLine("START_CONFIRMED isRunning=true within ${START_CONFIRM_TIMEOUT_MS}ms.")
-            appendLine("Observe attempts via ProviderRevokeCollector cmd=state; durable rows are the truth, not this line.")
+            // R4 P2: AutomationService sets isRunning=true SYNCHRONOUSLY before
+            // plan load / engine creation / any durable session or attempt row.
+            // So this confirms only that the SERVICE ACCEPTED the request — NOT
+            // that a durable run for THIS plan started. Named accordingly; the
+            // durable-start gate is the ProviderRevokeCollector cmd=state rows.
+            appendLine("REQUEST_ACCEPTED isRunning=true within ${START_CONFIRM_TIMEOUT_MS}ms — the service took the request.")
+            appendLine("This is NOT a durable start. Confirm the durable run via ProviderRevokeCollector cmd=state:")
+            appendLine("a running test_attempts row for this plan is the truth; isRunning alone is set before plan load.")
         } else {
-            appendLine("START_NOT_CONFIRMED: isRunning stayed false for ${START_CONFIRM_TIMEOUT_MS}ms after the call.")
+            appendLine("REQUEST_NOT_ACCEPTED: isRunning stayed false for ${START_CONFIRM_TIMEOUT_MS}ms after the call.")
             appendLine("Most likely the CellRebel Auto accessibility service is not enabled/connected")
             appendLine("(startAutomation is a silent no-op without it — operator precondition). Do NOT treat this as started.")
         }

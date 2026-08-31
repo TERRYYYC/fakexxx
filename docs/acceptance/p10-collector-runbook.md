@@ -123,11 +123,13 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
   --es command prepare_10a \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
   --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
-#   判据：logcat MockProviderAcceptance 出 seed 映射（fixtureIndex↔scheduleItemId↔dbId↔
-#   journeyCaseId↔requiredSuccesses）+ READY command=prepare_10a。
-#   失败发 SEED_FAILED command=prepare_10a 且**无 READY**（P1-3：READY 仅在 seed 全部证明
-#   后发射——digest pin+结构校验、显式 id 无漂移、单调 generation 写入+回读校验、
-#   ConfigPrefsSync 发布成功）。
+#   判据（R4 P1-1/gap⑦ 更新）：logcat MockProviderAcceptance 出 seed 映射 +
+#   SEED_LOCAL_VERIFIED command=prepare_10a（本地腿全证：digest pin、结构+quota 向量、
+#   显式 id、单调+owner-quiescent generation+回读、ConfigPrefsSync 发布）
+#   **且** SEED_CONTRACT_INCOMPLETE command=prepare_10a gap=7（有序 discover() 回读当前
+#   无可执行命令——见末「gap⑦」）。**刻意不发 full-seed-PASS 的 READY**——§3 seed 契约
+#   含有序回读腿，未满足前发 READY 即假绿（opus5 裁定该假绿阻塞 merge）。
+#   失败发 SEED_FAILED command=prepare_10a，无任何 success 标记。
 #   seed 内部对 schedule store 做**单调 generation reset**（R3 P1-2）：读当前 version、
 #   写 V+1 + pointer=profile-1 + exhausted=false（单原子 commit）、再回读校验。
 #   ⚠️ 不是 clear()——clear 会让下次 boot 重置回 version 1（回滚），违反 M-AD-24/spec

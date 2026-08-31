@@ -3,36 +3,42 @@ package name.caiyao.fakegps.mockprovider
 import org.json.JSONArray
 
 /**
- * P10DBG-COLLECTOR-V1 — PR #62 R3 P1-2: monotonic schedule reset for the
- * §5A seed.
+ * P10DBG-COLLECTOR-V1 — PR #62 R3 P1-2 + R4 P1-2: monotonic, owner-quiescent
+ * schedule reset for the §5A seed.
  *
- * WHY NOT `clear()`
- * -----------------
- * The previous seed cleared qwy_schedule_v1 wholesale; the next
- * ScheduleReinitPolicy initialization then wrote scheduleVersion **1** — a
- * version ROLLBACK. Canonical spec L1895/2056 and M-AD-24 require every
- * schedule reinitialization (including a same-topology exhausted reset) to
- * advance V → V+1: after a rollback, old (schedule, item, version)
- * identities from the previous run collide with the new one, so stale CAS
- * preconditions and completion proofs become reusable across generations.
+ * WHY NOT `clear()` (R3)
+ * ----------------------
+ * A wholesale clear lets the next boot re-Initialize at scheduleVersion 1 —
+ * a rollback violating M-AD-24 / spec L1895-2056 (every reinit advances
+ * V → V+1); old (schedule, item, version) identities then collide with the
+ * new run.
  *
- * HOW THIS COMPOSES WITH PRODUCTION (not a bypass)
+ * WHY QUIESCENCE + PRIOR-STATE CLASSIFICATION (R4)
  * ------------------------------------------------
- * The seeder reads the CURRENT stored version, computes this pure plan
- * (V+1, pointer=profile-1, exhausted=false, advanceCount=0), writes every
- * field in ONE atomic SharedPreferences commit, then READS BACK and fails
- * the seed on any mismatch. On the next provider boot,
- * QwyScheduleStore.initFromProfileIds sees the same item set with a present
- * scheduleId and takes ScheduleReinitPolicy's NoOp rule — PRESERVING the
- * V+1 generation. The debug write performs exactly the "new generation"
- * transition the policy's Initialize rule performs for a topology change
- * (bump + pointer reset + exhausted clear as one write, the M-AD-24
- * pairing), applied to the same-topology seed case the policy deliberately
- * refuses to touch on its own.
+ * The seed writes the production store from OUTSIDE
+ * EnvironmentControlHandler.withOwnerFence, so it may only run when the
+ * owner PROVABLY cannot write concurrently:
+ *
+ *  - [quiescenceMismatch] refuses while the owner service is running (a live
+ *    handler can reinit at construction or advance on completeAndAdvance —
+ *    the R4 counterexample: seed reads V7, owner advances to V8, seed writes
+ *    its own V8 and the readback matches) or while an IN-FLIGHT lease
+ *    (ACQUIRING/ACTIVE/RELEASING) exists (advancePointer requires one).
+ *    At-rest lease states (RELEASED/EXPIRED/REVOKED/RELEASE_INCOMPLETE)
+ *    cannot drive a schedule write. The seeder brackets the write with this
+ *    check BEFORE and AFTER; a fence that went live mid-seed fails the seed.
+ *  - [classifyPriorState] refuses PARTIAL stores: an absent version key with
+ *    surviving scheduleId/items/pointer was previously defaulted to 0 and
+ *    laundered into a fresh version-1 generation. Prior state must be
+ *    all-absent (Pristine → V=1) or all-present with a readable version
+ *    (Complete → V+1); anything else is corrupt and fail-closed.
+ *
+ * On the next provider boot, initFromProfileIds sees the same item set with
+ * a present scheduleId and NoOps — preserving the V+1 generation (the
+ * monotonic write and the production policy compose, not fight).
  *
  * Key literals are duplicated from QwyScheduleStore's private constants;
- * drift is pinned by P10CollectorSurfaceGuardTest (source scan of the
- * production file for every literal below).
+ * drift is pinned by P10CollectorSurfaceGuardTest.
  *
  * src/debug ONLY — production carries none of this.
  */
@@ -49,6 +55,12 @@ object APlus10AScheduleReset {
     const val KEY_EXHAUSTED = "exhausted"
     const val KEY_ADVANCE_COUNT = "advanceCount"
 
+    /** The six keys that constitute one complete generation record. */
+    val GENERATION_KEYS: List<String> = listOf(
+        KEY_SCHEDULE_ID, KEY_SCHEDULE_VERSION, KEY_CURRENT_ITEM_ID,
+        KEY_ITEM_IDS, KEY_EXHAUSTED, KEY_ADVANCE_COUNT,
+    )
+
     /** Last-applied projection keys — stale run residue removed by the same commit. */
     const val KEY_LAST_APPLIED_LAT = "lastAppliedLat"
     const val KEY_LAST_APPLIED_LNG = "lastAppliedLng"
@@ -56,6 +68,54 @@ object APlus10AScheduleReset {
     const val KEY_LAST_APPLIED_VERIFIED = "lastAppliedVerified"
 
     const val SCHEDULE_ID = "qwy-default-schedule"
+
+    /** Production owner service FQCN (drift-guarded by the surface guard). */
+    const val OWNER_SERVICE_FQCN = "name.caiyao.fakegps.integration.v1.EnvironmentControlService"
+
+    /** Classified pre-state of the schedule store. */
+    sealed interface PriorState {
+        /** No generation key present at all — a genuinely fresh store. */
+        data object Pristine : PriorState
+
+        /** All six keys present with a readable version — a complete prior generation. */
+        data class Complete(val version: Long) : PriorState
+
+        /** Some keys present, some absent (or version unreadable) — corrupt. */
+        data class Partial(val missingKeys: List<String>) : PriorState
+    }
+
+    /**
+     * Classify what is durably in the store. `storedVersion` is null when the
+     * version key is absent OR its value could not be read as a long — both
+     * make an otherwise-present store Partial (corrupt), never "version 0".
+     */
+    fun classifyPriorState(presentKeys: Set<String>, storedVersion: Long?): PriorState {
+        if (presentKeys.isEmpty()) return PriorState.Pristine
+        val missing = GENERATION_KEYS.filter { it !in presentKeys }
+        if (missing.isNotEmpty()) return PriorState.Partial(missingKeys = missing)
+        if (storedVersion == null) {
+            return PriorState.Partial(missingKeys = listOf(KEY_SCHEDULE_VERSION))
+        }
+        return PriorState.Complete(storedVersion)
+    }
+
+    /**
+     * Owner-fence quiescence (R4 P1-2). Returns null iff the production owner
+     * PROVABLY cannot write the schedule store concurrently; else the reason.
+     */
+    fun quiescenceMismatch(blockingLeaseState: String?, ownerServiceRunning: Boolean): String? {
+        if (ownerServiceRunning) {
+            return "owner service is running ($OWNER_SERVICE_FQCN) — it can reinit/advance the " +
+                "schedule concurrently; force-stop and seed in a fresh process"
+        }
+        if (blockingLeaseState in IN_FLIGHT_LEASE_STATES) {
+            return "in-flight lease state $blockingLeaseState — completeAndAdvance may bump the " +
+                "schedule version concurrently; resolve the lease before seeding"
+        }
+        return null
+    }
+
+    private val IN_FLIGHT_LEASE_STATES = setOf("ACQUIRING", "ACTIVE", "RELEASING")
 
     /** The full generation the seeder writes and must read back verbatim. */
     data class ResetPlan(
@@ -68,19 +128,31 @@ object APlus10AScheduleReset {
     )
 
     /**
-     * Compute the new generation: STRICTLY monotonic (`existingVersion + 1`
-     * for every legal input — a fresh/absent store reads 0 and becomes 1, a
-     * mid-run 7 becomes 8, an exhausted 12 becomes 13; never back to 1 over
-     * existing state). Corrupt stored versions are rejected, not laundered.
+     * Compute the new generation from a CLASSIFIED prior state:
+     * Pristine → 1; Complete(v) → v+1 (strictly monotonic, overflow
+     * fail-closed); Partial → refused, never laundered.
      */
-    fun plan(existingVersion: Long, itemIds: List<String>): ResetPlan {
-        require(existingVersion >= 0L) {
-            "stored scheduleVersion $existingVersion is corrupt — refusing to compute a generation over it"
-        }
+    fun plan(prior: PriorState, itemIds: List<String>): ResetPlan {
         require(itemIds.isNotEmpty()) { "a reset to zero items is not a seedable schedule" }
+        val version = when (prior) {
+            is PriorState.Pristine -> 1L
+            is PriorState.Complete -> {
+                require(prior.version >= 1L) {
+                    "a COMPLETE store must carry version >= 1, got ${prior.version} — corrupt, refusing"
+                }
+                require(prior.version < Long.MAX_VALUE) {
+                    "stored version is Long.MAX_VALUE — +1 would wrap negative; fail closed"
+                }
+                prior.version + 1
+            }
+            is PriorState.Partial -> throw IllegalArgumentException(
+                "partial pre-state (missing: ${prior.missingKeys.joinToString(",")}) — " +
+                    "refusing to launder a corrupt store into a fresh generation",
+            )
+        }
         return ResetPlan(
             scheduleId = SCHEDULE_ID,
-            scheduleVersion = existingVersion + 1,
+            scheduleVersion = version,
             itemIds = itemIds,
             currentItemId = itemIds.first(),
             exhausted = false,
@@ -97,9 +169,8 @@ object APlus10AScheduleReset {
 
     /**
      * Compare the read-back generation against the written plan. Returns null
-     * on an exact match, else a human-readable mismatch naming the first
-     * divergent field — the seeder turns any non-null into a seed FAILURE
-     * (a commit that "succeeded" but did not stick is a partial write).
+     * on an exact match, else the first divergent field — the seeder turns any
+     * non-null into a seed FAILURE.
      */
     fun verifyReadback(read: ResetPlan?, expected: ResetPlan): String? {
         if (read == null) return "schedule store unreadable after commit — partial or failed write"

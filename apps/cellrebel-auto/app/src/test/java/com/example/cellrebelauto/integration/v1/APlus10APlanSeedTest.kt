@@ -82,6 +82,23 @@ class APlus10APlanSeedTest {
         assertEquals(10, items.size)
         assertEquals((1..10).map { "profile-$it" }, items.map { it.expectedScheduleItemId })
         assertEquals(17, items.sumOf { it.requiredSuccesses })
+        assertEquals("frozen quota vector", listOf(2, 1, 3, 1, 2, 1, 1, 3, 1, 2), items.map { it.requiredSuccesses })
+    }
+
+    @Test
+    fun committedFileSha_feedsThroughRequireRegisteredDigest() {
+        // R4 P2: feed the COMPUTED committed-file SHA through the pin so a drift
+        // of the runtime constant away from the file goes red here (the byte
+        // literal / self-pin tests could both stay green under a constant-only
+        // mutation).
+        val moduleRoot = sequenceOf(File("."), File("app"), File("../app"))
+            .map { it.absoluteFile.normalize() }
+            .firstOrNull { File(it, "src/debug/AndroidManifest.xml").isFile }
+            ?: error("cannot locate the app module root")
+        val bytes = File(moduleRoot, "../../../docs/acceptance/a-plus-10a-fixture.json").normalize().readBytes()
+        val computed = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        APlus10APlanSeed.requireRegisteredDigest(computed, computed)
     }
 
     // ------------------------------------------------------------------
@@ -173,6 +190,22 @@ class APlus10APlanSeedTest {
         assertNotNull(APlus10APlanSeed.verifyPlanTopology(plan, APlus10APlanSeed.toTasks(items).dropLast(1)))
     }
 
+    @Test
+    fun verifyPlanTopology_rejectsSameTotalQuotaRedistribution() {
+        // R4 P1-4: a plan whose per-item quotas are a same-total redistribution
+        // (items 1↔2 swapped) has total 17 and every other current predicate
+        // true — start_run must still refuse it (wrong per-address attribution).
+        val items = APlus10APlanSeed.parsePayload(payload())
+        val plan = APlus10APlanSeed.toPlan(items)
+        val tasks = APlus10APlanSeed.toTasks(items).toMutableList()
+        val t0 = tasks[0]; val t1 = tasks[1]
+        tasks[0] = t0.copy(requiredSuccesses = t1.requiredSuccesses)
+        tasks[1] = t1.copy(requiredSuccesses = t0.requiredSuccesses)
+        val mismatch = APlus10APlanSeed.verifyPlanTopology(plan, tasks)
+        assertNotNull("same-total quota redistribution must be refused", mismatch)
+        assertTrue(mismatch!!.contains("registered"))
+    }
+
     // ------------------------------------------------------------------
     // NEGATIVES — one structural mutation each (P1-2)
     // ------------------------------------------------------------------
@@ -203,6 +236,17 @@ class APlus10APlanSeedTest {
         "sum 18",
         payload(items = (1..10).map { itemJson(it, if (it == 2) 2 else frozenQuotas[it - 1]) }, declaredTotal = 18),
     )
+
+    @Test
+    fun rejectsSameTotalQuotaRedistribution() {
+        // R4 P1-4: swap items 1↔2 quotas (sum still 17) — a sum-only check would
+        // pass; the exact ordered vector must reject it.
+        val swapped = frozenQuotas.toMutableList().also { it[0] = frozenQuotas[1]; it[1] = frozenQuotas[0] }
+        assertRejected(
+            "items 1↔2 quota redistribution (same total)",
+            payload(items = (1..10).map { itemJson(it, swapped[it - 1]) }),
+        )
+    }
 
     @Test
     fun rejectsQuotaSumDisagreeingWithDeclaredTotal() = assertRejected("declared 16", payload(declaredTotal = 16))

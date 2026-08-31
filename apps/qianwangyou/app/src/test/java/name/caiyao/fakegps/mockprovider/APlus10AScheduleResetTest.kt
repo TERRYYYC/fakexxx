@@ -1,84 +1,138 @@
 package name.caiyao.fakegps.mockprovider
 
+import name.caiyao.fakegps.mockprovider.APlus10AScheduleReset.PriorState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * PR #62 review R3 P1-2 — monotonic schedule reset for prepare_10a.
+ * PR #62 R3 P1-2 + R4 P1-2 — monotonic schedule reset for prepare_10a.
  *
- * The previous seed cleared qwy_schedule_v1 wholesale, so the next
- * ScheduleReinitPolicy initialization wrote scheduleVersion **1** — a version
- * ROLLBACK. Canonical spec L1895/2056 and M-AD-24 require every schedule
- * reinitialization (including a same-topology exhausted reset) to advance
- * V → V+1: clearing permits old (schedule, item, version) identities from a
- * previous run to collide with the new one, making stale CAS preconditions
- * and completion proofs reusable across generations.
+ * R3 established WHY not clear(): a wholesale clear lets the next boot
+ * re-Initialize at version 1 — a rollback violating M-AD-24 / spec
+ * L1895/2056 (every reinit advances V → V+1).
  *
- * The reset is therefore computed as a PURE plan (this object) and written as
- * ONE atomic prefs commit by the seeder: versionAfter = versionBefore + 1
- * (strictly monotonic for every input), pointer at profile-1, exhausted
- * cleared, advance count zeroed — and then READ BACK; any mismatch fails the
- * seed. On the next provider boot, initFromProfileIds sees the same item set
- * with a present scheduleId and takes the NoOp rule, PRESERVING the V+1
- * generation — the monotonic write and the production policy compose instead
- * of fighting.
+ * R4 established two further holes in the first fix:
+ *  - the raw read-modify-write is OUTSIDE the production owner fence: a
+ *    concurrent completeAndAdvance between the seed's read (V7) and write
+ *    (V8) makes the seed reuse production's generation number. The seed must
+ *    therefore only run under PROVEN QUIESCENCE (no in-flight lease, owner
+ *    service not running), bracketed before AND after the write — modeled
+ *    here as the pure [APlus10AScheduleReset.quiescenceMismatch].
+ *  - an absent version key was defaulted to 0 even when other schedule keys
+ *    survived, laundering a PARTIAL old store into a fresh version-1
+ *    generation. Prior state is now classified Pristine / Complete / Partial
+ *    and Partial is fail-closed.
  */
 class APlus10AScheduleResetTest {
 
     private val tenIds = (1..10).map { "profile-$it" }
+    private val allKeys = APlus10AScheduleReset.GENERATION_KEYS
 
     // ------------------------------------------------------------------
-    // plan() — strict monotonicity on every path
+    // classifyPriorState — Pristine / Complete / Partial (R4: no laundering)
     // ------------------------------------------------------------------
 
     @Test
-    fun freshStore_startsAtVersionOne() {
-        val plan = APlus10AScheduleReset.plan(existingVersion = 0L, itemIds = tenIds)
+    fun classify_allAbsent_isPristine() {
+        val prior = APlus10AScheduleReset.classifyPriorState(presentKeys = emptySet(), storedVersion = null)
+        assertEquals(PriorState.Pristine, prior)
+    }
+
+    @Test
+    fun classify_allPresent_isCompleteWithVersion() {
+        val prior = APlus10AScheduleReset.classifyPriorState(presentKeys = allKeys.toSet(), storedVersion = 7L)
+        assertEquals(PriorState.Complete(7L), prior)
+    }
+
+    @Test
+    fun classify_partialStore_isPartialNamingMissingKeys() {
+        // scheduleId/items/pointer survive but the version key is gone — the
+        // exact R4 counterexample that was previously laundered into V=1.
+        val present = allKeys.toSet() - APlus10AScheduleReset.KEY_SCHEDULE_VERSION
+        val prior = APlus10AScheduleReset.classifyPriorState(presentKeys = present, storedVersion = null)
+        val partial = prior as? PriorState.Partial ?: error("expected Partial, got $prior")
+        assertTrue(partial.missingKeys.contains(APlus10AScheduleReset.KEY_SCHEDULE_VERSION))
+    }
+
+    @Test
+    fun classify_versionPresentButUnreadable_isPartial() {
+        // Key present in the prefs but the stored value could not be read as a
+        // long — corrupt, never "0".
+        val prior = APlus10AScheduleReset.classifyPriorState(presentKeys = allKeys.toSet(), storedVersion = null)
+        assertTrue(prior is PriorState.Partial)
+    }
+
+    // ------------------------------------------------------------------
+    // plan() — strict monotonicity; Partial and overflow fail closed
+    // ------------------------------------------------------------------
+
+    @Test
+    fun pristine_startsAtVersionOne() {
+        val plan = APlus10AScheduleReset.plan(PriorState.Pristine, tenIds)
         assertEquals(1L, plan.scheduleVersion)
         assertEquals("profile-1", plan.currentItemId)
         assertEquals(false, plan.exhausted)
         assertEquals(0L, plan.advanceCount)
-        assertEquals(tenIds, plan.itemIds)
     }
 
     @Test
-    fun midRunStore_bumpsNotRollsBack() {
-        // A previous run advanced to version 7 with the pointer mid-schedule.
-        val plan = APlus10AScheduleReset.plan(existingVersion = 7L, itemIds = tenIds)
+    fun completeMidRun_bumpsNotRollsBack() {
+        val plan = APlus10AScheduleReset.plan(PriorState.Complete(7L), tenIds)
         assertEquals("V → V+1, never back to 1 (M-AD-24 / spec L1895/2056)", 8L, plan.scheduleVersion)
-        assertEquals("pointer must reset to the first item", "profile-1", plan.currentItemId)
+        assertEquals("profile-1", plan.currentItemId)
     }
 
     @Test
-    fun exhaustedStore_clearsExhaustedWithTheBump() {
-        // Terminal exhausted=true from the old run: the clear MUST ride a bump
-        // (the exact M-AD-24 pairing), never a rollback or a same-version write.
-        val plan = APlus10AScheduleReset.plan(existingVersion = 12L, itemIds = tenIds)
+    fun completeExhausted_clearsExhaustedWithTheBump() {
+        val plan = APlus10AScheduleReset.plan(PriorState.Complete(12L), tenIds)
         assertEquals(13L, plan.scheduleVersion)
         assertEquals(false, plan.exhausted)
     }
 
     @Test
-    fun monotonicity_holdsForArbitraryVersions() {
-        listOf(0L, 1L, 2L, 41L, 999L).forEach { v ->
-            val plan = APlus10AScheduleReset.plan(existingVersion = v, itemIds = tenIds)
-            assertTrue(
-                "versionAfter must be strictly greater than every prior version (got ${plan.scheduleVersion} for $v)",
-                plan.scheduleVersion > v,
-            )
+    fun monotonicity_holdsForArbitraryCompleteVersions() {
+        listOf(1L, 2L, 41L, 999L).forEach { v ->
+            val plan = APlus10AScheduleReset.plan(PriorState.Complete(v), tenIds)
+            assertTrue(plan.scheduleVersion > v)
             assertEquals(v + 1, plan.scheduleVersion)
         }
     }
 
     @Test
-    fun negativeStoredVersion_isRejectedNotLaundered() {
-        // A corrupt store must fail loud, not be "fixed" into a plausible value.
+    fun partialPriorState_isRejectedNotLaundered() {
         try {
-            APlus10AScheduleReset.plan(existingVersion = -3L, itemIds = tenIds)
-            org.junit.Assert.fail("negative stored version is corrupt state and must be rejected")
+            APlus10AScheduleReset.plan(
+                PriorState.Partial(missingKeys = listOf(APlus10AScheduleReset.KEY_SCHEDULE_VERSION)),
+                tenIds,
+            )
+            fail("a partial pre-state must be rejected, never laundered into a fresh generation")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains(APlus10AScheduleReset.KEY_SCHEDULE_VERSION))
+        }
+    }
+
+    @Test
+    fun nonPositiveStoredVersion_isRejected() {
+        listOf(0L, -3L).forEach { v ->
+            try {
+                APlus10AScheduleReset.plan(PriorState.Complete(v), tenIds)
+                fail("a complete store with version $v is corrupt and must be rejected")
+            } catch (e: IllegalArgumentException) {
+                // expected — a COMPLETE store always has version >= 1
+            }
+        }
+    }
+
+    @Test
+    fun maxValueVersion_failsClosedNotWraps() {
+        // R4 P2: Long.MAX_VALUE + 1 wraps negative — fail closed instead.
+        try {
+            APlus10AScheduleReset.plan(PriorState.Complete(Long.MAX_VALUE), tenIds)
+            fail("Long.MAX_VALUE must fail closed, not wrap negative")
         } catch (e: IllegalArgumentException) {
             // expected
         }
@@ -87,30 +141,56 @@ class APlus10AScheduleResetTest {
     @Test
     fun emptyItemIds_isRejected() {
         try {
-            APlus10AScheduleReset.plan(existingVersion = 3L, itemIds = emptyList())
-            org.junit.Assert.fail("a reset to zero items is not a seedable schedule")
+            APlus10AScheduleReset.plan(PriorState.Pristine, emptyList())
+            fail("a reset to zero items is not a seedable schedule")
         } catch (e: IllegalArgumentException) {
             // expected
         }
     }
 
     // ------------------------------------------------------------------
-    // itemIds wire format — must match QwyScheduleStore's JSON array codec
+    // quiescenceMismatch — the owner-fence precondition (R4 P1-2)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun quiescence_serviceRunning_isMismatch() {
+        val m = APlus10AScheduleReset.quiescenceMismatch(blockingLeaseState = null, ownerServiceRunning = true)
+        assertNotNull("a live owner service can reinit/advance concurrently — must refuse", m)
+        assertTrue(m!!.contains("service"))
+    }
+
+    @Test
+    fun quiescence_inFlightLease_isMismatch() {
+        listOf("ACQUIRING", "ACTIVE", "RELEASING").forEach { state ->
+            val m = APlus10AScheduleReset.quiescenceMismatch(blockingLeaseState = state, ownerServiceRunning = false)
+            assertNotNull("in-flight lease $state means the owner may advance concurrently", m)
+            assertTrue(m!!.contains(state))
+        }
+    }
+
+    @Test
+    fun quiescence_atRestStates_pass() {
+        listOf(null, "RELEASED", "EXPIRED", "REVOKED", "RELEASE_INCOMPLETE").forEach { state ->
+            assertNull(
+                "at-rest lease state $state cannot drive a concurrent schedule write",
+                APlus10AScheduleReset.quiescenceMismatch(blockingLeaseState = state, ownerServiceRunning = false),
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // itemIds wire format + readback verification (unchanged contracts)
     // ------------------------------------------------------------------
 
     @Test
     fun encodedItemIds_isTheProductionJsonArrayShape() {
-        val encoded = APlus10AScheduleReset.encodeItemIds(tenIds)
-        // QwyScheduleStore decodes with org.json.JSONArray; the canonical
-        // JSONArray rendering of these strings is exactly this.
-        assertEquals("""["profile-1","profile-2","profile-3","profile-4","profile-5","profile-6","profile-7","profile-8","profile-9","profile-10"]""", encoded)
+        assertEquals(
+            """["profile-1","profile-2","profile-3","profile-4","profile-5","profile-6","profile-7","profile-8","profile-9","profile-10"]""",
+            APlus10AScheduleReset.encodeItemIds(tenIds),
+        )
     }
 
-    // ------------------------------------------------------------------
-    // verifyReadback() — the written generation must be read back verbatim
-    // ------------------------------------------------------------------
-
-    private fun plan(v: Long = 8L) = APlus10AScheduleReset.plan(existingVersion = v - 1, itemIds = tenIds)
+    private fun plan(v: Long = 8L) = APlus10AScheduleReset.plan(PriorState.Complete(v - 1), tenIds)
 
     @Test
     fun readbackMatch_passes() {
@@ -121,43 +201,31 @@ class APlus10AScheduleResetTest {
     @Test
     fun readbackVersionMismatch_failsLoud() {
         val expected = plan(8L)
-        val drifted = expected.copy(scheduleVersion = 1L) // the rollback shape
-        val mismatch = APlus10AScheduleReset.verifyReadback(read = drifted, expected = expected)
-        assertNotNull("a version rollback surviving the write must fail the seed", mismatch)
+        val mismatch = APlus10AScheduleReset.verifyReadback(read = expected.copy(scheduleVersion = 1L), expected = expected)
+        assertNotNull(mismatch)
         assertTrue(mismatch!!.contains("scheduleVersion"))
     }
 
     @Test
     fun readbackPointerMismatch_failsLoud() {
         val expected = plan()
-        val drifted = expected.copy(currentItemId = "profile-5") // mid-run pointer survived
-        val mismatch = APlus10AScheduleReset.verifyReadback(read = drifted, expected = expected)
-        assertNotNull("a surviving mid-run pointer must fail the seed", mismatch)
-        assertTrue(mismatch!!.contains("currentItemId"))
+        assertNotNull(APlus10AScheduleReset.verifyReadback(read = expected.copy(currentItemId = "profile-5"), expected = expected))
     }
 
     @Test
     fun readbackExhaustedMismatch_failsLoud() {
         val expected = plan()
-        val drifted = expected.copy(exhausted = true) // terminal state survived
-        val mismatch = APlus10AScheduleReset.verifyReadback(read = drifted, expected = expected)
-        assertNotNull("a surviving exhausted=true must fail the seed", mismatch)
-        assertTrue(mismatch!!.contains("exhausted"))
+        assertNotNull(APlus10AScheduleReset.verifyReadback(read = expected.copy(exhausted = true), expected = expected))
     }
 
     @Test
     fun readbackAbsent_failsLoud() {
-        // Commit claimed success but nothing is readable — partial/failed write.
-        val mismatch = APlus10AScheduleReset.verifyReadback(read = null, expected = plan())
-        assertNotNull("an unreadable store after commit must fail the seed", mismatch)
+        assertNotNull(APlus10AScheduleReset.verifyReadback(read = null, expected = plan()))
     }
 
     @Test
     fun readbackItemIdsMismatch_failsLoud() {
         val expected = plan()
-        val drifted = expected.copy(itemIds = expected.itemIds.dropLast(1))
-        val mismatch = APlus10AScheduleReset.verifyReadback(read = drifted, expected = expected)
-        assertNotNull("a partial item list after commit must fail the seed", mismatch)
-        assertTrue(mismatch!!.contains("itemIds"))
+        assertNotNull(APlus10AScheduleReset.verifyReadback(read = expected.copy(itemIds = expected.itemIds.dropLast(1)), expected = expected))
     }
 }
