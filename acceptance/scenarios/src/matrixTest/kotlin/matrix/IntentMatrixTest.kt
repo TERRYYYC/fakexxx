@@ -8,6 +8,7 @@ import io.github.terryyyc.fakexxx.contract.v1.*
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
+import kotlin.math.PI
 
 /**
  * §10 `intent` rows M-IN-01, M-IN-02, M-IN-03 (lane `sol-blackbox`, §10.1
@@ -70,10 +71,12 @@ class IntentMatrixTest {
      */
     @Test
     fun M_IN_01() {
-        // Apply succeeds but coordinates are wrong (simulating partial apply).
-        // The provider returns coordinates that DON'T match the schedule item's
-        // target (31.2304, 121.4737) — and must detect this mismatch.
-        provider.overrideCoordinates = Pair(0.0, 0.0) // wrong coordinates
+        // Keep the mismatch deliberately close: 2 m is outside the frozen 1 m
+        // contract tolerance but inside the fake's former 0.0001 degree
+        // (roughly 11 m) box. A far-away (0,0) fixture could not distinguish the
+        // contract from that over-wide approximation.
+        val twoMetersNorth = 2.0 / 6_371_008.8 * 180.0 / PI
+        provider.overrideCoordinates = Pair(31.2304 + twoMetersNorth, 121.4737)
 
         val applyResult = provider.apply(caller, ApplyRequestV1(
             intent = intent(),

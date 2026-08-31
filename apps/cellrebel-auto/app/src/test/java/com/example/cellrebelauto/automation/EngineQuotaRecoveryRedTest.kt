@@ -258,7 +258,7 @@ class EngineQuotaRecoveryRedTest {
                 attemptId = 31L,
                 correlationRef = null,
                 eventType = "RELEASE_RECEIPT",
-                payloadDigest = "RELEASE_PENDING->CLOSED",
+                payloadDigest = "RELEASE_PENDING->RELEASED",
                 recordedAt = 1001L
             )
         )
@@ -380,6 +380,35 @@ class EngineQuotaRecoveryRedTest {
         )
     }
 
+    private suspend fun assertPreReleaseCarrierMissingStaysSticky(
+        phase: String,
+        expectedReason: String,
+    ) {
+        val (planId, taskId) = seedCrashedAt(phase, requiredSuccesses = 1)
+        db.openHelper.writableDatabase.execSQL(
+            "DELETE FROM trusted_quota_entries WHERE attemptId = 31"
+        )
+        val auditBefore = db.auditEventDao().forAttempt(31L)
+
+        repeat(2) { restartIndex ->
+            buildEngine(planId, VClock()).run()
+            val owner = db.testAttemptDao().getAttemptById(31L)!!
+            assertEquals(
+                "restart ${restartIndex + 1}: $phase missing carrier must remain operator-visible",
+                "RECOVERY_REQUIRED",
+                owner.aplusState,
+            )
+            assertEquals(expectedReason, owner.failureReason)
+            assertEquals("running", owner.status)
+            assertEquals(null, owner.endedAt)
+            assertEquals(1, db.testAttemptDao().getAttemptsForTask(taskId).size)
+            assertEquals("recovery must not reinterpret an invariant as release permission", 0, releaseInvocations)
+            assertEquals(0, applyInvocations)
+            assertEquals(0, advanceReplays.size)
+            assertEquals(auditBefore, db.auditEventDao().forAttempt(31L))
+        }
+    }
+
     private enum class DecisionCarrierSeed {
         OPPOSING_UNVERIFIED,
         BOTH
@@ -390,7 +419,10 @@ class EngineQuotaRecoveryRedTest {
      * bundle itself evaluates PASS; [carrierSeed] plants either the opposing negative carrier or
      * both mutually-exclusive carriers to exercise the repository's DECISION_CARRIER_CONFLICT.
      */
-    private suspend fun seedDecidingCarrierConflict(carrierSeed: DecisionCarrierSeed): Pair<Long, Long> {
+    private suspend fun seedDecidingCarrierConflict(
+        carrierSeed: DecisionCarrierSeed,
+        legacyFailureReason: String? = null
+    ): Pair<Long, Long> {
         val attemptId = 31L
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(
@@ -429,7 +461,7 @@ class EngineQuotaRecoveryRedTest {
                 runningObservedAt = null,
                 endedAt = null,
                 status = "running",
-                failureReason = null,
+                failureReason = legacyFailureReason,
                 webBrowsingScore = null,
                 videoStreamingScore = null,
                 latitude = 39.9,
@@ -527,9 +559,10 @@ class EngineQuotaRecoveryRedTest {
     }
 
     private suspend fun assertDecisionCarrierConflictConvergesAcrossTwoRestarts(
-        carrierSeed: DecisionCarrierSeed
+        carrierSeed: DecisionCarrierSeed,
+        legacyFailureReason: String? = null
     ) {
-        val (planId, sessionId) = seedDecidingCarrierConflict(carrierSeed)
+        val (planId, sessionId) = seedDecidingCarrierConflict(carrierSeed, legacyFailureReason)
         val trustedBefore = db.trustedQuotaDao().countAll()
         val unverifiedBefore = db.unverifiedAttemptRecordDao().countAll()
 
@@ -546,7 +579,9 @@ class EngineQuotaRecoveryRedTest {
             )
             assertTrue(
                 "restart ${restartIndex + 1}: the durable failure reason must preserve the typed conflict",
-                attempt.failureReason?.startsWith("DECISION_CARRIER_CONFLICT") == true
+                attempt.failureReason?.let {
+                    it.startsWith("DECISION_CARRIER_CONFLICT") || it == "CONFLICTING_DECISION_CARRIERS"
+                } == true
             )
             assertEquals(
                 "restart ${restartIndex + 1}: recovery must remain visibly paused",
@@ -631,6 +666,22 @@ class EngineQuotaRecoveryRedTest {
     }
 
     @Test
+    fun `QUOTA_COMMITTED missing trusted carrier stays sticky across two restarts`() = runTest {
+        assertPreReleaseCarrierMissingStaysSticky(
+            phase = "QUOTA_COMMITTED",
+            expectedReason = "QUOTA_CARRIER_MISSING",
+        )
+    }
+
+    @Test
+    fun `UNVERIFIED_RECORDED missing unverified carrier stays sticky across two restarts`() = runTest {
+        assertPreReleaseCarrierMissingStaysSticky(
+            phase = "UNVERIFIED_RECORDED",
+            expectedReason = "UNVERIFIED_CARRIER_MISSING",
+        )
+    }
+
+    @Test
     fun `ADVANCE_PENDING missing trusted carrier stays sticky across two restarts`() = runTest {
         assertAdvanceCarrierFailureStaysSticky("ADVANCE_PENDING")
     }
@@ -689,7 +740,7 @@ class EngineQuotaRecoveryRedTest {
                 attemptId = 31L,
                 correlationRef = null,
                 eventType = "RELEASE_RECEIPT",
-                payloadDigest = "RELEASE_PENDING->CLOSED",
+                payloadDigest = "RELEASE_PENDING->RELEASED",
                 recordedAt = 1001L
             )
         )
@@ -1045,5 +1096,13 @@ class EngineQuotaRecoveryRedTest {
     @Test
     fun `DECIDING full bundle with both carriers converges typed and remains paused across two restarts`() = runTest {
         assertDecisionCarrierConflictConvergesAcrossTwoRestarts(DecisionCarrierSeed.BOTH)
+    }
+
+    @Test
+    fun `legacy typed failure cannot bypass conflicting append-only decision carriers`() = runTest {
+        assertDecisionCarrierConflictConvergesAcrossTwoRestarts(
+            DecisionCarrierSeed.BOTH,
+            legacyFailureReason = "UNTRUSTED"
+        )
     }
 }

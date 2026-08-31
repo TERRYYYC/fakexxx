@@ -286,7 +286,8 @@ class TrustedLedgerRedTest {
                 attemptOrdinal = 1, successOrdinal = null, startedAt = 0L,
                 runningObservedAt = null, endedAt = null, status = "running",
                 failureReason = null, webBrowsingScore = null, videoStreamingScore = null,
-                latitude = TARGET_LAT, longitude = TARGET_LNG
+                latitude = TARGET_LAT, longitude = TARGET_LNG,
+                aplusLeaseId = LEASE
             )
         )
         val seededAttempt = db.testAttemptDao().getAttemptsForTask(seededTask.id)

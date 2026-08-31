@@ -342,7 +342,25 @@ class EnvironmentControlHandler(
             }
         }
 
-        observer.observe(lease, request)
+        val observation = observer.observe(lease, request)
+        // §6.4.1: VERIFIED with no provenance is unverifiable and Auto must reject it. The
+        // production QwyEnvironmentController intentionally has no audit-store dependency, while
+        // this contract boundary owns both the durable audit stream and the authorized caller /
+        // lease identity. Append the exact observe event before returning and project its durable
+        // qwy:<store>:<id> reference into the wire response. An audit write failure therefore
+        // fails the observe call closed instead of emitting a false VERIFIED fact.
+        val auditEvent = audit.append(
+            event = "observe",
+            callerApplicationId = caller.applicationId,
+            leaseId = lease.leaseId,
+            operationId = request.operationId,
+            payloadDigest = request.expectedIntentHash,
+        )
+        observation.copy(
+            evidenceRefs = (
+                observation.evidenceRefs + "qwy:integration.v1.audit:${auditEvent.seq}"
+            ).distinct(),
+        )
     }
 
     fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {

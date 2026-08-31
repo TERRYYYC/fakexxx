@@ -109,8 +109,12 @@ class RecoveryCoordinator(
             environmentRevision = outcome.environmentRevision,
             verificationLevelWire = outcome.verificationLevelWire
         ) ?: return ReconcileResult.InsufficientEvidence // receipt not durable ⇒ apply unproven
+        if (!receipt.matchesProviderOutcome(outcome)) {
+            return ReconcileResult.InsufficientEvidence
+        }
+        val durableLease = receipt.leaseId ?: return ReconcileResult.InsufficientEvidence
         log.recordCheckpoint(attemptId, "ADVANCED_TO_RELEASE", receipt.idempotencyKey, now)
-        return ReconcileResult.AdvancedToRelease(receipt, outcome.leaseId!!)
+        return ReconcileResult.AdvancedToRelease(receipt, durableLease)
     }
 
     /**
@@ -193,8 +197,15 @@ class RecoveryCoordinator(
         // (same key + different digest) MUST fail-closed BEFORE the provider call with the canonical
         // IDEMPOTENCY_CONFLICT outcome — zero external effect, no lease.
         val prior = log.receiptFor(idempotencyKey)
-        if (prior != null && prior.requestDigest != requestDigest) {
-            return ApplyOutcome(outcome = "IDEMPOTENCY_CONFLICT", providerHadAlreadyApplied = false, leaseId = null)
+        if (prior != null) {
+            if (prior.requestDigest != requestDigest) {
+                return ApplyOutcome(outcome = "IDEMPOTENCY_CONFLICT", providerHadAlreadyApplied = false, leaseId = null)
+            }
+            // The durable winner is the authority. Returning a freshly replayed provider response
+            // here can split the attempt owner onto lease B while the immutable receipt remains on
+            // lease A. An exact receipt replay therefore performs no external call and projects all
+            // fields from the stored row.
+            return prior.toApplyOutcome(providerHadAlreadyApplied = true)
         }
         val outcome = executor.apply(attemptId, intent, idempotencyKey, requestDigest, now)
         if (outcome.leaseId != null) {
@@ -213,9 +224,39 @@ class RecoveryCoordinator(
                 // Receipt not durable (storage failed) → fail-closed: the apply is NOT proven, no lease.
                 return ApplyOutcome(outcome = "RECEIPT_NOT_DURABLE", providerHadAlreadyApplied = false, leaseId = null)
             }
+            if (!receipt.matchesProviderOutcome(outcome)) {
+                return ApplyOutcome(
+                    outcome = "RECEIPT_PROOF_CONFLICT",
+                    providerHadAlreadyApplied = false,
+                    leaseId = null
+                )
+            }
+            // INSERT IGNORE may lose a concurrent same-key/same-digest race. Always return the
+            // durable readback winner, never the volatile loser returned by this invocation.
+            return receipt.toApplyOutcome(outcome.providerHadAlreadyApplied)
         }
         return outcome
     }
+
+    private fun RecordedReceipt.toApplyOutcome(providerHadAlreadyApplied: Boolean) = ApplyOutcome(
+        outcome = resultOutcome,
+        providerHadAlreadyApplied = providerHadAlreadyApplied,
+        leaseId = leaseId,
+        operationId = operationId,
+        acceptedIntentHash = acceptedIntentHash,
+        appliedAtEpochMs = appliedAtEpochMs,
+        environmentRevision = environmentRevision,
+        verificationLevelWire = verificationLevelWire
+    )
+
+    private fun RecordedReceipt.matchesProviderOutcome(outcome: ApplyOutcome): Boolean =
+        resultOutcome == outcome.outcome &&
+            leaseId == outcome.leaseId &&
+            operationId == outcome.operationId &&
+            acceptedIntentHash == outcome.acceptedIntentHash &&
+            appliedAtEpochMs == outcome.appliedAtEpochMs &&
+            environmentRevision == outcome.environmentRevision &&
+            verificationLevelWire == outcome.verificationLevelWire
 
     /**
      * Lease-release convergence (§8.1 BEGIN_RELEASE→RELEASE_RECEIPT; §8.2: no fresh apply until
@@ -251,7 +292,18 @@ class RecoveryCoordinator(
                 // Release incomplete / failed → fail-closed (§8.1 RELEASE_INCOMPLETE → RECOVERY_REQUIRED).
                 return null
             }
-            return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now)
+            val durable = log.recordReleaseReceipt(
+                idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now
+            ) ?: return null
+            // The durable winner, not the live response, is authoritative after an INSERT-IGNORE
+            // race. A same-identity FAILED winner must never be promoted to RELEASED merely because
+            // this caller's provider invocation succeeded.
+            return durable.takeIf {
+                it.idempotencyKey == idempotencyKey &&
+                    it.leaseId == leaseId &&
+                    it.releaseDigest == releaseDigest &&
+                    it.resultOutcome == "RELEASED"
+            }
         }
         if (byKey == null || byLease == null || byKey != byLease) {
             return null

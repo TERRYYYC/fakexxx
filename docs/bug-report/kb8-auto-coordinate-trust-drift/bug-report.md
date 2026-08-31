@@ -88,6 +88,8 @@ KB-8 的单一所有权迁移只传播到了跨进程 contract、digest 与 cano
 
 同一非作者审查者的 iterative re-review 又找到四个 kill point/旁路：failure continuation 与 `RELEASE_PENDING` 仍非原子；`ADVANCE_*` 缺/错 trusted carrier 不 sticky；release 前的 `DECIDING` anchor 错误被误判成 post-release；release checkpoint 的测试没有杀死“audit 提交、owner 0-row 更新”的实现。修复后再审仍发现两条同级旁路：`ADVANCE_*` 忽略 opposing unverified carrier，以及缺 scheduleRef 的 reason 第二次重启不 sticky。最终冻结 diff 已把这些项全部关闭。
 
+第七轮 exact-SHA 正式审查在 `f9b08db` 上再次以 `REQUEST_CHANGES` 证明：此前全绿仍未覆盖真实 Start 点击时序、QWY production `evidenceRefs`、QWY 对实际系统位置的 1 m 验证、attempt owner lease 绑定、缺 carrier 的重启稳定性、同 lease 多 release receipt 歧义、事务 0-row 更新、legacy typed failure 与 append-only carrier 冲突、release audit 伪造 `CLOSED`、durable PRE raw replay 旁路，以及 advance outcome/target 矛盾。修复后的 dirty-tree 预审又抓到同 identity 的并发 release winner 可用 `FAILED` outcome 冒充当前 live `RELEASED`；该路径同样已用 deterministic race oracle 先红后绿关闭。
+
 ### 4. 修复方案
 
 - 新增失败回归测试，冻结“Auto 不做距离比较”的行为。
@@ -118,8 +120,14 @@ KB-8 的单一所有权迁移只传播到了跨进程 contract、digest 与 cano
 - post-release advance/observe/readback 的所有失败统一使用可识别的 `ADVANCE_*` / tuple typed reason；后续重启只读验证 exact release proof，禁止 provider release、synthetic audit 与 fresh apply。`DECIDING` 缺 anchor 则单列为 release 前 sticky invariant，不要求不存在的 release receipt。
 - `ADVANCE_*` replay 前同时读取 trusted 与 unverified 两张 append-only carrier：missing、wrong-task 或双 carrier 分别 typed fail-closed；anchor scheduleRef 缺失也使用 sticky `ADVANCE_ANCHOR_SCHEDULE_REF_MISSING`。
 - `persistDecisionBundleAndEnterDeciding()` 在写 POST/receipt/`DECIDING` 前强制 durable PRE；`persistObservationAndMarkAplusState()` 写 PRE 前验证 attempt 存在、owner=`ENV_APPLIED` 且 next=`PRE_OBSERVED`，missing/wrong phase 整笔回滚。
+- CellRebel execution start 改为在生产 `ACTION_CLICK` / 成功 fallback tap 的真实派发边界回调；没有该回调的 synthetic success 一律 fail-closed，禁止再用 launch/navigation 时间伪造 `PRE < start`。
+- `recordTrustedCompletion()` 在 mint 前把 receipt/PRE/POST lease 与 `TestAttempt.aplusLeaseId` 绑定；apply/release 的 race loser 只接受 durable winner 的完整 proof tuple。同 lease 多行、同 identity 但 outcome 不同均无有效 release proof。
+- carrier missing/conflict reason 变为 sticky；所有 PRE/DECIDING/terminal 更新使用 expected-state CAS 或单 SQL 原子 close，并要求更新行数恰为 1；release audit 只声明真实的 `RELEASE_PENDING → RELEASED`。
+- QWY production 不再回放 `lastApplied` desired coordinate：通过 `LocationManager` 读取 GPS/network 两路实际系统位置，要求两路新鲜、mock、结构有效，并分别对 QWY-owned current schedule target 执行 Haversine `<= 1.0 m`。apply/observe 坐标只投影该 readback；desired record 仅保留审计与 freshness anchor。
+- `EnvironmentControlHandler.observe()` 在返回前先追加 durable observe audit，并投影可在 QWY 侧解析的 `qwy:integration.v1.audit:<seq>`；audit 写失败时 observe fail-closed。
+- advance receipt 严格解码 typed outcome：`ADVANCED` 必须有 target，`EXHAUSTED` 必须无 target，未知 wire 或双向矛盾均停止推进。
 
-不改 provider 侧验证、不放宽其他 §6.4 谓词，也不修改 wire contract。
+provider 侧只补齐其本来独占的位置腿与证据出处；Auto 仍不做距离比较，也未放宽其他 §6.4 谓词或修改 wire contract。
 
 ### 5. 验证方式
 
@@ -136,9 +144,10 @@ KB-8 的单一所有权迁移只传播到了跨进程 contract、digest 与 cano
 - RED（第三轮审阅闭环）：新增通用 release audit 与原子 close 三项首次运行 66 项中 3 项失败；owner/execution replay 用例覆盖缺指针、悬空/foreign owner 及 14 个 execution 字段冲突。
 - RED（第五轮审阅闭环）：两条 `RELEASED` two-restart 用例分别复现第二次启动补造 receipt 与追加两条假 audit；两条完整 `DECIDING` carrier-conflict 用例均停在错误的 `DECIDING`；repository 旁路用例在无 POST/receipt 时实际返回 PASS 并错误 mint。
 - RED（第六轮正式审查闭环）：第一批新增 12 条——`ADVANCE_*` missing/conflicting exact receipt 6 red、`RELEASED` 后 failure close 崩溃 1 red、重复 release provenance/post-release synthetic history 2 red、durable PRE/missing owner/wrong phase 3 red。第一次 iterative re-review 再新增 8 条并全部复现：pre-`RELEASE_PENDING` normal/recovery split 与 `DECIDING` anchor 双重启 3 red，三 phase missing carrier、wrong-task 与 release checkpoint 0-row rollback 5 red。第二次 iterative re-review新增三 phase双 carrier与三 phase missing scheduleRef 共 6 red。
-- GREEN：上述 26 条新增回归全部通过；完整 Auto app unit suite 498/498。正常执行与崩溃恢复两条生产路径仍以“provider 合法坐标远离旧 Auto 坐标”的正例完成可信 mint；production NaN/signed-zero、immutable replay、decision carrier、release-first 与两次重启矩阵均通过。
-- 构建：Auto `testDebugUnitTest + lintDebug + assembleDebug + assembleRelease` 通过，最终一次合并执行 182 tasks；debug-only collector purity、零 lint 债务与 repo signer 校验继续通过。
-- 复审：同一非作者 reviewer 对最终冻结 diff `9ae9a8e00fb156b17397bb652f190f14a41d835240bf839c77f75661454b391a` 返回 `APPROVE`；最后两项 OPEN 均 CLOSED，独立定向 `EngineQuotaRecoveryRedTest` 22/22，通过且未发现新增 P1/P2。
+- RED（第七轮正式审查闭环）：真实 shared-clock Start 顺序、owner lease split-brain、carrier sticky、事务 0-row、raw PRE、typed advance 与 release 歧义均先以独立 oracle 复现；QWY policy 在实现前 3/3 red，覆盖 0.99/1.01 m、20 m actual mismatch、缺/旧/非 mock/异常读回，acceptance 的 2 m 偏差也杀死旧 11 m 近似；最后一条 release outcome race 在 live `RELEASED`、durable `FAILED` 的确定性窗口先红。
+- GREEN：完整 Auto app unit suite 516/516、QWY app unit suite 749/749、acceptance suite 31/31。正常执行与崩溃恢复仍以 provider-owned coordinate 完成可信 mint；production Start 时序、OS readback、evidence refs、NaN/signed-zero、immutable replay、decision carrier、release-first、并发 winner 与两次重启矩阵均通过。
+- 构建：双 App debug/release assemble 通过；Auto lint 为 0，QWY 的 23 条继承 lint 债务未增长；debug-only collector purity、repo signer、contract 与 release-debt guards 继续通过。
+- 复审：历史冻结 diff 曾取得非作者 `APPROVE`，但后续 exact SHA `f9b08db` 的正式审查正确返回 `REQUEST_CHANGES`；当前所有 11 项与追加的 release outcome race 已由 dirty-tree fresh-context 复核为 `CLEAN`。最终新 exact HEAD 仍必须重新取得独立正式结论，不能复用旧 verdict。
 - 静态边界：Auto main/test 源码已无 `targetLat`、`targetLng`、caller tolerance、haversine 或旧冻结距离常量。
 - 全仓：文档落盘后的最终 dirty-tree 预跑 `verify-a-plus --stage full` 为 10/11；唯一失败是 provenance 正确拒绝“工作树尚未提交”，其余双 App 单测/构建、contract、acceptance、边界与 release-debt 均通过。提交后必须在 clean exact HEAD 取得 11/11。
-- 模拟器：上一候选 exact debug APK 已在 API 35 ARM64 隔离模拟器完成设备端字节校验与冷启动；第二轮审阅修复改变了 Auto APK 输入，因此最终 SHA/启动证据必须在新 clean HEAD 重跑后取代旧值。已连接的 Moto 真机未被触碰。模拟器未配置无障碍、LSPosed 与 System Mock，因此 smoke 不替代真机 G2。
+- 模拟器：上一候选 exact debug APK 已在 API 35 ARM64 隔离模拟器完成设备端字节校验与冷启动；本轮审阅修复改变了双 App APK 输入，因此最终 SHA/启动证据必须在新 clean HEAD 重跑后取代旧值。已连接的 Moto 真机未被触碰。模拟器未配置无障碍、LSPosed 与 System Mock，因此 smoke 不替代真机 G2。

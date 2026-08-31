@@ -444,6 +444,154 @@ class DurableEvidenceReplayTest {
     }
 
     @Test
+    fun `ignored PRE owner publication rolls back the durable carrier`() = runTest {
+        seedPostPendingAttempt()
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE test_attempts SET aplusState = 'ENV_APPLIED' WHERE id = 77"
+        )
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER ignore_pre_owner_publication
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN OLD.id = 77 AND NEW.aplusState = 'PRE_OBSERVED'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END
+            """.trimIndent()
+        )
+
+        val failure = runCatching {
+            repo.persistObservationAndMarkAplusState(
+                attemptId = 77L,
+                phase = "PRE",
+                snapshot = observation(),
+                aplusState = "PRE_OBSERVED"
+            )
+        }.exceptionOrNull()
+
+        assertTrue("a zero-row owner publication must abort the transaction", failure is IllegalStateException)
+        assertNull("the PRE carrier must roll back with its ignored owner update",
+            db.durableObservationDao().forAttemptPhase(77L, "PRE"))
+        assertEquals("ENV_APPLIED", db.testAttemptDao().getAttemptById(77L)!!.aplusState)
+    }
+
+    @Test
+    fun `ignored DECIDING owner publication rolls back POST and completion receipt`() = runTest {
+        seedPostPendingAttempt()
+        repo.persistObservation(77L, "PRE", observation())
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER ignore_deciding_owner_publication
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN OLD.id = 77 AND NEW.aplusState = 'DECIDING'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END
+            """.trimIndent()
+        )
+
+        val failure = decisionBundleFailure()
+
+        assertTrue("a zero-row DECIDING publication must abort the transaction", failure is IllegalStateException)
+        assertDecisionBundleRolledBack()
+    }
+
+    @Test
+    fun `ignored failed terminal projection rolls back CLOSED owner state`() = runTest {
+        seedPostPendingAttempt()
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE test_attempts SET aplusState = 'RELEASED' WHERE id = 77"
+        )
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER ignore_failed_terminal_projection
+            BEFORE UPDATE OF status ON test_attempts
+            WHEN OLD.id = 77 AND NEW.status = 'failed'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END
+            """.trimIndent()
+        )
+
+        val failure = runCatching {
+            repo.closeAplusFailure(77L, "UNTRUSTED", 9_000L)
+        }.exceptionOrNull()
+        val owner = db.testAttemptDao().getAttemptById(77L)!!
+
+        assertTrue("an ignored terminal row update must fail closed", failure is IllegalStateException)
+        assertEquals("the CLOSED half must roll back", "RELEASED", owner.aplusState)
+        assertEquals("the status half must remain non-terminal", "running", owner.status)
+        assertNull(owner.endedAt)
+    }
+
+    @Test
+    fun `decision bundle rejects a noncanonical raw PRE carrier`() = runTest {
+        seedPostPendingAttempt()
+        db.durableObservationDao().insertIfAbsent(
+            rawRecord(77L, evidenceRefsJson = "[ \"qwy:store:77\" ]")
+        )
+
+        val failure = decisionBundleFailure()
+
+        assertTrue("raw PRE provenance must be validated before DECIDING", failure is IllegalStateException)
+        assertDecisionBundleRolledBack()
+    }
+
+    @Test
+    fun `trusted decision rejects evidence lease that differs from the attempt owner lease`() = runTest {
+        val ownedExecution = execution("exec-77", 77L)
+        val evidenceObservation = observation().copy(leaseId = "lease-evidence")
+        val mismatched = trustedContext(ownedExecution).copy(
+            applyReceiptLease = "lease-evidence",
+            preObservation = evidenceObservation.copy(observedAtElapsedRealtimeMs = 1_000L),
+            postObservation = evidenceObservation.copy(observedAtElapsedRealtimeMs = 14_000L)
+        )
+        seedPostPendingAttempt()
+
+        val result = runCatching {
+            enterDecidingWithDurableBundle(mismatched)
+            repo.recordTrustedCompletion(mismatched, commitClockMs = 99_000L)
+        }
+
+        assertEquals(
+            "the durable evidence lease must bind to TestAttempt.aplusLeaseId",
+            TrustDecision.FAIL,
+            result.getOrNull()
+        )
+        assertNull("lease split-brain must never mint trusted quota", db.trustedQuotaDao().getByAttempt(77L))
+        assertTrue(
+            "lease split-brain must leave a durable negative decision carrier",
+            db.unverifiedAttemptRecordDao().getByAttempt(77L) != null
+        )
+    }
+
+    @Test
+    fun `DECIDING re-evaluation rejects a raw PRE carrier that bypassed direct replay`() = runTest {
+        val ownedExecution = execution("exec-77", 77L)
+        val ctx = trustedContext(ownedExecution)
+        seedPostPendingAttempt()
+        db.durableObservationDao().insertIfAbsent(
+            rawRecord(77L, snapshot = ctx.preObservation, evidenceRefsJson = "[ \"qwy:store:77\" ]")
+        )
+        repo.persistObservation(77L, "POST", ctx.postObservation)
+        repo.persistCompletionReceipt(
+            77L,
+            ctx.completionEvidenceWire,
+            ctx.applyReceiptIntentHash,
+            ctx.applyReceiptLease
+        )
+        db.testAttemptDao().markAplusState(77L, "DECIDING")
+
+        val failure = runCatching {
+            repo.recordTrustedCompletion(ctx, commitClockMs = 99_000L)
+        }.exceptionOrNull()
+
+        assertTrue("recovery-time decision must revalidate raw PRE provenance", failure is IllegalStateException)
+        assertNull(db.trustedQuotaDao().getByAttempt(77L))
+        assertNull(db.unverifiedAttemptRecordDao().getByAttempt(77L))
+    }
+
+    @Test
     fun `decision bundle conflict rolls back POST and leaves owner POST pending`() = runTest {
         seedPostPendingAttempt()
         repo.persistObservation(77L, "PRE", observation())

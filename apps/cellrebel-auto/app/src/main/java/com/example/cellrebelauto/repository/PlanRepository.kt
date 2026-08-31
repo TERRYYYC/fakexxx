@@ -283,7 +283,7 @@ class PlanRepository(private val db: AppDatabase) {
                 "RELEASE_CHECKPOINT_OWNER_INVALID: attempt=$attemptId phase=${attempt.aplusState}"
             )
         }
-        val expectedPayload = "RELEASE_PENDING->CLOSED"
+        val expectedPayload = "RELEASE_PENDING->RELEASED"
         val existing = db.auditEventDao().forAttempt(attemptId)
             .filter { it.eventType == "RELEASE_RECEIPT" }
         when {
@@ -379,7 +379,15 @@ class PlanRepository(private val db: AppDatabase) {
             )
         }
         val durable = persistObservationInTransaction(attemptId, phase, snapshot)
-        db.testAttemptDao().markAplusState(attemptId, aplusState)
+        check(
+            db.testAttemptDao().markAplusStateFrom(
+                attemptId = attemptId,
+                expectedState = requiredOwnerState,
+                nextState = aplusState
+            ) == 1
+        ) {
+            "OBSERVATION_OWNER_UPDATE_FAILED: attempt=$attemptId phase=$phase"
+        }
         durable
     }
 
@@ -403,15 +411,18 @@ class PlanRepository(private val db: AppDatabase) {
             attemptId,
             allowedPhases = setOf("POST_OBSERVE_PENDING", "DECIDING")
         )
-        db.durableObservationDao().forAttemptPhase(attemptId, "PRE")
+        val durablePreRecord = db.durableObservationDao().forAttemptPhase(attemptId, "PRE")
             ?: throw IllegalStateException(
                 "DECISION_PRE_MISSING: attempt=$attemptId cannot enter DECIDING"
             )
+        requireCanonicalObservationRecord(durablePreRecord)
         val durablePost = persistObservationInTransaction(attemptId, "POST", postObservation)
         val durableReceipt = persistCompletionReceiptInTransaction(
             attemptId, completionEvidenceWire, acceptedIntentHash, leaseId
         )
-        db.testAttemptDao().markAplusState(attemptId, "DECIDING")
+        check(db.testAttemptDao().markDecidingFromPostBundle(attemptId) == 1) {
+            "DECISION_OWNER_UPDATE_FAILED: attempt=$attemptId"
+        }
         durablePost to durableReceipt
     }
 
@@ -424,7 +435,26 @@ class PlanRepository(private val db: AppDatabase) {
             "DURABLE_OBSERVATION_INVALID_COORDINATES: attempt=$attemptId phase=$phase"
         }
         val canonical = snapshot.canonicalSignedZero()
-        val candidate = com.example.cellrebelauto.model.ledger.DurableObservationRecord(
+        val candidate = observationRecordFromSnapshot(attemptId, phase, canonical)
+        db.durableObservationDao().insertIfAbsent(candidate)
+        val winner = db.durableObservationDao().forAttemptPhase(attemptId, phase)
+            ?: throw IllegalStateException(
+                "DURABLE_OBSERVATION_MISSING: no row after insert for attempt=$attemptId phase=$phase"
+            )
+        if (winner.copy(id = 0).canonicalSignedZero() != candidate) {
+            throw IllegalStateException(
+                "DURABLE_OBSERVATION_CONFLICT: immutable replay mismatch for " +
+                    "attempt=$attemptId phase=$phase"
+            )
+        }
+        return observationSnapshotFromRecord(winner)
+    }
+
+    private fun observationRecordFromSnapshot(
+        attemptId: Long,
+        phase: String,
+        canonical: com.example.cellrebelauto.environment.ObservationSnapshot
+    ) = com.example.cellrebelauto.model.ledger.DurableObservationRecord(
             attemptId = attemptId, phase = phase,
             leaseId = canonical.leaseId,
             acceptedIntentHash = canonical.acceptedIntentHash,
@@ -444,18 +474,23 @@ class PlanRepository(private val db: AppDatabase) {
             evidenceRefsJson = org.json.JSONArray(canonical.evidenceRefs).toString(),
             evidenceRefs = canonical.evidenceRefs.joinToString(";")
         )
-        db.durableObservationDao().insertIfAbsent(candidate)
-        val winner = db.durableObservationDao().forAttemptPhase(attemptId, phase)
-            ?: throw IllegalStateException(
-                "DURABLE_OBSERVATION_MISSING: no row after insert for attempt=$attemptId phase=$phase"
-            )
-        if (winner.copy(id = 0).canonicalSignedZero() != candidate) {
+
+    /** Reconstructing a snapshot must not erase conflicting raw append-only provenance columns. */
+    private fun requireCanonicalObservationRecord(
+        record: com.example.cellrebelauto.model.ledger.DurableObservationRecord
+    ): com.example.cellrebelauto.environment.ObservationSnapshot {
+        val snapshot = observationSnapshotFromRecord(record)
+        val expected = observationRecordFromSnapshot(
+            record.attemptId,
+            record.phase,
+            snapshot.canonicalSignedZero()
+        )
+        if (record.copy(id = 0).canonicalSignedZero() != expected) {
             throw IllegalStateException(
-                "DURABLE_OBSERVATION_CONFLICT: immutable replay mismatch for " +
-                    "attempt=$attemptId phase=$phase"
+                "DURABLE_OBSERVATION_RAW_CONFLICT: attempt=${record.attemptId} phase=${record.phase}"
             )
         }
-        return observationSnapshotFromRecord(winner)
+        return snapshot.canonicalSignedZero()
     }
 
     /**
@@ -650,10 +685,10 @@ class PlanRepository(private val db: AppDatabase) {
             )
         }
         val durablePre = db.durableObservationDao().forAttemptPhase(attemptId, "PRE")
-            ?.let(::observationSnapshotFromRecord)
+            ?.let(::requireCanonicalObservationRecord)
             ?: throw IllegalStateException("DECISION_PRE_MISSING: attempt=$attemptId")
         val durablePost = db.durableObservationDao().forAttemptPhase(attemptId, "POST")
-            ?.let(::observationSnapshotFromRecord)
+            ?.let(::requireCanonicalObservationRecord)
             ?: throw IllegalStateException("DECISION_POST_MISSING: attempt=$attemptId")
         val durableReceipt = db.durableCompletionReceiptDao().forAttempt(attemptId)
             ?: throw IllegalStateException("DECISION_RECEIPT_MISSING: attempt=$attemptId")
@@ -806,11 +841,13 @@ class PlanRepository(private val db: AppDatabase) {
         endedAt: Long,
         failureReason: String?
     ) = db.withTransaction {
-        db.testAttemptDao().markAplusState(attemptId, "CLOSED")
-        if (failureReason == null) {
-            db.testAttemptDao().markInterruptedIfNonTerminal(attemptId, endedAt)
+        val updated = if (failureReason == null) {
+            db.testAttemptDao().closeAplusInterrupted(attemptId, endedAt)
         } else {
-            db.testAttemptDao().markFailed(attemptId, failureReason, endedAt)
+            db.testAttemptDao().closeAplusFailed(attemptId, failureReason, endedAt)
+        }
+        check(updated == 1) {
+            "RECOVERED_CLOSE_OWNER_INVALID: attempt=$attemptId"
         }
     }
 
@@ -822,23 +859,23 @@ class PlanRepository(private val db: AppDatabase) {
         webScore: Double?,
         videoScore: Double?
     ) = db.withTransaction {
-        db.testAttemptDao().markAplusState(attemptId, "CLOSED")
-        db.testAttemptDao().markSucceeded(
+        check(db.testAttemptDao().closeAplusSucceeded(
             attemptId = attemptId,
             successOrdinal = db.trustedQuotaDao().trustedCountForTask(taskId),
-            runningObservedAt = null,
             endedAt = endedAt,
             webScore = webScore,
-            videoScore = videoScore,
-            status = "succeeded"
-        )
+            videoScore = videoScore
+        ) == 1) {
+            "APLUS_SUCCESS_CLOSE_OWNER_INVALID: attempt=$attemptId"
+        }
     }
 
     /** Close the A+ owner and project a typed failure in one transaction. */
     suspend fun closeAplusFailure(attemptId: Long, reason: String, endedAt: Long) =
         db.withTransaction {
-            db.testAttemptDao().markAplusState(attemptId, "CLOSED")
-            db.testAttemptDao().markFailed(attemptId, reason, endedAt)
+            check(db.testAttemptDao().closeAplusFailed(attemptId, reason, endedAt) == 1) {
+                "APLUS_FAILURE_CLOSE_OWNER_INVALID: attempt=$attemptId"
+            }
         }
 
     // ---- Trusted completion persistence (R4-F1, §11.2 / §11.4) ----
@@ -895,7 +932,21 @@ class PlanRepository(private val db: AppDatabase) {
         }
         // (2) Evaluate only the complete durable winner bundle, never a live payload that may have
         // lost an execution/observation/receipt race.
-        val decision = TrustPolicy().evaluate(durableCtx)
+        val policyDecision = TrustPolicy().evaluate(durableCtx)
+        // The mutable attempt owner is the release authority. A semantically valid bundle that is
+        // internally self-consistent on lease A still cannot mint if the attempt owns lease B.
+        // Convert that attribution failure into an ordinary unverified decision so recovery has a
+        // durable negative carrier; structural/raw carrier conflicts above continue to throw.
+        val ownerLeaseMatches = attempt?.aplusLeaseId?.let { ownerLease ->
+            durableCtx.applyReceiptLease == ownerLease &&
+                durableCtx.preObservation.leaseId == ownerLease &&
+                durableCtx.postObservation.leaseId == ownerLease
+        } == true
+        val decision = if (attempt != null && policyDecision == TrustDecision.PASS && !ownerLeaseMatches) {
+            TrustDecision.FAIL
+        } else {
+            policyDecision
+        }
         val existingTrusted = attempt?.let {
             db.trustedQuotaDao().getByAttempt(durableExecution.attemptId)
         }

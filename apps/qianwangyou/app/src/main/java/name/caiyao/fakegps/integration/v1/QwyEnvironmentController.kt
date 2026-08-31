@@ -3,19 +3,17 @@ package name.caiyao.fakegps.integration.v1
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.location.LocationManager
+import android.os.SystemClock
+import io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
 import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.config.ConfigCodec
 import name.caiyao.fakegps.config.ConfigHolder
 import name.caiyao.fakegps.config.ConfigPrefsSync
-import name.caiyao.fakegps.config.PayloadRead
-import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.SpoofConfig
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
-import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolution
-import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolver
 import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
@@ -40,10 +38,9 @@ interface QwyEnvironment {
      * coordinates for that item). Any known blocker → NONE — preflight must
      * never claim a level the environment cannot currently back (INV-08).
      *
-     * NOT a prediction of the apply outcome: the publish result is measured
-     * truth, knowable only at apply time. The apply receipt (F-14 fix:
-     * computed from the real ConfigPrefsSync result) and observeEffective()
-     * remain the only trusted sources of an ACHIEVED level.
+     * NOT a prediction of the apply outcome: command publication and fresh OS
+     * readback are measured truth, knowable only at apply/observe time. Those
+     * two surfaces remain the only sources of an ACHIEVED level.
      */
     fun achievableVerificationLevelWire(): Int
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
@@ -91,10 +88,11 @@ data class EffectiveEnvironment(
  * P1 fixes (dsf round-1 review):
  * - P1-1: schedule initialized from profile DB on construction (synchronous
  *   SQLite query on the existing "temp" table)
- * - P1-2: verificationLevel reflects actual mockGateway state; fail-loud when
- *   the gateway is unavailable instead of hardcoding INDEPENDENTLY_VERIFIED
- * - P1-3: observeEffective reads from ConfigPrefsSync (persistent) not
- *   in-memory ConfigHolder, so restart does not lie about passthrough
+ * - P1-2: verificationLevel reflects fresh framework-provider readback;
+ *   fail-loud when the write gateway is unavailable and fail-closed when the
+ *   independent read side cannot corroborate the publish
+ * - P1-3: observeEffective reads LocationManager provider state, never
+ *   ConfigHolder, ConfigPrefs, or the persisted desired command coordinates
  *
  * KNOWN BOUNDARY: schedule items are derived from the existing profile DB
  * (ProfileEntity rows, id ASC). An operator-facing schedule editor with
@@ -138,16 +136,27 @@ class QwyEnvironmentController(
         }
     }
 
+    private val locationManager: LocationManager? = try {
+        appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+    } catch (_: Throwable) {
+        null
+    }
+
     // P1-2 fix: mockGateway construction failure is tracked; apply/cleanup
     // must report honestly when it is null.
-    private val mockGateway: MockProviderGateway? = try {
-        val lm = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    private val mockGateway: MockProviderGateway? = locationManager?.let { manager ->
         CoordinatedMockProviderGateway(
-            AndroidMockProviderGateway(lm),
+            AndroidMockProviderGateway(manager),
             NoopFusedGateway,
         )
-    } catch (e: Throwable) {
-        null
+    }
+
+    /**
+     * KB-8 read side. This is intentionally independent of [scheduleStore]'s
+     * last-applied command record: requested coordinates are not observations.
+     */
+    private val systemMockTrustPolicy: SystemMockTrustPolicy? = locationManager?.let { manager ->
+        SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))
     }
 
     override fun scheduleSnapshot(): ScheduleSnapshot? {
@@ -191,8 +200,11 @@ class QwyEnvironmentController(
         )
         configHolder.update(ConfigCodec.toJson(config))
 
-        mockGateway!!.replaceGpsProvider()
-        mockGateway!!.publish(
+        // Capture the lower freshness bound BEFORE the system mutation. A
+        // cached fix from an earlier address can never satisfy this apply.
+        val publishNotBeforeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        mockGateway.replaceGpsProvider()
+        mockGateway.publish(
             MockLocationConfig(
                 latitude = coords.first,
                 longitude = coords.second,
@@ -201,24 +213,37 @@ class QwyEnvironmentController(
 
         val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
 
-        // P2 fix (dsf round-3/4): persist the applied coordinates + publish
-        // outcome so observeEffective returns what the mock provider actually
-        // has, with verification level matching the real sync result.
-        scheduleStore.recordLastApplied(
-            coords.first, coords.second, android.os.SystemClock.elapsedRealtime(),
-            verified = published,
+        val readback = systemMockTrustPolicy?.evaluate(
+            targetLatitude = coords.first,
+            targetLongitude = coords.second,
+            publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
         )
 
-        // P1-2 fix: verification level reflects actual publish outcome.
-        val verificationLevel = if (published)
+        // Persist only the command/audit record and the freshness anchor. Its
+        // coordinates and transport flag are never reused as effective state.
+        scheduleStore.recordLastApplied(
+            latitude = coords.first,
+            longitude = coords.second,
+            publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
+            transportPublished = published,
+        )
+
+        // Config transport success is necessary but not sufficient. The
+        // achieved level is VERIFIED only when fresh OS readback independently
+        // corroborates both framework providers within the frozen 1 m bound.
+        val verificationLevel = if (published && readback?.verified == true)
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
             VerificationLevelV1.NONE.wire
 
         return ApplyOutcome(
-            effectiveLatitude = coords.first,
-            effectiveLongitude = coords.second,
-            deliveryModeWire = 1,
+            effectiveLatitude = readback?.latitude,
+            effectiveLongitude = readback?.longitude,
+            deliveryModeWire = if (readback?.isMock == true) {
+                DeliveryModeV1.SYSTEM_MOCK.wire
+            } else {
+                null
+            },
             verificationLevelWire = verificationLevel,
         )
     }
@@ -259,7 +284,9 @@ class QwyEnvironmentController(
         // before any verification could happen, so claiming VERIFIED over it
         // from preflight would be the same constant-lie F-14 killed in the
         // apply receipt (Handler:247), wearing preflight's clothes (Handler:113).
-        if (mockGateway == null) return VerificationLevelV1.NONE.wire
+        if (mockGateway == null || systemMockTrustPolicy == null) {
+            return VerificationLevelV1.NONE.wire
+        }
         val currentItem = scheduleStore.getCurrentItemId()
             ?: return VerificationLevelV1.NONE.wire
         return if (resolveItemCoordinates(currentItem) != null) {
@@ -271,10 +298,9 @@ class QwyEnvironmentController(
 
     override fun cleanup(leaseId: String): CleanupOutcome {
         // P3-1 fix: report honestly whether removal actually happened.
-        // P2-2 fix (dsf round-4): clear lastApplied so observe no longer
-        // reports stale mock coordinates after cleanup.
-        // P3-2 fix (dsf round-5): clear lastApplied in all branches, including
-        // when removeGpsProvider throws.
+        // Clear the apply anchor in all branches, including when removal
+        // throws, so a cached provider sample cannot be attributed to a lease
+        // that has already been released.
         return if (mockGateway != null) {
             try {
                 mockGateway!!.removeGpsProvider()
@@ -291,63 +317,45 @@ class QwyEnvironmentController(
     }
 
     override fun observeEffective(): EffectiveEnvironment {
-        // P2 fix (dsf round-3): prefer the last-applied intent coordinates
-        // (what the mock provider is actually publishing) over ConfigPrefsSync
-        // (which reads DB active-profile coords that may differ).
-        // Fall back to ConfigPrefsSync only when no intent was applied (cold
-        // start with a pre-existing hook config).
-        val lastApplied = scheduleStore.getLastApplied()
-        val payload = ConfigPrefsSync.readPublished(appContext)
-
-        val lat: Double?
-        val lng: Double?
-        val isMock: Boolean
-        val fingerprint: String
-
-        if (lastApplied != null) {
-            // Intent coordinates are what the mock provider has right now.
-            lat = lastApplied.latitude
-            lng = lastApplied.longitude
-            // P2-1 fix (dsf round-4): verification must match the actual
-            // publish outcome recorded at apply time, not just "apply happened".
-            isMock = lastApplied.verified
-            fingerprint = "intent:${lastApplied.latitude},${lastApplied.longitude}@${lastApplied.atMs}:verified=${lastApplied.verified}"
+        val appliedCommand = scheduleStore.getLastApplied()
+        val currentTarget = scheduleStore.getCurrentItemId()?.let(::resolveItemCoordinates)
+        val readback = if (
+            appliedCommand != null && currentTarget != null && systemMockTrustPolicy != null
+        ) {
+            systemMockTrustPolicy.evaluate(
+                targetLatitude = currentTarget.first,
+                targetLongitude = currentTarget.second,
+                publishNotBeforeElapsedRealtimeMs =
+                    appliedCommand.publishNotBeforeElapsedRealtimeMs,
+            )
         } else {
-            // No intent applied yet — read what the hook transport says.
-            val published = when (payload) {
-                is PayloadRead.Raw -> PublishedConfig.parse(payload.text)
-                else -> null
-            }
-            val resolution = EffectiveMockLocationResolver.resolve(published)
-            when (resolution) {
-                is EffectiveMockLocationResolution.Ready -> {
-                    lat = resolution.config.latitude
-                    lng = resolution.config.longitude
-                    isMock = true
-                }
-                is EffectiveMockLocationResolution.Invalid -> {
-                    lat = null
-                    lng = null
-                    isMock = false
-                }
-            }
-            fingerprint = when (payload) {
-                is PayloadRead.Raw -> PublishedConfig.fingerprint(payload.text)
-                is PayloadRead.ReadError -> "read-error:${payload.cause}"
-                PayloadRead.Absent -> "passthrough"
-            }
+            null
         }
 
-        val verificationLevel = if (isMock)
+        // `transportPublished` is a command-side prerequisite only. Effective
+        // coordinates, mock identity and distance come exclusively from the OS
+        // readback above; no lastApplied coordinate can enter this projection.
+        val verified = appliedCommand?.transportPublished == true && readback?.verified == true
+        val verificationLevel = if (verified)
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
             VerificationLevelV1.NONE.wire
+        val fingerprint = when {
+            readback != null -> "${readback.fingerprint}:transport=${appliedCommand?.transportPublished == true}"
+            appliedCommand == null -> "system-mock:no-apply-anchor"
+            currentTarget == null -> "system-mock:no-current-target"
+            else -> "system-mock:readback-unavailable"
+        }
 
         return EffectiveEnvironment(
-            latitude = lat,
-            longitude = lng,
-            isMock = isMock,
-            deliveryModeWire = if (isMock) 1 else null,
+            latitude = readback?.latitude,
+            longitude = readback?.longitude,
+            isMock = readback?.isMock,
+            deliveryModeWire = if (readback?.isMock == true) {
+                DeliveryModeV1.SYSTEM_MOCK.wire
+            } else {
+                null
+            },
             verificationLevelWire = verificationLevel,
             environmentFingerprint = fingerprint,
             evidenceRefs = emptyList(),

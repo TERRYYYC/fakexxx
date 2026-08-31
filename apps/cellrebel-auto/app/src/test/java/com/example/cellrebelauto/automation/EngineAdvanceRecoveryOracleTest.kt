@@ -11,6 +11,7 @@ import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
@@ -711,7 +712,8 @@ class EngineAdvanceRecoveryOracleTest {
         // recompute must be rejected BEFORE the terminal readback — the exhausted path
         // must NOT bypass receipt-digest verification (v1.46 defect).
         advanceAnswer = AdvanceReceiptV1(
-            outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null, // EXHAUSTED
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId, advancedToItemId = null,
             scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-recovery",
             effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
         )
@@ -739,7 +741,8 @@ class EngineAdvanceRecoveryOracleTest {
         // Control case: proves the M-AD-16 test is not vacuously true. An honest exhausted
         // receipt plus a fresh discover() readback that matches all four legs → succeeded.
         advanceAnswer = AdvanceReceiptV1(
-            outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null, // EXHAUSTED
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId, advancedToItemId = null,
             scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-recovery",
             effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
         )
@@ -770,6 +773,69 @@ class EngineAdvanceRecoveryOracleTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("honest exhausted receipt + matching readback ⇒ CLOSED", "CLOSED", attempt.aplusState)
         assertEquals("closed trusted", "succeeded", attempt.status)
+    }
+
+    @Test
+    fun `ADVANCED without a target fails closed before exhausted readback can bless it`() = runTest {
+        advanceAnswer = AdvanceReceiptV1(
+            outcomeWire = AdvanceOutcomeV1.ADVANCED.wire,
+            advancedFromItemId = anchorItemId,
+            advancedToItemId = null,
+            scheduleVersionAfter = anchorVersion + 1,
+            effectiveIntentHash = "eff-recovery",
+            effectiveEnvironmentRevision = 7L,
+            receiptDigest = "filled-at-call"
+        )
+        val malformedExecutor = object : ExternalApplyExecutor by journeyExecutor {
+            override fun discover(): CapabilitySnapshotV1 = CapabilitySnapshotV1(
+                serviceVersion = "fake-1.0",
+                supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
+                supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                environmentRevision = 7L,
+                profileRefs = listOf("p"),
+                scheduleRefs = listOf("s"),
+                currentScheduleId = anchorScheduleId,
+                currentItemId = anchorItemId,
+                scheduleVersion = anchorVersion + 1,
+                exhausted = true
+            )
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+
+        buildEngineWith(planId, VClock(), malformedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals(
+            "ADVANCE_OUTCOME_TARGET_MISMATCH:ADVANCED_WITHOUT_TARGET",
+            attempt.failureReason
+        )
+        assertEquals("a contradictory receipt must never terminalize trusted", "running", attempt.status)
+    }
+
+    @Test
+    fun `EXHAUSTED with a target fails closed before non-terminal observe can bless it`() = runTest {
+        advanceAnswer = AdvanceReceiptV1(
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId,
+            advancedToItemId = "item-after-9z",
+            scheduleVersionAfter = anchorVersion + 1,
+            effectiveIntentHash = "eff-recovery",
+            effectiveEnvironmentRevision = 7L,
+            receiptDigest = "filled-at-call"
+        )
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+
+        buildEngineWith(planId, VClock(), journeyExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals(
+            "ADVANCE_OUTCOME_TARGET_MISMATCH:EXHAUSTED_WITH_TARGET",
+            attempt.failureReason
+        )
+        assertEquals("a contradictory receipt must never terminalize trusted", "running", attempt.status)
     }
 
     // ---- M-AD-17: Non-terminal observe intentHash mismatch → RECOVERY_REQUIRED ----

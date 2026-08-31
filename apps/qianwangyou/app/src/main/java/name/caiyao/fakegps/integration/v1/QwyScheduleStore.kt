@@ -133,21 +133,25 @@ class QwyScheduleStore(context: Context) {
     }
 
     /**
-     * Persist the last-applied intent coordinates + publish outcome (dsf P2 fix).
+     * Persist the last apply COMMAND for audit plus its pre-publish monotonic
+     * freshness anchor.
      *
-     * The mock provider publishes intent coords, but ConfigPrefsSync publishes
-     * DB active-profile coords. observeEffective must return what the mock
-     * provider actually has (intent coords), so we persist them here.
-     *
-     * `verified` is the ConfigPrefsSync.sync() outcome — observe must not claim
-     * INDEPENDENTLY_VERIFIED if the publish failed (P2-1 fix).
+     * This is deliberately not an effective-environment observation. The
+     * desired coordinates must never be replayed as actual coordinates;
+     * [QwyEnvironmentController.observeEffective] reads the OS provider state.
+     * `transportPublished` only records ConfigPrefsSync's command-side outcome.
      */
-    fun recordLastApplied(latitude: Double, longitude: Double, elapsedRealtimeMs: Long, verified: Boolean) {
+    fun recordLastApplied(
+        latitude: Double,
+        longitude: Double,
+        publishNotBeforeElapsedRealtimeMs: Long,
+        transportPublished: Boolean,
+    ) {
         prefs.edit()
             .putFloat(KEY_LAST_APPLIED_LAT, latitude.toFloat())
             .putFloat(KEY_LAST_APPLIED_LNG, longitude.toFloat())
-            .putLong(KEY_LAST_APPLIED_AT, elapsedRealtimeMs)
-            .putBoolean(KEY_LAST_APPLIED_VERIFIED, verified)
+            .putLong(KEY_LAST_APPLIED_AT, publishNotBeforeElapsedRealtimeMs)
+            .putBoolean(KEY_LAST_APPLIED_VERIFIED, transportPublished)
             .commit()
     }
 
@@ -161,7 +165,14 @@ class QwyScheduleStore(context: Context) {
             .commit()
     }
 
-    data class LastApplied(val latitude: Double, val longitude: Double, val atMs: Long, val verified: Boolean)
+    data class LastApplied(
+        /** Desired command coordinate; audit only, never effective readback. */
+        val latitude: Double,
+        /** Desired command coordinate; audit only, never effective readback. */
+        val longitude: Double,
+        val publishNotBeforeElapsedRealtimeMs: Long,
+        val transportPublished: Boolean,
+    )
 
     fun getLastApplied(): LastApplied? {
         val atMs = prefs.getLong(KEY_LAST_APPLIED_AT, 0L)
@@ -169,8 +180,8 @@ class QwyScheduleStore(context: Context) {
         return LastApplied(
             latitude = prefs.getFloat(KEY_LAST_APPLIED_LAT, 0f).toDouble(),
             longitude = prefs.getFloat(KEY_LAST_APPLIED_LNG, 0f).toDouble(),
-            atMs = atMs,
-            verified = prefs.getBoolean(KEY_LAST_APPLIED_VERIFIED, false),
+            publishNotBeforeElapsedRealtimeMs = atMs,
+            transportPublished = prefs.getBoolean(KEY_LAST_APPLIED_VERIFIED, false),
         )
     }
 

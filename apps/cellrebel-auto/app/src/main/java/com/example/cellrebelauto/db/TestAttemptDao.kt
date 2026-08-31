@@ -136,7 +136,57 @@ interface TestAttemptDao {
 
     /** Persist the current §8.1 phase on the attempt (§7.1: the Attempt owns its 当前 operation). */
     @Query("UPDATE test_attempts SET aplusState = :aplusState WHERE id = :attemptId")
-    suspend fun markAplusState(attemptId: Long, aplusState: String)
+    suspend fun markAplusState(attemptId: Long, aplusState: String): Int
+
+    /** Expected-state CAS for carrier + owner transactions; zero rows is an invariant failure. */
+    @Query(
+        "UPDATE test_attempts SET aplusState = :nextState " +
+            "WHERE id = :attemptId AND aplusState = :expectedState"
+    )
+    suspend fun markAplusStateFrom(
+        attemptId: Long,
+        expectedState: String,
+        nextState: String
+    ): Int
+
+    /** POST bundle publication is replayable only from POST_OBSERVE_PENDING or DECIDING. */
+    @Query(
+        "UPDATE test_attempts SET aplusState = 'DECIDING' " +
+            "WHERE id = :attemptId AND aplusState IN ('POST_OBSERVE_PENDING','DECIDING')"
+    )
+    suspend fun markDecidingFromPostBundle(attemptId: Long): Int
+
+    /** Atomic A+ terminal projections. Owner and public attempt truth change in one row write. */
+    @Query(
+        "UPDATE test_attempts SET aplusState = 'CLOSED', status = 'interrupted', " +
+            "failureReason = 'INTERRUPTED', endedAt = :endedAt " +
+            "WHERE id = :attemptId AND status IN ('starting','running') " +
+            "AND aplusState IN ('RELEASED','ADVANCE_OBSERVING','ADVANCE_STATE_READBACK')"
+    )
+    suspend fun closeAplusInterrupted(attemptId: Long, endedAt: Long): Int
+
+    @Query(
+        "UPDATE test_attempts SET aplusState = 'CLOSED', status = 'failed', " +
+            "failureReason = :reason, endedAt = :endedAt " +
+            "WHERE id = :attemptId AND status IN ('starting','running') " +
+            "AND aplusState IN ('RELEASED','ADVANCE_OBSERVING','ADVANCE_STATE_READBACK')"
+    )
+    suspend fun closeAplusFailed(attemptId: Long, reason: String, endedAt: Long): Int
+
+    @Query(
+        "UPDATE test_attempts SET aplusState = 'CLOSED', status = 'succeeded', " +
+            "successOrdinal = :successOrdinal, endedAt = :endedAt, " +
+            "webBrowsingScore = :webScore, videoStreamingScore = :videoScore " +
+            "WHERE id = :attemptId AND status IN ('starting','running') " +
+            "AND aplusState IN ('RELEASED','ADVANCE_OBSERVING','ADVANCE_STATE_READBACK')"
+    )
+    suspend fun closeAplusSucceeded(
+        attemptId: Long,
+        successOrdinal: Int,
+        endedAt: Long,
+        webScore: Double?,
+        videoScore: Double?
+    ): Int
 
     /**
      * Atomically mark RECOVERY_REQUIRED with a typed reason (Sol R2 P1-3: durable leg-specific reason).

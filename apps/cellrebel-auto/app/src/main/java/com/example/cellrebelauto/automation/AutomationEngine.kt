@@ -133,6 +133,9 @@ class AutomationEngine(
         private const val RELEASED_RECEIPT_FAILURE = "RELEASED_RECEIPT_MISSING_OR_CONFLICT"
         private const val RELEASE_CHECKPOINT_FAILURE = "RELEASE_CHECKPOINT_AUDIT_CONFLICT"
         private const val DECISION_CARRIER_FAILURE = "DECISION_CARRIER_CONFLICT"
+        private const val CONFLICTING_DECISION_CARRIERS_FAILURE = "CONFLICTING_DECISION_CARRIERS"
+        private const val QUOTA_CARRIER_MISSING_FAILURE = "QUOTA_CARRIER_MISSING"
+        private const val UNVERIFIED_CARRIER_MISSING_FAILURE = "UNVERIFIED_CARRIER_MISSING"
         private const val DECIDING_ANCHOR_FAILURE = "ANCHOR_MISSING_QUOTA_MET:phase=DECIDING"
     }
 
@@ -310,9 +313,6 @@ class AutomationEngine(
 
                 // # 创建尝试行（starting），ordinal = 任务内计数 + 1
                 val startedAt = nowMs()
-                // R44 (Sol GREEN-review-3 F3): the §7.1 execution evidence binds the MONOTONIC elapsed
-                // domain — captured from the elapsed seam at the same lifecycle moment as the wall stamp.
-                val attemptStartedAtElapsed = elapsedClockMs()
                 val attemptOrdinal = planRepository.countAttemptsForTask(task.id) + 1
                 val attemptId = planRepository.insertAttempt(
                     TestAttempt(
@@ -452,14 +452,27 @@ class AutomationEngine(
                     val currentExecId = "exec-${attemptId}-${nowMs()}"
                     planRepository.markCurrentExecutionId(attemptId, currentExecId)
                     updateState(AutomationState.LAUNCHING_CELLREBEL)
+                    var attemptStartedAtElapsed: Long? = null
                     var runningConfirmedAtElapsed = 0L
-                    val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
-                        // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
-                        runningConfirmedAtElapsed = elapsedClockMs()
-                        planRepository.markAttemptRunning(attemptId, runningAt)
-                        aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
-                        planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
-                    }
+                    val outcome = cellRebelRunner.runTest(
+                        startedAt = startedAt,
+                        testTimeoutMs = testTimeoutMs,
+                        onStartDispatched = {
+                            // §6.4.2 start authority: capture at the actual ACTION_CLICK / fallback
+                            // tap inside CellRebelAttemptFlow, after launch/navigation/PRE. Keep the
+                            // first dispatched interaction immutable if the 3s fallback later fires.
+                            if (attemptStartedAtElapsed == null) {
+                                attemptStartedAtElapsed = elapsedClockMs()
+                            }
+                        },
+                        onRunningObserved = { runningAt ->
+                            // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
+                            runningConfirmedAtElapsed = elapsedClockMs()
+                            planRepository.markAttemptRunning(attemptId, runningAt)
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
+                            planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
+                        }
+                    )
                     ensureActive()
                     when (outcome) {
                         is AttemptOutcome.Failure -> {
@@ -476,6 +489,25 @@ class AutomationEngine(
                             return@coroutineScope
                         }
                         is AttemptOutcome.Success -> {
+                            val executionStartedAtElapsed = attemptStartedAtElapsed
+                            if (executionStartedAtElapsed == null) {
+                                // A success without a witnessed Start interaction cannot be
+                                // bracketed by PRE/POST and must never mint trusted quota.
+                                aplusState = attemptDriver?.driveTransition(
+                                    attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED
+                                ) ?: aplusState
+                                if (!aplusReleaseAndFinalize(
+                                        attemptId, task.id, AttemptState.RELEASE_PENDING,
+                                        success = false, reason = FailureReason.UNTRUSTED.name,
+                                        endedAt = outcome.endedAt, webScore = null, videoScore = null
+                                    )) {
+                                    return@coroutineScope
+                                }
+                                aplusPause(
+                                    "CellRebel success lacked an actual Start-dispatch timestamp for attempt $attemptId"
+                                )
+                                return@coroutineScope
+                            }
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.COMPLETION_OBSERVED) ?: aplusState
                             // R43 (Sol GREEN-review-2 F3): the §7.1 execution evidence row is persisted AT
                             // the COMPLETION_OBSERVED phase boundary — BEFORE the post-observe call and long
@@ -493,7 +525,7 @@ class AutomationEngine(
                                 // seam — NEVER AttemptOutcome.startedAt/endedAt (wall/epoch; the spec
                                 // forbids reusing them, and only the elapsed domain is comparable to
                                 // the provider observations in §6.4.2 bracketing).
-                                startedAtElapsed = attemptStartedAtElapsed,
+                                startedAtElapsed = executionStartedAtElapsed,
                                 runningConfirmedAtElapsed = runningConfirmedAtElapsed,
                                 completedAtElapsed = completedAtElapsed,
                                 baselineRunningState = "IDLE",
@@ -501,7 +533,7 @@ class AutomationEngine(
                                 runningDurationMs = completedAtElapsed - runningConfirmedAtElapsed,
                                 webBrowsingScore = outcome.webScore,
                                 videoStreamingScore = outcome.videoScore,
-                                roundTimestampsElapsed = "$attemptStartedAtElapsed;$completedAtElapsed"
+                                roundTimestampsElapsed = "$executionStartedAtElapsed;$completedAtElapsed"
                             )
                             // §8.1: COMPLETION_OBSERVED → POST_OBSERVE_PENDING is persisted BEFORE the post-observe
                             // call (Sol round-23 P1-1): a crash in the post-observe call must recover as
@@ -675,10 +707,14 @@ class AutomationEngine(
                 // ==================== CellRebel verified attempt ====================
                 returnToSelf()
                 updateState(AutomationState.LAUNCHING_CELLREBEL)
-                val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
-                    // # C2：观察到 RUNNING 的瞬间持久化 starting -> running 迁移（spec O3）
-                    planRepository.markAttemptRunning(attemptId, runningAt)
-                }
+                val outcome = cellRebelRunner.runTest(
+                    startedAt = startedAt,
+                    testTimeoutMs = testTimeoutMs,
+                    onRunningObserved = { runningAt ->
+                        // # C2：观察到 RUNNING 的瞬间持久化 starting -> running 迁移（spec O3）
+                        planRepository.markAttemptRunning(attemptId, runningAt)
+                    }
+                )
                 ensureActive()
                 returnToSelf()
 
@@ -904,11 +940,17 @@ class AutomationEngine(
         // an external leg. In particular, an opposing decision carrier can never be repaired by
         // release/reconcile. Keep it sticky across every restart instead of letting the generic
         // RECOVERY_REQUIRED branch release and terminalize contradictory truth.
-        if (crashed.aplusState == "RECOVERY_REQUIRED" &&
-            crashed.failureReason == DECISION_CARRIER_FAILURE
-        ) {
+        val stickyCarrierInvariant = crashed.failureReason?.let { reason ->
+            reason == DECISION_CARRIER_FAILURE ||
+                reason.startsWith("$DECISION_CARRIER_FAILURE:") ||
+                reason == CONFLICTING_DECISION_CARRIERS_FAILURE ||
+                reason == QUOTA_CARRIER_MISSING_FAILURE ||
+                reason == UNVERIFIED_CARRIER_MISSING_FAILURE
+        } == true
+        if (crashed.aplusState == "RECOVERY_REQUIRED" && stickyCarrierInvariant) {
             aplusPause(
-                "decision carrier conflict remains unresolved for attempt ${crashed.id} — fail-closed"
+                "decision carrier invariant remains unresolved for attempt ${crashed.id}: " +
+                    crashed.failureReason
             )
             return false
         }
@@ -949,7 +991,27 @@ class AutomationEngine(
         // continuation write and RELEASE_PENDING owner write. New writes commit those two fields
         // in one SQL statement, but an already-durable split row must still converge without
         // reacquiring evidence, re-deciding, or returning to the main loop for a fresh apply.
-        if (isTerminalFailureContinuation(crashed.failureReason) &&
+        val hasLegacyTerminalContinuation = isTerminalFailureContinuation(crashed.failureReason)
+        if (hasLegacyTerminalContinuation) {
+            // Append-only decision truth outranks a mutable legacy continuation. In particular, a
+            // trusted mint must never be closed as failed merely because an older build left a
+            // standalone failureReason before publishing RELEASE_PENDING.
+            val legacyTrusted = planRepository.getTrustedEntry(crashed.id)
+            val legacyUnverified = planRepository.getUnverifiedRecord(crashed.id)
+            if (legacyTrusted != null) {
+                val reason = if (legacyUnverified != null) {
+                    CONFLICTING_DECISION_CARRIERS_FAILURE
+                } else {
+                    "$DECISION_CARRIER_FAILURE:LEGACY_TYPED_FAILURE_OPPOSES_TRUSTED"
+                }
+                planRepository.markRecoveryRequired(crashed.id, reason)
+                aplusPause(
+                    "legacy typed failure conflicts with durable decision truth for attempt ${crashed.id}"
+                )
+                return false
+            }
+        }
+        if (hasLegacyTerminalContinuation &&
             crashed.aplusState in setOf(
                 "APPLY_PENDING", "ENV_APPLIED", "PRE_OBSERVED", "CELLREBEL_START_PENDING",
                 "CELLREBEL_RUNNING", "POST_OBSERVE_PENDING", "DECIDING", "RECOVERY_REQUIRED"
@@ -1184,17 +1246,17 @@ class AutomationEngine(
         val trusted = planRepository.getTrustedEntry(crashed.id)
         val unverified = planRepository.getUnverifiedRecord(crashed.id)
         if (trusted != null && unverified != null) {
-            planRepository.markRecoveryRequired(crashed.id, "CONFLICTING_DECISION_CARRIERS")
+            planRepository.markRecoveryRequired(crashed.id, CONFLICTING_DECISION_CARRIERS_FAILURE)
             aplusPause("conflicting decision carriers for recovered attempt ${crashed.id}")
             return false
         }
         if (crashed.aplusState == "QUOTA_COMMITTED" && trusted == null) {
-            planRepository.markRecoveryRequired(crashed.id, "QUOTA_CARRIER_MISSING")
+            planRepository.markRecoveryRequired(crashed.id, QUOTA_CARRIER_MISSING_FAILURE)
             aplusPause("QUOTA_COMMITTED recovery lacks trusted carrier for attempt ${crashed.id}")
             return false
         }
         if (crashed.aplusState == "UNVERIFIED_RECORDED" && unverified == null) {
-            planRepository.markRecoveryRequired(crashed.id, "UNVERIFIED_CARRIER_MISSING")
+            planRepository.markRecoveryRequired(crashed.id, UNVERIFIED_CARRIER_MISSING_FAILURE)
             aplusPause("UNVERIFIED_RECORDED recovery lacks unverified carrier for attempt ${crashed.id}")
             return false
         }
@@ -1700,6 +1762,26 @@ class AutomationEngine(
                 "completeAndAdvance not proven for attempt $attemptId — schedule did not advance"
             )
         }
+        val advanceOutcome = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
+            .fromWire(advanceReceipt.outcomeWire)
+            ?: return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_OUTCOME_UNKNOWN",
+                "advance receipt has unknown outcome ${advanceReceipt.outcomeWire} for attempt $attemptId"
+            )
+        val outcomeTargetMismatch = when (advanceOutcome) {
+            io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.ADVANCED ->
+                if (advanceReceipt.advancedToItemId == null) "ADVANCED_WITHOUT_TARGET" else null
+            io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.EXHAUSTED ->
+                if (advanceReceipt.advancedToItemId != null) "EXHAUSTED_WITH_TARGET" else null
+        }
+        if (outcomeTargetMismatch != null) {
+            return failPostReleaseAdvance(
+                attemptId,
+                "ADVANCE_OUTCOME_TARGET_MISMATCH:$outcomeTargetMismatch",
+                "advance receipt outcome/target contradiction for attempt $attemptId: $outcomeTargetMismatch"
+            )
+        }
         // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
         // (requestDigest, idempotencyKey) together with the outcome the provider claims.
         val expectedReceiptDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
@@ -1716,7 +1798,8 @@ class AutomationEngine(
         // the environment moved. Independent verification is mandatory — non-terminal: observe()
         // four legs; terminal (exhausted): a fresh discover() readback with the v1.55 non-null
         // group precondition then its own four legs.
-        val exhausted = advanceReceipt.advancedToItemId == null
+        val exhausted = advanceOutcome ==
+            io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.EXHAUSTED
         if (!exhausted) {
             planRepository.markAplusState(attemptId, "ADVANCE_OBSERVING")
             // The observe tuple's operationId: the VERBATIM apply receipt first (the engine owns

@@ -108,6 +108,16 @@ class EngineTrustedPathRedTest {
                 is AttemptOutcome.Failure -> template.copy(startedAt = startedAt, endedAt = nowMs())
             }
         }
+
+        override suspend fun runTest(
+            startedAt: Long,
+            testTimeoutMs: Long,
+            onStartDispatched: suspend () -> Unit,
+            onRunningObserved: suspend (Long) -> Unit
+        ): AttemptOutcome {
+            onStartDispatched()
+            return runTest(startedAt, testTimeoutMs, onRunningObserved)
+        }
     }
 
     private class FakeGpsSetter(outcomes: List<GpsOutcome>) : GpsLocationSetter {
@@ -212,7 +222,7 @@ class EngineTrustedPathRedTest {
         private val observe: SeededObserve,
         private val revision: SeededRevision,
         private val quota: SeededQuota,
-        private val evidence: FakeEvidenceSource
+        private val evidence: APlusEvidenceSource
     ) : APlusBackend {
         override val executor: ExternalApplyExecutor = exec
         override val recoveryLog: DurableRecoveryLog = log
@@ -578,6 +588,16 @@ class EngineTrustedPathRedTest {
                 clock.now = 13_000L
                 return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
             }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
         }
 
         buildEngine(
@@ -654,6 +674,16 @@ class EngineTrustedPathRedTest {
                 clock.now = 13_000L
                 return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
             }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
         }
 
         buildEngine(
@@ -695,6 +725,16 @@ class EngineTrustedPathRedTest {
                 onRunningObserved(clock.now)
                 clock.now = 13_000L
                 return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
+            }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
             }
         }
 
@@ -752,6 +792,16 @@ class EngineTrustedPathRedTest {
                 clock.now = EXEC_COMPLETED_AT_ELAPSED
                 return AttemptOutcome.Success(8.0, 7.0, clock.now, startedAt, clock.now)
             }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
         }
 
         buildEngine(
@@ -795,6 +845,17 @@ class EngineTrustedPathRedTest {
                 onRunningObserved(clock.nowMs())
                 return AttemptOutcome.Success(webScore = 8.0, videoScore = 7.0, runningObservedAt = clock.nowMs(), startedAt = startedAt, endedAt = clock.nowMs())
             }
+
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
         }
         buildEngine(
             planId, runner, FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
@@ -809,6 +870,91 @@ class EngineTrustedPathRedTest {
         assertEquals(13000L - 2100L, row.runningDurationMs)
         assertEquals("2000;13000", row.roundTimestampsElapsed)
         assertNotNull("the journey still mints (only the persisted row's clock domain moved)", db.trustedQuotaDao().getByAttempt(realAttemptId))
+    }
+
+    @Test
+    fun `R46-F1 production order - PRE from the shared monotonic clock precedes the persisted CellRebel start`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val baseEvidence = FakeEvidenceSource(
+            TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true
+        )
+        // Model the real call order with one shared elapsedRealtime source. Qianwangyou stamps PRE
+        // when observe() is called; Auto must capture execution.startedAt only afterward, at the
+        // actual CellRebel start boundary. The previous fixture hard-coded PRE=1000/start=2000 and
+        // therefore could not detect an engine that captured "start" before discover/apply/PRE.
+        val sharedElapsed = ArrayDeque(
+            listOf(1000L, 1100L, 5000L, 5100L, 16_000L, 17_000L)
+        )
+        val nextElapsed = { sharedElapsed.removeFirst() }
+        val evidence = object : APlusEvidenceSource by baseEvidence {
+            override suspend fun acquirePreObservation(
+                attemptId: Long,
+                runSessionId: Long
+            ): ObservationSnapshot = baseEvidence.acquirePreObservation(attemptId, runSessionId)!!.copy(
+                observedAtElapsedRealtimeMs = nextElapsed()
+            )
+
+            override suspend fun acquirePostObservation(
+                attemptId: Long,
+                runSessionId: Long
+            ): ObservationSnapshot = baseEvidence.acquirePostObservation(attemptId, runSessionId)!!.copy(
+                observedAtElapsedRealtimeMs = nextElapsed()
+            )
+        }
+        val backend = FakeBackend(
+            RecordingExternalApplyExecutor(),
+            FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()),
+            SeededRevision(emptyMap()),
+            SeededQuota(emptyMap()),
+            evidence
+        )
+        val clock = VirtualClock()
+        var navigationFinishedAtElapsed = -1L
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome = error("A+ trust must use the start-aware runner entrypoint")
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                // launch/navigation finishes long after PRE, but still before the real Start click.
+                navigationFinishedAtElapsed = nextElapsed()
+                onStartDispatched()
+                onRunningObserved(clock.nowMs())
+                return AttemptOutcome.Success(8.0, 7.0, clock.nowMs(), startedAt, clock.nowMs())
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = backend,
+            elapsedClockMs = nextElapsed
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        val execution = db.attemptExecutionDao().forAttempt(attempt.id).single()
+        assertEquals(
+            "execution start must be captured at the actual click, after provider PRE and navigation",
+            5000L,
+            execution.startedAtElapsed
+        )
+        assertEquals("navigation is not execution start", 1100L, navigationFinishedAtElapsed)
+        assertNotNull(
+            "the real shared-clock order must satisfy PRE < start and mint trusted quota",
+            db.trustedQuotaDao().getByAttempt(attempt.id)
+        )
+        assertTrue("every expected production clock boundary must be consumed", sharedElapsed.isEmpty())
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----
@@ -982,6 +1128,17 @@ class EngineTrustedPathRedTest {
                     webScore = 8.0, videoScore = 7.0, runningObservedAt = 4242L,
                     startedAt = startedAt, endedAt = 4300L
                 )
+            }
+
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
             }
         }
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))

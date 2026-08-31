@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import androidx.room.Transaction
 
 /**
  * R43 (Sol GREEN-review P1-1): Room-backed durable operation receipts + checkpoints — the
@@ -83,6 +84,42 @@ interface ReleaseReceiptDao {
 
     @Query("SELECT * FROM release_receipts WHERE leaseId = :leaseId LIMIT 1")
     suspend fun byLease(leaseId: String): ReleaseReceiptRow?
+
+    /** Every row claiming [leaseId]. A release proof is unique only when this list has one row. */
+    @Query("SELECT * FROM release_receipts WHERE leaseId = :leaseId ORDER BY idempotencyKey ASC")
+    suspend fun allByLease(leaseId: String): List<ReleaseReceiptRow>
+
+    /**
+     * Atomically insert/replay one release tuple while enforcing the logical one-row-per-lease
+     * invariant. The schema's historical primary key is the operation key, so an already-ambiguous
+     * lease must fail closed instead of letting an unordered LIMIT 1 choose its proof.
+     */
+    @Transaction
+    suspend fun insertOrReplayUnambiguous(row: ReleaseReceiptRow): ReleaseReceiptRow? {
+        val existingByKey = byKey(row.idempotencyKey)
+        val existingByLease = allByLease(row.leaseId)
+        if (existingByKey != null) {
+            return existingByKey.takeIf {
+                existingByLease.size == 1 && existingByLease.single() == it &&
+                    it.idempotencyKey == row.idempotencyKey &&
+                    it.leaseId == row.leaseId &&
+                    it.releaseDigest == row.releaseDigest &&
+                    it.resultOutcome == row.resultOutcome
+            }
+        }
+        if (existingByLease.isNotEmpty()) return null
+
+        insertIfAbsent(row)
+        val winnerByKey = byKey(row.idempotencyKey) ?: return null
+        val winnersByLease = allByLease(row.leaseId)
+        return winnerByKey.takeIf {
+            winnersByLease.size == 1 && winnersByLease.single() == it &&
+                it.idempotencyKey == row.idempotencyKey &&
+                it.leaseId == row.leaseId &&
+                it.releaseDigest == row.releaseDigest &&
+                it.resultOutcome == row.resultOutcome
+        }
+    }
 }
 
 /**
@@ -164,7 +201,7 @@ class RoomDurableRecoveryLog(
 
     override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? =
         kotlinx.coroutines.runBlocking {
-            releases.byLease(leaseId)?.let {
+            releases.allByLease(leaseId).singleOrNull()?.let {
                 RecordedReleaseReceipt(it.idempotencyKey, it.leaseId, it.releaseDigest, it.resultOutcome, it.createdAt)
             }
         }
@@ -183,18 +220,16 @@ class RoomDurableRecoveryLog(
         outcome: String,
         now: Long
     ): RecordedReleaseReceipt? = kotlinx.coroutines.runBlocking {
-        val existing = releases.byKey(idempotencyKey)
-        if (existing != null) {
-            return@runBlocking if (existing.leaseId == leaseId && existing.releaseDigest == releaseDigest) {
-                RecordedReleaseReceipt(existing.idempotencyKey, existing.leaseId, existing.releaseDigest, existing.resultOutcome, existing.createdAt)
-            } else null // conflict, prior preserved
+        releases.insertOrReplayUnambiguous(
+            ReleaseReceiptRow(idempotencyKey, leaseId, releaseDigest, outcome, now)
+        )?.let { row ->
+            RecordedReleaseReceipt(
+                row.idempotencyKey,
+                row.leaseId,
+                row.releaseDigest,
+                row.resultOutcome,
+                row.createdAt
+            )
         }
-        releases.insertIfAbsent(ReleaseReceiptRow(idempotencyKey, leaseId, releaseDigest, outcome, now))
-        // R43 (Sol GREEN-review-2 F4): race-loss re-validation — the read-back row may be the
-        // winner's; a differing (lease, digest) tuple is a conflict, never a successful replay.
-        val row = releases.byKey(idempotencyKey)
-            ?: return@runBlocking null
-        if (row.leaseId != leaseId || row.releaseDigest != releaseDigest) return@runBlocking null
-        RecordedReleaseReceipt(row.idempotencyKey, row.leaseId, row.releaseDigest, row.resultOutcome, row.createdAt)
     }
 }

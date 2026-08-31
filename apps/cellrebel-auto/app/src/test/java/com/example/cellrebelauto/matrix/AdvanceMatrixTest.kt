@@ -30,6 +30,7 @@ import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
@@ -391,7 +392,8 @@ class AdvanceMatrixTest {
     @Test
     fun M_AD_16() = runTest {
         advanceAnswer = AdvanceReceiptV1(
-            outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null,
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId, advancedToItemId = null,
             scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-matrix",
             effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
         )

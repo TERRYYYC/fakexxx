@@ -9,6 +9,7 @@ import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
@@ -69,7 +70,8 @@ class EngineJourneyConsumerOracleTest {
 
     private var preflightDecision: Int? = ScheduleDecisionV1.ALLOWED_NOW.wire // null = unavailable (fail-closed)
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
-        outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null,
+        outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+        advancedFromItemId = anchorItemId, advancedToItemId = null,
         scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-hash-1",
         effectiveEnvironmentRevision = 7L, receiptDigest = "rd"
     )
@@ -255,6 +257,16 @@ class EngineJourneyConsumerOracleTest {
                 override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome {
                     onRunningObserved(4242L)
                     return AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
+                }
+
+                override suspend fun runTest(
+                    startedAt: Long,
+                    testTimeoutMs: Long,
+                    onStartDispatched: suspend () -> Unit,
+                    onRunningObserved: suspend (Long) -> Unit
+                ): AttemptOutcome {
+                    onStartDispatched()
+                    return runTest(startedAt, testTimeoutMs, onRunningObserved)
                 }
             },
             gpsSetter = object : GpsLocationSetter {

@@ -20,7 +20,11 @@ class CellRebelAttemptFlowTest {
      * # 脚本化假驱动：snapshot() 逐帧消费，耗尽后重复最后一帧；
      * # 点击效果由帧序列预先编排，计数器记录点击/坐标点按次数
      */
-    private class FakeDriver(frames: List<ScreenNode?>) : CellRebelDriver {
+    private class FakeDriver(
+        frames: List<ScreenNode?>,
+        private val actionClickResult: Boolean = true,
+        private val interactionEvents: MutableList<String>? = null,
+    ) : CellRebelDriver {
         private val frames = frames.toMutableList()
         var clickStartCount = 0
             private set
@@ -35,11 +39,13 @@ class CellRebelAttemptFlowTest {
 
         override suspend fun clickStart(): Boolean {
             clickStartCount++
-            return true
+            interactionEvents?.add("click")
+            return actionClickResult
         }
 
         override suspend fun dispatchStartTap(): Boolean {
             dispatchTapCount++
+            interactionEvents?.add("tap")
             return true
         }
     }
@@ -55,6 +61,66 @@ class CellRebelAttemptFlowTest {
         nowMs = clock.nowMs,
         delayMs = clock.delayMs
     )
+
+    @Test
+    fun `actual ACTION_CLICK dispatch fires the execution-start callback afterward`() {
+        val clock = VirtualClock()
+        val events = mutableListOf<String>()
+        val driver = FakeDriver(
+            listOf(
+                CellRebelFixtures.ready(),
+                CellRebelFixtures.running(),
+                CellRebelFixtures.completed(),
+                CellRebelFixtures.completed(),
+            ),
+            interactionEvents = events,
+        )
+
+        kotlinx.coroutines.test.runTest {
+            newFlow(clock).run(
+                driver,
+                startedAt = 0L,
+                testTimeoutMs = 90_000L,
+                onStartDispatched = { events += "start-signal" },
+            )
+        }
+
+        assertEquals(
+            "the execution start signal belongs to the actual Start interaction, never lifecycle entry",
+            listOf("click", "start-signal"),
+            events.take(2),
+        )
+    }
+
+    @Test
+    fun `failed ACTION_CLICK fires execution-start only after the successful fallback tap`() {
+        val clock = VirtualClock()
+        val events = mutableListOf<String>()
+        val driver = FakeDriver(
+            listOf(
+                CellRebelFixtures.ready(),
+                CellRebelFixtures.running(),
+                CellRebelFixtures.completed(),
+                CellRebelFixtures.completed(),
+            ),
+            actionClickResult = false,
+            interactionEvents = events,
+        )
+
+        kotlinx.coroutines.test.runTest {
+            newFlow(clock).run(
+                driver,
+                startedAt = 0L,
+                testTimeoutMs = 90_000L,
+                onStartDispatched = { events += "start-signal" },
+            )
+        }
+
+        assertEquals(
+            listOf("click", "tap", "start-signal"),
+            events.take(3),
+        )
+    }
 
     @Test
     fun `never transitions to running yields NO_RUNNING_EVIDENCE after fallback tap`() {

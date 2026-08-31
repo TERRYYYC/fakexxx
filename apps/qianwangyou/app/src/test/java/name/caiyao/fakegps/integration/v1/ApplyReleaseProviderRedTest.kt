@@ -13,6 +13,7 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHE
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
@@ -398,5 +399,39 @@ class ApplyReleaseProviderRedTest {
             VerificationLevelV1.NONE.wire,
             observed.verificationLevelWire,
         )
+    }
+
+    @Test
+    fun observe_verifiedResponseCarriesAResolvableDurableAuditEvidenceRef() {
+        val h = harness()
+        // Production QwyEnvironmentController has no audit-store dependency. Model its current
+        // empty environment projection: the contract handler, which owns the durable audit store
+        // and caller/lease identity, must attach the observation's provenance before returning it.
+        h.env.evidenceRefs = emptyList()
+        val receipt = h.apply(key = "apl-observe-evidence")
+
+        val observed = h.handler.observe(
+            AUTO_UID,
+            ObserveRequestV1(
+                leaseId = receipt.leaseId,
+                operationId = "observe-evidence",
+                expectedIntentHash = receipt.acceptedIntentHash,
+            ),
+        )
+
+        val auditEvent = h.audit.all().last()
+        val durableRef = "qwy:integration.v1.audit:${auditEvent.seq}"
+        assertTrue(
+            "a VERIFIED observation with no evidenceRefs is unverifiable and Auto must reject it",
+            observed.evidenceRefs.isNotEmpty(),
+        )
+        assertTrue(
+            "the returned reference must resolve to the exact durable observe audit event",
+            durableRef in observed.evidenceRefs,
+        )
+        assertEquals("observe", auditEvent.event)
+        assertEquals(AUTO_PKG, auditEvent.callerApplicationId)
+        assertEquals(receipt.leaseId, auditEvent.leaseId)
+        assertEquals(receipt.acceptedIntentHash, auditEvent.payloadDigest)
     }
 }

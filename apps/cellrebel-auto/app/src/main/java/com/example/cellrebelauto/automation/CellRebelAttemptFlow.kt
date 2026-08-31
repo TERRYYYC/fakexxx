@@ -33,6 +33,9 @@ interface CellRebelRunner {
      * @param onRunningObserved C2: fired the instant RUNNING evidence is
      * observed, so the caller can persist the starting -> running transition
      * immediately (spec O3 state table). Default: no-op.
+     * @param onStartDispatched fired immediately after the real ACTION_CLICK or
+     * successful fallback tap is dispatched. Launch/navigation/lifecycle-entry
+     * time is not execution-start evidence (§6.4.2).
      * # 观察到 RUNNING 的瞬间触发，调用方据此立即持久化 running 迁移
      */
     suspend fun runTest(
@@ -40,6 +43,18 @@ interface CellRebelRunner {
         testTimeoutMs: Long,
         onRunningObserved: suspend (runningAtMs: Long) -> Unit = {}
     ): AttemptOutcome
+
+    /**
+     * Start-aware execution used by A+ trust. The compatibility implementation deliberately does
+     * NOT invent a Start timestamp for older/synthetic runners; an A+ success from such a runner
+     * fails closed in AutomationEngine. Device production overrides this at the real UI boundary.
+     */
+    suspend fun runTest(
+        startedAt: Long,
+        testTimeoutMs: Long,
+        onStartDispatched: suspend () -> Unit,
+        onRunningObserved: suspend (runningAtMs: Long) -> Unit
+    ): AttemptOutcome = runTest(startedAt, testTimeoutMs, onRunningObserved)
 }
 
 /**
@@ -96,6 +111,7 @@ class CellRebelAttemptFlow(
         driver: CellRebelDriver,
         startedAt: Long,
         testTimeoutMs: Long,
+        onStartDispatched: suspend () -> Unit = {},
         onRunningObserved: suspend (runningAtMs: Long) -> Unit = {}
     ): AttemptOutcome {
         // # 预算锚点：进入验证生命周期的时刻（审计 startedAt 不动）
@@ -138,9 +154,17 @@ class CellRebelAttemptFlow(
 
         // # 第 1 步：ACTION_CLICK 启动测试；返回 false（未找到按钮）→ 立即坐标兜底（AC-B3）
         var fallbackTapDone = false
-        if (!driver.clickStart()) {
+        val actionClickDispatched = driver.clickStart()
+        val startDispatched = if (!actionClickDispatched) {
             fallbackTapDone = true
             driver.dispatchStartTap()
+        } else {
+            true
+        }
+        if (startDispatched) {
+            // The engine's immutable elapsed start stamp belongs to the actual ACTION_CLICK /
+            // fallback-tap boundary, after launch, navigation, and READY baseline acquisition.
+            onStartDispatched()
         }
         val clickedAt = nowMs()
 

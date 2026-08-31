@@ -508,7 +508,7 @@ class CrashMatrixTest {
         )
         assertEquals(
             "the durable release receipt closes from RELEASE_PENDING",
-            "RELEASE_PENDING->CLOSED",
+            "RELEASE_PENDING->RELEASED",
             audit.single { it.eventType == "RELEASE_RECEIPT" }.payloadDigest
         )
     }
@@ -560,7 +560,7 @@ class CrashMatrixTest {
         )
         assertEquals(
             "the release receipt must close only from RELEASE_PENDING",
-            "RELEASE_PENDING->CLOSED",
+            "RELEASE_PENDING->RELEASED",
             audit.single { it.eventType == "RELEASE_RECEIPT" }.payloadDigest
         )
     }
@@ -588,7 +588,7 @@ class CrashMatrixTest {
                 attemptId = 77L,
                 correlationRef = null,
                 eventType = "RELEASE_RECEIPT",
-                payloadDigest = "RELEASE_PENDING->CLOSED",
+                payloadDigest = "RELEASE_PENDING->RELEASED",
                 recordedAt = 900L
             )
         )
@@ -635,7 +635,7 @@ class CrashMatrixTest {
             1,
             releaseAudits.size
         )
-        assertEquals("RELEASE_PENDING->CLOSED", releaseAudits.single().payloadDigest)
+        assertEquals("RELEASE_PENDING->RELEASED", releaseAudits.single().payloadDigest)
     }
 
     @Test
@@ -694,7 +694,7 @@ class CrashMatrixTest {
         val finalReleaseAudits = db.auditEventDao().forAttempt(77L)
             .filter { it.eventType == "RELEASE_RECEIPT" }
         assertEquals("the successful retry writes exactly one release audit", 1, finalReleaseAudits.size)
-        assertEquals("RELEASE_PENDING->CLOSED", finalReleaseAudits.single().payloadDigest)
+        assertEquals("RELEASE_PENDING->RELEASED", finalReleaseAudits.single().payloadDigest)
         assertEquals("the rolled-back timestamp must not leak", 901L, finalReleaseAudits.single().recordedAt)
     }
 
@@ -721,7 +721,7 @@ class CrashMatrixTest {
                 attemptId = 77L,
                 correlationRef = null,
                 eventType = "RELEASE_RECEIPT",
-                payloadDigest = "RELEASE_PENDING->CLOSED",
+                payloadDigest = "RELEASE_PENDING->RELEASED",
                 recordedAt = 900L
             )
         )
@@ -761,7 +761,7 @@ class CrashMatrixTest {
             1,
             releaseAudits.size
         )
-        assertEquals("RELEASE_PENDING->CLOSED", releaseAudits.single().payloadDigest)
+        assertEquals("RELEASE_PENDING->RELEASED", releaseAudits.single().payloadDigest)
     }
 
     @Test
