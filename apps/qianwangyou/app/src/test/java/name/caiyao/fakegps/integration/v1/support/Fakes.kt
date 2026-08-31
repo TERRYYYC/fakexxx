@@ -5,6 +5,14 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
 import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.integration.v1.AdvancePointerOutcome
 import name.caiyao.fakegps.integration.v1.ApplyOutcome
+import name.caiyao.fakegps.integration.v1.AuthoritativeContinuityOracle
+import name.caiyao.fakegps.integration.v1.AuthoritativeContinuitySnapshot
+import name.caiyao.fakegps.integration.v1.AuthoritativeContinuitySource
+import name.caiyao.fakegps.integration.v1.AuthoritativeContinuityState
+import name.caiyao.fakegps.integration.v1.AuthoritativeCoverageMask
+import name.caiyao.fakegps.integration.v1.AuthoritativeMutationOutcome
+import name.caiyao.fakegps.integration.v1.AuthoritativeMutationToken
+import name.caiyao.fakegps.integration.v1.AuthoritativeOracleHealth
 import name.caiyao.fakegps.integration.v1.CleanupOutcome
 import name.caiyao.fakegps.integration.v1.ContinuityEvidenceCapability
 import name.caiyao.fakegps.integration.v1.DurableKv
@@ -12,6 +20,9 @@ import name.caiyao.fakegps.integration.v1.EffectiveEnvironment
 import name.caiyao.fakegps.integration.v1.MonotonicClock
 import name.caiyao.fakegps.integration.v1.PackageIdentityResolver
 import name.caiyao.fakegps.integration.v1.QwyEnvironment
+import name.caiyao.fakegps.integration.v1.QwySemanticDigestV1
+import name.caiyao.fakegps.integration.v1.QwySemanticClientDeathToken
+import name.caiyao.fakegps.integration.v1.QwySemanticMutationEndpoint
 import name.caiyao.fakegps.integration.v1.RevisionBumpReason
 import name.caiyao.fakegps.integration.v1.ScheduleSnapshot
 import name.caiyao.fakegps.integration.v1.SignerLookup
@@ -149,6 +160,188 @@ class FakeIdentityResolver : PackageIdentityResolver {
     }
 }
 
+/** Controllable authoritative source used by the provider's JVM lane. */
+class FakeAuthoritativeOracleSource(
+    private val capability: () -> ContinuityEvidenceCapability,
+    ownerUid: Int,
+    ownerPackage: String,
+) : AuthoritativeContinuitySource {
+    private var state = AuthoritativeContinuityState(
+        ownerUid = ownerUid,
+        ownerPackage = ownerPackage,
+        gpsProviderEnabled = true,
+        networkProviderEnabled = true,
+        installedCoverageMask = AuthoritativeCoverageMask.REQUIRED_V1,
+        health = AuthoritativeOracleHealth.HEALTHY,
+        qwySemanticDigest = "fake-qwy-generation-1",
+        lastCompletedQwyMutationId = null,
+    )
+
+    var oracle = AuthoritativeContinuityOracle(
+        bootId = "fake-boot-1",
+        oracleInstanceId = "fake-oracle-instance-1",
+        initialState = state,
+    )
+        private set
+
+    val scriptedSnapshots = ArrayDeque<AuthoritativeContinuitySnapshot>()
+    var failNextRead: Boolean = false
+
+    override fun snapshot(): AuthoritativeContinuitySnapshot? {
+        if (scriptedSnapshots.isNotEmpty()) return scriptedSnapshots.removeFirst()
+        if (failNextRead) {
+            failNextRead = false
+            throw IllegalStateException("simulated authoritative Binder read failure")
+        }
+        return when (capability()) {
+            ContinuityEvidenceCapability.COMPLETE -> oracle.snapshot()
+            ContinuityEvidenceCapability.INCOMPLETE -> oracle.snapshot().copy(
+                installedCoverageMask = AuthoritativeCoverageMask.REQUIRED_V1 xor
+                    AuthoritativeCoverageMask.BUILD_ATTESTATION,
+                health = AuthoritativeOracleHealth.HOOKS_INCOMPLETE,
+            )
+            ContinuityEvidenceCapability.UNAVAILABLE -> null
+        }
+    }
+
+    fun currentState(): AuthoritativeContinuityState = state
+
+    fun registerSemanticSession(semanticDigest: String) {
+        val next = state.copy(qwySemanticDigest = semanticDigest)
+        state = next
+        if (oracle.snapshot().health == AuthoritativeOracleHealth.SESSION_UNCERTAIN) {
+            oracle.registerRecoveredSession(next)
+        } else {
+            val token = oracle.beginMutation()
+            oracle.finishMutation(token, AuthoritativeMutationOutcome.CHANGED, next)
+        }
+    }
+
+    /** Mirrors the remote QWY session death discontinuity before a new owner registers. */
+    fun ownerProcessDied() {
+        changed(
+            semanticDigest = state.qwySemanticDigest,
+            mutationId = state.lastCompletedQwyMutationId,
+        )
+    }
+
+    fun replaceOracle(
+        bootId: String = "fake-boot-2",
+        oracleInstanceId: String = "fake-oracle-instance-2",
+    ) {
+        oracle = AuthoritativeContinuityOracle(
+            bootId = bootId,
+            oracleInstanceId = oracleInstanceId,
+            initialState = state,
+        )
+    }
+
+    fun finishSemanticMutation(
+        token: AuthoritativeMutationToken,
+        mutationId: String,
+        changed: Boolean,
+        uncertain: Boolean,
+        afterDigest: String?,
+    ) {
+        val next = if (!changed && !uncertain) {
+            // A proved no-op changes journal sequence only. Semantic state and
+            // the most recent completed correlation remain byte-for-byte stable.
+            state
+        } else {
+            state.copy(
+                qwySemanticDigest = afterDigest ?: state.qwySemanticDigest,
+                lastCompletedQwyMutationId = if (changed && !uncertain) mutationId else null,
+            )
+        }
+        state = next
+        oracle.finishMutation(
+            token = token,
+            outcome = when {
+                uncertain -> AuthoritativeMutationOutcome.UNCERTAIN
+                changed -> AuthoritativeMutationOutcome.CHANGED
+                else -> AuthoritativeMutationOutcome.PROVED_NO_OP
+            },
+            state = next,
+        )
+    }
+
+    fun changed(
+        ownerUid: Int? = state.ownerUid,
+        ownerPackage: String? = state.ownerPackage,
+        gpsEnabled: Boolean = state.gpsProviderEnabled,
+        networkEnabled: Boolean = state.networkProviderEnabled,
+        semanticDigest: String? = state.qwySemanticDigest,
+        mutationId: String? = null,
+    ) {
+        val next = state.copy(
+            ownerUid = ownerUid,
+            ownerPackage = ownerPackage,
+            gpsProviderEnabled = gpsEnabled,
+            networkProviderEnabled = networkEnabled,
+            qwySemanticDigest = semanticDigest,
+            lastCompletedQwyMutationId = mutationId,
+        )
+        val token = oracle.beginMutation()
+        state = next
+        oracle.finishMutation(token, AuthoritativeMutationOutcome.CHANGED, next)
+    }
+}
+
+/** Pure endpoint adapter that drives the same oracle state machine as Binder. */
+class FakeQwySemanticMutationEndpoint(
+    private val source: FakeAuthoritativeOracleSource,
+) : QwySemanticMutationEndpoint {
+    private data class Active(
+        val mutationId: String,
+        val token: AuthoritativeMutationToken,
+    )
+
+    private var nextToken = 1L
+    private val active = linkedMapOf<Long, Active>()
+    var beginCount = 0
+        private set
+    var finishCount = 0
+        private set
+
+    override fun registerCurrentSession(
+        semanticDigest: String,
+        clientDeathToken: QwySemanticClientDeathToken,
+    ) {
+        check(clientDeathToken.isAlive())
+        source.registerSemanticSession(semanticDigest)
+    }
+
+    override fun beginMutation(
+        mutationId: String,
+        beforeDigest: String,
+        clientDeathToken: QwySemanticClientDeathToken,
+    ): Long {
+        check(clientDeathToken.isAlive())
+        check(source.currentState().qwySemanticDigest == beforeDigest)
+        val wireToken = nextToken++
+        active[wireToken] = Active(mutationId, source.oracle.beginMutation())
+        beginCount += 1
+        return wireToken
+    }
+
+    override fun finishMutation(
+        token: Long,
+        changed: Boolean,
+        uncertain: Boolean,
+        afterDigest: String?,
+    ) {
+        val mutation = checkNotNull(active.remove(token))
+        source.finishSemanticMutation(
+            token = mutation.token,
+            mutationId = mutation.mutationId,
+            changed = changed,
+            uncertain = uncertain,
+            afterDigest = afterDigest,
+        )
+        finishCount += 1
+    }
+}
+
 /**
  * Fake of qianwangyou's existing capabilities. Deterministic and steerable.
  *
@@ -172,6 +365,7 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     /** Strong by default so existing matrix happy paths model a complete oracle. */
     var continuityCapability: ContinuityEvidenceCapability =
         ContinuityEvidenceCapability.COMPLETE
+    var authoritativeSemanticMutations: Boolean = false
     /** Test hook for revision/effective-read linearization regressions. */
     var beforeObserveEffective: (() -> Unit)? = null
     /** Runs at the external apply boundary, before any fake environment mutation. */
@@ -447,6 +641,20 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
         continuityCapability
+
+    override fun authoritativeSemanticDigest(ownerGeneration: Long): String =
+        QwySemanticDigestV1.compute(
+            ownerGeneration = ownerGeneration,
+            activeMode = "always_on",
+            activeProfileRef = currentItemId,
+            schedule = scheduleSnapshot(),
+            effectiveLatitude = effectiveLatitude,
+            effectiveLongitude = effectiveLongitude,
+            projectionActive = effectiveLatitude != null && effectiveLongitude != null,
+        )
+
+    override fun authoritativeSemanticMutationEnabled(): Boolean =
+        authoritativeSemanticMutations
 
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
         relevantChangeListener = listener

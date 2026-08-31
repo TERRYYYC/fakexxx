@@ -9,6 +9,8 @@
 -keep class name.caiyao.fakegps.hook.FusedDeliveryPlan
 -keep class name.caiyao.fakegps.hook.FusedHookRegistry
 -keep class name.caiyao.fakegps.hook.FusedTaskTracker
+-keep class name.caiyao.fakegps.oracle.** { *; }
+-keep class name.caiyao.fakegps.hook.oracle.** { *; }
 
 # Xposed replaces this exact target-classloader method at runtime. Keeping the class and method is
 # required not just for its name: R8 must not inline the default `false` into the probe service.

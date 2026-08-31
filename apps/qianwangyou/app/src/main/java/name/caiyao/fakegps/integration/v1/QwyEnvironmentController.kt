@@ -12,7 +12,9 @@ import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.config.ConfigCodec
 import name.caiyao.fakegps.config.ConfigHolder
 import name.caiyao.fakegps.config.ConfigPrefsSync
+import name.caiyao.fakegps.config.PayloadRead
 import name.caiyao.fakegps.config.SpoofConfig
+import name.caiyao.fakegps.data.SpoofSettings
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
@@ -56,6 +58,9 @@ interface QwyEnvironment {
     fun achievableVerificationLevelWire(): Int
     /** Strength of the installed transition-history sources (§6.4). */
     fun continuityEvidenceCapability(): ContinuityEvidenceCapability
+    /** Canonical QWY semantic state; null means the authoritative lane is unavailable. */
+    fun authoritativeSemanticDigest(ownerGeneration: Long): String? = null
+    fun authoritativeSemanticMutationEnabled(): Boolean = false
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
 
     /**
@@ -414,6 +419,40 @@ class QwyEnvironmentController(
 
     override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
         relevantChangeMonitor.continuityEvidenceCapability()
+
+    override fun authoritativeSemanticDigest(ownerGeneration: Long): String? {
+        val schedule = scheduleStore.readScheduleState()
+        val applied = scheduleStore.getLastApplied()
+        val settings = SpoofSettings.getInstance(appContext)
+        val publishedConfigDigest = when (val published = ConfigPrefsSync.readPublished(appContext)) {
+            PayloadRead.Absent -> "absent"
+            is PayloadRead.Raw -> runCatching {
+                QwyPublishedConfigSemanticV1.digest(published.text)
+            }.getOrNull() ?: return null
+            is PayloadRead.ReadError -> return null
+        }
+        val modeSemantics = DurableFieldCodec.encode(
+            listOf(
+                settings.getRawMode(),
+                settings.getRawHourStart().toString(),
+                settings.getRawHourEnd().toString(),
+                settings.readLocationDeliveryMode().wireValue,
+            ),
+        )
+        return QwySemanticDigestV1.compute(
+            ownerGeneration = ownerGeneration,
+            activeMode = modeSemantics,
+            activeProfileRef = schedule?.currentItemId,
+            schedule = schedule,
+            effectiveLatitude = applied?.latitude,
+            effectiveLongitude = applied?.longitude,
+            projectionActive = applied?.transportPublished == true &&
+                mockRefreshSession?.isActive == true,
+            publishedConfigDigest = publishedConfigDigest,
+        )
+    }
+
+    override fun authoritativeSemanticMutationEnabled(): Boolean = true
 
     override fun cleanup(leaseId: String): CleanupOutcome {
         // P3-1 fix: report honestly whether removal actually happened.

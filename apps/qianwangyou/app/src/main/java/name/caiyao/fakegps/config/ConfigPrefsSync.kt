@@ -94,6 +94,20 @@ object ConfigPrefsSync {
         context: Context,
         profileId: Long? = null,
         clearIfMissing: Boolean = false,
+    ): Boolean = name.caiyao.fakegps.integration.v1.QwySemanticWriterRuntime.mutate(
+        "config-publish",
+    ) { authoritative ->
+        val published = syncLocal(context, profileId, clearIfMissing)
+        if (authoritative) {
+            check(published) { "authoritative config publication failed" }
+        }
+        published
+    }
+
+    private fun syncLocal(
+        context: Context,
+        profileId: Long?,
+        clearIfMissing: Boolean,
     ): Boolean {
         Log.w(TAG, "sync() ENTER")
         return synchronized(PUBLISH_LOCK) {

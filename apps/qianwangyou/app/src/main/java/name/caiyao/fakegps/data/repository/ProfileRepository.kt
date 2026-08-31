@@ -8,6 +8,7 @@ import name.caiyao.fakegps.data.db.AppDatabase
 import name.caiyao.fakegps.data.db.ProfileEntity
 import name.caiyao.fakegps.data.db.ProfileSummary
 import kotlinx.coroutines.flow.Flow
+import name.caiyao.fakegps.integration.v1.QwySemanticWriterRuntime
 
 class ProfileRepository(
     private val db: AppDatabase,
@@ -29,7 +30,14 @@ class ProfileRepository(
 
     suspend fun getById(id: Long): ProfileEntity? = dao.getById(id)
 
-    suspend fun save(profile: ProfileEntity): SaveResult {
+    suspend fun save(profile: ProfileEntity): SaveResult =
+        QwySemanticWriterRuntime.mutateSuspend("profile-save") { authoritative ->
+            saveLocal(profile).also { result ->
+                requireAuthoritativePublication(authoritative, result.published)
+            }
+        }
+
+    private suspend fun saveLocal(profile: ProfileEntity): SaveResult {
         val id = if (profile.id == 0L) {
             dao.insert(profile)
         } else {
@@ -39,15 +47,21 @@ class ProfileRepository(
         return SaveResult(id, republish(profileId = id))
     }
 
-    suspend fun deleteById(id: Long) {
-        dao.deleteById(id)
-        republish(clearIfMissing = true)
-    }
+    suspend fun deleteById(id: Long) =
+        QwySemanticWriterRuntime.mutateSuspend("profile-delete") { authoritative ->
+            dao.deleteById(id)
+            val published = republish(clearIfMissing = true)
+            requireAuthoritativePublication(authoritative, published)
+            Unit
+        }
 
-    suspend fun deleteAll() {
-        dao.deleteAll()
-        republish(clearIfMissing = true)
-    }
+    suspend fun deleteAll() =
+        QwySemanticWriterRuntime.mutateSuspend("profile-delete-all") { authoritative ->
+            dao.deleteAll()
+            val published = republish(clearIfMissing = true)
+            requireAuthoritativePublication(authoritative, published)
+            Unit
+        }
 
     /**
      * Adds a confirmed archive batch atomically without changing the published hook snapshot.
@@ -88,5 +102,16 @@ class ProfileRepository(
             Log.e("ProfileRepository", "config republish returned false")
         }
         return published
+    }
+
+    /** A selected lane cannot treat an absent or failed hook publication as a known outcome. */
+    private fun requireAuthoritativePublication(authoritative: Boolean, published: Boolean) {
+        if (!authoritative) return
+        check(publishOverride != null || context != null) {
+            "authoritative profile publisher is unavailable"
+        }
+        check(published) {
+            "authoritative profile publication failed"
+        }
     }
 }

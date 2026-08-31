@@ -51,6 +51,9 @@
         <meta-data
             android:name="xposedsharedprefs"
             android:value="true" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
 
         <activity
             android:name=".ui.ComposeActivity"
@@ -127,6 +130,15 @@
         -->
         <service
             android:name=".integration.v1.EnvironmentControlService"
+            android:exported="true" />
+
+        <!--
+            Private system_server oracle registrar. It intentionally has no intent filter and
+            stays in the main process. Export is required for the explicit cross-uid bind, while
+            every registrar transaction independently requires Binder caller UID 1000.
+        -->
+        <service
+            android:name=".oracle.OracleBridgeService"
             android:exported="true" />
 
     </application>

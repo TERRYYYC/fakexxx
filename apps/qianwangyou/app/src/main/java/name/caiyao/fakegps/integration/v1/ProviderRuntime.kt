@@ -166,6 +166,9 @@ object ProviderRuntime {
     @Volatile
     private var kvRef: DurableKv? = null
 
+    @Volatile
+    private var semanticWriterInstallation: AutoCloseable? = null
+
     private val bootLock = Any()
 
     fun handler(context: Context): EnvironmentControlHandler {
@@ -185,6 +188,14 @@ object ProviderRuntime {
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
             environment = QwyEnvironmentController(appContext),
+            authoritativeSource = BinderAuthoritativeContinuitySource(),
+            expectedOracleOwnerPackage = appContext.packageName,
+            expectedOracleOwnerUid = appContext.applicationInfo.uid,
+            semanticCoordinator = QwySemanticMutationCoordinator(
+                endpointProvider = BinderQwySemanticMutationEndpointProvider(),
+                clientDeathTokenFactory = BinderQwySemanticClientDeathTokenFactory,
+            ),
+            installSemanticWriters = true,
         )
         // Publish the writer handle only after the whole owner graph has
         // started successfully. A failed composition must not be discoverable
@@ -212,6 +223,11 @@ object ProviderRuntime {
         clock: MonotonicClock,
         resolver: PackageIdentityResolver,
         environment: QwyEnvironment,
+        authoritativeSource: AuthoritativeContinuitySource = AuthoritativeContinuitySource { null },
+        expectedOracleOwnerPackage: String = "",
+        expectedOracleOwnerUid: Int = -1,
+        semanticCoordinator: QwySemanticMutationCoordinator? = null,
+        installSemanticWriters: Boolean = false,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -224,6 +240,9 @@ object ProviderRuntime {
             environment,
             clock,
             VerifiedObservationWatermarkStore(kv),
+            authoritativeSource,
+            expectedOracleOwnerPackage,
+            expectedOracleOwnerUid,
         )
 
         val handler = EnvironmentControlHandler(
@@ -237,6 +256,10 @@ object ProviderRuntime {
             environment = environment,
             clock = clock,
             storage = kv,
+            authoritativeSource = authoritativeSource,
+            expectedOracleOwnerPackage = expectedOracleOwnerPackage,
+            expectedOracleOwnerUid = expectedOracleOwnerUid,
+            semanticCoordinator = semanticCoordinator,
         )
 
         // A provider process that starts without proof of a clean shutdown must
@@ -251,9 +274,47 @@ object ProviderRuntime {
         // replace the handler's own listener with an identical-looking one —
         // two registrations racing to be the survivor. Composition's job is to
         // call onOwnerProcessStart, not to re-do what it does.
+        var installedWriterLane: AutoCloseable? = null
         try {
             handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
+            if (installSemanticWriters && semanticCoordinator != null &&
+                environment.authoritativeSemanticMutationEnabled()
+            ) {
+                val digest = environment.authoritativeSemanticDigest(tracker.generation)
+                val snapshot = runCatching(authoritativeSource::snapshot).getOrNull()
+                val ready = digest != null && snapshot != null &&
+                    semanticCoordinator.isReadyFor(digest) &&
+                    snapshot.isStableCompleteFor(
+                        expectedOracleOwnerPackage,
+                        expectedOracleOwnerUid,
+                    ) &&
+                    snapshot.qwySemanticDigest == digest &&
+                    tracker.isAuthoritativeCursorAcknowledged(snapshot)
+                if (ready) {
+                    installedWriterLane = QwySemanticWriterRuntime.install(
+                        coordinator = semanticCoordinator,
+                        semanticDigestProvider = QwySemanticDigestProvider {
+                            environment.authoritativeSemanticDigest(tracker.generation)
+                        },
+                        sessionHealth = QwySemanticSessionHealth { expectedDigest ->
+                            runCatching(authoritativeSource::snapshot).getOrNull()
+                                ?.takeIf {
+                                    it.isStableCompleteFor(
+                                        expectedOracleOwnerPackage,
+                                        expectedOracleOwnerUid,
+                                    )
+                                }
+                                ?.qwySemanticDigest == expectedDigest
+                        },
+                    )
+                    semanticWriterInstallation = installedWriterLane
+                }
+            }
         } catch (startupFailure: Throwable) {
+            runCatching { installedWriterLane?.close() }
+            if (semanticWriterInstallation === installedWriterLane) {
+                semanticWriterInstallation = null
+            }
             // Startup may already have bound AppOps and started the framework
             // refresh loop while converging a pending advance. The handler is
             // not cacheable when this call throws, so explicitly retire that

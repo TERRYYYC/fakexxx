@@ -22,6 +22,9 @@ class EnvironmentObserver internal constructor(
     private val environment: QwyEnvironment,
     private val clock: MonotonicClock,
     private val watermarks: VerifiedObservationWatermarkStore,
+    private val authoritativeSource: AuthoritativeContinuitySource,
+    private val expectedOracleOwnerPackage: String,
+    private val expectedOracleOwnerUid: Int,
 ) {
     /**
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
@@ -36,12 +39,26 @@ class EnvironmentObserver internal constructor(
             )
         }
 
+        // FULL is derived only from one synchronous authoritative
+        // PRE/raw-read/POST interval. A missing or throwing Binder endpoint is
+        // represented as a null endpoint and reconciles fail-closed to NONE.
+        // Refresh ticks remain outside the journal: only a real mutation can
+        // advance its sequence, so reading fresh framework evidence alone does
+        // not manufacture a revision bump.
+        val windowStartElapsedRealtimeMs = clock.elapsedRealtimeMs()
+        val pre = runCatching(authoritativeSource::snapshot).getOrNull()
         val effective = environment.observeEffective()
         val schedule = environment.scheduleSnapshot()
-        // Read the revision AFTER the effective-state adapter has reconciled
-        // any synchronously delivered relevant change. Handler callbacks share
-        // the owner fence, so the tuple now has one linearization point.
-        val snap = tracker.snapshot()
+        val post = runCatching(authoritativeSource::snapshot).getOrNull()
+        val snap = tracker.reconcileAuthoritativeWindow(
+            window = AuthoritativeObservationWindow(
+                pre = pre,
+                post = post,
+                windowStartElapsedRealtimeMs = windowStartElapsedRealtimeMs,
+            ),
+            expectedOwnerPackage = expectedOracleOwnerPackage,
+            expectedOwnerUid = expectedOracleOwnerUid,
+        )
         val sourceTimes = effective.verifiedSourceElapsedRealtimeMs
         val conservativeEvidenceTime = sourceTimes
             .takeIf { it.keys == SystemMockTrustPolicy.REQUIRED_FRAMEWORK_SOURCES }
