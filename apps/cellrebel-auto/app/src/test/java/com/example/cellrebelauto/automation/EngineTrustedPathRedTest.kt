@@ -454,6 +454,8 @@ class EngineTrustedPathRedTest {
                 ApplicationProvider.getApplicationContext(),
                 db,
                 providerSignerDigest = { trustedSigner },
+                providerApplicationId =
+                    io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
                 attemptValidityTimeoutMs = 90_000L,
                 serviceLifecycleExecutor = journeyExecutor
             ),
@@ -573,6 +575,8 @@ class EngineTrustedPathRedTest {
             ApplicationProvider.getApplicationContext(),
             db,
             providerSignerDigest = { trustedSigner },
+            providerApplicationId =
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
             attemptValidityTimeoutMs = 90_000L,
             serviceLifecycleExecutor = journeyExecutor
         )

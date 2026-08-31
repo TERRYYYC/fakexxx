@@ -64,6 +64,57 @@ class SystemMockTrustPolicyTest {
         assertFalse("readback exceptions fail closed", throwing.verified)
     }
 
+    @Test
+    fun `verified evidence time is the conservative required source minimum`() {
+        val result = policy(
+            listOf(
+                readback("gps", targetLatitude, targetLongitude, true, publishAnchorMs + 200L),
+                readback("network", targetLatitude, targetLongitude, true, publishAnchorMs + 100L),
+            ),
+        ).evaluateTarget()
+
+        assertTrue(result.verified)
+        assertEquals(publishAnchorMs + 100L, result.evidenceObservedAtElapsedRealtimeMs)
+        assertEquals(
+            mapOf(
+                "gps" to publishAnchorMs + 200L,
+                "network" to publishAnchorMs + 100L,
+            ),
+            result.verifiedSourceElapsedRealtimeMs,
+        )
+    }
+
+    @Test
+    fun `disabled required provider fails closed even when its cache entry looks valid`() {
+        val readbacks = frameworkReadbacks(
+            latitude = targetLatitude,
+            longitude = targetLongitude,
+            observedAtMs = publishAnchorMs,
+        ).map { sample ->
+            if (sample.source == "network") sample.copy(providerEnabled = false) else sample
+        }
+
+        assertFalse(policy(readbacks).evaluateTarget().verified)
+    }
+
+    @Test
+    fun `new samples in the same environment retain one time independent fingerprint`() {
+        val first = policy(
+            frameworkReadbacks(targetLatitude, targetLongitude, publishAnchorMs),
+        ).evaluateTarget()
+        val later = policy(
+            frameworkReadbacks(targetLatitude, targetLongitude, publishAnchorMs + 14_000L),
+        ).evaluateTarget()
+
+        assertTrue(first.verified)
+        assertTrue(later.verified)
+        assertEquals(first.fingerprint, later.fingerprint)
+        assertFalse(
+            "sample time is a watermark, not environment identity",
+            first.verifiedSourceElapsedRealtimeMs == later.verifiedSourceElapsedRealtimeMs,
+        )
+    }
+
     private fun policy(readbacks: List<SystemMockLocationReadback>) =
         SystemMockTrustPolicy(SystemMockLocationReader { readbacks })
 

@@ -163,6 +163,20 @@ enum class RevisionBumpReason {
     OBSERVER_GAP,
 }
 
+/**
+ * Whether the installed relevant-change sources can prove an uninterrupted
+ * observation window rather than only report changes eventually.
+ *
+ * Endpoint verification and continuity are deliberately orthogonal: a fresh
+ * framework readback may be independently verified while an asynchronous
+ * watcher still cannot prove that the owner/provider never left and returned.
+ */
+enum class ContinuityEvidenceCapability {
+    COMPLETE,
+    INCOMPLETE,
+    UNAVAILABLE,
+}
+
 /** Continuity snapshot produced by the revision owner (§6.6, INV-25). */
 data class RevisionSnapshot(
     val revision: Long,

@@ -10,6 +10,7 @@ doc_kind: bug_report
 created: 2026-08-31
 status: fixed_pending_exact_head
 github_issue: 64
+continuity_blocker_issue: 66
 ---
 
 # KB-8 Auto coordinate trust drift
@@ -25,7 +26,7 @@ github_issue: 64
 | 超时策略 | 若移除旧 owner 腿后出现第三个以上独立架构缺口，停止继续补丁，回到 #1 / canonical spec 做边界重审。 |
 | 预警策略 | 保留 pre/post 对称的 null、NaN、Infinity、越界坐标负例；同时以源码扫描确保 `CompletionTrustContext` 不再出现 `targetLat` / `targetLng` / caller tolerance。 |
 | 用户可见交互修正 | 不改布局。运行页原先会停在 `UNTRUSTED` / paused；修复后，只有 provider 已按 canonical contract 给出完整可信证据时才允许继续计数。 |
-| 验收 | RED 以预期的旧距离判定失败；GREEN 后目标测试与完整 Auto unit suite 通过；lint/assemble 与除“工作树尚未提交”外的 A+ gate 通过；模拟器 smoke 独立验证双 App 可安装启动。本修复不冒充真机 G2 PASS。 |
+| 验收 | RED 以预期的旧距离判定失败；GREEN 后目标测试与完整 Auto/QWY/acceptance suite 通过；lint/assemble 与除“工作树尚未提交”外的 A+ gate 通过。新 exact HEAD 仍需重跑 CI、独立审查与模拟器双 App 冷启动；本修复不冒充真机 G2 PASS。 |
 
 ## Bug report 五件套
 
@@ -90,6 +91,14 @@ KB-8 的单一所有权迁移只传播到了跨进程 contract、digest 与 cano
 
 第七轮 exact-SHA 正式审查在 `f9b08db` 上再次以 `REQUEST_CHANGES` 证明：此前全绿仍未覆盖真实 Start 点击时序、QWY production `evidenceRefs`、QWY 对实际系统位置的 1 m 验证、attempt owner lease 绑定、缺 carrier 的重启稳定性、同 lease 多 release receipt 歧义、事务 0-row 更新、legacy typed failure 与 append-only carrier 冲突、release audit 伪造 `CLOSED`、durable PRE raw replay 旁路，以及 advance outcome/target 矛盾。修复后的 dirty-tree 预审又抓到同 identity 的并发 release winner 可用 `FAILED` outcome 冒充当前 live `RELEASED`；该路径同样已用 deterministic race oracle 先红后绿关闭。
 
+第八轮 exact-SHA 正式审查在 `9eb6389` 上继续以 `REQUEST_CHANGES` 找到两条 provider-side 可信度缺口：QWY 只调用 `getLastKnownLocation()`，同一 GPS/network 缓存会在 PRE/POST 被重复读取，却由 `EnvironmentObserver` 重新标成 handler 当前时间并获得新的 audit ref；同时 production `changeListener` 没有 AppOps owner 事件源。这样执行窗口内 owner/provider 失效仍可能保持相同 revision/fingerprint 并错误铸造可信配额。黑盒 FakeQwy 还会在 2 m/null partial apply 时无条件签发 VERIFIED apply receipt，与生产 fail-closed 契约不一致。
+
+第九轮 dirty-tree fresh-context 审阅进一步证明：公开 Android AppOps callback、provider broadcast 与 current-state query 都没有历史序号或同步 drain barrier，owner/provider 即使在执行窗口内被切走再恢复，POST 也可能先读到恢复后的端点、稍后才收到旧 callback；因此 public-API production 不能声明 `FULL` continuity。另一个独立 production 调用链审计确认，advance receipt 在 `SCHEDULE_BOUNDARY` bump 前捕获旧 revision，而 post-advance observation 必然读取新 revision；同时 release 已停止 refresher、移除 test provider 并清掉 apply anchor，旧 `advancePointer()` 却只移动 schedule metadata，没有重建下一 item 的真实系统投影。两者都属于无竞态即可复现的 P1。
+
+第十轮 dirty-tree fresh-context 审阅把问题继续推进到进程与持久化边界：apply 的 `ACQUIRING` 写入仍停在 `DurableKv.transaction` 的内存 buffer 时就调用外部系统，finalize 失败可留下已改变的 OS 环境却没有 committed owner；non-terminal advance 后 refresher 仍 active，下一次 apply 会重复 `start()` 并确定性失败，而进程重建后 session 又无法从 durable projection 恢复；`QwyScheduleStore` 忽略 `SharedPreferences.commit()` 的 false，甚至可能在 mutation 被丢弃后清 pending；`EnvironmentControlService.onDestroy()` 还会把普通组件销毁误写成 owner 干净退出。apply 修复的独立子审又证明，失败调用从未返回 server-generated leaseId，旧测试却偷读内部 lease 后 release；同键异 payload 在该 lease 被释放后还可丢失永久绑定，双重持久化故障会留下 public API 无法恢复的 `ACQUIRING`，且 mutation-then-throw 没有 durable typed reason。release 的外部 cleanup 也存在同一 buffered-state 根因，进程若死在 cleanup 后/receipt 前会启动恢复成 `RELEASED`，但调用方永远拿不到可重放 receipt。
+
+第十一轮 dirty-tree exact-head 预审继续找到跨组件边界的阻断：QWY owner startup 在 pending convergence 失败时会遗留 AppOps watcher、refresh loop 与 executor，下一次 Binder 调用会再造一套 process owner；Auto debug APK 又固定绑定 production QWY package，导致本仓 `.bench` provider 永远不可达。修复后的 iterative re-review 进一步证明，caller revoke 的 pairing/lease/audit 不是同一事务且只按 package 撤销、provider cleanup 的 live/startup terminal revision 与 audit 可分裂、provider cleanup 后的 public release 会误继承恢复归属、重新 apply 会残留 provider provenance，且恢复 admission 若把 deadline 从 wall clock 重桥接会延长原有租约。上述路径均以事务故障、同包双 signer、进程死亡和 wall-clock 回拨的回归先红后绿；Auto 运行页的 active package 判定也改为与实际 bind target 共用同一选择器。
+
 ### 4. 修复方案
 
 - 新增失败回归测试，冻结“Auto 不做距离比较”的行为。
@@ -124,8 +133,24 @@ KB-8 的单一所有权迁移只传播到了跨进程 contract、digest 与 cano
 - `recordTrustedCompletion()` 在 mint 前把 receipt/PRE/POST lease 与 `TestAttempt.aplusLeaseId` 绑定；apply/release 的 race loser 只接受 durable winner 的完整 proof tuple。同 lease 多行、同 identity 但 outcome 不同均无有效 release proof。
 - carrier missing/conflict reason 变为 sticky；所有 PRE/DECIDING/terminal 更新使用 expected-state CAS 或单 SQL 原子 close，并要求更新行数恰为 1；release audit 只声明真实的 `RELEASE_PENDING → RELEASED`。
 - QWY production 不再回放 `lastApplied` desired coordinate：通过 `LocationManager` 读取 GPS/network 两路实际系统位置，要求两路新鲜、mock、结构有效，并分别对 QWY-owned current schedule target 执行 Haversine `<= 1.0 m`。apply/observe 坐标只投影该 readback；desired record 仅保留审计与 freshness anchor。
+- QWY observation 的 wire 时间改为 required GPS/network 样本中更早的真实 `elapsedRealtimeNanos`，禁止 handler 当前时钟“洗新”；每 lease、每 source 的 durable watermark 要求下一次 VERIFIED observation 严格推进，同一缓存样本在 POST 必须降为 NONE。环境 fingerprint 不含样本时间，合法的新样本仍保持同一环境身份。
+- provider-enabled 与当前 mock-location AppOps owner 都成为 apply/preflight/observe 的可信前置条件。production 以 own-package AppOps watcher 把 owner 变化映射为 `PERMISSION_OR_OWNER_CHANGED` revision bump；监听注册失败、当前 owner 非本 App 或状态查询异常均 fail-closed。
+- FakeQwy 的 apply/observe 共用实际坐标解析和冻结的 1 m Haversine 判定；2 m、1.01 m 与 null partial apply 的 receipt 均返回 NONE，不再只在后续 observe 才降级。
+- endpoint verification 与 transition-history capability 拆成正交证明：当前公开 AppOps source 即使监听成功也至多 `INCOMPLETE → PARTIAL`，注册/查询失败为 `UNAVAILABLE → NONE`；只有未来具备权威序号与读窗 fence 的 oracle 才可返回 `COMPLETE → FULL`。降级时清除旧 continuity window，避免把端点恢复误写成全程连续。
+- active lease 由单一 `FrameworkMockRefreshSession` 每秒重发 GPS/network 样本，PRE/POST 的 `refreshNow()` 还会同步生成新样本；publish/schedule/remove 失败会停止 session、清理 provider 并通过 typed relevant-change route bump revision。该 heartbeat 只解决 raw sample freshness，明确不得升级 continuity coverage。
+- `EnvironmentObserver` 先完成 effective read/reconcile，再在 handler owner fence 内读取 revision snapshot；已经送达的 callback 因而不能落在 effective tuple 与 revision 之间。公开异步 source 仍保持 PARTIAL/NONE，不因这个线性化点冒充 FULL。
+- advance 改为使用 schedule-boundary bump 后的真实 revision 写 receipt；release 后的 committed advance 必须幂等收敛 schedule pointer 与下一 item 的 framework projection，pointer 已前移的 crash recovery 仍重建/验证 projection，全部成功后才清 pending marker，且不重复增加 schedule version。
 - `EnvironmentControlHandler.observe()` 在返回前先追加 durable observe audit，并投影可在 QWY 侧解析的 `qwy:integration.v1.audit:<seq>`；audit 写失败时 observe fail-closed。
 - advance receipt 严格解码 typed outcome：`ADVANCED` 必须有 target，`EXHAUSTED` 必须无 target，未知 wire 或双向矛盾均停止推进。
+- apply 改为三阶段 durable protocol：先原子提交 append-only caller/key/digest admission 与 `ACQUIRING` owner，再执行外部环境变更，最后原子提交 `ACTIVE`、revision/coverage、receipt 与 audit。同 principal/key/digest 的公开重试复用原 leaseId；异 payload 即使 owner 已释放也永久 wire-12，外部部分变更或 finalize/marker 双故障都保留 typed、可滚前 owner。
+- release 同样先提交 exact `RELEASING + releaseKey`，再在 transaction 外 cleanup，最后把 terminal lease、revision、receipt 与 audit 一次提交；cleanup/finalize 失败保留 `RELEASE_INCOMPLETE`，连该恢复写也失败则保留 `RELEASING`。owner 重启可重做 cleanup，但在 caller receipt 尚未完成时不得伪造不可重放的 `RELEASED`。
+- schedule pointer、projection anchor 与 clear 全部检查同步 commit 返回值并逐字段读回；commit=false 或“声称成功但漏 mutation”均 fail loud、pending 不清。durable `(itemId, scheduleVersion, purpose)` 区分 lease projection 与 post-advance reconstruction，下一 lease 会退休旧 marker。
+- refresher 增加单 loop 的 `startOrReconfigure()`：release→advance→observe→next apply 只切换 config、不创建第二个 scheduler；进程本地 session 丢失时，observe 仅可按 exact durable POST_ADVANCE tuple 懒重建，schedule generation 漂移则拒绝。
+- Service 生命周期边界只会 invalidate clean-shutdown evidence，绝不 mint；旧版本由 `onDestroy()` 写下的 legacy marker 在新 schema 中被忽略并清除。clean=true 保留给未来显式证明 owner 与 refresher 都已 quiescent 的协议。
+- owner startup 组装失败会按逆序关闭 change monitor、AppOps listener、refresh session 与 executor；runtime 只在完整 compose 成功后发布 process owner，防止后续 Binder 重试叠加 watcher、publisher 或多 writer。
+- Auto 的 debug/release provider package 由单一 `ProviderPackageTarget` 决定：debug 绑定并校验 `.bench`，release 绑定 production；Binder ComponentName、signer gate 与运行页 active 状态使用同一目标。
+- caller revoke 将 pairing、按 `(applicationId, signerDigest)` 精确匹配的 lease transition 与 audit 放进同一 transaction；provider cleanup 的 external attempt 与 terminal finalize 分离，live/startup 都以 terminal、revision 与 audit 的同一原子 phase3 收敛。
+- public release phase1 明确清除 provider recovery provenance；same-key apply resume 只清理旧 release/revoke 归属，保留原 monotonic deadline 与 admission generation，绝不从可回拨 wall clock 重桥接租约时限。
 
 provider 侧只补齐其本来独占的位置腿与证据出处；Auto 仍不做距离比较，也未放宽其他 §6.4 谓词或修改 wire contract。
 
@@ -145,9 +170,13 @@ provider 侧只补齐其本来独占的位置腿与证据出处；Auto 仍不做
 - RED（第五轮审阅闭环）：两条 `RELEASED` two-restart 用例分别复现第二次启动补造 receipt 与追加两条假 audit；两条完整 `DECIDING` carrier-conflict 用例均停在错误的 `DECIDING`；repository 旁路用例在无 POST/receipt 时实际返回 PASS 并错误 mint。
 - RED（第六轮正式审查闭环）：第一批新增 12 条——`ADVANCE_*` missing/conflicting exact receipt 6 red、`RELEASED` 后 failure close 崩溃 1 red、重复 release provenance/post-release synthetic history 2 red、durable PRE/missing owner/wrong phase 3 red。第一次 iterative re-review 再新增 8 条并全部复现：pre-`RELEASE_PENDING` normal/recovery split 与 `DECIDING` anchor 双重启 3 red，三 phase missing carrier、wrong-task 与 release checkpoint 0-row rollback 5 red。第二次 iterative re-review新增三 phase双 carrier与三 phase missing scheduleRef 共 6 red。
 - RED（第七轮正式审查闭环）：真实 shared-clock Start 顺序、owner lease split-brain、carrier sticky、事务 0-row、raw PRE、typed advance 与 release 歧义均先以独立 oracle 复现；QWY policy 在实现前 3/3 red，覆盖 0.99/1.01 m、20 m actual mismatch、缺/旧/非 mock/异常读回，acceptance 的 2 m 偏差也杀死旧 11 m 近似；最后一条 release outcome race 在 live `RELEASED`、durable `FAILED` 的确定性窗口先红。
-- GREEN：完整 Auto app unit suite 516/516、QWY app unit suite 749/749、acceptance suite 31/31。正常执行与崩溃恢复仍以 provider-owned coordinate 完成可信 mint；production Start 时序、OS readback、evidence refs、NaN/signed-zero、immutable replay、decision carrier、release-first、并发 winner 与两次重启矩阵均通过。
+- RED（第八轮正式审查闭环）：QWY raw evidence time/provider-enabled/durable watermark/AppOps watcher seam 缺失先在 targeted lane 编译失败；FakeQwy 的 2 m、1.01 m 与 null partial apply 三项均实际错误返回 VERIFIED。追加 current-owner gate 后，监听已注册但 AppOps 非当前 owner 的用例也先红。
+- RED（第九轮 fresh-context 闭环）：continuity capability、observer-gap coverage 与 effective-read fence 在实现前先以缺失 API 编译失败；owner away→restore、provider disable→enable 两条 acceptance 证明恢复后的 VERIFIED endpoint 仍不可计入 trusted quota。旧 advance 路径的无竞态实测为 receipt revision `3`、紧随其后的 observation revision `4`；pointer 已到 `item-2` 但 projection crash 后重启的 retry count 为 `0`，两项均先红。
+- RED（第十轮 fresh-context 闭环）：apply/release 的 committed-owner external boundary、public same-key recovery、永久 admission key、mutation-then-throw typed reason、双重 marker 故障、cleanup 后进程死亡、commit=false/readback-drop、refresher handoff/rebuild 与 legacy clean marker 共新增/改写的回归均在旧实现上变红；仅 `ApplyReleaseProviderRedTest` 首轮即为 19 项中的 8 项失败，修复后全绿。
+- RED（第十一轮 exact-head 预审闭环）：startup compose 失败资源回收、debug `.bench` ComponentName、撤销事务回滚/同包双 signer、live/startup provider cleanup 原子 finalize、public release 恢复归属、apply resume provenance 与 wall-clock 回拨 deadline、运行页 debug target 共新增的回归均先杀死旧实现再转绿。
+- GREEN：完整 Auto app unit suite 518/518、QWY app unit suite 816/816、acceptance suite 34/34，失败与跳过均为 0。具备强 continuity oracle 的 fake 正常/崩溃路径仍以 provider-owned coordinate 完成可信 mint；production Start 时序、OS readback、raw sample freshness、provider/owner status、evidence refs、NaN/signed-zero、immutable replay、decision carrier、release-first、并发 winner、durable apply/release、advance projection convergence、refresher 交接/重建与两次重启矩阵均通过。当前 public-API production 会安全停在 PARTIAL/NONE、不铸造 trusted quota；恢复 FULL 的产品缺口已单列为 GitHub #66，并保持 release-blocking/open。
 - 构建：双 App debug/release assemble 通过；Auto lint 为 0，QWY 的 23 条继承 lint 债务未增长；debug-only collector purity、repo signer、contract 与 release-debt guards 继续通过。
-- 复审：历史冻结 diff 曾取得非作者 `APPROVE`，但后续 exact SHA `f9b08db` 的正式审查正确返回 `REQUEST_CHANGES`；当前所有 11 项与追加的 release outcome race 已由 dirty-tree fresh-context 复核为 `CLEAN`。最终新 exact HEAD 仍必须重新取得独立正式结论，不能复用旧 verdict。
+- 复审：历史冻结 diff 曾取得非作者 `APPROVE`，但 exact SHA `f9b08db` 与 `9eb6389` 的正式审查均正确返回 `REQUEST_CHANGES`；前者 11 项与 release outcome race、后者 raw-cache/AppOps/fake-parity 缺口均已进入 Red→Green 闭环。最终新 exact HEAD 仍必须重新取得独立正式结论，不能复用旧 verdict。
 - 静态边界：Auto main/test 源码已无 `targetLat`、`targetLng`、caller tolerance、haversine 或旧冻结距离常量。
 - 全仓：文档落盘后的最终 dirty-tree 预跑 `verify-a-plus --stage full` 为 10/11；唯一失败是 provenance 正确拒绝“工作树尚未提交”，其余双 App 单测/构建、contract、acceptance、边界与 release-debt 均通过。提交后必须在 clean exact HEAD 取得 11/11。
 - 模拟器：上一候选 exact debug APK 已在 API 35 ARM64 隔离模拟器完成设备端字节校验与冷启动；本轮审阅修复改变了双 App APK 输入，因此最终 SHA/启动证据必须在新 clean HEAD 重跑后取代旧值。已连接的 Moto 真机未被触碰。模拟器未配置无障碍、LSPosed 与 System Mock，因此 smoke 不替代真机 G2。

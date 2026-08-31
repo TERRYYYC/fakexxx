@@ -13,6 +13,7 @@ internal data class SystemMockLocationReadback(
     val longitude: Double,
     val isMock: Boolean,
     val observedAtElapsedRealtimeMs: Long,
+    val providerEnabled: Boolean = true,
 )
 
 /** Injectable read side kept separate from the mock-provider command gateway. */
@@ -26,6 +27,10 @@ internal data class SystemMockTrustResult(
     val isMock: Boolean?,
     val verified: Boolean,
     val fingerprint: String,
+    /** Oldest required-source sample: the conservative wire observation time. */
+    val evidenceObservedAtElapsedRealtimeMs: Long?,
+    /** Per-source sample identity used by the durable lease watermark. */
+    val verifiedSourceElapsedRealtimeMs: Map<String, Long>,
 )
 
 /** Provider-side coordinate trust decision for KB-8 / INV-23. */
@@ -39,14 +44,11 @@ internal class SystemMockTrustPolicy(
         publishNotBeforeElapsedRealtimeMs: Long,
     ): SystemMockTrustResult {
         val readbacks = runCatching(reader::read).getOrElse { emptyList() }
-        val representative = readbacks.maxWithOrNull(
-            compareBy<SystemMockLocationReadback> { it.observedAtElapsedRealtimeMs }
-                .thenBy { it.source },
-        )
         val fingerprint = readbacks
             .sortedBy { it.source }
             .joinToString(separator = "|") { sample ->
-                "${sample.source}:${sample.latitude.toBits()}:${sample.longitude.toBits()}:${sample.isMock}"
+                "${sample.source}:${sample.latitude.toBits()}:${sample.longitude.toBits()}:" +
+                    "${sample.isMock}:${sample.providerEnabled}"
             }
             .ifEmpty { "unavailable" }
             .let { "system-mock:$it" }
@@ -55,9 +57,16 @@ internal class SystemMockTrustPolicy(
             readbacks.filter { it.source == source }.singleOrNull()
         }
         val hasEveryRequiredSource = selected.size == requiredSources.size
+        val representative = selected.maxWithOrNull(
+            compareBy<SystemMockLocationReadback> { it.observedAtElapsedRealtimeMs }
+                .thenBy { it.source },
+        )
+        val evidenceObservedAtElapsedRealtimeMs = selected
+            .takeIf { hasEveryRequiredSource }
+            ?.minOfOrNull { it.observedAtElapsedRealtimeMs }
         val targetIsValid = validCoordinates(targetLatitude, targetLongitude)
         val everySourceVerified = hasEveryRequiredSource && selected.all { sample ->
-            sample.isMock &&
+            sample.providerEnabled && sample.isMock &&
                 sample.observedAtElapsedRealtimeMs >= publishNotBeforeElapsedRealtimeMs &&
                 validCoordinates(sample.latitude, sample.longitude) &&
                 HaversineDistance.meters(
@@ -67,14 +76,21 @@ internal class SystemMockTrustPolicy(
                     sample.longitude,
                 ) <= ContractV1.TRUSTED_LOCATION_TOLERANCE_METERS
         }
+        val verified = publishNotBeforeElapsedRealtimeMs > 0L &&
+            targetIsValid && everySourceVerified
 
         return SystemMockTrustResult(
             latitude = representative?.latitude,
             longitude = representative?.longitude,
-            isMock = readbacks.takeIf { it.isNotEmpty() }?.all { it.isMock },
-            verified = publishNotBeforeElapsedRealtimeMs > 0L &&
-                targetIsValid && everySourceVerified,
+            isMock = selected.takeIf { hasEveryRequiredSource }?.all { it.isMock },
+            verified = verified,
             fingerprint = fingerprint,
+            evidenceObservedAtElapsedRealtimeMs = evidenceObservedAtElapsedRealtimeMs,
+            verifiedSourceElapsedRealtimeMs = if (verified) {
+                selected.associate { it.source to it.observedAtElapsedRealtimeMs }
+            } else {
+                emptyMap()
+            },
         )
     }
 

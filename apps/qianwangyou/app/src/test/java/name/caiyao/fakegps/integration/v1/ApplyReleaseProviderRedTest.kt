@@ -13,6 +13,7 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHE
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -42,11 +43,11 @@ import org.junit.Test
  *  - §10 M-CR-01/02 expected terminals (Auto-side rows): "同键 apply，最多一个
  *    lease" / "同键返回原 receipt" — the provider-side halves below pin the
  *    same device truths from the owner's side.
- *  - INV-28: ANY non-RELEASED lease blocks a new apply, sole exception the
- *    same-caller same-key replay. A torn apply (lease committed, receipt not)
- *    would leave the device permanently wedged: the replay finds no receipt,
- *    re-executes, and collides with its own half-write — so lease + receipt
- *    must commit as one durable fact, exactly like §6.7.5's pointer+receipt.
+ *  - INV-28: ANY non-RELEASED lease blocks a new apply. Apply admission is a
+ *    deliberate ACQUIRING commit before the external mutation; success then
+ *    atomically commits ACTIVE + receipt. A failure after admission preserves
+ *    that exact owner as RELEASE_INCOMPLETE for explicit release recovery — it
+ *    never rolls an already-mutated external environment back to "no lease".
  */
 class ApplyReleaseProviderRedTest {
 
@@ -59,15 +60,252 @@ class ApplyReleaseProviderRedTest {
     // ------------------------------------------------------- crash: apply
 
     /**
-     * dsf F-6 apply half: a write fault at the receipt write crashes apply
-     * mid-flight. Post-restart the same-key replay must converge to EXACTLY
-     * ONE usable lease (M-CR-01's device truth, provider side): either nothing
-     * committed (clean re-execution) or everything did (stored receipt) —
-     * never a lease without a retrievable receipt, which would wedge the
-     * device behind INV-28 with no legal exit.
+     * FC-1: the external environment mutation may begin only after an
+     * ACQUIRING owner is visible from committed backing, not merely through
+     * the writer transaction's read-your-writes buffer.
      */
     @Test
-    fun apply_crashBetweenWrites_convergesToSingleUsableLease() {
+    fun apply_externalMutationBeginsOnlyAfterAcquiringOwnerIsDurable() {
+        val h = harness()
+        var durableOwnerAtExternalBoundary: LeaseRecord? = null
+        h.env.beforeApplyEnvironment = {
+            durableOwnerAtExternalBoundary = EnvironmentLeaseStore(
+                h.kv.reopenCommitted(),
+                h.clock,
+            ).blockingLease()
+        }
+
+        val receipt = h.apply(key = "apl-owner-before-external")
+
+        assertNotNull(
+            "external mutation must never run while the ACQUIRING owner exists only in txBuffer",
+            durableOwnerAtExternalBoundary,
+        )
+        assertEquals(receipt.leaseId, durableOwnerAtExternalBoundary?.leaseId)
+        assertEquals(LeaseState.ACQUIRING, durableOwnerAtExternalBoundary?.state)
+        assertEquals(AUTO_PKG, durableOwnerAtExternalBoundary?.callerApplicationId)
+        assertEquals(AUTO_SIGNER, durableOwnerAtExternalBoundary?.callerSignerDigest)
+        assertEquals("apl-owner-before-external", durableOwnerAtExternalBoundary?.applyIdempotencyKey)
+    }
+
+    /**
+     * FC-1 second window: an external apply can succeed and the finalize write
+     * can still fail. The failure must leave one durable, caller-owned lease
+     * that blocks a duplicate apply and can be released to recover the device.
+     */
+    @Test
+    fun apply_externalSuccessThenFinalizeFailure_publicReplayConvergesSameDurableOwner() {
+        val h = harness()
+        h.kv.failOnWrite = { namespace, _ ->
+            namespace == DurableIdempotencyStore.RECEIPT_NAMESPACE
+        }
+
+        try {
+            h.apply(key = "apl-finalize-fault")
+            fail("injected finalize fault must surface")
+        } catch (expected: RuntimeException) {
+            // Persistence fault, not a typed business answer.
+        }
+        h.kv.failOnWrite = null
+
+        assertEquals("the external mutation completed before finalize failed", 1, h.env.applyCount)
+        val durableOwner = h.leases.blockingLease()
+        assertNotNull("a successful external mutation must never be ownerless", durableOwner)
+        assertEquals(AUTO_PKG, durableOwner?.callerApplicationId)
+        assertEquals(AUTO_SIGNER, durableOwner?.callerSignerDigest)
+        assertEquals("apl-finalize-fault", durableOwner?.applyIdempotencyKey)
+        assertEquals(
+            "the uncertain external result must be caller-recoverable without trusting it",
+            LeaseState.RELEASE_INCOMPLETE,
+            durableOwner?.state,
+        )
+
+        // Recovery must use only the public request. The caller never received
+        // the server-generated leaseId from the failed first call.
+        val replay = h.apply(key = "apl-finalize-fault")
+        val replayAgain = h.apply(key = "apl-finalize-fault")
+        assertEquals(replay, replayAgain)
+        assertEquals(durableOwner?.leaseId, replay.leaseId)
+        assertEquals(LeaseState.ACTIVE, h.leases.get(replay.leaseId)?.state)
+        expectContractFailure(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT) {
+            h.apply(
+                key = "apl-finalize-fault",
+                intent = h.intent(attemptId = "different-pending-payload"),
+            )
+        }
+        assertEquals("recovery may re-drive the idempotent environment but never create lease 2", 2, h.env.applyCount)
+        assertEquals(replay.leaseId, h.leases.blockingLease()?.leaseId)
+
+        h.release(replay.leaseId, key = "apl-finalize-recover")
+        val next = h.apply(key = "apl-after-recovery", intent = h.intent(attemptId = "att-2"))
+        assertNotEquals(replay.leaseId, next.leaseId)
+    }
+
+    @Test
+    fun apply_partialExternalFailure_persistsTypedReasonAndPublicReplayRecovers() {
+        val h = harness()
+        h.env.afterApplyEnvironmentMutation = {
+            throw IllegalStateException("injected failure after external mutation")
+        }
+
+        try {
+            h.apply(key = "apl-external-fault")
+            fail("injected external fault must surface")
+        } catch (expected: IllegalStateException) {
+            assertEquals("injected failure after external mutation", expected.message)
+        }
+
+        val durableOwner = h.leases.blockingLease()
+        assertNotNull("external failure must retain its admitted durable owner", durableOwner)
+        assertEquals(LeaseState.RELEASE_INCOMPLETE, durableOwner?.state)
+        assertEquals("apl-external-fault", durableOwner?.applyIdempotencyKey)
+        assertEquals(
+            "the uncertain external result needs a durable typed recovery reason",
+            listOf(ContractErrorCodeV1.RELEASE_INCOMPLETE.wire),
+            durableOwner?.residualReasonWires,
+        )
+
+        h.env.afterApplyEnvironmentMutation = null
+        val replay = h.apply(key = "apl-external-fault")
+        assertEquals(durableOwner?.leaseId, replay.leaseId)
+        assertEquals(2, h.env.applyCount)
+    }
+
+    @Test
+    fun apply_incompleteMarkerWriteAlsoFails_samePublicReplayResumesAcquiringOwner() {
+        val h = harness()
+        h.env.afterApplyEnvironmentMutation = {
+            // The external state has already changed. Also fail the best-effort
+            // ACQUIRING -> RELEASE_INCOMPLETE recovery commit.
+            h.kv.failOnWrite = { _, _ -> true }
+            throw IllegalStateException("external and recovery persistence failed")
+        }
+
+        try {
+            h.apply(key = "apl-double-fault")
+            fail("double fault must surface")
+        } catch (expected: IllegalStateException) {
+            assertEquals("external and recovery persistence failed", expected.message)
+            assertTrue("secondary durable failure is preserved", expected.suppressed.isNotEmpty())
+        }
+        h.kv.failOnWrite = null
+        h.env.afterApplyEnvironmentMutation = null
+
+        assertEquals(LeaseState.ACQUIRING, h.leases.blockingLease()?.state)
+        val replay = h.apply(key = "apl-double-fault")
+        assertEquals(h.leases.blockingLease()?.leaseId, replay.leaseId)
+        assertEquals(2, h.env.applyCount)
+    }
+
+    @Test
+    fun resumedPublicApplyClearsFormerProviderCleanupOwnership() {
+        val h = harness()
+        h.env.afterApplyEnvironmentMutation = {
+            throw IllegalStateException("leave admitted apply without receipt")
+        }
+        try {
+            h.apply(key = "apl-provider-handoff")
+            fail("injected first apply failure must surface")
+        } catch (_: IllegalStateException) {
+            // Expected.
+        }
+        h.env.afterApplyEnvironmentMutation = null
+
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        h.env.cleanupOutcome = CleanupOutcome.Incomplete(
+            listOf(ContractErrorCodeV1.RELEASE_INCOMPLETE.wire),
+        )
+        h.handler.runRevokedLeaseCleanup()
+        val providerIncomplete = h.leases.blockingLease()!!
+        assertEquals(LeaseState.RELEASE_INCOMPLETE, providerIncomplete.state)
+        assertNotNull(providerIncomplete.recoveryEvidenceRef)
+
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        h.env.cleanupOutcome = CleanupOutcome.Complete
+        val resumed = h.apply(key = "apl-provider-handoff")
+        assertEquals(providerIncomplete.leaseId, resumed.leaseId)
+        assertEquals(LeaseState.ACTIVE, h.leases.get(resumed.leaseId)?.state)
+
+        // A later unclean restart makes the public APPLY owner uncertain. It
+        // must stay caller-recoverable; stale revoke/provider provenance from
+        // the earlier lifecycle must not silently reassign cleanup to qwy.
+        h.restart(cleanlinessProvable = false)
+        assertEquals(LeaseState.RELEASE_INCOMPLETE, h.leases.get(resumed.leaseId)?.state)
+        h.handler.runRevokedLeaseCleanup()
+        assertEquals(
+            "a resumed public apply is no longer provider-owned cleanup",
+            LeaseState.RELEASE_INCOMPLETE,
+            h.leases.get(resumed.leaseId)?.state,
+        )
+
+        val released = h.release(resumed.leaseId, key = "rel-public-after-resumed-apply")
+        assertTrue(released.releaseComplete)
+    }
+
+    @Test
+    fun resumedApplyNeverRebridgesItsDeadlineFromChangedWallClock() {
+        val h = harness()
+        val intent = h.intent(deadlineInMs = 60_000L)
+        h.env.afterApplyEnvironmentMutation = {
+            throw IllegalStateException("leave admission resumable")
+        }
+        try {
+            h.apply(key = "apl-deadline-once", intent = intent)
+            fail("injected first apply failure must surface")
+        } catch (_: IllegalStateException) {
+            // Expected.
+        }
+        h.env.afterApplyEnvironmentMutation = null
+
+        // Elapsed time did not move, but the human/NTP moved wall time back a
+        // day. Replaying the same admission must retain its first monotonic
+        // deadline rather than minting another day of lease lifetime.
+        h.clock.jumpWallClock(-24L * 60L * 60L * 1_000L)
+        val resumed = h.apply(key = "apl-deadline-once", intent = intent)
+        h.clock.advance(61_000L)
+
+        assertEquals(
+            LeaseState.EXPIRED,
+            h.leases.effectiveState(resumed.leaseId, h.tracker.generation),
+        )
+    }
+
+    @Test
+    fun apply_failedAdmissionKeyRemainsPermanentlyBoundAfterOwnerIsReleased() {
+        val h = harness()
+        h.env.afterApplyEnvironmentMutation = {
+            throw IllegalStateException("leave admitted key without receipt")
+        }
+        try {
+            h.apply(key = "apl-permanent-binding")
+            fail("injected failure must surface")
+        } catch (_: IllegalStateException) {
+            // Expected.
+        }
+        h.env.afterApplyEnvironmentMutation = null
+
+        // Simulate an explicit/operator recovery of the uncertain owner. This
+        // setup may inspect provider state; the assertion below may not.
+        val failedOwner = h.leases.blockingLease()!!
+        h.release(failedOwner.leaseId, key = "rel-failed-admission")
+
+        expectContractFailure(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT) {
+            h.apply(
+                key = "apl-permanent-binding",
+                intent = h.intent(attemptId = "different-after-release"),
+            )
+        }
+        assertEquals("a released owner does not erase the original key binding", 1, h.env.applyCount)
+    }
+
+    /**
+     * dsf F-6 apply half, strengthened by FC-1: a receipt-write fault happens
+     * after the external mutation. The already-committed admission must remain
+     * as exactly one recoverable owner; restart and retry cannot manufacture a
+     * second lease, and explicit release converges the uncertain environment.
+     */
+    @Test
+    fun apply_crashBetweenWrites_convergesThroughDurableOwnerRecovery() {
         val h = harness()
 
         h.kv.failOnWrite = { namespace, _ ->
@@ -84,14 +322,17 @@ class ApplyReleaseProviderRedTest {
 
         h.restart(cleanlinessProvable = true)
 
-        // Same-key replay converges to one lease...
+        // The external mutation happened, so rollback-to-nothing is no longer
+        // legal. Public same-key replay must recover without knowing leaseId.
+        val owner = h.leases.blockingLease()
+        assertNotNull("finalize failure must retain one durable owner", owner)
+        assertEquals(LeaseState.RELEASE_INCOMPLETE, owner?.state)
         val replay = h.apply(key = "apl-crash")
-        // ...is durable-stable (byte-identical receipt on re-replay)...
         val replay2 = h.apply(key = "apl-crash")
-        assertEquals("stored receipt, not a second execution", replay, replay2)
+        assertEquals(replay, replay2)
+        assertEquals(owner?.leaseId, replay.leaseId)
+        assertEquals("retry re-drives the same owner once", 2, h.env.applyCount)
 
-        // ...and the lease it names is REAL: releasable, after which the
-        // device accepts a fresh apply (not wedged behind a torn half-write).
         h.release(replay.leaseId, key = "apl-crash-rel")
         val next = h.apply(key = "apl-next", intent = h.intent(attemptId = "att-2"))
         assertNotEquals("fresh lease after convergence", replay.leaseId, next.leaseId)
@@ -134,6 +375,121 @@ class ApplyReleaseProviderRedTest {
         // Device converged: the released lease no longer blocks a new apply.
         val next = h.apply(key = "rel-next", intent = h.intent(attemptId = "att-2"))
         assertNotEquals(receipt.leaseId, next.leaseId)
+    }
+
+    @Test
+    fun release_externalCleanupBeginsOnlyAfterReleasingOwnerIsDurable() {
+        val h = harness()
+        val applied = h.apply(key = "rel-owner-apply")
+        var durableOwnerAtCleanup: LeaseRecord? = null
+        h.env.beforeCleanup = {
+            durableOwnerAtCleanup = EnvironmentLeaseStore(
+                h.kv.reopenCommitted(),
+                h.clock,
+            ).get(applied.leaseId)
+        }
+
+        h.release(applied.leaseId, key = "rel-owner-durable")
+
+        assertEquals(LeaseState.RELEASING, durableOwnerAtCleanup?.state)
+        assertEquals("rel-owner-durable", durableOwnerAtCleanup?.releaseIdempotencyKey)
+    }
+
+    @Test
+    fun release_cleanupSuccessThenFinalizeFailure_samePublicReplayReturnsReceipt() {
+        val h = harness()
+        val applied = h.apply(key = "rel-finalize-apply")
+        h.kv.failOnWrite = { namespace, _ ->
+            namespace == DurableIdempotencyStore.RECEIPT_NAMESPACE
+        }
+
+        try {
+            h.release(applied.leaseId, key = "rel-finalize-fault")
+            fail("finalize fault must surface")
+        } catch (_: RuntimeException) {
+            // Expected.
+        }
+        h.kv.failOnWrite = null
+
+        assertEquals(LeaseState.RELEASE_INCOMPLETE, h.leases.get(applied.leaseId)?.state)
+        val replay = h.release(applied.leaseId, key = "rel-finalize-fault")
+        assertTrue(replay.releaseComplete)
+        assertEquals(replay, h.release(applied.leaseId, key = "rel-finalize-fault"))
+    }
+
+    @Test
+    fun release_processDiesAfterCleanup_restartKeepsSameKeyPublicReplayReachable() {
+        val h = harness()
+        val applied = h.apply(key = "rel-restart-apply")
+        h.env.afterCleanupEnvironmentMutation = {
+            h.kv.failOnWrite = { _, _ -> true }
+            throw IllegalStateException("process died after cleanup")
+        }
+
+        try {
+            h.release(applied.leaseId, key = "rel-restart-fault")
+            fail("simulated process death must surface")
+        } catch (_: IllegalStateException) {
+            // Expected.
+        }
+        h.kv.failOnWrite = null
+        h.env.afterCleanupEnvironmentMutation = null
+        assertEquals(LeaseState.RELEASING, h.leases.get(applied.leaseId)?.state)
+
+        h.restart(cleanlinessProvable = false)
+        val replay = h.release(applied.leaseId, key = "rel-restart-fault")
+        assertTrue(replay.releaseComplete)
+        assertEquals(replay, h.release(applied.leaseId, key = "rel-restart-fault"))
+    }
+
+    @Test
+    fun publicReleaseAfterProviderCleanupMustKeepItsReceiptRecoveryOwnership() {
+        val h = harness()
+        val applied = h.apply(key = "rel-provider-handoff-apply")
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        h.env.cleanupOutcome = CleanupOutcome.Incomplete(
+            listOf(ContractErrorCodeV1.RELEASE_INCOMPLETE.wire),
+        )
+        h.handler.runRevokedLeaseCleanup()
+        assertEquals(LeaseState.RELEASE_INCOMPLETE, h.leases.get(applied.leaseId)?.state)
+        assertNotNull(h.leases.get(applied.leaseId)?.recoveryEvidenceRef)
+
+        // A new operator decision authorizes the same exact principal to take
+        // ownership of public release recovery.
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        h.env.cleanupOutcome = CleanupOutcome.Complete
+        h.env.afterCleanupEnvironmentMutation = {
+            // Model process death after public RELEASING + cleanup: neither the
+            // finalize commit nor the catch-path marker can land.
+            h.kv.failOnWrite = { _, _ -> true }
+            throw IllegalStateException("process died during public recovery release")
+        }
+        try {
+            h.release(applied.leaseId, key = "rel-provider-handoff-public")
+            fail("simulated process death must surface")
+        } catch (_: IllegalStateException) {
+            // Expected.
+        }
+        h.kv.failOnWrite = null
+        h.env.afterCleanupEnvironmentMutation = null
+
+        val publicOwner = h.leases.get(applied.leaseId)
+        assertEquals(LeaseState.RELEASING, publicOwner?.state)
+        assertEquals("rel-provider-handoff-public", publicOwner?.releaseIdempotencyKey)
+
+        h.restart(cleanlinessProvable = false)
+
+        assertEquals(
+            "non-null public release key must dominate stale provider-cleanup provenance",
+            LeaseState.RELEASING,
+            h.leases.get(applied.leaseId)?.state,
+        )
+        val replay = h.release(applied.leaseId, key = "rel-provider-handoff-public")
+        assertTrue(replay.releaseComplete)
+        assertEquals(
+            replay,
+            h.release(applied.leaseId, key = "rel-provider-handoff-public"),
+        )
     }
 
     /**

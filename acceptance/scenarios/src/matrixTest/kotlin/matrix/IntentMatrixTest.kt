@@ -51,6 +51,99 @@ class IntentMatrixTest {
         deadlineEpochMs = clock.epochMs + 60_000L,
     )
 
+    @Test
+    fun restoredMockOwnerWithDelayedCallbackCannotMintTrustedQuota() {
+        assertRestoredEndpointWithIncompleteHistoryIsNotCounted(
+            operationStem = "owner-away-restore",
+        )
+    }
+
+    @Test
+    fun restoredProvidersWithoutSynchronousHistoryCannotMintTrustedQuota() {
+        assertRestoredEndpointWithIncompleteHistoryIsNotCounted(
+            operationStem = "providers-disable-enable",
+        )
+    }
+
+    /**
+     * The endpoint has returned to a fully verified current state, but the
+     * transition source cannot synchronously prove that it stayed there for
+     * the whole PRE→POST window. Fresh coordinates are not continuity proof.
+     */
+    private fun assertRestoredEndpointWithIncompleteHistoryIsNotCounted(
+        operationStem: String,
+    ) {
+        provider.setContinuity(
+            ContinuityCoverageV1.PARTIAL,
+            sinceElapsedMs = null,
+            sinceEpochMs = null,
+        )
+        val apply = provider.apply(
+            caller,
+            ApplyRequestV1(
+                intent = intent(attemptId = operationStem),
+                idempotencyKey = "$operationStem-apply",
+                callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
+            ),
+        )
+        val receipt = checkNotNull(apply.applyReceipt)
+        assertEquals(
+            "current endpoint verification remains orthogonal to history coverage",
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            receipt.verificationLevelWire,
+        )
+
+        clock.advance(1_000L)
+        val pre = checkNotNull(
+            provider.observe(
+                caller,
+                ObserveRequestV1(
+                    receipt.leaseId,
+                    "$operationStem-pre",
+                    receipt.acceptedIntentHash,
+                ),
+            ).environmentObservation,
+        )
+        val completionAt = clock.elapsedRealtimeMs + 5_000L
+        clock.advance(6_000L)
+        val post = checkNotNull(
+            provider.observe(
+                caller,
+                ObserveRequestV1(
+                    receipt.leaseId,
+                    "$operationStem-post",
+                    receipt.acceptedIntentHash,
+                ),
+            ).environmentObservation,
+        )
+
+        assertEquals(
+            VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            post.verificationLevelWire,
+        )
+        assertEquals(ContinuityCoverageV1.PARTIAL.wire, post.continuityCoverageWire)
+        val verdict = TrustTupleJudge.judge(
+            TrustTupleJudge.AttemptEvidence(
+                deliveryModeWire = checkNotNull(post.deliveryModeWire),
+                verificationLevelWire = post.verificationLevelWire,
+                isMock = post.isMock,
+                scheduleDecisionWire = post.scheduleDecisionWire,
+                continuityCoverageWire = post.continuityCoverageWire,
+                continuitySinceElapsedMs = post.continuitySinceElapsedRealtimeMs,
+                preObservedAtElapsedMs = pre.observedAtElapsedRealtimeMs,
+                postObservedAtElapsedMs = post.observedAtElapsedRealtimeMs,
+                cellRebelCompletedAtElapsedMs = completionAt,
+                evidenceRefs = post.evidenceRefs,
+            ),
+        )
+        assertEquals(
+            TrustTupleJudge.Verdict.NotCounted(
+                TrustTupleJudge.Refusal.CONTINUITY_WINDOW_UNPROVEN,
+            ),
+            verdict,
+        )
+    }
+
     /**
      * M-IN-01: apply partially effective, coordinates stuck at wrong address.
      *
@@ -84,6 +177,11 @@ class IntentMatrixTest {
             callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
         ))
         assertEquals(ContractResultKindV1.APPLY, applyResult.resultKindOrNull())
+        assertEquals(
+            "apply receipt must fail closed when the effective coordinates are 2 m from target",
+            VerificationLevelV1.NONE.wire,
+            applyResult.applyReceipt!!.verificationLevelWire,
+        )
 
         val leaseId = applyResult.applyReceipt!!.leaseId
         val intentHash = applyResult.applyReceipt!!.acceptedIntentHash
@@ -140,6 +238,25 @@ class IntentMatrixTest {
             "rejection reason must be VERIFICATION_NOT_INDEPENDENT (provider downgraded)",
             TrustTupleJudge.Refusal.VERIFICATION_NOT_INDEPENDENT,
             (verdict as TrustTupleJudge.Verdict.NotCounted).reason,
+        )
+    }
+
+    @Test
+    fun applyReceiptDowngradesAtJustOverFrozenTolerance() {
+        val justOverOneMeterNorth = 1.01 / 6_371_008.8 * 180.0 / PI
+        provider.overrideCoordinates = Pair(31.2304 + justOverOneMeterNorth, 121.4737)
+
+        val applyResult = provider.apply(caller, ApplyRequestV1(
+            intent = intent(),
+            idempotencyKey = "apply-partial-just-over-one-meter",
+            callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
+        ))
+
+        assertEquals(ContractResultKindV1.APPLY, applyResult.resultKindOrNull())
+        assertEquals(
+            "apply receipt must fail closed outside the frozen 1 m tolerance",
+            VerificationLevelV1.NONE.wire,
+            applyResult.applyReceipt!!.verificationLevelWire,
         )
     }
 
@@ -205,6 +322,11 @@ class IntentMatrixTest {
             callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
         ))
         assertEquals(ContractResultKindV1.APPLY, applyResult.resultKindOrNull())
+        assertEquals(
+            "apply receipt must fail closed when effective coordinates are null",
+            VerificationLevelV1.NONE.wire,
+            applyResult.applyReceipt!!.verificationLevelWire,
+        )
 
         val leaseId = applyResult.applyReceipt!!.leaseId
         val intentHash = applyResult.applyReceipt!!.acceptedIntentHash

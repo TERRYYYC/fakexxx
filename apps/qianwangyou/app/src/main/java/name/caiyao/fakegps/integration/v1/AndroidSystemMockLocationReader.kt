@@ -20,9 +20,12 @@ internal class AndroidSystemMockLocationReader(
     @SuppressLint("MissingPermission")
     override fun read(): List<SystemMockLocationReadback> =
         SystemMockTrustPolicy.REQUIRED_FRAMEWORK_SOURCES.mapNotNull { source ->
-            runCatching { locationManager.getLastKnownLocation(source) }
+            runCatching {
+                val providerEnabled = locationManager.isProviderEnabled(source)
+                locationManager.getLastKnownLocation(source)?.let { providerEnabled to it }
+            }
                 .getOrNull()
-                ?.let { location ->
+                ?.let { (providerEnabled, location) ->
                     SystemMockLocationReadback(
                         source = source,
                         latitude = location.latitude,
@@ -30,6 +33,7 @@ internal class AndroidSystemMockLocationReader(
                         isMock = LocationCompat.isMock(location),
                         observedAtElapsedRealtimeMs =
                             location.elapsedRealtimeNanos / NANOS_PER_MILLISECOND,
+                        providerEnabled = providerEnabled,
                     )
                 }
         }

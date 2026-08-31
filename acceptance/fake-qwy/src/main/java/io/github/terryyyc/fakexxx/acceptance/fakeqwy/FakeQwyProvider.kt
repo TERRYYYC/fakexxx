@@ -387,7 +387,13 @@ class FakeQwyProvider(
             clock.elapsedRealtimeMs + (request.intent.deadlineEpochMs - clock.epochMs)
         }
 
-        val verificationWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        val currentItem = schedule?.currentItem
+        val (effectiveLat, effectiveLng) = effectiveCoordinates(currentItem)
+        val verificationWire = coordinateVerificationLevelWire(
+            effectiveLat = effectiveLat,
+            effectiveLng = effectiveLng,
+            targetItem = currentItem,
+        )
 
         // Create with ACQUIRING (production handler does ACQUIRING → apply → ACTIVE)
         val lease = LeaseRecord(
@@ -797,23 +803,18 @@ class FakeQwyProvider(
 
         // Coordinates: when overrideCoordinates is set (even to Pair(null, null)),
         // use its values directly — don't fall back to the schedule item.
-        val coords = overrideCoordinates
-        val lat = if (coords != null) coords.first else currentItem?.latitude
-        val lng = if (coords != null) coords.second else currentItem?.longitude
+        val (lat, lng) = effectiveCoordinates(currentItem)
 
         // ── Coordinate verification (KB-8): provider-side honesty gate ──
         // The provider holds both the target (schedule item) and effective
         // coordinates. If they disagree — or if effective coords are null —
         // the provider cannot honestly claim INDEPENDENTLY_VERIFIED.
-        val coordinatesVerified = verifyCoordinates(lat, lng, currentItem)
-
         // Wire codes
         val deliveryModeWire = overrideDeliveryModeWire
             ?: if (injectUnknownWireCodes) 999 else DeliveryModeV1.SYSTEM_MOCK.wire
         val verificationLevelWire = overrideVerificationLevelWire
             ?: if (injectUnknownWireCodes) 999
-            else if (!coordinatesVerified) VerificationLevelV1.NONE.wire
-            else VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+            else coordinateVerificationLevelWire(lat, lng, currentItem)
         val isMock = overrideIsMock ?: true
         val scheduleDecisionWire = forceScheduleDecisionWire
             ?: if (injectUnknownWireCodes) 999 else ScheduleDecisionV1.ALLOWED_NOW.wire
@@ -872,6 +873,19 @@ class FakeQwyProvider(
             targetItem.latitude,
             targetItem.longitude,
         ) <= ContractV1.TRUSTED_LOCATION_TOLERANCE_METERS
+    }
+
+    private fun effectiveCoordinates(targetItem: ScheduleItem?): Pair<Double?, Double?> =
+        overrideCoordinates ?: Pair(targetItem?.latitude, targetItem?.longitude)
+
+    private fun coordinateVerificationLevelWire(
+        effectiveLat: Double?,
+        effectiveLng: Double?,
+        targetItem: ScheduleItem?,
+    ): Int = if (verifyCoordinates(effectiveLat, effectiveLng, targetItem)) {
+        VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+    } else {
+        VerificationLevelV1.NONE.wire
     }
 
     private fun distanceMeters(

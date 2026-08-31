@@ -29,7 +29,7 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  */
 class BinderExternalApplyExecutor(
     private val context: Context,
-    private val providerApplicationId: String = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+    private val providerApplicationId: String = ProviderPackageTarget.currentApplicationId,
 ) : ExternalApplyExecutor {
 
     @Volatile

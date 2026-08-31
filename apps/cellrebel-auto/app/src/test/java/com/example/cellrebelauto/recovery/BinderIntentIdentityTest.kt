@@ -67,7 +67,7 @@ class BinderIntentIdentityTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val service = FakeProviderService()
         Shadows.shadowOf(app).setComponentNameAndServiceForBindService(
-            ComponentName(ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION, ContractV1.SERVICE_CLASS_NAME),
+            ComponentName(ProviderPackageTarget.currentApplicationId, ContractV1.SERVICE_CLASS_NAME),
             service
         )
         val executor = BinderExternalApplyExecutor(app)

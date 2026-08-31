@@ -1,9 +1,12 @@
 package com.example.cellrebelauto.automation
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.ServiceConnection
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor
+import com.example.cellrebelauto.recovery.ProviderPackageTarget
 import com.example.cellrebelauto.recovery.testApplyIntent
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import org.junit.Assert.assertEquals
@@ -32,17 +35,40 @@ class ProviderBindLifecycleTest {
     @Test
     fun `bind issues a bindService intent against the frozen contract component`() {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val executor = BinderExternalApplyExecutor(app)
+        var boundIntent: Intent? = null
+        val recordingContext = object : ContextWrapper(app) {
+            override fun bindService(
+                service: Intent,
+                conn: ServiceConnection,
+                flags: Int,
+            ): Boolean {
+                boundIntent = service
+                return true
+            }
+        }
+        val executor = BinderExternalApplyExecutor(recordingContext)
         val returned = executor.bind()
-        // bind() dispatched the intent for the FROZEN component (ContractV1 constants — the same
-        // ones production uses; a hand-typed or mutated component fails this).
         assertTrue("bind() against the frozen provider component must dispatch (returned false)", returned)
-        // Robolectric's ShadowApplication records bound connections; the component must be the
-        // frozen one. (peekNumberOfBoundServices is not on all versions — assert dispatch only.)
-        val connections = Shadows.shadowOf(app).boundServiceConnections
-        assertTrue(
-            "the bind must have registered a connection for the frozen component",
-            connections.isNotEmpty()
+        assertEquals(
+            "debug Auto must target the QWY debug applicationIdSuffix, not the absent release package",
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH,
+            boundIntent?.component?.packageName,
+        )
+        assertEquals(
+            ContractV1.SERVICE_CLASS_NAME,
+            boundIntent?.component?.className,
+        )
+    }
+
+    @Test
+    fun `provider build pairing selects bench for debug and production for release`() {
+        assertEquals(
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH,
+            ProviderPackageTarget.forDebugBuild(true),
+        )
+        assertEquals(
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+            ProviderPackageTarget.forDebugBuild(false),
         )
     }
 

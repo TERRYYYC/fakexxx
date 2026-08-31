@@ -90,7 +90,8 @@ object APlusComposition {
                 context.packageManager, it
             )
         },
-        providerApplicationId: String = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+        providerApplicationId: String =
+            com.example.cellrebelauto.recovery.ProviderPackageTarget.currentApplicationId,
         // R45 (Sol R45 P1-1): the attempt validity window width — the SAME config value the engine
         // uses to build the apply intent (startedAt → startedAt + testTimeoutMs). The evidence
         // source must recompute the intent from the IDENTICAL durable inputs; before this seam the
@@ -109,7 +110,10 @@ object APlusComposition {
         serviceLifecycleExecutor: ExternalApplyExecutor? = null
     ): APlusBackend {
         val rawExecutor: ExternalApplyExecutor = serviceLifecycleExecutor
-            ?: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(context)
+            ?: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(
+                context,
+                providerApplicationId,
+            )
         // R45 (Sol R45 P1-2): the §6.5.3 reverse-authorization gate guards the ENTIRE journey
         // surface — discover/preflight/apply/observe/completeAndAdvance/release — not just the
         // post-apply observation. Before this decorator the gate ran only inside the evidence

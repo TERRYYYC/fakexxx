@@ -7,6 +7,7 @@ import name.caiyao.fakegps.integration.v1.support.FakeMonotonicClock
 import name.caiyao.fakegps.integration.v1.support.InMemoryDurableKv
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -85,5 +86,6 @@ class MultiProcessMatrixTest {
         val after = tracker.snapshot()
         assertTrue("gap bumps revision", after.revision > before.revision)
         assertNotEquals("gap degrades coverage", ContinuityCoverageV1.FULL.wire, after.coverageWire)
+        assertNull("a degraded source cannot retain the old FULL window", after.continuitySinceElapsedRealtimeMs)
     }
 }

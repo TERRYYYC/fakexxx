@@ -93,12 +93,20 @@ class ContinuityTracker(
     }
 
     /** Lossy observer self-report (§6.6): bump + degrade, never silent. */
-    fun reportObserverGap() {
+    fun reportObserverGap(
+        coverage: ContinuityCoverageV1 = ContinuityCoverageV1.PARTIAL,
+    ) {
+        require(coverage != ContinuityCoverageV1.FULL) {
+            "an observer gap cannot establish FULL continuity"
+        }
         storage.transaction {
             val current = storage.read(REVISION_NAMESPACE, KEY_REVISION)?.toLong() ?: 0L
             storage.write(REVISION_NAMESPACE, KEY_REVISION, (current + 1L).toString())
             storage.write(REVISION_NAMESPACE, KEY_COVERAGE,
-                ContinuityCoverageV1.PARTIAL.wire.toString())
+                coverage.wire.toString())
+            // A degraded observer cannot retain the previous FULL window's
+            // start: that would make a null proof look continuous in audits.
+            storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE, "")
         }
     }
 

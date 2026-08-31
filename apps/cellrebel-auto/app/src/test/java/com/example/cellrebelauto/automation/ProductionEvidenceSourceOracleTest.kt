@@ -95,6 +95,8 @@ class ProductionEvidenceSourceOracleTest {
         ApplicationProvider.getApplicationContext(),
         db,
         providerSignerDigest = { if (signerTrusted) "sha256:trusted" else "sha256:other" },
+        providerApplicationId =
+            io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
         attemptValidityTimeoutMs = attemptTimeoutMs,
         serviceLifecycleExecutor = fakeExecutor
     )
