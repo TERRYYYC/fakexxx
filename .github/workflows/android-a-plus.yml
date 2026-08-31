@@ -332,6 +332,14 @@ jobs:
         # "runs the production script, never a copy" argument as above.
         run: ./scripts/selftest-test-hook-package-identity.sh
 
+      - name: selftest-test-hook-evidence-carrier
+        # G2 §5.G (PR #62 R3 P1-4): the raw acceptance report must be preserved
+        # in a caller-owned directory this script never deletes, bound with
+        # session/path/sha/apk — and cleanup must delete ONLY TEMP_ROOT. c1-c4
+        # exercise the shipped preserve_report + assert cleanup_transaction
+        # never references the evidence dir. Device-free (fixture files).
+        run: ./scripts/selftest-test-hook-evidence-carrier.sh
+
       - name: selftest-test-hook-acceptance-readiness
         # G2 §3.3-3 last sentence / S1 block: without a transaction-free
         # readiness path, an on-device run has no canonical way to prove it

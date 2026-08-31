@@ -184,6 +184,43 @@ object APlus10APlanSeed {
         }
 
     /**
+     * PR #62 R3 P2: start_run must be bound to the SEEDED FX-G2-10A plan, not
+     * to any arbitrary planId. Given a loaded plan + its tasks, return null iff
+     * the plan is the registered §5A topology (source name, 10 rows, quota sum
+     * 17, csvRow 1..10 contiguous, per-item quotas summing to the total, and
+     * every legacy coordinate column still the out-of-domain placeholder — a
+     * real coordinate would mean the plan came from a CSV import, not this
+     * seeder). Otherwise return a human-readable mismatch reason.
+     */
+    fun verifyPlanTopology(plan: LocationPlan, tasks: List<LocationTask>): String? {
+        if (plan.sourceFileName != SOURCE_NAME) {
+            return "plan sourceFileName '${plan.sourceFileName}' != '$SOURCE_NAME' — not the §5A seed plan"
+        }
+        if (plan.totalRows != EXPECTED_ITEM_COUNT) {
+            return "plan totalRows ${plan.totalRows} != $EXPECTED_ITEM_COUNT"
+        }
+        if (plan.totalRequiredSuccesses != EXPECTED_TOTAL_REQUIRED_SUCCESSES) {
+            return "plan totalRequiredSuccesses ${plan.totalRequiredSuccesses} != $EXPECTED_TOTAL_REQUIRED_SUCCESSES"
+        }
+        if (tasks.size != EXPECTED_ITEM_COUNT) {
+            return "plan carries ${tasks.size} tasks, expected $EXPECTED_ITEM_COUNT"
+        }
+        val byOrder = tasks.sortedWith(compareBy({ it.priority }, { it.csvRow }))
+        byOrder.forEachIndexed { i, t ->
+            if (t.csvRow != i + 1) return "task at order $i has csvRow ${t.csvRow}, expected ${i + 1}"
+            if (t.requiredSuccesses < 1) return "task csvRow ${t.csvRow} requiredSuccesses ${t.requiredSuccesses} < 1"
+            if (t.latitude != COORDINATE_PLACEHOLDER || t.longitude != COORDINATE_PLACEHOLDER) {
+                return "task csvRow ${t.csvRow} carries real coordinates (${t.latitude},${t.longitude}) — " +
+                    "not a KB-8 seed plan (looks like a CSV import)"
+            }
+        }
+        if (byOrder.sumOf { it.requiredSuccesses } != EXPECTED_TOTAL_REQUIRED_SUCCESSES) {
+            return "task quota sum ${byOrder.sumOf { it.requiredSuccesses }} != $EXPECTED_TOTAL_REQUIRED_SUCCESSES"
+        }
+        return null
+    }
+
+    /**
      * Render the seed evidence block. REFUSES to render if the inserted task id
      * count differs from the fixture item count — a partial insert would make
      * the map lie about which journeys are present.

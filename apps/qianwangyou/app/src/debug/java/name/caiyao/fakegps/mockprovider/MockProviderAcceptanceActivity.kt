@@ -116,19 +116,59 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
 
         val db = AppDatabase.getInstance(applicationContext)
         val dao = db.profileDao()
-        // PR #62 P1-3 fresh-state reset: clear the durable schedule store FIRST.
-        // ScheduleReinitPolicy deliberately NO-OPs on a same-topology reseed
-        // (M-AD-24: same item set = no generation change), so re-seeding
-        // profile-1..10 over an old run would PRESERVE a mid-run pointer or a
-        // terminal exhausted=true. Clearing the store makes the next provider
-        // boot take Rule 1 (fresh Initialize: version 1, pointer=profile-1,
-        // exhausted=false) — a new generation by construction, not a bypass of
-        // the NoOp rule. Literal duplicated from QwyScheduleStore's private
-        // PREFS_NAME; drift is pinned by P10CollectorSurfaceGuardTest.
-        val cleared = applicationContext
-            .getSharedPreferences(QWY_SCHEDULE_PREFS_NAME, MODE_PRIVATE)
-            .edit().clear().commit()
-        check(cleared) { "schedule store clear did not commit — stale pointer/exhausted would survive" }
+        // PR #62 R3 P1-2 — MONOTONIC generation reset (replaces the earlier
+        // clear(): clearing let the next boot re-Initialize at version 1, a
+        // rollback that lets old (schedule,item,version) identities collide
+        // with the new run — M-AD-24 / spec L1895-2056 require V → V+1 on
+        // every reinit, including a same-topology exhausted reset).
+        //
+        // Read the CURRENT stored version, compute the pure V+1 plan, write
+        // every schedule field in ONE atomic commit (bump + pointer reset +
+        // exhausted clear ride the same write, the M-AD-24 pairing; stale
+        // last-applied projections are removed by the same commit), then READ
+        // BACK and fail the seed on any mismatch. On the next provider boot,
+        // initFromProfileIds sees the same item set + present scheduleId and
+        // NoOps — preserving this V+1 generation rather than fighting it.
+        val schedulePrefs = applicationContext
+            .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
+        val versionBefore = schedulePrefs.getLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, 0L)
+        val resetPlan = APlus10AScheduleReset.plan(
+            existingVersion = versionBefore,
+            itemIds = rows.map { "${APlus10AFixtureSeed.SCHEDULE_ITEM_PREFIX}${it.id}" },
+        )
+        val committed = schedulePrefs.edit()
+            .putString(APlus10AScheduleReset.KEY_SCHEDULE_ID, resetPlan.scheduleId)
+            .putLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, resetPlan.scheduleVersion)
+            .putString(APlus10AScheduleReset.KEY_ITEM_IDS, APlus10AScheduleReset.encodeItemIds(resetPlan.itemIds))
+            .putString(APlus10AScheduleReset.KEY_CURRENT_ITEM_ID, resetPlan.currentItemId)
+            .putBoolean(APlus10AScheduleReset.KEY_EXHAUSTED, resetPlan.exhausted)
+            .putLong(APlus10AScheduleReset.KEY_ADVANCE_COUNT, resetPlan.advanceCount)
+            .remove(APlus10AScheduleReset.KEY_LAST_APPLIED_LAT)
+            .remove(APlus10AScheduleReset.KEY_LAST_APPLIED_LNG)
+            .remove(APlus10AScheduleReset.KEY_LAST_APPLIED_AT)
+            .remove(APlus10AScheduleReset.KEY_LAST_APPLIED_VERIFIED)
+            .commit()
+        check(committed) { "schedule generation write did not commit — stale generation would survive" }
+        // Readback through a fresh handle: what is durably stored, not the editor's echo.
+        val readBack = applicationContext
+            .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
+            .let { p ->
+                val id = p.getString(APlus10AScheduleReset.KEY_SCHEDULE_ID, null)
+                val item = p.getString(APlus10AScheduleReset.KEY_CURRENT_ITEM_ID, null)
+                val encoded = p.getString(APlus10AScheduleReset.KEY_ITEM_IDS, null)
+                if (id == null || item == null || encoded == null) null
+                else APlus10AScheduleReset.ResetPlan(
+                    scheduleId = id,
+                    scheduleVersion = p.getLong(APlus10AScheduleReset.KEY_SCHEDULE_VERSION, -1L),
+                    itemIds = org.json.JSONArray(encoded).let { arr -> (0 until arr.length()).map { arr.getString(it) } },
+                    currentItemId = item,
+                    exhausted = p.getBoolean(APlus10AScheduleReset.KEY_EXHAUSTED, true),
+                    advanceCount = p.getLong(APlus10AScheduleReset.KEY_ADVANCE_COUNT, -1L),
+                )
+            }
+        APlus10AScheduleReset.verifyReadback(readBack, resetPlan)?.let { mismatch ->
+            throw IllegalStateException("schedule generation readback mismatch — $mismatch")
+        }
 
         // Isolated .bench data only (same seam as prepare_kyiv): clear then insert
         // with EXPLICIT ids so expectedScheduleItemId=profile-N stays byte-exact.
@@ -156,8 +196,11 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         // PR #62 P1-1: the report emits only the independently verified
         // REGISTERED digest, never the caller-declared value.
         return APlus10AFixtureSeed.seedReport(items, insertedIds, APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST) +
-            "schedule store cleared (fresh Initialize on next provider boot: pointer=profile-1, exhausted=false)\n" +
-            "NEXT: force-stop $QWY_BENCH_HINT then bind; discover() must read back profile-1..profile-10 with currentItemId=profile-1"
+            "SCHEDULE_GENERATION versionBefore=$versionBefore versionAfter=${resetPlan.scheduleVersion} " +
+            "pointer=${resetPlan.currentItemId} exhausted=${resetPlan.exhausted} (monotonic V+1, readback verified)\n" +
+            "NEXT: force-stop $QWY_BENCH_HINT then bind; readback via discover(): currentItemId=profile-1 and " +
+            "scheduleVersion=${resetPlan.scheduleVersion} (the executable subset — the full ordered profile-1..10 " +
+            "list readback awaits the P1-3 profileRefs projection scope decision)"
     }
 
     private fun sha256Hex(bytes: ByteArray): String =
@@ -177,11 +220,6 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         const val COMMAND_PREPARE_10A = "prepare_10a"
         const val COMMAND_STOP = "stop"
 
-        /**
-         * QwyScheduleStore's private PREFS_NAME, duplicated for the P1-3
-         * fresh-state reset (drift pinned by P10CollectorSurfaceGuardTest).
-         */
-        const val QWY_SCHEDULE_PREFS_NAME = "qwy_schedule_v1"
         private const val QWY_BENCH_HINT = "name.caiyao.fakegps.bench"
         const val KYIV_LATITUDE = 50.4501
         const val KYIV_LONGITUDE = 30.5234

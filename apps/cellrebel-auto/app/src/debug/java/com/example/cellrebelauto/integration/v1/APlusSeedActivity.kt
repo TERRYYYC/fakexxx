@@ -30,14 +30,17 @@ import kotlinx.coroutines.runBlocking
  * That is the shared gap① the A/B/C blocks all inherit: no product run can be
  * started from a device shell. This surface closes it with two commands.
  *
- *   seed_plan — decode the frozen fixture payload (its SHA-256 must equal the
- *               executor-recorded digest), build the plan + 10 tasks WITH the
- *               trust-target coordinates, insert atomically, and print the
- *               fixtureIndex ↔ taskId attribution map.
+ *   seed_plan — decode the frozen fixture payload (pinned to the REGISTERED
+ *               digest), build the plan + 10 tasks consuming ONLY
+ *               {order, journeyCaseId, requiredSuccesses} — KB-8: Auto does
+ *               not import coordinates; the legacy non-null LocationTask
+ *               coordinate columns carry an out-of-domain placeholder — insert
+ *               atomically, and print the fixtureIndex ↔ taskId attribution map.
  *   start_run — call the SAME companion the UI calls
- *               (AutomationService.startAutomation) for a given planId. Requires
- *               the accessibility service to be enabled (operator precondition);
- *               reports honestly when it is not connected.
+ *               (AutomationService.startAutomation) for a planId that must be
+ *               the seeded FX-G2-10A plan/topology. Requires the accessibility
+ *               service enabled (operator precondition); confirms via isRunning
+ *               and reports honestly when it is not connected.
  *
  * src/debug ONLY — production carries none of this.
  */
@@ -135,11 +138,18 @@ class APlusSeedActivity : Activity() {
             appendLine("REFUSED: start_run needs --el plan_id <id> (from a prior seed_plan)")
             return
         }
-        val exists = runBlocking {
-            AppDatabase.getInstance(applicationContext).planDao().getPlanById(planId) != null
+        // PR #62 R3 P2: bind to the SEEDED FX-G2-10A plan/topology, not any
+        // planId. A run started against a foreign plan (a leftover CSV import,
+        // a wrong id) would execute the wrong journeys and mis-attribute.
+        val topologyMismatch = runBlocking {
+            val db = AppDatabase.getInstance(applicationContext)
+            val plan = db.planDao().getPlanById(planId)
+                ?: return@runBlocking "plan $planId not found — seed it first with cmd=seed_plan"
+            val tasks = db.locationTaskDao().getTasksForPlan(planId)
+            APlus10APlanSeed.verifyPlanTopology(plan, tasks)
         }
-        if (!exists) {
-            appendLine("REFUSED: plan $planId not found — seed it first with cmd=seed_plan")
+        if (topologyMismatch != null) {
+            appendLine("REFUSED: $topologyMismatch")
             return
         }
         // The SAME entry the product UI uses. startAutomation is a silent no-op

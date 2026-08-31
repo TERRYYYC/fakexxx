@@ -3,6 +3,8 @@ package com.example.cellrebelauto.integration.v1
 import java.io.File
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -108,12 +110,67 @@ class APlus10APlanSeedTest {
     }
 
     @Test
+    fun placeholder_isStructurallyOutOfGeographicDomain() {
+        // PR #62 R3 P3: assert the SEMANTIC property (out of the legal lat/lng
+        // domain), not merely == the constant — the earlier self-test stayed
+        // green if the constant were changed back to 0.0 (a real place). The
+        // dispatch hard constraint requires a value that cannot be mistaken for
+        // a real target.
+        val p = APlus10APlanSeed.COORDINATE_PLACEHOLDER
+        assertTrue(
+            "placeholder $p must be outside lat [-90,90] AND lng [-180,180] on both axes",
+            p < -90.0 || p > 90.0,
+        )
+        assertTrue("placeholder must also be outside the longitude domain", p < -180.0 || p > 180.0)
+    }
+
+    @Test
     fun toPlan_totalRequiredSuccessesIsTheSum() {
         val items = APlus10APlanSeed.parsePayload(payload())
         val plan = APlus10APlanSeed.toPlan(items, globalBufferSeconds = 60)
         assertEquals(10, plan.totalRows)
         assertEquals(17, plan.totalRequiredSuccesses)
         assertEquals("FX-G2-10A", plan.sourceFileName)
+    }
+
+    // ------------------------------------------------------------------
+    // verifyPlanTopology — start_run binds to the SEEDED plan (P2)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun verifyPlanTopology_acceptsTheSeededPlan() {
+        val items = APlus10APlanSeed.parsePayload(payload())
+        val plan = APlus10APlanSeed.toPlan(items)
+        val tasks = APlus10APlanSeed.toTasks(items)
+        assertNull("the seeded FX-G2-10A plan must verify", APlus10APlanSeed.verifyPlanTopology(plan, tasks))
+    }
+
+    @Test
+    fun verifyPlanTopology_rejectsForeignSource() {
+        val items = APlus10APlanSeed.parsePayload(payload())
+        val plan = APlus10APlanSeed.toPlan(items).copy(sourceFileName = "user-import.csv")
+        assertNotNull(APlus10APlanSeed.verifyPlanTopology(plan, APlus10APlanSeed.toTasks(items)))
+    }
+
+    @Test
+    fun verifyPlanTopology_rejectsRealCoordinates() {
+        val items = APlus10APlanSeed.parsePayload(payload())
+        val plan = APlus10APlanSeed.toPlan(items)
+        // A CSV-imported plan with the same shape but REAL coordinates must be
+        // refused — it is not this KB-8 seeder's output.
+        val csvTasks = APlus10APlanSeed.toTasks(items).mapIndexed { i, t ->
+            t.copy(latitude = 50.4 + i * 0.001, longitude = 30.5 + i * 0.001)
+        }
+        val mismatch = APlus10APlanSeed.verifyPlanTopology(plan, csvTasks)
+        assertNotNull(mismatch)
+        assertTrue(mismatch!!.contains("real coordinates"))
+    }
+
+    @Test
+    fun verifyPlanTopology_rejectsWrongRowCount() {
+        val items = APlus10APlanSeed.parsePayload(payload())
+        val plan = APlus10APlanSeed.toPlan(items)
+        assertNotNull(APlus10APlanSeed.verifyPlanTopology(plan, APlus10APlanSeed.toTasks(items).dropLast(1)))
     }
 
     // ------------------------------------------------------------------

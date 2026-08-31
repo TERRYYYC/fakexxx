@@ -267,22 +267,48 @@ class P10CollectorSurfaceGuardTest {
             .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
             .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
 
-        // (a) fresh-state reset + literal drift guard against production.
+        // (a) MONOTONIC generation reset (R3 P1-2: wholesale clear() caused a
+        // version-1 rollback on the next boot; M-AD-24 / spec L1895-2056
+        // require V → V+1 on every reinit). The seed must go through the
+        // pure plan + atomic write + readback verification — never clear().
         assertTrue(
-            "seed must clear the durable schedule store (fresh Initialize on next boot)",
-            code.contains("QWY_SCHEDULE_PREFS_NAME") && Regex("""edit\(\)\.clear\(\)\.commit\(\)""").containsMatchIn(code),
+            "seed must compute the monotonic generation via APlus10AScheduleReset.plan",
+            code.contains("APlus10AScheduleReset.plan("),
         )
+        assertTrue(
+            "seed must verify the written generation via APlus10AScheduleReset.verifyReadback",
+            code.contains("APlus10AScheduleReset.verifyReadback("),
+        )
+        assertEquals(
+            "the seed path must NOT wholesale-clear the schedule store (version rollback)",
+            false,
+            Regex("""edit\(\)\.clear\(\)""").containsMatchIn(code),
+        )
+        // Literal drift guard: every duplicated prefs key in the reset object
+        // must still exist verbatim in QwyScheduleStore — if production moves
+        // the store or renames a key, the reset silently writes the wrong file.
         val storeSource = File(
             moduleRoot,
             "src/main/java/name/caiyao/fakegps/integration/v1/QwyScheduleStore.kt",
         ).readText()
-        val literal = Regex("""QWY_SCHEDULE_PREFS_NAME\s*=\s*"([^"]+)"""").find(code)?.groupValues?.get(1)
-        assertTrue("QWY_SCHEDULE_PREFS_NAME literal must be present", literal != null)
-        assertTrue(
-            "duplicated schedule-prefs literal '$literal' must still match QwyScheduleStore's " +
-                "PREFS_NAME — if production moved the store, the reset silently clears the wrong file",
-            storeSource.contains("\"$literal\""),
-        )
+        val resetSource = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AScheduleReset.kt",
+        ).readText()
+        listOf(
+            "qwy_schedule_v1", "scheduleId", "scheduleVersion", "currentItemId",
+            "itemIds", "exhausted", "advanceCount",
+            "lastAppliedLat", "lastAppliedLng", "lastAppliedAtMs", "lastAppliedVerified",
+        ).forEach { literal ->
+            assertTrue(
+                "reset object must carry the literal \"$literal\"",
+                resetSource.contains("\"$literal\""),
+            )
+            assertTrue(
+                "duplicated literal \"$literal\" must still match QwyScheduleStore — production moved/renamed it",
+                storeSource.contains("\"$literal\""),
+            )
+        }
 
         // (b) sync outcome is checked, not dropped.
         assertTrue(

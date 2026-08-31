@@ -85,6 +85,7 @@ APP_SYMBOLS_QIANWANGYOU=(
   "ExtraCoerce"
   # G2 §5A 10-address explicit-id fixture seeder (backfill).
   "APlus10AFixtureSeed"
+  "APlus10AScheduleReset"
 )
 
 APP_DIR=""

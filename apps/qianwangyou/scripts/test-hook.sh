@@ -12,7 +12,7 @@
 #                       probe's own missing-extra abort (identity proof).
 #                       Never installs, publishes, or writes business state.
 #   --cellular-matrix   Strict, isolated acceptance transaction. Publishes
-#                       debug-only exact and behavioral schema-v3 payloads,
+#                       debug-only exact and behavioral current-schema (v4) payloads,
 #                       verifies every supported cellular field, and restores the
 #                       database-backed payload.
 #   --runtime-verify    Read-only validation of release probe/scheduler evidence already present
@@ -60,6 +60,13 @@ PY=$(command -v python3 || command -v python) ||
     { echo "HARNESS_ERROR python3 not found" >&2; exit 2; }
 
 TEMP_ROOT=""
+# G2 §5.G evidence carrier (PR #62 R3 P1-4): raw acceptance reports are
+# preserved OUTSIDE the transaction's temp area, in a caller-owned directory
+# this script never deletes — success or failure. Override with
+# HOOK_EVIDENCE_DIR; default is a timestamped directory under the repo's
+# c5-evidence/ tree.
+EVIDENCE_DIR=""
+INSTALLED_APK_SHA=""
 TRANSACTION_ACTIVE=0
 DB_BEFORE=""
 PREFS_BEFORE=""
@@ -326,6 +333,8 @@ install_debug_apk_if_changed() {
         # (path cardinality proven above). Signer/applicationId legs stay with
         # their own §4.2 steps — this echo does not claim them.
         echo "VERIFIED install.apk sha256=$installed_sha (sole base.apk bytes == built debug APK)"
+        # §5.G (P1-4): exported for the per-report EVIDENCE binding lines.
+        INSTALLED_APK_SHA="$installed_sha"
         return 0
     fi
 
@@ -405,13 +414,13 @@ preflight_matrix() {
             grep -F 'FakeGPS: [DIAG] prefs loaded fields=' >/dev/null
         then
             wait_for_profile_schema || return $?
-            echo "VERIFIED preflight.xposed self-hook loaded schema-v3 prefs"
+            echo "VERIFIED preflight.xposed self-hook loaded schema-v4 prefs"
             return 0
         fi
         sleep 1
         attempt=$((attempt + 1))
     done
-    echo "HARNESS_ERROR Xposed self-hook did not load schema-v3 prefs" >&2
+    echo "HARNESS_ERROR Xposed self-hook did not load schema-v4 prefs" >&2
     return 2
 }
 
@@ -550,6 +559,33 @@ run_acceptance_readiness() {
     echo "READINESS_PASS $ACCEPTANCE_ACT is the signature-gated bench acceptance component; no transaction entered"
 }
 
+# G2 §5.G evidence carrier (PR #62 R3 P1-4). Previously every raw report
+# lived only in TEMP_ROOT and cleanup_transaction deleted it — the run could
+# not bind session id + result file + installed APK SHA (acceptance package
+# §5.G), and a failure destroyed its own only raw carrier. Every report is
+# now copied into EVIDENCE_DIR (never deleted by this script) and bound on
+# stdout as one EVIDENCE line. Guarded device-free by
+# scripts/selftest-test-hook-evidence-carrier.sh.
+preserve_report() { # session local_report
+    session=$1
+    local_report=$2
+    [ -n "$EVIDENCE_DIR" ] && [ -d "$EVIDENCE_DIR" ] || {
+        echo "HARNESS_ERROR evidence directory missing; cannot preserve raw report for $session" >&2
+        return 2
+    }
+    preserved="$EVIDENCE_DIR/$session.json"
+    cp -- "$local_report" "$preserved" 2>/dev/null || {
+        echo "HARNESS_ERROR could not preserve raw report for $session into $EVIDENCE_DIR" >&2
+        return 2
+    }
+    report_sha=$(shasum -a 256 "$preserved" 2>/dev/null | awk '{print $1}')
+    [ -n "$report_sha" ] || {
+        echo "HARNESS_ERROR could not fingerprint preserved report for $session" >&2
+        return 2
+    }
+    echo "EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=${INSTALLED_APK_SHA:-unknown}"
+}
+
 run_scenario() {
     scenario=$1
     session="acceptance-$(date +%s)-$$-$scenario"
@@ -605,6 +641,10 @@ run_scenario() {
         echo "HARNESS_ERROR could not read acceptance report for $session" >&2
         return 2
     }
+
+    # §5.G binding (P1-4): preserve the raw report BEFORE any verdict runs —
+    # a failed verdict must still leave its raw carrier behind.
+    preserve_report "$session" "$local_report" || return $?
 
     control_args=()
     if [ "$scenario" = "unavailable" ]; then
@@ -724,12 +764,21 @@ run_cellular_matrix() {
         { echo "HARNESS_ERROR no saved profile to protect" >&2; return 2; }
     PREFS_BEFORE=$(snapshot_prefs)
     [ -n "$PREFS_BEFORE" ] ||
-        { echo "HARNESS_ERROR schema-v3 safe-zone prefs not found" >&2; return 2; }
+        { echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2; return 2; }
     PREFS_BEFORE_FINGERPRINT=$(prefs_payload_fingerprint "$PREFS_BEFORE") ||
         { echo "HARNESS_ERROR could not fingerprint protected transport payload" >&2; return 2; }
 
     TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fakegps-acceptance.XXXXXX") ||
         { echo "HARNESS_ERROR could not create temporary directory" >&2; return 2; }
+    # §5.G (P1-4): the preserved evidence directory outlives this run — only
+    # TEMP_ROOT (the working area) is cleaned up. Fail loud if it cannot exist:
+    # a run without a durable carrier must not proceed to scenarios.
+    EVIDENCE_DIR="${HOOK_EVIDENCE_DIR:-$REPO_ROOT/c5-evidence/hook-acceptance-$(date -u +%Y%m%dT%H%M%SZ)}"
+    mkdir -p -- "$EVIDENCE_DIR" 2>/dev/null && [ -w "$EVIDENCE_DIR" ] || {
+        echo "HARNESS_ERROR could not create writable evidence directory: $EVIDENCE_DIR" >&2
+        return 2
+    }
+    echo "[evidence] preserved directory: $EVIDENCE_DIR (never deleted by this script)"
     TRANSACTION_ACTIVE=1
     trap cleanup_transaction EXIT
     trap 'signal_exit INT' INT
@@ -754,7 +803,7 @@ run_runtime_verify() {
     }
     prefs=$(snapshot_prefs)
     [ -n "$prefs" ] || {
-        echo "HARNESS_ERROR schema-v3 safe-zone prefs not found" >&2
+        echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2
         return 2
     }
     fingerprint=$(prefs_payload_fingerprint "$prefs") || {

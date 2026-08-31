@@ -126,13 +126,17 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
 #   判据：logcat MockProviderAcceptance 出 seed 映射（fixtureIndex↔scheduleItemId↔dbId↔
 #   journeyCaseId↔requiredSuccesses）+ READY command=prepare_10a。
 #   失败发 SEED_FAILED command=prepare_10a 且**无 READY**（P1-3：READY 仅在 seed 全部证明
-#   后发射——digest+结构校验、schedule store 已清、显式 id 无漂移、ConfigPrefsSync 发布成功）。
-#   seed 内部先清 durable schedule store（同拓扑重种在 ScheduleReinitPolicy 下是 NoOp、
-#   会保留上一轮 mid-run 指针/exhausted=true——清空后下次 boot 走 Rule 1 全新 generation：
-#   version 1、pointer=profile-1、exhausted=false）。seed 后必须 force-stop
-#   name.caiyao.fakegps.bench 再 bind（schedule 在 QwyEnvironmentController 构造时从 temp
-#   表 id ASC 重建；与 prepare_kyiv 的 6.0.1 进程重置同理），随后 discover() 回读
-#   profile-1..profile-10 完整有序 + currentItemId=profile-1（种子契约第 3 条）。
+#   后发射——digest pin+结构校验、显式 id 无漂移、单调 generation 写入+回读校验、
+#   ConfigPrefsSync 发布成功）。
+#   seed 内部对 schedule store 做**单调 generation reset**（R3 P1-2）：读当前 version、
+#   写 V+1 + pointer=profile-1 + exhausted=false（单原子 commit）、再回读校验。
+#   ⚠️ 不是 clear()——clear 会让下次 boot 重置回 version 1（回滚），违反 M-AD-24/spec
+#   L1895-2056「每次 reinit 必须 V→V+1」，旧 (schedule,item,version) 身份会与新 run 撞车。
+#   下次 boot initFromProfileIds 见同拓扑+已有 scheduleId 走 NoOp，保留这个 V+1 generation。
+#   报告发 SCHEDULE_GENERATION versionBefore=.. versionAfter=..。seed 后须 force-stop
+#   name.caiyao.fakegps.bench 再 bind，随后 discover() 回读 currentItemId=profile-1 +
+#   scheduleVersion（可执行子集）——完整有序 profile-1..10 list 回读依赖 profileRefs
+#   projection scope 决定（见 §5A 末「已知 product/spec 缺口」）。
 
 # Auto：种 plan + 10 task（csvRow/priority=fixtureIndex → 执行序=fixture 序）
 #   KB-8（spec v1.62，operator 裁定）：Auto 只消费 {顺序, journeyCaseId, requiredSuccesses}，
@@ -149,7 +153,10 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 #   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId。
 
 # Auto：启动 run（产品自身入口 AutomationService.startAutomation；无障碍服务须已启用）
-adb shell am start -n .../APlusSeedActivity --es cmd start_run --el plan_id <planId>
+adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity --es cmd start_run --el plan_id <planId>
+#   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
+#   （sourceFileName=FX-G2-10A / 10 行 / quota 和 17 / csvRow 1..10 / 坐标列仍是 KB-8 占位），
+#   拓扑不符（外来 CSV import、错 id）即 REFUSED（P2）。
 #   判据：START_CONFIRMED（isRunning 在 10s 内变 true）才算启动；START_NOT_CONFIRMED =
 #   无障碍服务未连接（startAutomation 静默 no-op），不得当作已启动。真相在
 #   ProviderRevokeCollector cmd=state 的 durable attempt 行，不在这行输出。
@@ -164,7 +171,17 @@ scheduleItemId / scheduleVersion 独立重算）。
 > **已知 product/spec drift（gap⑥，编排前置）**：当前 `TrustPolicy` 仍在 Auto 侧对
 > task 坐标列求 haversine（spec v1.62 L1757 明令退役的「旧文」形状）。产品修复合入前，
 > **任何** seed 方案都无法在真机产出 trusted completion——A 块 device 场次必须排在该
-> 产品修复之后。修复归 canonical fix owner 独立 PR，不在本 debug-only backfill 内。
+> 产品修复之后。修复归 canonical fix owner 独立 PR（opus5 已派 @glm52 实现 / @codex-terra
+> 审），不在本 debug-only backfill 内。
+>
+> **已知 product/spec 缺口（gap⑦，R3 P1-3 暴露，scope 待裁）**：种子契约第 3 条要求
+> discover() 回读**有序 profile-1..profile-10** 作 seed PASS 前置，但
+> `EnvironmentControlHandler` 的 `CapabilitySnapshotV1.profileRefs` 硬编码 `emptyList()`，
+> `HandshakeProbeActivity` 也不投影 profileRefs——**当前没有任何可执行命令能回读有序 item
+> 列表**。本 backfill 只把可执行子集（`currentItemId=profile-1` + `scheduleVersion` 单调）
+> 纳入 seed 判据；完整有序回读需要一个 authorized 的 profileRefs/schedule projection
+> （生产改动，超 debug-only scope）。**在该 projection 落地前，种子契约第 3 条的「完整有序
+> 回读」不得当作已满足**——它是 device 编排的显式前置，不是本 PR 声称已闭合的判据。
 
 ## 门控词表（冻结）
 
@@ -305,7 +322,9 @@ durable readback 不在读时改写 qwy bytes、错误 principal 不会假绿、
   durable 字节 + 目录漂移守卫）。
 - 纯度：`check-debug-only-collector.sh`（源 + APK 双查）+ 负矩阵
   `selftest-debug-only-collector.sh`（9 case，含新增 seed 符号）。
-- §5A seed backfill：`APlus10AFixtureSeedTest`（qwy，显式 id/parse/映射/digest）+
-  `APlus10APlanSeedTest`（Auto，坐标 carry/映射/totalRequiredSuccesses）——纯 JVM，钉死
-  autoGenerate 漂移与丢坐标假红两个病根。§8.4 EXPIRED：`QwyDurableSnapshotTest` 新增
-  clean-shutdown marker 由生产 `record()` 写、debug 非破坏性读回（含 literal drift 守卫）。
+- §5A seed backfill：`APlus10AFixtureSeedTest`（qwy，显式 id / digest pin / 结构绑定 +
+  篡改负测）+ `APlus10APlanSeedTest`（Auto，KB-8 去坐标 / 占位超界语义 / 拓扑校验 / 映射）+
+  `APlus10AScheduleResetTest`（qwy，单调 V+1 + 回读校验，R3 P1-2）——纯 JVM。
+  §5.G evidence carrier：`selftest-test-hook-evidence-carrier.sh`（raw report 保全 +
+  session/path/sha/apk 绑定 + cleanup 只删 TEMP_ROOT，R3 P1-4）。§8.4 EXPIRED：
+  `QwyDurableSnapshotTest` clean-shutdown marker 生产 `record()` 写、debug 非破坏性读回。
