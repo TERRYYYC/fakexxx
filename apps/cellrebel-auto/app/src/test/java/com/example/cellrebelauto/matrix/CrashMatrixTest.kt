@@ -521,12 +521,21 @@ class CrashMatrixTest {
     @Test
     fun `M_CR_06`() = runTest {
         // M-CR-06 (R38): positive trust PASS. CURRENT execution seeded FIRST, DECOY second (reversed
-        // from R37 to defeat .last() bypass). committedAt == RECOVERY_NOW (exact).
+        // from R37 to defeat .last() bypass). committedAt == RECOVERY_NOW (exact). KB-8 additionally
+        // keeps the durable plan at (39.9, 116.4) while the provider observations report a valid,
+        // independently verified Kyiv coordinate, proving recovery has no Auto-local distance gate.
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId, planId)
-        seedMcr06Fixture(sessionId, intentDigest, seededDigest, currentFirst = true)
+        seedMcr06Fixture(
+            sessionId,
+            intentDigest,
+            seededDigest,
+            currentFirst = true,
+            preOverride = { copy(effectiveLat = 50.4501, effectiveLng = 30.5234) },
+            postOverride = { copy(effectiveLat = 50.4501, effectiveLng = 30.5234) }
+        )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
@@ -704,6 +713,22 @@ class CrashMatrixTest {
         assertDiscriminatorReject("M-CR-06 coordinates discriminator", "latitude outside the geographic range",
             preOverride = { copy(effectiveLat = 91.0) },
             postOverride = { copy(effectiveLat = 91.0) })
+    }
+
+    @Test fun `M_CR_06_discriminator_null_coords`() = runTest {
+        assertDiscriminatorReject("M-CR-06 null coordinates", "durable effective coordinates are absent",
+            preOverride = { copy(effectiveLat = null, effectiveLng = null) },
+            postOverride = { copy(effectiveLat = null, effectiveLng = null) })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_NaN`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only NaN", "PRE latitude is non-finite, POST canonical",
+            preOverride = { copy(effectiveLat = Double.NaN) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_infinity`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only infinity", "POST longitude is non-finite, PRE canonical",
+            postOverride = { copy(effectiveLng = Double.POSITIVE_INFINITY) })
     }
 
     @Test fun `M_CR_06_discriminator_evidence_refs`() = runTest {

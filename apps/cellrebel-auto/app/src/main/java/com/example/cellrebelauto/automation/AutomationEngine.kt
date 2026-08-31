@@ -119,8 +119,9 @@ class AutomationEngine(
     // # 默认 null = 纯 legacy（pre-freeze 生产现状）。非 null 且 completionEvidenceSource 非 null 时
     // # engine 进入 A+ 模式：恢复段同键 reconcile + release 收敛 + schedule 门；正路径走 §3.1 生命周期。
     private val recoveryCoordinator: RecoveryCoordinator? = null,
-    // # R8-F1（Sol round-7 P1-2）：A+ 证据获取 seam（观察/分类/回执 artifact）。目标坐标与本地重算
-    // # hash 不由它提供——ctx 由持久 attempt intent 组装（INV-23）。默认 null = legacy。
+    // # R8-F1（Sol round-7 P1-2）：A+ 证据获取 seam（观察/分类/回执 artifact）。KB-8 下
+    // # provider effective coordinate 只作为结构/审计事实；ctx 的 owner-side hash 由持久 attempt
+    // # intent 本地重算（INV-23），不再组装 Auto-local 目标坐标。默认 null = legacy。
     private val completionEvidenceSource: APlusEvidenceSource? = null
 ) {
     companion object {

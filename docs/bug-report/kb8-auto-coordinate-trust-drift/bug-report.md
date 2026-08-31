@@ -71,8 +71,8 @@ KB-8 的单一所有权迁移只传播到了跨进程 contract、digest 与 cano
 ## 验证结果
 
 - RED：新增 KB-8 回归在旧实现上是 52 项中的唯一失败，失败点为旧 Auto-local 距离判定。
-- GREEN：目标 trust suite 通过；完整 Auto app unit suite 427/427 通过；崩溃恢复矩阵继续拒绝空值、非有限值和越界 provider 坐标。
+- GREEN：目标 trust suite 通过；完整 Auto app unit suite 430/430 通过；正常执行与崩溃恢复两条生产路径都以“provider 合法坐标远离旧 Auto 坐标”的正例完成可信 mint；恢复矩阵继续拒绝持久化后的空值、非有限值和越界 provider 坐标。
 - 构建：Auto `assembleDebug` 与 `assembleRelease` 通过；debug-only collector purity、零 lint 债务与 repo signer 校验通过。
 - 静态边界：Auto main/test 源码已无 `targetLat`、`targetLng`、caller tolerance、haversine 或旧冻结距离常量。
-- 全仓：`verify-a-plus --stage full` 共 11 道门，10 道通过；唯一失败为 provenance 对未提交工作树的预期拒绝，提交后需复跑。
-- 模拟器：当前工作树的 exact debug APK 已在 API 35 ARM64 模拟器完成设备端字节校验与冷启动。Auto SHA-256 为 `32dcde341a8a6240f0af1636c33061f662f997f140e9b42647fd7143cdc964db`，冷启动 653 ms；千网游 bench 为 `d950131a15745d0a20ea2810a3cf3c4f7d4251ed1a5d3bad08598edaa54142ae`，冷启动 864 ms；两进程存活且 crash buffer 为空。模拟器未配置无障碍、LSPosed 与 System Mock，因此该 smoke 不替代真机 G2。
+- 全仓：最终 clean HEAD 的 `verify-a-plus --stage full` 11/11 通过，包括 provenance、双 App 单测/构建、contract、acceptance、边界与 release-debt。
+- 模拟器：最终可执行代码的 exact debug APK 已在 API 35 ARM64 模拟器完成设备端字节校验与冷启动。Auto SHA-256 为 `2b7583fca7b4e25c24570f2495e741e561b6f7f660594d1ace4ddbf48d90ef2e`，冷启动 1391 ms；千网游 bench 为 `d950131a15745d0a20ea2810a3cf3c4f7d4251ed1a5d3bad08598edaa54142ae`，冷启动 1734 ms；两进程存活且 crash buffer 为空。随后仅更新本证据文字，不改变 APK 输入。模拟器未配置无障碍、LSPosed 与 System Mock，因此该 smoke 不替代真机 G2。

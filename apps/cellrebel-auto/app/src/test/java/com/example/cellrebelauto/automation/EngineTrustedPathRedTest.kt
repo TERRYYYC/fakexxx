@@ -361,13 +361,23 @@ class EngineTrustedPathRedTest {
     // ---- R10-F1 positive: provider-driven apply→lease + decision RED + terminal-success ----
 
     @Test
-    fun `R10-F1 positive - the normal chain drives apply then decide then release, and a passing completion must populate evidence, mint, and terminalize as succeeded`() = runTest {
+    fun `R10-F1 positive - the normal chain accepts provider-verified KB-8 coordinates and terminalizes as succeeded`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         seedTerminalDummyAttempt(taskId = taskId, attemptId = 77L) // non-constant attempt identity (P1-6)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        val backend = FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
+        // KB-8 production-path discriminator: the plan still carries the legacy CSV coordinate
+        // (39.9, 116.4), while Qianwangyou reports a valid independently verified coordinate in
+        // Kyiv. Auto must not recreate a second distance oracle before the trust decision.
+        val backend = FakeBackend(
+            executor,
+            log,
+            SeededObserve(emptyMap()),
+            SeededRevision(emptyMap()),
+            SeededQuota(emptyMap()),
+            FakeEvidenceSource(50.4501, 30.5234, WIRE_VERIFIED, "SYSTEM_MOCK", present = true)
+        )
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
