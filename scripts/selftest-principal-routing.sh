@@ -15,6 +15,12 @@
 #   case 6  selector deleted from src/main             → guard FAILS (exit 2)
 #   case 7  release "APK" missing the selector bytes   → guard FAILS (artifact half)
 #   case 8  clean release "APK" with selector bytes    → guard PASSES
+#   case 9  selector mutated to `selected = resolve(true)` → guard FAILS
+#           (Terra R3 exact mutation: the build flag is bypassed at the
+#           binding site while every marker the old guard checked survives)
+#   case 10 resolve body hardcodes `if (true)` (parameter ignored) → guard FAILS
+#           (same failure mode one level deeper: binding passes, body lies)
+#   case 11 branches swapped (debug→PRODUCTION)        → guard FAILS
 #
 # The behavioral half (hardcoded production ⇒ default composition fail-closes
 # in a debug build) is killed in the Kotlin lane by
@@ -50,27 +56,80 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # make_app_fixture <dir> <debug-const> <release-const> [extra-main-file-body]
+#                   [selector-mutation]
 # The optional mutation body goes into a SEPARATE src/main file — the real
 # Terra-P2 shape (a hardcoded gate inside a composition file), not appended to
-# the selector itself.
+# the selector itself. The optional selector-mutation rewrites the selector
+# itself (Terra R3 family: presence survives, binding does not).
 make_app_fixture() {
-  local dir="$1" dbg="$2" rel="$3" extra_main="${4:-}"
+  local dir="$1" dbg="$2" rel="$3" extra_main="${4:-}" sel_mut="${5:-}"
   mkdir -p \
     "$dir/src/main/java/com/example/app" \
     "$dir/src/debug/java/com/example/app" \
     "$dir/src/release/java/com/example/app"
-  cat >"$dir/src/main/java/com/example/app/ProviderPrincipal.kt" <<'EOF'
-package com.example.app
-import io.github.terryyyc.fakexxx.contract.v1.ContractV1
-internal object ProviderPrincipal {
+  local selector_body
+  case "$sel_mut" in
+    ""|none)
+      selector_body='internal object ProviderPrincipal {
     fun resolve(isDebugBuild: Boolean): String =
-        if (isDebugBuild) ContractV1.PROVIDER_APPLICATION_ID_BENCH
-        else ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        if (isDebugBuild) {
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH
+        } else {
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        }
     val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
     val knownApplicationIds: List<String> =
         listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
-}
-EOF
+}' ;;
+    # Terra R3 EXACT mutation: the binding bypasses the build flag; every marker
+    # the pre-strengthening guard checked (literals, ProviderPrincipalBuild
+    # reference, variant constants, dex bytes) survives this diff.
+    resolve_true)
+      selector_body='internal object ProviderPrincipal {
+    fun resolve(isDebugBuild: Boolean): String =
+        if (isDebugBuild) {
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH
+        } else {
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        }
+    val selected: String = resolve(true)
+    val knownApplicationIds: List<String> =
+        listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
+}' ;;
+    # Same failure mode one level deeper: binding consumes the flag, but the
+    # body ignores its parameter — release still hard-routes bench.
+    body_hardcode)
+      selector_body='internal object ProviderPrincipal {
+    fun resolve(isDebugBuild: Boolean): String =
+        if (true) {
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH
+        } else {
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        }
+    val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
+    val knownApplicationIds: List<String> =
+        listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
+}' ;;
+    # Branch swap: debug selects production, release selects bench.
+    branch_swap)
+      selector_body='internal object ProviderPrincipal {
+    fun resolve(isDebugBuild: Boolean): String =
+        if (isDebugBuild) {
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        } else {
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH
+        }
+    val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
+    val knownApplicationIds: List<String> =
+        listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
+}' ;;
+    *)
+      echo "make_app_fixture: unknown selector-mutation: $sel_mut" >&2; exit 2 ;;
+  esac
+  {
+    printf 'package com.example.app\nimport io.github.terryyyc.fakexxx.contract.v1.ContractV1\n'
+    printf '%s\n' "$selector_body"
+  } >"$dir/src/main/java/com/example/app/ProviderPrincipal.kt"
   if [ -n "$extra_main" ]; then
     printf 'package com.example.app\n\n%s\n' "$extra_main" \
       >"$dir/src/main/java/com/example/app/Composition.kt"
@@ -169,6 +228,36 @@ if "$GUARD" "$F1" --apk "$A8" >/dev/null 2>&1; then
   report ok "case8 clean release APK passes"
 else
   report fail "case8 clean release APK passes" "guard rejected a clean APK"
+fi
+
+# ---- case 9: selector mutated to selected = resolve(true) (Terra R3 exact) --
+# The recorded false-green: every marker the pre-strengthening guard checked
+# survives (variant constants, literals-in-selector, ProviderPrincipalBuild
+# reference via knownApplicationIds, dex bytes) while release hard-routes bench.
+F9="$WORK/app-resolve-true/app"
+make_app_fixture "$F9" "true" "false" "" "resolve_true"
+if "$GUARD" "$F9" >/dev/null 2>&1; then
+  report fail "case9 selected=resolve(true) is rejected" "guard passed a build-flag bypass at the binding site"
+else
+  report ok "case9 selected=resolve(true) is rejected"
+fi
+
+# ---- case 10: resolve body ignores its parameter ----------------------------
+F10="$WORK/app-body-hardcode/app"
+make_app_fixture "$F10" "true" "false" "" "body_hardcode"
+if "$GUARD" "$F10" >/dev/null 2>&1; then
+  report fail "case10 resolve body if(true) is rejected" "guard passed an ignored-parameter body"
+else
+  report ok "case10 resolve body if(true) is rejected"
+fi
+
+# ---- case 11: branches swapped ----------------------------------------------
+F11="$WORK/app-branch-swap/app"
+make_app_fixture "$F11" "true" "false" "" "branch_swap"
+if "$GUARD" "$F11" >/dev/null 2>&1; then
+  report fail "case11 swapped branches are rejected" "guard passed debug→production / release→bench routing"
+else
+  report ok "case11 swapped branches are rejected"
 fi
 
 # ---- verdict ---------------------------------------------------------------

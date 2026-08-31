@@ -115,6 +115,26 @@ for marker in "PROVIDER_APPLICATION_ID_PRODUCTION" "PROVIDER_APPLICATION_ID_BENC
   fi
 done
 
+# 2c. exact SELECTION BINDING (Terra R3): presence of the markers proves nothing
+# about routing — `selected = resolve(true)` keeps every marker green while
+# release hard-routes bench. The binding is pinned exactly, in three parts:
+#   (i)   `selected` consumes the build flag at the call site (kills the
+#         resolve(true) bypass);
+#   (ii)  the resolve body branches on its OWN parameter with BENCH in the
+#         debug arm (kills an ignored-parameter body and a branch swap);
+#   (iii) the else arm maps to PRODUCTION (kills the swapped release leg).
+# These are frozen anchors like the variant constants in check 1: a legitimate
+# refactor updates the pin in the same commit, by design.
+if ! grep -qF 'val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)' "$SELECTOR_FILE"; then
+  echo "FAIL: $SELECTOR_FILE must bind \`val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)\` exactly — a resolve(<literal>) bypass hard-routes release (Terra R3 false-green)" >&2
+  fail=1
+fi
+if ! { grep -A2 -F 'if (isDebugBuild) {' "$SELECTOR_FILE" | grep -qF 'PROVIDER_APPLICATION_ID_BENCH' && \
+      grep -A1 -F '} else {' "$SELECTOR_FILE" | grep -qF 'PROVIDER_APPLICATION_ID_PRODUCTION'; }; then
+  echo "FAIL: $SELECTOR_FILE must map the debug arm of resolve to BENCH and the else arm to PRODUCTION (branch swap / ignored-parameter body)" >&2
+  fail=1
+fi
+
 # ---- 3. release APK artifact scan ------------------------------------------
 if [ -n "$APK" ]; then
   if [ ! -f "$APK" ]; then
