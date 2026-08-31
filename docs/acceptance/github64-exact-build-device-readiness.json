@@ -1,0 +1,162 @@
+{
+  "artifacts": [
+    {
+      "buildCommand": "cd apps/cellrebel-auto && ./gradlew --no-daemon clean assembleDebug",
+      "id": "auto",
+      "packageName": "com.example.cellrebelauto",
+      "relativePath": "apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk",
+      "sha256": "7bd07b07fde483cf1252722f2c29880c0030d47e52638761f19fa2d0dc4a3f1b",
+      "signerDn": "C=US, O=Android, CN=Android Debug",
+      "signerSha256": "7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41",
+      "sizeBytes": 11413622,
+      "versionCode": "1",
+      "versionName": "1.0"
+    },
+    {
+      "buildCommand": "cd apps/qianwangyou && ./gradlew --no-daemon clean assembleDebug",
+      "id": "qwy",
+      "packageName": "name.caiyao.fakegps.bench",
+      "relativePath": "apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk",
+      "sha256": "bb5be7db762a0e38218465e321b582eddb62c3f9110b714ac1c18076a151a161",
+      "signerDn": "C=US, O=Android, CN=Android Debug",
+      "signerSha256": "7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41",
+      "sizeBytes": 23194413,
+      "versionCode": "8",
+      "versionName": "3.0.0"
+    }
+  ],
+  "buildEnvironment": {
+    "aapt": "Android Asset Packaging Tool v0.2-14042983 (build-tools 36.1.0)",
+    "apksigner": "0.9 (build-tools 36.1.0)",
+    "gradle": "9.3.1",
+    "java": "OpenJDK 17.0.20+0",
+    "os": "Mac OS X 26.6.2 aarch64",
+    "repeatCleanBuildsWithSameBytes": 2
+  },
+  "candidate": {
+    "allowedPreparationDelta": [
+      "docs/acceptance/github64-exact-build-device-readiness.json",
+      "docs/acceptance/github64-exact-build-device-readiness.md",
+      "scripts/check-github64-device-readiness.py",
+      "scripts/selftest-github64-device-readiness.sh"
+    ],
+    "baseHead": "9eb6389e05e49e5a19c3890fd1a39b9be7e11c1d",
+    "productHead": "5002e0e005324c32ca3d36d10510180d1fafbf81",
+    "productTree": "ff4c6440509aa1d90b4a7a8dc6647b47c2d33af1",
+    "pullRequest": "https://github.com/TERRYYYC/fakexxx/pull/65"
+  },
+  "inputs": [
+    {
+      "id": "contract",
+      "relativePath": "contracts/environment-control-v1/compatibility.yaml",
+      "sha256": "c64dd132418493ba5918d86e481382d29b3d351867f3e3d3569577abb3d6f543"
+    },
+    {
+      "id": "schedule",
+      "itemCount": 10,
+      "relativePath": "docs/acceptance/a-plus-10a-fixture.json",
+      "requiredTrustedSuccesses": 17,
+      "sha256": "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"
+    }
+  ],
+  "observedAt": "2026-08-31T08:53:09Z",
+  "packageId": "github64-exact-build-device-readiness",
+  "readiness": {
+    "blockers": [
+      {
+        "evidence": "apps/qianwangyou: python3 -m unittest scripts.test_cellular_acceptance_matrix => 18 tests, 1 failure; writer schema 4 != emitted schema 3",
+        "id": "G2-HARNESS-SCHEMA-001",
+        "owner": "PR #62",
+        "scope": [
+          "G"
+        ],
+        "url": "https://github.com/TERRYYYC/fakexxx/pull/62"
+      },
+      {
+        "evidence": "test-hook.sh has no serial/lease gate and uses unscoped adb; mock_provider_acceptance.sh defaults to a physical-device serial",
+        "id": "G2-HARNESS-LEASE-002",
+        "owner": "PR #62",
+        "scope": [
+          "A",
+          "B",
+          "C",
+          "E-device",
+          "G"
+        ],
+        "url": "https://github.com/TERRYYYC/fakexxx/pull/62"
+      },
+      {
+        "evidence": "raw Hook report is deleted with its temporary directory and is not sealed to session/APK/report/manifest digests; restore is incomplete",
+        "id": "G2-HARNESS-EVIDENCE-003",
+        "owner": "PR #62",
+        "scope": [
+          "A",
+          "B",
+          "C",
+          "E-device",
+          "G"
+        ],
+        "url": "https://github.com/TERRYYYC/fakexxx/pull/62"
+      },
+      {
+        "evidence": "independent review requested changes: fixture pinning, monotonic schedule reset, impossible discover readback, report persistence/APK binding, and related harness gaps",
+        "id": "G2-PR62-CHANGES-REQUESTED-004",
+        "owner": "PR #62",
+        "scope": [
+          "A",
+          "B",
+          "C",
+          "G"
+        ],
+        "url": "https://github.com/TERRYYYC/fakexxx/pull/62"
+      },
+      {
+        "evidence": "exact product HEAD 5002e0e does not contain PR #63 provider-principal routing; debug/G2 start can resolve the revoked production identity and pause before attempt one",
+        "id": "G2-PR63-PRINCIPAL-ROUTING-005",
+        "owner": "PR #63",
+        "scope": [
+          "A",
+          "B",
+          "C"
+        ],
+        "url": "https://github.com/TERRYYYC/fakexxx/pull/63"
+      },
+      {
+        "evidence": "public callbacks are intentionally PARTIAL/NONE at exact HEAD; no authoritative sequence/history oracle can claim FULL or mint trusted quota",
+        "id": "G2-ISSUE66-CONTINUITY-006",
+        "owner": "Issue #66",
+        "scope": [
+          "A",
+          "B",
+          "TRUSTED_QUOTA"
+        ],
+        "url": "https://github.com/TERRYYYC/fakexxx/issues/66"
+      }
+    ],
+    "canonicalLedger": {
+      "relativePath": "docs/acceptance/matrix-evidence-device.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "state": "EMPTY_UNCHANGED"
+    },
+    "goNoGo": "NO_GO_DEVICE_EXECUTION",
+    "operatorAuthorizationRequired": [
+      "DEVICE_LEASE",
+      "APK_INSTALL_OR_REPLACE",
+      "LSPOSED_SCOPE_CHANGE",
+      "SYSTEM_MOCK_SELECTION",
+      "DEVICE_STATE_MUTATION",
+      "CLEANUP_OR_RESTORE"
+    ],
+    "scopeDisposition": {
+      "A": "BLOCKED_BY_PR62_PR63_AND_ISSUE66",
+      "B": "BLOCKED_BY_PR62_PR63_AND_ISSUE66",
+      "C": "BLOCKED_BY_PR62_AND_PR63_NOT_ISSUE66",
+      "E-host": "READY_FOR_HOST_AUDIT",
+      "E-device": "BLOCKED_BY_HARNESS_AND_AUTHORIZATION_NOT_ISSUE66",
+      "G": "BLOCKED_BY_PR62_SCHEMA_AND_EVIDENCE_NOT_ISSUE66",
+      "M-CO-06": "ACCEPTED_HOST_DISPOSITION_NO_DEVICE_LEDGER_ROW",
+      "M-VS-01": "POST_V1_ACCEPTED_OUT_OF_CURRENT_G2"
+    }
+  },
+  "schemaVersion": 1
+}
