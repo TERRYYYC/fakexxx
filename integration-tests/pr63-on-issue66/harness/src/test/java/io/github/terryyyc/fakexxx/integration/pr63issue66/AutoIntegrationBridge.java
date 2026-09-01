@@ -2,12 +2,12 @@ package io.github.terryyyc.fakexxx.integration.pr63issue66;
 
 import android.content.Context;
 import com.example.cellrebelauto.BuildConfig;
+import com.example.cellrebelauto.automation.ProviderPrincipal;
 import com.example.cellrebelauto.recovery.ApplyOutcome;
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor;
 import com.example.cellrebelauto.recovery.ProviderExecutorAcquisition;
 import com.example.cellrebelauto.recovery.ProviderExecutorRegistry;
 import com.example.cellrebelauto.recovery.ProviderExecutorRegistryKt;
-import com.example.cellrebelauto.recovery.ProviderPackageTarget;
 import com.example.cellrebelauto.recovery.ProviderScopedExternalApplyExecutor;
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1;
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1;
@@ -74,7 +74,7 @@ public final class AutoIntegrationBridge implements AutoCloseable {
     }
 
     public static String selectedProviderTarget() {
-        return ProviderPackageTarget.INSTANCE.getCurrentApplicationId();
+        return ProviderPrincipal.INSTANCE.getSelected();
     }
 
     public CapabilitySnapshotV1 discover() {

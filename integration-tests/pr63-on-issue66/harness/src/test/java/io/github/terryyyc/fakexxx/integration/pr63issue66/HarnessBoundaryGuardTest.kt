@@ -99,7 +99,14 @@ class HarnessBoundaryGuardTest {
 
         listOf(
             service.replace(SERVICE_PLAN_READ, "planRepository.getPlanFromCurrentBuild(planId)"),
-            service.replace(SERVICE_DURABLE_PROVIDER, "ProviderPackageTarget.currentApplicationId"),
+            service.replace(SERVICE_DURABLE_PROVIDER, "ProviderPrincipal.selected"),
+            service.replace(
+                SERVICE_SIGNER_FROM_DURABLE_PROVIDER,
+                SERVICE_SIGNER_FROM_DURABLE_PROVIDER.replace(
+                    "providerApplicationId)",
+                    "ProviderPrincipal.selected)",
+                ),
+            ),
             service.replace(
                 SERVICE_SIGNER_FROM_DURABLE_PROVIDER,
                 SERVICE_SIGNER_FROM_DURABLE_PROVIDER.replace(
@@ -108,14 +115,14 @@ class HarnessBoundaryGuardTest {
                 ),
             ),
             service.replace(SERVICE_PRINCIPAL_GUARD, "guardCurrentBuildProviderPrincipal("),
-            service.replace(SERVICE_GUARD_ARGS, SERVICE_GUARD_ARGS.replace("providerApplicationId", "ProviderPackageTarget.currentApplicationId")),
+            service.replace(SERVICE_GUARD_ARGS, SERVICE_GUARD_ARGS.replace("providerApplicationId", "ProviderPrincipal.selected")),
             service.replace(SERVICE_ACQUIRE, "providerExecutorRegistry.value.acquireCurrentBuild("),
             service.replace(SERVICE_ACQUIRE_ARGS, SERVICE_ACQUIRE_ARGS.replace("capturedProviderSigner", "currentBuildSigner")),
             service.replace(SERVICE_READY_GATE, "if (false) {"),
             service.replace(SERVICE_BACKEND, "APlusComposition.testOnlyBackend("),
             service.replace(SERVICE_ENGINE_PARAMS, "APlusComposition.recoveryCoordinator(aplusBackend)"),
             service.replace(SERVICE_ENGINE_FACTORY, "AutomationEngine("),
-            service + "\nval forbidden = ProviderPackageTarget.currentApplicationId\n",
+            service + "\nval forbidden = ProviderPrincipal.selected\n",
         ).forEachIndexed { index, mutated ->
             assertTrue(
                 "production service route mutation $index escaped",
@@ -150,6 +157,13 @@ class HarnessBoundaryGuardTest {
                 BRIDGE_SIGNER_FROM_DURABLE_PROVIDER.replace(
                     "durableProviderApplicationId",
                     "\"name.caiyao.fakegps.bench\"",
+                ),
+            ),
+            durableBridge.replace(
+                BRIDGE_SIGNER_FROM_DURABLE_PROVIDER,
+                BRIDGE_SIGNER_FROM_DURABLE_PROVIDER.replace(
+                    "durableProviderApplicationId",
+                    "ProviderPrincipal.INSTANCE.getSelected()",
                 ),
             ),
             durableBridge.replace(BRIDGE_PRINCIPAL_GUARD, "guardCurrentBuildProviderPrincipal("),
@@ -282,7 +296,7 @@ class HarnessBoundaryGuardTest {
         if (positions.any { it < 0 } || positions.zipWithNext().any { (left, right) -> left >= right }) {
             add("production route must be Room plan -> guard -> acquire -> ready -> backend -> params -> engine")
         }
-        if ("ProviderPackageTarget.currentApplicationId" in source) {
+        if ("ProviderPackageTarget" in source || "ProviderPrincipal.selected" in source) {
             add("AutomationService must never select the provider from the current build")
         }
     }
@@ -322,6 +336,9 @@ class HarnessBoundaryGuardTest {
         }
         if ("recoveryCoordinator\$app_release" in source) {
             add("test bridge must use the Service composition oracle")
+        }
+        if ("ProviderPrincipal.INSTANCE.getSelected()" in source) {
+            add("test bridge signer lookup must consume the durable plan provider")
         }
     }
 
