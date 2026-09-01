@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.example.cellrebelauto.automation.ProviderPrincipal
 import com.example.cellrebelauto.recovery.ContractResponseValidator
 import com.example.cellrebelauto.recovery.ContractResponseValidator.ValidatedContractResponse
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
@@ -54,12 +55,10 @@ import java.util.concurrent.atomic.AtomicReference
  * exactly who they are talking to.
  *
  * The provider's debug build carries an `applicationIdSuffix ".bench"`, so the
- * package name differs between debug and release. Both are tried, in that order,
- * because a debug Auto talking to a release provider (or the reverse) is a real
- * configuration and silently failing to bind would look identical to "provider
- * not installed". Issue #13 (applicationId cutover) will eventually make this
- * single-valued; until then, guessing one name would make half the device
- * matrix invisible.
+ * package name differs between debug and release. This client binds only the
+ * principal selected by the Auto build: falling back to the sibling package
+ * would let diagnostics report success against a different identity than the
+ * engine's trust gate and Binder executor.
  */
 class EnvironmentControlClient(private val context: Context) {
 
@@ -90,18 +89,8 @@ class EnvironmentControlClient(private val context: Context) {
         data class Refused(val providerPackage: String, val cause: Throwable) : HandshakeResult
     }
 
-    fun handshake(timeoutMs: Long = 5_000L): HandshakeResult {
-        for (pkg in PROVIDER_PACKAGES) {
-            when (val result = tryPackage(pkg, timeoutMs)) {
-                // Only a genuine bind failure justifies moving to the next
-                // candidate. A provider that bound and then refused has answered
-                // — trying its sibling package would hide that answer.
-                is HandshakeResult.NotBindable -> continue
-                else -> return result
-            }
-        }
-        return HandshakeResult.NotBindable(PROVIDER_PACKAGES.toList())
-    }
+    fun handshake(timeoutMs: Long = 5_000L): HandshakeResult =
+        tryPackage(PROVIDER_PACKAGE, timeoutMs)
 
     private fun tryPackage(providerPackage: String, timeoutMs: Long): HandshakeResult {
         val latch = CountDownLatch(1)
@@ -194,11 +183,11 @@ class EnvironmentControlClient(private val context: Context) {
          */
         const val PROVIDER_SERVICE_CLASS = ContractV1.SERVICE_CLASS_NAME
 
-        /** Debug first: a developer device most often has the .bench build on it. */
-        val PROVIDER_PACKAGES = arrayOf(
-            ContractV1.PROVIDER_APPLICATION_ID_BENCH,
-            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
-        )
+        /** The same build-selected principal used by trust and the production Binder executor. */
+        val PROVIDER_PACKAGE: String = ProviderPrincipal.selected
+
+        /** Immutable compatibility surface for reports that render the attempted package set. */
+        val PROVIDER_PACKAGES: List<String> = listOf(PROVIDER_PACKAGE)
 
         /** §6.8: the version this client speaks, surfaced for skew reporting. */
         val CLIENT_PROTOCOL_VERSION: Int get() = ContractV1.PROTOCOL_VERSION

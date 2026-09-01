@@ -191,6 +191,18 @@ jobs:
           ./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app \
             --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release-unsigned.apk
 
+      # Terra PR-#65 review P2: CI runs debug unit tests and only assembles
+      # release, so the release leg of the #63 single-principal routing is
+      # proven here on the release artifact — variant constants pinned, the
+      # principal literals confined to the single selection point, and the
+      # selector class present in the release dex pool. The debug leg is
+      # DefaultPrincipalCompositionGreenTest.
+      - name: provider principal routing proof (release artifact)
+        working-directory: .
+        run: |
+          ./scripts/check-principal-routing.sh apps/cellrebel-auto/app \
+            --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release-unsigned.apk
+
       # Lint runs through the debt ratchet rather than as `lintDebug`, so a
       # green check never hides a growing error count. Budget for this app is 0.
       - name: lint debt ratchet
@@ -317,6 +329,14 @@ jobs:
         # src/main, vacuous marker, marker/class bytes in a release APK).
         # Device-free by construction (fixture trees + fixture zips).
         run: ./scripts/selftest-debug-only-collector.sh
+
+      - name: selftest-principal-routing
+        # Terra PR-#65 review P2: negative matrix for the release-variant
+        # provider-principal routing proof (flipped variant constants, a
+        # hardcoded principal gate in src/main, selector absent from the
+        # release dex). Same "a guard that cannot fail is decoration" argument
+        # as the collector selftest above. Device-free by construction.
+        run: ./scripts/selftest-principal-routing.sh
 
       - name: selftest-install-apk-verified
         run: ./scripts/selftest-install-apk-verified.sh

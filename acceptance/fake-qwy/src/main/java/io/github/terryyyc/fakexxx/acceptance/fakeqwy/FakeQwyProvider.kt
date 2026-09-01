@@ -867,6 +867,15 @@ class FakeQwyProvider(
         if (targetItem == null) return false
         if (!effectiveLat.isFinite() || !effectiveLng.isFinite()) return false
         if (effectiveLat !in -90.0..90.0 || effectiveLng !in -180.0..180.0) return false
+        // KB-8 fake/production parity (Terra PR-#65 review P1): the TARGET must
+        // pass the same finite/range validity gate production Qianwangyou applies
+        // (SystemMockTrustPolicy.validCoordinates on the target) BEFORE any
+        // distance comparison. Without this, an out-of-domain target like
+        // (0.0, 360.0) wraps inside haversine (Δλ=2π ⇒ sin(Δλ/2)²≈1.5e-32) to a
+        // ~1.56e-9 m "distance" and mints INDEPENDENTLY_VERIFIED from a
+        // coordinate that can never exist.
+        if (!targetItem.latitude.isFinite() || !targetItem.longitude.isFinite()) return false
+        if (targetItem.latitude !in -90.0..90.0 || targetItem.longitude !in -180.0..180.0) return false
         return distanceMeters(
             effectiveLat,
             effectiveLng,

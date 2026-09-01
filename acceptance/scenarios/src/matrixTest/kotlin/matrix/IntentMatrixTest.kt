@@ -261,6 +261,103 @@ class IntentMatrixTest {
     }
 
     /**
+     * KB-8 Fake parity (Terra PR-#65 review P1): an INVALID target coordinate must
+     * fail closed in the fake exactly like production Qianwangyou.
+     *
+     * Production `SystemMockTrustPolicy.evaluate` validates the TARGET via
+     * `validCoordinates(targetLatitude, targetLongitude)` (finite + range) BEFORE
+     * any haversine comparison. The fake's `verifyCoordinates` validated only the
+     * EFFECTIVE coordinates, so target `(0.0, 360.0)` with effective `(0.0, 0.0)`
+     * wrapped inside the haversine formula: Δλ = 2π ⇒ sin(Δλ/2)² ≈ 1.5e-32 ⇒
+     * distance ≈ 1.56e-9 m ≤ the 1 m tolerance ⇒ SYSTEM_MOCK_INDEPENDENTLY_VERIFIED
+     * minted from a coordinate that can never exist. Receipt AND observation must
+     * both downgrade to NONE — parity with the production target gate.
+     */
+    @Test
+    fun targetLongitudeOutsideDomainFailsClosedInReceiptAndObservation() {
+        // The exact reviewed vector: valid effective coords, out-of-domain target.
+        provider.setSchedule("sched-invalid-target", listOf(
+            FakeQwyProvider.ScheduleItem(
+                itemId = "item-invalid-lng",
+                latitude = 0.0,
+                longitude = 360.0,
+            ),
+        ))
+        provider.overrideCoordinates = Pair(0.0, 0.0)
+
+        val applyResult = provider.apply(caller, ApplyRequestV1(
+            intent = intent(attemptId = "attempt-invalid-target-lng"),
+            idempotencyKey = "apply-invalid-target-lng",
+            callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
+        ))
+        assertEquals(ContractResultKindV1.APPLY, applyResult.resultKindOrNull())
+        assertEquals(
+            "apply receipt must fail closed on an out-of-domain TARGET (production parity)",
+            VerificationLevelV1.NONE.wire,
+            applyResult.applyReceipt!!.verificationLevelWire,
+        )
+
+        val leaseId = applyResult.applyReceipt!!.leaseId
+        val intentHash = applyResult.applyReceipt!!.acceptedIntentHash
+        clock.advance(1_000L)
+        val observation = provider.observe(caller, ObserveRequestV1(
+            leaseId = leaseId,
+            operationId = "op-observe-invalid-target-lng",
+            expectedIntentHash = intentHash,
+        )).environmentObservation!!
+        assertEquals(
+            "observation must fail closed on an out-of-domain TARGET (haversine wraparound is not proximity)",
+            VerificationLevelV1.NONE.wire,
+            observation.verificationLevelWire,
+        )
+    }
+
+    /**
+     * KB-8 Fake parity, second arm of the same P1: a NaN TARGET must also fail
+     * closed. NaN never reaches a true comparison (`NaN <= tolerance` is false, so
+     * this happens to fail closed today), but the regression pins it as contract —
+     * the fake may not start relying on IEEE-754 accident where production relies
+     * on an explicit validity gate. Receipt AND observation must both be NONE.
+     */
+    @Test
+    fun targetCoordinateNaNFailsClosedInReceiptAndObservation() {
+        provider.setSchedule("sched-nan-target", listOf(
+            FakeQwyProvider.ScheduleItem(
+                itemId = "item-nan-target",
+                latitude = Double.NaN,
+                longitude = 121.4737,
+            ),
+        ))
+        provider.overrideCoordinates = Pair(31.2304, 121.4737)
+
+        val applyResult = provider.apply(caller, ApplyRequestV1(
+            intent = intent(attemptId = "attempt-nan-target"),
+            idempotencyKey = "apply-nan-target",
+            callerProtocolVersion = ContractV1.PROTOCOL_VERSION,
+        ))
+        assertEquals(ContractResultKindV1.APPLY, applyResult.resultKindOrNull())
+        assertEquals(
+            "apply receipt must fail closed on a NaN TARGET (production parity)",
+            VerificationLevelV1.NONE.wire,
+            applyResult.applyReceipt!!.verificationLevelWire,
+        )
+
+        val leaseId = applyResult.applyReceipt!!.leaseId
+        val intentHash = applyResult.applyReceipt!!.acceptedIntentHash
+        clock.advance(1_000L)
+        val observation = provider.observe(caller, ObserveRequestV1(
+            leaseId = leaseId,
+            operationId = "op-observe-nan-target",
+            expectedIntentHash = intentHash,
+        )).environmentObservation!!
+        assertEquals(
+            "observation must fail closed on a NaN TARGET",
+            VerificationLevelV1.NONE.wire,
+            observation.verificationLevelWire,
+        )
+    }
+
+    /**
      * M-IN-02: lease reuse but intent has changed → ENVIRONMENT_DRIFT.
      *
      * "lease 复用但意图已切换，observation 仍返回旧 intent hash →

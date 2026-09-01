@@ -128,7 +128,10 @@ class ProductionEvidenceSourceOracleTest {
                 aplusAnchorScheduleId = "qwy-default-schedule"
             )
         )
-        // Approve the TRUSTED signer principal for the production provider app id.
+        // Approve the TRUSTED signer principal UNDER TEST. This oracle exercises the production
+        // principal path (backend() injects it explicitly), so the approved pairing must bind the
+        // same injected identity — never the build-selected one — keeping every leg on ONE
+        // principal (the ProviderPrincipal single-truth-source contract from #63).
         val trustedSigner = "sha256:trusted"
         val approvedId = db.providerPairingDao().insert(
             com.example.cellrebelauto.model.plan.ProviderPairingRecord(
