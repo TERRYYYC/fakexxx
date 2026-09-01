@@ -59,21 +59,31 @@ interface DurableRecoveryLog {
         acceptedIntentHash: String? = null,
         appliedAtEpochMs: Long? = null,
         environmentRevision: Long? = null,
-        verificationLevelWire: Int? = null
+        verificationLevelWire: Int? = null,
+        providerApplicationId: String? = null,
     ): RecordedReceipt?
 
     /** Durable recovery checkpoint for an attempt (§7.1 RecoveryCheckpoint), or null. */
     fun checkpointFor(attemptId: Long): RecoveryCheckpoint?
 
     /** Record a recovery checkpoint (terminal-state projection or reconcile progress). */
-    fun recordCheckpoint(attemptId: Long, lastDurableStage: String, receiptKey: String?, now: Long)
+    fun recordCheckpoint(
+        attemptId: Long,
+        lastDurableStage: String,
+        receiptKey: String?,
+        now: Long,
+        providerApplicationId: String? = null,
+    ): RecoveryCheckpoint?
 
     /**
      * The durable RELEASE receipt for [leaseId], or null if none (§8.1 RELEASE_RECEIPT; §8.2: no fresh
      * apply until a release receipt is durable — Sol round-8 P1-4). A Boolean "released" is NOT a
      * durable proof; this typed readback is what the recovery RED asserts.
      */
-    fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt?
+    fun releaseReceiptFor(
+        leaseId: String,
+        providerApplicationId: String? = null,
+    ): RecordedReleaseReceipt?
 
     /**
      * The durable RELEASE receipt for the OPERATION key [idempotencyKey] (INV-13 idempotency is keyed by
@@ -92,7 +102,8 @@ interface DurableRecoveryLog {
         leaseId: String,
         releaseDigest: String,
         outcome: String,
-        now: Long
+        now: Long,
+        providerApplicationId: String? = null,
     ): RecordedReleaseReceipt?
 }
 
@@ -113,7 +124,9 @@ data class RecordedReceipt(
     val acceptedIntentHash: String? = null,
     val appliedAtEpochMs: Long? = null,
     val environmentRevision: Long? = null,
-    val verificationLevelWire: Int? = null
+    val verificationLevelWire: Int? = null,
+    /** Frozen provider applicationId. Null means legacy/unknown and is not scoped-replayable. */
+    val providerApplicationId: String? = null,
 )
 
 /** A recovery checkpoint (§7.1 RecoveryCheckpoint projection). */
@@ -121,7 +134,9 @@ data class RecoveryCheckpoint(
     val attemptId: Long,
     val lastDurableStage: String,
     val receiptKey: String?,
-    val recordedAt: Long
+    val recordedAt: Long,
+    /** Frozen provider applicationId. */
+    val providerApplicationId: String? = null,
 )
 
 /** A durable release receipt (§8.1 RELEASE_RECEIPT projection, lease-bound). */
@@ -130,5 +145,7 @@ data class RecordedReleaseReceipt(
     val leaseId: String,
     val releaseDigest: String,
     val resultOutcome: String,
-    val createdAt: Long
+    val createdAt: Long,
+    /** Frozen provider applicationId; lease identity is (providerApplicationId, leaseId). */
+    val providerApplicationId: String? = null,
 )

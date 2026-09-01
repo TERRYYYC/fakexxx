@@ -140,8 +140,8 @@ class Migration4to5Test {
 
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            // 本测试聚焦 4→5 的数据语义；当前 DB 版本 v6，故补 no-op 的 MIGRATION_5_6（F-19）。
-            .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
+            // 本测试聚焦 4→5 的数据语义；同时补齐到当前 v7 的完整阶梯。
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
             .allowMainThreadQueries()
             .build()
 
@@ -149,7 +149,7 @@ class Migration4to5Test {
     fun `v4 to v5 migration preserves legacy data and snapshots legacy progress as unverified`() = runTest {
         createV4Database()
 
-        // Opening at the current version runs MIGRATION_4_5 (+ no-op 5_6) + full schema
+        // Opening at the current version runs 4→5→6→7 + full schema
         // validation (throws on mismatch).
         val db = openRoomDb()
 
@@ -213,7 +213,7 @@ class Migration4to5Test {
         } finally {
             noMigrationDb.close()
         }
-        assertTrue("opening a v4 file at v6 without migration must fail, not destroy", threw)
+        assertTrue("opening a v4 file at v7 without migration must fail, not destroy", threw)
 
         // The v4 file itself is intact (no destructive fallback was registered).
         // Re-opening WITH the migrations still works and preserves data.
@@ -225,7 +225,7 @@ class Migration4to5Test {
     /**
      * F-19 regression guard for the dispatch requirement「真有 v2–v4 设备时仍走迁移，不是无脑重建」:
      * the PRODUCTION configuration (quarantine + full ladder + fallbackToDestructiveMigration)
-     * must migrate a genuine v4 file 4→5→6 with ALL data preserved. The destructive fallback only
+     * must migrate a genuine v4 file 4→5→6→7 with ALL data preserved. The destructive fallback only
      * fires when NO migration path exists — a complete ladder means it stays dormant, and the
      * v5-drift quarantine must ignore non-v5 files entirely.
      * # 生产配置（含 destructive fallback + 隔离区）打开 v4 库：走阶梯保数据，fallback 不误触发
@@ -236,7 +236,7 @@ class Migration4to5Test {
 
         val db = AppDatabase.buildProductionDatabase(context, dbName)
         try {
-            // Legacy rows survive the full 4→5→6 ladder under the production builder.
+            // Legacy rows survive the full 4→5→6→7 ladder under the production builder.
             val task = db.locationTaskDao().getTaskById(1L)
             assertNotNull("v4 data must survive the production open path", task)
             assertEquals(2, task!!.completedSuccesses)
@@ -244,8 +244,8 @@ class Migration4to5Test {
             assertNotNull("legacy snapshot must exist after ladder migration", snapshot)
             assertEquals(1, db.testAttemptDao().getAttemptsForTask(1L).size)
 
-            // And the file really is at v6 now.
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            // And the file really is at v7 now.
+            assertEquals(7, db.openHelper.readableDatabase.version)
         } finally {
             db.close()
         }

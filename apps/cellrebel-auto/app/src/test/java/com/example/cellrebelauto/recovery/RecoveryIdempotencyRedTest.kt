@@ -284,7 +284,8 @@ class RecoveryIdempotencyRedTest {
                 acceptedIntentHash: String?,
                 appliedAtEpochMs: Long?,
                 environmentRevision: Long?,
-                verificationLevelWire: Int?
+                verificationLevelWire: Int?,
+                providerApplicationId: String?,
             ): RecordedReceipt? {
                 backing.seedReceipt(
                     idempotencyKey = idempotencyKey,
@@ -296,7 +297,8 @@ class RecoveryIdempotencyRedTest {
                     acceptedIntentHash = acceptedIntentHash,
                     appliedAtEpochMs = appliedAtEpochMs,
                     environmentRevision = environmentRevision,
-                    verificationLevelWire = verificationLevelWire
+                    verificationLevelWire = verificationLevelWire,
+                    providerApplicationId = providerApplicationId,
                 )
                 return backing.recordReceipt(
                     idempotencyKey,
@@ -308,7 +310,8 @@ class RecoveryIdempotencyRedTest {
                     acceptedIntentHash,
                     appliedAtEpochMs,
                     environmentRevision,
-                    verificationLevelWire
+                    verificationLevelWire,
+                    providerApplicationId,
                 )
             }
         }

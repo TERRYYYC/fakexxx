@@ -100,20 +100,31 @@ class MainViewModel @JvmOverloads constructor(
     val pairingUiState: kotlinx.coroutines.flow.StateFlow<PairingUiState> =
         kotlinx.coroutines.flow.combine(
             planRepository.observeAttemptsWithTasks(),
-            _providerEntries
-        ) { attempts, entries ->
+            _providerEntries,
+            planRepository.observeLatestPlan(),
+        ) { attempts, entries, latestPlan ->
+            val crashed = attempts.firstOrNull {
+                it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
+            }?.attempt
             // R46 (Sol R46 P2): the Run surface's providerActive binds the CURRENT measured
             // principal — an approved DB row PLUS a discovered pending candidate for the same
             // appId means the signer rotated and the current signer is NOT approved (§6.5.4:
             // signer 变化即新 provider). The old `entries.any { it.isApproved }` kept showing
             // Trusted on a rotated-away principal.
-            val hasActiveProvider = currentRunTargetActive(
-                entries,
-                com.example.cellrebelauto.BuildConfig.DEBUG,
+            val runTargetApplicationId = durableRunTargetApplicationId(
+                    hasCrashedAttempt = crashed != null,
+                    crashedProviderApplicationId = crashed?.providerApplicationId,
+                    planProviderApplicationId = latestPlan?.providerApplicationId,
             )
-            val crashed = attempts.firstOrNull {
-                it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
-            }?.attempt
+            val hasActiveProvider = if (crashed != null) {
+                currentCrashedOwnerActive(
+                    entries,
+                    runTargetApplicationId,
+                    crashed.providerSignerDigest,
+                )
+            } else {
+                currentRunTargetActive(entries, runTargetApplicationId)
+            }
             val hasUnverified = kotlinx.coroutines.runBlocking {
                 dbInstance.unverifiedAttemptRecordDao().getByAttempt(
                     attempts.firstOrNull()?.attempt?.id ?: -1L
@@ -123,6 +134,10 @@ class MainViewModel @JvmOverloads constructor(
                 hasProviderRecord = entries.isNotEmpty(),
                 providerActive = hasActiveProvider,
                 crashedAplusState = crashed?.aplusState,
+                crashedProviderFailure =
+                    com.example.cellrebelauto.recovery.ProviderPrincipalFailureReason
+                        .fromDurableCode(crashed?.failureReason),
+                hasOutstandingLease = crashed?.aplusLeaseId != null,
                 hasUnverifiedRecord = hasUnverified
             )
         }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Lazily, PairingUiState.Trusted)
@@ -152,11 +167,38 @@ class MainViewModel @JvmOverloads constructor(
 
         internal fun currentRunTargetActive(
             entries: List<ProviderEntry>,
-            debugBuild: Boolean,
-        ): Boolean = currentPrincipalActive(
-            entries,
-            com.example.cellrebelauto.automation.ProviderPrincipal.resolve(debugBuild),
-        )
+            providerApplicationId: String?,
+            providerSignerDigest: String? = null,
+        ): Boolean = providerApplicationId != null &&
+            com.example.cellrebelauto.automation.ProviderPrincipal
+                .isKnownApplicationId(providerApplicationId) &&
+            if (providerSignerDigest == null) {
+                currentPrincipalActive(entries, providerApplicationId)
+            } else {
+                entries.any {
+                    it.applicationId == providerApplicationId &&
+                        it.signerDigest == providerSignerDigest &&
+                        it.isApproved && it.isCurrent
+                }
+            }
+
+        /** A crashed attempt must prove exact S; app-level approval cannot fill a null owner. */
+        internal fun currentCrashedOwnerActive(
+            entries: List<ProviderEntry>,
+            providerApplicationId: String?,
+            providerSignerDigest: String?,
+        ): Boolean = providerSignerDigest != null &&
+            currentRunTargetActive(entries, providerApplicationId, providerSignerDigest)
+
+        internal fun durableRunTargetApplicationId(
+            hasCrashedAttempt: Boolean,
+            crashedProviderApplicationId: String?,
+            planProviderApplicationId: String?,
+        ): String? = if (hasCrashedAttempt) {
+            crashedProviderApplicationId
+        } else {
+            planProviderApplicationId
+        }
 
         /**
          * Pure projection (R45, Sol R45 P2): approved principals are the ACTIVE pairing rows; a
@@ -172,25 +214,29 @@ class MainViewModel @JvmOverloads constructor(
             rows: List<com.example.cellrebelauto.model.plan.ProviderPairingRecord>,
             resolveCurrentSigner: (applicationId: String) -> String?
         ): List<ProviderEntry> {
+            val currentSigners = com.example.cellrebelauto.automation.ProviderPrincipal
+                .knownApplicationIds.associateWith(resolveCurrentSigner)
             val approved = rows.filter { it.revokedAt == null }.map {
                 ProviderEntry(
                     applicationId = it.applicationId,
                     signerDigest = it.currentSignerDigest,
                     approvedVersionCode = it.approvedVersionCode,
-                    isApproved = true
+                    isApproved = true,
+                    isCurrent = currentSigners[it.applicationId] == it.currentSignerDigest,
                 )
             }
             val activePrincipals = rows.filter { it.revokedAt == null }
                 .map { it.applicationId to it.currentSignerDigest }.toSet()
             val pending = mutableListOf<ProviderEntry>()
             for (appId in com.example.cellrebelauto.automation.ProviderPrincipal.knownApplicationIds) {
-                val signer = resolveCurrentSigner(appId) ?: continue // not installed / unresolvable
+                val signer = currentSigners[appId] ?: continue // not installed / unresolvable
                 if (appId to signer in activePrincipals) continue // the CURRENT signer IS approved
                 pending += ProviderEntry(
                     applicationId = appId,
                     signerDigest = signer,
                     approvedVersionCode = null,
-                    isApproved = false
+                    isApproved = false,
+                    isCurrent = true,
                 )
             }
             return approved + pending
@@ -399,7 +445,9 @@ class MainViewModel @JvmOverloads constructor(
                             sourceFileName = fileName,
                             globalBufferSeconds = buffer,
                             rows = result.rows,
-                            importedAt = System.currentTimeMillis()
+                            importedAt = System.currentTimeMillis(),
+                            providerApplicationId =
+                                com.example.cellrebelauto.automation.ProviderPrincipal.selected,
                         )
                     }
                     _importNotice.value =

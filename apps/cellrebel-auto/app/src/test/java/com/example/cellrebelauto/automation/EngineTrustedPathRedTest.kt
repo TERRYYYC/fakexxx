@@ -284,7 +284,9 @@ class EngineTrustedPathRedTest {
         val planId = db.planDao().insertPlan(
             LocationPlan(
                 sourceFileName = "r10.csv", importedAt = 1000L,
-                globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = quota
+                globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = quota,
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
             )
         )
         db.planDao().insertTasks(
@@ -306,7 +308,9 @@ class EngineTrustedPathRedTest {
                 successOrdinal = null, startedAt = 450L, runningObservedAt = null, endedAt = 470L,
                 status = "interrupted", failureReason = "INTERRUPTED",
                 webBrowsingScore = null, videoStreamingScore = null,
-                latitude = 39.9, longitude = 116.4
+                latitude = 39.9, longitude = 116.4,
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
             )
         )
     }
@@ -333,7 +337,9 @@ class EngineTrustedPathRedTest {
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
                 aplusState = aplusState, aplusLeaseId = aplusLeaseId,
-                aplusAnchorScheduleId = aplusAnchorScheduleId
+                aplusAnchorScheduleId = aplusAnchorScheduleId,
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
             )
         )
         return sessionId
@@ -397,7 +403,7 @@ class EngineTrustedPathRedTest {
     private suspend fun productionObservationFixture(
         coordinates: List<Pair<Double, Double>>
     ): ProductionObservationFixture {
-        val trustedSigner = "sha256:production-invalid-coordinate-test"
+        val trustedSigner = "sha256:213f22768cf67f2dff2c3de83a534938aa24d87b015a317a45add4e2e66f30ea"
         db.providerPairingDao().insert(
             com.example.cellrebelauto.model.plan.ProviderPairingRecord(
                 applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
@@ -450,14 +456,15 @@ class EngineTrustedPathRedTest {
             )
         }
         return ProductionObservationFixture(
-            backend = APlusComposition.productionBackend(
+            backend = APlusComposition.testOnlyBackend(
                 ApplicationProvider.getApplicationContext(),
                 db,
-                providerSignerDigest = { trustedSigner },
-                providerApplicationId =
+                providerExecutor = com.example.cellrebelauto.recovery.ProviderScopedExternalApplyExecutor.wrap(
                     io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                    journeyExecutor,
+                ),
+                providerSignerDigest = { trustedSigner },
                 attemptValidityTimeoutMs = 90_000L,
-                serviceLifecycleExecutor = journeyExecutor
             ),
             provider = provider,
             observationCount = { observationOrdinal }
@@ -518,7 +525,7 @@ class EngineTrustedPathRedTest {
     fun `R10-F1 production backend - one durable observation writer reaches KB-8 trust and mint`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        val trustedSigner = "sha256:production-path-test"
+        val trustedSigner = "sha256:1e12cf1e3bdb7f981a3cc8df2772a9ec050222dd8757041a2cca18fff8e9bc85"
         db.providerPairingDao().insert(
             com.example.cellrebelauto.model.plan.ProviderPairingRecord(
                 applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
@@ -571,14 +578,15 @@ class EngineTrustedPathRedTest {
                 verificationLevelWire = WIRE_VERIFIED
             )
         }
-        val backend = APlusComposition.productionBackend(
+        val backend = APlusComposition.testOnlyBackend(
             ApplicationProvider.getApplicationContext(),
             db,
-            providerSignerDigest = { trustedSigner },
-            providerApplicationId =
+            providerExecutor = com.example.cellrebelauto.recovery.ProviderScopedExternalApplyExecutor.wrap(
                 io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                journeyExecutor,
+            ),
+            providerSignerDigest = { trustedSigner },
             attemptValidityTimeoutMs = 90_000L,
-            serviceLifecycleExecutor = journeyExecutor
         )
         val clock = VirtualClock()
         val runner = object : CellRebelRunner {
@@ -1170,8 +1178,13 @@ class EngineTrustedPathRedTest {
         // legacy counter. Fail-closed by construction (no stubs), not by skeleton accident.
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
-        val backend = APlusComposition.productionBackend(
+        val backend = APlusComposition.testOnlyBackend(
             androidx.test.core.app.ApplicationProvider.getApplicationContext(), db,
+            providerExecutor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(
+                androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                providerApplicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1
+                    .PROVIDER_APPLICATION_ID_PRODUCTION,
+            ),
             attemptValidityTimeoutMs = 90_000L
         )
         val clock = VirtualClock()

@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.ui
 
 import com.example.cellrebelauto.model.plan.TestAttempt
+import com.example.cellrebelauto.recovery.ProviderPrincipalFailureReason
 
 /**
  * R43 (Sol GREEN-review-2 F5 / spec Task 6): the SEVEN on-site operator states the run surface
@@ -67,19 +68,39 @@ sealed class PairingUiState {
          * A crashed attempt's phase decides recovery vs release-incomplete; an UNVERIFIED_RECORDED
          * attempt decides unverified; otherwise the pairing lifecycle decides the top state.
          */
-        fun project(
+        internal fun project(
             hasProviderRecord: Boolean,
             providerActive: Boolean,
             incompatible: Boolean = false,
             incompatibleDetail: String = "",
             crashedAplusState: String? = null,
+            crashedProviderFailure: ProviderPrincipalFailureReason? = null,
+            hasOutstandingLease: Boolean = crashedAplusState == "RELEASE_PENDING",
             hasUnverifiedRecord: Boolean = false
         ): PairingUiState = when {
+            // A replacement signer cannot prove cleanup of the older signer's outstanding lease.
+            // Keep the durable incident/manual action visible even when pairing discovery now
+            // reports B as pending (or B was later approved).
+            crashedAplusState == "RECOVERY_REQUIRED" &&
+                crashedProviderFailure == ProviderPrincipalFailureReason.SIGNER_UNTRUSTED ->
+                ReleaseIncomplete
+            crashedProviderFailure in setOf(
+                ProviderPrincipalFailureReason.SIGNER_OWNER_UNKNOWN,
+                ProviderPrincipalFailureReason.SIGNER_OWNER_CONFLICT,
+            ) && hasOutstandingLease -> ReleaseIncomplete
+            crashedProviderFailure in setOf(
+                ProviderPrincipalFailureReason.SIGNER_OWNER_UNKNOWN,
+                ProviderPrincipalFailureReason.SIGNER_OWNER_CONFLICT,
+            ) -> RecoveryRequired
+            crashedAplusState != null && !providerActive ->
+                if (hasOutstandingLease) ReleaseIncomplete else RecoveryRequired
+            // An outstanding durable lease is an active incident even if the current provider is
+            // absent/pending/incompatible. Pairing UI must never hide manual cleanup.
+            crashedAplusState == "RELEASE_PENDING" -> ReleaseIncomplete
             !hasProviderRecord -> NotPaired
             !providerActive -> PendingOperatorApproval
             incompatible -> Incompatible(incompatibleDetail)
             crashedAplusState == "RECOVERY_REQUIRED" -> RecoveryRequired
-            crashedAplusState == "RELEASE_PENDING" -> ReleaseIncomplete
             hasUnverifiedRecord -> UnverifiedCompletion
             else -> Trusted
         }

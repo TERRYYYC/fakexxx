@@ -118,10 +118,82 @@ class ProviderEntriesProjectionTest {
 
         org.junit.Assert.assertTrue(
             "debug Binder targets .bench, so the Run status must not inspect production instead",
-            MainViewModel.currentRunTargetActive(benchEntries, debugBuild = true),
+            MainViewModel.currentRunTargetActive(benchEntries, bench),
         )
         org.junit.Assert.assertFalse(
-            MainViewModel.currentRunTargetActive(benchEntries, debugBuild = false),
+            MainViewModel.currentRunTargetActive(benchEntries, prod),
+        )
+    }
+
+    @Test
+    fun `run status consumes the durable provider identity rather than a build flag`() {
+        val productionEntries = MainViewModel.computeProviderEntries(
+            listOf(row(prod, "sha256:prod")),
+        ) { appId -> if (appId == prod) "sha256:prod" else null }
+
+        org.junit.Assert.assertTrue(
+            "a restored production attempt remains active even in a debug build",
+            MainViewModel.currentRunTargetActive(productionEntries, prod),
+        )
+        org.junit.Assert.assertFalse(
+            MainViewModel.currentRunTargetActive(productionEntries, bench),
+        )
+        org.junit.Assert.assertFalse(
+            "legacy null identity must not fall back to the current build",
+            MainViewModel.currentRunTargetActive(productionEntries, null),
+        )
+    }
+
+    @Test
+    fun `run status joins the durable signer owner when old and rotated signers are both approved`() {
+        val signerA = "sha256:70506b15b8a45e1147ade558c1869420b8cd4c65e9590647e09b5c816b58975c"
+        val signerB = "sha256:4412f6d72f33cc7f8e643f7624d4ec743f5389185fc952366da015a6ab6c8a63"
+        val entries = MainViewModel.computeProviderEntries(
+            listOf(row(prod, signerA), row(prod, signerB)),
+        ) { appId -> if (appId == prod) signerB else null }
+
+        org.junit.Assert.assertFalse(
+            "the current B approval must not make an A-owned crashed run active",
+            MainViewModel.currentRunTargetActive(entries, prod, signerA),
+        )
+        org.junit.Assert.assertTrue(
+            "only the exact current (P,B) principal is active",
+            MainViewModel.currentRunTargetActive(entries, prod, signerB),
+        )
+    }
+
+    @Test
+    fun `legacy crashed signer owner cannot borrow app-level approval before Service guard`() {
+        val entries = MainViewModel.computeProviderEntries(
+            listOf(row(prod, "sha256:current")),
+        ) { appId -> if (appId == prod) "sha256:current" else null }
+
+        org.junit.Assert.assertFalse(
+            "a crashed attempt with no signer owner is unknown even when P has an active pairing",
+            MainViewModel.currentCrashedOwnerActive(entries, prod, null),
+        )
+    }
+
+    @Test
+    fun `run status without a crashed attempt uses the durable plan and never the build default`() {
+        assertEquals(
+            "a production plan remains the UI target in this debug bench test process",
+            prod,
+            MainViewModel.durableRunTargetApplicationId(
+                hasCrashedAttempt = false,
+                crashedProviderApplicationId = null,
+                planProviderApplicationId = prod,
+            ),
+        )
+        assertEquals(
+            "without a plan or attempt the status is unknown, not the build target",
+            null,
+            MainViewModel.durableRunTargetApplicationId(false, null, null),
+        )
+        assertEquals(
+            "a legacy crashed owner stays unknown and cannot borrow its plan principal",
+            null,
+            MainViewModel.durableRunTargetApplicationId(true, null, prod),
         )
     }
 }

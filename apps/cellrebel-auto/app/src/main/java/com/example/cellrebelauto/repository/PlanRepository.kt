@@ -2,11 +2,13 @@ package com.example.cellrebelauto.repository
 
 import androidx.room.withTransaction
 import com.example.cellrebelauto.automation.plan.PlanScheduler
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
 import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
+import com.example.cellrebelauto.environment.ProviderSignerDigest
 import com.example.cellrebelauto.environment.hasStructurallyValidEffectiveCoordinates
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.audit.AutoAuditEvent
@@ -18,6 +20,14 @@ import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.model.plan.WorklistRow
+import com.example.cellrebelauto.recovery.PROVIDER_SIGNER_UNTRUSTED_RELEASE_FAILURE
+import com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_CONFLICT_FAILURE
+import com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE
+import com.example.cellrebelauto.automation.ProviderPrincipal
+import com.example.cellrebelauto.recovery.ProviderPrincipalFailureException
+import com.example.cellrebelauto.recovery.ProviderPrincipalFailureReason
+import com.example.cellrebelauto.recovery.attemptProviderPrincipalFailureInTransaction
+import com.example.cellrebelauto.recovery.planProviderPrincipalFailureInTransaction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 
@@ -193,14 +203,21 @@ class PlanRepository(private val db: AppDatabase) {
         sourceFileName: String,
         globalBufferSeconds: Int,
         rows: List<WorklistRow>,
-        importedAt: Long
-    ): Long = db.planDao().insertPlanWithTasks(
+        importedAt: Long,
+        providerApplicationId: String,
+    ): Long {
+        val frozenProviderApplicationId =
+            ProviderPrincipal.requireKnownApplicationId(
+                providerApplicationId
+            )
+        return db.planDao().insertPlanWithTasks(
         LocationPlan(
             sourceFileName = sourceFileName,
             importedAt = importedAt,
             globalBufferSeconds = globalBufferSeconds,
             totalRows = rows.size,
-            totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses }
+            totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses },
+            providerApplicationId = frozenProviderApplicationId,
         ),
         rows.map {
             LocationTask(
@@ -213,6 +230,7 @@ class PlanRepository(private val db: AppDatabase) {
             )
         }
     )
+    }
 
     // ---- Recovery (INV-9 / O4) ----
 
@@ -237,6 +255,130 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun findAPlusRecoverableAttempts(planId: Long): List<TestAttempt> =
         db.testAttemptDao().findAplusRecoverableAttempts(planId)
 
+    /**
+     * Service pre-bind boundary: a restored plan and every non-terminal A+ owner/proof row must
+     * already join the selected executor identity. No Binder acquisition is allowed to precede this
+     * transaction, so legacy/foreign recovery state produces zero provider calls and zero binds.
+     */
+    suspend fun recoveryProviderPrincipalFailure(
+        planId: Long,
+        executorApplicationId: String,
+        executorSignerDigest: String?,
+    ): String? = db.withTransaction {
+        recoveryProviderPrincipalFailureInTransaction(
+            planId,
+            executorApplicationId,
+            executorSignerDigest,
+        )
+    }
+
+    /** Explicit appId-only fixture seam; no production source calls this method. */
+    @androidx.annotation.VisibleForTesting(otherwise = androidx.annotation.VisibleForTesting.PRIVATE)
+    internal suspend fun testOnlyRecoveryProviderApplicationFailure(
+        planId: Long,
+        executorApplicationId: String,
+    ): String? = db.withTransaction {
+        planProviderPrincipalFailureInTransaction(
+            db,
+            planId,
+            executorApplicationId,
+        )?.let { return@withTransaction it }
+        for (attempt in db.testAttemptDao().findAplusRecoverableAttempts(planId)) {
+            val requireApplyReceipt = attempt.aplusLeaseId != null ||
+                attempt.aplusState !in setOf(null, "CREATED", "APPLY_PENDING")
+            attemptProviderPrincipalFailureInTransaction(
+                db = db,
+                attemptId = attempt.id,
+                executorApplicationId = executorApplicationId,
+                expectedLeaseId = attempt.aplusLeaseId,
+                requireApplyReceipt = requireApplyReceipt,
+                applyReceiptKey = APlusOperationIdentity.applyIdempotencyKey(attempt.id),
+                executorSignerDigest = null,
+            )?.let { return@withTransaction it }
+        }
+        null
+    }
+
+    /**
+     * Service pre-bind gate. Detection and the typed manual-recovery projection are one Room
+     * transaction; a crash cannot leave a half-written sticky state. Safety still derives from the
+     * immutable owner join on every retry, never from the sticky reason alone.
+     */
+    suspend fun guardRecoveryProviderPrincipal(
+        planId: Long,
+        executorApplicationId: String,
+        executorSignerDigest: String?,
+    ): String? = db.withTransaction {
+        val failure = recoveryProviderPrincipalFailureInTransaction(
+            planId,
+            executorApplicationId,
+            executorSignerDigest,
+        ) ?: return@withTransaction null
+        persistProviderPrincipalRecoveryInTransaction(planId, failure)
+        failure
+    }
+
+    suspend fun persistProviderPrincipalRecovery(planId: Long, reason: String): Int =
+        db.withTransaction {
+            persistProviderPrincipalRecoveryInTransaction(planId, reason)
+        }
+
+    private suspend fun persistProviderPrincipalRecoveryInTransaction(
+        planId: Long,
+        reason: String,
+    ): Int {
+        val recoverable = db.testAttemptDao().findAplusRecoverableAttempts(planId)
+        recoverable.forEach { attempt ->
+            db.testAttemptDao().markRecoveryRequired(attempt.id, reason)
+        }
+        db.runSessionDao().findActiveRunningSession(planId)?.let { session ->
+            db.runSessionDao().updateStatus(session.id, "paused")
+        }
+        return recoverable.size
+    }
+
+    private suspend fun recoveryProviderPrincipalFailureInTransaction(
+        planId: Long,
+        executorApplicationId: String,
+        executorSignerDigest: String?,
+    ): String? {
+        planProviderPrincipalFailureInTransaction(
+            db,
+            planId,
+            executorApplicationId,
+        )?.let { return it }
+        val signer = ProviderSignerDigest.normalizeOrNull(executorSignerDigest)
+            ?: return PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE
+        val recoverable = db.testAttemptDao().findAplusRecoverableAttempts(planId)
+        val stickySignerReasons = setOf(
+            PROVIDER_SIGNER_UNTRUSTED_RELEASE_FAILURE,
+            PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE,
+            PROVIDER_SIGNER_OWNER_CONFLICT_FAILURE,
+        )
+        recoverable.firstOrNull {
+            it.aplusState == "RECOVERY_REQUIRED" && it.failureReason in stickySignerReasons
+        }?.failureReason?.let { return it }
+        for (attempt in recoverable) {
+            val requireApplyReceipt = attempt.aplusLeaseId != null ||
+                attempt.aplusState !in setOf(null, "CREATED", "APPLY_PENDING")
+            attemptProviderPrincipalFailureInTransaction(
+                db = db,
+                attemptId = attempt.id,
+                executorApplicationId = executorApplicationId,
+                expectedLeaseId = attempt.aplusLeaseId,
+                requireApplyReceipt = requireApplyReceipt,
+                applyReceiptKey = APlusOperationIdentity.applyIdempotencyKey(attempt.id),
+                executorSignerDigest = signer,
+            )?.let { return it }
+        }
+        // A plan with no outstanding attempt may use the current signer for future work, but only
+        // after the operator approved this exact (P,S). This never authorizes an older lease.
+        if (db.providerPairingDao().activeFor(executorApplicationId, signer) == null) {
+            return PROVIDER_SIGNER_UNTRUSTED_RELEASE_FAILURE
+        }
+        return null
+    }
+
     /** The active (running) session the recovery supersedes rather than duplicating (Sol round-8 P1-6). */
     suspend fun findActiveRunSession(planId: Long): RunSession? =
         db.runSessionDao().findActiveRunningSession(planId)
@@ -256,6 +398,12 @@ class PlanRepository(private val db: AppDatabase) {
     /** Atomically mark RECOVERY_REQUIRED with durable typed reason (Sol R2 P1-3). */
     suspend fun markRecoveryRequired(attemptId: Long, reason: String) =
         db.testAttemptDao().markRecoveryRequired(attemptId, reason)
+
+    /** Persist a typed provider failure using its stable database code. */
+    internal suspend fun markProviderRecoveryRequired(
+        attemptId: Long,
+        reason: ProviderPrincipalFailureReason,
+    ) = db.testAttemptDao().markRecoveryRequired(attemptId, reason.durableCode)
 
     /**
      * Persist the terminal intent before release. If the process dies after RELEASED but before the
@@ -916,7 +1064,39 @@ class PlanRepository(private val db: AppDatabase) {
      * The committedAt of the minted TrustedQuotaEntry MUST bind this caller-injected clock,
      * never a default constant or execution.completedAtElapsed.
      */
-    suspend fun recordTrustedCompletion(ctx: CompletionTrustContext, commitClockMs: Long): TrustDecision = db.withTransaction {
+    suspend fun recordTrustedCompletion(
+        ctx: CompletionTrustContext,
+        commitClockMs: Long,
+    ): TrustDecision = recordTrustedCompletionInternal(ctx, commitClockMs, null)
+
+    /** Production A+ decision entrypoint: the Kotlin type forbids omitting/nulling the executor P. */
+    suspend fun recordTrustedCompletionForProvider(
+        ctx: CompletionTrustContext,
+        commitClockMs: Long,
+        providerApplicationId: String,
+        providerSignerDigest: String,
+    ): TrustDecision = recordTrustedCompletionInternal(
+        ctx,
+        commitClockMs,
+        providerApplicationId,
+        ProviderSignerDigest.requireCanonical(providerSignerDigest),
+    )
+
+    private suspend fun recordTrustedCompletionInternal(
+        ctx: CompletionTrustContext,
+        commitClockMs: Long,
+        expectedProviderApplicationId: String?,
+        expectedProviderSignerDigest: String? = null,
+    ): TrustDecision = db.withTransaction {
+        // Durable principal ownership is a prerequisite to DECIDING, not another evidence detail.
+        // Validate the complete owner/proof join before persisting a candidate execution or minting.
+        // The nullable expected target preserves the historical repository-only test seam; production
+        // always supplies its identity-scoped executor target.
+        validateDecisionProviderPrincipalInTransaction(
+            attemptId = ctx.execution.attemptId,
+            expectedProviderApplicationId = expectedProviderApplicationId,
+            expectedProviderSignerDigest = expectedProviderSignerDigest,
+        )
         // (1) Persist/read back the FULL §7.1 carrier. INSERT IGNORE is only an idempotency primitive:
         // exact readback equality decides whether the live candidate is the same immutable execution.
         val durableExecution = persistExecutionInTransaction(ctx.execution)
@@ -1026,6 +1206,36 @@ class PlanRepository(private val db: AppDatabase) {
         }
         if (attempt == null) return@withTransaction TrustDecision.FAIL
         decision
+    }
+
+    private suspend fun validateDecisionProviderPrincipalInTransaction(
+        attemptId: Long,
+        expectedProviderApplicationId: String?,
+        expectedProviderSignerDigest: String?,
+    ) {
+        // Repository-only legacy tests have no production executor/log composition. Every service
+        // path supplies the identity-scoped executor target, which activates the durable join below.
+        if (expectedProviderApplicationId == null) return
+        val signer = ProviderSignerDigest.normalizeOrNull(expectedProviderSignerDigest)
+            ?: throw ProviderPrincipalFailureException(
+                ProviderPrincipalFailureReason.SIGNER_OWNER_UNKNOWN,
+                "attempt=$attemptId signer owner missing",
+            )
+        attemptProviderPrincipalFailureInTransaction(
+            db = db,
+            attemptId = attemptId,
+            executorApplicationId = expectedProviderApplicationId,
+            expectedLeaseId = null,
+            requireApplyReceipt = true,
+            applyReceiptKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+            executorSignerDigest = signer,
+        )?.let { failure ->
+            throw ProviderPrincipalFailureException(
+                ProviderPrincipalFailureReason.fromDurableCode(failure)
+                    ?: ProviderPrincipalFailureReason.PRINCIPAL_UNKNOWN,
+                "attempt=$attemptId durable owner/proof join failed",
+            )
+        }
     }
 
     // ---- Session lifecycle ----

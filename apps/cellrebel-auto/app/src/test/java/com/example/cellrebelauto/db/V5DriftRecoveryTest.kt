@@ -170,7 +170,7 @@ class V5DriftRecoveryTest {
                 assertEquals(0, db.trustedQuotaDao().countAll())
 
                 val version = db.openHelper.readableDatabase.version
-                assertEquals("rebuilt database must be at the current schema version", 6, version)
+                assertEquals("rebuilt database must be at the current schema version", 7, version)
 
                 // And the drifted master row is gone for good.
                 val hash = db.openHelper.readableDatabase

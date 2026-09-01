@@ -11,6 +11,9 @@ import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1
 import io.github.terryyyc.fakexxx.contract.v1.IEnvironmentControlV1
 import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * R43 (Sol GREEN-review-2 F1/F2): the production [ExternalApplyExecutor] over the frozen
@@ -30,45 +33,194 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  */
 class BinderExternalApplyExecutor(
     private val context: Context,
-    providerApplicationId: String = com.example.cellrebelauto.automation.ProviderPrincipal.selected
-) : ExternalApplyExecutor {
+    providerApplicationId: String = ProviderPrincipal.selected,
+) : ProviderScopedExternalApplyExecutor {
 
-    val targetApplicationId: String = providerApplicationId
+    override val targetApplicationId: String =
+        ProviderPrincipal.requireKnownApplicationId(providerApplicationId)
+
+    private val expectedComponent = ComponentName(targetApplicationId, ContractV1.SERVICE_CLASS_NAME)
+
+    private enum class LifecyclePhase { NEW, BINDING, BOUND, TERMINAL }
+
+    private val lifecycleLock = Any()
 
     @Volatile
     private var remote: IEnvironmentControlV1? = null
 
+    private var lifecyclePhase: LifecyclePhase = LifecyclePhase.NEW
+    private var lifecycleGeneration: Long = 0L
+    private var bindAccepted: Boolean = false
+    private var connectionIdentityValidator: (() -> Boolean)? = null
+
+    private val boundState = MutableStateFlow(false)
+
+    /** Installed exactly once by the registry before bind; never supplied by a production caller. */
+    internal fun installConnectionIdentityValidator(validator: () -> Boolean) {
+        synchronized(lifecycleLock) {
+            require(lifecyclePhase == LifecyclePhase.NEW && connectionIdentityValidator == null) {
+                "connection identity validator must be installed once before bind"
+            }
+            connectionIdentityValidator = validator
+        }
+    }
+
     /** Bind to the provider service (idempotent). Returns false when the provider is unavailable. */
     fun bind(): Boolean {
-        if (remote != null) return true
-        val intent = Intent().setComponent(
-            ComponentName(targetApplicationId, ContractV1.SERVICE_CLASS_NAME)
-        )
-        return try {
+        val generation = synchronized(lifecycleLock) {
+            when (lifecyclePhase) {
+                LifecyclePhase.NEW -> {
+                    lifecyclePhase = LifecyclePhase.BINDING
+                    ++lifecycleGeneration
+                }
+                LifecyclePhase.BINDING, LifecyclePhase.BOUND -> return bindAccepted || remote != null
+                LifecyclePhase.TERMINAL -> return false
+            }
+        }
+        val intent = Intent().setComponent(expectedComponent)
+        val requested = try {
             context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         } catch (e: Exception) {
             false // provider not installed / not exported — fail closed
         }
+        var unbindAcceptedAfterTerminal = false
+        val usable = synchronized(lifecycleLock) {
+            if (lifecycleGeneration != generation || lifecyclePhase == LifecyclePhase.TERMINAL) {
+                // Terminal cleanup may win while bindService is still returning. If Android then
+                // reports an accepted bind, close that accepted binding exactly once here.
+                unbindAcceptedAfterTerminal = requested
+                false
+            } else if (!requested) {
+                // A hostile/test Context can deliver a synchronous callback and still return false.
+                // The bind result is authoritative: discard the callback without unbinding a
+                // binding Android says was never established.
+                lifecyclePhase = LifecyclePhase.TERMINAL
+                lifecycleGeneration++
+                bindAccepted = false
+                remote = null
+                boundState.value = false
+                false
+            } else {
+                bindAccepted = true
+                lifecyclePhase = if (remote != null) LifecyclePhase.BOUND else LifecyclePhase.BINDING
+                true
+            }
+        }
+        if (unbindAcceptedAfterTerminal) {
+            try {
+                context.unbindService(connection)
+            } catch (_: Exception) {
+                // The terminal state is authoritative even if Android already dropped the bind.
+            }
+        }
+        return usable
+    }
+
+    /** Wait until the exact component's asynchronous callback publishes a usable interface. */
+    suspend fun awaitBound(timeoutMs: Long): Boolean {
+        val eligible = synchronized(lifecycleLock) {
+            bindAccepted && lifecyclePhase != LifecyclePhase.TERMINAL
+        }
+        if (!eligible || timeoutMs <= 0L) {
+            // Readiness failure is terminal for this executor instance. In particular, a zero
+            // timeout must revoke an already-accepted bind request before its callback can race in.
+            unbind()
+            return false
+        }
+        if (synchronized(lifecycleLock) {
+                lifecyclePhase == LifecyclePhase.BOUND && remote != null
+            }
+        ) return true
+        val ready = withTimeoutOrNull(timeoutMs) {
+            boundState.first { it }
+            true
+        } ?: false
+        if (!ready) {
+            unbind()
+            return false
+        }
+        return synchronized(lifecycleLock) {
+            bindAccepted && lifecyclePhase == LifecyclePhase.BOUND && remote != null
+        }
     }
 
     fun unbind() {
+        val shouldUnbind = synchronized(lifecycleLock) {
+            if (lifecyclePhase == LifecyclePhase.TERMINAL) return
+            lifecyclePhase = LifecyclePhase.TERMINAL
+            lifecycleGeneration++
+            val accepted = bindAccepted
+            bindAccepted = false
+            remote = null
+            boundState.value = false
+            accepted
+        }
         try {
-            context.unbindService(connection)
+            if (shouldUnbind) context.unbindService(connection)
         } catch (e: Exception) {
             // not bound — nothing to do
         }
-        remote = null
     }
 
-    val isBound: Boolean get() = remote != null
+    val isBound: Boolean
+        get() = synchronized(lifecycleLock) {
+            lifecyclePhase == LifecyclePhase.BOUND && remote != null
+        }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            remote = IEnvironmentControlV1.Stub.asInterface(service)
+            val admittedGeneration = synchronized(lifecycleLock) {
+                if (lifecyclePhase == LifecyclePhase.TERMINAL || name != expectedComponent) return
+                lifecycleGeneration
+            }
+            // Interface conversion can call into a local Binder implementation. Do it outside the
+            // lock, then re-check the generation before publication so terminal timeout cannot be
+            // blocked by or lose to a slow/hostile conversion.
+            val candidate = IEnvironmentControlV1.Stub.asInterface(service)
+            val identityMatches = try {
+                // Direct executor construction is an explicit low-level test seam. Production
+                // composition accepts only registry acquisitions, and the registry always installs
+                // this exact-signer validator before bind.
+                connectionIdentityValidator?.invoke() ?: true
+            } catch (_: Exception) {
+                false
+            }
+            if (!identityMatches) {
+                unbind()
+                return
+            }
+            synchronized(lifecycleLock) {
+                if (lifecycleGeneration != admittedGeneration ||
+                    lifecyclePhase == LifecyclePhase.TERMINAL ||
+                    name != expectedComponent
+                ) return
+                remote = candidate
+                lifecyclePhase = if (candidate != null) LifecyclePhase.BOUND else LifecyclePhase.BINDING
+                boundState.value = candidate != null
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
+            clearPublishedRemote(name)
+        }
+
+        override fun onBindingDied(name: ComponentName?) {
+            if (name != expectedComponent) return
+            unbind()
+        }
+
+        override fun onNullBinding(name: ComponentName?) {
+            if (name != expectedComponent) return
+            unbind()
+        }
+    }
+
+    private fun clearPublishedRemote(name: ComponentName?) {
+        synchronized(lifecycleLock) {
+            if (name != expectedComponent || lifecyclePhase == LifecyclePhase.TERMINAL) return
             remote = null
+            lifecyclePhase = LifecyclePhase.BINDING
+            boundState.value = false
         }
     }
 

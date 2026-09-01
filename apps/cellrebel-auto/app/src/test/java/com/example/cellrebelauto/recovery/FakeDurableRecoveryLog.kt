@@ -32,11 +32,13 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         acceptedIntentHash: String? = null,
         appliedAtEpochMs: Long? = null,
         environmentRevision: Long? = null,
-        verificationLevelWire: Int? = null
+        verificationLevelWire: Int? = null,
+        providerApplicationId: String? = null,
     ) {
         receipts[idempotencyKey] = RecordedReceipt(
             idempotencyKey, requestDigest, outcome, createdAt, leaseId,
-            operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision, verificationLevelWire
+            operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision,
+            verificationLevelWire, providerApplicationId,
         )
     }
 
@@ -52,12 +54,15 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         acceptedIntentHash: String?,
         appliedAtEpochMs: Long?,
         environmentRevision: Long?,
-        verificationLevelWire: Int?
+        verificationLevelWire: Int?,
+        providerApplicationId: String?,
     ): RecordedReceipt? {
         val existing = receipts[idempotencyKey]
         if (existing != null) {
             // Same key: replay is idempotent iff the canonical request digest matches (INV-13).
-            if (existing.requestDigest == requestDigest) return existing
+            if (existing.requestDigest == requestDigest &&
+                existing.providerApplicationId == providerApplicationId
+            ) return existing
             // Same key, different canonical digest → conflict; prior receipt preserved, no re-write.
             return null
         }
@@ -65,7 +70,8 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         // R44 (Sol GREEN-review-3 F3): the verbatim ApplyReceiptV1 proof fields persist + read back too.
         val receipt = RecordedReceipt(
             idempotencyKey, requestDigest, outcome, now, leaseId,
-            operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision, verificationLevelWire
+            operationId, acceptedIntentHash, appliedAtEpochMs, environmentRevision,
+            verificationLevelWire, providerApplicationId,
         )
         receipts[idempotencyKey] = receipt
         return receipt
@@ -77,15 +83,25 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         attemptId: Long,
         lastDurableStage: String,
         receiptKey: String?,
-        now: Long
-    ) {
-        checkpoints[attemptId] = RecoveryCheckpoint(attemptId, lastDurableStage, receiptKey, now)
+        now: Long,
+        providerApplicationId: String?,
+    ): RecoveryCheckpoint? {
+        val existing = checkpoints[attemptId]
+        if (existing != null && existing.providerApplicationId != providerApplicationId) return null
+        return RecoveryCheckpoint(
+            attemptId, lastDurableStage, receiptKey, now, providerApplicationId
+        ).also { checkpoints[attemptId] = it }
     }
 
     // ---- release receipts (Sol round-8 P1-4: lease-bound durable proof; round-9 P1-5: operation-key binding) ----
 
     private val releaseReceiptsByKey = mutableMapOf<String, RecordedReleaseReceipt>()
-    private val releaseReceiptsByLease = mutableMapOf<String, RecordedReleaseReceipt>()
+    private val releaseReceiptsByLease =
+        mutableMapOf<Pair<String?, String>, RecordedReleaseReceipt>()
+
+    /** Legacy test/read convenience; scoped tests pass the principal explicitly. */
+    fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? =
+        releaseReceiptFor(leaseId, null)
 
     /** Pre-populate a durable release receipt (to seed a release-replay scenario). */
     fun seedReleaseReceipt(
@@ -93,11 +109,14 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         leaseId: String,
         releaseDigest: String,
         outcome: String,
-        createdAt: Long
+        createdAt: Long,
+        providerApplicationId: String? = null,
     ) {
-        val receipt = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        val receipt = RecordedReleaseReceipt(
+            idempotencyKey, leaseId, releaseDigest, outcome, createdAt, providerApplicationId
+        )
         releaseReceiptsByKey[idempotencyKey] = receipt
-        releaseReceiptsByLease[leaseId] = receipt
+        releaseReceiptsByLease[providerApplicationId to leaseId] = receipt
     }
 
     /** Seed ONLY the key index (a partial index — the coordinator must fail closed, Sol round-18 P1-5). */
@@ -106,9 +125,12 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         leaseId: String,
         releaseDigest: String,
         outcome: String,
-        createdAt: Long
+        createdAt: Long,
+        providerApplicationId: String? = null,
     ) {
-        releaseReceiptsByKey[idempotencyKey] = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        releaseReceiptsByKey[idempotencyKey] = RecordedReleaseReceipt(
+            idempotencyKey, leaseId, releaseDigest, outcome, createdAt, providerApplicationId
+        )
     }
 
     /** Seed ONLY the lease index (a partial index — the coordinator must fail closed, Sol round-18 P1-5). */
@@ -117,12 +139,18 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         leaseId: String,
         releaseDigest: String,
         outcome: String,
-        createdAt: Long
+        createdAt: Long,
+        providerApplicationId: String? = null,
     ) {
-        releaseReceiptsByLease[leaseId] = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        releaseReceiptsByLease[providerApplicationId to leaseId] = RecordedReleaseReceipt(
+            idempotencyKey, leaseId, releaseDigest, outcome, createdAt, providerApplicationId
+        )
     }
 
-    override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? = releaseReceiptsByLease[leaseId]
+    override fun releaseReceiptFor(
+        leaseId: String,
+        providerApplicationId: String?,
+    ): RecordedReleaseReceipt? = releaseReceiptsByLease[providerApplicationId to leaseId]
 
     override fun releaseReceiptForKey(idempotencyKey: String): RecordedReleaseReceipt? = releaseReceiptsByKey[idempotencyKey]
 
@@ -131,17 +159,23 @@ class FakeDurableRecoveryLog : DurableRecoveryLog {
         leaseId: String,
         releaseDigest: String,
         outcome: String,
-        now: Long
+        now: Long,
+        providerApplicationId: String?,
     ): RecordedReleaseReceipt? {
         val existing = releaseReceiptsByKey[idempotencyKey]
         if (existing != null) {
             // Same operation key: replay iff the lease AND digest match (INV-13); else conflict.
-            if (existing.leaseId == leaseId && existing.releaseDigest == releaseDigest) return existing
+            if (existing.leaseId == leaseId &&
+                existing.releaseDigest == releaseDigest &&
+                existing.providerApplicationId == providerApplicationId
+            ) return existing
             return null
         }
-        val receipt = RecordedReleaseReceipt(idempotencyKey, leaseId, releaseDigest, outcome, now)
+        val receipt = RecordedReleaseReceipt(
+            idempotencyKey, leaseId, releaseDigest, outcome, now, providerApplicationId
+        )
         releaseReceiptsByKey[idempotencyKey] = receipt
-        releaseReceiptsByLease[leaseId] = receipt
+        releaseReceiptsByLease[providerApplicationId to leaseId] = receipt
         return receipt
     }
 }

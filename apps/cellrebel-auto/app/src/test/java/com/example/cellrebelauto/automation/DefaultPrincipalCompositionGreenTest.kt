@@ -10,6 +10,7 @@ import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
+import com.example.cellrebelauto.recovery.ProviderScopedExternalApplyExecutor
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
@@ -27,22 +28,19 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * GREEN (Terra PR-#65 review P2): the DEFAULT-principal composition oracle.
+ * GREEN (Terra PR-#65 review P2): the unified selected-principal composition oracle.
  *
  * The cited oracles proved the principal seam only through INJECTED identities:
  * [ProductionEvidenceSourceOracleTest] injects the production principal end to
  * end; [ProviderPrincipalRoutingRedTest] rejects an explicit trust/Binder fork;
  * [EngineTrustedPathRedTest]'s default-backend test is deliberately unbound and
- * asserts a pause. None of them walks a SUCCESSFUL no-override composition, so
- * hardcoding the production principal into the trust/observe gates of
- * [APlusComposition.productionBackend] (the `isCurrentSignerTrusted(...)` sites)
- * kept every oracle green while the SHIPPED debug build (selected = bench) would
- * fail closed at the gate — the exact G2 split-principal failure #63 closed.
+ * asserts a pause. This test exercises the selected-principal adapter used by
+ * unit fixtures, while production recovery consumes a registry-issued capability
+ * whose P/S identity is read from durable state.
  *
- * This test drives the SHIPPED default: `productionBackend` with NO
- * `providerApplicationId` override, the build-selected principal (= bench in this
- * debug test build), a bench pairing with a trusted signer, and the selected-target
- * Binder executor accepted by the fork guard.
+ * The fixture uses the build-selected principal (= bench in this debug test
+ * build), a bench pairing with a trusted signer, and an explicitly scoped
+ * selected-target executor accepted by the fork guard.
  *
  * KILLING MUTATIONS:
  *  - hardcode `PROVIDER_APPLICATION_ID_PRODUCTION` at the APlusComposition trust/
@@ -51,13 +49,14 @@ import org.robolectric.RobolectricTestRunner
  *  - hardcode `PROVIDER_APPLICATION_ID_BENCH` there instead → this test stays
  *    green but [ProductionEvidenceSourceOracleTest] FAILS (its injected
  *    production pairing stops being consulted). The pair closes both directions.
- *  - re-gate release (cleanup) → the post-revoke release passthrough FAILS.
+ *  - let release bypass signer ownership → the post-rotation fail-closed
+ *    assertion FAILS.
  *
  * The release-leg routing truth (release variant selects production) is carried
  * by `scripts/check-principal-routing.sh` in the release CI lane — CI runs debug
  * unit tests and only assembles release, so no JVM test can observe it.
  *
- * # 默认 principal 组合 oracle：不覆写、走出货默认选中腿，trusted observe + revoke 后 cleanup
+ * # 统一 selected principal 组合 oracle：显式 scoped fixture，trusted observe + rotation 后 fail-closed
  */
 @RunWith(RobolectricTestRunner::class)
 class DefaultPrincipalCompositionGreenTest {
@@ -101,18 +100,23 @@ class DefaultPrincipalCompositionGreenTest {
             )
         )
 
-    private fun signerDigest(): (String) -> String? = { if (signerTrusted) "sha256:trusted" else "sha256:other" }
+    private fun signerDigest(): (String) -> String? = {
+        if (signerTrusted) TRUSTED_SIGNER else ROTATED_SIGNER
+    }
 
     /**
-     * THE leg under test: NO `providerApplicationId` override — the composition
-     * must route trust, observe, and cleanup through the build-selected principal.
+     * Test-only selected-principal adapter. Production uses a registry-issued
+     * acquisition whose durable P/S is verified before the first provider action.
      */
-    private fun defaultBackend() = APlusComposition.productionBackend(
-        ApplicationProvider.getApplicationContext(),
-        db,
+    private fun defaultBackend() = APlusComposition.testOnlyBackend(
+        context = ApplicationProvider.getApplicationContext(),
+        db = db,
+        providerExecutor = ProviderScopedExternalApplyExecutor.wrap(
+            ProviderPrincipal.selected,
+            fakeExecutor,
+        ),
         providerSignerDigest = signerDigest(),
         attemptValidityTimeoutMs = attemptTimeoutMs,
-        serviceLifecycleExecutor = fakeExecutor
     )
 
     @Before
@@ -126,7 +130,14 @@ class DefaultPrincipalCompositionGreenTest {
         // operationId + intent hash), EXCEPT the approved pairing binds the
         // BUILD-SELECTED principal — never an injected identity.
         val planId = db.planDao().insertPlanWithTasks(
-            LocationPlan(sourceFileName = "p.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
+            LocationPlan(
+                sourceFileName = "p.csv",
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 1,
+                totalRequiredSuccesses = 1,
+                providerApplicationId = ProviderPrincipal.selected,
+            ),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1))
         )
         seededPlanId = planId
@@ -140,7 +151,9 @@ class DefaultPrincipalCompositionGreenTest {
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
                 aplusState = "ENV_APPLIED", aplusLeaseId = "lease-77", currentExecutionId = "exec-77",
-                aplusAnchorScheduleId = "qwy-default-schedule"
+                aplusAnchorScheduleId = "qwy-default-schedule",
+                providerApplicationId = ProviderPrincipal.selected,
+                providerSignerDigest = TRUSTED_SIGNER,
             )
         )
         // Approve the trusted signer UNDER the BUILD-SELECTED principal. The default
@@ -149,7 +162,7 @@ class DefaultPrincipalCompositionGreenTest {
         val approvedId = db.providerPairingDao().insert(
             com.example.cellrebelauto.model.plan.ProviderPairingRecord(
                 applicationId = ProviderPrincipal.selected,
-                currentSignerDigest = "sha256:trusted",
+                currentSignerDigest = TRUSTED_SIGNER,
                 approvedAt = 1000L, revokedAt = null, approvedVersionCode = 1
             )
         )
@@ -160,7 +173,9 @@ class DefaultPrincipalCompositionGreenTest {
                 requestDigest = expectedHash(), resultOutcome = "APPLIED", createdAt = 1000L,
                 leaseId = "lease-77", operationId = "op-77", acceptedIntentHash = expectedHash(),
                 appliedAtEpochMs = 1000L, environmentRevision = 7L,
-                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                providerApplicationId = ProviderPrincipal.selected,
+                providerSignerDigest = TRUSTED_SIGNER,
             )
         )
         observeResult = EnvironmentObservationV1(
@@ -183,8 +198,8 @@ class DefaultPrincipalCompositionGreenTest {
     }
 
     @Test
-    fun `the default composition accepts the selected binder target without override`() {
-        // Pin what "default" means in this debug test build: the single selection
+    fun `the selected composition accepts the selected binder target`() {
+        // Pin what "selected" means in this debug test build: the single selection
         // IS the bench principal (release selects production — proven by the
         // release-lane routing guard, not observable from debug unit tests).
         assertEquals(
@@ -199,20 +214,24 @@ class DefaultPrincipalCompositionGreenTest {
             ProviderPrincipal.selected,
             selectedBinder.targetApplicationId
         )
-        // NO principal override + the selected-target Binder executor: the fork
-        // guard must ACCEPT (a rejection here would mean the default composition
-        // and the shipped Binder default disagree — the split #63 made structural).
-        APlusComposition.productionBackend(
-            app,
-            db,
+        val backend = APlusComposition.testOnlyBackend(
+            context = app,
+            db = db,
+            providerExecutor = ProviderScopedExternalApplyExecutor.wrap(
+                ProviderPrincipal.selected,
+                selectedBinder,
+            ),
             providerSignerDigest = signerDigest(),
             attemptValidityTimeoutMs = attemptTimeoutMs,
-            serviceLifecycleExecutor = selectedBinder
+        )
+        assertEquals(
+            ProviderPrincipal.selected,
+            (backend.executor as ProviderScopedExternalApplyExecutor).targetApplicationId,
         )
     }
 
     @Test
-    fun `no-override default principal walks trusted observe then post-revoke cleanup`() = runBlocking {
+    fun `selected principal walks trusted observe then rotation fails closed`() = runBlocking {
         // ---- trusted window: new work passes, trusted observe SUCCEEDS ----
         val backend = defaultBackend()
         val probeIntent = io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1(
@@ -221,35 +240,42 @@ class DefaultPrincipalCompositionGreenTest {
             notBeforeEpochMs = 0L, deadlineEpochMs = 1L
         )
         assertEquals(
-            "trusted signer ⇒ apply passes through on the DEFAULT principal (killing mutation: hardcoded production ⇒ PROVIDER_SIGNER_UNTRUSTED)",
+            "trusted signer ⇒ apply passes through on the selected principal (killing mutation: hardcoded production ⇒ PROVIDER_SIGNER_UNTRUSTED)",
             "APPLIED",
             backend.executor.apply(77L, probeIntent, "key-default-apply", "digest", 0L).outcome
         )
         val pre = backend.evidenceSource.acquirePreObservation(77L, 5L)
         assertNotNull(
-            "trusted observe SUCCEEDS through the no-override default principal (killing mutation: hardcoded production gate ⇒ null)",
+            "trusted observe SUCCEEDS through the selected principal (killing mutation: hardcoded production gate ⇒ null)",
             pre
         )
         assertEquals("exactly one observe call", 1, observeCalls.size)
         assertEquals("the observe tuple binds the durable receipt lease", "lease-77", observeCalls[0].first)
         assertEquals("the expected hash is the owner recompute", expectedHash(), observeCalls[0].third)
 
-        // ---- revoke window (signer rotated away from the approved pairing) ----
+        // ---- rotation window (signer moved away from the approved pairing) ----
         signerTrusted = false
         assertNull(
-            "post-revoke observe fail-closes on the default principal",
+            "post-rotation observe fail-closes on the selected principal",
             backend.evidenceSource.acquirePostObservation(77L, 5L)
         )
-        assertEquals("no observe call was consumed post-revoke", 1, observeCalls.size)
+        assertEquals("no observe call was consumed post-rotation", 1, observeCalls.size)
         assertEquals(
-            "post-revoke NEW trusted work stays gated",
+            "post-rotation NEW trusted work stays gated",
             "PROVIDER_SIGNER_UNTRUSTED",
             backend.executor.apply(77L, probeIntent, "key-default-apply-2", "digest", 0L).outcome
         )
         assertEquals(
-            "post-revoke RELEASE still passes through — lease cleanup is exempt (§6.5.4), stranding the lease forever would be the regression",
-            "RELEASED",
+            "post-rotation release must fail closed until durable signer ownership is resolved",
+            "PROVIDER_SIGNER_UNTRUSTED",
             backend.executor.release(77L, "rel-key-77", "lease-77", "rel-digest", 0L).outcome
         )
+    }
+
+    private companion object {
+        const val TRUSTED_SIGNER =
+            "sha256:a9a089195c68d2adeee23beaa2c3a93b1d4cdf09046e7a9e520b3b166dff3e6a"
+        const val ROTATED_SIGNER =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     }
 }

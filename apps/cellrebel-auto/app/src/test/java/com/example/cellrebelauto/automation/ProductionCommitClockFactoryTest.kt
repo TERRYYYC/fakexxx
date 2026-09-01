@@ -2,7 +2,6 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.plan.LocationPlan
@@ -10,9 +9,7 @@ import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.repository.PlanRepository
-import com.example.cellrebelauto.recovery.FakeDurableRecoveryLog
 import com.example.cellrebelauto.recovery.testApplyIntent
-import com.example.cellrebelauto.recovery.RecordingExternalApplyExecutor
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -64,9 +61,20 @@ class ProductionCommitClockFactoryTest {
     @Test
     fun `production engine factory wires the monotonic commit clock for the ledger mint`() = runTest {
         val WALL_VALUE = 15000L // deliberately distinctive wall-domain value (≠ the shadow monotonic clock)
+        val providerApplicationId =
+            io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        val signer =
+            "sha256:f11bcdf6c2c0a0aca874a195c63db9e5f871e0733b972f63afbf5a1d3eeb4e40"
         // Seed a §6.4-positive DECIDING crash fixture (mirrors CrashMatrixTest.M_CR_06).
         val planId = db.planDao().insertPlanWithTasks(
-            LocationPlan(sourceFileName = "clk.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
+            LocationPlan(
+                sourceFileName = "clk.csv",
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 1,
+                totalRequiredSuccesses = 1,
+                providerApplicationId = providerApplicationId,
+            ),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1))
         )
         val taskId = db.locationTaskDao().getTasksForPlan(planId).first().id
@@ -79,7 +87,9 @@ class ProductionCommitClockFactoryTest {
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
                 aplusState = "DECIDING", aplusLeaseId = "lease-77",
-                aplusAnchorScheduleId = "qwy-default-schedule"
+                aplusAnchorScheduleId = "qwy-default-schedule",
+                providerApplicationId = providerApplicationId,
+                providerSignerDigest = signer,
             )
         )
         val intentDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
@@ -110,25 +120,53 @@ class ProductionCommitClockFactoryTest {
         repo.persistObservation(77L, "PRE", snapshot("PRE"))
         repo.persistObservation(77L, "POST", snapshot("POST"))
         repo.persistCompletionReceipt(77L, 1, intentDigest, "lease-77")
-        val executor = RecordingExternalApplyExecutor()
-        val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), requestDigest = intentDigest, now = 1000L)
-        log.seedReceipt(com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), intentDigest, "RELEASED", 1000L)
-
-        val backend = com.example.cellrebelauto.automation.APlusComposition.run {
-            object : com.example.cellrebelauto.automation.aplus.APlusBackend {
-                override val executor = executor
-                override val recoveryLog = log
-                override val observeIntent = com.example.cellrebelauto.recovery.ObserveIntentAcquirer { true }
-                override val receiptRevision = com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer { _, _ -> true }
-                override val trustedQuota = com.example.cellrebelauto.recovery.TrustedQuotaAcquirer { true }
-                override val evidenceSource = object : com.example.cellrebelauto.automation.aplus.APlusEvidenceSource {
-                    override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) = null as com.example.cellrebelauto.environment.ObservationSnapshot?
-                    override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) = null as com.example.cellrebelauto.environment.ObservationSnapshot?
-                    override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long) = null as com.example.cellrebelauto.automation.aplus.APlusCompletionEvidence?
-                }
+        db.operationReceiptDao().insertIfAbsent(
+            com.example.cellrebelauto.recovery.OperationReceiptRow(
+                idempotencyKey =
+                    com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .applyIdempotencyKey(77L),
+                requestDigest = intentDigest,
+                resultOutcome = "APPLIED",
+                createdAt = 1_000L,
+                leaseId = "lease-77",
+                providerApplicationId = providerApplicationId,
+                providerSignerDigest = signer,
+            )
+        )
+        com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()).approve(
+            providerApplicationId,
+            signer,
+            versionCode = 1,
+            approvedAt = 1L,
+        )
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val boundContext = object : android.content.ContextWrapper(app) {
+            override fun bindService(
+                service: android.content.Intent,
+                conn: android.content.ServiceConnection,
+                flags: Int,
+            ): Boolean {
+                conn.onServiceConnected(requireNotNull(service.component), TestNoopEnvironmentControlService())
+                return true
             }
+
+            override fun unbindService(conn: android.content.ServiceConnection) = Unit
         }
+        val acquisition = com.example.cellrebelauto.recovery.ProviderExecutorRegistry(
+            boundContext,
+            currentSignerDigest = { signer },
+        ) { applicationId ->
+            com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(boundContext, applicationId)
+        }
+            .acquire(providerApplicationId, signer)
+        assertEquals(true, acquisition.awaitBound(1_000L))
+        val backend = APlusComposition.productionBackend(
+            context = app,
+            db = db,
+            providerAcquisition = acquisition,
+            providerSignerDigest = { signer },
+            attemptValidityTimeoutMs = 90_000L,
+        )
         val (coordinator, evidence) = com.example.cellrebelauto.automation.APlusComposition.engineAplusParams(backend)
 
         // THE production construction path (exactly what AutomationService calls; the commit clock
@@ -163,6 +201,7 @@ class ProductionCommitClockFactoryTest {
             // default parameter (e.g. to a wall clock) is what this oracle must kill.
         )
         engine.run()
+        acquisition.close()
 
         val entry = db.trustedQuotaDao().getByAttempt(77L)
         assertNotNull("the factory-built engine must mint the trusted entry (absence = failure)", entry)

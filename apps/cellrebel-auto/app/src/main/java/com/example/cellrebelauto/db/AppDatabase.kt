@@ -29,7 +29,7 @@ import com.example.cellrebelauto.recovery.RecoveryCheckpointRoomDao
 import com.example.cellrebelauto.recovery.ReleaseReceiptDao
 
 /**
- * Room database singleton, version 6 (F-19; table-for-table identical to v5's committed end-state).
+ * Room database singleton, version 7.
  *
  * v5 introduced the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables
  * (MIGRATION_4_5). `cellrebel_executions` is born in v5 carrying its FULL §7.1 / §8.6 completion-
@@ -47,6 +47,11 @@ import com.example.cellrebelauto.recovery.ReleaseReceiptDao
  * The version bump re-opens a migration window; recovery itself is the v5-drift quarantine +
  * MIGRATION_5_6 no-op + destructive fallback, see [buildProductionDatabase].
  *
+ * v7 adds the nullable provider applicationId to the plan, attempt, operation receipt, recovery
+ * checkpoint, and release receipt, plus the immutable signer owner to the attempt and its three
+ * recovery proofs. MIGRATION_6_7 never supplies a default or backfill: migrated null means
+ * legacy/unknown and is deliberately unusable for automatic provider recovery.
+ *
  * INV-24 chronicle — DO NOT silently re-freeze or delete: INV-24 (spec §invariants, AC-14) bans
  * destructive fallback so operator data survives upgrades. The operator EXPLICITLY exempted this
  * invariant on 2026-08-27T09:46Z, scoped to Auto only (`com.example.cellrebelauto`, dev-phase app,
@@ -54,10 +59,11 @@ import com.example.cellrebelauto.recovery.ReleaseReceiptDao
  * qianwangyou production app (#46 / F-10 — real operator data, separate ruling). The exemption is
  * registered in the spec's INV-24 / AC-14 ledger rows and in docs/features/2026-08-27-f19-*.md.
  *
- * # Room 数据库单例，版本 6（F-19：表结构与 v5 提交终态逐表相同）。v6 只为重开迁移窗口——
+ * # Room 数据库单例，版本 7。v6（F-19）只为重开迁移窗口——
  * # 设备存在未提交 8/01 分支的漂移 v5 库，同版本号下 Room 无迁移路径。恢复机构 = v5 漂移隔离区 +
  * # no-op MIGRATION_5_6 + destructive fallback。INV-24 由 operator 2026-08-27T09:46Z 裁定豁免，
- * # 范围仅限 Auto 开发期 app 本次事故，不外溢千网游生产包（#46 / F-10）。
+ * # 范围仅限 Auto 开发期 app 本次事故，不外溢千网游生产包（#46 / F-10）。v7 新增五个
+ * # nullable provider applicationId 与四个 nullable signer owner，旧行绝不回填或推断。
  */
 @Database(
     entities = [
@@ -78,7 +84,7 @@ import com.example.cellrebelauto.recovery.ReleaseReceiptDao
         RecoveryCheckpointRow::class,
         ReleaseReceiptRow::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -240,15 +246,21 @@ abstract class AppDatabase : RoomDatabase() {
          * # EXPLICITLY exempted by the operator on 2026-08-27T09:46Z, scoped to this dev-phase app
          * # (versionCode=1) whose only at-risk rows are stale 8/01 dev data (sealed in
          * # g2-auto-crash-triage-20260827/raw/). Mechanism, in firing order:
-         * #   1. v5-drift quarantine (above) — the ZY22 incident path: drifted v5 → delete → fresh v6;
-         * #   2. explicit migration ladder 2→3→4→5→6 — v2–v4 devices and healthy v5 KEEP their data
-         * #      (MIGRATION_5_6 is a documented no-op; fallback does NOT fire when a path exists);
+         * #   1. v5-drift quarantine (above) — the ZY22 incident path: drifted v5 → delete → fresh v7;
+         * #   2. explicit migration ladder 2→3→4→5→6→7 — legacy devices KEEP their data
+         * #      (MIGRATION_5_6 is a documented no-op; 6→7 adds nullable principal columns only);
          * #   3. fallbackToDestructiveMigration — belt for v1/unknown versions with no path.
          */
         internal fun buildProductionDatabase(context: Context, dbName: String): AppDatabase {
             quarantineDriftedV5Database(context, dbName)
             return Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                )
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
         }

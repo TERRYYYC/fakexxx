@@ -19,10 +19,26 @@ class ProviderTrustGate(
     private val currentSignerDigest: (applicationId: String) -> String?
 ) {
 
-    /** True iff the provider's CURRENT signer is an operator-approved active principal. */
-    suspend fun isCurrentSignerTrusted(applicationId: String): Boolean {
-        val signer = currentSignerDigest(applicationId) ?: return false
-        return trustStore.findActive(applicationId, signer) != null
+    /** Explicit compatibility seam for adapter tests without a registry-issued expected signer. */
+    internal suspend fun isCurrentSignerTrusted(applicationId: String): Boolean {
+        val current = ProviderSignerDigest.normalizeOrNull(currentSignerDigest(applicationId))
+            ?: return false
+        return trustStore.findActive(applicationId, current) != null
+    }
+
+    /**
+     * True iff the provider's CURRENT signer is the exact immutable owner expected by this run and
+     * that canonical pair remains operator-approved. Approval of another signer never substitutes.
+     */
+    suspend fun isCurrentSignerTrusted(
+        applicationId: String,
+        expectedSignerDigest: String,
+    ): Boolean {
+        val expected = ProviderSignerDigest.normalizeOrNull(expectedSignerDigest) ?: return false
+        val current = ProviderSignerDigest.normalizeOrNull(currentSignerDigest(applicationId))
+            ?: return false
+        if (current != expected) return false
+        return trustStore.findActive(applicationId, expected) != null
     }
 
     companion object {
@@ -53,7 +69,9 @@ class ProviderTrustGate(
             val signers = signatures ?: return null
             if (signers.size != 1) return null // multi-signer: rejected in v1 (§6.5.1)
             val digest = java.security.MessageDigest.getInstance("SHA-256").digest(signers[0].toByteArray())
-            return digest.joinToString("") { "%02x".format(it) }.let { "sha256:$it" }
+            return ProviderSignerDigest.normalizeOrNull(
+                digest.joinToString("") { "%02x".format(it) }.let { "sha256:$it" }
+            )
         }
     }
 }

@@ -51,6 +51,7 @@ class AutomationService : AccessibilityService() {
 
     companion object {
         private const val TAG = "AutomationSvc"
+        private const val PROVIDER_BIND_READY_TIMEOUT_MS = 5_000L
 
         // R43 (Sol GREEN-review-2 F1): lifecycle observability for the provider bind — the oracle
         // asserts the connect callback ATTEMPTED the bind (count > 0) and recorded its result.
@@ -64,6 +65,33 @@ class AutomationService : AccessibilityService() {
         fun resetProviderBindObservability() {
             providerBindAttempts = 0
             lastProviderBindReturnedTrue = null
+        }
+
+        /** Testable owner-state transition used before any provider registry acquisition. */
+        internal suspend fun persistUnknownProviderRecovery(
+            planId: Long,
+            planRepository: PlanRepository,
+        ): Int = persistProviderPrincipalRecovery(
+            planId,
+            planRepository,
+            "PROVIDER_PRINCIPAL_UNKNOWN",
+        )
+
+        internal suspend fun persistProviderUnavailableRecovery(
+            planId: Long,
+            planRepository: PlanRepository,
+        ): Int = persistProviderPrincipalRecovery(
+            planId,
+            planRepository,
+            "PROVIDER_BIND_NOT_READY",
+        )
+
+        internal suspend fun persistProviderPrincipalRecovery(
+            planId: Long,
+            planRepository: PlanRepository,
+            reason: String,
+        ): Int {
+            return planRepository.persistProviderPrincipalRecovery(planId, reason)
         }
 
         // # MIUI SecurityCenter 包名（后台启动拦截弹窗的来源）
@@ -139,11 +167,9 @@ class AutomationService : AccessibilityService() {
 
     // ---- Lifecycle ----
 
-    // R43 (Sol GREEN-review-2 F1): the SERVICE-LIFECYCLE binder executor. Binding happens at
-    // service connect and unbinds at destroy — the provider connection outlives individual runs,
-    // and an unbound provider still fail-closes every call (PROVIDER_NOT_BOUND, no lease).
-    @Volatile
-    private var binderExecutor: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor? = null
+    private val providerExecutorRegistry = lazy {
+        com.example.cellrebelauto.recovery.ProviderExecutorRegistry(applicationContext)
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -151,13 +177,6 @@ class AutomationService : AccessibilityService() {
         _isServiceConnected.value = true
         Log.d(TAG, "Service connected")
         addLog("Accessibility service connected")
-        // F1: bind the frozen-contract provider service for the accessibility-service lifetime.
-        val executor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(applicationContext)
-        val bound = executor.bind()
-        binderExecutor = executor
-        providerBindAttempts++
-        lastProviderBindReturnedTrue = bound
-        addLog(if (bound) "A+ provider service bind requested" else "A+ provider unavailable — apply will fail closed")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -269,8 +288,9 @@ class AutomationService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         automationJob?.cancel()
-        binderExecutor?.unbind()
-        binderExecutor = null
+        if (providerExecutorRegistry.isInitialized()) {
+            providerExecutorRegistry.value.unbindAll()
+        }
         serviceScope.cancel()
         instance = null
         _isServiceConnected.value = false
@@ -301,74 +321,156 @@ class AutomationService : AccessibilityService() {
         _isRunning.value = true
 
         automationJob = serviceScope.launch {
-            // # 读取计划与高级配置（超时/GPS 稳定）
-            val plan = planRepository.getPlan(planId)
-            val planConfig = configStore.config.first()
-            if (plan == null) {
-                addLog("ERROR: plan #$planId not found")
-                _isRunning.value = false
-                return@launch
-            }
-
-            // # R8-F1/F2（Sol round-7 P1-1 / round-11 P1-1）：A+ 组合根。生产经 engineAplusParams 从
-            // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
-            // R43 GREEN (F1): the REAL production backend over the frozen contract — reusing the
-            // SERVICE-LIFECYCLE binder executor (bound at onServiceConnected) + the Room receipt
-            // store; an unbound provider fail-closes inside the adapters, not by stubs.
-            val aplusBackend: APlusBackend = APlusComposition.productionBackend(
-                applicationContext, db,
-                // R45 (Sol R45 P1-1): the SAME timeout config the engine's apply intent uses — the
-                // evidence source must recompute the identical (startedAt → startedAt+timeout) window.
-                attemptValidityTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
-                serviceLifecycleExecutor = binderExecutor
-            )
-            val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
-            // R43 (Sol R42 P1-2): the ENTIRE production engine construction delegates to the pure
-            // factory — the monotonic commit-clock default lives there (production wiring, observable
-            // by the factory-wiring test), not in an invisible call-site lambda.
-            val newEngine = AutomationEngineFactory.productionEngine(
-                planId = planId,
-                planRepository = planRepository,
-                cellRebelRunner = cellRebelHandler,
-                gpsSetter = fakeGpsHandler,
-                globalBufferSeconds = plan.globalBufferSeconds,
-                testTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
-                gpsSettleMs = planConfig.gpsSettleSeconds * 1000L,
-                // # F003：每次 attempt 重新读取开关（AC-F3-5 中途切换下个 attempt 生效）
-                stageToggles = {
-                    val c = configStore.config.first()
-                    StageToggles(c.locationStageEnabled, c.testStageEnabled)
-                },
-                auditDao = db.auditEventDao(),
-                aplusCoordinator = aplusCoordinator,
-                aplusEvidence = aplusEvidence,
-                bridge = bridge
-            )
-            engine = newEngine
-
-            // # F8：6 个转发 collector 随单次 run 明确取消（流永不完成，
-            // # 不取消则 engine.run 返回后 automationJob 仍存活 → 泄漏）
-            withForwarders(
-                forwarders = listOf(
-                    // # 监听引擎状态并转发到 companion 的 StateFlow
-                    { newEngine.state.collect { _currentState.value = it } },
-                    // # 收集循环计数
-                    { newEngine.cycleCount.collect { _cycleCount.value = it } },
-                    // # 收集日志
-                    { newEngine.logs.collect { _logs.value = it } },
-                    // # 转发 Run 页所需的引擎投影流
-                    { newEngine.currentTask.collect { _currentTask.value = it } },
-                    { newEngine.cooldown.collect { _cooldown.value = it } },
-                    { newEngine.lastFailure.collect { _lastFailure.value = it } }
-                )
-            ) {
-                // # 运行引擎（阻塞直到完成/取消/出错）
-                try {
-                    newEngine.run()
-                } finally {
-                    _isRunning.value = false
-                    engine = null
+            try {
+                // Read the durable plan before selecting or binding any provider principal.
+                val plan = planRepository.getPlan(planId)
+                if (plan == null) {
+                    addLog("ERROR: plan #$planId not found")
+                    return@launch
                 }
+                if (!ProviderPrincipal
+                        .isKnownApplicationId(plan.providerApplicationId)
+                ) {
+                    persistUnknownProviderRecovery(planId, planRepository)
+                    addLog(
+                        "ERROR: plan #$planId has no known durable provider identity; " +
+                            "legacy recovery requires manual handling"
+                    )
+                    _currentState.value = AutomationState.PAUSED
+                    return@launch
+                }
+                val providerApplicationId =
+                    ProviderPrincipal
+                        .requireKnownApplicationId(plan.providerApplicationId)
+                val capturedProviderSigner =
+                    com.example.cellrebelauto.environment.ProviderSignerDigest.normalizeOrNull(
+                        com.example.cellrebelauto.environment.ProviderTrustGate
+                            .packageManagerSignerDigest(packageManager, providerApplicationId)
+                    )
+                val durableRecoveryFailure = planRepository.guardRecoveryProviderPrincipal(
+                    planId,
+                    providerApplicationId,
+                    capturedProviderSigner,
+                )
+                if (durableRecoveryFailure != null) {
+                    addLog(
+                        "ERROR: plan #$planId durable provider owner/proof join failed: " +
+                            durableRecoveryFailure
+                    )
+                    _currentState.value = AutomationState.PAUSED
+                    return@launch
+                }
+                val planConfig = configStore.config.first()
+
+                // Ownership starts only after plan lookup. The registry shares one executor per
+                // frozen identity and the acquisition is always released when this run ends.
+                val providerAcquisition =
+                    try {
+                        providerExecutorRegistry.value.acquire(
+                            providerApplicationId,
+                            capturedProviderSigner
+                                ?: throw com.example.cellrebelauto.recovery.ProviderSignerIdentityException(
+                                    com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE
+                                ),
+                        )
+                    } catch (identity: com.example.cellrebelauto.recovery.ProviderSignerIdentityException) {
+                        persistProviderPrincipalRecovery(
+                            planId,
+                            planRepository,
+                            identity.failureReason,
+                        )
+                        addLog(
+                            "ERROR: provider signer changed before exact bind: " +
+                                identity.failureReason
+                        )
+                        _currentState.value = AutomationState.PAUSED
+                        return@launch
+                    }
+                try {
+                    providerBindAttempts++
+                    lastProviderBindReturnedTrue = providerAcquisition.bindRequested
+                    addLog(
+                        if (providerAcquisition.bindRequested) {
+                            "A+ provider service bind requested; awaiting exact Binder callback"
+                        } else {
+                            "A+ provider unavailable — apply will fail closed"
+                        }
+                    )
+                    val providerReady = providerAcquisition.awaitBound(
+                        PROVIDER_BIND_READY_TIMEOUT_MS
+                    )
+                    addLog(
+                        if (providerReady) {
+                            "A+ provider service ready for frozen identity"
+                        } else {
+                            "A+ provider bind did not become ready — run will fail closed"
+                        }
+                    )
+                    if (!providerReady) {
+                        val readySigner =
+                            com.example.cellrebelauto.environment.ProviderSignerDigest.normalizeOrNull(
+                                com.example.cellrebelauto.environment.ProviderTrustGate
+                                    .packageManagerSignerDigest(packageManager, providerApplicationId)
+                            )
+                        val reason = when {
+                            readySigner == null ->
+                                com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_UNKNOWN_FAILURE
+                            readySigner != capturedProviderSigner ->
+                                com.example.cellrebelauto.recovery.PROVIDER_SIGNER_OWNER_CONFLICT_FAILURE
+                            else -> "PROVIDER_BIND_NOT_READY"
+                        }
+                        persistProviderPrincipalRecovery(planId, planRepository, reason)
+                        _currentState.value = AutomationState.PAUSED
+                        return@launch
+                    }
+
+                    val aplusBackend: APlusBackend = APlusComposition.productionBackend(
+                        applicationContext,
+                        db,
+                        providerAcquisition = providerAcquisition,
+                        attemptValidityTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
+                    )
+                    val (aplusCoordinator, aplusEvidence) =
+                        APlusComposition.engineAplusParams(aplusBackend)
+                    val newEngine = AutomationEngineFactory.productionEngine(
+                        planId = planId,
+                        planRepository = planRepository,
+                        cellRebelRunner = cellRebelHandler,
+                        gpsSetter = fakeGpsHandler,
+                        globalBufferSeconds = plan.globalBufferSeconds,
+                        testTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
+                        gpsSettleMs = planConfig.gpsSettleSeconds * 1000L,
+                        // # F003：每次 attempt 重新读取开关（AC-F3-5 中途切换下个 attempt 生效）
+                        stageToggles = {
+                            val c = configStore.config.first()
+                            StageToggles(c.locationStageEnabled, c.testStageEnabled)
+                        },
+                        auditDao = db.auditEventDao(),
+                        aplusCoordinator = aplusCoordinator,
+                        aplusEvidence = aplusEvidence,
+                        bridge = bridge,
+                    )
+                    engine = newEngine
+
+                    // # F8：转发 collector 随单次 run 明确取消。
+                    withForwarders(
+                        forwarders = listOf(
+                            { newEngine.state.collect { _currentState.value = it } },
+                            { newEngine.cycleCount.collect { _cycleCount.value = it } },
+                            { newEngine.logs.collect { _logs.value = it } },
+                            { newEngine.currentTask.collect { _currentTask.value = it } },
+                            { newEngine.cooldown.collect { _cooldown.value = it } },
+                            { newEngine.lastFailure.collect { _lastFailure.value = it } },
+                        )
+                    ) {
+                        newEngine.run()
+                    }
+                } finally {
+                    providerAcquisition.close()
+                }
+            } finally {
+                _isRunning.value = false
+                engine = null
             }
         }
     }

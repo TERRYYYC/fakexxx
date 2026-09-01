@@ -83,6 +83,7 @@ GATES="
 3|acceptance-scenarios|PR-5|acceptance/scenarios|cd acceptance && ./gradlew test
 3|matrix-coverage|PR-5|scripts/check-matrix-coverage.sh|./scripts/check-matrix-coverage.sh
 3|forbidden-boundaries|PR-5|acceptance/scripts/check-forbidden-boundaries.sh|./acceptance/scripts/check-forbidden-boundaries.sh
+3|auto-qwy-host|PR-6|integration-tests/pr63-on-issue66/run-host-gate.sh|bash ./integration-tests/pr63-on-issue66/run-host-gate.sh
 3|release-debt|PR-2|scripts/check-release-debt.sh|./scripts/check-release-debt.sh
 "
 
@@ -113,6 +114,63 @@ fi
 
 RUN=0; PASSED=0; FAILED=0; PENDING=0
 FAILED_NAMES=""; PENDING_NAMES=""
+HOST_RECEIPT="integration-tests/pr63-on-issue66/harness/build/reports/pr63-on-issue66/host-gate-receipt.json"
+HOST_RECEIPT_VALIDATED=0
+
+verify_host_receipt() {
+  local receipt_path="$1"
+
+  if [ ! -f "$receipt_path" ]; then
+    printf 'verify-a-plus: host gate passed but receipt is missing: %s\n' "$receipt_path" >&2
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'verify-a-plus: python3 is required to validate the host-gate JSON receipt\n' >&2
+    return 1
+  fi
+
+  python3 - "$receipt_path" <<'PY'
+import json
+import sys
+
+receipt_path = sys.argv[1]
+expected = {
+    "hostIntegration": "PASS",
+    "issue66Ac7": "NOT_PASSED",
+    "deviceFull": "BLOCKED",
+    "overall": "BLOCKED",
+    "reason": "NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY",
+}
+
+try:
+    with open(receipt_path, encoding="utf-8") as receipt_file:
+        receipt = json.load(receipt_file)
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    print(f"verify-a-plus: invalid host-gate JSON receipt: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(receipt, dict):
+    print("verify-a-plus: host-gate JSON receipt must be an object", file=sys.stderr)
+    raise SystemExit(1)
+
+mismatches = [
+    f"{field}={receipt.get(field)!r} (expected {expected_value!r})"
+    for field, expected_value in expected.items()
+    if receipt.get(field) != expected_value
+]
+if mismatches:
+    print(
+        "verify-a-plus: host-gate receipt contract mismatch: " + "; ".join(mismatches),
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+print(
+    "     receipt: VALID — hostIntegration=PASS; "
+    "issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED"
+)
+PY
+}
 
 printf 'verify-a-plus: stage=%s\n' "$STAGE"
 
@@ -135,9 +193,30 @@ while IFS='|' read -r rank name pr file cmd; do
 
   printf '\n---- %s\n     $ %s\n' "$name" "$cmd"
   RUN=$((RUN + 1))
+  if [ "$name" = "auto-qwy-host" ]; then
+    # Never let a previous successful run satisfy the current aggregate gate.
+    if ! rm -f "$HOST_RECEIPT"; then
+      FAILED=$((FAILED + 1))
+      FAILED_NAMES="$FAILED_NAMES $name(stale-receipt)"
+      printf '     -> FAIL (could not remove stale host evidence receipt)\n'
+      continue
+    fi
+  fi
   if ( eval "$cmd" ); then
-    PASSED=$((PASSED + 1))
-    printf '     -> PASS\n'
+    if [ "$name" = "auto-qwy-host" ]; then
+      if verify_host_receipt "$HOST_RECEIPT"; then
+        HOST_RECEIPT_VALIDATED=1
+        PASSED=$((PASSED + 1))
+        printf '     -> PASS (repository host integration only; product/device remains BLOCKED)\n'
+      else
+        FAILED=$((FAILED + 1))
+        FAILED_NAMES="$FAILED_NAMES $name(receipt)"
+        printf '     -> FAIL (missing or invalid host evidence receipt)\n'
+      fi
+    else
+      PASSED=$((PASSED + 1))
+      printf '     -> PASS\n'
+    fi
   else
     FAILED=$((FAILED + 1))
     FAILED_NAMES="$FAILED_NAMES $name"
@@ -160,7 +239,13 @@ if [ "$PENDING" -gt 0 ]; then
 fi
 
 if [ "$FAILED" -eq 0 ]; then
-  printf '\nRESULT: all gates required at stage=%s passed.\n' "$STAGE"
+  if [ "$HOST_RECEIPT_VALIDATED" -eq 1 ]; then
+    printf '\nRESULT: repository host gates required at stage=%s passed.\n' "$STAGE"
+    printf 'PRODUCT/DEVICE RESULT: BLOCKED — issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED.\n'
+    printf 'REASON: NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY\n'
+  else
+    printf '\nRESULT: all gates required at stage=%s passed.\n' "$STAGE"
+  fi
   exit 0
 fi
 printf '\nRESULT: %d gate(s) failed at stage=%s.\n' "$FAILED" "$STAGE"

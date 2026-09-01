@@ -1,5 +1,6 @@
 package com.example.cellrebelauto.ui
 
+import com.example.cellrebelauto.recovery.ProviderPrincipalFailureReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,6 +74,33 @@ class PairingUiStateTest {
         )
         assertTrue(s is PairingUiState.ReleaseIncomplete)
         assertTrue("concrete action names manual lease confirmation (INV-21)", s.recoveryAction.contains("租约"))
+    }
+
+    @Test
+    fun `rotated signer release failure remains manual recovery when pairing state changes`() {
+        val s = PairingUiState.project(
+            hasProviderRecord = true,
+            providerActive = false,
+            crashedAplusState = "RECOVERY_REQUIRED",
+            crashedProviderFailure = ProviderPrincipalFailureReason.SIGNER_UNTRUSTED,
+        )
+
+        assertTrue("the outstanding old-signer lease outranks approval UI", s is PairingUiState.ReleaseIncomplete)
+        assertTrue("the action must require manual lease recovery", s.recoveryAction.contains("手动"))
+    }
+
+    @Test
+    fun `pre-guard APPLY_PENDING owner mismatch outranks replacement pairing`() {
+        val s = PairingUiState.project(
+            hasProviderRecord = true,
+            providerActive = false,
+            crashedAplusState = "APPLY_PENDING",
+        )
+
+        assertTrue(
+            "a crashed durable owner that is not the current exact principal needs manual recovery",
+            s is PairingUiState.RecoveryRequired,
+        )
     }
 
     @Test

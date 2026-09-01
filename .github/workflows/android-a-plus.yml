@@ -1,11 +1,14 @@
 name: android-a-plus
 
-# Four independent lanes (three app lanes + acceptance).
+# Independent app/release lanes, with separate host-integration and acceptance
+# evidence.
 #
 # `cellrebel-auto` and `qianwangyou` have NO dependency edge between them, by
 # design (INV-19): the two apps build, test and release independently, and a
-# green result on one must never be read as "the other is releasable". Runtime
-# compatibility is decided by the contract handshake, not by a joint build.
+# green result on one must never be read as "the other is releasable". The
+# device-free host-integration job composes both real app artifacts only inside
+# its test JVM; it does not couple their release lanes or replace contract and
+# separately authorized device evidence.
 #
 # Spec: feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md §12.1, §14, INV-19.
 
@@ -304,6 +307,47 @@ jobs:
             apps/qianwangyou/app/build/reports/**
             apps/qianwangyou/app/build/test-results/**
             apps/qianwangyou/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+  auto-qwy-host-integration:
+    # Device-free host evidence only. This composes the Auto release artifact
+    # with QWY's debug production-handler artifact plus canonical fake
+    # oracle/environment support in one test JVM. It exercises a local Binder
+    # adapter with injected caller identity. A green result does NOT prove two installed APKs,
+    # Android Service lifecycle, cross-process Binder, PackageManager signer
+    # lookup, or emulator/physical-device behavior, and creates no release
+    # dependency edge between the two app lanes above.
+    name: auto + qwy host integration (in-process; no device)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: repository wrappers and host runner are executable
+        run: |
+          chmod +x \
+            apps/cellrebel-auto/gradlew \
+            apps/qianwangyou/gradlew \
+            integration-tests/pr63-on-issue66/run-host-gate.sh
+
+      - name: combined host gate
+        run: ./integration-tests/pr63-on-issue66/run-host-gate.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: auto-qwy-host-integration-evidence
+          path: |
+            apps/cellrebel-auto/app/build/reports/**
+            apps/cellrebel-auto/app/build/test-results/**
+            apps/qianwangyou/app/build/reports/**
+            apps/qianwangyou/app/build/test-results/**
+            integration-tests/pr63-on-issue66/harness/build/reports/**
+            integration-tests/pr63-on-issue66/harness/build/test-results/**
           if-no-files-found: warn
 
   install-guards:
