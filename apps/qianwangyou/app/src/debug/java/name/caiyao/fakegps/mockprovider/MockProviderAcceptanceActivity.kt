@@ -256,7 +256,7 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         APlus10AFixtureSeed.seedReport(items, insertedIds, APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST) +
             "SCHEDULE_GENERATION priorState=${priorState::class.simpleName} versionAfter=${resetPlan.scheduleVersion} " +
             "pointer=${resetPlan.currentItemId} exhausted=${resetPlan.exhausted} " +
-            "(monotonic V+1, owner-quiescent, readback verified)\n" +
+            "(monotonic V+1, owner-fenced, schedule + full-domain readback verified)\n" +
             "NEXT: force-stop $QWY_BENCH_HINT then bind; readback via discover(): currentItemId=profile-1 and " +
             "scheduleVersion=${resetPlan.scheduleVersion} (the executable subset — the full ordered profile-1..10 " +
             "list readback awaits the gap⑦ profileRefs projection scope decision)"

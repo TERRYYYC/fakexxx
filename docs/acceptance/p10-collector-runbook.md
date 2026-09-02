@@ -119,13 +119,22 @@ payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.
 ```
 # qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture——
 #      千网游是坐标唯一所有者，KB-8）
+#   ⚠️ 单飞前置（R7 P1-1，强制）：owner fence 只串行化 EnvironmentControlHandler 自身的
+#      fenced ops；prepareKyiv / ProfileRepository / 设置 UI 会在**不持该锁**下改同一 profile
+#      表+transport。因此 seed 必须是该 PID 内唯一的写者——先 force-stop 并**确认旧进程已消失**
+#      再发这唯一一条 seed 命令，且 seed 与其被消费之间不得再跑任何 profile 写路径：
+#        adb shell am force-stop name.caiyao.fakegps.bench
+#        # 确认已消失（无输出才继续；有输出=旧进程还在，禁止 seed）：
+#        adb shell 'pidof name.caiyao.fakegps.bench || true'
 adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity \
   --es command prepare_10a \
   --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
   --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
-#   判据（R4 P1-1/gap⑦ 更新）：logcat MockProviderAcceptance 出 seed 映射 +
+#   判据（R4 P1-1/gap⑦ + R7 P1-1 更新）：logcat MockProviderAcceptance 出 seed 映射 +
 #   SEED_LOCAL_VERIFIED command=prepare_10a（本地腿全证：digest pin、结构+quota 向量、
-#   显式 id、单调+owner-fenced generation+回读、ConfigPrefsSync 发布）
+#   显式 id、单调+owner-fenced generation+回读、ConfigPrefsSync 发布、
+#   **且末尾对全写入域做终态回读**——10 行 profile 逐字节 + 设置姿态（HOOK/cleanup=false）+
+#   已发布 transport 载 profile-1 身份；任一漂移 → SEED_FAILED，不发 SEED_LOCAL_VERIFIED）
 #   **且** SEED_CONTRACT_INCOMPLETE command=prepare_10a gap=7（有序 discover() 回读当前
 #   无可执行命令——见末「gap⑦」）。**刻意不发 full-seed-PASS 的 READY**——§3 seed 契约
 #   含有序回读腿，未满足前发 READY 即假绿（opus5 裁定该假绿阻塞 merge）。
@@ -168,16 +177,21 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 #   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
 #   （sourceFileName=FX-G2-10A / 10 行 / quota 冻结向量 [2,1,3,1,2,1,1,3,1,2] / csvRow 1..10 /
 #   坐标列仍是 KB-8 占位），拓扑不符（外来 CSV import、错 id、同总额再分配）即 REFUSED（P2/P4）。
-#   判据（R6 P1-2 typed verdict，替代 R5 的 REQUEST_ACCEPTED）：verdict 绑定 request-owned
-#   durable generation——命令前先取 RunSession pre-max id，之后只有【新 RunSession（id >
-#   pre-max）且 planId=本请求】才算 start：
-#     RUN_STARTED sessionId=<S> planId=<P>  —— 本请求真正启动；一切归因锚到 sessionId=<S>
-#     RUN_START_CONFLICT                    —— 新 session 属别的 plan（并发/外来 start 抢占）
-#     RUN_NOT_STARTED                       —— 10s 内无新 session（无障碍服务未连接的静默
-#                                              no-op / 被当重复请求忽略 / 引擎建 session 前失败）。
-#   ⚠️ 全局 isRunning=true、或某条**陈旧同-plan attempt** 存在，都不满足本请求——那是别人的
-#   generation。cmd=state 的 running 行现带 taskId + runSessionId + taskPlanId + sessionPlanId
-#   双腿，两腿不一致会打 PLAN_BINDING_MISMATCH（错归因行永不静默读作干净）。
+#   判据（R7 P1-2 typed receipt + verdict，替代 R6 的裸 verdict）：start_run 全程持 process-wide
+#   单飞锁（=本请求的 owner token，输掉的同-plan 竞争者只能在赢家 verdict 后进入，pre-max 已含
+#   赢家 session → 永远拿不到 RUN_STARTED）。先发原子受理回执，再走 pre-max=MAX(id) 隔离 +
+#   读全部 id>pre-max 的 session：
+#     START_RECEIPT accepted|already_running|not_connected   —— 触引擎前的原子受理判定
+#     RUN_STARTED sessionId=<S> planId=<P> firstAttemptId=<A> —— 唯一绿：恰一条新右 plan session
+#                                              **且**有 durable 首 attempt 里程碑；归因锚 sessionId=<S>
+#     RUN_START_CONFLICT                    —— 新 session 属别的 plan，或出现 ≥2 条新 session（竞争
+#                                              歧义，拒绝归因）
+#     RUN_START_DEGENERATE sessionId=<S> status=<st> —— session 建了但 0 attempt 就 paused/terminal
+#                                              （provider discovery 失败 / plan 已完成）——非可用 run
+#     RUN_NOT_STARTED                       —— 无新 session，或有 session 但超时仍无首 attempt 里程碑。
+#   ⚠️ 全局 isRunning、陈旧同-plan attempt、裸 session（无 attempt）都**不**满足本请求。
+#   cmd=state 现为单事务快照，running 行带 attemptStatus + aplusState + runSessionId +
+#   sessionStatus + taskPlanId + sessionPlanId，两 plan 腿不一致打 PLAN_BINDING_MISMATCH。
 ```
 
 **跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider
