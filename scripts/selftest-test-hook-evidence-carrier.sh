@@ -73,6 +73,10 @@ EXPECT_SHA="$(shasum -a 256 "$TMP/acceptance-1.json" | awk '{print $1}')"
 grep -q "EVIDENCE session=acceptance-1 report=$EV/acceptance-1.json report_sha256=$EXPECT_SHA apk_sha256=$APK_SHA" <<<"$OUT" &&
     report ok "c1 one EVIDENCE line binds session/path/sha/apk" ||
     report fail "c1 one EVIDENCE line binds session/path/sha/apk" "$OUT"
+[ -f "$EV/acceptance-1.json.evidence" ] &&
+    [ "$(cat "$EV/acceptance-1.json.evidence")" = "$(grep '^EVIDENCE session=acceptance-1 ' <<<"$OUT" | head -1)" ] &&
+    report ok "c1 durable commit record equals the emitted line" ||
+    report fail "c1 durable commit record equals the emitted line" "$(cat "$EV/acceptance-1.json.evidence" 2>/dev/null)"
 
 # ---- c2: missing evidence dir — loud failure, no silent skip ---------------
 run_preserve "$WORK/does-not-exist" "acceptance-2" "$TMP/acceptance-1.json"
@@ -279,6 +283,83 @@ case "$CASE" in
         echo "DRIVER_SESSION $s"
         exit 0
         ;;
+    residue-final)
+        # R7 P1-3 (Sol repro a): a FINAL report file with NO commit record —
+        # the cp-then-TERM residue of the old design — must NOT read as
+        # captured. Salvage must redo the full capture, replacing the residue.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="res-final"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/res.json"
+        REPORT_CAPTURED=0
+        printf 'PRE-COMMIT-RESIDUE-GARBAGE' >"$EVIDENCE_DIR/res-final.json"
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        printf '{"probe":"residue-replaced"}' >"$FAKE_DEVICE_REPORT"
+        try_capture_report || exit 88
+        [ "$REPORT_CAPTURED" -eq 1 ] || exit 87
+        exit 0
+        ;;
+    residue-partial)
+        # The commit-protocol crash shape: only a .partial staged when the
+        # signal landed. Retry must complete cleanly over it.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="res-partial"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/resp.json"
+        REPORT_CAPTURED=0
+        printf 'HALF' >"$EVIDENCE_DIR/res-partial.json.partial"
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        printf '{"probe":"partial-completed"}' >"$FAKE_DEVICE_REPORT"
+        try_capture_report || exit 86
+        exit 0
+        ;;
+    record-mismatch)
+        # A commit record whose sha no longer matches the preserved bytes is
+        # a LOUD rc=2 — validate-and-re-emit, never trust-and-green.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="rec-bad"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/rb.json"
+        REPORT_CAPTURED=0
+        printf '{"probe":"tampered-bytes"}' >"$EVIDENCE_DIR/rec-bad.json"
+        wrong_sha=$(printf 'other-bytes' | shasum -a 256 | awk '{print $1}')
+        printf 'EVIDENCE session=rec-bad report=%s report_sha256=%s apk_sha256=%s\n' \
+            "$EVIDENCE_DIR/rec-bad.json" "$wrong_sha" "$DRIVER_APK_SHA" \
+            >"$EVIDENCE_DIR/rec-bad.json.evidence"
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        try_capture_report
+        rc=$?
+        [ "$rc" -eq 2 ] || { echo "DRIVER_ERROR mismatch rc=$rc (want 2)" >&2; exit 85; }
+        [ "$REPORT_CAPTURED" -eq 0 ] || exit 84
+        exit 0
+        ;;
+    shasum-retry)
+        # R7 P1-3 (Sol repro b): a malformed-shasum failure must leave NO
+        # final file and NO record, and a clean retry must then succeed.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="sha-retry"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/sr.json"
+        REPORT_CAPTURED=0
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        printf '{"probe":"sha-retry-bytes"}' >"$FAKE_DEVICE_REPORT"
+        mkdir -p "$WORKD/shim"
+        printf '#!/bin/sh\necho "zzz-not-hex  x"\n' >"$WORKD/shim/shasum"
+        chmod +x "$WORKD/shim/shasum"
+        OLD_PATH=$PATH
+        PATH="$WORKD/shim:$PATH"
+        try_capture_report
+        rc=$?
+        PATH=$OLD_PATH
+        [ "$rc" -eq 2 ] || { echo "DRIVER_ERROR shim rc=$rc (want 2)" >&2; exit 83; }
+        [ ! -f "$EVIDENCE_DIR/sha-retry.json" ] ||
+            { echo "DRIVER_ERROR bad-shasum left a FINAL file" >&2; exit 82; }
+        [ ! -f "$EVIDENCE_DIR/sha-retry.json.evidence" ] ||
+            { echo "DRIVER_ERROR bad-shasum left a commit record" >&2; exit 81; }
+        try_capture_report || exit 80
+        [ "$REPORT_CAPTURED" -eq 1 ] || exit 79
+        exit 0
+        ;;
     *)
         echo "DRIVER_ERROR unknown case $CASE" >&2
         exit 99
@@ -328,16 +409,23 @@ D2="$WORK/dup"
 run_driver "dup-window" "$D2"
 [ "$RC" -eq 0 ] && report ok "b2 dup-window driver completes (quiet no-op + capture + re-entry)" ||
     report fail "b2 dup-window driver completes" "rc=$RC out=$OUT"
-[ "$(evidence_count)" -eq 1 ] &&
-    report ok "b2 flag-reset re-entry emits NO second EVIDENCE line (durable key)" ||
-    report fail "b2 flag-reset re-entry emits NO second EVIDENCE line" "count=$(evidence_count) out=$OUT"
+# R7 P1-3: re-entry VALIDATES the commit record and RE-EMITS the recorded
+# line — so the window re-entry yields two IDENTICAL lines (one binding,
+# presented twice), never a second differing binding or a second copy.
+UNIQ_LINES="$(printf '%s\n' "$OUT" | grep '^EVIDENCE session=' | sort -u | wc -l | tr -d ' ')"
+[ "$(evidence_count)" -eq 2 ] && [ "$UNIQ_LINES" -eq 1 ] &&
+    report ok "b2 flag-reset re-entry re-emits the SAME validated record (2 identical lines, 1 binding)" ||
+    report fail "b2 flag-reset re-entry re-emits the SAME validated record" "count=$(evidence_count) uniq=$UNIQ_LINES out=$OUT"
+FIRST_LINE="$(printf '%s\n' "$OUT" | grep '^EVIDENCE session=' | head -1)"
 [ "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)" = '{"probe":"dup-carrier"}' ] &&
-    report ok "b2 preserved bytes intact after re-entry" ||
-    report fail "b2 preserved bytes intact after re-entry" "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)"
+    [ -f "$D2/evidence/dup-session.json.evidence" ] &&
+    report ok "b2 preserved bytes + commit record intact after re-entry" ||
+    report fail "b2 preserved bytes + commit record intact after re-entry" "$(ls "$D2/evidence" 2>/dev/null)"
 run_driver "cleanup-rerun" "$D2"
-[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 0 ] &&
-    report ok "b2 second-process cleanup over same evidence emits no duplicate" ||
-    report fail "b2 second-process cleanup over same evidence emits no duplicate" "rc=$RC count=$(evidence_count) out=$OUT"
+SECOND_LINE="$(printf '%s\n' "$OUT" | grep '^EVIDENCE session=' | head -1)"
+[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 1 ] && [ "$SECOND_LINE" = "$FIRST_LINE" ] &&
+    report ok "b2 second-process cleanup re-emits the identical record, no new binding" ||
+    report fail "b2 second-process cleanup re-emits the identical record" "rc=$RC count=$(evidence_count) out=$OUT"
 [ "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)" = '{"probe":"dup-carrier"}' ] &&
     report ok "b2 second-process cleanup never overwrites the preserved bytes" ||
     report fail "b2 second-process cleanup never overwrites the preserved bytes" "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)"
@@ -393,6 +481,44 @@ RC=$?
 grep -q '^EVIDENCE session=' <<<"$OUT" &&
     report fail "b4 no EVIDENCE line may bind a garbage sha" "$OUT" ||
     report ok "b4 no EVIDENCE line binds a garbage sha"
+# R7 P1-3: the failure must leave NO final file and NO commit record — a
+# pre-commit residue at the final path was Sol's reproduced false green.
+[ ! -f "$EVB4/sess-b4.json" ] && [ ! -f "$EVB4/sess-b4.json.evidence" ] &&
+    report ok "b4 bad shasum leaves neither final file nor commit record" ||
+    report fail "b4 bad shasum leaves neither final file nor commit record" "$(ls "$EVB4" 2>/dev/null)"
+
+# ---- b7: pre-commit residue is NOT a completed binding (R7 P1-3) -----------
+D7="$WORK/residue-final"
+run_driver "residue-final" "$D7"
+[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 1 ] &&
+    report ok "b7 final-file residue without record forces a REAL capture" ||
+    report fail "b7 final-file residue without record forces a REAL capture" "rc=$RC count=$(evidence_count) out=$OUT"
+[ "$(cat "$D7/evidence/res-final.json" 2>/dev/null)" = '{"probe":"residue-replaced"}' ] &&
+    [ -f "$D7/evidence/res-final.json.evidence" ] &&
+    report ok "b7 residue replaced by bound bytes + commit record" ||
+    report fail "b7 residue replaced by bound bytes + commit record" "$(cat "$D7/evidence/res-final.json" 2>/dev/null)"
+D7B="$WORK/residue-partial"
+run_driver "residue-partial" "$D7B"
+[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 1 ] &&
+    [ "$(cat "$D7B/evidence/res-partial.json" 2>/dev/null)" = '{"probe":"partial-completed"}' ] &&
+    report ok "b7 .partial crash residue completes cleanly on retry" ||
+    report fail "b7 .partial crash residue completes cleanly on retry" "rc=$RC out=$OUT"
+
+# ---- b8: record validation — mismatched record is loud, never green --------
+D8="$WORK/record-mismatch"
+run_driver "record-mismatch" "$D8"
+[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 0 ] &&
+    grep -q "does not match preserved bytes" <<<"$OUT" &&
+    report ok "b8 record/bytes mismatch -> loud rc=2 from capture, zero EVIDENCE" ||
+    report fail "b8 record/bytes mismatch -> loud rc=2, zero EVIDENCE" "rc=$RC count=$(evidence_count) out=$OUT"
+
+# ---- b9: bad shasum leaves nothing; clean retry then succeeds --------------
+D9="$WORK/shasum-retry"
+run_driver "shasum-retry" "$D9"
+[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 1 ] &&
+    [ -f "$D9/evidence/sha-retry.json" ] && [ -f "$D9/evidence/sha-retry.json.evidence" ] &&
+    report ok "b9 bad-shasum failure is residue-free and a clean retry completes the binding" ||
+    report fail "b9 bad-shasum failure residue-free + retry completes" "rc=$RC count=$(evidence_count) out=$OUT"
 
 printf 'test-hook evidence-carrier selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

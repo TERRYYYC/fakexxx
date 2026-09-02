@@ -599,18 +599,38 @@ preserve_report() { # session local_report
         return 2
     }
     preserved="$EVIDENCE_DIR/$session.json"
-    cp -- "$local_report" "$preserved" 2>/dev/null || {
+    # R7 P1-3 commit protocol: the FINAL paths appear only after bytes and
+    # both hashes are bound. Work happens on .partial names; the durable
+    # commit record (sidecar carrying the exact EVIDENCE line) is renamed
+    # into place LAST. Any interruption before that rename leaves partials
+    # a retry overwrites — never a final file that re-entry could mistake
+    # for a completed binding.
+    cp -- "$local_report" "$preserved.partial" 2>/dev/null || {
         echo "HARNESS_ERROR could not preserve raw report for $session into $EVIDENCE_DIR" >&2
         return 2
     }
-    report_sha=$(shasum -a 256 "$preserved" 2>/dev/null | awk '{print $1}')
+    report_sha=$(shasum -a 256 "$preserved.partial" 2>/dev/null | awk '{print $1}')
     # R5 P2: 64-hex, not merely non-empty — a mangled shasum output line would
-    # otherwise bind garbage into the EVIDENCE line and stay green.
+    # otherwise bind garbage into the EVIDENCE line and stay green. With the
+    # commit protocol this fails BEFORE any final file exists.
     printf '%s' "$report_sha" | grep -Eq '^[0-9a-f]{64}$' || {
         echo "HARNESS_ERROR could not fingerprint preserved report for $session (got '$report_sha')" >&2
+        rm -f -- "$preserved.partial"
         return 2
     }
-    echo "EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=$INSTALLED_APK_SHA"
+    evidence_line="EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=$INSTALLED_APK_SHA"
+    printf '%s\n' "$evidence_line" >"$preserved.evidence.partial" || {
+        echo "HARNESS_ERROR could not stage evidence record for $session" >&2
+        return 2
+    }
+    # Commit order: report first, record LAST (rename is atomic on one fs).
+    # A crash between the two leaves report-without-record = NOT captured.
+    mv -f -- "$preserved.partial" "$preserved" &&
+        mv -f -- "$preserved.evidence.partial" "$preserved.evidence" || {
+        echo "HARNESS_ERROR could not commit evidence record for $session" >&2
+        return 2
+    }
+    printf '%s\n' "$evidence_line"
 }
 
 # §5.G evidence carrier (R4 P1-4 + R5 P1): whenever report_ready is observed,
@@ -620,12 +640,29 @@ preserve_report() { # session local_report
 try_capture_report() {
     [ "$REPORT_CAPTURED" -eq 1 ] && return 0
     [ -n "$CURRENT_SESSION" ] || return 0
-    # DURABLE idempotency (R6 P2): the in-memory flag is set AFTER
-    # preserve_report emits its EVIDENCE line, so a signal in that window
-    # could re-enter via the EXIT salvage and DUPLICATE the binding. The
-    # preserved file itself is the durable key — if it already exists, the
-    # capture happened; mark and return without a second copy or line.
-    if [ -n "$EVIDENCE_DIR" ] && [ -f "$EVIDENCE_DIR/$CURRENT_SESSION.json" ]; then
+    # DURABLE idempotency (R6 P2 -> R7 P1-3): the durable key is the COMMIT
+    # RECORD ($session.json.evidence, written atomically only after bytes and
+    # both hashes were bound), NEVER the raw report file — a pre-commit
+    # residue (cp landed, then TERM/bad shasum) must not read as captured.
+    # Re-entry VALIDATES the record (recompute the report sha, compare) and
+    # re-emits the recorded line; a record that no longer matches its bytes
+    # is a loud rc=2, not a silent green.
+    if [ -n "$EVIDENCE_DIR" ] && [ -f "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence" ]; then
+        record=$(cat "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence")
+        recorded_sha=${record##*report_sha256=}; recorded_sha=${recorded_sha%% *}
+        actual_sha=$(shasum -a 256 "$EVIDENCE_DIR/$CURRENT_SESSION.json" 2>/dev/null | awk '{print $1}')
+        case "$record" in
+            "EVIDENCE session=$CURRENT_SESSION "*) ;;
+            *)
+                echo "HARNESS_ERROR evidence record for $CURRENT_SESSION is malformed: $record" >&2
+                return 2
+                ;;
+        esac
+        if [ -z "$actual_sha" ] || [ "$recorded_sha" != "$actual_sha" ]; then
+            echo "HARNESS_ERROR evidence record for $CURRENT_SESSION does not match preserved bytes (recorded=$recorded_sha actual=${actual_sha:-<missing>})" >&2
+            return 2
+        fi
+        printf '%s\n' "$record"
         REPORT_CAPTURED=1
         return 0
     fi
