@@ -119,11 +119,20 @@ class ProviderRevokeCollectorActivity : Activity() {
         // durable plan so a start verdict can be attributed to the REQUESTED
         // plan — a global isRunning/attempt count cannot distinguish plan X
         // from a stale plan Y run.
+        // R6 P1-2: bind BOTH legs — task→plan AND session→plan — and flag a
+        // divergence loudly (a mis-attributed row must never read as clean).
         val runningPlanBindings = runBlocking {
             val d = AppDatabase.getInstance(applicationContext)
             d.testAttemptDao().getAllAttempts()
                 .filter { it.status == "starting" || it.status == "running" }
-                .map { a -> "attempt=${a.id} taskId=${a.taskId} planId=${d.locationTaskDao().getTaskById(a.taskId)?.planId ?: "?"}" }
+                .map { a ->
+                    val taskPlan = d.locationTaskDao().getTaskById(a.taskId)?.planId
+                    val sessionPlan = d.runSessionDao().getById(a.runSessionId)?.planId
+                    val mismatch = APlus10APlanSeed.planBindingMismatch(taskPlan, sessionPlan)
+                    "attempt=${a.id} taskId=${a.taskId} runSessionId=${a.runSessionId} " +
+                        "taskPlanId=${taskPlan ?: "?"} sessionPlanId=${sessionPlan ?: "?"}" +
+                        (mismatch?.let { " PLAN_BINDING_MISMATCH: $it" } ?: "")
+                }
         }
         appendLine("[state] durable readback (Room):")
         appendLine("running attempts: ${snap.runningAttemptCount} " +

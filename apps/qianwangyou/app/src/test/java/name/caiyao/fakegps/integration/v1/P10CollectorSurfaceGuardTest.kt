@@ -288,11 +288,11 @@ class P10CollectorSurfaceGuardTest {
         // after) so a concurrent owner reinit/advance cannot reuse the version.
         assertTrue(
             "quiescence must be checked BEFORE the write",
-            code.contains("quiescenceOrThrow(\"before write\")"),
+            code.contains("fencedPreconditionOrThrow(\"before write\")"),
         )
         assertTrue(
             "quiescence must be checked AFTER the write (a fence that went live mid-seed is stale)",
-            code.contains("quiescenceOrThrow(\"after write\")"),
+            code.contains("fencedPreconditionOrThrow(\"after write\")"),
         )
         // R5 P1: the bracket must extend over the WHOLE seed (reset + profile
         // rewrite + publish) and close on the owner's DURABLE witnesses — the
@@ -300,7 +300,7 @@ class P10CollectorSurfaceGuardTest {
         // schedule re-verify. Observational timing alone cannot close TOCTOU.
         assertTrue(
             "an end-of-seed quiescence bracket must exist",
-            code.contains("quiescenceOrThrow(\"end of seed\")"),
+            code.contains("fencedPreconditionOrThrow(\"end of seed\")"),
         )
         assertTrue(
             "the audit-seq witness must be compared across the whole seed",
@@ -310,31 +310,34 @@ class P10CollectorSurfaceGuardTest {
             "the durable ADVANCE_PENDING slot must be consulted (a committed advance replays onto a fresh seed)",
             code.contains("advancePendingPresent = snap.advancePendingRaw != null"),
         )
+        // R6 P1: REAL owner serialization — boot first, then hold the SAME
+        // monitor withOwnerFence uses, across the entire seed region.
         assertTrue(
-            "owner liveness must be three-state (null = unknown fails closed)",
-            code.contains("ownerServiceLiveness(): Boolean?") || code.contains("val ownerRunning: Boolean?"),
+            "seed must boot the handler BEFORE locking (construction reinit happens-before)",
+            code.contains("ProviderRuntime.handler(applicationContext)"),
         )
         assertTrue(
-            "quiescence must consult APlus10AScheduleReset.quiescenceMismatch",
-            code.contains("APlus10AScheduleReset.quiescenceMismatch("),
+            "seed must hold the reflected owner monitor across the region",
+            code.contains("APlus10AOwnerFence.lockOf(") && code.contains("synchronized(ownerLock)"),
+        )
+        assertTrue(
+            "preconditions must consult fencedSeedPreconditionMismatch",
+            code.contains("APlus10AScheduleReset.fencedSeedPreconditionMismatch("),
+        )
+        // Field-name drift pin (the runtime half is the latch race test).
+        val handlerSource = File(
+            moduleRoot,
+            "src/main/java/name/caiyao/fakegps/integration/v1/EnvironmentControlHandler.kt",
+        ).readText()
+        assertTrue(
+            "production handler must still declare the ownerLock field APlus10AOwnerFence reflects",
+            handlerSource.contains("private val ownerLock"),
         )
         // (a3) R4 P1-2: prior state must be CLASSIFIED (partial fail-closed),
         // never a raw getLong(..., 0L) default that launders a partial store.
         assertTrue(
             "the seed must classify the prior state via APlus10AScheduleReset.classifyPriorState",
             code.contains("APlus10AScheduleReset.classifyPriorState("),
-        )
-        // Owner-service FQCN drift guard: the reset object's literal must match
-        // the production service class name (else quiescence checks a ghost).
-        val serviceManifest = File(moduleRoot, "src/main/AndroidManifest.xml").readText()
-        val resetSourceForFqcn = File(
-            moduleRoot,
-            "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AScheduleReset.kt",
-        ).readText()
-        assertTrue(
-            "OWNER_SERVICE_FQCN must reference the real EnvironmentControlService",
-            resetSourceForFqcn.contains("name.caiyao.fakegps.integration.v1.EnvironmentControlService") &&
-                serviceManifest.contains(".integration.v1.EnvironmentControlService"),
         )
         // Literal drift guard: every duplicated prefs key in the reset object
         // must still exist verbatim in QwyScheduleStore — if production moves

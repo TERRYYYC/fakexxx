@@ -284,6 +284,64 @@ class APlus10APlanSeedTest {
         assertTrue(report.contains("cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"))
     }
 
+    // ------------------------------------------------------------------
+    // startRunVerdict — request-owned durable-start generation (R6 P1-2)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun startRunVerdict_staleSamePlanRun_noNewSession_isNotStarted() {
+        // A paused/crashed same-plan A+ attempt keeps old rows nonterminal and
+        // isRunning may even be true — but NO NEW RunSession means THIS request
+        // started nothing. The old cmd=state predicate was satisfied by the
+        // stale row; the session generation is not.
+        val v = APlus10APlanSeed.startRunVerdict(
+            preMaxSessionId = 41L, latestSessionId = 41L, latestSessionPlanId = 7L, requestedPlanId = 7L)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.NoNewSession, v)
+    }
+
+    @Test
+    fun startRunVerdict_noSessionsAtAll_isNotStarted() {
+        val v = APlus10APlanSeed.startRunVerdict(
+            preMaxSessionId = 0L, latestSessionId = null, latestSessionPlanId = null, requestedPlanId = 7L)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.NoNewSession, v)
+    }
+
+    @Test
+    fun startRunVerdict_newSessionRightPlan_isStartedWithGeneration() {
+        val v = APlus10APlanSeed.startRunVerdict(
+            preMaxSessionId = 41L, latestSessionId = 42L, latestSessionPlanId = 7L, requestedPlanId = 7L)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.Started(sessionId = 42L, planId = 7L), v)
+    }
+
+    @Test
+    fun startRunVerdict_newSessionWrongPlan_isConflictNotStarted() {
+        // Concurrent/foreign start won the engine slot — this request must NOT
+        // claim it.
+        val v = APlus10APlanSeed.startRunVerdict(
+            preMaxSessionId = 41L, latestSessionId = 42L, latestSessionPlanId = 9L, requestedPlanId = 7L)
+        val c = v as? APlus10APlanSeed.StartRunVerdict.WrongPlanSession ?: error("expected WrongPlanSession, got $v")
+        assertEquals(42L, c.sessionId)
+        assertEquals(9L, c.sessionPlanId)
+    }
+
+    @Test
+    fun startRunVerdict_newLegacySessionNullPlan_isConflictNotStarted() {
+        // A legacy/null-plan session cannot be claimed by any request.
+        val v = APlus10APlanSeed.startRunVerdict(
+            preMaxSessionId = 41L, latestSessionId = 42L, latestSessionPlanId = null, requestedPlanId = 7L)
+        assertTrue(v is APlus10APlanSeed.StartRunVerdict.WrongPlanSession)
+    }
+
+    @Test
+    fun planBindingMismatch_flagsTaskVsSessionLegDivergence() {
+        // R6 P1-2 "mismatched task/session plan legs": a running attempt whose
+        // task belongs to plan 7 but whose session belongs to plan 9 is a
+        // mis-attributed row and must be flagged, never silently accepted.
+        assertNull(APlus10APlanSeed.planBindingMismatch(taskPlanId = 7L, sessionPlanId = 7L))
+        assertNotNull(APlus10APlanSeed.planBindingMismatch(taskPlanId = 7L, sessionPlanId = 9L))
+        assertNotNull(APlus10APlanSeed.planBindingMismatch(taskPlanId = 7L, sessionPlanId = null))
+    }
+
     @Test
     fun seedReport_failsWhenTaskCountDoesNotMatch() {
         val items = APlus10APlanSeed.parsePayload(payload())

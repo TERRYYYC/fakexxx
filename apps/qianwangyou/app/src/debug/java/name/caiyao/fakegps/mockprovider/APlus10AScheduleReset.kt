@@ -69,9 +69,6 @@ object APlus10AScheduleReset {
 
     const val SCHEDULE_ID = "qwy-default-schedule"
 
-    /** Production owner service FQCN (drift-guarded by the surface guard). */
-    const val OWNER_SERVICE_FQCN = "name.caiyao.fakegps.integration.v1.EnvironmentControlService"
-
     /** Classified pre-state of the schedule store. */
     sealed interface PriorState {
         /** No generation key present at all — a genuinely fresh store. */
@@ -100,46 +97,39 @@ object APlus10AScheduleReset {
     }
 
     /**
-     * Owner-fence quiescence (R4 P1-2; R5 hardened). Returns null iff the
-     * production owner PROVABLY cannot write the schedule store concurrently
-     * AND no committed-but-unsettled advance can replay onto the new seed.
-     *
-     * R5 changes:
-     *  - `ownerServiceRunning` is THREE-state: null = liveness UNKNOWN (the
-     *    ActivityManager probe failed) and refuses — unknown was previously
-     *    fail-open.
-     *  - `advancePendingPresent`: a non-empty durable ADVANCE_PENDING slot is
-     *    a committed advance whose external mutation has not finished; the
-     *    next fenced entry / owner boot REPLAYS it — over a fresh seed too.
-     *  - Only a CONVERGED lease state (absent or RELEASED) passes. REVOKED /
-     *    RELEASE_INCOMPLETE / EXPIRED still block new applies, reference the
-     *    OLD generation's identities, and are mutated by boot recovery —
-     *    seeding over them is refused (previously waved through as "at rest").
+     * Seed preconditions, checked UNDER the held owner fence (R6 P1 — the
+     * fence itself, APlus10AOwnerFence.lockOf, is the serialization; these are
+     * the durable states that make a seed semantically safe even with the
+     * fence held):
+     *  - `advancePendingPresent`: a non-empty ADVANCE_PENDING slot is a
+     *    committed advance whose external mutation has not finished; the next
+     *    fenced entry REPLAYS it — over a fresh seed too. Refuse until the
+     *    owner settles it.
+     *  - Only a CONVERGED lease state (absent or RELEASED) passes: REVOKED /
+     *    RELEASE_INCOMPLETE / EXPIRED still block applies, reference the OLD
+     *    generation's identities, and are mutated by recovery.
+     * (R5's owner-service liveness probe is deliberately GONE: it was an
+     * observational check with a false premise — debug surfaces boot the
+     * handler without the service, and construction reinit leaves no audit
+     * row. The held monitor replaces it with real exclusion; stacking the
+     * probe back on top would only re-manufacture false confidence.)
      */
-    fun quiescenceMismatch(
+    fun fencedSeedPreconditionMismatch(
         blockingLeaseState: String?,
-        ownerServiceRunning: Boolean?,
         advancePendingPresent: Boolean,
     ): String? {
-        when (ownerServiceRunning) {
-            null -> return "owner service liveness is unknown (probe failed) — fail closed, " +
-                "never assume quiescence from a failed check"
-            true -> return "owner service is running ($OWNER_SERVICE_FQCN) — it can reinit/advance the " +
-                "schedule concurrently; force-stop and seed in a fresh process"
-            false -> { /* provably down */ }
-        }
         if (advancePendingPresent) {
             return "durable ADVANCE_PENDING slot is non-empty — a committed advance would replay " +
-                "onto the new seed at the next fenced entry/boot; let the owner settle it first"
+                "onto the new seed at the next fenced entry; let the owner settle it first"
         }
         if (blockingLeaseState != null && blockingLeaseState !in CONVERGED_LEASE_STATES) {
             return "lease state $blockingLeaseState is not converged (only absent or RELEASED is " +
-                "seedable) — it blocks applies, references the old generation, and boot recovery mutates it"
+                "seedable) — it blocks applies, references the old generation, and recovery mutates it"
         }
         return null
     }
 
-    private val CONVERGED_LEASE_STATES = setOf("RELEASED")
+        private val CONVERGED_LEASE_STATES = setOf("RELEASED")
 
     /**
      * R5 P2 overflow runway: a full A-block run performs up to 10 advances

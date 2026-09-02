@@ -127,20 +127,35 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
 
         val db = AppDatabase.getInstance(applicationContext)
         val dao = db.profileDao()
-        // PR #62 R3 P1-2 + R4 P1-2 — MONOTONIC, OWNER-QUIESCENT generation reset.
+        // R6 P1 — REAL owner serialization (supersedes the R4/R5 observational
+        // probes, which Sol defeated with concrete interleavings: debug
+        // surfaces boot the handler without the service; handler CONSTRUCTION
+        // can reinit the schedule with no audit row; runRevokedLeaseCleanup is
+        // fenced but appends no audit row).
         //
-        // R3: never clear() (the next boot would re-Initialize at version 1 —
-        // a rollback violating M-AD-24 / spec L1895-2056).
-        // R4: the write is OUTSIDE EnvironmentControlHandler.withOwnerFence, so
-        // it may only run under PROVEN QUIESCENCE — no live owner service and no
-        // in-flight lease — bracketed BEFORE and AFTER the write; and a PARTIAL
-        // prior store is fail-closed instead of being laundered into V=1.
+        // 1. Boot FIRST: ProviderRuntime.handler() is bootLock-serialized and
+        //    returns only after construction (incl. the controller schedule
+        //    reinit) completed — construction cannot straddle the seed. NOTE:
+        //    booting runs §8.4 recovery; that is correct for a SEED (the
+        //    "never boot" rule protects the fault collector's EVIDENCE dumps,
+        //    which still never boot).
+        // 2. Hold the SAME monitor withOwnerFence synchronizes on
+        //    (APlus10AOwnerFence.lockOf, reflection; pinned by the surface
+        //    guard + a latch-driven race test) across the ENTIRE
+        //    reset/profile/publish region: every fenced owner op — apply,
+        //    release, advance, revoke cleanup — blocks until the seed exits.
+        //    Real mutual exclusion, not a timing observation.
+        // R3 stays: never clear() (version-1 rollback, M-AD-24 / L1895-2056).
+        // R4 stays: PARTIAL prior stores are fail-closed, never laundered.
+        val ownerHandler = name.caiyao.fakegps.integration.v1.ProviderRuntime.handler(applicationContext)
+        val ownerLock = APlus10AOwnerFence.lockOf(ownerHandler)
         val schedulePrefs = applicationContext
             .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)
 
-        // Quiescence BEFORE + witness capture: the owner's monotonic audit seq
-        // is the durable trace every fenced mutation must leave (R5 P1).
-        val auditSeqBefore = quiescenceOrThrow("before write")
+        return synchronized(ownerLock) {
+        // Preconditions under the held fence + audit-seq belt (defense-in-depth;
+        // the LOCK is the serialization proof, the seq is a tripwire).
+        val auditSeqBefore = fencedPreconditionOrThrow("before write")
 
         // Classify the prior state from durable keys — an absent version key
         // over surviving keys is Partial (corrupt), not "version 0".
@@ -173,13 +188,18 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         APlus10AScheduleReset.verifyReadback(readBack, resetPlan)?.let { mismatch ->
             throw IllegalStateException("schedule generation readback mismatch — $mismatch")
         }
-        // Quiescence AFTER the schedule write (mid-bracket).
-        quiescenceOrThrow("after write")
+        // Mid-bracket precondition re-check (belt; the lock is held throughout).
+        fencedPreconditionOrThrow("after write")
 
         // Isolated .bench data only (same seam as prepare_kyiv): clear then insert
         // with EXPLICIT ids so expectedScheduleItemId=profile-N stays byte-exact.
-        dao.deleteAll()
-        val insertedIds = dao.insertAll(rows)
+        // runBlocking: suspension points are illegal inside a critical section,
+        // and BLOCKING this IO thread while holding the owner monitor is exactly
+        // the semantics we want — the fence stays held across the DB rewrite.
+        val insertedIds = kotlinx.coroutines.runBlocking {
+            dao.deleteAll()
+            dao.insertAll(rows)
+        }
 
         // Same profile posture prepare_kyiv established and G1 C5 run-2 verified:
         // HOOK delivery + no forced mock-provider cleanup. The A-block EC provider
@@ -208,7 +228,7 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         //   3. schedule generation still reads back EXACTLY as planned → no
         //      boot-reinit rewrote it (e.g. off a mid-rewrite profile table).
         // Any mutation between "before write" and here trips at least one.
-        val auditSeqEnd = quiescenceOrThrow("end of seed")
+        val auditSeqEnd = fencedPreconditionOrThrow("end of seed")
         check(auditSeqEnd == auditSeqBefore) {
             "owner audit seq moved ($auditSeqBefore → $auditSeqEnd) during the seed — a fenced " +
                 "owner mutation interleaved; the seeded generation cannot be trusted"
@@ -221,36 +241,30 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         // explicit fixture id — a green mapping over a mismatch is forbidden.
         // PR #62 P1-1: the report emits only the independently verified
         // REGISTERED digest, never the caller-declared value.
-        return APlus10AFixtureSeed.seedReport(items, insertedIds, APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST) +
+        APlus10AFixtureSeed.seedReport(items, insertedIds, APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST) +
             "SCHEDULE_GENERATION priorState=${priorState::class.simpleName} versionAfter=${resetPlan.scheduleVersion} " +
             "pointer=${resetPlan.currentItemId} exhausted=${resetPlan.exhausted} " +
             "(monotonic V+1, owner-quiescent, readback verified)\n" +
             "NEXT: force-stop $QWY_BENCH_HINT then bind; readback via discover(): currentItemId=profile-1 and " +
             "scheduleVersion=${resetPlan.scheduleVersion} (the executable subset — the full ordered profile-1..10 " +
             "list readback awaits the gap⑦ profileRefs projection scope decision)"
+        } // synchronized(ownerLock)
     }
 
     /**
-     * R4 P1-2 + R5 P1 quiescence gate. The seed writes the schedule store
-     * outside the production owner fence, so it may only run when the owner
-     * PROVABLY cannot write concurrently AND no committed advance can replay:
-     * owner service down (three-state — an UNKNOWN probe fails closed), no
-     * non-converged lease (only absent/RELEASED pass), and an EMPTY durable
-     * ADVANCE_PENDING slot. Reads everything durably via QwyDurableSnapshot
-     * (fresh FileDurableKv, no runtime boot). Returns the owner's monotonic
-     * audit seq as the durable WITNESS: every fenced owner mutation appends an
-     * audit row, so the caller can prove "no fenced write interleaved" by
-     * comparing the witness across the whole seed — the racing writer cannot
-     * avoid leaving this trace (this is what makes the bracket fail-closed
-     * rather than a timing observation).
+     * R6 P1 — seed preconditions read UNDER the held owner fence, via
+     * QwyDurableSnapshot (fresh FileDurableKv, pure reads). With the real
+     * monitor held, no fenced owner op can interleave; these check the durable
+     * states that make a seed semantically safe anyway (pending advance would
+     * replay at the NEXT fenced entry; a non-converged lease references the
+     * old generation). Returns the audit seq as defense-in-depth only — the
+     * held lock, not the seq, is the serialization proof.
      */
-    private fun quiescenceOrThrow(phase: String): Long {
-        val ownerRunning: Boolean? = ownerServiceLiveness()
+    private fun fencedPreconditionOrThrow(phase: String): Long {
         val snap = name.caiyao.fakegps.integration.v1.QwyDurableSnapshot
             .capture(name.caiyao.fakegps.integration.v1.QwyDurableSnapshot.durableDir(applicationContext))
-        APlus10AScheduleReset.quiescenceMismatch(
+        APlus10AScheduleReset.fencedSeedPreconditionMismatch(
             blockingLeaseState = snap.lease.leaseState,
-            ownerServiceRunning = ownerRunning,
             advancePendingPresent = snap.advancePendingRaw != null,
         )?.let { reason ->
             throw IllegalStateException("schedule reset refused ($phase): $reason")
@@ -258,23 +272,7 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         return snap.maxAuditSeq
     }
 
-    /**
-     * Owner service liveness, THREE-state (R5 P2): true / false / null=UNKNOWN.
-     * A failed ActivityManager probe must not read as "not running" — the
-     * caller fails closed on null. getRunningServices is deprecated for third
-     * parties but still returns this app's OWN services; debug-only.
-     */
-    @Suppress("DEPRECATION")
-    private fun ownerServiceLiveness(): Boolean? {
-        val am = getSystemService(android.content.Context.ACTIVITY_SERVICE)
-            as? android.app.ActivityManager ?: return null
-        return runCatching {
-            am.getRunningServices(Int.MAX_VALUE)
-                .any { it.service.className == APlus10AScheduleReset.OWNER_SERVICE_FQCN }
-        }.getOrNull()
-    }
-
-    /** Re-read the durable schedule generation through a fresh handle. */
+        /** Re-read the durable schedule generation through a fresh handle. */
     private fun readBackSchedule(): APlus10AScheduleReset.ResetPlan? =
         applicationContext
             .getSharedPreferences(APlus10AScheduleReset.PREFS_NAME, MODE_PRIVATE)

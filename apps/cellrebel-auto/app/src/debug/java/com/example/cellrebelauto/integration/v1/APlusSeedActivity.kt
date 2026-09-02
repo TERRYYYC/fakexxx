@@ -38,9 +38,12 @@ import kotlinx.coroutines.runBlocking
  *               atomically, and print the fixtureIndex ↔ taskId attribution map.
  *   start_run — call the SAME companion the UI calls
  *               (AutomationService.startAutomation) for a planId that must be
- *               the seeded FX-G2-10A plan/topology. Requires the accessibility
- *               service enabled (operator precondition); confirms via isRunning
- *               and reports honestly when it is not connected.
+ *               the seeded FX-G2-10A plan/topology. The verdict binds to a
+ *               request-owned durable generation: a NEW RunSession (id > the
+ *               pre-command max) whose planId equals the request — never the
+ *               global isRunning flag, which another request can flip
+ *               (R6 P1-2). RUN_NOT_STARTED / RUN_START_CONFLICT are typed
+ *               failures; a stale same-plan attempt can never satisfy it.
  *
  * src/debug ONLY — production carries none of this.
  */
@@ -152,38 +155,53 @@ class APlusSeedActivity : Activity() {
             appendLine("REFUSED: $topologyMismatch")
             return
         }
-        // The SAME entry the product UI uses. startAutomation is a silent no-op
-        // when the accessibility service is not connected (it only logs), so a
-        // bare "start requested" would be a false green (PR #62 review P2).
-        // Poll the service's own isRunning StateFlow with a bounded timeout and
-        // report a DISTINCT verdict for each outcome.
+        // R6 P1-2 — request-owned durable-start generation. startAutomation is
+        // a Unit fire-and-forget; the global isRunning flag can be set by a
+        // DIFFERENT request while this one is silently ignored ("Already
+        // running"), and a stale nonterminal same-plan attempt satisfies any
+        // attempt-scanning predicate without this request starting anything.
+        // The ONLY durable transition this request can own is a NEW RunSession
+        // row (id > pre-command max) whose planId equals the requested plan —
+        // captured before the call, verdict typed by APlus10APlanSeed.startRunVerdict.
         appendLine("[start_run] AutomationService.startAutomation(plan=$planId) — the product's own run entry.")
         if (AutomationService.isRunning.value) {
             appendLine("REFUSED: a run is already active (isRunning=true) — one run at a time; stop it first.")
             return
         }
+        val preMaxSessionId = runBlocking {
+            AppDatabase.getInstance(applicationContext).runSessionDao().getLatest()?.id ?: 0L
+        }
         AutomationService.startAutomation(planId)
         val deadline = System.currentTimeMillis() + START_CONFIRM_TIMEOUT_MS
-        var confirmed = false
+        var latest: com.example.cellrebelauto.model.RunSession? = null
         while (System.currentTimeMillis() < deadline) {
-            if (AutomationService.isRunning.value) { confirmed = true; break }
+            latest = runBlocking { AppDatabase.getInstance(applicationContext).runSessionDao().getLatest() }
+            if (latest != null && latest.id > preMaxSessionId) break
             Thread.sleep(START_CONFIRM_POLL_MS)
         }
-        if (confirmed) {
-            // R4 P2: AutomationService sets isRunning=true SYNCHRONOUSLY before
-            // plan load / engine creation / any durable session or attempt row.
-            // So this confirms only that the SERVICE ACCEPTED the request — NOT
-            // that a durable run for THIS plan started. Named accordingly; the
-            // durable-start gate is the ProviderRevokeCollector cmd=state rows.
-            appendLine("REQUEST_ACCEPTED isRunning=true within ${START_CONFIRM_TIMEOUT_MS}ms — the service took the request.")
-            appendLine("This is NOT a durable start. Confirm the durable run via ProviderRevokeCollector cmd=state:")
-            appendLine("the truth is a running attempt line showing planId=$planId (state now resolves each running")
-            appendLine("attempt to its durable plan) — a running row bound to ANOTHER planId is a stale/foreign run,")
-            appendLine("not this request. isRunning alone is set before plan load and proves nothing plan-specific.")
-        } else {
-            appendLine("REQUEST_NOT_ACCEPTED: isRunning stayed false for ${START_CONFIRM_TIMEOUT_MS}ms after the call.")
-            appendLine("Most likely the CellRebel Auto accessibility service is not enabled/connected")
-            appendLine("(startAutomation is a silent no-op without it — operator precondition). Do NOT treat this as started.")
+        when (val v = APlus10APlanSeed.startRunVerdict(
+            preMaxSessionId = preMaxSessionId,
+            latestSessionId = latest?.id,
+            latestSessionPlanId = latest?.planId,
+            requestedPlanId = planId,
+        )) {
+            is APlus10APlanSeed.StartRunVerdict.Started -> {
+                appendLine("RUN_STARTED sessionId=${v.sessionId} planId=${v.planId} " +
+                    "(request-owned durable generation: NEW RunSession > pre-max $preMaxSessionId, plan-bound)")
+                appendLine("Attribute everything to sessionId=${v.sessionId}: cmd=state lines carry " +
+                    "runSessionId + task/session plan legs; rows bound to another session are NOT this run.")
+            }
+            is APlus10APlanSeed.StartRunVerdict.WrongPlanSession -> {
+                appendLine("RUN_START_CONFLICT: new session ${v.sessionId} belongs to plan " +
+                    "${v.sessionPlanId ?: "<null>"}, not requested ${v.requestedPlanId} — a concurrent/" +
+                    "foreign start won the engine slot. This request did NOT start its run; do not proceed.")
+            }
+            APlus10APlanSeed.StartRunVerdict.NoNewSession -> {
+                appendLine("RUN_NOT_STARTED: no NEW RunSession within ${START_CONFIRM_TIMEOUT_MS}ms " +
+                    "(pre-max $preMaxSessionId unchanged). Causes: accessibility service not connected " +
+                    "(silent no-op), request ignored as duplicate, or engine failed before session " +
+                    "creation. A pre-existing same-plan attempt does NOT satisfy this request.")
+            }
         }
     }
 

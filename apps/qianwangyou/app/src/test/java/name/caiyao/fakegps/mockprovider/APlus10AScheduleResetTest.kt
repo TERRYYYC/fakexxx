@@ -160,70 +160,36 @@ class APlus10AScheduleResetTest {
     }
 
     // ------------------------------------------------------------------
-    // quiescenceMismatch — the owner-fence precondition (R4 P1-2, R5 hardened)
+    // fencedSeedPreconditionMismatch — durable preconditions under the HELD
+    // owner fence (R6 P1: the reflected monitor is the serialization; the
+    // R5 service-liveness probe is deliberately gone — false premise)
     // ------------------------------------------------------------------
 
     @Test
-    fun quiescence_serviceRunning_isMismatch() {
-        val m = APlus10AScheduleReset.quiescenceMismatch(
-            blockingLeaseState = null, ownerServiceRunning = true, advancePendingPresent = false)
-        assertNotNull("a live owner service can reinit/advance concurrently — must refuse", m)
-        assertTrue(m!!.contains("service"))
-    }
-
-    @Test
-    fun quiescence_serviceLivenessUnknown_isMismatch_failClosed() {
-        // R5 P2: an UNKNOWN liveness (ActivityManager threw) previously mapped
-        // to false = fail-OPEN. Unknown must refuse.
-        val m = APlus10AScheduleReset.quiescenceMismatch(
-            blockingLeaseState = null, ownerServiceRunning = null, advancePendingPresent = false)
-        assertNotNull("unknown owner liveness must fail closed, never be treated as quiescent", m)
-        assertTrue(m!!.contains("unknown"))
-    }
-
-    @Test
-    fun quiescence_inFlightLease_isMismatch() {
-        listOf("ACQUIRING", "ACTIVE", "RELEASING").forEach { state ->
-            val m = APlus10AScheduleReset.quiescenceMismatch(
-                blockingLeaseState = state, ownerServiceRunning = false, advancePendingPresent = false)
-            assertNotNull("in-flight lease $state means the owner may advance concurrently", m)
+    fun precondition_inFlightAndNonConvergedLeases_areMismatch() {
+        listOf("ACQUIRING", "ACTIVE", "RELEASING", "REVOKED", "RELEASE_INCOMPLETE", "EXPIRED").forEach { state ->
+            val m = APlus10AScheduleReset.fencedSeedPreconditionMismatch(
+                blockingLeaseState = state, advancePendingPresent = false)
+            assertNotNull("non-converged lease state $state must refuse the seed", m)
             assertTrue(m!!.contains(state))
         }
     }
 
     @Test
-    fun quiescence_nonReleasedBlockingStates_areMismatch_failClosed() {
-        // R5 P2: REVOKED / RELEASE_INCOMPLETE / EXPIRED were waved through as
-        // "at rest". They still BLOCK new applies and reference the OLD
-        // generation identities; boot recovery also mutates them. Only a fully
-        // converged store (no lease, or RELEASED) may be seeded over.
-        listOf("REVOKED", "RELEASE_INCOMPLETE", "EXPIRED").forEach { state ->
-            val m = APlus10AScheduleReset.quiescenceMismatch(
-                blockingLeaseState = state, ownerServiceRunning = false, advancePendingPresent = false)
-            assertNotNull("non-RELEASED blocking state $state must refuse the seed", m)
-            assertTrue(m!!.contains(state))
-        }
-    }
-
-    @Test
-    fun quiescence_advancePendingSlot_isMismatch() {
-        // R5 P1: a durable ADVANCE_PENDING slot is a committed advance whose
-        // external mutation has not finished — the next fenced entry/boot
-        // REPLAYS it on top of whatever schedule exists, including a fresh
-        // seed. Must refuse until the owner settles it.
-        val m = APlus10AScheduleReset.quiescenceMismatch(
-            blockingLeaseState = null, ownerServiceRunning = false, advancePendingPresent = true)
+    fun precondition_advancePendingSlot_isMismatch() {
+        val m = APlus10AScheduleReset.fencedSeedPreconditionMismatch(
+            blockingLeaseState = null, advancePendingPresent = true)
         assertNotNull("a durable pending advance would replay onto the new seed — must refuse", m)
         assertTrue(m!!.contains("ADVANCE_PENDING"))
     }
 
     @Test
-    fun quiescence_convergedStates_pass() {
+    fun precondition_convergedStates_pass() {
         listOf(null, "RELEASED").forEach { state ->
             assertNull(
-                "a converged lease state ($state) with owner down and no pending advance is seedable",
-                APlus10AScheduleReset.quiescenceMismatch(
-                    blockingLeaseState = state, ownerServiceRunning = false, advancePendingPresent = false),
+                "a converged lease state ($state) with no pending advance is seedable under the fence",
+                APlus10AScheduleReset.fencedSeedPreconditionMismatch(
+                    blockingLeaseState = state, advancePendingPresent = false),
             )
         }
     }

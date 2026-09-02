@@ -620,6 +620,15 @@ preserve_report() { # session local_report
 try_capture_report() {
     [ "$REPORT_CAPTURED" -eq 1 ] && return 0
     [ -n "$CURRENT_SESSION" ] || return 0
+    # DURABLE idempotency (R6 P2): the in-memory flag is set AFTER
+    # preserve_report emits its EVIDENCE line, so a signal in that window
+    # could re-enter via the EXIT salvage and DUPLICATE the binding. The
+    # preserved file itself is the durable key — if it already exists, the
+    # capture happened; mark and return without a second copy or line.
+    if [ -n "$EVIDENCE_DIR" ] && [ -f "$EVIDENCE_DIR/$CURRENT_SESSION.json" ]; then
+        REPORT_CAPTURED=1
+        return 0
+    fi
     has_state "$CURRENT_SESSION" "report_ready" || return 0
     root_shell "cat $CURRENT_REMOTE_REPORT" >"$CURRENT_LOCAL_REPORT" 2>/dev/null || {
         echo "HARNESS_ERROR report_ready seen but could not read on-device report for $CURRENT_SESSION" >&2

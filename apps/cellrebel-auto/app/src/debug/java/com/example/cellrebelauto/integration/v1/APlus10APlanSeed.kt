@@ -237,6 +237,50 @@ object APlus10APlanSeed {
     }
 
     /**
+     * R6 P1-2 — request-owned durable-start generation. startAutomation is a
+     * Unit fire-and-forget and the global isRunning flag can be flipped by a
+     * DIFFERENT request (or already be true while this one is silently ignored
+     * as "Already running"), so acceptance must bind to a durable transition
+     * this request caused: a NEW RunSession row (id > the pre-command max)
+     * whose planId equals the requested plan. A stale nonterminal same-plan
+     * attempt does NOT create a new session and therefore can never satisfy
+     * this verdict.
+     */
+    sealed interface StartRunVerdict {
+        data class Started(val sessionId: Long, val planId: Long) : StartRunVerdict
+        data class WrongPlanSession(val sessionId: Long, val sessionPlanId: Long?, val requestedPlanId: Long) : StartRunVerdict
+        data object NoNewSession : StartRunVerdict
+    }
+
+    fun startRunVerdict(
+        preMaxSessionId: Long,
+        latestSessionId: Long?,
+        latestSessionPlanId: Long?,
+        requestedPlanId: Long,
+    ): StartRunVerdict {
+        if (latestSessionId == null || latestSessionId <= preMaxSessionId) {
+            return StartRunVerdict.NoNewSession
+        }
+        if (latestSessionPlanId != requestedPlanId) {
+            return StartRunVerdict.WrongPlanSession(latestSessionId, latestSessionPlanId, requestedPlanId)
+        }
+        return StartRunVerdict.Started(latestSessionId, requestedPlanId)
+    }
+
+    /**
+     * R6 P1-2 "mismatched task/session plan legs": a running attempt binds a
+     * task (→ task.planId) AND a session (→ session.planId). If the two legs
+     * disagree (or the session leg is null), the row is mis-attributed and
+     * must be flagged loudly in cmd=state, never silently accepted.
+     */
+    fun planBindingMismatch(taskPlanId: Long?, sessionPlanId: Long?): String? = when {
+        taskPlanId == null -> "task leg unresolvable (task missing)"
+        sessionPlanId == null -> "session leg null (legacy/unbound session) vs task plan $taskPlanId"
+        taskPlanId != sessionPlanId -> "task plan $taskPlanId != session plan $sessionPlanId"
+        else -> null
+    }
+
+    /**
      * Render the seed evidence block. REFUSES to render if the inserted task id
      * count differs from the fixture item count — a partial insert would make
      * the map lie about which journeys are present.
