@@ -78,6 +78,8 @@ android {
 
     buildFeatures {
         compose = true
+        // Private system_server continuity bridge (separate from frozen Environment Control v1).
+        aidl = true
         // Required so the hook/UI can compile out debug-only behaviour (self-hooking as a test
         // probe, verbose [DIAG] logging) instead of shipping it. AGP 8 defaults this off.
         buildConfig = true

@@ -20,6 +20,8 @@ import name.caiyao.fakegps.config.SpoofConfig;
 import name.caiyao.fakegps.config.ConfigPrefsSync;
 import name.caiyao.fakegps.config.PublishedConfig;
 import name.caiyao.fakegps.config.TransportSchemaContract;
+import name.caiyao.fakegps.hook.oracle.SystemServerOracleEntryPolicy;
+import name.caiyao.fakegps.hook.oracle.SystemServerOracleInstaller;
 import name.caiyao.fakegps.verify.RuntimeSelfHookPolicy;
 import name.caiyao.fakegps.verify.RuntimeHookSentinel;
 import name.caiyao.fakegps.verify.RuntimeEvidence;
@@ -78,6 +80,14 @@ public class MainHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+        // LSPosed's legacy callback names system_server as (android, android), while its scope key
+        // is `system`. This exact branch must run before every generic self-hook/config decision:
+        // system_server receives only the continuity producer and never spoof/scheduler hooks.
+        if (SystemServerOracleEntryPolicy.isSystemServer(lpparam.packageName, lpparam.processName)) {
+            SystemServerOracleInstaller.install(lpparam.classLoader);
+            return;
+        }
+
         // The configuration process is never self-hooked in release. The sole shipped exception
         // is the private one-shot :hook_verify process, selected by the shared policy below.
         //

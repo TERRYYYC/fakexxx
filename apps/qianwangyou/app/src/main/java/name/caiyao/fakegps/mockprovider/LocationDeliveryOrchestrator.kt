@@ -2,6 +2,7 @@ package name.caiyao.fakegps.mockprovider
 
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.data.LocationDeliveryMode
+import name.caiyao.fakegps.integration.v1.QwySemanticWriterRuntime
 
 /**
  * Orders provider state and the persisted Hook/System-Mock intent as one product transition.
@@ -15,14 +16,28 @@ class LocationDeliveryOrchestrator(
     private val persistMode: (LocationDeliveryMode) -> Boolean,
     private val publishConfig: () -> Boolean,
     private val persistCleanupRequired: (Boolean) -> Boolean,
+    private val ownership: MockProviderOwnership = ProcessMockProviderOwnership,
+    private val semanticMutation: (
+        kind: String,
+        operation: (authoritativeLaneSelected: Boolean) -> MockProviderState,
+    ) -> MockProviderState = { kind, operation ->
+        QwySemanticWriterRuntime.mutate(kind, operation)
+    },
+    private val projectionMatchesExactly: (MockLocationConfig) -> Boolean = { true },
+    private val semanticProjectionRepair: (kind: String, operation: () -> Unit) -> Boolean =
+        QwySemanticWriterRuntime::repairExternalProjection,
 ) {
-    fun enable(): MockProviderState {
+    fun enable(): MockProviderState = semanticMutation("mock-provider-enable") {
+        authoritative -> enableInternal(authoritative)
+    }
+
+    private fun enableInternal(authoritative: Boolean): MockProviderState {
         val resolution = EffectiveMockLocationResolver.resolve(readPublished())
         val ready = resolution as? EffectiveMockLocationResolution.Ready
         if (ready == null) {
             val reason = (resolution as EffectiveMockLocationResolution.Invalid).message
             if (readMode() == LocationDeliveryMode.SYSTEM_MOCK || readCleanupRequired()) {
-                val recovered = disable()
+                val recovered = disableInternal(authoritative)
                 return if (recovered is MockProviderState.Failed) recovered
                 else MockProviderState.Failed(reason)
             }
@@ -50,21 +65,28 @@ class LocationDeliveryOrchestrator(
         }
 
         if (!persistMode(LocationDeliveryMode.SYSTEM_MOCK)) {
-            return rollbackToHook("无法保存 System Mock 位置模式")
+            return rollbackToHook("无法保存 System Mock 位置模式", authoritative)
         }
-        if (!publishConfig()) {
-            return rollbackToHook("无法发布 System Mock 的 Hook 位置旁路配置")
+        if (!authoritative && !publishConfig()) {
+            return rollbackToHook(
+                "无法发布 System Mock 的 Hook 位置旁路配置",
+                authoritative,
+            )
         }
         if (!persistCleanupRequired(false)) {
-            return rollbackToHook("System Mock 未进入可恢复的稳定状态")
+            return rollbackToHook("System Mock 未进入可恢复的稳定状态", authoritative)
         }
         return controller.state
     }
 
-    fun disable(): MockProviderState {
+    fun disable(): MockProviderState = semanticMutation("mock-provider-disable") {
+        authoritative -> disableInternal(authoritative)
+    }
+
+    private fun disableInternal(authoritative: Boolean): MockProviderState {
         val marked = persistCleanupRequired(true)
         val persisted = persistMode(LocationDeliveryMode.HOOK)
-        val published = persisted && publishConfig()
+        val published = persisted && (authoritative || publishConfig())
         controller.stop()
 
         if (controller.state is MockProviderState.Failed) return controller.state
@@ -77,38 +99,94 @@ class LocationDeliveryOrchestrator(
         return MockProviderState.Idle
     }
 
-    fun refresh(): MockProviderState {
-        if (readMode() != LocationDeliveryMode.SYSTEM_MOCK) return disable()
+    fun refresh(): MockProviderState = QwySemanticWriterRuntime.serializeSelection {
+        if (readMode() != LocationDeliveryMode.SYSTEM_MOCK) {
+            return@serializeSelection semanticMutation(
+                "mock-provider-refresh-disable",
+            ) { authoritative -> disableInternal(authoritative) }
+        }
 
         val resolution = EffectiveMockLocationResolver.resolve(readPublished())
         val ready = resolution as? EffectiveMockLocationResolution.Ready
         if (ready == null) {
             val reason = (resolution as EffectiveMockLocationResolution.Invalid).message
-            val stopped = disable()
-            return if (stopped is MockProviderState.Failed) stopped else MockProviderState.Failed(reason)
+            val stopped = semanticMutation(
+                "mock-provider-refresh-invalid",
+            ) { authoritative -> disableInternal(authoritative) }
+            return@serializeSelection if (stopped is MockProviderState.Failed) {
+                stopped
+            } else {
+                MockProviderState.Failed(reason)
+            }
         }
 
         val running = controller.state as? MockProviderState.Running
-        if (running?.config == ready.config) {
-            controller.tick()
+        val serviceStillOwnsProjection =
+            ownership.projectionOwnershipSnapshot() ==
+                MockProviderProjectionOwnership.ServiceActive(ready.config)
+        if (running?.config == ready.config && serviceStillOwnsProjection) {
+            if (projectionMatchesExactly(ready.config)) {
+                // Re-publishing the exact already-active A coordinates can only replace A with A;
+                // timestamps/cadence are outside the semantic digest. Keep this ordinary heartbeat
+                // out of the oracle entirely. If the call fails, only the subsequent provider
+                // removal is semantic, so that cleanup receives its own PRE bracket.
+                controller.publishTickSample()?.let { failure ->
+                    semanticProjectionRepair("mock-provider-refresh-failure-cleanup") {
+                        controller.finishFailedTick(failure)
+                    }
+                }
+            } else {
+                val repaired = semanticProjectionRepair(
+                    "mock-provider-refresh-coordinate-repair",
+                ) {
+                    publishTickInsideAuthoritativeBracket()
+                }
+                if (!repaired) return@serializeSelection controller.state
+            }
         } else {
-            controller.start(ready.config, providerMayAlreadyExist = true)
+            semanticMutation("mock-provider-refresh-reconfigure") { _ ->
+                controller.start(ready.config, providerMayAlreadyExist = true)
+                controller.state
+            }
         }
-        return controller.state
+        controller.state
+    }
+
+    private fun publishTickInsideAuthoritativeBracket() {
+        var cleanupPerformed = false
+        fun cleanupOnce(failure: Throwable) {
+            if (cleanupPerformed) return
+            cleanupPerformed = true
+            controller.finishFailedTick(failure)
+        }
+
+        QwySemanticWriterRuntime.registerUncertainCompensation {
+            cleanupOnce(
+                IllegalStateException(
+                    "authoritative mock-provider tick outcome became uncertain",
+                ),
+            )
+        }
+        controller.publishTickSample()?.let { failure ->
+            cleanupOnce(failure)
+            throw failure
+        }
     }
 
     /** Best-effort provider cleanup without changing persisted user intent. */
-    fun cleanupRuntimeOnly(): MockProviderState {
+    fun cleanupRuntimeOnly(): MockProviderState = QwySemanticWriterRuntime.serializeSelection {
         if (readMode() != LocationDeliveryMode.SYSTEM_MOCK && !readCleanupRequired()) {
-            return controller.state
+            return@serializeSelection controller.state
         }
-        controller.stop()
-        return controller.state
+        semanticMutation("mock-provider-runtime-cleanup") { _ ->
+            controller.stop()
+            controller.state
+        }
     }
 
-    private fun rollbackToHook(reason: String): MockProviderState {
+    private fun rollbackToHook(reason: String, authoritative: Boolean): MockProviderState {
         val persisted = persistMode(LocationDeliveryMode.HOOK)
-        val published = persisted && publishConfig()
+        val published = persisted && (authoritative || publishConfig())
         controller.stop()
         val stopped = controller.state is MockProviderState.Idle
         val cleanupFailure = controller.state as? MockProviderState.Failed

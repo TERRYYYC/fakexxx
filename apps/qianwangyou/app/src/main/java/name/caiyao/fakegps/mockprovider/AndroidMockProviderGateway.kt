@@ -1,19 +1,22 @@
 package name.caiyao.fakegps.mockprovider
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.location.Location
 import android.location.LocationManager
 import android.location.provider.ProviderProperties
 import android.os.Build
 import android.os.SystemClock
 import androidx.annotation.RequiresApi
+import name.caiyao.fakegps.hook.oracle.Android15OracleHookPlan
 
 class AndroidMockProviderGateway(
-    private val locationManager: LocationManager,
+    context: Context,
     private val sampleFactory: MockLocationSampleFactory = MockLocationSampleFactory(
         elapsedRealtimeNanos = SystemClock::elapsedRealtimeNanos,
     ),
 ) : MockProviderGateway {
+    private val locationManager: LocationManager = authoritativeLocationManager(context)
 
     override fun replaceGpsProvider() {
         ACTIVE_PROVIDER_NAMES.forEach { provider ->
@@ -101,6 +104,17 @@ class AndroidMockProviderGateway(
     }
 
     private companion object {
+        fun authoritativeLocationManager(context: Context): LocationManager {
+            val attributed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                context.createAttributionContext(
+                    Android15OracleHookPlan.QWY_MUTATION_ATTRIBUTION_TAG,
+                )
+            } else {
+                context
+            }
+            return checkNotNull(attributed.getSystemService(LocationManager::class.java))
+        }
+
         val ACTIVE_PROVIDER_NAMES = listOf(
             LocationManager.GPS_PROVIDER,
             LocationManager.NETWORK_PROVIDER,

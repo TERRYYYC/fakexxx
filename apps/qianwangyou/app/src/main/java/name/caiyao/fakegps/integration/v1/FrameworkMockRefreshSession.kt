@@ -4,6 +4,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
+import name.caiyao.fakegps.mockprovider.MockProviderOwnership
 
 internal fun interface FrameworkMockRefreshCancellation {
     fun cancel()
@@ -19,6 +20,11 @@ internal interface FrameworkMockRefreshScheduler {
 
     /** Permanently retires scheduler resources owned by this session. */
     fun shutdown()
+}
+
+internal enum class FrameworkSemanticRepairResult {
+    COMPLETED,
+    DEFERRED,
 }
 
 internal class ScheduledExecutorFrameworkMockRefreshScheduler(
@@ -57,10 +63,23 @@ internal class FrameworkMockRefreshSession(
     private val scheduler: FrameworkMockRefreshScheduler,
     private val refreshIntervalMillis: Long = DEFAULT_REFRESH_INTERVAL_MILLIS,
     private val onRelevantChange: (RevisionBumpReason) -> Unit,
+    private val ownership: MockProviderOwnership = MockProviderOwnership.UNRESTRICTED,
+    private val projectionMatches: (MockLocationConfig) -> Boolean = { true },
+    private val semanticRepair:
+        (kind: String, operation: () -> Unit) -> FrameworkSemanticRepairResult =
+        { kind, operation ->
+            if (QwySemanticWriterRuntime.repairExternalProjection(kind, operation)) {
+                FrameworkSemanticRepairResult.COMPLETED
+            } else {
+                FrameworkSemanticRepairResult.DEFERRED
+            }
+        },
+    private val beforeFailedRefreshCleanup: () -> Unit = {},
 ) {
     private val lock = Any()
     private var generation = 0L
     private var active: ActiveSession? = null
+    private var cleanupUncertain = false
     private var closed = false
 
     init {
@@ -69,6 +88,9 @@ internal class FrameworkMockRefreshSession(
 
     val isActive: Boolean
         get() = synchronized(lock) { active != null }
+
+    val isProvablyInactive: Boolean
+        get() = synchronized(lock) { active == null && !cleanupUncertain }
 
     /** Replaces the framework providers, publishes immediately, then starts refreshes. */
     fun start(config: MockLocationConfig) {
@@ -96,8 +118,12 @@ internal class FrameworkMockRefreshSession(
             if (existing != null) {
                 check(!requireInactive) { "framework mock refresh session is already active" }
                 try {
-                    gateway.publish(config)
+                    check(ownership.runAsIntegration(existing.ownershipClaim) {
+                        gateway.publish(config)
+                    }) { "framework mock ownership was superseded" }
                     existing.config = config
+                    existing.configEpoch += 1L
+                    cleanupUncertain = false
                 } catch (caught: Throwable) {
                     cleanupFailedSessionLocked(existing.token, caught)
                     failure = caught
@@ -107,11 +133,19 @@ internal class FrameworkMockRefreshSession(
             }
 
             val token = ++generation
-            active = ActiveSession(token = token, config = config)
+            val ownershipClaim = ownership.claimIntegration()
+            active = ActiveSession(
+                token = token,
+                config = config,
+                ownershipClaim = ownershipClaim,
+            )
 
             try {
-                gateway.replaceGpsProvider()
-                gateway.publish(config)
+                check(ownership.runAsIntegration(ownershipClaim) {
+                    gateway.replaceGpsProvider()
+                    gateway.publish(config)
+                }) { "framework mock ownership was superseded" }
+                cleanupUncertain = false
             } catch (caught: Throwable) {
                 cleanupFailedSessionLocked(token, caught)
                 failure = caught
@@ -150,7 +184,8 @@ internal class FrameworkMockRefreshSession(
     fun refreshNow(): Boolean {
         val attempt = publishActive(expectedToken = null)
         attempt.failure?.let { caught ->
-            notifyRelevantChange(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED, caught)
+            beforeFailedRefreshCleanup()
+            cleanupFailedRefresh(attempt, caught)
             throw caught
         }
         return attempt.attempted
@@ -189,6 +224,7 @@ internal class FrameworkMockRefreshSession(
     private fun stopLocked(): Throwable? {
         var failure: Throwable? = null
         val current = active
+        if (current == null && !cleanupUncertain) return null
         active = null
         generation += 1
 
@@ -198,9 +234,14 @@ internal class FrameworkMockRefreshSession(
             failure = caught
         }
 
+        val ownershipClaim = current?.ownershipClaim ?: ownership.claimIntegration()
         try {
-            gateway.removeGpsProvider()
+            check(ownership.releaseIntegration(ownershipClaim, gateway::removeGpsProvider)) {
+                "framework mock ownership was superseded during cleanup"
+            }
+            cleanupUncertain = false
         } catch (caught: Throwable) {
+            cleanupUncertain = true
             failure?.addSuppressed(caught) ?: run { failure = caught }
         }
         return failure
@@ -209,28 +250,145 @@ internal class FrameworkMockRefreshSession(
     private fun refreshScheduled(token: Long) {
         val attempt = publishActive(expectedToken = token)
         attempt.failure?.let { caught ->
-            notifyRelevantChange(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED, caught)
+            beforeFailedRefreshCleanup()
+            cleanupFailedRefresh(attempt, caught)
         }
     }
 
-    private fun publishActive(expectedToken: Long?): PublishAttempt = synchronized(lock) {
-        val current = active ?: return@synchronized PublishAttempt.NOT_ACTIVE
-        if (expectedToken != null && current.token != expectedToken) {
-            return@synchronized PublishAttempt.NOT_ACTIVE
+    private fun publishActive(expectedToken: Long?): PublishAttempt =
+        QwySemanticWriterRuntime.serializeSelection {
+            synchronized(lock) {
+                val current = active ?: return@synchronized PublishAttempt.NOT_ACTIVE
+                if (expectedToken != null && current.token != expectedToken) {
+                    return@synchronized PublishAttempt.NOT_ACTIVE
+                }
+
+                try {
+                    val publish = {
+                        check(ownership.runAsIntegration(current.ownershipClaim) {
+                            gateway.publish(current.config)
+                        }) { "framework mock ownership was superseded" }
+                    }
+                    val publishInsideAuthoritativeBracket = {
+                        var cleanupPerformed = false
+                        val cleanupOnce: (Throwable) -> Unit = { failure ->
+                            if (!cleanupPerformed) {
+                                cleanupPerformed = true
+                                cleanupFailedSessionAndNotifyLocked(
+                                    token = current.token,
+                                    configEpoch = current.configEpoch,
+                                    primaryFailure = failure,
+                                )
+                            }
+                        }
+                        QwySemanticWriterRuntime.registerUncertainCompensation {
+                            cleanupOnce(
+                                IllegalStateException(
+                                    "authoritative framework refresh outcome became uncertain",
+                                ),
+                            )
+                        }
+                        try {
+                            publish()
+                        } catch (caught: Throwable) {
+                            cleanupOnce(caught)
+                            throw caught
+                        }
+                    }
+                    if (projectionMatches(current.config)) {
+                        // Exact A→A sample publication changes only timestamp/cadence data, which
+                        // is outside the semantic digest. A partial call still writes only A, so
+                        // keep the heartbeat out of the oracle. Its failure path brackets the
+                        // subsequent semantic provider removal in cleanupFailedRefresh().
+                        publish()
+                    } else {
+                        // B/unavailable→A repairs effective state and must own an exact journal
+                        // interval. The outer selection lock keeps the decision and publish atomic.
+                        if (
+                            semanticRepair("framework-refresh-coordinate-repair") {
+                                publishInsideAuthoritativeBracket()
+                            } == FrameworkSemanticRepairResult.DEFERRED
+                        ) {
+                            return@synchronized PublishAttempt.deferred(
+                                current.token,
+                                current.configEpoch,
+                            )
+                        }
+                    }
+                    PublishAttempt.succeeded(current.token, current.configEpoch)
+                } catch (caught: Throwable) {
+                    PublishAttempt(
+                        attempted = true,
+                        token = current.token,
+                        configEpoch = current.configEpoch,
+                        failure = caught,
+                    )
+                }
+            }
         }
 
+    private fun cleanupFailedRefresh(
+        attempt: PublishAttempt,
+        primaryFailure: Throwable,
+    ) {
+        val token = attempt.token ?: return
+        val configEpoch = attempt.configEpoch ?: return
+        var cleanupEntered = false
         try {
-            gateway.publish(current.config)
-            PublishAttempt.SUCCEEDED
-        } catch (caught: Throwable) {
-            cleanupFailedSessionLocked(current.token, caught)
-            PublishAttempt(attempted = true, failure = caught)
+            QwySemanticWriterRuntime.repairExternalProjection(
+                "framework-refresh-failure-cleanup",
+            ) {
+                cleanupEntered = true
+                synchronized(lock) {
+                    cleanupFailedSessionAndNotifyLocked(
+                        token = token,
+                        configEpoch = configEpoch,
+                        primaryFailure = primaryFailure,
+                    )
+                }
+            }
+        } catch (cleanupFailure: Throwable) {
+            primaryFailure.addSuppressed(cleanupFailure)
         }
+
+        // A selected authoritative lane can disappear before cleanup begins. In that case a raw
+        // provider removal would mutate outside the oracle, so retain the active exact projection
+        // for a later retry. With no installed lane repairExternalProjection executes the legacy
+        // cleanup inline and sets cleanupEntered.
+        if (!cleanupEntered) return
     }
 
-    private fun cleanupFailedSessionLocked(token: Long, primaryFailure: Throwable) {
-        val current = active ?: return
-        if (current.token != token) return
+    /** Caller owns [lock]; callback and cleanup remain one causal operation. */
+    private fun cleanupFailedSessionAndNotifyLocked(
+        token: Long,
+        configEpoch: Long,
+        primaryFailure: Throwable,
+    ): Boolean {
+        val cleaned = cleanupFailedSessionLocked(
+            token = token,
+            primaryFailure = primaryFailure,
+            expectedConfigEpoch = configEpoch,
+        )
+        if (cleaned) {
+            notifyRelevantChange(
+                RevisionBumpReason.MODE_OR_PROVIDER_CHANGED,
+                primaryFailure,
+            )
+        }
+        return cleaned
+    }
+
+    private fun cleanupFailedSessionLocked(
+        token: Long,
+        primaryFailure: Throwable,
+        expectedConfigEpoch: Long? = null,
+    ): Boolean {
+        val current = active ?: return false
+        if (current.token != token ||
+            (expectedConfigEpoch != null && current.configEpoch != expectedConfigEpoch)
+        ) {
+            return false
+        }
         active = null
         generation += 1
 
@@ -240,10 +398,16 @@ internal class FrameworkMockRefreshSession(
             primaryFailure.addSuppressed(cleanupFailure)
         }
         try {
-            gateway.removeGpsProvider()
+            check(ownership.releaseIntegration(
+                current.ownershipClaim,
+                gateway::removeGpsProvider,
+            )) { "framework mock ownership was superseded during cleanup" }
+            cleanupUncertain = false
         } catch (cleanupFailure: Throwable) {
+            cleanupUncertain = true
             primaryFailure.addSuppressed(cleanupFailure)
         }
+        return true
     }
 
     private fun notifyRelevantChange(reason: RevisionBumpReason, primaryFailure: Throwable) {
@@ -257,16 +421,36 @@ internal class FrameworkMockRefreshSession(
     private class ActiveSession(
         val token: Long,
         var config: MockLocationConfig,
+        val ownershipClaim: Long,
+        var configEpoch: Long = 0L,
         var cancellation: FrameworkMockRefreshCancellation? = null,
     )
 
     private data class PublishAttempt(
         val attempted: Boolean,
+        val token: Long?,
+        val configEpoch: Long?,
         val failure: Throwable?,
     ) {
         companion object {
-            val NOT_ACTIVE = PublishAttempt(attempted = false, failure = null)
-            val SUCCEEDED = PublishAttempt(attempted = true, failure = null)
+            val NOT_ACTIVE = PublishAttempt(
+                attempted = false,
+                token = null,
+                configEpoch = null,
+                failure = null,
+            )
+            fun succeeded(token: Long, configEpoch: Long) = PublishAttempt(
+                attempted = true,
+                token = token,
+                configEpoch = configEpoch,
+                failure = null,
+            )
+            fun deferred(token: Long, configEpoch: Long) = PublishAttempt(
+                attempted = false,
+                token = token,
+                configEpoch = configEpoch,
+                failure = null,
+            )
         }
     }
 

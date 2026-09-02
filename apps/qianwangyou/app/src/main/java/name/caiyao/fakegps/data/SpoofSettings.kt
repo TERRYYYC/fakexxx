@@ -5,7 +5,9 @@ import android.content.SharedPreferences
 import androidx.core.content.edit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishPropagation
+import name.caiyao.fakegps.integration.v1.QwySemanticWriterRuntime
 
 enum class LocationDeliveryMode(val wireValue: String) {
     HOOK("hook"),
@@ -21,7 +23,10 @@ enum class LocationDeliveryMode(val wireValue: String) {
  * SharedPreferences wrapper for spoof configuration.
  * Read by UI (Compose) and exposed to hooks via AppInfoProvider.
  */
-class SpoofSettings private constructor(private val prefs: SharedPreferences) {
+class SpoofSettings internal constructor(
+    private val prefs: SharedPreferences,
+    private val authoritativePublisher: (() -> Boolean)? = null,
+) {
 
     companion object {
         private const val PREFS_NAME = "spoof_settings"
@@ -51,9 +56,12 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
 
         fun getInstance(context: Context): SpoofSettings {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: SpoofSettings(
-                    context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                ).also { INSTANCE = it }
+                INSTANCE ?: context.applicationContext.let { appContext ->
+                    SpoofSettings(
+                        prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+                        authoritativePublisher = { ConfigPrefsSync.sync(appContext) },
+                    )
+                }.also { INSTANCE = it }
             }
         }
     }
@@ -74,18 +82,47 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
     val locationDeliveryMode: StateFlow<LocationDeliveryMode> = _locationDeliveryMode
 
     fun setSpoofMode(mode: String) {
-        prefs.edit().putString(KEY_SPOOF_MODE, mode).apply()
-        _spoofMode.value = mode
+        QwySemanticWriterRuntime.mutate("spoof-mode") { authoritative ->
+            if (authoritative) {
+                check(prefs.edit().putString(KEY_SPOOF_MODE, mode).commit()) {
+                    "authoritative spoof-mode preference commit failed"
+                }
+            } else {
+                prefs.edit().putString(KEY_SPOOF_MODE, mode).apply()
+            }
+            _spoofMode.value = mode
+            if (authoritative) publishInsideAuthoritativeBracket()
+        }
     }
 
     fun setActiveHourStart(hour: Int) {
-        prefs.edit().putInt(KEY_ACTIVE_HOUR_START, hour.coerceIn(0, 23)).apply()
-        _activeHourStart.value = hour.coerceIn(0, 23)
+        QwySemanticWriterRuntime.mutate("active-hour-start") { authoritative ->
+            val sanitized = hour.coerceIn(0, 23)
+            if (authoritative) {
+                check(prefs.edit().putInt(KEY_ACTIVE_HOUR_START, sanitized).commit()) {
+                    "authoritative active-hour-start preference commit failed"
+                }
+            } else {
+                prefs.edit().putInt(KEY_ACTIVE_HOUR_START, sanitized).apply()
+            }
+            _activeHourStart.value = sanitized
+            if (authoritative) publishInsideAuthoritativeBracket()
+        }
     }
 
     fun setActiveHourEnd(hour: Int) {
-        prefs.edit().putInt(KEY_ACTIVE_HOUR_END, hour.coerceIn(0, 23)).apply()
-        _activeHourEnd.value = hour.coerceIn(0, 23)
+        QwySemanticWriterRuntime.mutate("active-hour-end") { authoritative ->
+            val sanitized = hour.coerceIn(0, 23)
+            if (authoritative) {
+                check(prefs.edit().putInt(KEY_ACTIVE_HOUR_END, sanitized).commit()) {
+                    "authoritative active-hour-end preference commit failed"
+                }
+            } else {
+                prefs.edit().putInt(KEY_ACTIVE_HOUR_END, sanitized).apply()
+            }
+            _activeHourEnd.value = sanitized
+            if (authoritative) publishInsideAuthoritativeBracket()
+        }
     }
 
     /**
@@ -101,9 +138,19 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
     }
 
     fun setLocationDeliveryMode(mode: LocationDeliveryMode): Boolean {
-        val committed = prefs.edit().putString(KEY_LOCATION_DELIVERY_MODE, mode.wireValue).commit()
-        if (committed) _locationDeliveryMode.value = mode
-        return committed
+        return QwySemanticWriterRuntime.mutate("location-delivery-mode") { authoritative ->
+            val committed = prefs.edit()
+                .putString(KEY_LOCATION_DELIVERY_MODE, mode.wireValue)
+                .commit()
+            if (committed) _locationDeliveryMode.value = mode
+            if (authoritative) {
+                check(committed) {
+                    "authoritative location-delivery-mode preference commit failed"
+                }
+                publishInsideAuthoritativeBracket()
+            }
+            committed
+        }
     }
 
     fun readLocationDeliveryMode(): LocationDeliveryMode = LocationDeliveryMode.fromWireValue(
@@ -130,4 +177,14 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
     fun getRawMode(): String = prefs.getString(KEY_SPOOF_MODE, MODE_ALWAYS_ON)!!
     fun getRawHourStart(): Int = prefs.getInt(KEY_ACTIVE_HOUR_START, 7)
     fun getRawHourEnd(): Int = prefs.getInt(KEY_ACTIVE_HOUR_END, 22)
+
+    /** The hook-visible payload is part of the same semantic state as these raw settings. */
+    private fun publishInsideAuthoritativeBracket() {
+        val publisher = checkNotNull(authoritativePublisher) {
+            "authoritative settings publisher is unavailable"
+        }
+        check(publisher()) {
+            "authoritative settings publication failed"
+        }
+    }
 }

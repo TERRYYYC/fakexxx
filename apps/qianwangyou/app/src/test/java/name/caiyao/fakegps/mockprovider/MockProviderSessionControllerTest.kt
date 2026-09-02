@@ -98,6 +98,37 @@ class MockProviderSessionControllerTest {
     }
 
     @Test
+    fun `stale service controller cannot touch an integration owned provider`() {
+        val gateway = RecordingMockProviderGateway()
+        val resetClaim = ProcessMockProviderOwnership.claimIntegration()
+        ProcessMockProviderOwnership.releaseIntegration(resetClaim) {}
+        val controller = MockProviderSessionController(
+            gateway = gateway,
+            ownership = ProcessMockProviderOwnership,
+        )
+        controller.start(MockLocationConfig(50.4501, 30.5234))
+        assertTrue(controller.state is MockProviderState.Running)
+        gateway.calls.clear()
+        val claim = ProcessMockProviderOwnership.claimIntegration()
+        try {
+            controller.tick()
+            assertEquals(
+                MockProviderState.Failed(
+                    message = "Environment Control owns the system mock provider",
+                    providerCleanupRequired = false,
+                ),
+                controller.state,
+            )
+            controller.stop()
+
+            assertEquals(emptyList<String>(), gateway.calls)
+            assertEquals(MockProviderState.Idle, controller.state)
+        } finally {
+            ProcessMockProviderOwnership.releaseIntegration(claim) {}
+        }
+    }
+
+    @Test
     fun `mock app permission failure carries an actionable recovery`() {
         val gateway = RecordingMockProviderGateway(
             failure = SecurityException("not allowed to perform MOCK_LOCATION"),

@@ -15,7 +15,7 @@ import java.util.concurrent.Executors
 class ObservationFreshnessProviderTest {
 
     @Test
-    fun `apply cannot promote an incomplete relevant-change source to FULL continuity`() {
+    fun `incomplete authoritative source forces the observation to NONE`() {
         val h = ProviderHarness.create()
         h.pair()
         h.env.continuityCapability = ContinuityEvidenceCapability.INCOMPLETE
@@ -31,8 +31,8 @@ class ObservationFreshnessProviderTest {
         )
 
         assertEquals(
-            "async/current-state observation can report only partial coverage",
-            ContinuityCoverageV1.PARTIAL.wire,
+            "public callbacks may stage PARTIAL, but missing authoritative hooks make the served window NONE",
+            ContinuityCoverageV1.NONE.wire,
             observed.continuityCoverageWire,
         )
         assertNull(observed.continuitySinceElapsedRealtimeMs)

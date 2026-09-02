@@ -28,3 +28,9 @@ sealed interface PayloadRead {
     val textOrNull: String?
         get() = (this as? Raw)?.text
 }
+
+/** Fail-closed read of the independently persisted active publication pointer. */
+sealed interface SemanticPublicationIdentityRead {
+    data class Known(val activeProfileId: Long?) : SemanticPublicationIdentityRead
+    data class ReadError(val cause: String) : SemanticPublicationIdentityRead
+}

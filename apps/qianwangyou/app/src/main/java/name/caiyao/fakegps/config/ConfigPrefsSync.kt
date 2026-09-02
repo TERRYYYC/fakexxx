@@ -94,6 +94,20 @@ object ConfigPrefsSync {
         context: Context,
         profileId: Long? = null,
         clearIfMissing: Boolean = false,
+    ): Boolean = name.caiyao.fakegps.integration.v1.QwySemanticWriterRuntime.mutate(
+        "config-publish",
+    ) { authoritative ->
+        val published = syncLocal(context, profileId, clearIfMissing)
+        if (authoritative) {
+            check(published) { "authoritative config publication failed" }
+        }
+        published
+    }
+
+    private fun syncLocal(
+        context: Context,
+        profileId: Long?,
+        clearIfMissing: Boolean,
     ): Boolean {
         Log.w(TAG, "sync() ENTER")
         return synchronized(PUBLISH_LOCK) {
@@ -290,6 +304,30 @@ object ConfigPrefsSync {
         // Distinct from Absent on purpose: a failed read means the hook is still running its
         // last-known-good config, which is the opposite of "nothing is being spoofed".
         PayloadRead.ReadError("${t.javaClass.simpleName}: ${t.message}")
+    }
+
+    /**
+     * Reads the active profile identity from the same durable pointer contract
+     * used by publication. Before the private state has been initialized this
+     * resolves the legacy transported pointer; any preferences/migration read
+     * failure remains distinguishable so continuity authority can fail closed.
+     */
+    @JvmStatic
+    fun readSemanticPublicationIdentity(
+        context: Context,
+    ): SemanticPublicationIdentityRead = try {
+        val state = context.getSharedPreferences(PUBLISH_STATE_PREFS, Context.MODE_PRIVATE)
+        val initialized = state.getBoolean(KEY_STATE_INITIALIZED, false)
+        val storedActive = state.getLong(KEY_ACTIVE_PROFILE_ID, 0L).takeIf { it > 0L }
+        val active = if (initialized) {
+            storedActive
+        } else {
+            legacyActiveProfileId(acquireTransport(context).prefs)
+        }
+        SemanticPublicationIdentityRead.Known(active)
+    } catch (t: Throwable) {
+        Log.e(TAG, "could not read semantic publication identity; failing closed", t)
+        SemanticPublicationIdentityRead.ReadError("${t.javaClass.simpleName}: ${t.message}")
     }
 
     /** Wall-clock time of the last VERIFIED publish, or null if never published / not recorded. */

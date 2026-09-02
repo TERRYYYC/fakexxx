@@ -22,6 +22,21 @@ class SystemMockTrustPolicyTest {
     }
 
     @Test
+    fun `verification tolerance cannot classify a bitwise coordinate drift as raw refresh`() {
+        val nearButDifferent = policy(readbacksAtDistance(0.5)).evaluateTarget()
+        val exact = policy(
+            frameworkReadbacks(targetLatitude, targetLongitude, publishAnchorMs),
+        ).evaluateTarget()
+
+        assertTrue("the near sample remains valid verification evidence", nearButDifferent.verified)
+        assertFalse(
+            "a digest-visible coordinate change must enter semantic repair",
+            nearButDifferent.matchesExactTargetProjection,
+        )
+        assertTrue(exact.matchesExactTargetProjection)
+    }
+
+    @Test
     fun `requested lastApplied target cannot replace a mismatching OS readback`() {
         val actualLatitude = targetLatitude + latitudeOffsetMetres(20.0)
         val actual = frameworkReadbacks(
@@ -113,6 +128,44 @@ class SystemMockTrustPolicyTest {
             "sample time is a watermark, not environment identity",
             first.verifiedSourceElapsedRealtimeMs == later.verifiedSourceElapsedRealtimeMs,
         )
+    }
+
+    @Test
+    fun `inactive ownership cannot hide a foreign active mock projection`() {
+        val foreignProjection = policy(
+            frameworkReadbacks(targetLatitude, targetLongitude, publishAnchorMs),
+        ).evaluateTarget()
+
+        val selected = foreignProjection.forAuthoritativeDigest(
+            projectionExpectedActive = false,
+        )
+
+        assertTrue(selected is AuthoritativeProjectionReadback.Observed)
+        assertTrue((selected as AuthoritativeProjectionReadback.Observed).result.projectionActive)
+    }
+
+    @Test
+    fun `inactive digest requires complete nonmock proof and rejects partial or missing state`() {
+        val inactive = policy(
+            frameworkReadbacks(
+                targetLatitude,
+                targetLongitude,
+                publishAnchorMs,
+                isMock = false,
+            ),
+        ).evaluateTarget().forAuthoritativeDigest(projectionExpectedActive = false)
+        val partial = policy(
+            listOf(
+                readback("gps", targetLatitude, targetLongitude, true, publishAnchorMs),
+                readback("network", targetLatitude, targetLongitude, false, publishAnchorMs),
+            ),
+        ).evaluateTarget().forAuthoritativeDigest(projectionExpectedActive = false)
+        val missing = policy(emptyList()).evaluateTarget()
+            .forAuthoritativeDigest(projectionExpectedActive = false)
+
+        assertTrue(inactive is AuthoritativeProjectionReadback.Inactive)
+        assertTrue(partial is AuthoritativeProjectionReadback.Unknown)
+        assertTrue(missing is AuthoritativeProjectionReadback.Unknown)
     }
 
     private fun policy(readbacks: List<SystemMockLocationReadback>) =

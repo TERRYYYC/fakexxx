@@ -1,6 +1,8 @@
 package name.caiyao.fakegps.integration.v1
 
 import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
@@ -54,6 +56,91 @@ class FrameworkMockRefreshSessionTest {
     }
 
     @Test
+    fun `identical tick stays raw while coordinate repair enters semantic mutation`() {
+        val gateway = RecordingGateway()
+        var projectionMatches = true
+        val semanticRepairs = mutableListOf<String>()
+        val session = newSession(
+            gateway = gateway,
+            scheduler = RecordingRefreshScheduler(),
+            projectionMatches = { projectionMatches },
+            semanticRepair = { kind, operation ->
+                semanticRepairs += kind
+                operation()
+                FrameworkSemanticRepairResult.COMPLETED
+            },
+        )
+        session.start(CONFIG)
+
+        assertTrue(session.refreshNow())
+        assertTrue("A to A refresh must not manufacture semantic history", semanticRepairs.isEmpty())
+
+        projectionMatches = false
+        assertTrue(session.refreshNow())
+        assertEquals(listOf("framework-refresh-coordinate-repair"), semanticRepairs)
+        assertEquals(listOf(CONFIG, CONFIG, CONFIG), gateway.published)
+    }
+
+    @Test
+    fun `selected identical tick never enters authoritative mutation`() {
+        val endpoint = RecordingSemanticEndpoint()
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider { endpoint },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            coordinator.registerCurrentSession("digest-a"),
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { "digest-a" },
+            sessionHealth = QwySemanticSessionHealth { it == "digest-a" },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val gateway = RecordingGateway()
+            val session = newSession(gateway, RecordingRefreshScheduler())
+            session.start(CONFIG)
+
+            assertTrue(session.refreshNow())
+
+            assertEquals(
+                listOf(
+                    "register:digest-a",
+                ),
+                endpoint.calls,
+            )
+            assertEquals(listOf(CONFIG, CONFIG), gateway.published)
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `authority mismatch before coordinate repair defers without cleaning active session`() {
+        val gateway = RecordingGateway()
+        val reasons = mutableListOf<RevisionBumpReason>()
+        val session = newSession(
+            gateway = gateway,
+            scheduler = RecordingRefreshScheduler(),
+            onRelevantChange = reasons::add,
+            projectionMatches = { false },
+            semanticRepair = { _, _ -> FrameworkSemanticRepairResult.DEFERRED },
+        )
+        session.start(CONFIG)
+
+        assertFalse(session.refreshNow())
+
+        assertTrue("a deferred repair must retain its one active refresh session", session.isActive)
+        assertFalse(session.isProvablyInactive)
+        assertEquals(listOf(CONFIG), gateway.published)
+        assertTrue("deferment is not a provider failure", reasons.isEmpty())
+    }
+
+    @Test
     fun `initial publish failure cancels session cleans provider and reports typed change`() {
         val events = mutableListOf<String>()
         val gateway = RecordingGateway(events, failOnPublishNumber = 1)
@@ -102,6 +189,341 @@ class FrameworkMockRefreshSessionTest {
     }
 
     @Test
+    fun `failed provider removal remains uncertain until a later removal succeeds`() {
+        val gateway = RecordingGateway(failOnRemoveNumber = 1)
+        val session = newSession(gateway, RecordingRefreshScheduler())
+        session.start(CONFIG)
+
+        assertThrows(IllegalStateException::class.java) {
+            session.stop()
+        }
+
+        assertFalse(session.isActive)
+        assertFalse("failed removal cannot prove an inactive projection", session.isProvablyInactive)
+
+        session.stop()
+
+        assertTrue("a successful cleanup retry proves the inactive state", session.isProvablyInactive)
+    }
+
+    @Test
+    fun `periodic exact failure brackets only its semantic cleanup`() {
+        var semanticDigest = "digest-a"
+        val callbackBrackets = mutableListOf<Boolean>()
+        val endpoint = RecordingSemanticEndpoint()
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider { endpoint },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            coordinator.registerCurrentSession("digest-a"),
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { semanticDigest },
+            sessionHealth = QwySemanticSessionHealth { it == semanticDigest },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val gateway = RecordingGateway(
+                failOnPublishNumber = 2,
+                onRemove = { semanticDigest = "digest-b" },
+            )
+            val scheduler = RecordingRefreshScheduler()
+            val session = newSession(gateway, scheduler, onRelevantChange = {
+                callbackBrackets +=
+                    QwySemanticWriterRuntime.isAuthoritativeMutationInFlightOnCurrentThread()
+            })
+            session.start(CONFIG)
+
+            scheduler.fire(0)
+
+            assertEquals(
+                listOf(
+                    "register:digest-a",
+                    "begin:test-framework-refresh-failure-cleanup:digest-a",
+                    "finish:1:true:false:digest-b",
+                ),
+                endpoint.calls,
+            )
+            assertEquals(
+                "the cleanup callback belongs to the same authoritative bracket",
+                listOf(true),
+                callbackBrackets,
+            )
+            assertFalse(session.isActive)
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `drift repair failure cleans provider before uncertain finish inside original bracket`() {
+        val trace = mutableListOf<String>()
+        var semanticDigest = "digest-a"
+        val endpoint = RecordingSemanticEndpoint(trace)
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider { endpoint },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertEquals(
+            QwySemanticSessionRegistration.Registered("digest-a"),
+            coordinator.registerCurrentSession("digest-a"),
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { semanticDigest },
+            sessionHealth = QwySemanticSessionHealth { it == "digest-a" },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val gateway = RecordingGateway(
+                events = trace,
+                failOnPublishNumber = 2,
+                onRemove = { semanticDigest = "digest-inactive" },
+            )
+            val session = newSession(
+                gateway = gateway,
+                scheduler = RecordingRefreshScheduler(trace),
+                onRelevantChange = {
+                    trace += "callback:${
+                        QwySemanticWriterRuntime
+                            .isAuthoritativeMutationInFlightOnCurrentThread()
+                    }"
+                },
+                projectionMatches = { false },
+                semanticRepair = { kind, operation ->
+                    if (QwySemanticWriterRuntime.repairExternalProjection(kind, operation)) {
+                        FrameworkSemanticRepairResult.COMPLETED
+                    } else {
+                        FrameworkSemanticRepairResult.DEFERRED
+                    }
+                },
+            )
+            session.start(CONFIG)
+            semanticDigest = "digest-drifted"
+            trace.clear()
+
+            assertThrows(QwySemanticWriterAmbiguityException::class.java) {
+                session.refreshNow()
+            }
+
+            assertEquals(
+                listOf(
+                    "begin:test-framework-refresh-coordinate-repair:digest-a",
+                    "publish:2",
+                    "cancel",
+                    "remove",
+                    "callback:true",
+                    "finish:1:false:true:",
+                ),
+                trace,
+            )
+            assertFalse(session.isActive)
+            assertTrue(session.isProvablyInactive)
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `post publish endpoint loss compensates framework session inside original token`() {
+        val trace = mutableListOf<String>()
+        var semanticDigest = "digest-a"
+        var endpointAvailable = true
+        val endpoint = RecordingSemanticEndpoint(trace)
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider {
+                endpoint.takeIf { endpointAvailable }
+            },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertTrue(
+            coordinator.registerCurrentSession("digest-a") is
+                QwySemanticSessionRegistration.Registered,
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { semanticDigest },
+            sessionHealth = QwySemanticSessionHealth { it == "digest-a" },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val gateway = RecordingGateway(
+                events = trace,
+                onPublishSuccess = { publishNumber ->
+                    if (publishNumber == 2) {
+                        semanticDigest = "digest-a"
+                        endpointAvailable = false
+                    }
+                },
+                onRemove = { semanticDigest = "digest-inactive" },
+            )
+            val session = newSession(
+                gateway = gateway,
+                scheduler = RecordingRefreshScheduler(trace),
+                onRelevantChange = {
+                    trace += "callback:${QwySemanticWriterRuntime
+                        .isAuthoritativeMutationInFlightOnCurrentThread()}"
+                },
+                projectionMatches = { false },
+                semanticRepair = { kind, operation ->
+                    if (QwySemanticWriterRuntime.repairExternalProjection(kind, operation)) {
+                        FrameworkSemanticRepairResult.COMPLETED
+                    } else {
+                        FrameworkSemanticRepairResult.DEFERRED
+                    }
+                },
+            )
+            session.start(CONFIG)
+            semanticDigest = "digest-drifted"
+            trace.clear()
+
+            assertThrows(QwySemanticWriterAmbiguityException::class.java) {
+                session.refreshNow()
+            }
+
+            assertEquals(
+                listOf(
+                    "begin:test-framework-refresh-coordinate-repair:digest-a",
+                    "publish:2",
+                    "cancel",
+                    "remove",
+                    "callback:true",
+                    "finish:1:false:true:",
+                ),
+                trace,
+            )
+            assertFalse(session.isActive)
+            assertEquals(1, trace.count { it.startsWith("begin:") })
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `finish failure compensates framework session before uncertain retry`() {
+        val trace = mutableListOf<String>()
+        var semanticDigest = "digest-a"
+        val endpoint = RecordingSemanticEndpoint(trace, failFinishCalls = setOf(1))
+        val coordinator = QwySemanticMutationCoordinator(
+            endpointProvider = QwySemanticMutationEndpointProvider { endpoint },
+            clientDeathTokenFactory = QwySemanticClientDeathTokenFactory {
+                QwySemanticClientDeathToken { true }
+            },
+        )
+        assertTrue(
+            coordinator.registerCurrentSession("digest-a") is
+                QwySemanticSessionRegistration.Registered,
+        )
+        val installation = QwySemanticWriterRuntime.install(
+            coordinator = coordinator,
+            semanticDigestProvider = QwySemanticDigestProvider { semanticDigest },
+            sessionHealth = QwySemanticSessionHealth { it == "digest-a" },
+            mutationIdFactory = { kind -> "test-$kind" },
+        )
+        try {
+            val gateway = RecordingGateway(
+                events = trace,
+                onPublishSuccess = { publishNumber ->
+                    if (publishNumber == 2) semanticDigest = "digest-a"
+                },
+                onRemove = { semanticDigest = "digest-inactive" },
+            )
+            val session = newSession(
+                gateway = gateway,
+                scheduler = RecordingRefreshScheduler(trace),
+                onRelevantChange = {
+                    trace += "callback:${QwySemanticWriterRuntime
+                        .isAuthoritativeMutationInFlightOnCurrentThread()}"
+                },
+                projectionMatches = { false },
+                semanticRepair = { kind, operation ->
+                    if (QwySemanticWriterRuntime.repairExternalProjection(kind, operation)) {
+                        FrameworkSemanticRepairResult.COMPLETED
+                    } else {
+                        FrameworkSemanticRepairResult.DEFERRED
+                    }
+                },
+            )
+            session.start(CONFIG)
+            semanticDigest = "digest-drifted"
+            trace.clear()
+
+            assertThrows(QwySemanticWriterAmbiguityException::class.java) {
+                session.refreshNow()
+            }
+
+            assertEquals(
+                listOf(
+                    "begin:test-framework-refresh-coordinate-repair:digest-a",
+                    "publish:2",
+                    "finish:1:true:false:digest-a",
+                    "cancel",
+                    "remove",
+                    "callback:true",
+                    "finish:1:false:true:",
+                ),
+                trace,
+            )
+            assertEquals(1, trace.count { it.startsWith("begin:") })
+            assertFalse(session.isActive)
+        } finally {
+            installation.close()
+        }
+    }
+
+    @Test
+    fun `stale failed refresh cannot retire newer reconfiguration`() {
+        val failedPublish = CountDownLatch(1)
+        val releaseCleanup = CountDownLatch(1)
+        val events = mutableListOf<String>()
+        val gateway = RecordingGateway(
+            events = events,
+            failOnPublishNumber = 2,
+            onPublishFailure = failedPublish::countDown,
+        )
+        val scheduler = RecordingRefreshScheduler(events)
+        val session = newSession(
+            gateway = gateway,
+            scheduler = scheduler,
+            beforeFailedRefreshCleanup = {
+                check(releaseCleanup.await(5, TimeUnit.SECONDS))
+            },
+        )
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            session.start(CONFIG)
+            val failedRefresh = executor.submit { scheduler.fire(0) }
+            assertTrue(failedPublish.await(5, TimeUnit.SECONDS))
+
+            session.startOrReconfigure(SECOND_CONFIG)
+            releaseCleanup.countDown()
+            failedRefresh.get(5, TimeUnit.SECONDS)
+
+            assertTrue("the newer successful projection must remain active", session.isActive)
+            assertEquals(listOf(CONFIG, SECOND_CONFIG), gateway.published)
+            assertFalse("stale cleanup must not remove the newer projection", events.contains("remove"))
+            assertEquals("the original loop remains the single owner", 0, events.count { it == "cancel" })
+            assertEquals(1, scheduler.taskCount)
+
+            scheduler.fire(0)
+            assertEquals(listOf(CONFIG, SECOND_CONFIG, SECOND_CONFIG), gateway.published)
+        } finally {
+            releaseCleanup.countDown()
+            executor.shutdownNow()
+            executor.awaitTermination(1, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
     fun `refreshNow failure cancels session and rethrows after reporting typed change`() {
         val events = mutableListOf<String>()
         val gateway = RecordingGateway(events, failOnPublishNumber = 2)
@@ -128,6 +550,7 @@ class FrameworkMockRefreshSessionTest {
         )
         assertEquals(listOf(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED), reasons)
         assertFalse(session.isActive)
+        assertTrue(session.isProvablyInactive)
     }
 
     @Test
@@ -255,19 +678,34 @@ class FrameworkMockRefreshSessionTest {
         gateway: MockProviderGateway,
         scheduler: FrameworkMockRefreshScheduler,
         onRelevantChange: (RevisionBumpReason) -> Unit = {},
+        projectionMatches: (MockLocationConfig) -> Boolean = { true },
+        semanticRepair: (String, () -> Unit) -> FrameworkSemanticRepairResult =
+            { _, operation ->
+                operation()
+                FrameworkSemanticRepairResult.COMPLETED
+            },
+        beforeFailedRefreshCleanup: () -> Unit = {},
     ) = FrameworkMockRefreshSession(
         gateway = gateway,
         scheduler = scheduler,
         refreshIntervalMillis = 1_000,
         onRelevantChange = onRelevantChange,
+        projectionMatches = projectionMatches,
+        semanticRepair = semanticRepair,
+        beforeFailedRefreshCleanup = beforeFailedRefreshCleanup,
     )
 
     private class RecordingGateway(
         private val events: MutableList<String> = mutableListOf(),
         private val failOnPublishNumber: Int? = null,
+        private val failOnRemoveNumber: Int? = null,
+        private val onRemove: () -> Unit = {},
+        private val onPublishFailure: () -> Unit = {},
+        private val onPublishSuccess: (Int) -> Unit = {},
     ) : MockProviderGateway {
         val published = mutableListOf<MockLocationConfig>()
         private var publishCount = 0
+        private var removeCount = 0
 
         override fun replaceGpsProvider() {
             events += "replace"
@@ -277,13 +715,61 @@ class FrameworkMockRefreshSessionTest {
             publishCount += 1
             events += "publish:$publishCount"
             if (publishCount == failOnPublishNumber) {
+                onPublishFailure()
                 throw IllegalStateException("publish failed at $publishCount")
             }
             published += config
+            onPublishSuccess(publishCount)
         }
 
         override fun removeGpsProvider() {
             events += "remove"
+            removeCount += 1
+            if (removeCount == failOnRemoveNumber) {
+                throw IllegalStateException("remove failed at $removeCount")
+            }
+            onRemove()
+        }
+    }
+
+    private class RecordingSemanticEndpoint(
+        private val trace: MutableList<String>? = null,
+        private val failFinishCalls: Set<Int> = emptySet(),
+    ) : QwySemanticMutationEndpoint {
+        val calls = mutableListOf<String>()
+        private var nextToken = 0L
+        private var finishCallCount = 0
+
+        private fun record(call: String) {
+            calls += call
+            trace?.add(call)
+        }
+
+        override fun registerCurrentSession(
+            semanticDigest: String,
+            clientDeathToken: QwySemanticClientDeathToken,
+        ) {
+            record("register:$semanticDigest")
+        }
+
+        override fun beginMutation(
+            mutationId: String,
+            beforeDigest: String,
+            clientDeathToken: QwySemanticClientDeathToken,
+        ): Long {
+            record("begin:$mutationId:$beforeDigest")
+            return ++nextToken
+        }
+
+        override fun finishMutation(
+            token: Long,
+            changed: Boolean,
+            uncertain: Boolean,
+            afterDigest: String?,
+        ) {
+            finishCallCount += 1
+            record("finish:$token:$changed:$uncertain:${afterDigest.orEmpty()}")
+            if (finishCallCount in failFinishCalls) error("finish failed at $finishCallCount")
         }
     }
 

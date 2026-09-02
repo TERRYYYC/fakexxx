@@ -12,12 +12,19 @@ import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.config.ConfigCodec
 import name.caiyao.fakegps.config.ConfigHolder
 import name.caiyao.fakegps.config.ConfigPrefsSync
+import name.caiyao.fakegps.config.PayloadRead
+import name.caiyao.fakegps.config.SemanticPublicationIdentityRead
 import name.caiyao.fakegps.config.SpoofConfig
+import name.caiyao.fakegps.data.LocationDeliveryMode
+import name.caiyao.fakegps.data.SpoofSettings
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
+import name.caiyao.fakegps.mockprovider.MockProviderProjectionOwnership
+import name.caiyao.fakegps.mockprovider.MockProviderStartupProjectionReconciler
+import name.caiyao.fakegps.mockprovider.ProcessMockProviderOwnership
 import java.util.concurrent.ScheduledThreadPoolExecutor
 
 /**
@@ -56,6 +63,22 @@ interface QwyEnvironment {
     fun achievableVerificationLevelWire(): Int
     /** Strength of the installed transition-history sources (§6.4). */
     fun continuityEvidenceCapability(): ContinuityEvidenceCapability
+    /** Canonical QWY semantic state; null means the authoritative lane is unavailable. */
+    fun authoritativeSemanticDigest(ownerGeneration: Long): String? = null
+    /**
+     * Recomputes the canonical digest with an explicit inactive framework
+     * projection. This is evidence input, never permission to assume inactive.
+     */
+    fun authoritativeSemanticDigestAssumingInactiveProjection(
+        ownerGeneration: Long,
+    ): String? = null
+    /** True only when RecoveryUnknown is the sole missing proof and cleanup can establish it. */
+    fun canReconcileAuthoritativeProjectionOnOwnerStart(): Boolean = false
+    /** Locally adopts exact, externally attested inactivity without an OS mutation. */
+    fun adoptAuthoritativeInactiveProjectionOnOwnerStart() {}
+    fun authoritativeSemanticMutationEnabled(): Boolean = false
+    /** Establishes a cold-process projection baseline before oracle registration. */
+    fun reconcileProjectionOnOwnerStart() {}
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
 
     /**
@@ -179,7 +202,7 @@ class QwyEnvironmentController(
     // must report honestly when it is null.
     private val mockGateway: MockProviderGateway? = locationManager?.let { manager ->
         CoordinatedMockProviderGateway(
-            AndroidMockProviderGateway(manager),
+            AndroidMockProviderGateway(appContext),
             NoopFusedGateway,
         )
     }
@@ -199,6 +222,14 @@ class QwyEnvironmentController(
             gateway = gateway,
             scheduler = ScheduledExecutorFrameworkMockRefreshScheduler(executor),
             onRelevantChange = relevantChangeMonitor::reportRelevantChange,
+            ownership = ProcessMockProviderOwnership,
+            projectionMatches = { config ->
+                systemMockTrustPolicy?.evaluate(
+                    targetLatitude = config.latitude,
+                    targetLongitude = config.longitude,
+                    publishNotBeforeElapsedRealtimeMs = 0L,
+                )?.matchesExactTargetProjection == true
+            },
         )
     }
 
@@ -415,6 +446,141 @@ class QwyEnvironmentController(
     override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
         relevantChangeMonitor.continuityEvidenceCapability()
 
+    override fun reconcileProjectionOnOwnerStart() {
+        val gateway = mockGateway ?: return
+        MockProviderStartupProjectionReconciler(
+            ownership = ProcessMockProviderOwnership,
+            gateway = gateway,
+        ).reconcile()
+    }
+
+    override fun authoritativeSemanticDigest(ownerGeneration: Long): String? {
+        val schedule = scheduleStore.readScheduleState()
+        val applied = scheduleStore.getLastApplied()
+        val refreshSession = mockRefreshSession ?: return null
+        val projectionOwnership =
+            ProcessMockProviderOwnership.projectionOwnershipSnapshot()
+        if (projectionOwnership == MockProviderProjectionOwnership.Uncertain) return null
+        val projectionExpectedActive = applied?.transportPublished == true ||
+            refreshSession.isActive ||
+            projectionOwnership is MockProviderProjectionOwnership.ServiceActive ||
+            projectionOwnership is MockProviderProjectionOwnership.IntegrationActive
+        if (projectionOwnership == MockProviderProjectionOwnership.RecoveryUnknown &&
+            !projectionExpectedActive
+        ) return null
+        if (!projectionExpectedActive) {
+            if (!refreshSession.isProvablyInactive ||
+                projectionOwnership != MockProviderProjectionOwnership.ProvablyInactive
+            ) {
+                return null
+            }
+        }
+        val trustPolicy = systemMockTrustPolicy ?: return null
+        val digestTarget = applied?.let { it.latitude to it.longitude }
+            ?: schedule?.currentItemId?.let(::resolveItemCoordinates)
+            ?: (0.0 to 0.0)
+        // Always read the effective framework caches, including when local ownership says
+        // inactive. The latter proves only QWY's last action; another PID can create/publish a
+        // provider without changing this process-local state.
+        val projectionReadback = trustPolicy.evaluate(
+            targetLatitude = digestTarget.first,
+            targetLongitude = digestTarget.second,
+            publishNotBeforeElapsedRealtimeMs =
+                applied?.publishNotBeforeElapsedRealtimeMs ?: 0L,
+        ).forAuthoritativeDigest(projectionExpectedActive)
+        val actualProjection = when (projectionReadback) {
+            AuthoritativeProjectionReadback.Unknown -> return null
+            AuthoritativeProjectionReadback.Inactive -> null
+            is AuthoritativeProjectionReadback.Observed -> projectionReadback.result
+        }
+        return computeAuthoritativeSemanticDigest(
+            ownerGeneration = ownerGeneration,
+            schedule = schedule,
+            effectiveLatitude = actualProjection?.latitude,
+            effectiveLongitude = actualProjection?.longitude,
+            projectionActive = actualProjection?.projectionActive == true,
+            effectiveProjectionFingerprint =
+                actualProjection?.fingerprint ?: "system-mock:inactive",
+        )
+    }
+
+    override fun authoritativeSemanticDigestAssumingInactiveProjection(
+        ownerGeneration: Long,
+    ): String? {
+        val refreshSession = mockRefreshSession ?: return null
+        if (scheduleStore.getLastApplied() != null || refreshSession.isActive) return null
+        return computeAuthoritativeSemanticDigest(
+            ownerGeneration = ownerGeneration,
+            schedule = scheduleStore.readScheduleState(),
+            effectiveLatitude = null,
+            effectiveLongitude = null,
+            projectionActive = false,
+            effectiveProjectionFingerprint = "system-mock:inactive",
+        )
+    }
+
+    override fun canReconcileAuthoritativeProjectionOnOwnerStart(): Boolean =
+        ProcessMockProviderOwnership.projectionOwnershipSnapshot() ==
+            MockProviderProjectionOwnership.RecoveryUnknown &&
+            mockRefreshSession?.isActive == false &&
+            scheduleStore.getLastApplied() == null
+
+    override fun adoptAuthoritativeInactiveProjectionOnOwnerStart() {
+        check(canReconcileAuthoritativeProjectionOnOwnerStart()) {
+            "authoritative inactive projection adoption lacks a RecoveryUnknown baseline"
+        }
+        check(mockRefreshSession?.isProvablyInactive == true) {
+            "authoritative inactive projection adoption has a live local refresh session"
+        }
+        ProcessMockProviderOwnership.markServiceProjectionInactive()
+    }
+
+    private fun computeAuthoritativeSemanticDigest(
+        ownerGeneration: Long,
+        schedule: ScheduleSnapshot?,
+        effectiveLatitude: Double?,
+        effectiveLongitude: Double?,
+        projectionActive: Boolean,
+        effectiveProjectionFingerprint: String,
+    ): String? {
+        val settings = SpoofSettings.getInstance(appContext)
+        val activePublicationId = when (
+            val identity = ConfigPrefsSync.readSemanticPublicationIdentity(appContext)
+        ) {
+            is SemanticPublicationIdentityRead.Known ->
+                identity.activeProfileId?.toString()
+            is SemanticPublicationIdentityRead.ReadError -> return null
+        }
+        val publishedConfigDigest = when (val published = ConfigPrefsSync.readPublished(appContext)) {
+            PayloadRead.Absent -> "absent"
+            is PayloadRead.Raw -> runCatching {
+                QwyPublishedConfigSemanticV1.digest(published.text)
+            }.getOrNull() ?: return null
+            is PayloadRead.ReadError -> return null
+        }
+        val modeSemantics = DurableFieldCodec.encode(
+            listOf(
+                settings.getRawMode(),
+                settings.getRawHourStart().toString(),
+                settings.getRawHourEnd().toString(),
+                settings.readLocationDeliveryMode().wireValue,
+            ),
+        )
+        return QwySemanticDigestV1.compute(
+            ownerGeneration = ownerGeneration,
+            activeMode = modeSemantics,
+            activeProfileRef = activePublicationId,
+            schedule = schedule,
+            effectiveLatitude = effectiveLatitude,
+            effectiveLongitude = effectiveLongitude,
+            projectionActive = projectionActive,
+            effectiveProjectionFingerprint = effectiveProjectionFingerprint,
+            publishedConfigDigest = publishedConfigDigest,
+        )
+    }
+
+    override fun authoritativeSemanticMutationEnabled(): Boolean = true
+
     override fun cleanup(leaseId: String): CleanupOutcome {
         // P3-1 fix: report honestly whether removal actually happened.
         // Clear the apply anchor in all branches, including when removal
@@ -450,28 +616,32 @@ class QwyEnvironmentController(
         if (schedule != null && refreshSession != null && !refreshSession.isActive) {
             val restartable = scheduleStore.postAdvanceProjectionFor(schedule)
             if (restartable != null && currentTarget != null) {
-                val publishNotBeforeElapsedRealtimeMs = SystemClock.elapsedRealtime()
-                refreshSession.startOrReconfigure(
-                    MockLocationConfig(
+                QwySemanticWriterRuntime.mutate(
+                    "post-advance-projection-rehydrate",
+                ) {
+                    val publishNotBeforeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+                    refreshSession.startOrReconfigure(
+                        MockLocationConfig(
+                            latitude = currentTarget.first,
+                            longitude = currentTarget.second,
+                        ),
+                    )
+                    val published = ConfigPrefsSync.sync(
+                        appContext,
+                        profileId = null,
+                        clearIfMissing = false,
+                    )
+                    scheduleStore.recordLastApplied(
                         latitude = currentTarget.first,
                         longitude = currentTarget.second,
-                    ),
-                )
-                val published = ConfigPrefsSync.sync(
-                    appContext,
-                    profileId = null,
-                    clearIfMissing = false,
-                )
-                scheduleStore.recordLastApplied(
-                    latitude = currentTarget.first,
-                    longitude = currentTarget.second,
-                    publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
-                    transportPublished = published,
-                    scheduleItemId = restartable.scheduleItemId,
-                    scheduleVersion = restartable.scheduleVersion,
-                    purpose = ProjectionPurpose.POST_ADVANCE,
-                )
-                appliedCommand = scheduleStore.getLastApplied()
+                        publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
+                        transportPublished = published,
+                        scheduleItemId = restartable.scheduleItemId,
+                        scheduleVersion = restartable.scheduleVersion,
+                        purpose = ProjectionPurpose.POST_ADVANCE,
+                    )
+                    appliedCommand = scheduleStore.getLastApplied()
+                }
             }
         }
         // A production observe must advance the actual framework samples; the
@@ -479,15 +649,16 @@ class QwyEnvironmentController(
         val refreshed = runCatching {
             mockRefreshSession?.refreshNow() == true
         }.getOrDefault(false)
+        val appliedAtRead = appliedCommand
         val readback = if (
-            refreshed && appliedCommand != null && currentTarget != null &&
+            refreshed && appliedAtRead != null && currentTarget != null &&
             systemMockTrustPolicy != null
         ) {
             systemMockTrustPolicy.evaluate(
                 targetLatitude = currentTarget.first,
                 targetLongitude = currentTarget.second,
                 publishNotBeforeElapsedRealtimeMs =
-                    appliedCommand.publishNotBeforeElapsedRealtimeMs,
+                    appliedAtRead.publishNotBeforeElapsedRealtimeMs,
             )
         } else {
             null
@@ -497,14 +668,14 @@ class QwyEnvironmentController(
         // coordinates, mock identity and distance come exclusively from the OS
         // readback above; no lastApplied coordinate can enter this projection.
         val verified = relevantChangeMonitor.canVerifyCurrentOwner() &&
-            appliedCommand?.transportPublished == true && readback?.verified == true
+            appliedAtRead?.transportPublished == true && readback?.verified == true
         val verificationLevel = if (verified)
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
             VerificationLevelV1.NONE.wire
         val fingerprint = when {
-            readback != null -> "${readback.fingerprint}:transport=${appliedCommand?.transportPublished == true}"
-            appliedCommand == null -> "system-mock:no-apply-anchor"
+            readback != null -> "${readback.fingerprint}:transport=${appliedAtRead?.transportPublished == true}"
+            appliedAtRead == null -> "system-mock:no-apply-anchor"
             currentTarget == null -> "system-mock:no-current-target"
             else -> "system-mock:readback-unavailable"
         }
