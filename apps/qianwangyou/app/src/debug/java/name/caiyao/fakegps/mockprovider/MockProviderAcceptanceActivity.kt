@@ -339,23 +339,38 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         check(!settings.isMockProviderCleanupRequired()) {
             "written-domain drift: mock-provider cleanup flag was re-enabled after the seed"
         }
-        // (3) Transport payload: readable and carrying the seeded profile-1's
-        //     identity (addname + coordinates) — not a stale/foreign publish.
+        // (3) Transport payload: R8 P1-1 — compare the COMPLETE published
+        //     profile-1 envelope against the SEEDED expectation, not just
+        //     addname+latitude. Comparing to the seeded expectation (want1)
+        //     rather than the current DB catches a post-getAll longitude
+        //     rewrite+republish regardless of ordering: if the writer changed
+        //     the DB before step (1) it fails there; if after, the published
+        //     value now differs from want1 and fails here.
         val want1 = expectedRows.first()
         when (val read = ConfigPrefsSync.readPublished(applicationContext)) {
             is name.caiyao.fakegps.config.PayloadRead.Raw -> {
-                val fields = org.json.JSONObject(read.text).optJSONObject("fields")
+                val envelope = org.json.JSONObject(read.text)
+                val fields = envelope.optJSONObject("fields")
                     ?: throw IllegalStateException("written-domain drift: published transport has no fields object")
-                val publishedName = fields.optString("addname", "")
-                check(publishedName == want1.addname) {
-                    "written-domain drift: published transport carries addname='$publishedName', " +
-                        "not the seeded profile-1 '${want1.addname}' — a concurrent publish overwrote it"
+                // Envelope legs: schema present, mode == the seeded delivery mode.
+                check(envelope.has("schemaVersion")) {
+                    "written-domain drift: published transport envelope has no schemaVersion"
                 }
-                want1.latitude?.let { lat ->
-                    check(fields.optDouble("latitude", Double.NaN) == lat) {
-                        "written-domain drift: published transport latitude != seeded profile-1"
-                    }
+                val publishedMode = envelope.optString("mode", "")
+                check(publishedMode == LocationDeliveryMode.HOOK.wireValue) {
+                    "written-domain drift: published transport mode='$publishedMode' != seeded HOOK"
                 }
+                // EVERY field the seed set on profile-1 must match byte-for-byte.
+                fun mismatch(name: String): Nothing =
+                    throw IllegalStateException("written-domain drift: published transport $name != seeded profile-1 " +
+                        "(a concurrent writer changed the profile/payload)")
+                want1.addname?.let { if (fields.optString("addname", " ") != it) mismatch("addname") }
+                want1.latitude?.let { if (fields.optDouble("latitude", Double.NaN) != it) mismatch("latitude") }
+                want1.longitude?.let { if (fields.optDouble("longitude", Double.NaN) != it) mismatch("longitude") }
+                want1.altitude?.let { if (fields.optDouble("altitude", Double.NaN) != it) mismatch("altitude") }
+                want1.accuracy?.let { if (fields.optDouble("accuracy", Double.NaN).toFloat() != it) mismatch("accuracy") }
+                want1.tac?.let { if (fields.optInt("tac", Int.MIN_VALUE) != it) mismatch("tac") }
+                want1.wifiSsid?.let { if (fields.optString("wifiSsid", " ") != it) mismatch("wifiSsid") }
             }
             name.caiyao.fakegps.config.PayloadRead.Absent ->
                 throw IllegalStateException("written-domain drift: published transport is ABSENT after the seed published it")

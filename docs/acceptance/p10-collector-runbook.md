@@ -119,22 +119,23 @@ payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.
 ```
 # qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture——
 #      千网游是坐标唯一所有者，KB-8）
-#   ⚠️ 单飞前置（R7 P1-1，强制）：owner fence 只串行化 EnvironmentControlHandler 自身的
-#      fenced ops；prepareKyiv / ProfileRepository / 设置 UI 会在**不持该锁**下改同一 profile
-#      表+transport。因此 seed 必须是该 PID 内唯一的写者——先 force-stop 并**确认旧进程已消失**
-#      再发这唯一一条 seed 命令，且 seed 与其被消费之间不得再跑任何 profile 写路径：
-#        adb shell am force-stop name.caiyao.fakegps.bench
-#        # 确认已消失（无输出才继续；有输出=旧进程还在，禁止 seed）：
-#        adb shell 'pidof name.caiyao.fakegps.bench || true'
-adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider.MockProviderAcceptanceActivity \
-  --es command prepare_10a \
-  --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
-  --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
-#   判据（R4 P1-1/gap⑦ + R7 P1-1 更新）：logcat MockProviderAcceptance 出 seed 映射 +
-#   SEED_LOCAL_VERIFIED command=prepare_10a（本地腿全证：digest pin、结构+quota 向量、
-#   显式 id、单调+owner-fenced generation+回读、ConfigPrefsSync 发布、
-#   **且末尾对全写入域做终态回读**——10 行 profile 逐字节 + 设置姿态（HOOK/cleanup=false）+
-#   已发布 transport 载 profile-1 身份；任一漂移 → SEED_FAILED，不发 SEED_LOCAL_VERIFIED）
+#   ⚠️ 必须经**可执行 fail-closed 单飞门**（R8 P1-1），不要手敲 am start：owner fence 只
+#      串行化 EnvironmentControlHandler 自身的 fenced ops；prepareKyiv / ProfileRepository /
+#      设置 UI 会在**不持该锁**下改同一 profile 表+transport。seed-10a-gate.sh 是唯一被认可的
+#      启动器——它取独占锁（原子 mkdir，拒并发）、force-stop、**断言旧 PID 已消失**（还活着即
+#      非零退出、绝不 seed）、再发这唯一一条 seed，最后在**同一受保护事务内**读取 seed 自身
+#      的 SEED_LOCAL_VERIFIED + SEED_CONTRACT_INCOMPLETE 判定才打 SEED_GATE_PASS。
+#      device-free 由 scripts/selftest-seed-10a-gate.sh 逐条 pin（存活 PID / 持锁 / SEED_FAILED /
+#      无判定 / 裸 local-verified 无 gap⑦ 拆分 全部 fail-closed）。
+apps/qianwangyou/scripts/seed-10a-gate.sh \
+  --fixture <base64(a-plus-10a-fixture.json)> \
+  --digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
+#   判据（R4 P1-1/gap⑦ + R7/R8 P1-1）：门打 SEED_GATE_PASS command=prepare_10a（=独占锁 +
+#   PID 静默 + seed 判定，三者齐全）。seed 自身在持 owner fence 下末尾对**全写入域**做终态回读——
+#   10 行 profile 逐字节（dao.getAll）+ 设置姿态（HOOK/cleanup=false）+ 已发布 transport
+#   的 profile-1 **完整** envelope（schemaVersion/mode + addname/lat/**lng**/alt/accuracy/tac/wifiSsid
+#   逐字段对种子期望；不是只比 addname+lat）；任一漂移 → SEED_FAILED（门转 SEED_GATE_FAIL，非零退出）。
+#   非 canonical 手动 am start（绕过门）不被接受为可信 seed。
 #   **且** SEED_CONTRACT_INCOMPLETE command=prepare_10a gap=7（有序 discover() 回读当前
 #   无可执行命令——见末「gap⑦」）。**刻意不发 full-seed-PASS 的 READY**——§3 seed 契约
 #   含有序回读腿，未满足前发 READY 即假绿（opus5 裁定该假绿阻塞 merge）。

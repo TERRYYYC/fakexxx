@@ -340,6 +340,17 @@ jobs:
         # never references the evidence dir. Device-free (fixture files).
         run: ./scripts/selftest-test-hook-evidence-carrier.sh
 
+      - name: selftest-seed-10a-gate
+        # G2 §5A (PR #62 R8 P1-1): the seed's in-app owner fence does not cover
+        # the prepareKyiv/UI/ProfileRepository writer domain, so the SOLE
+        # sanctioned launcher is an executable fail-closed host gate — exclusive
+        # lock, force-stop, assert no surviving PID, then the sole seed launch,
+        # with SEED_GATE_PASS owned by that protected transaction. This drives
+        # the shipped gate functions with a faked device seam and pins each
+        # fail-closed branch (surviving PID, held lock, SEED_FAILED, no verdict,
+        # bare local-verified without the gap⑦ split). Device-free.
+        run: ./scripts/selftest-seed-10a-gate.sh
+
       - name: selftest-test-hook-acceptance-readiness
         # G2 §3.3-3 last sentence / S1 block: without a transaction-free
         # readiness path, an on-device run has no canonical way to prove it

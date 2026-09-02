@@ -324,13 +324,22 @@ class P10CollectorSurfaceGuardTest {
             "preconditions must consult fencedSeedPreconditionMismatch",
             code.contains("APlus10AScheduleReset.fencedSeedPreconditionMismatch("),
         )
-        // R7 P1-1: SEED_LOCAL_VERIFIED must terminally re-read the FULL written
-        // domain (profile rows + settings + transport), not just lease/pending/
-        // audit/schedule — a concurrent profile/transport rewrite would
-        // otherwise pass. Wiring-sensitive: removing the call turns this red.
+        // R7 P1-1 → R8 P2: SEED_LOCAL_VERIFIED must terminally re-read the FULL
+        // written domain (profile rows + settings + transport). Wiring-sensitive
+        // by OCCURRENCE COUNT: a bare contains("verifyWrittenDomainOrThrow(")
+        // stayed true after deleting the call because the declaration remains
+        // (Sol R8 P2: count 2 -> 1). Require BOTH the declaration and at least
+        // one invocation — deleting the call drops the count to 1 and reddens.
+        val verifierOccurrences = Regex(Regex.escape("verifyWrittenDomainOrThrow(")).findAll(code).count()
         assertTrue(
-            "seed must terminally verify the full written domain (profile rows + settings + transport)",
-            code.contains("verifyWrittenDomainOrThrow("),
+            "seed must both DECLARE and CALL verifyWrittenDomainOrThrow (>=2 occurrences; " +
+                "deleting the invocation drops to 1)",
+            verifierOccurrences >= 2,
+        )
+        val callInSeed = code.substringBefore("private fun verifyWrittenDomainOrThrow")
+        assertTrue(
+            "the seed body (not just the declaration) must invoke verifyWrittenDomainOrThrow",
+            callInSeed.contains("verifyWrittenDomainOrThrow("),
         )
         val verifyBody = code.substringAfter("private fun verifyWrittenDomainOrThrow", "")
         assertTrue(
@@ -345,6 +354,15 @@ class P10CollectorSurfaceGuardTest {
             "the written-domain readback must re-read the published transport (ConfigPrefsSync.readPublished)",
             verifyBody.contains("ConfigPrefsSync.readPublished("),
         )
+        // R8 P1-1: the transport compare must be COMPLETE — every seeded field
+        // of profile-1, not just addname+latitude. Pin the load-bearing
+        // longitude Sol named plus the remaining fields and the envelope legs.
+        for (leg in listOf("longitude", "altitude", "accuracy", "tac", "wifiSsid", "schemaVersion")) {
+            assertTrue(
+                "the transport readback must compare the published $leg against the seeded profile-1",
+                verifyBody.contains(leg),
+            )
+        }
         // Field-name drift pin (the runtime half is the latch race test).
         val handlerSource = File(
             moduleRoot,
