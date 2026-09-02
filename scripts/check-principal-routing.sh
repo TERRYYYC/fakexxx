@@ -115,24 +115,46 @@ for marker in "PROVIDER_APPLICATION_ID_PRODUCTION" "PROVIDER_APPLICATION_ID_BENC
   fi
 done
 
-# 2c. exact SELECTION BINDING (Terra R3): presence of the markers proves nothing
-# about routing — `selected = resolve(true)` keeps every marker green while
-# release hard-routes bench. The binding is pinned exactly, in three parts:
-#   (i)   `selected` consumes the build flag at the call site (kills the
-#         resolve(true) bypass);
-#   (ii)  the resolve body branches on its OWN parameter with BENCH in the
-#         debug arm (kills an ignored-parameter body and a branch swap);
-#   (iii) the else arm maps to PRODUCTION (kills the swapped release leg).
-# These are frozen anchors like the variant constants in check 1: a legitimate
-# refactor updates the pin in the same commit, by design.
-if ! grep -qF 'val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)' "$SELECTOR_FILE"; then
-  echo "FAIL: $SELECTOR_FILE must bind \`val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)\` exactly — a resolve(<literal>) bypass hard-routes release (Terra R3 false-green)" >&2
+# 2c. canonical SELECTION BINDING, scoped to the unique shipped declarations
+# (Terra R3+R4): presence proves nothing, and WHOLE-FILE greps can be answered
+# by a decoy — a private object or comment carrying the pinned text while the
+# shipped top-level `selected = resolve(true)` routes release to bench. The
+# anchors stay frozen; they are now read FROM the declarations that ship:
+#   (i)   exactly ONE line-anchored `val selected` exists, and that line equals
+#         the frozen binding byte-for-byte (decoys make the count ≠ 1 or fail
+#         the exact compare);
+#   (ii)  exactly ONE `fun resolve(` exists; its body window maps the parameter
+#         arm to BENCH and the else arm to PRODUCTION — adjacency is measured
+#         from the declaration itself, so a decoy elsewhere in the file cannot
+#         answer for it.
+SEL_CANON='val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)'
+SEL_COUNT=$(grep -cE '^[[:space:]]*val selected\b' "$SELECTOR_FILE" 2>/dev/null || printf 0)
+if [ "${SEL_COUNT:-0}" -ne 1 ]; then
+  echo "FAIL: expected exactly ONE line-anchored \`val selected\` declaration in $SELECTOR_FILE (found ${SEL_COUNT:-0}) — renamed, deleted, or a decoy duplicate answers for the shipped binding" >&2
   fail=1
+else
+  SEL_ACTUAL=$(grep -E '^[[:space:]]*val selected\b' "$SELECTOR_FILE" | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  if [ "$SEL_ACTUAL" != "$SEL_CANON" ]; then
+    echo "FAIL: the shipped \`val selected\` must bind the build flag exactly:" >&2
+    echo "  expected: $SEL_CANON" >&2
+    echo "  actual:   $SEL_ACTUAL" >&2
+    fail=1
+  fi
 fi
-if ! { grep -A2 -F 'if (isDebugBuild) {' "$SELECTOR_FILE" | grep -qF 'PROVIDER_APPLICATION_ID_BENCH' && \
-      grep -A1 -F '} else {' "$SELECTOR_FILE" | grep -qF 'PROVIDER_APPLICATION_ID_PRODUCTION'; }; then
-  echo "FAIL: $SELECTOR_FILE must map the debug arm of resolve to BENCH and the else arm to PRODUCTION (branch swap / ignored-parameter body)" >&2
+RES_COUNT=$(grep -cE '^[[:space:]]*fun resolve\(' "$SELECTOR_FILE" 2>/dev/null || printf 0)
+if [ "${RES_COUNT:-0}" -ne 1 ]; then
+  echo "FAIL: expected exactly ONE \`fun resolve(\` declaration in $SELECTOR_FILE (found ${RES_COUNT:-0}) — a decoy overload cannot answer for the shipped mapping" >&2
   fail=1
+else
+  if ! { grep -A2 -E '^[[:space:]]*fun resolve\(' "$SELECTOR_FILE" | grep -qF 'if (isDebugBuild) {' && \
+        grep -A2 -E '^[[:space:]]*fun resolve\(' "$SELECTOR_FILE" | grep -qF 'PROVIDER_APPLICATION_ID_BENCH'; }; then
+    echo "FAIL: the shipped resolve's parameter arm must map isDebugBuild to BENCH (within the function body window)" >&2
+    fail=1
+  fi
+  if ! grep -A4 -E '^[[:space:]]*fun resolve\(' "$SELECTOR_FILE" | grep -qF 'PROVIDER_APPLICATION_ID_PRODUCTION'; then
+    echo "FAIL: the shipped resolve's else arm must map to PRODUCTION (within the function body window)" >&2
+    fail=1
+  fi
 fi
 
 # ---- 3. release APK artifact scan ------------------------------------------

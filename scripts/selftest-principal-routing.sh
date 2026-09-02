@@ -21,6 +21,12 @@
 #   case 10 resolve body hardcodes `if (true)` (parameter ignored) → guard FAILS
 #           (same failure mode one level deeper: binding passes, body lies)
 #   case 11 branches swapped (debug→PRODUCTION)        → guard FAILS
+#   case 12 top-level selected = resolve(true) + a PRIVATE nested decoy object
+#           carrying the pinned binding text → guard FAILS (Terra R4: the R3
+#           strengthening was whole-file grep, so a decoy answered for the
+#           shipped declaration; release routes bench while the guard exits 0)
+#   case 13 same mutation with a COMMENT decoy         → guard FAILS (the
+#           comment shape of the same decoy class)
 #
 # The behavioral half (hardcoded production ⇒ default composition fail-closes
 # in a debug build) is killed in the Kotlin lane by
@@ -120,6 +126,39 @@ make_app_fixture() {
             ContractV1.PROVIDER_APPLICATION_ID_BENCH
         }
     val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
+    val knownApplicationIds: List<String> =
+        listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
+}' ;;
+    # Terra R4 decoy class, nested-object shape: the SHIPPED top-level binding
+    # bypasses the build flag; a private decoy object carries the exact pinned
+    # binding text so the whole-file R3 greps still hit.
+    decoy_object)
+      selector_body='internal object ProviderPrincipal {
+    fun resolve(isDebugBuild: Boolean): String =
+        if (isDebugBuild) {
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH
+        } else {
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        }
+    val selected: String = resolve(true)
+    val knownApplicationIds: List<String> =
+        listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
+    private object ProofAnchor {
+        val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
+    }
+}' ;;
+    # Terra R4 decoy class, comment shape: same shipped bypass, decoy as a
+    # comment line carrying the pinned text.
+    decoy_comment)
+      selector_body='internal object ProviderPrincipal {
+    fun resolve(isDebugBuild: Boolean): String =
+        if (isDebugBuild) {
+            ContractV1.PROVIDER_APPLICATION_ID_BENCH
+        } else {
+            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+        }
+    // frozen proof anchor: val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
+    val selected: String = resolve(true)
     val knownApplicationIds: List<String> =
         listOf(selected, resolve(!ProviderPrincipalBuild.isDebugBuild))
 }' ;;
@@ -258,6 +297,24 @@ if "$GUARD" "$F11" >/dev/null 2>&1; then
   report fail "case11 swapped branches are rejected" "guard passed debug→production / release→bench routing"
 else
   report ok "case11 swapped branches are rejected"
+fi
+
+# ---- case 12: top-level resolve(true) + nested-object decoy (Terra R4) -----
+F12="$WORK/app-decoy-object/app"
+make_app_fixture "$F12" "true" "false" "" "decoy_object"
+if "$GUARD" "$F12" >/dev/null 2>&1; then
+  report fail "case12 nested-object decoy is rejected" "guard let a private decoy answer for the shipped top-level binding"
+else
+  report ok "case12 nested-object decoy is rejected"
+fi
+
+# ---- case 13: top-level resolve(true) + comment decoy (Terra R4) -----------
+F13="$WORK/app-decoy-comment/app"
+make_app_fixture "$F13" "true" "false" "" "decoy_comment"
+if "$GUARD" "$F13" >/dev/null 2>&1; then
+  report fail "case13 comment decoy is rejected" "guard let a comment decoy answer for the shipped top-level binding"
+else
+  report ok "case13 comment decoy is rejected"
 fi
 
 # ---- verdict ---------------------------------------------------------------
