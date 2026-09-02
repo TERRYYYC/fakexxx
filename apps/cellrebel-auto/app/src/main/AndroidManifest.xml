@@ -16,13 +16,13 @@
         <!-- R43 (Sol GREEN-review-2 F1): the frozen-contract provider (production + bench), required
              for package visibility before binding IEnvironmentControlV1 (Android 11+ filtering). -->
         <package android:name="name.caiyao.fakegps" />
-        <package android:name="name.caiyao.fakegps.bench" />
+        <package android:name="${benchProviderPackage}" />
     </queries>
 
     <application
         android:name=".CellRebelAutoApp"
         android:allowBackup="true"
-        android:label="CellRebel Auto"
+        android:label="${appLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.CellRebelAuto">
 

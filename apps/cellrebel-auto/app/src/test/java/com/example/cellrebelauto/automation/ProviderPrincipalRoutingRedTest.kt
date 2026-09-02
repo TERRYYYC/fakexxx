@@ -30,6 +30,13 @@ import java.io.File
  */
 @RunWith(RobolectricTestRunner::class)
 class ProviderPrincipalRoutingRedTest {
+    // Preserve the original explicit production-owner test in ordinary builds;
+    // the codex variant has exactly one legal owner and must exercise that owner.
+    private val explicitTarget = if (ProviderPrincipalBuild.isCodexBenchBuild) {
+        "name.caiyao.fakegps.codexbench"
+    } else {
+        ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
+    }
 
     private val moduleRoot: File = sequenceOf(File("."), File("app"), File("../app"))
         .map { it.absoluteFile.normalize() }
@@ -75,7 +82,7 @@ class ProviderPrincipalRoutingRedTest {
             ProviderPrincipal.resolve(isDebugBuild = false),
         )
         assertEquals(
-            ProviderPrincipal.resolve(ProviderPrincipalBuild.isDebugBuild),
+            ProviderPrincipal.resolve(ProviderPrincipalBuild.isDebugBuild, ProviderPrincipalBuild.isCodexBenchBuild),
             ProviderPrincipal.selected,
         )
     }
@@ -128,7 +135,7 @@ class ProviderPrincipalRoutingRedTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val executor = BinderExternalApplyExecutor(
             app,
-            providerApplicationId = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+            providerApplicationId = explicitTarget,
         )
 
         val getter = executor.javaClass.methods.singleOrNull {
@@ -136,7 +143,7 @@ class ProviderPrincipalRoutingRedTest {
         }
         assertNotNull("the target identity must be observable to the composition guard", getter)
         assertEquals(
-            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+            explicitTarget,
             getter!!.invoke(executor),
         )
     }
@@ -148,7 +155,7 @@ class ProviderPrincipalRoutingRedTest {
         try {
             val productionExecutor = BinderExternalApplyExecutor(
                 app,
-                providerApplicationId = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                providerApplicationId = explicitTarget,
             )
 
             assertThrows(IllegalArgumentException::class.java) {
@@ -167,13 +174,11 @@ class ProviderPrincipalRoutingRedTest {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
         val db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
         try {
+            val executor = BinderExternalApplyExecutor(app, explicitTarget)
             assertThrows(IllegalArgumentException::class.java) {
                 ProviderScopedExternalApplyExecutor.wrap(
                     "unknown.provider",
-                    BinderExternalApplyExecutor(
-                        app,
-                        ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
-                    ),
+                    executor,
                 )
             }
         } finally {
@@ -203,7 +208,7 @@ class ProviderPrincipalRoutingRedTest {
         ) { applicationId ->
             BinderExternalApplyExecutor(boundContext, applicationId)
         }
-            .acquire(ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION, signer)
+            .acquire(explicitTarget, signer)
         try {
             kotlinx.coroutines.runBlocking {
                 assertTrue(acquisition.awaitBound(1_000L))
@@ -217,12 +222,12 @@ class ProviderPrincipalRoutingRedTest {
             )
 
             assertEquals(
-                ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                explicitTarget,
                 (backend.executor as ProviderScopedExternalApplyExecutor).targetApplicationId,
             )
             assertEquals(
                 "the coordinator cannot lose the production executor principal",
-                ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                explicitTarget,
                 APlusComposition.recoveryCoordinator(backend).targetApplicationId,
             )
             val factory = APlusComposition::class.java.methods.single {
@@ -308,14 +313,14 @@ class ProviderPrincipalRoutingRedTest {
     fun `production engine factory rejects a scoped coordinator with a test-only unchecked owner seam`() {
         val scopedButUnchecked = com.example.cellrebelauto.recovery.RecoveryCoordinator(
             ProviderScopedExternalApplyExecutor.wrap(
-                ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                explicitTarget,
                 com.example.cellrebelauto.recovery.RecordingExternalApplyExecutor(),
             ),
             com.example.cellrebelauto.recovery.FakeDurableRecoveryLog(),
         )
 
         assertEquals(
-            ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+            explicitTarget,
             scopedButUnchecked.targetApplicationId,
         )
         assertEquals(false, scopedButUnchecked.hasDurableProviderPrincipalPreflight)
@@ -337,7 +342,7 @@ class ProviderPrincipalRoutingRedTest {
                 context = app,
                 db = db,
                 providerExecutor = ProviderScopedExternalApplyExecutor.wrap(
-                    ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                    explicitTarget,
                     raw,
                 ),
                 providerSignerDigest = { "sha256:3c8acf667613543c77f23ebe1d934d56e08f94b7deee67b173cc9016baf6b381" },

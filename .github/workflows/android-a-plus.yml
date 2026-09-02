@@ -239,6 +239,43 @@ jobs:
             apps/cellrebel-auto/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
 
+  codex-bench:
+    # This is an isolated packaging/routing lane, not Issue #66 device FULL evidence.
+    name: codex-bench (isolated APKs + actual-variant routing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: actual codex-bench Auto routing and build
+        working-directory: apps/cellrebel-auto
+        run: |
+          ./gradlew --no-daemon :app:testCodexBenchUnitTest \
+            --tests '*CodexBench*' --tests '*ProviderPrincipalRoutingRedTest' \
+            --tests '*BinderIntentIdentityTest' --tests '*DefaultPrincipalCompositionGreenTest' \
+            :app:assembleCodexBench
+      - name: isolated QWY build
+        working-directory: apps/qianwangyou
+        run: ./gradlew --no-daemon :app:assembleCodexBench
+      - name: compiled identities and pinned signers
+        run: |
+          bash scripts/check-codex-bench-apks.sh \
+            apps/qianwangyou/app/build/outputs/apk/codexBench/app-codexBench.apk \
+            apps/cellrebel-auto/app/build/outputs/apk/codexBench/app-codexBench.apk
+          bash scripts/selftest-principal-routing.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codex-bench-evidence
+          path: |
+            apps/cellrebel-auto/app/build/reports/tests/testCodexBenchUnitTest/**
+            apps/cellrebel-auto/app/build/test-results/testCodexBenchUnitTest/**
+            apps/cellrebel-auto/app/build/outputs/apk/codexBench/*.apk
+            apps/qianwangyou/app/build/outputs/apk/codexBench/*.apk
+          if-no-files-found: error
+
   qianwangyou:
     # Green here covers apps/qianwangyou ONLY. No edge to cellrebel-auto.
     name: qianwangyou (unit + lint + assemble)
