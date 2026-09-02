@@ -278,6 +278,47 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
+     * R6 P1-2 (Sol): the start verdict must bind to a REQUEST-OWNED durable
+     * transition — a NEW RunSession (id > pre-command max) whose planId equals
+     * the request — never the global isRunning flag or a stale same-plan
+     * attempt scan. The pure verdict logic is behaviorally tested in
+     * [APlus10APlanSeedTest]; this guard pins that the SHIPPED activity
+     * actually consumes it and speaks the typed vocabulary the runbook reads.
+     */
+    @Test
+    fun gap1_startRunVerdictIsRequestOwnedGeneration() {
+        val code = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "APlusSeedActivity.kt" }.second
+        assertTrue(
+            "start_run must capture the pre-command session max (getLatest) BEFORE starting",
+            Regex("""preMaxSessionId[\s\S]{0,200}runSessionDao\(\)\.getLatest\(\)""").containsMatchIn(code),
+        )
+        assertTrue(
+            "the verdict must come from the tested pure function APlus10APlanSeed.startRunVerdict",
+            code.contains("APlus10APlanSeed.startRunVerdict("),
+        )
+        for (token in listOf("RUN_STARTED", "RUN_START_CONFLICT", "RUN_NOT_STARTED")) {
+            assertTrue("start_run must emit the typed token $token", code.contains(token))
+        }
+        assertEquals(
+            "the pre-R6 untyped acceptance token must be gone — a typed verdict " +
+                "and a vague acknowledgement cannot coexist as vocabulary",
+            false,
+            code.contains("REQUEST_ACCEPTED"),
+        )
+        val collector = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "ProviderRevokeCollectorActivity.kt" }.second
+        assertTrue(
+            "cmd=state must print runSessionId per running attempt (session leg of the binding)",
+            collector.contains("runSessionId=\${a.runSessionId}"),
+        )
+        assertTrue(
+            "cmd=state must flag task-plan vs session-plan divergence via planBindingMismatch",
+            collector.contains("APlus10APlanSeed.planBindingMismatch("),
+        )
+    }
+
+    /**
      * KB-8 (PR #62 review P1-1) — canonical spec v1.62 freezes coordinate
      * ownership with the provider: Auto does not import/hold/assert
      * coordinates (§2.2; KB-8 permanent limit). The plan seeder must

@@ -125,7 +125,7 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
   --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
 #   判据（R4 P1-1/gap⑦ 更新）：logcat MockProviderAcceptance 出 seed 映射 +
 #   SEED_LOCAL_VERIFIED command=prepare_10a（本地腿全证：digest pin、结构+quota 向量、
-#   显式 id、单调+owner-quiescent generation+回读、ConfigPrefsSync 发布）
+#   显式 id、单调+owner-fenced generation+回读、ConfigPrefsSync 发布）
 #   **且** SEED_CONTRACT_INCOMPLETE command=prepare_10a gap=7（有序 discover() 回读当前
 #   无可执行命令——见末「gap⑦」）。**刻意不发 full-seed-PASS 的 READY**——§3 seed 契约
 #   含有序回读腿，未满足前发 READY 即假绿（opus5 裁定该假绿阻塞 merge）。
@@ -134,13 +134,16 @@ adb shell am start -n name.caiyao.fakegps.bench/name.caiyao.fakegps.mockprovider
 #   写 V+1 + pointer=profile-1 + exhausted=false（单原子 commit）、再回读校验。
 #   ⚠️ 不是 clear()——clear 会让下次 boot 重置回 version 1（回滚），违反 M-AD-24/spec
 #   L1895-2056「每次 reinit 必须 V→V+1」，旧 (schedule,item,version) 身份会与新 run 撞车。
-#   ⚠️ owner-quiescence 三点前置（R4/R5 P1，写 store 在 owner fence 外）：owner service 必须
-#   down（liveness unknown = fail-closed）、无非 converged lease（仅 absent/RELEASED 放行，
-#   REVOKED/RELEASE_INCOMPLETE/EXPIRED 拒）、durable ADVANCE_PENDING slot 必须为空（否则已
-#   commit 的 advance 会在下次 fenced entry/boot 回放到新 seed 上）。整个 seed（reset+profile
-#   重写+publish）以 owner 的 durable audit seq 为见证收尾：seed 前后 audit seq 不变 + 最终
-#   schedule 再回读一致，才算证明无 fenced owner 写穿插（观测式计时不能消 TOCTOU）。
-#   前置不满足即 SEED_FAILED——执行者须先 force-stop bench 让 owner 静默、并确认无 pending advance。
+#   ⚠️ 真实 owner fence（R6 P1-1，替代 R5 的观测式 quiescence——观测计时消不掉 TOCTOU）：
+#   seed 先 boot-first 取 ProviderRuntime.handler(context)（吃掉 handler 构造期 reinit，
+#   使其发生在 seed 之前而非中间），再反射取 owner 的**同一把 private ownerLock**，整个
+#   seed 临界区（precondition 检查 + reset + profile 重写 + publish + 回读）都在
+#   synchronized(ownerLock) 内执行——与 withOwnerFence 的所有 fenced owner 写真互斥，
+#   包括 debug surface 直调 handler() 触发的路径。锁内前置：无非 converged lease（仅
+#   absent/RELEASED 放行，REVOKED/RELEASE_INCOMPLETE/EXPIRED 拒）、durable ADVANCE_PENDING
+#   slot 必须为空（否则已 commit 的 advance 会回放到新 seed 上）。belt：owner durable
+#   audit seq 在临界区首尾必须不变 + 最终 schedule 回读一致（防未走锁的 owner 写路径）。
+#   前置不满足即 SEED_FAILED——执行者须先确认无 pending advance / 无 blocking lease。
 #   报告发 SCHEDULE_GENERATION priorState=.. versionAfter=..。seed 后须 force-stop
 #   name.caiyao.fakegps.bench 再 bind，随后 discover() 回读 currentItemId=profile-1 +
 #   scheduleVersion（可执行子集）——完整有序 profile-1..10 list 回读依赖 profileRefs
@@ -165,11 +168,16 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 #   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
 #   （sourceFileName=FX-G2-10A / 10 行 / quota 冻结向量 [2,1,3,1,2,1,1,3,1,2] / csvRow 1..10 /
 #   坐标列仍是 KB-8 占位），拓扑不符（外来 CSV import、错 id、同总额再分配）即 REFUSED（P2/P4）。
-#   判据（R5 P2 更新 token）：REQUEST_ACCEPTED（isRunning 10s 内 true）只证【服务接受了请求】，
-#   **非 durable start**（isRunning 在 plan load 前同步置位）；REQUEST_NOT_ACCEPTED = 无障碍
-#   服务未连接（startAutomation 静默 no-op）。durable 真相 = ProviderRevokeCollector cmd=state
-#   的 running attempt 行**显示 planId=<本 planId>**（state 现把每个 running attempt 解析到其
-#   durable plan）；绑到别的 planId = 陈旧/外来 run，不是本请求。
+#   判据（R6 P1-2 typed verdict，替代 R5 的 REQUEST_ACCEPTED）：verdict 绑定 request-owned
+#   durable generation——命令前先取 RunSession pre-max id，之后只有【新 RunSession（id >
+#   pre-max）且 planId=本请求】才算 start：
+#     RUN_STARTED sessionId=<S> planId=<P>  —— 本请求真正启动；一切归因锚到 sessionId=<S>
+#     RUN_START_CONFLICT                    —— 新 session 属别的 plan（并发/外来 start 抢占）
+#     RUN_NOT_STARTED                       —— 10s 内无新 session（无障碍服务未连接的静默
+#                                              no-op / 被当重复请求忽略 / 引擎建 session 前失败）。
+#   ⚠️ 全局 isRunning=true、或某条**陈旧同-plan attempt** 存在，都不满足本请求——那是别人的
+#   generation。cmd=state 的 running 行现带 taskId + runSessionId + taskPlanId + sessionPlanId
+#   双腿，两腿不一致会打 PLAN_BINDING_MISMATCH（错归因行永不静默读作干净）。
 ```
 
 **跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider

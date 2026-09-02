@@ -3,8 +3,8 @@ package name.caiyao.fakegps.mockprovider
 import org.json.JSONArray
 
 /**
- * P10DBG-COLLECTOR-V1 — PR #62 R3 P1-2 + R4 P1-2: monotonic, owner-quiescent
- * schedule reset for the §5A seed.
+ * P10DBG-COLLECTOR-V1 — PR #62 R3 P1-2 + R4 P1-2 + R6 P1-1: monotonic,
+ * owner-FENCED schedule reset for the §5A seed.
  *
  * WHY NOT `clear()` (R3)
  * ----------------------
@@ -13,25 +13,34 @@ import org.json.JSONArray
  * V → V+1); old (schedule, item, version) identities then collide with the
  * new run.
  *
- * WHY QUIESCENCE + PRIOR-STATE CLASSIFICATION (R4)
- * ------------------------------------------------
- * The seed writes the production store from OUTSIDE
- * EnvironmentControlHandler.withOwnerFence, so it may only run when the
- * owner PROVABLY cannot write concurrently:
+ * WHY A REAL OWNER FENCE + PRIOR-STATE CLASSIFICATION (R4 → R6)
+ * -------------------------------------------------------------
+ * R4/R5 tried observational quiescence (owner-service liveness probe +
+ * before/after witness brackets). Sol's R6 counterexamples killed that
+ * shape: debug surfaces call ProviderRuntime.handler() directly without the
+ * service, handler CONSTRUCTION itself reinitializes the schedule with no
+ * audit row, and stacking probes can never close the TOCTOU window. R6
+ * therefore serializes for real: the seeder boots the handler FIRST (so the
+ * construction reinit happens before, not during, the seed), reflects the
+ * owner's own private `ownerLock` via [APlus10AOwnerFence], and runs the
+ * ENTIRE critical section — precondition checks, reset, profile rewrite,
+ * publish, readback — inside `synchronized(ownerLock)`, mutually exclusive
+ * with every withOwnerFence owner write. Inside the lock:
  *
- *  - [quiescenceMismatch] refuses while the owner service is running (a live
- *    handler can reinit at construction or advance on completeAndAdvance —
- *    the R4 counterexample: seed reads V7, owner advances to V8, seed writes
- *    its own V8 and the readback matches) or while an IN-FLIGHT lease
- *    (ACQUIRING/ACTIVE/RELEASING) exists (advancePointer requires one).
- *    At-rest lease states (RELEASED/EXPIRED/REVOKED/RELEASE_INCOMPLETE)
- *    cannot drive a schedule write. The seeder brackets the write with this
- *    check BEFORE and AFTER; a fence that went live mid-seed fails the seed.
+ *  - [fencedSeedPreconditionMismatch] refuses while a NON-CONVERGED lease
+ *    exists (only absent/RELEASED pass; REVOKED/RELEASE_INCOMPLETE/EXPIRED
+ *    refuse — their recovery paths may still write) or while the durable
+ *    ADVANCE_PENDING slot is non-empty (a committed advance would replay
+ *    onto the fresh seed at the next fenced entry/boot).
  *  - [classifyPriorState] refuses PARTIAL stores: an absent version key with
  *    surviving scheduleId/items/pointer was previously defaulted to 0 and
  *    laundered into a fresh version-1 generation. Prior state must be
  *    all-absent (Pristine → V=1) or all-present with a readable version
  *    (Complete → V+1); anything else is corrupt and fail-closed.
+ *
+ * Belt: the owner's durable audit seq must be identical at the start and
+ * end of the critical section, and the final readback must match the plan —
+ * catching any owner write path that bypassed the lock.
  *
  * On the next provider boot, initFromProfileIds sees the same item set with
  * a present scheduleId and NoOps — preserving the V+1 generation (the

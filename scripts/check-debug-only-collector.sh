@@ -86,6 +86,8 @@ APP_SYMBOLS_QIANWANGYOU=(
   # G2 §5A 10-address explicit-id fixture seeder (backfill).
   "APlus10AFixtureSeed"
   "APlus10AScheduleReset"
+  # R6 P1-1: reflected owner-lock seam for the fenced seed critical section.
+  "APlus10AOwnerFence"
 )
 
 APP_DIR=""
