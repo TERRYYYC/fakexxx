@@ -356,8 +356,50 @@ case "$CASE" in
             { echo "DRIVER_ERROR bad-shasum left a FINAL file" >&2; exit 82; }
         [ ! -f "$EVIDENCE_DIR/sha-retry.json.evidence" ] ||
             { echo "DRIVER_ERROR bad-shasum left a commit record" >&2; exit 81; }
+        # R8 P2: the .partial residue must ALSO be gone — deleting the
+        # rm -f "$preserved.partial" cleanup previously stayed green because
+        # retry overwrote the residue; assert it directly.
+        [ ! -f "$EVIDENCE_DIR/sha-retry.json.partial" ] ||
+            { echo "DRIVER_ERROR bad-shasum left a .partial residue" >&2; exit 78; }
         try_capture_report || exit 80
         [ "$REPORT_CAPTURED" -eq 1 ] || exit 79
+        exit 0
+        ;;
+    record-defect)
+        # R8 P1-3: replay reconstructs the canonical line and requires byte-exact
+        # equality. Each defect variant (wrong path / stale apk / extra field /
+        # embedded newline) must be a LOUD rc=2 with no capture, even though the
+        # report_sha256 is CORRECT for the bytes on disk.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="rec-defect"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/rd.json"
+        REPORT_CAPTURED=0
+        printf '{"probe":"defect-bytes"}' >"$EVIDENCE_DIR/rec-defect.json"
+        good_sha=$(shasum -a 256 "$EVIDENCE_DIR/rec-defect.json" | awk '{print $1}')
+        variant=$3
+        case "$variant" in
+            wrong-path)
+                printf 'EVIDENCE session=rec-defect report=/wrong/report.json report_sha256=%s apk_sha256=%s\n' \
+                    "$good_sha" "$DRIVER_APK_SHA" >"$EVIDENCE_DIR/rec-defect.json.evidence" ;;
+            stale-apk)
+                printf 'EVIDENCE session=rec-defect report=%s report_sha256=%s apk_sha256=%s\n' \
+                    "$EVIDENCE_DIR/rec-defect.json" "$good_sha" "$(printf 'bbbb%.0s' {1..16})" \
+                    >"$EVIDENCE_DIR/rec-defect.json.evidence" ;;
+            extra-field)
+                printf 'EVIDENCE session=rec-defect report=%s report_sha256=%s apk_sha256=%s extra=pwned\n' \
+                    "$EVIDENCE_DIR/rec-defect.json" "$good_sha" "$DRIVER_APK_SHA" \
+                    >"$EVIDENCE_DIR/rec-defect.json.evidence" ;;
+            embedded-newline)
+                printf 'EVIDENCE session=rec-defect report=%s report_sha256=%s apk_sha256=%s\nSECOND LINE\n' \
+                    "$EVIDENCE_DIR/rec-defect.json" "$good_sha" "$DRIVER_APK_SHA" \
+                    >"$EVIDENCE_DIR/rec-defect.json.evidence" ;;
+        esac
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        try_capture_report
+        rc=$?
+        [ "$rc" -eq 2 ] || { echo "DRIVER_ERROR $variant rc=$rc (want 2)" >&2; exit 77; }
+        [ "$REPORT_CAPTURED" -eq 0 ] || { echo "DRIVER_ERROR $variant set captured" >&2; exit 76; }
         exit 0
         ;;
     *)
@@ -367,9 +409,9 @@ case "$CASE" in
 esac
 DRIVER_EOF
 
-run_driver() { # case workdir -> OUT / RC
+run_driver() { # case workdir [variant] -> OUT / RC
     mkdir -p "$2"
-    OUT="$(TEST_HOOK_PATH="$TEST_HOOK" DRIVER_APK_SHA="$APK_SHA" bash "$DRIVER" "$1" "$2" 2>&1)"
+    OUT="$(TEST_HOOK_PATH="$TEST_HOOK" DRIVER_APK_SHA="$APK_SHA" bash "$DRIVER" "$1" "$2" "${3-}" 2>&1)"
     RC=$?
 }
 
@@ -508,7 +550,7 @@ run_driver "residue-partial" "$D7B"
 D8="$WORK/record-mismatch"
 run_driver "record-mismatch" "$D8"
 [ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 0 ] &&
-    grep -q "does not match preserved bytes" <<<"$OUT" &&
+    grep -q "is not the exact canonical binding" <<<"$OUT" &&
     report ok "b8 record/bytes mismatch -> loud rc=2 from capture, zero EVIDENCE" ||
     report fail "b8 record/bytes mismatch -> loud rc=2, zero EVIDENCE" "rc=$RC count=$(evidence_count) out=$OUT"
 
@@ -519,6 +561,17 @@ run_driver "shasum-retry" "$D9"
     [ -f "$D9/evidence/sha-retry.json" ] && [ -f "$D9/evidence/sha-retry.json.evidence" ] &&
     report ok "b9 bad-shasum failure is residue-free and a clean retry completes the binding" ||
     report fail "b9 bad-shasum failure residue-free + retry completes" "rc=$RC count=$(evidence_count) out=$OUT"
+
+# ---- b10: replay reconstructs the canonical record; every defect is loud ----
+# (R8 P1-3) — a CORRECT report sha does not rescue a wrong path / stale apk /
+# extra field / embedded newline. Each variant: rc=2, no capture, no re-emit.
+for variant in wrong-path stale-apk extra-field embedded-newline; do
+    D="$WORK/rec-$variant"
+    run_driver "record-defect" "$D" "$variant"
+    [ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 0 ] &&
+        report ok "b10 $variant record -> loud rc=2, no false re-emit" ||
+        report fail "b10 $variant record -> loud rc=2, no false re-emit" "rc=$RC count=$(evidence_count) out=$OUT"
+done
 
 printf 'test-hook evidence-carrier selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

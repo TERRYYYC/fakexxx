@@ -640,31 +640,43 @@ preserve_report() { # session local_report
 try_capture_report() {
     [ "$REPORT_CAPTURED" -eq 1 ] && return 0
     [ -n "$CURRENT_SESSION" ] || return 0
-    # DURABLE idempotency (R6 P2 -> R7 P1-3): the durable key is the COMMIT
-    # RECORD ($session.json.evidence, written atomically only after bytes and
-    # both hashes were bound), NEVER the raw report file — a pre-commit
-    # residue (cp landed, then TERM/bad shasum) must not read as captured.
-    # Re-entry VALIDATES the record (recompute the report sha, compare) and
-    # re-emits the recorded line; a record that no longer matches its bytes
-    # is a loud rc=2, not a silent green.
+    # DURABLE idempotency (R6 P2 -> R7 P1-3 -> R8 P1-3): the durable key is the
+    # COMMIT RECORD ($session.json.evidence, written atomically only after bytes
+    # and both hashes were bound), NEVER the raw report file. Replay does NOT
+    # trust the stored record's contents — it RECONSTRUCTS the exact canonical
+    # four-field line from the current session, the canonical preserved path,
+    # the RECOMPUTED report sha, and the VALIDATED installed APK sha, then
+    # requires byte-exact single-line equality (cmp). This fails closed on a
+    # wrong report= path, a stale apk_sha256, extra fields, or an embedded
+    # newline (Sol R8: a correct report hash with report=/wrong.json + record
+    # apk bbbb… under installed aaaa… previously replayed a false §5.G line).
     if [ -n "$EVIDENCE_DIR" ] && [ -f "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence" ]; then
-        record=$(cat "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence")
-        recorded_sha=${record##*report_sha256=}; recorded_sha=${recorded_sha%% *}
-        actual_sha=$(shasum -a 256 "$EVIDENCE_DIR/$CURRENT_SESSION.json" 2>/dev/null | awk '{print $1}')
-        case "$record" in
-            "EVIDENCE session=$CURRENT_SESSION "*) ;;
-            *)
-                echo "HARNESS_ERROR evidence record for $CURRENT_SESSION is malformed: $record" >&2
-                return 2
-                ;;
-        esac
-        if [ -z "$actual_sha" ] || [ "$recorded_sha" != "$actual_sha" ]; then
-            echo "HARNESS_ERROR evidence record for $CURRENT_SESSION does not match preserved bytes (recorded=$recorded_sha actual=${actual_sha:-<missing>})" >&2
+        preserved="$EVIDENCE_DIR/$CURRENT_SESSION.json"
+        # (a) installed APK sha must be a bound 64-hex — the canonical line
+        #     cannot be reconstructed against an unbound/foreign apk identity.
+        if ! printf '%s' "$INSTALLED_APK_SHA" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            echo "HARNESS_ERROR cannot validate evidence record for $CURRENT_SESSION: installed APK SHA not bound (got '${INSTALLED_APK_SHA:-<empty>}')" >&2
             return 2
         fi
-        printf '%s\n' "$record"
-        REPORT_CAPTURED=1
-        return 0
+        # (b) recompute the preserved report's sha — the record must match the
+        #     bytes actually on disk, not a stored claim.
+        actual_sha=$(shasum -a 256 "$preserved" 2>/dev/null | awk '{print $1}')
+        if ! printf '%s' "$actual_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "HARNESS_ERROR cannot fingerprint preserved report for $CURRENT_SESSION on replay (got '${actual_sha:-<missing>}')" >&2
+            return 2
+        fi
+        # (c) the ONE canonical four-field line this session must carry.
+        expected_line="EVIDENCE session=$CURRENT_SESSION report=$preserved report_sha256=$actual_sha apk_sha256=$INSTALLED_APK_SHA"
+        # (d) byte-exact single-line equality: cmp against expected_line + "\n".
+        #     Any extra field, wrong path, stale apk, embedded newline, or extra
+        #     trailing bytes makes the stored record differ -> loud rc=2.
+        if printf '%s\n' "$expected_line" | cmp -s - "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence"; then
+            printf '%s\n' "$expected_line"
+            REPORT_CAPTURED=1
+            return 0
+        fi
+        echo "HARNESS_ERROR evidence record for $CURRENT_SESSION is not the exact canonical binding (expected: $expected_line; stored differs — wrong path/apk/sha, extra fields, or embedded newline)" >&2
+        return 2
     fi
     has_state "$CURRENT_SESSION" "report_ready" || return 0
     root_shell "cat $CURRENT_REMOTE_REPORT" >"$CURRENT_LOCAL_REPORT" 2>/dev/null || {
