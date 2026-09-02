@@ -17,6 +17,7 @@ import name.caiyao.fakegps.integration.v1.RevisionBumpReason
 import name.caiyao.fakegps.integration.v1.ScheduleSnapshot
 import name.caiyao.fakegps.integration.v1.SignerLookup
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -75,6 +76,7 @@ class APlus10AOwnerFenceRaceTest {
 
         val held = CountDownLatch(1)
         val release = CountDownLatch(1)
+        val bAtCallSite = CountDownLatch(1)
         val bFinished = AtomicBoolean(false)
 
         val a = Thread {
@@ -86,16 +88,35 @@ class APlus10AOwnerFenceRaceTest {
         assertTrue("holder thread must acquire the monitor", held.await(5, TimeUnit.SECONDS))
 
         val b = Thread {
+            bAtCallSite.countDown() // barrier: B is scheduled and about to enter the fenced call
             handler.runRevokedLeaseCleanup() // REAL fenced op (no caller identity needed)
             bFinished.set(true)
         }.apply { start() }
 
-        Thread.sleep(400)
-        assertFalse(
-            "a real fenced owner op must BLOCK while the seed holds lockOf(handler) — " +
-                "if this finished, lockOf is not the owner monitor (drift or split lock)",
-            bFinished.get(),
+        // Sol R7 P2-1: the old sleep(400) could pass with a WRONG lock if B was
+        // simply not scheduled yet. Prove B actually began the fenced call AND
+        // is genuinely blocked on MONITOR ENTRY — not merely unscheduled. A
+        // thread contending for a `synchronized` monitor sits in Thread.State
+        // BLOCKED; a wrong/split lock would instead let B run the op to
+        // completion (TERMINATED, bFinished=true), so requiring an observed
+        // BLOCKED state is the barrier the bare sleep lacked.
+        assertTrue("B must reach the fenced call site", bAtCallSite.await(5, TimeUnit.SECONDS))
+        val blockedDeadline = System.currentTimeMillis() + 5_000
+        while (b.state != Thread.State.BLOCKED && System.currentTimeMillis() < blockedDeadline) {
+            assertFalse(
+                "B must not complete the fenced op while the seed holds lockOf(handler) — " +
+                    "if it finished, lockOf is not the owner monitor (drift or split lock)",
+                bFinished.get(),
+            )
+            Thread.sleep(5)
+        }
+        assertEquals(
+            "B must be BLOCKED on monitor entry while the seed holds the lock — a wrong lock " +
+                "would let the fenced op run to completion instead of contending for the monitor",
+            Thread.State.BLOCKED,
+            b.state,
         )
+        assertFalse("the fenced op must not have completed while blocked", bFinished.get())
 
         release.countDown()
         b.join(5_000)

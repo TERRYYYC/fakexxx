@@ -285,40 +285,83 @@ class APlus10APlanSeedTest {
     }
 
     // ------------------------------------------------------------------
-    // startRunVerdict — request-owned durable-start generation (R6 P1-2)
+    // startRunVerdict — request-owned durable-start generation (R6 P1-2 → R7 P1-2)
     // ------------------------------------------------------------------
+
+    private fun row(id: Long, planId: Long?, status: String = "running") =
+        APlus10APlanSeed.NewSessionRow(id, planId, status)
 
     @Test
     fun startRunVerdict_staleSamePlanRun_noNewSession_isNotStarted() {
         // A paused/crashed same-plan A+ attempt keeps old rows nonterminal and
-        // isRunning may even be true — but NO NEW RunSession means THIS request
-        // started nothing. The old cmd=state predicate was satisfied by the
-        // stale row; the session generation is not.
+        // isRunning may even be true — but NO NEW session (id > pre-max) means
+        // THIS request started nothing.
         val v = APlus10APlanSeed.startRunVerdict(
-            preMaxSessionId = 41L, latestSessionId = 41L, latestSessionPlanId = 7L, requestedPlanId = 7L)
+            newSessions = emptyList(), requestedPlanId = 7L, firstAttemptId = null)
         assertEquals(APlus10APlanSeed.StartRunVerdict.NoNewSession, v)
     }
 
     @Test
-    fun startRunVerdict_noSessionsAtAll_isNotStarted() {
+    fun startRunVerdict_newSessionRightPlanWithMilestone_isStarted() {
+        // The ONLY green path: exactly one new right-plan session AND a durable
+        // first-attempt row bound to it.
         val v = APlus10APlanSeed.startRunVerdict(
-            preMaxSessionId = 0L, latestSessionId = null, latestSessionPlanId = null, requestedPlanId = 7L)
-        assertEquals(APlus10APlanSeed.StartRunVerdict.NoNewSession, v)
+            newSessions = listOf(row(42L, 7L)), requestedPlanId = 7L, firstAttemptId = 900L)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.Started(sessionId = 42L, planId = 7L, firstAttemptId = 900L), v)
     }
 
     @Test
-    fun startRunVerdict_newSessionRightPlan_isStartedWithGeneration() {
+    fun startRunVerdict_newRightPlanSessionButNoAttemptYet_isAwaitingMilestone_notStarted() {
+        // R7 P1-2: the Engine creates the session BEFORE provider discovery.
+        // A right-plan session with no attempt yet is NOT started — the caller
+        // keeps polling, it never prints RUN_STARTED on the bare session.
         val v = APlus10APlanSeed.startRunVerdict(
-            preMaxSessionId = 41L, latestSessionId = 42L, latestSessionPlanId = 7L, requestedPlanId = 7L)
-        assertEquals(APlus10APlanSeed.StartRunVerdict.Started(sessionId = 42L, planId = 7L), v)
+            newSessions = listOf(row(42L, 7L, status = "running")), requestedPlanId = 7L, firstAttemptId = null)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.AwaitingMilestone, v)
+    }
+
+    @Test
+    fun startRunVerdict_zeroAttemptCompletedSession_isDegenerate_notStarted() {
+        // Sol R7: an already-complete plan can instantly complete a zero-attempt
+        // session; discovery failure can pause one. Either is a typed failure,
+        // never RUN_STARTED.
+        val completed = APlus10APlanSeed.startRunVerdict(
+            newSessions = listOf(row(42L, 7L, status = "completed")), requestedPlanId = 7L, firstAttemptId = null)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.DegenerateSession(42L, "completed"), completed)
+        val paused = APlus10APlanSeed.startRunVerdict(
+            newSessions = listOf(row(43L, 7L, status = "paused")), requestedPlanId = 7L, firstAttemptId = null)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.DegenerateSession(43L, "paused"), paused)
+    }
+
+    @Test
+    fun startRunVerdict_twoNewSessions_isAmbiguous_neverAttributed() {
+        // R7 P1-2 cardinality: two starters raced and both created sessions —
+        // attribution is ambiguous, so NEITHER is claimed even if one matches
+        // the plan and has a milestone. (The activity's single-flight lock
+        // prevents this in-process; the verdict fails closed if it ever occurs.)
+        val v = APlus10APlanSeed.startRunVerdict(
+            newSessions = listOf(row(42L, 7L), row(43L, 7L)), requestedPlanId = 7L, firstAttemptId = 900L)
+        val a = v as? APlus10APlanSeed.StartRunVerdict.AmbiguousNewSessions ?: error("expected Ambiguous, got $v")
+        assertEquals(listOf(42L, 43L), a.sessionIds)
+    }
+
+    @Test
+    fun startRunVerdict_raceLoserCannotBorrowWinnerSession() {
+        // The concrete Sol counterexample: A wins and created session 42 (plan
+        // 7, milestone present). Loser B snapshotted the SAME pre-max (41) but
+        // was rejected by startWithPlan as "Already running". Because the
+        // activity holds B's whole attempt behind the single-flight lock, B's
+        // pre-max is re-evaluated AFTER A's verdict — so from B's fence (42)
+        // there is NO new session and B gets NoNewSession, never A's RUN_STARTED.
+        val bView = APlus10APlanSeed.startRunVerdict(
+            newSessions = emptyList(), requestedPlanId = 7L, firstAttemptId = null)
+        assertEquals(APlus10APlanSeed.StartRunVerdict.NoNewSession, bView)
     }
 
     @Test
     fun startRunVerdict_newSessionWrongPlan_isConflictNotStarted() {
-        // Concurrent/foreign start won the engine slot — this request must NOT
-        // claim it.
         val v = APlus10APlanSeed.startRunVerdict(
-            preMaxSessionId = 41L, latestSessionId = 42L, latestSessionPlanId = 9L, requestedPlanId = 7L)
+            newSessions = listOf(row(42L, 9L)), requestedPlanId = 7L, firstAttemptId = 900L)
         val c = v as? APlus10APlanSeed.StartRunVerdict.WrongPlanSession ?: error("expected WrongPlanSession, got $v")
         assertEquals(42L, c.sessionId)
         assertEquals(9L, c.sessionPlanId)
@@ -326,9 +369,10 @@ class APlus10APlanSeedTest {
 
     @Test
     fun startRunVerdict_newLegacySessionNullPlan_isConflictNotStarted() {
-        // A legacy/null-plan session cannot be claimed by any request.
+        // A legacy/null-plan session cannot be claimed — checked BEFORE the
+        // milestone, so even a present attempt does not rescue it.
         val v = APlus10APlanSeed.startRunVerdict(
-            preMaxSessionId = 41L, latestSessionId = 42L, latestSessionPlanId = null, requestedPlanId = 7L)
+            newSessions = listOf(row(42L, null)), requestedPlanId = 7L, firstAttemptId = 900L)
         assertTrue(v is APlus10APlanSeed.StartRunVerdict.WrongPlanSession)
     }
 

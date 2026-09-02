@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.integration.v1
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -278,36 +279,82 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
-     * R6 P1-2 (Sol): the start verdict must bind to a REQUEST-OWNED durable
-     * transition — a NEW RunSession (id > pre-command max) whose planId equals
-     * the request — never the global isRunning flag or a stale same-plan
-     * attempt scan. The pure verdict logic is behaviorally tested in
-     * [APlus10APlanSeedTest]; this guard pins that the SHIPPED activity
-     * actually consumes it and speaks the typed vocabulary the runbook reads.
+     * R6 P1-2 → R7 P1-2 (Sol): the start verdict must bind to a REQUEST-OWNED
+     * durable transition. The pure verdict logic is behaviorally tested in
+     * [APlus10APlanSeedTest]; this guard is WIRING-SENSITIVE — it pins the
+     * actual arguments the shipped activity feeds the verdict (Sol P2-3: the
+     * old guard only checked a token was present, so a mis-wired call could
+     * pass). It requires: MAX(id) fence (not getLatest, which orders by
+     * startedAt and clock skew can hide a newer id), an `id > ?` cardinality
+     * query, the durable first-attempt milestone leg, single-flight, the
+     * atomic START_RECEIPT, and the typed vocabulary — including the
+     * degenerate/awaiting failures that keep a zero-attempt session out of
+     * RUN_STARTED.
      */
     @Test
     fun gap1_startRunVerdictIsRequestOwnedGeneration() {
         val code = kotlinSourcesWithoutComments(debugSourceDir)
             .first { it.first.name == "APlusSeedActivity.kt" }.second
+        // Pre-max fence via MAX(id), NOT getLatest (startedAt ordering).
         assertTrue(
-            "start_run must capture the pre-command session max (getLatest) BEFORE starting",
-            Regex("""preMaxSessionId[\s\S]{0,200}runSessionDao\(\)\.getLatest\(\)""").containsMatchIn(code),
+            "start_run must fence pre-max via MAX(id), not startedAt-ordered getLatest",
+            Regex("""preMaxSessionId[\s\S]{0,160}MAX\(id\)[\s\S]{0,120}run_sessions""").containsMatchIn(code),
+        )
+        assertFalse(
+            "start_run must NOT use getLatest for the pre-max fence (clock skew hides a newer id)",
+            Regex("""preMaxSessionId[\s\S]{0,160}getLatest""").containsMatchIn(code),
+        )
+        // ALL new rows read via id > ? (cardinality), fed as newSessions.
+        assertTrue(
+            "start_run must read ALL sessions with id > pre-max (cardinality query)",
+            Regex("""id\s*>\s*\?[\s\S]{0,80}run_sessions|run_sessions[\s\S]{0,80}id\s*>\s*\?""").containsMatchIn(code),
         )
         assertTrue(
-            "the verdict must come from the tested pure function APlus10APlanSeed.startRunVerdict",
-            code.contains("APlus10APlanSeed.startRunVerdict("),
+            "the verdict must consume the newSessions list argument",
+            Regex("""startRunVerdict\([\s\S]{0,200}newSessions\s*=""").containsMatchIn(code),
         )
-        for (token in listOf("RUN_STARTED", "RUN_START_CONFLICT", "RUN_NOT_STARTED")) {
+        // Durable first-attempt milestone leg, bound to the new session.
+        assertTrue(
+            "start_run must resolve the durable first-attempt milestone (test_attempts by runSessionId)",
+            Regex("""firstAttemptId[\s\S]{0,160}test_attempts[\s\S]{0,80}runSessionId""").containsMatchIn(code),
+        )
+        assertTrue(
+            "the verdict must be fed the firstAttemptId milestone argument",
+            Regex("""startRunVerdict\([\s\S]{0,240}firstAttemptId\s*=""").containsMatchIn(code),
+        )
+        // Single-flight owner token across the whole entry.
+        assertTrue(
+            "start_run must hold the single-flight lock across receipt+start+poll",
+            code.contains("synchronized(START_RUN_LOCK)"),
+        )
+        // Atomic typed receipt BEFORE the engine call.
+        for (receipt in listOf("START_RECEIPT accepted", "START_RECEIPT already_running", "START_RECEIPT not_connected")) {
+            assertTrue("start_run must emit the atomic receipt '$receipt'", code.contains(receipt))
+        }
+        // Typed verdict vocabulary — including R7 degenerate/awaiting failures.
+        for (token in listOf("RUN_STARTED", "RUN_START_CONFLICT", "RUN_START_DEGENERATE", "RUN_NOT_STARTED")) {
             assertTrue("start_run must emit the typed token $token", code.contains(token))
         }
         assertEquals(
-            "the pre-R6 untyped acceptance token must be gone — a typed verdict " +
-                "and a vague acknowledgement cannot coexist as vocabulary",
+            "the pre-R6 untyped acceptance token must be gone",
             false,
             code.contains("REQUEST_ACCEPTED"),
         )
         val collector = kotlinSourcesWithoutComments(debugSourceDir)
             .first { it.first.name == "ProviderRevokeCollectorActivity.kt" }.second
+        // R7 P2: state() must be ONE transactional snapshot with per-row status.
+        assertTrue(
+            "cmd=state must build its readback in a single withTransaction snapshot",
+            collector.contains("withTransaction"),
+        )
+        assertTrue(
+            "cmd=state must print per-row session status",
+            collector.contains("sessionStatus="),
+        )
+        assertTrue(
+            "cmd=state must print per-row attempt status",
+            collector.contains("attemptStatus="),
+        )
         assertTrue(
             "cmd=state must print runSessionId per running attempt (session leg of the binding)",
             collector.contains("runSessionId=\${a.runSessionId}"),

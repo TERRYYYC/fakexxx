@@ -237,34 +237,75 @@ object APlus10APlanSeed {
     }
 
     /**
-     * R6 P1-2 — request-owned durable-start generation. startAutomation is a
-     * Unit fire-and-forget and the global isRunning flag can be flipped by a
-     * DIFFERENT request (or already be true while this one is silently ignored
-     * as "Already running"), so acceptance must bind to a durable transition
-     * this request caused: a NEW RunSession row (id > the pre-command max)
-     * whose planId equals the requested plan. A stale nonterminal same-plan
-     * attempt does NOT create a new session and therefore can never satisfy
-     * this verdict.
+     * R6 P1-2 → R7 P1-2 — request-owned durable-start generation.
+     *
+     * startAutomation is a Unit fire-and-forget and the global isRunning flag
+     * can be flipped by a DIFFERENT request, so acceptance must bind to a
+     * durable transition THIS request caused. Sol's R7 counterexamples force
+     * three tightenings over the R6 shape:
+     *
+     *  1. CARDINALITY — the verdict consumes ALL sessions with id > pre-max,
+     *     not the single "latest". Anything other than exactly one new row is
+     *     ambiguous (two starters raced) and is REJECTED, never attributed.
+     *     (Same-plan caller B borrowing winner A's session is additionally
+     *     killed by the activity's in-process single-flight lock: B enters
+     *     only after A's verdict, so B's pre-max already contains A's session
+     *     → NoNewSession for B.)
+     *  2. MILESTONE — a new right-plan session row alone is NOT a started
+     *     run: the Engine creates the session BEFORE provider discovery, so
+     *     discovery failure can pause it with zero attempts and an
+     *     already-complete plan can complete it instantly. Started requires
+     *     the durable first-attempt milestone (a test_attempts row bound to
+     *     the new session).
+     *  3. DEGENERACY — a new right-plan session that reached a
+     *     paused/terminal status with NO attempt is a typed failure
+     *     (DegenerateSession), never RUN_STARTED.
+     *
+     * AwaitingMilestone is the only non-terminal verdict: session exists, is
+     * still in a live status, and the first attempt has not landed yet — the
+     * caller keeps polling until timeout (then reports no-milestone).
      */
     sealed interface StartRunVerdict {
-        data class Started(val sessionId: Long, val planId: Long) : StartRunVerdict
+        data class Started(val sessionId: Long, val planId: Long, val firstAttemptId: Long) : StartRunVerdict
         data class WrongPlanSession(val sessionId: Long, val sessionPlanId: Long?, val requestedPlanId: Long) : StartRunVerdict
+        data class AmbiguousNewSessions(val sessionIds: List<Long>) : StartRunVerdict
+        data class DegenerateSession(val sessionId: Long, val status: String) : StartRunVerdict
+        data object AwaitingMilestone : StartRunVerdict
         data object NoNewSession : StartRunVerdict
     }
 
+    /** One durable session row created after the request's pre-max fence. */
+    data class NewSessionRow(val id: Long, val planId: Long?, val status: String)
+
+    /**
+     * Session statuses that, with zero attempts, prove the run died/parked
+     * BEFORE its first durable attempt — RunSession statuses are
+     * running/completed/stopped/error (entity doc) plus paused/interrupted
+     * (recovery projections). "running"/"starting" are the live set.
+     */
+    val DEGENERATE_SESSION_STATUSES: Set<String> =
+        setOf("paused", "completed", "stopped", "error", "interrupted")
+
     fun startRunVerdict(
-        preMaxSessionId: Long,
-        latestSessionId: Long?,
-        latestSessionPlanId: Long?,
+        newSessions: List<NewSessionRow>,
         requestedPlanId: Long,
+        firstAttemptId: Long?,
     ): StartRunVerdict {
-        if (latestSessionId == null || latestSessionId <= preMaxSessionId) {
-            return StartRunVerdict.NoNewSession
+        if (newSessions.isEmpty()) return StartRunVerdict.NoNewSession
+        if (newSessions.size != 1) {
+            return StartRunVerdict.AmbiguousNewSessions(newSessions.map { it.id })
         }
-        if (latestSessionPlanId != requestedPlanId) {
-            return StartRunVerdict.WrongPlanSession(latestSessionId, latestSessionPlanId, requestedPlanId)
+        val s = newSessions.single()
+        if (s.planId != requestedPlanId) {
+            return StartRunVerdict.WrongPlanSession(s.id, s.planId, requestedPlanId)
         }
-        return StartRunVerdict.Started(latestSessionId, requestedPlanId)
+        if (firstAttemptId != null) {
+            return StartRunVerdict.Started(s.id, requestedPlanId, firstAttemptId)
+        }
+        if (s.status in DEGENERATE_SESSION_STATUSES) {
+            return StartRunVerdict.DegenerateSession(s.id, s.status)
+        }
+        return StartRunVerdict.AwaitingMilestone
     }
 
     /**

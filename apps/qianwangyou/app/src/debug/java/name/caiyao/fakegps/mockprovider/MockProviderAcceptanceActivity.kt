@@ -237,6 +237,18 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
             throw IllegalStateException("end-of-seed schedule drift — $mismatch")
         }
 
+        // R7 P1-1 (Sol): the ownerLock serializes only EnvironmentControlHandler's
+        // OWN fenced ops. prepareKyiv / ProfileRepository / the settings UI mutate
+        // the SAME profile table + transport WITHOUT that lock, so the checks
+        // above (lease/pending/audit/schedule) would stay green over rewritten
+        // profile bytes. SEED_LOCAL_VERIFIED must therefore terminally re-read
+        // the FULL written domain and prove every byte is still exactly what the
+        // seed committed. Concurrency is additionally excluded operationally by
+        // the runbook's pre-seed force-stop + fresh-PID single-flight gate (no
+        // other writer is alive during the sole seed launch); this readback is
+        // the in-process proof that closes the residual window.
+        verifyWrittenDomainOrThrow(dao, rows, settings)
+
         // Throws (IllegalStateException) if any inserted id drifted from the
         // explicit fixture id — a green mapping over a mismatch is forbidden.
         // PR #62 P1-1: the report emits only the independently verified
@@ -290,6 +302,67 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
                     advanceCount = p.getLong(APlus10AScheduleReset.KEY_ADVANCE_COUNT, -1L),
                 )
             }
+
+    /**
+     * R7 P1-1 — terminal readback of the FULL written domain (profile rows +
+     * settings + published transport). Called at end-of-seed UNDER the held
+     * owner fence: it proves every byte the seed committed is still exactly the
+     * seed's, so a concurrent profile/transport rewrite (prepareKyiv, UI
+     * save/delete/import) cannot pass SEED_LOCAL_VERIFIED on the schedule/lease
+     * checks alone. Throws (loud fail-closed) on any drift.
+     */
+    private fun verifyWrittenDomainOrThrow(
+        dao: name.caiyao.fakegps.data.db.ProfileDao,
+        expectedRows: List<name.caiyao.fakegps.data.db.ProfileEntity>,
+        settings: SpoofSettings,
+    ) {
+        // (1) Profile table: exactly the ten rows, byte-exact on every field
+        //     the provider apply path + A-block trust predicate read.
+        val actual = kotlinx.coroutines.runBlocking { dao.getAll() }
+        check(actual.size == expectedRows.size) {
+            "written-domain drift: profile row count ${actual.size} != seeded ${expectedRows.size} " +
+                "(a concurrent writer changed the table)"
+        }
+        val actualById = actual.associateBy { it.id }
+        expectedRows.forEach { want ->
+            val got = actualById[want.id]
+                ?: throw IllegalStateException("written-domain drift: seeded profile id=${want.id} is gone")
+            check(got == want) {
+                "written-domain drift: profile id=${want.id} bytes changed since the seed committed " +
+                    "(expected $want, durable $got)"
+            }
+        }
+        // (2) Settings: the exact posture the seed set.
+        check(settings.readLocationDeliveryMode() == LocationDeliveryMode.HOOK) {
+            "written-domain drift: delivery mode is not HOOK — a concurrent settings write changed it"
+        }
+        check(!settings.isMockProviderCleanupRequired()) {
+            "written-domain drift: mock-provider cleanup flag was re-enabled after the seed"
+        }
+        // (3) Transport payload: readable and carrying the seeded profile-1's
+        //     identity (addname + coordinates) — not a stale/foreign publish.
+        val want1 = expectedRows.first()
+        when (val read = ConfigPrefsSync.readPublished(applicationContext)) {
+            is name.caiyao.fakegps.config.PayloadRead.Raw -> {
+                val fields = org.json.JSONObject(read.text).optJSONObject("fields")
+                    ?: throw IllegalStateException("written-domain drift: published transport has no fields object")
+                val publishedName = fields.optString("addname", "")
+                check(publishedName == want1.addname) {
+                    "written-domain drift: published transport carries addname='$publishedName', " +
+                        "not the seeded profile-1 '${want1.addname}' — a concurrent publish overwrote it"
+                }
+                want1.latitude?.let { lat ->
+                    check(fields.optDouble("latitude", Double.NaN) == lat) {
+                        "written-domain drift: published transport latitude != seeded profile-1"
+                    }
+                }
+            }
+            name.caiyao.fakegps.config.PayloadRead.Absent ->
+                throw IllegalStateException("written-domain drift: published transport is ABSENT after the seed published it")
+            is name.caiyao.fakegps.config.PayloadRead.ReadError ->
+                throw IllegalStateException("written-domain readback failed to read the transport: ${read.cause}")
+        }
+    }
 
         private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes)

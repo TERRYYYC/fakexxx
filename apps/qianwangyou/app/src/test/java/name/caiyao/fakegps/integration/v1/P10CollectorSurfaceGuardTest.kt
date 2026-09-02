@@ -324,6 +324,27 @@ class P10CollectorSurfaceGuardTest {
             "preconditions must consult fencedSeedPreconditionMismatch",
             code.contains("APlus10AScheduleReset.fencedSeedPreconditionMismatch("),
         )
+        // R7 P1-1: SEED_LOCAL_VERIFIED must terminally re-read the FULL written
+        // domain (profile rows + settings + transport), not just lease/pending/
+        // audit/schedule — a concurrent profile/transport rewrite would
+        // otherwise pass. Wiring-sensitive: removing the call turns this red.
+        assertTrue(
+            "seed must terminally verify the full written domain (profile rows + settings + transport)",
+            code.contains("verifyWrittenDomainOrThrow("),
+        )
+        val verifyBody = code.substringAfter("private fun verifyWrittenDomainOrThrow", "")
+        assertTrue(
+            "the written-domain readback must re-read the durable profile rows (dao.getAll)",
+            verifyBody.contains("dao.getAll()"),
+        )
+        assertTrue(
+            "the written-domain readback must re-read the settings posture (delivery mode + cleanup flag)",
+            verifyBody.contains("readLocationDeliveryMode()") && verifyBody.contains("isMockProviderCleanupRequired()"),
+        )
+        assertTrue(
+            "the written-domain readback must re-read the published transport (ConfigPrefsSync.readPublished)",
+            verifyBody.contains("ConfigPrefsSync.readPublished("),
+        )
         // Field-name drift pin (the runtime half is the latch race test).
         val handlerSource = File(
             moduleRoot,
