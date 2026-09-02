@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # Selftest for the §5.G evidence carrier inside apps/qianwangyou/scripts/test-hook.sh
-# (PR #62 R3 P1-4).
+# (PR #62 R3 P1-4 → R6 P2).
 #
 # The finding: every raw acceptance report lived only in TEMP_ROOT and
 # cleanup_transaction deleted it, so a --cellular-matrix run could not bind
 # session id + result file + installed APK SHA (acceptance package §5.G) and a
 # failed run destroyed its own only raw carrier.
 #
-# This exercises the REAL shipped preserve_report() (extracted by sed, same
-# pattern as selftest-test-hook-install-guard.sh) and pins:
-#   c1  a preserved copy exists + one EVIDENCE line binds session/path/sha/apk
-#   c2  a missing evidence directory is a LOUD rc=2, never a silent skip
-#   c3  an unwritable evidence directory is a LOUD rc=2
-#   c4  simulated cleanup (rm -rf TEMP_ROOT) does NOT touch the preserved copy
+# This exercises the REAL shipped functions (extracted by sed, same pattern as
+# selftest-test-hook-install-guard.sh). Two layers:
+#
+#   c1–c6  preserve_report unit behavior (binding line, loud failures, apk sha)
+#   b1–b6  BEHAVIORAL drivers (R6 P2): the shipped try_capture_report /
+#          cleanup_transaction / run_scenario logic runs in a disposable child
+#          process with fake device edges, so real INT/TERM delivery, duplicate
+#          capture windows, CURRENT_* rolling across scenarios, failure/timeout
+#          capture ordering, and malformed shasum output are all verified by
+#          OBSERVED OUTCOME (files + EVIDENCE lines + exit codes), not by
+#          grepping for tokens — an inverted guard or deleted call goes red.
+#
 # Exit 0 = all cases pass; anything else = failure.
 
 set -uo pipefail
@@ -113,56 +119,280 @@ run_preserve "$EV5" "acceptance-6" "$SRC5" ""
 [ "$RC" -eq 2 ] && report ok "c6 empty apk sha -> rc=2" ||
     report fail "c6 empty apk sha -> rc=2" "rc=$RC out=$OUT"
 
-# ---- c7: run_scenario ORDERING regression (R4 P1-4) ------------------------
-# The finding: on restore_failed / restore-timeout, the runner returned the
-# primary failure BEFORE fetching the report_ready bytes, losing the only host
-# carrier. Structurally assert the shipped run_scenario captures the report on
-# EVERY failure branch before its `return 1`. Extract the function and check
-# that a try_capture_report call precedes each failure return in both the
-# activity-failed and the timeout branches.
-SCENARIO_FN="$(sed -n '/^run_scenario()/,/^}/p' "$TEST_HOOK")"
-[ -n "$SCENARIO_FN" ] || { echo "could not extract run_scenario" >&2; exit 1; }
-# activity-failed branch: try_capture_report must appear between the
-# has_state failure test and its HARNESS_ERROR ... return 1.
-FAIL_BLOCK="$(printf '%s\n' "$SCENARIO_FN" | sed -n '/acceptance activity failed for/,/return 1/p')"
-printf '%s\n' "$SCENARIO_FN" | awk '/has_state "\$session" "aborted"/{f=1} f&&/try_capture_report/{print; exit}' | grep -q try_capture_report &&
-    report ok "c7 failure branch captures report before return" ||
-    report fail "c7 failure branch captures report before return" "no try_capture_report before the activity-failed return"
-# timeout branch: try_capture_report before the timeout return 1.
-printf '%s\n' "$SCENARIO_FN" | awk '/timed out waiting for report_ready/{seen=1} /try_capture_report/{last=NR} END{}' >/dev/null
-printf '%s\n' "$SCENARIO_FN" | grep -B4 "timed out waiting for report_ready" | grep -q try_capture_report &&
-    report ok "c7 timeout branch captures report before return" ||
-    report fail "c7 timeout branch captures report before return" "no try_capture_report before the timeout return"
-# The capture is a TOP-LEVEL idempotent function driven by CURRENT_* globals
-# (R5 P1) so the EXIT/signal cleanup can reuse it for an interrupted scenario.
-CAPTURE_FN="$(sed -n '/^try_capture_report()/,/^}/p' "$TEST_HOOK")"
-[ -n "$CAPTURE_FN" ] && printf '%s\n' "$CAPTURE_FN" | grep -q "REPORT_CAPTURED" &&
-    report ok "c7 capture is top-level and idempotent (REPORT_CAPTURED guard)" ||
-    report fail "c7 capture is top-level and idempotent" "missing top-level try_capture_report or guard"
-printf '%s\n' "$SCENARIO_FN" | grep -q "CURRENT_SESSION=" &&
-    report ok "c7 run_scenario registers the in-flight session for salvage" ||
-    report fail "c7 run_scenario registers the in-flight session" "no CURRENT_SESSION registration"
+# ============================================================================
+# b-suite (R6 P2): behavioral drivers. A child bash process extracts the REAL
+# shipped functions itself, wires the REAL trap lines run_cellular_matrix
+# installs, and fakes only the device/database edges (adb, root_shell, logcat
+# reads, restore, snapshots). Every verdict below is an observed outcome —
+# exit code, preserved file bytes, EVIDENCE line count — so deleting a capture
+# call, inverting a guard, or dropping the duplicate-window durable key makes
+# a case go red instead of staying green.
+# ============================================================================
 
-# ---- c8: EXIT/signal salvage (R5 P1) ---------------------------------------
-# A SIGINT/SIGTERM after report_ready but before the poll captured it must not
-# let the TEMP_ROOT removal destroy the only local copy: cleanup_transaction
-# must invoke the salvage BEFORE any restore/removal work.
-CLEANUP_FN="$(sed -n '/^cleanup_transaction()/,/^}/p' "$TEST_HOOK")"
-printf '%s\n' "$CLEANUP_FN" | grep -q "try_capture_report" &&
-    report ok "c8 cleanup salvages an uncaptured report_ready report" ||
-    report fail "c8 cleanup salvages an uncaptured report" "cleanup_transaction never calls try_capture_report"
-# Ordering: the salvage call must appear BEFORE the TEMP_ROOT rm in the function body.
-SALVAGE_LINE=$(printf '%s\n' "$CLEANUP_FN" | grep -n "try_capture_report" | head -1 | cut -d: -f1)
-RM_LINE=$(printf '%s\n' "$CLEANUP_FN" | grep -n 'rm -rf' | head -1 | cut -d: -f1)
-[ -n "$SALVAGE_LINE" ] && [ -n "$RM_LINE" ] && [ "$SALVAGE_LINE" -lt "$RM_LINE" ] &&
-    report ok "c8 salvage precedes TEMP_ROOT removal" ||
-    report fail "c8 salvage precedes TEMP_ROOT removal" "salvage=$SALVAGE_LINE rm=$RM_LINE"
+DRIVER="$WORK/driver.sh"
+cat >"$DRIVER" <<'DRIVER_EOF'
+#!/usr/bin/env bash
+# Behavioral driver for selftest-test-hook-evidence-carrier.sh (R6 P2).
+# Env: TEST_HOOK_PATH (shipped script), DRIVER_APK_SHA (64-hex).
+set -u
+CASE=$1
+WORKD=$2
 
-# ---- c9: report sha must be 64-hex, not merely non-empty (R5 P2) -----------
-PRESERVE_FN2="$(sed -n '/^preserve_report()/,/^}/p' "$TEST_HOOK")"
-printf '%s\n' "$PRESERVE_FN2" | grep 'report_sha"' | grep -q 'grep -Eq' &&
-    report ok "c9 report sha bound to 64-hex (not just non-empty)" ||
-    report fail "c9 report sha bound to 64-hex" "preserve_report lacks the 64-hex report_sha check"
+# ---- shipped logic under test (extracted verbatim; fakes never shadow it) --
+extract() { sed -n "/^$1()/,/^}/p" "$TEST_HOOK_PATH"; }
+for fn in preserve_report try_capture_report cleanup_transaction signal_exit has_state run_scenario; do
+    body="$(extract "$fn")"
+    [ -n "$body" ] || { echo "DRIVER_ERROR cannot extract $fn" >&2; exit 99; }
+    eval "$body"
+done
+
+# ---- fake device/database edges (the ONLY fakes) ---------------------------
+FAKE_LOGS="$WORKD/fake-logs.txt"
+FAKE_DEVICE_REPORT="$WORKD/fake-device-report.json"
+read_acceptance_logs() { cat "$FAKE_LOGS" 2>/dev/null; }
+root_shell() {
+    case "$1" in
+        cat\ *) cat "$FAKE_DEVICE_REPORT" ;;
+        *) : ;;
+    esac
+}
+adb() { :; }
+restore_database_payload() { return 0; }
+snapshot_db() { printf 'DBSNAP'; }
+snapshot_prefs() { printf 'PREFSNAP'; }
+
+# ---- environment the shipped functions expect ------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$TEST_HOOK_PATH")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PY="$(command -v python3)"
+MATRIX_TOOL="$SCRIPT_DIR/cellular_acceptance_matrix.py"
+BENCH_PACKAGE="name.caiyao.fakegps.bench"
+ACCEPTANCE_ACT="$BENCH_PACKAGE/name.caiyao.fakegps.probe.HookAcceptanceActivity"
+TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fakegps-acceptance.XXXXXX") || exit 99
+EVIDENCE_DIR="$WORKD/evidence"; mkdir -p "$EVIDENCE_DIR"
+INSTALLED_APK_SHA="$DRIVER_APK_SHA"
+DB_BEFORE='DBSNAP'
+PREFS_BEFORE='PREFSNAP'
+RESTORE_FAILED=0
+TRANSACTION_ACTIVE=0
+CURRENT_SESSION=""; CURRENT_REMOTE_REPORT=""; CURRENT_LOCAL_REPORT=""
+REPORT_CAPTURED=0
+FULL_RSCP_CONTROL_REPORT=""
+
+echo "DRIVER_TEMP_ROOT=$TEMP_ROOT"
+
+log_state() { # session state — the exact substring has_state greps for
+    printf '{"sessionId":"%s","state":"%s"}\n' "$1" "$2" >>"$FAKE_LOGS"
+}
+
+install_shipped_traps() {
+    # The EXACT trap wiring run_cellular_matrix installs — extracted, not
+    # re-typed, so deleting a trap in the shipped script kills these cases.
+    wiring="$(sed -n '/^run_cellular_matrix()/,/^}/p' "$TEST_HOOK_PATH" | grep -E '^[[:space:]]*trap ')"
+    [ -n "$wiring" ] || { echo "DRIVER_ERROR no trap wiring found in run_cellular_matrix" >&2; exit 99; }
+    eval "$wiring"
+}
+
+case "$CASE" in
+    signal-term|signal-int)
+        # report_ready observed, poll has NOT captured yet, signal lands.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="sig-$CASE"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/sig.json"
+        REPORT_CAPTURED=0
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        printf '{"probe":"signal-carrier"}' >"$FAKE_DEVICE_REPORT"
+        install_shipped_traps
+        sig=TERM; [ "$CASE" = signal-int ] && sig=INT
+        kill -"$sig" $$
+        echo "DRIVER_UNREACHABLE signal did not interrupt the run"
+        exit 97
+        ;;
+    dup-window)
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="dup-session"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/dup.json"
+        REPORT_CAPTURED=0
+        # Guard direction: WITHOUT report_ready the capture must stay quiet —
+        # rc 0, no copy. An inverted has_state guard writes a copy here.
+        : >"$FAKE_LOGS"
+        try_capture_report || exit 96
+        [ ! -f "$EVIDENCE_DIR/$CURRENT_SESSION.json" ] ||
+            { echo "DRIVER_ERROR captured without report_ready" >&2; exit 95; }
+        log_state "$CURRENT_SESSION" report_ready
+        printf '{"probe":"dup-carrier"}' >"$FAKE_DEVICE_REPORT"
+        try_capture_report || exit 94
+        # R6 duplicate window: a signal lands AFTER preserve_report emitted the
+        # EVIDENCE line but BEFORE REPORT_CAPTURED=1 ran; the EXIT salvage then
+        # re-enters with the flag still 0. The durable key (preserved file)
+        # must absorb it: no second copy, no second line.
+        REPORT_CAPTURED=0
+        try_capture_report || exit 93
+        [ "$REPORT_CAPTURED" -eq 1 ] || exit 92
+        exit 0
+        ;;
+    cleanup-rerun)
+        # A SECOND process (fresh flags, same evidence dir) running the full
+        # EXIT cleanup must not duplicate or overwrite the binding.
+        TRANSACTION_ACTIVE=1
+        CURRENT_SESSION="dup-session"
+        CURRENT_REMOTE_REPORT="/fake/device/report.json"
+        CURRENT_LOCAL_REPORT="$TEMP_ROOT/dup2.json"
+        REPORT_CAPTURED=0
+        : >"$FAKE_LOGS"; log_state "$CURRENT_SESSION" report_ready
+        printf '{"probe":"dup-carrier-SECOND"}' >"$FAKE_DEVICE_REPORT"
+        install_shipped_traps
+        exit 0  # EXIT trap -> cleanup_transaction -> salvage sees durable key
+        ;;
+    roll)
+        # CURRENT_* must ROLL across scenarios: run_scenario's registration
+        # block re-binds session/report coordinates and resets REPORT_CAPTURED
+        # for each scenario. Two failure-branch runs, different bytes each.
+        TRANSACTION_ACTIVE=1
+        date() { if [ "${1-}" = "+%s" ]; then echo 1700000000; else command date "$@"; fi; }
+        s1="acceptance-1700000000-$$-full-rscp"
+        s2="acceptance-1700000000-$$-full-rssi"
+        : >"$FAKE_LOGS"; log_state "$s1" probe_failed; log_state "$s1" report_ready
+        printf '{"probe":"roll-ONE"}' >"$FAKE_DEVICE_REPORT"
+        run_scenario full-rscp 2>/dev/null; rc1=$?
+        [ "$rc1" -eq 1 ] || { echo "DRIVER_ERROR scenario1 rc=$rc1 (want 1)" >&2; exit 91; }
+        : >"$FAKE_LOGS"; log_state "$s2" probe_failed; log_state "$s2" report_ready
+        printf '{"probe":"roll-TWO-different-bytes"}' >"$FAKE_DEVICE_REPORT"
+        run_scenario full-rssi 2>/dev/null; rc2=$?
+        [ "$rc2" -eq 1 ] || { echo "DRIVER_ERROR scenario2 rc=$rc2 (want 1)" >&2; exit 90; }
+        echo "DRIVER_SESSIONS $s1 $s2"
+        exit 0
+        ;;
+    timeout)
+        # report_ready never joined by restored: the timeout branch must still
+        # capture the device bytes BEFORE returning its failure.
+        TRANSACTION_ACTIVE=1
+        date() { if [ "${1-}" = "+%s" ]; then echo 1700000000; else command date "$@"; fi; }
+        sleep() { :; }
+        s="acceptance-1700000000-$$-full-rscp"
+        : >"$FAKE_LOGS"; log_state "$s" report_ready
+        printf '{"probe":"timeout-carrier"}' >"$FAKE_DEVICE_REPORT"
+        run_scenario full-rscp; rc=$?
+        [ "$rc" -eq 1 ] || { echo "DRIVER_ERROR timeout rc=$rc (want 1)" >&2; exit 89; }
+        echo "DRIVER_SESSION $s"
+        exit 0
+        ;;
+    *)
+        echo "DRIVER_ERROR unknown case $CASE" >&2
+        exit 99
+        ;;
+esac
+DRIVER_EOF
+
+run_driver() { # case workdir -> OUT / RC
+    mkdir -p "$2"
+    OUT="$(TEST_HOOK_PATH="$TEST_HOOK" DRIVER_APK_SHA="$APK_SHA" bash "$DRIVER" "$1" "$2" 2>&1)"
+    RC=$?
+}
+
+evidence_count() { printf '%s\n' "$OUT" | grep -c '^EVIDENCE session='; }
+
+# ---- b1: real INT/TERM delivery after report_ready salvages the report -----
+for sigspec in signal-term:143 signal-int:130; do
+    scase="${sigspec%%:*}"; want_rc="${sigspec##*:}"
+    D="$WORK/$scase"
+    run_driver "$scase" "$D"
+    [ "$RC" -eq "$want_rc" ] && ! grep -q DRIVER_UNREACHABLE <<<"$OUT" &&
+        report ok "b1 $scase interrupts with rc=$want_rc" ||
+        report fail "b1 $scase interrupts with rc=$want_rc" "rc=$RC out=$OUT"
+    # The shipped signal trap (not the ambient shell's EXIT behavior) must own
+    # the interruption: signal_exit names the signal. Some bashes run EXIT
+    # traps even on an untrapped TERM, so the salvage alone cannot prove the
+    # trap wiring survived — this line can.
+    SIGNAME="${scase#signal-}"; SIGNAME="$(printf '%s' "$SIGNAME" | tr '[:lower:]' '[:upper:]')"
+    grep -q "interrupted by $SIGNAME" <<<"$OUT" &&
+        report ok "b1 $scase shipped trap handled the signal (interrupted-by line)" ||
+        report fail "b1 $scase shipped trap handled the signal" "no 'interrupted by $SIGNAME' in: $OUT"
+    [ "$(evidence_count)" -eq 1 ] &&
+        report ok "b1 $scase salvage emits exactly one EVIDENCE line" ||
+        report fail "b1 $scase salvage emits exactly one EVIDENCE line" "count=$(evidence_count) out=$OUT"
+    PRESERVED="$D/evidence/sig-$scase.json"
+    [ -f "$PRESERVED" ] && [ "$(cat "$PRESERVED")" = '{"probe":"signal-carrier"}' ] &&
+        report ok "b1 $scase preserved file carries the device bytes" ||
+        report fail "b1 $scase preserved file carries the device bytes" "missing/mangled $PRESERVED"
+    TR="$(printf '%s\n' "$OUT" | sed -n 's/^DRIVER_TEMP_ROOT=//p')"
+    [ -n "$TR" ] && [ ! -d "$TR" ] &&
+        report ok "b1 $scase TEMP_ROOT still removed after salvage" ||
+        report fail "b1 $scase TEMP_ROOT still removed after salvage" "TEMP_ROOT=$TR survived"
+done
+
+# ---- b2: duplicate-window + second-process cleanup idempotence -------------
+D2="$WORK/dup"
+run_driver "dup-window" "$D2"
+[ "$RC" -eq 0 ] && report ok "b2 dup-window driver completes (quiet no-op + capture + re-entry)" ||
+    report fail "b2 dup-window driver completes" "rc=$RC out=$OUT"
+[ "$(evidence_count)" -eq 1 ] &&
+    report ok "b2 flag-reset re-entry emits NO second EVIDENCE line (durable key)" ||
+    report fail "b2 flag-reset re-entry emits NO second EVIDENCE line" "count=$(evidence_count) out=$OUT"
+[ "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)" = '{"probe":"dup-carrier"}' ] &&
+    report ok "b2 preserved bytes intact after re-entry" ||
+    report fail "b2 preserved bytes intact after re-entry" "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)"
+run_driver "cleanup-rerun" "$D2"
+[ "$RC" -eq 0 ] && [ "$(evidence_count)" -eq 0 ] &&
+    report ok "b2 second-process cleanup over same evidence emits no duplicate" ||
+    report fail "b2 second-process cleanup over same evidence emits no duplicate" "rc=$RC count=$(evidence_count) out=$OUT"
+[ "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)" = '{"probe":"dup-carrier"}' ] &&
+    report ok "b2 second-process cleanup never overwrites the preserved bytes" ||
+    report fail "b2 second-process cleanup never overwrites the preserved bytes" "$(cat "$D2/evidence/dup-session.json" 2>/dev/null)"
+
+# ---- b3: CURRENT_* rolls across scenarios (and failure branch captures) ----
+D3="$WORK/roll"
+run_driver "roll" "$D3"
+[ "$RC" -eq 0 ] && report ok "b3 two failure-branch scenarios both return 1 with capture" ||
+    report fail "b3 two failure-branch scenarios both return 1 with capture" "rc=$RC out=$OUT"
+S1="$(printf '%s\n' "$OUT" | sed -n 's/^DRIVER_SESSIONS \([^ ]*\) .*/\1/p')"
+S2="$(printf '%s\n' "$OUT" | sed -n 's/^DRIVER_SESSIONS [^ ]* //p')"
+[ "$(evidence_count)" -eq 2 ] &&
+    report ok "b3 exactly two EVIDENCE lines (one per scenario)" ||
+    report fail "b3 exactly two EVIDENCE lines" "count=$(evidence_count) out=$OUT"
+if [ -n "$S1" ] && [ -n "$S2" ]; then
+    [ "$(cat "$D3/evidence/$S1.json" 2>/dev/null)" = '{"probe":"roll-ONE"}' ] &&
+        report ok "b3 first scenario bound its OWN bytes" ||
+        report fail "b3 first scenario bound its OWN bytes" "$(cat "$D3/evidence/$S1.json" 2>/dev/null)"
+    [ "$(cat "$D3/evidence/$S2.json" 2>/dev/null)" = '{"probe":"roll-TWO-different-bytes"}' ] &&
+        report ok "b3 rolled scenario bound its OWN bytes (not the stale carrier)" ||
+        report fail "b3 rolled scenario bound its OWN bytes" "$(cat "$D3/evidence/$S2.json" 2>/dev/null)"
+    SHA2="$(shasum -a 256 "$D3/evidence/$S2.json" 2>/dev/null | awk '{print $1}')"
+    grep -q "EVIDENCE session=$S2 report=$D3/evidence/$S2.json report_sha256=$SHA2" <<<"$OUT" &&
+        report ok "b3 rolled EVIDENCE line binds the rolled session+sha" ||
+        report fail "b3 rolled EVIDENCE line binds the rolled session+sha" "$OUT"
+else
+    report fail "b3 driver reported its sessions" "no DRIVER_SESSIONS line: $OUT"
+fi
+
+# ---- b6: timeout branch still captures before returning --------------------
+D6="$WORK/timeout"
+run_driver "timeout" "$D6"
+[ "$RC" -eq 0 ] && report ok "b6 timeout scenario returns 1 after capturing" ||
+    report fail "b6 timeout scenario returns 1 after capturing" "rc=$RC out=$OUT"
+[ "$(evidence_count)" -eq 1 ] && grep -q "timed out waiting for report_ready" <<<"$OUT" &&
+    report ok "b6 timeout branch preserved the report_ready bytes" ||
+    report fail "b6 timeout branch preserved the report_ready bytes" "count=$(evidence_count) out=$OUT"
+
+# ---- b4: malformed shasum output -> loud rc=2, no EVIDENCE (was token c9) --
+SHIM="$WORK/shim"; mkdir -p "$SHIM"
+printf '#!/bin/sh\necho "zzz-not-hex-garbage  fake"\n' >"$SHIM/shasum"
+chmod +x "$SHIM/shasum"
+EVB4="$WORK/ev-b4"; mkdir -p "$EVB4"
+SRCB4="$WORK/src-b4.json"; printf '{"probe":"b4"}' >"$SRCB4"
+OUT="$(EVIDENCE_DIR="$EVB4" INSTALLED_APK_SHA="$APK_SHA" PATH="$SHIM:$PATH" bash -c '
+    '"$FN"'
+    preserve_report "$1" "$2"
+' _ "sess-b4" "$SRCB4" 2>&1)"
+RC=$?
+[ "$RC" -eq 2 ] && grep -q "could not fingerprint preserved report" <<<"$OUT" &&
+    report ok "b4 malformed shasum output -> rc=2 with named failure" ||
+    report fail "b4 malformed shasum output -> rc=2 with named failure" "rc=$RC out=$OUT"
+grep -q '^EVIDENCE session=' <<<"$OUT" &&
+    report fail "b4 no EVIDENCE line may bind a garbage sha" "$OUT" ||
+    report ok "b4 no EVIDENCE line binds a garbage sha"
 
 printf 'test-hook evidence-carrier selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
