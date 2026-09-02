@@ -15,6 +15,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        buildConfigField("boolean", "CODEX_BENCH", "false")
+        manifestPlaceholders["appLabel"] = "CellRebel Auto"
+        manifestPlaceholders["benchProviderPackage"] = "name.caiyao.fakegps.bench"
     }
 
     signingConfigs {
@@ -40,6 +43,14 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("bench")
         }
+        create("codexBench") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".codexbench"
+            buildConfigField("boolean", "CODEX_BENCH", "true")
+            manifestPlaceholders["appLabel"] = "CellRebel Auto · codex-bench"
+            manifestPlaceholders["benchProviderPackage"] = "name.caiyao.fakegps.codexbench"
+            matchingFallbacks += listOf("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -61,6 +72,21 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+    }
+
+    // Reuse debug-only adapters and probes while keeping ordinary variant paths unchanged.
+    sourceSets.getByName("codexBench") { setRoot("src/debug") }
+}
+
+configurations.named("codexBenchImplementation") {
+    extendsFrom(configurations.getByName("debugImplementation"))
+}
+
+androidComponents {
+    // AGP 9 defaults unit tests to the tested build type (debug) only. Exercise
+    // the actual codexBench BuildConfig and adapter, without changing other variants.
+    beforeVariants(selector().withBuildType("codexBench")) {
+        (it as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
     }
 }
 

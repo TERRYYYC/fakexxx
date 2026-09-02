@@ -199,12 +199,15 @@ class DefaultPrincipalCompositionGreenTest {
 
     @Test
     fun `the selected composition accepts the selected binder target`() {
-        // Pin what "selected" means in this debug test build: the single selection
-        // IS the bench principal (release selects production — proven by the
-        // release-lane routing guard, not observable from debug unit tests).
+        // Pin the actual variant independently from the selector under test.
+        // Ordinary debug preserves its prior bench assertion; codexBench is isolated.
         assertEquals(
-            "this oracle is only meaningful while the debug test build selects bench",
-            io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH,
+            "this oracle is only meaningful while the actual variant selects its pinned bench",
+            if (com.example.cellrebelauto.BuildConfig.CODEX_BENCH) {
+                "name.caiyao.fakegps.codexbench"
+            } else {
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH
+            },
             ProviderPrincipal.selected
         )
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()

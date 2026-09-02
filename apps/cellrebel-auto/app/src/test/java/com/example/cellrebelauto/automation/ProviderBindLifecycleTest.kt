@@ -84,8 +84,8 @@ class ProviderBindLifecycleTest {
         val returned = executor.bind()
         assertTrue("bind() against the frozen provider component must dispatch (returned false)", returned)
         assertEquals(
-            "debug Auto must target the QWY debug applicationIdSuffix, not the absent release package",
-            ContractV1.PROVIDER_APPLICATION_ID_BENCH,
+            "Auto must bind its build-selected provider, never a sibling installation",
+            ProviderPrincipal.selected,
             boundIntent?.component?.packageName,
         )
         assertEquals(

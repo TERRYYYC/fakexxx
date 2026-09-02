@@ -71,3 +71,9 @@ Files: ProviderPrincipal.kt, debug/release ProviderPrincipalBuild.kt, provider-p
 3. Capture new HEAD, APK SHA-256, signer, labels and exact IDs. Old emulator evidence does not cover these new bytes.
 4. Device operations remain serial-qualified and limited to the authorized Moto. Re-read current state before installation; do not pause old automation or alter global mock/LSPosed state without resolving the live-run boundary.
 5. Keep #66 open and PRs unmerged; separately report packaging completion versus physical oracle acceptance.
+
+## Verification implementation notes
+
+- `.github/workflows/android-a-plus.yml` adds a separate codex-bench lane which builds both isolated APKs, runs actual-variant Auto tests, checks compiled identities/signers, and publishes evidence. It does not replace or couple the existing release lanes.
+- AGP 9 needs codexBench unit tests explicitly enabled; the diagnosed configuration failure and non-vacuous regression evidence are recorded in `docs/bug-report/codex-bench-unit-test-entry/bug-report.md`.
+- The ordinary debug and codexBench suites each retain an independent expected identity. A failed constructor must not accidentally satisfy a later unknown-wrapper rejection assertion.
