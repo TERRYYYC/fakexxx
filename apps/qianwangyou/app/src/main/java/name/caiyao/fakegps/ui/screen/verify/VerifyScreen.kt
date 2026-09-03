@@ -43,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishPropagation
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.ui.observationScopePresentation
 import name.caiyao.fakegps.verify.FieldReport
 import name.caiyao.fakegps.verify.FieldVerdict
 import name.caiyao.fakegps.verify.HookApplicability
@@ -193,13 +194,13 @@ private fun VerdictCard(state: VerifyUiState) {
             when (state.applicability) {
                 HookApplicability.MODE_OFF -> {
                     headline = "伪装已关闭"
-                    detail = "当前模式为「关闭」，hook 原样透传真实设备信息。" +
+                    detail = "当前模式为「关闭」，本模块原样透传系统 API 返回值。" +
                         "到「设置 → 伪装模式」开启后再验证。"
                 }
                 HookApplicability.OUTSIDE_ACTIVE_HOURS -> {
                     headline = "当前不在生效时段"
-                    detail = "模式为「按时段」，现在不在配置的时间窗口内，hook 按设计透传真实值。" +
-                        "此时读到真实值是正常的，不代表伪装失败。"
+                    detail = "模式为「按时段」，现在不在配置的时间窗口内，本模块按设计透传系统 API 返回值。" +
+                        "此时读到未被本模块替换的值是正常的，不代表伪装失败。"
                 }
                 HookApplicability.SCHEMA_REJECTED -> {
                     headline = "hook 拒绝了当前配置"
@@ -223,7 +224,7 @@ private fun VerdictCard(state: VerifyUiState) {
                 }
                 HookApplicability.NEVER_PUBLISHED -> {
                     headline = "尚未发布过配置"
-                    detail = "还没有任何配置送达 hook，所有字段都会透传真实值。到档案编辑页保存一次即可。"
+                    detail = "还没有任何配置送达 hook，本模块会透传系统 API 返回值。到档案编辑页保存一次即可。"
                 }
                 HookApplicability.PUBLICATION_FAILED -> {
                     headline = "档案尚未发布"
@@ -289,7 +290,7 @@ private fun VerdictCard(state: VerifyUiState) {
             }
             VerificationStatus.NOTHING_CONFIGURED -> {
                 headline = "当前档案没有配置任何字段"
-                detail = "所有字段都会透传真实值。到档案编辑页填入至少一个字段再来验证。"
+                detail = "本模块会透传系统 API 返回值。到档案编辑页填入至少一个字段再来验证。"
                 tone = MaterialTheme.colorScheme.onSurfaceVariant
             }
         }
@@ -337,7 +338,7 @@ private fun VerdictCard(state: VerifyUiState) {
 internal fun partialVerificationDetail(summary: VerificationSummary): String {
     val unchecked = buildList {
         if (summary.ambiguous > 0) {
-            add("${summary.ambiguous} 个值与真实值相同，需改成明显不同的值")
+            add("${summary.ambiguous} 个值与读取基线相同，需改成明显不同的值")
         }
         if (summary.unobservable > 0) add("${summary.unobservable} 个本进程读不到")
         if (summary.notVerifiable > 0) add("${summary.notVerifiable} 个没有系统读取接口")
@@ -359,20 +360,7 @@ internal fun probeFailureMessage(failure: ProbeFailure): String = when (failure)
 
 @Composable
 private fun ScopeCard(state: VerifyUiState) {
-    val text = when (state.scope) {
-        ObservationScope.SELF_HOOKED ->
-            "调试构建：本应用已 hook 自身进程，所以这里的读回值可以直接证明 hook 是否生效（受控探针模式）。" +
-                "同时会在一次受保护的基线读取中绕过自身 getter hook；若配置值恰好等于真值，" +
-                "该字段会标为「巧合」而不是「已生效」，避免把未运行误判成成功。"
-        ObservationScope.HOOK_PROBE ->
-            "正式构建的主界面保持未 hook；本次观测来自独立、非导出的 :hook_verify 进程。" +
-                "只有 Vector/LSPosed 已把模块注入该进程、且请求 ID 与配置指纹都匹配时，" +
-                "这些公共 API 读回值才会进入字段判定。"
-        ObservationScope.REAL_BASELINE ->
-            "正式构建不会 hook 自己的进程 —— 否则配置界面会把伪造值当成真值显示回来。" +
-                "因此本页读到的是本机真实值，不能用来判断目标 App 内的 hook 是否生效；" +
-                "它的用途是给你一份真实基线，好挑一个明显区别于真实网络的值。"
-    }
+    val text = observationScopePresentation(state.scope).explanation
     InfoCard(title = "这一页能证明什么", body = text)
 }
 
@@ -477,11 +465,7 @@ private fun InfoCard(title: String, body: String) {
 
 @Composable
 private fun FieldRow(f: FieldReport, scope: ObservationScope) {
-    val observedLabel = when (scope) {
-        ObservationScope.SELF_HOOKED -> "观测"
-        ObservationScope.HOOK_PROBE -> "探针观测"
-        ObservationScope.REAL_BASELINE -> "真实"
-    }
+    val observedLabel = observationScopePresentation(scope).observedLabel
     val observedValue = displayedObservation(scope, f.observed, f.baseline)
 
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
@@ -510,7 +494,7 @@ private fun FieldRow(f: FieldReport, scope: ObservationScope) {
 
         if (f.ambiguous) {
             Text(
-                text = "此值与真实值相同 — 即使 hook 生效也无法区分，建议改成明显不同的值",
+                text = "此值与读取基线相同 — 即使 hook 生效也无法区分，建议改成明显不同的值",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(top = 4.dp),

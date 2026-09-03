@@ -1,7 +1,5 @@
 package name.caiyao.fakegps.verify
 
-import name.caiyao.fakegps.BuildConfig
-
 /**
  * What a reading taken inside THIS process is evidence of.
  *
@@ -12,29 +10,31 @@ import name.caiyao.fakegps.BuildConfig
  */
 enum class ObservationScope {
     /**
-     * Debug build: the module hooks its own process, so a reading equal to the configured value
+     * Ordinary debug build: the module hooks its own process, so a reading equal to the configured value
      * proves the chain works end to end. This is the controlled-probe mode scripts/test-hook.sh uses.
      * The flip side is that readings here are NOT the real device values.
      */
     SELF_HOOKED,
 
     /**
-     * Stable release: observations came from the private `:hook_verify` process after its sentinel
+     * Observations came from the private `:hook_verify` process after its sentinel
      * proved that Xposed installed the module in that target classloader.
      */
     HOOK_PROBE,
 
     /**
-     * Release build: MainHook deliberately skips its own package so the configuration UI can never
-     * display fake values back as though they were real. Readings prove nothing about the hook, but
-     * they ARE the genuine device baseline — which is what the user needs in order to pick a value
-     * that visibly differs from the real network.
+     * Release/codexBench configuration process: MainHook deliberately skips non-probe self
+     * processes, so this module does not fabricate the baseline. These readings prove nothing
+     * about target hook success; other modules or system mock providers may still affect them.
      */
     REAL_BASELINE;
 
     companion object {
-        /** Mirrors the self-hook condition in MainHook#handleLoadPackage. */
+        /** Configuration-process classification, not a runtime framework/sentinel assertion. */
         fun current(): ObservationScope =
-            if (BuildConfig.DEBUG) SELF_HOOKED else REAL_BASELINE
+            if (RuntimeSelfHookPolicy.shouldHook(
+                    RuntimeSelfHookPolicy.MODULE_PACKAGE,
+                    RuntimeSelfHookPolicy.MODULE_PACKAGE,
+                )) SELF_HOOKED else REAL_BASELINE
     }
 }

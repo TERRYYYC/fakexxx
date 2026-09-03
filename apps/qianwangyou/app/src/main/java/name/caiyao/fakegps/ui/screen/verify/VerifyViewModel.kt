@@ -153,8 +153,8 @@ class VerifyViewModel(app: Application) : AndroidViewModel(app) {
 
             // The same readings feed different columns depending on what they can prove. Under
             // SELF_HOOKED they are observations that confirm or refute the config; under
-            // REAL_BASELINE they are untouched device values, so every configured field is honestly
-            // reported as "no evidence" instead of as a failure.
+            // REAL_BASELINE this module does not self-hook them, but system mock providers or other
+            // modules may still affect them. Configured fields therefore have "no evidence", not failure.
             val processScope = ObservationScope.current()
             val selfHooked = processScope == ObservationScope.SELF_HOOKED
             val baseline = if (selfHooked) {

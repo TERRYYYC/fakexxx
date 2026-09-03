@@ -19,6 +19,8 @@ internal data class SystemMockLocationReadback(
 /** Injectable read side kept separate from the mock-provider command gateway. */
 internal fun interface SystemMockLocationReader {
     fun read(): List<SystemMockLocationReadback>
+
+    fun readSnapshot(): SystemMockReadSnapshot = SystemMockReadSnapshot(read())
 }
 
 internal data class SystemMockTrustResult(
@@ -74,13 +76,17 @@ internal fun SystemMockTrustResult.forAuthoritativeDigest(
 internal class SystemMockTrustPolicy(
     private val reader: SystemMockLocationReader,
     private val requiredSources: Set<String> = REQUIRED_FRAMEWORK_SOURCES,
+    private val diagnosticSink: (SystemMockEvaluationDiagnostics) -> Unit = {},
 ) {
     fun evaluate(
         targetLatitude: Double,
         targetLongitude: Double,
         publishNotBeforeElapsedRealtimeMs: Long,
     ): SystemMockTrustResult {
-        val readbacks = runCatching(reader::read).getOrElse { emptyList() }
+        val snapshot = runCatching(reader::readSnapshot).getOrElse { cause ->
+            SystemMockReadSnapshot(emptyList(), readerFailure = SystemMockReadFailure.from(cause))
+        }
+        val readbacks = snapshot.readbacks
         val fingerprint = readbacks
             .sortedBy { it.source }
             .joinToString(separator = "|") { sample ->
@@ -131,7 +137,7 @@ internal class SystemMockTrustPolicy(
         val verified = publishNotBeforeElapsedRealtimeMs > 0L &&
             matchesTargetProjection && everySourceFresh
 
-        return SystemMockTrustResult(
+        val result = SystemMockTrustResult(
             latitude = representative?.latitude,
             longitude = representative?.longitude,
             isMock = selected.takeIf { hasEveryRequiredSource }?.all { it.isMock },
@@ -149,6 +155,12 @@ internal class SystemMockTrustPolicy(
                 emptyMap()
             },
         )
+        // A diagnostic transport is not a trust input. Neither its formatting nor its failure
+        // can affect the result, fingerprint, canonical projection or durable watermark.
+        runCatching {
+            diagnosticSink(snapshot.evaluationDiagnostics(requiredSources, publishNotBeforeElapsedRealtimeMs))
+        }
+        return result
     }
 
     private fun validCoordinates(latitude: Double, longitude: Double): Boolean =

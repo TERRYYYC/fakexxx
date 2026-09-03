@@ -1,0 +1,6 @@
+utc_started=2026-09-03T13:59:07Z
+cwd=/Users/terry/Desktop/coding/fakexxx-location-readback
+head=6691bcb00305615676ef8d6856561ba3c23d61ab
+command=shasum -a 256 apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk apps/qianwangyou/app/build/outputs/apk/codexBench/app-codexBench.apk apps/qianwangyou/app/build/outputs/apk/release/app-release.apk apps/qianwangyou/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk apps/cellrebel-auto/app/build/outputs/apk/codexBench/app-codexBench.apk 
+exit=0
+utc_completed=2026-09-03T13:59:07Z

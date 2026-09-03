@@ -1,0 +1,7 @@
+signer ok: apps/qianwangyou/app/build/outputs/apk/codexBench/app-codexBench.apk
+  cert sha256: 7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41
+codex-bench isolation PASS: name.caiyao.fakegps.codexbench | 千网游 · codex-bench
+signer ok: apps/cellrebel-auto/app/build/outputs/apk/codexBench/app-codexBench.apk
+  cert sha256: 7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41
+codex-bench isolation PASS: com.example.cellrebelauto.codexbench | CellRebel Auto · codex-bench
+Both APKs have isolated codex-bench identities; no device verification is implied.

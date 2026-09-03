@@ -1,0 +1,36 @@
+boot_id=7c78851c-bd41-4221-9bc4-272e87542dd0
+qwy_package=name.caiyao.fakegps.codexbench
+qwy_uid=10208
+qwy_pid=10461
+android_mock_location_app=千网游 · codex-bench
+mock_location_appop=allow
+qwy_ui_switch_checked=true
+qwy_ui_status="System Mock 运行中 · 18 次"
+qwy_ui_effective_profile=[redacted]
+system_mock_writer_fp=sha256:3332aada1694f5df
+system_mock_writer_all_durability_booleans=true
+
+[production service and adjacent production-reader evaluation]
+1788458486.782 CODEX_PHASE: RAW_SYSTEM_MOCK_START
+1788458486.983 PID=10461/TID=14206 ConfigPrefsSync: published=true readable=true transportAccepted=true commit=true outcomeDurable=true profileId=1 fp=sha256:3332aada1694f5df bytes=255
+1788458486.991 PID=10461 MockProviderMain: event=start state=Running(config=[redacted], emittedCount=1)
+1788458488.001 PID=10461/TID=14206 QwySystemMockRead: origin=SERVICE source=gps status=SAMPLE enabled=true mock=true source_elapsed_ms=1066506 publish_anchor_ms=0 freshness=UNASSESSED failure=none reader_failure=none
+1788458488.001 PID=10461/TID=14206 QwySystemMockRead: origin=SERVICE source=network status=SAMPLE enabled=true mock=true source_elapsed_ms=1066506 publish_anchor_ms=0 freshness=UNASSESSED failure=none reader_failure=none
+
+[Android location-service cross-check]
+network provider [mock]:
+  last location=Location[network redacted mock]
+  identity=10208/name.caiyao.fakegps.codexbench[qwy_authoritative_continuity]
+gps provider [mock]:
+  last location=Location[gps redacted mock]
+  identity=10208/name.caiyao.fakegps.codexbench[qwy_authoritative_continuity]
+
+Boundary: these lines prove two raw samples from the real GPS/network readers, with enabled and
+mock flags, in one adjacent evaluation of the production service. The production service passes
+publish_anchor_ms=0, so freshness is honestly UNASSESSED. This file does not claim post-anchor
+freshness, trust, exact coordinate equality, continuity, a public target API value, Moto behavior
+or #66 FULL. The System Mock switch published the separate fingerprint above only after the cold-B
+receipt was complete; it is not part of, and cannot contaminate, the A/hot-B/cold-B proof.
+
+Primary receipts: raw-mock-picker.xml, raw-mock-appops-selected.stdout,
+raw-qwy-post-toggle.xml, raw-post-toggle-logcat.stdout, raw-post-toggle-location.stdout.

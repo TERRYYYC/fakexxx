@@ -32,7 +32,7 @@ class VerifyUiContractTest {
             ),
         )
 
-        assertTrue(detail.contains("2 个值与真实值相同"))
+        assertTrue(detail.contains("2 个值与读取基线相同"))
         assertTrue(detail.contains("明显不同"))
         assertFalse(detail.contains("另有 ，"))
     }

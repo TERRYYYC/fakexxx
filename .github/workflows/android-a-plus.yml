@@ -256,9 +256,12 @@ jobs:
             --tests '*CodexBench*' --tests '*ProviderPrincipalRoutingRedTest' \
             --tests '*BinderIntentIdentityTest' --tests '*DefaultPrincipalCompositionGreenTest' \
             :app:assembleCodexBench
-      - name: isolated QWY build
+      - name: actual codex-bench QWY self-hook isolation and build
         working-directory: apps/qianwangyou
-        run: ./gradlew --no-daemon :app:assembleCodexBench
+        run: |
+          ./gradlew --no-daemon :app:testCodexBenchUnitTest \
+            --tests '*RuntimeSelfHook*' --tests '*ObservationScope*' \
+            :app:assembleCodexBench
       - name: compiled identities and pinned signers
         run: |
           bash scripts/check-codex-bench-apks.sh \
@@ -273,6 +276,8 @@ jobs:
             apps/cellrebel-auto/app/build/reports/tests/testCodexBenchUnitTest/**
             apps/cellrebel-auto/app/build/test-results/testCodexBenchUnitTest/**
             apps/cellrebel-auto/app/build/outputs/apk/codexBench/*.apk
+            apps/qianwangyou/app/build/reports/tests/testCodexBenchUnitTest/**
+            apps/qianwangyou/app/build/test-results/testCodexBenchUnitTest/**
             apps/qianwangyou/app/build/outputs/apk/codexBench/*.apk
           if-no-files-found: error
 

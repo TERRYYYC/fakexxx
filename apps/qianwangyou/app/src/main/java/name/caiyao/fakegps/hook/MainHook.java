@@ -88,17 +88,19 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // The configuration process is never self-hooked in release. The sole shipped exception
-        // is the private one-shot :hook_verify process, selected by the shared policy below.
+        // Release and codexBench do not spoof their configuration/ordinary self processes.
+        // Their sole self-hook exception is the exact private one-shot :hook_verify process.
         //
-        // A debug build hooks its own process so it can act as a controlled probe: it reads plain
+        // Ordinary debug hooks its own process so it can act as a controlled probe: it reads plain
         // LocationManager (MapScreen/VerifyViewModel, no GMS fused path), which is what lets
         // scripts/test-hook.sh tell "the hook machinery is broken" apart from "the target app uses
         // an API we don't cover". A release build must never spoof its own UI — that would make the
         // configuration screen display the fake values back to the user as if they were real. The
-        // release probe keeps that isolation while providing a deliberately hook-enabled reader.
+        // private probe keeps that isolation while providing a deliberately hook-enabled reader.
+        // The generated build policy, not DEBUG/log verbosity, controls eligibility. This early
+        // return leaves framework XSharedPreferences support alone: LSPosed installs that before
+        // dispatching module callbacks, separately from this module's spoof hooks.
         if (!RuntimeSelfHookPolicy.shouldHook(
-                name.caiyao.fakegps.BuildConfig.DEBUG,
                 lpparam.packageName,
                 lpparam.processName)) {
             return;

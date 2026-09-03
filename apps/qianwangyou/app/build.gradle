@@ -51,6 +51,7 @@ android {
     buildTypes {
         debug {
             signingConfig signingConfigs.bench
+            buildConfigField 'boolean', 'ALLOW_NON_PROBE_SELF_HOOK', 'true'
             // Bench variant: installs as a SEPARATE app alongside the release (production) build.
             // Release = "name.caiyao.fakegps" (千网游), stays on the phone untouched.
             // Debug  = "name.caiyao.fakegps.bench" (千网游·测试), independent installation.
@@ -61,6 +62,9 @@ android {
         }
         codexBench {
             initWith debug
+            // Its main/ordinary self processes perform independent raw readback.
+            // Keep DEBUG diagnostics without inheriting debug's deliberate self spoof.
+            buildConfigField 'boolean', 'ALLOW_NON_PROBE_SELF_HOOK', 'false'
             // Explicit isolated installation; never replace the ordinary bench app.
             applicationIdSuffix ".codexbench"
             manifestPlaceholders = [appLabel: '千网游 · codex-bench']
@@ -68,6 +72,7 @@ android {
         }
         release {
             signingConfig signingConfigs.bench
+            buildConfigField 'boolean', 'ALLOW_NON_PROBE_SELF_HOOK', 'false'
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -96,10 +101,23 @@ android {
         androidTest.assets.srcDirs += files("$projectDir/schemas")
         // Reuse the existing debug probes without moving them into release sources.
         codexBench.setRoot('src/debug')
+        // These tests exercise src/debug-only probes, absent from the release APK.
+        // Share them across both debug-backed variants without compiling them in release.
+        testCodexBench.java.srcDir('src/testDebug/java')
     }
 }
 
 configurations.codexBenchImplementation.extendsFrom(configurations.debugImplementation)
+
+androidComponents {
+    // AGP 9 otherwise omits non-debug unit-test tasks. Test the actual generated
+    // codexBench/release policy, not a debug test that pretends to be another build.
+    beforeVariants(selector().all()) { variant ->
+        if (variant.buildType in ['codexBench', 'release']) {
+            (variant as com.android.build.api.variant.HasUnitTestBuilder).enableUnitTest = true
+        }
+    }
+}
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")

@@ -1,0 +1,6 @@
+apps/qianwangyou/app/build/test-results/testDebugUnitTest
+suites=147 tests=1046 failures=0 errors=0 skipped=0
+apps/qianwangyou/app/build/test-results/testCodexBenchUnitTest
+suites=147 tests=1046 failures=0 errors=0 skipped=0
+apps/qianwangyou/app/build/test-results/testReleaseUnitTest
+suites=140 tests=1010 failures=0 errors=0 skipped=0

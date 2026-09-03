@@ -52,6 +52,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import name.caiyao.fakegps.data.model.FieldSpec
 import name.caiyao.fakegps.data.model.FieldType
 import name.caiyao.fakegps.config.UnavailableSpec
+import name.caiyao.fakegps.ui.observationScopePresentation
 import name.caiyao.fakegps.verify.ObservationScope
 import name.caiyao.fakegps.verify.VerificationEngine
 
@@ -254,19 +255,15 @@ private fun TextField(
     // A spoofed value is only provable if it differs from what the device already reports. Flagging
     // the collision at input time is the only point where the user can still act on it.
     //
-    // Only meaningful against a REAL baseline: a debug build hooks itself, so there "reference" is
-    // already the spoofed value and a match means the hook WORKS — warning about it would be
-    // exactly backwards.
+    // Only meaningful against a baseline not self-hooked by this module. A self-hook-eligible
+    // build may already read its spoofed value as "reference", so a collision warning there would
+    // be misleading. Neither baseline nor passthrough certifies the absence of other spoofing.
     val unavailable = value == ProfileFieldDraft.UNAVAILABLE_TOKEN
     val supportsUnavailable = UnavailableSpec.supportsUnavailable(spec.dbColumn)
     val collides = !unavailable && scope == ObservationScope.REAL_BASELINE && value.isNotBlank() &&
         reference != null && VerificationEngine.valuesMatch(value, reference)
 
-    val referenceLabel = when (scope) {
-        ObservationScope.REAL_BASELINE -> "本机真实值"
-        ObservationScope.SELF_HOOKED -> "本机当前读到（调试构建已自我 hook，可能已是伪造值）"
-        ObservationScope.HOOK_PROBE -> "验证探针读到（已被 hook）"
-    }
+    val referenceLabel = observationScopePresentation(scope).referenceLabel
 
     Column(modifier = Modifier.fillMaxWidth()) {
         OutlinedTextField(
@@ -275,15 +272,15 @@ private fun TextField(
             label = { Text(label) },
             // Empty means passthrough — the project's core invariant, previously stated only on the
             // boolean dropdown, so text fields gave no hint that blank was a meaningful choice.
-            placeholder = { Text(if (spec.hint.isBlank()) "留空 = 透传真实值" else "${spec.hint}（留空 = 透传）") },
+            placeholder = { Text(if (spec.hint.isBlank()) "留空 = 透传系统 API 返回值" else "${spec.hint}（留空 = 透传）") },
             isError = collides || validationError != null,
             supportingText = {
                 when {
                     validationError != null -> Text(validationError)
                     unavailable -> Text("不上报：目标 App 将看到该 API 的“无数据”值")
                     collides -> Text("与$referenceLabel 相同 — 即使生效也无法区分，建议换一个明显不同的值")
-                    supportsUnavailable -> Text("留空 = 透传真实值；不上报 = 该 API 返回无数据")
-                    else -> Text("留空 = 透传真实值；此字段不支持不上报")
+                    supportsUnavailable -> Text("留空 = 透传系统 API 返回值；不上报 = 该 API 返回无数据")
+                    else -> Text("留空 = 透传系统 API 返回值；此字段不支持不上报")
                 }
             },
             trailingIcon = if (supportsUnavailable) {
@@ -328,15 +325,11 @@ private fun BooleanField(
     val selectedLabel = options.firstOrNull { it.first == value }?.second ?: "透传"
 
     // Booleans need the same reference and collision treatment as text fields: with only two
-    // possible values a collision with reality is far MORE likely here, not less.
+    // possible values a collision with the baseline is far MORE likely here, not less.
     val collides = scope == ObservationScope.REAL_BASELINE && value.isNotBlank() &&
         reference != null && VerificationEngine.valuesMatch(value, reference)
 
-    val referenceLabel = when (scope) {
-        ObservationScope.REAL_BASELINE -> "本机真实值"
-        ObservationScope.SELF_HOOKED -> "本机当前读到（调试构建已自我 hook，可能已是伪造值）"
-        ObservationScope.HOOK_PROBE -> "验证探针读到（已被 hook）"
-    }
+    val referenceLabel = observationScopePresentation(scope).referenceLabel
     val referenceText = reference?.let { if (it.equals("true", true) || it == "1") "是" else "否" }
 
     ExposedDropdownMenuBox(
@@ -353,7 +346,7 @@ private fun BooleanField(
                 when {
                     collides -> Text("与$referenceLabel 相同 — 即使生效也无法区分，建议改成相反的值")
                     referenceText != null -> Text("$referenceLabel：$referenceText")
-                    else -> Text("透传 = 保持真实值")
+                    else -> Text("透传 = 保持系统 API 返回值")
                 }
             },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },

@@ -1,0 +1,69 @@
+boot_id_before_shutdown=7c78851c-bd41-4221-9bc4-272e87542dd0
+
+[production UI stop]
+1788458572.878 CODEX_PHASE: SYSTEM_MOCK_STOP_START
+1788458573.012 PID=10461 MockProviderMain: event=stop-and-use-hook state=Idle
+qwy_ui_switch_checked=false
+qwy_ui_status="Hook 位置注入"
+activity_services_for_qwy=(nothing)
+
+[provider boundary after stop]
+network_provider_mock_override=removed
+network_provider_last_location=null
+network_provider_identity=10144/com.google.android.gms[network_location_provider]
+gps_provider_mock_override=removed
+gps_provider_last_location=null
+gps_provider_identity=1000/android[GnssService]
+passive_and_fused_cache_still_contained_prior_mock_sample=true
+
+[authorization and framework cleanup]
+mock_location_appop=default
+revoke_ACCESS_FINE_LOCATION_exit=0
+revoke_ACCESS_COARSE_LOCATION_exit=0
+revoke_POST_NOTIFICATIONS_exit=0
+restore_development_settings_enabled_to_absent_exit=0
+VectorModuleDisable={"Disabled":["name.caiyao.fakegps.codexbench"],"Failed":[],"success":true}
+VectorModuleReadback={"PACKAGE":"name.caiyao.fakegps.codexbench","UID":10208,"STATUS":"disabled"}
+VectorZygiskDisableMarker_created_exit=0
+force_stop_qwy_exit=0
+force_stop_auto_exit=0
+
+There was no separate post-revoke permission dump, post-delete settings readback, post-touch
+marker listing or post-force-stop PID snapshot before the ADB transport became unavailable.
+These four items are successful command receipts, not independent terminal-state readbacks.
+
+[retained cleanup failure]
+command="vector-cli --json scope set name.caiyao.fakegps.codexbench"
+exit=1
+error="java.lang.NullPointerException: ScopeCommand.set parameter apps is null"
+scope_after_failed_empty_set=com.example.cellrebelauto.codexbench/0,name.caiyao.fakegps.codexbench/0
+
+Vector v2.2 rejected its documented optional empty argument list. A per-app removal was planned,
+but the private ADB transport became offline before that command could run. Causality is not
+assigned to any preceding cleanup command. The guest was restarted once through its authenticated
+emulator console; ADB became offline again while the guest heartbeat still advanced.
+
+[host boundary captured 2026-09-03T18:11:58Z]
+emulator_console_name=codex_framework_api35
+emulator_console_path=/tmp/fakexxx-framework.wofmpO/avds/codex_framework_api35.avd
+emulator_console_kill=OK
+dedicated_avd_directory_deleted=true
+dedicated_avd_ini_deleted=true
+codex_framework_api35_process=absent
+owned_ports_5040_5580_5581_listeners=absent
+default_adb_inventory=empty
+
+The dedicated temporary AVD contained no user data outside this run. Destroying it removed the
+residual inert Vector scope, installed test apps and all guest test state. This is stronger cleanup
+than preserving the userdata for replay; the host receipts remain available for review. The AVD
+cannot be recovered, but it can be recreated from the pinned plan and artifacts.
+
+Primary receipts: cleanup-stop-logcat.stdout, cleanup-qwy-post-stop.xml,
+cleanup-post-stop-services.stdout, cleanup-post-stop-location.stdout,
+cleanup-mock-app-readback.stdout, cleanup-vector-module-disable.stdout,
+cleanup-vector-modules-readback.stdout, cleanup-vector-zygisk-disable-marker.meta,
+cleanup-vector-scope-clear.meta/.stderr, cleanup-vector-scope-readback.stdout,
+cleanup-revoke-qwy-fine.meta, cleanup-revoke-qwy-coarse.meta,
+cleanup-revoke-qwy-notifications.meta, cleanup-dev-options-restore.meta.
+The final AVD/process/port facts are host observations recorded in this portable extract, not
+guest receipts from the earlier boot.
