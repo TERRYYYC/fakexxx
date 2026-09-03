@@ -2,7 +2,12 @@ package name.caiyao.fakegps.mockprovider
 
 import java.io.File
 import java.security.MessageDigest
+import name.caiyao.fakegps.config.ConfigPrefsSync
+import name.caiyao.fakegps.data.db.ProfileEntity
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -302,5 +307,142 @@ class APlus10AFixtureSeedTest {
         } catch (e: IllegalArgumentException) {
             // expected — declared digest must also equal the registered pin
         }
+    }
+
+    // ------------------------------------------------------------------
+    // R9 P1 (Sol) — exact canonical transport envelope: mirror + comparator
+    //
+    // The old verifier read root `mode` and required "hook" (the writer puts
+    // "hook" under locationDeliveryMode; root mode is the spoof mode), read
+    // `fields.wifiSsid` (the canonical column is wifi_ssid), only checked that
+    // schemaVersion EXISTS, and accepted extra/missing legs. A freshly
+    // published valid payload therefore deterministically failed while the
+    // source-token guard stayed green. These cases drive the mirror with a
+    // fixture in the WRITER's exact shape and mutate one leg at a time.
+    // ------------------------------------------------------------------
+
+    private val seededRow: ProfileEntity =
+        APlus10AFixtureSeed.toProfileRows(APlus10AFixtureSeed.parsePayload(payload())).first()
+
+    private val snapshot = APlus10AFixtureSeed.TransportSettingsSnapshot(
+        refreshIntervalSec = 30,
+        locationDeliveryMode = "hook",
+        spoofMode = "always_on",
+        activeHourStart = 7,
+        activeHourEnd = 22,
+    )
+
+    /** `fields` in the writer's shape: DB column keys, org.json number rendering (3.0 → 3). */
+    private fun canonicalFields(ssidKey: String = "wifi_ssid", extra: String = "", drop: String? = null,
+                                longitude: Double = seededRow.longitude!!): String {
+        val legs = linkedMapOf(
+            "latitude" to JSONObject.numberToString(seededRow.latitude!!),
+            "longitude" to JSONObject.numberToString(longitude),
+            "altitude" to JSONObject.numberToString(seededRow.altitude!!),
+            "accuracy" to JSONObject.numberToString(seededRow.accuracy!!.toDouble()),
+            "addname" to JSONObject.quote(seededRow.addname),
+            "tac" to seededRow.tac!!.toString(),
+            ssidKey to JSONObject.quote(seededRow.wifiSsid),
+        )
+        drop?.let { legs.remove(it) }
+        return legs.entries.joinToString(",") { "\"${it.key}\":${it.value}" } + extra
+    }
+
+    /** The full canonical payload exactly as ConfigPrefsSync.buildFieldMapJson emits it. */
+    private fun canonicalPublished(
+        schemaVersion: Int = ConfigPrefsSync.SCHEMA_VERSION,
+        mode: String = "always_on",
+        delivery: String = "hook",
+        activeHours: String = """"activeHours":{"start":7,"end":22},""",
+        fields: String = canonicalFields(),
+        unavailable: String = "[]",
+    ): String =
+        """{"schemaVersion":$schemaVersion,"refreshIntervalSec":30,"locationDeliveryMode":"$delivery",""" +
+            """$activeHours"mode":"$mode","fields":{$fields},"unavailable":$unavailable}"""
+
+    private fun mismatch(published: String, row: ProfileEntity = seededRow): String? =
+        APlus10AFixtureSeed.transportEnvelopeMismatch(
+            published, APlus10AFixtureSeed.expectedTransportEnvelope(row, snapshot))
+
+    @Test
+    fun envelope_canonicalPublishedPayloadMatchesTheMirrorExactly() {
+        assertNull(mismatch(canonicalPublished()))
+    }
+
+    @Test
+    fun envelope_mirrorUsesTheWriterSchemaConstantAndSplitsDeliveryFromSpoofMode() {
+        val expected = APlus10AFixtureSeed.expectedTransportEnvelope(seededRow, snapshot)
+        assertEquals(ConfigPrefsSync.SCHEMA_VERSION, expected.getInt("schemaVersion"))
+        assertEquals("hook", expected.getString("locationDeliveryMode"))
+        assertEquals("always_on", expected.getString("mode"))
+        assertEquals(7, expected.getJSONObject("activeHours").getInt("start"))
+        assertEquals(22, expected.getJSONObject("activeHours").getInt("end"))
+        assertEquals(0, expected.getJSONArray("unavailable").length())
+        assertTrue(expected.getJSONObject("fields").has("wifi_ssid"))
+        assertEquals(false, expected.getJSONObject("fields").has("wifiSsid"))
+    }
+
+    @Test
+    fun envelope_numbersCompareNumericallyNotByRendering() {
+        // accuracy is REAL in SQLite; the writer emits getDouble → org.json renders 3.0 as 3.
+        val row = seededRow.copy(accuracy = 3f)
+        val expected = APlus10AFixtureSeed.expectedTransportEnvelope(row, snapshot)
+        val base = canonicalFields().replace(
+            "\"accuracy\":${JSONObject.numberToString(seededRow.accuracy!!.toDouble())}", "\"accuracy\":3")
+        assertNull(APlus10AFixtureSeed.transportEnvelopeMismatch(canonicalPublished(fields = base), expected))
+        val asDouble = base.replace("\"accuracy\":3", "\"accuracy\":3.0")
+        assertNull(APlus10AFixtureSeed.transportEnvelopeMismatch(canonicalPublished(fields = asDouble), expected))
+    }
+
+    @Test
+    fun envelope_rootModeIsTheSpoofMode_notTheDeliveryWireValue() {
+        // Sol R9: the old verifier required root mode == "hook"; a canonical payload has
+        // mode=always_on and locationDeliveryMode=hook. Root mode "hook" must now MISMATCH.
+        val reason = mismatch(canonicalPublished(mode = "hook"))
+        assertNotNull(reason); assertTrue(reason!!, reason.contains("$.mode"))
+        val delivery = mismatch(canonicalPublished(delivery = "system_mock"))
+        assertNotNull(delivery); assertTrue(delivery!!, delivery.contains("$.locationDeliveryMode"))
+    }
+
+    @Test
+    fun envelope_fieldKeyMustBeTheDbColumn_wifi_ssid() {
+        val reason = mismatch(canonicalPublished(fields = canonicalFields(ssidKey = "wifiSsid")))
+        assertNotNull(reason)
+        assertTrue(reason!!, reason.contains("wifi_ssid") && reason.contains("wifiSsid"))
+    }
+
+    @Test
+    fun envelope_extraOrMissingFieldIsAMismatch() {
+        val extra = mismatch(canonicalPublished(fields = canonicalFields(extra = ""","speed":0.5""")))
+        assertNotNull(extra); assertTrue(extra!!, extra.contains("$.fields") && extra.contains("speed"))
+        val missing = mismatch(canonicalPublished(fields = canonicalFields(drop = "longitude")))
+        assertNotNull(missing); assertTrue(missing!!, missing.contains("$.fields") && missing.contains("longitude"))
+    }
+
+    @Test
+    fun envelope_valueDriftIsAMismatch() {
+        // R8's counterexample at the exact-envelope level: a post-getAll longitude rewrite+republish.
+        val reason = mismatch(canonicalPublished(fields = canonicalFields(longitude = seededRow.longitude!! + 1.0)))
+        assertNotNull(reason); assertTrue(reason!!, reason.contains("$.fields.longitude"))
+    }
+
+    @Test
+    fun envelope_schemaVersionMustBeTheExactWriterValue() {
+        val reason = mismatch(canonicalPublished(schemaVersion = ConfigPrefsSync.PREVIOUS_SCHEMA_VERSION))
+        assertNotNull(reason); assertTrue(reason!!, reason.contains("$.schemaVersion"))
+    }
+
+    @Test
+    fun envelope_unavailableSetAndActiveHoursAreLoadBearing() {
+        val unavailable = mismatch(canonicalPublished(unavailable = """["tac"]"""))
+        assertNotNull(unavailable); assertTrue(unavailable!!, unavailable.contains("$.unavailable"))
+        val noHours = mismatch(canonicalPublished(activeHours = ""))
+        assertNotNull(noHours); assertTrue(noHours!!, noHours.contains("activeHours"))
+    }
+
+    @Test
+    fun envelope_nonJsonPublishedTransportIsAMismatch() {
+        assertNotNull(mismatch("not json at all"))
+        assertNotNull(mismatch("[]"))
     }
 }

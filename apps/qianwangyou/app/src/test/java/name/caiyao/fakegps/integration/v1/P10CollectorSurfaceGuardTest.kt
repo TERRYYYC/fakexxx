@@ -354,15 +354,37 @@ class P10CollectorSurfaceGuardTest {
             "the written-domain readback must re-read the published transport (ConfigPrefsSync.readPublished)",
             verifyBody.contains("ConfigPrefsSync.readPublished("),
         )
-        // R8 P1-1: the transport compare must be COMPLETE — every seeded field
-        // of profile-1, not just addname+latitude. Pin the load-bearing
-        // longitude Sol named plus the remaining fields and the envelope legs.
-        for (leg in listOf("longitude", "altitude", "accuracy", "tac", "wifiSsid", "schemaVersion")) {
-            assertTrue(
-                "the transport readback must compare the published $leg against the seeded profile-1",
-                verifyBody.contains(leg),
-            )
+        // R8 P1-1 → R9 P1 (Sol): the transport compare must be the EXACT canonical
+        // envelope — built from the seeded row + the live settings snapshot by the
+        // pure mirror (APlus10AFixtureSeed.expectedTransportEnvelope) and compared
+        // structurally (transportEnvelopeMismatch: same key sets, typed values,
+        // unavailable set). Token-presence pins ("longitude" appears somewhere)
+        // stayed green while root `mode` was compared to "hook" and `wifiSsid`
+        // was read instead of the canonical `wifi_ssid` column — pin the WIRING.
+        assertTrue(
+            "the transport readback must build the exact canonical expectation via APlus10AFixtureSeed.expectedTransportEnvelope(",
+            verifyBody.contains("APlus10AFixtureSeed.expectedTransportEnvelope("),
+        )
+        assertTrue(
+            "the transport readback must compare via APlus10AFixtureSeed.transportEnvelopeMismatch(",
+            verifyBody.contains("APlus10AFixtureSeed.transportEnvelopeMismatch("),
+        )
+        for (leg in listOf(
+            "readRefreshIntervalSec()", "readLocationDeliveryMode().wireValue",
+            "getRawMode()", "getRawHourStart()", "getRawHourEnd()",
+        )) {
+            assertTrue("the settings snapshot fed to the mirror must read $leg", verifyBody.contains(leg))
         }
+        assertEquals(
+            "root `mode` is the spoof mode; it must never be compared to the HOOK delivery wire value",
+            false,
+            verifyBody.contains("optString(\"mode\""),
+        )
+        assertEquals(
+            "the canonical column is wifi_ssid; the Kotlin property name must not be used as a JSON key",
+            false,
+            verifyBody.contains("\"wifiSsid\""),
+        )
         // Field-name drift pin (the runtime half is the latch race test).
         val handlerSource = File(
             moduleRoot,
@@ -444,6 +466,54 @@ class P10CollectorSurfaceGuardTest {
      * in the debug manifest) — an entry that cannot be started by
      * `adb shell am start` is not a triggerable surface.
      */
+    /**
+     * R9 P1 (Sol): the seed's transport verifier mirrors ConfigPrefsSync.buildFieldMapJson.
+     * The mirror is pure and behaviourally tested in APlus10AFixtureSeedTest against a
+     * canonical fixture plus mutations; THIS guard pins every writer literal the mirror
+     * relies on, so a writer change reddens here instead of silently desynchronising the
+     * mirror (which would then reject every valid payload — fail-closed, but blind).
+     */
+    @Test
+    fun r9_transportEnvelopeMirrorIsPinnedToTheCanonicalWriter() {
+        val writer = File(moduleRoot, "src/main/java/name/caiyao/fakegps/config/ConfigPrefsSync.kt").readText()
+            .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+            .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
+        listOf(
+            "const val SCHEMA_VERSION = 4",
+            "root.put(\"schemaVersion\", SCHEMA_VERSION)",
+            "\"refreshIntervalSec\"",
+            "\"locationDeliveryMode\"",
+            "root.put(\"mode\", mode)",
+            "root.put(\"activeHours\", JSONObject().put(\"start\", s).put(\"end\", e))",
+            "root.put(\"fields\", fields)",
+            "root.put(\"unavailable\", JSONArray(unavailable.asList()))",
+            "if (name == \"unavailable_fields\")",
+            "if (c.isNull(i)) continue",
+            "if (name == \"id\") continue",
+            "Cursor.FIELD_TYPE_INTEGER -> fields.put(name, c.getLong(i))",
+            "Cursor.FIELD_TYPE_FLOAT   -> fields.put(name, c.getDouble(i))",
+            "Cursor.FIELD_TYPE_STRING  -> fields.put(name, c.getString(i))",
+        ).forEach { literal ->
+            assertTrue("canonical writer must still contain the literal the mirror relies on: $literal", writer.contains(literal))
+        }
+        val entity = File(moduleRoot, "src/main/java/name/caiyao/fakegps/data/db/ProfileEntity.kt").readText()
+        assertTrue(
+            "the wifi ssid column must stay wifi_ssid (the mirror keys by DB column name)",
+            entity.contains("@ColumnInfo(name = \"wifi_ssid\") val wifiSsid"),
+        )
+        val provider = File(moduleRoot, "src/main/java/name/caiyao/fakegps/data/AppInfoProvider.java").readText()
+        for (col in listOf("SpoofSettings.KEY_SPOOF_MODE", "SpoofSettings.KEY_ACTIVE_HOUR_START", "SpoofSettings.KEY_ACTIVE_HOUR_END")) {
+            assertTrue("the settings cursor must expose $col (root mode + activeHours legs)", provider.contains(col))
+        }
+        val mirror = File(moduleRoot, "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AFixtureSeed.kt").readText()
+        assertTrue("the mirror must key the ssid by the canonical column", mirror.contains("\"wifi_ssid\""))
+        assertEquals("the mirror must never use the property name as a JSON key", false, mirror.contains("put(\"wifiSsid\""))
+        assertTrue(
+            "the mirror must reference the writer's schema constant, not a literal 4",
+            mirror.contains("ConfigPrefsSync.SCHEMA_VERSION"),
+        )
+    }
+
     @Test
     fun faultCollectorActivityIsDeclaredInDebugManifest() {
         val manifest = File(moduleRoot, "src/debug/AndroidManifest.xml").readText()

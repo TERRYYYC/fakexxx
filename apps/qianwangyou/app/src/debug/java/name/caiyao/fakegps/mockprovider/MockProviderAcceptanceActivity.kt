@@ -73,6 +73,11 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
      *   --es fixture_digest <sha256 the executor recorded over that file>
      */
     private fun prepare10a() {
+        // R9 P1 (Sol): the host gate binds each launch to a unique token and accepts only
+        // terminal markers carrying it, so a marker left by an EARLIER launch can never be
+        // borrowed by (or poison) a later one. Echo it verbatim on every terminal marker,
+        // plus the REGISTERED digest, so the gate can bind the verdict to what it launched.
+        val token = seedToken()
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { seed10a() } }
             result.fold(
@@ -88,10 +93,14 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
                     // a complete seed would — a READY here would be the exact
                     // false green opus5 ruled blocks merge pending operator scope.
                     // Distinct markers: local legs proven, contract still open.
-                    Log.i(TAG, "SEED_LOCAL_VERIFIED command=$COMMAND_PREPARE_10A")
                     Log.i(
                         TAG,
-                        "SEED_CONTRACT_INCOMPLETE command=$COMMAND_PREPARE_10A gap=7 " +
+                        "SEED_LOCAL_VERIFIED command=$COMMAND_PREPARE_10A token=$token " +
+                            "digest=${APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST}",
+                    )
+                    Log.i(
+                        TAG,
+                        "SEED_CONTRACT_INCOMPLETE command=$COMMAND_PREPARE_10A gap=7 token=$token " +
                             "reason=ordered-discover-readback-unavailable " +
                             "(profileRefs=emptyList; needs authorized projection). NOT a full §3 seed PASS.",
                     )
@@ -99,7 +108,7 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
                 },
                 onFailure = { e ->
                     // P1-3: a failed seed must NOT emit any success marker.
-                    Log.i(TAG, "SEED_FAILED command=$COMMAND_PREPARE_10A ${e::class.java.simpleName}: ${e.message}")
+                    Log.i(TAG, "SEED_FAILED command=$COMMAND_PREPARE_10A token=$token ${e::class.java.simpleName}: ${e.message}")
                     finish()
                 },
             )
@@ -339,39 +348,35 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         check(!settings.isMockProviderCleanupRequired()) {
             "written-domain drift: mock-provider cleanup flag was re-enabled after the seed"
         }
-        // (3) Transport payload: R8 P1-1 — compare the COMPLETE published
-        //     profile-1 envelope against the SEEDED expectation, not just
-        //     addname+latitude. Comparing to the seeded expectation (want1)
-        //     rather than the current DB catches a post-getAll longitude
-        //     rewrite+republish regardless of ordering: if the writer changed
-        //     the DB before step (1) it fails there; if after, the published
-        //     value now differs from want1 and fails here.
+        // (3) Transport payload: R8 P1-1 → R9 P1 (Sol). Compare the published
+        //     transport against the EXACT canonical envelope the writer
+        //     (ConfigPrefsSync.buildFieldMapJson) must have produced for the
+        //     seeded profile-1 under the settings posture the seed just set:
+        //     schemaVersion / refreshIntervalSec / locationDeliveryMode / root
+        //     mode (= spoof mode, NOT the delivery mode) / activeHours / fields
+        //     keyed by DB column (wifi_ssid) with the exact non-null key set /
+        //     unavailable. Structural equality — extra, missing, re-keyed or
+        //     retyped legs all fail. Comparing against the SEEDED expectation
+        //     (want1) rather than the current DB still catches a post-getAll
+        //     rewrite+republish either way (R8): pre-getAll it fails the row
+        //     check, post-getAll it fails here.
         val want1 = expectedRows.first()
+        val snapshot = APlus10AFixtureSeed.TransportSettingsSnapshot(
+            refreshIntervalSec = settings.readRefreshIntervalSec(),
+            locationDeliveryMode = settings.readLocationDeliveryMode().wireValue,
+            spoofMode = settings.getRawMode(),
+            activeHourStart = settings.getRawHourStart(),
+            activeHourEnd = settings.getRawHourEnd(),
+        )
+        val expected = APlus10AFixtureSeed.expectedTransportEnvelope(want1, snapshot)
         when (val read = ConfigPrefsSync.readPublished(applicationContext)) {
-            is name.caiyao.fakegps.config.PayloadRead.Raw -> {
-                val envelope = org.json.JSONObject(read.text)
-                val fields = envelope.optJSONObject("fields")
-                    ?: throw IllegalStateException("written-domain drift: published transport has no fields object")
-                // Envelope legs: schema present, mode == the seeded delivery mode.
-                check(envelope.has("schemaVersion")) {
-                    "written-domain drift: published transport envelope has no schemaVersion"
+            is name.caiyao.fakegps.config.PayloadRead.Raw ->
+                APlus10AFixtureSeed.transportEnvelopeMismatch(read.text, expected)?.let { reason ->
+                    throw IllegalStateException(
+                        "written-domain drift: published transport != exact canonical expectation — $reason " +
+                            "(a concurrent writer changed the profile/payload, or the writer contract drifted)",
+                    )
                 }
-                val publishedMode = envelope.optString("mode", "")
-                check(publishedMode == LocationDeliveryMode.HOOK.wireValue) {
-                    "written-domain drift: published transport mode='$publishedMode' != seeded HOOK"
-                }
-                // EVERY field the seed set on profile-1 must match byte-for-byte.
-                fun mismatch(name: String): Nothing =
-                    throw IllegalStateException("written-domain drift: published transport $name != seeded profile-1 " +
-                        "(a concurrent writer changed the profile/payload)")
-                want1.addname?.let { if (fields.optString("addname", " ") != it) mismatch("addname") }
-                want1.latitude?.let { if (fields.optDouble("latitude", Double.NaN) != it) mismatch("latitude") }
-                want1.longitude?.let { if (fields.optDouble("longitude", Double.NaN) != it) mismatch("longitude") }
-                want1.altitude?.let { if (fields.optDouble("altitude", Double.NaN) != it) mismatch("altitude") }
-                want1.accuracy?.let { if (fields.optDouble("accuracy", Double.NaN).toFloat() != it) mismatch("accuracy") }
-                want1.tac?.let { if (fields.optInt("tac", Int.MIN_VALUE) != it) mismatch("tac") }
-                want1.wifiSsid?.let { if (fields.optString("wifiSsid", " ") != it) mismatch("wifiSsid") }
-            }
             name.caiyao.fakegps.config.PayloadRead.Absent ->
                 throw IllegalStateException("written-domain drift: published transport is ABSENT after the seed published it")
             is name.caiyao.fakegps.config.PayloadRead.ReadError ->
@@ -379,7 +384,14 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         }
     }
 
-        private fun sha256Hex(bytes: ByteArray): String =
+        /**
+     * The gate's launch token, sanitised to its [A-Za-z0-9-] alphabet. A manual launch
+     * without a token is reported as token=none — visible, and never gate-accepted.
+     */
+    private fun seedToken(): String =
+        intent.getStringExtra(EXTRA_SEED_TOKEN)?.takeIf { SEED_TOKEN_SHAPE.matches(it) } ?: "none"
+
+    private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it) }
 
@@ -392,6 +404,9 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
         const val EXTRA_COMMAND = "command"
         const val EXTRA_FIXTURE_PAYLOAD_B64 = "fixture_payload_base64"
         const val EXTRA_FIXTURE_DIGEST = "fixture_digest"
+        /** R9 P1: gate-issued launch token echoed on every prepare_10a terminal marker. */
+        const val EXTRA_SEED_TOKEN = "seed_token"
+        private val SEED_TOKEN_SHAPE = Regex("[A-Za-z0-9-]{1,96}")
         const val COMMAND_PREPARE_KYIV = "prepare_kyiv"
         const val COMMAND_PREPARE_10A = "prepare_10a"
         const val COMMAND_STOP = "stop"

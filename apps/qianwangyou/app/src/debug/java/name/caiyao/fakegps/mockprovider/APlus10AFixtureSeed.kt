@@ -1,6 +1,11 @@
 package name.caiyao.fakegps.mockprovider
 
+import name.caiyao.fakegps.config.ConfigPrefsSync
+import name.caiyao.fakegps.config.UnavailableFieldSet
+import name.caiyao.fakegps.config.UnavailablePayloadContract
 import name.caiyao.fakegps.data.db.ProfileEntity
+import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
@@ -214,6 +219,132 @@ object APlus10AFixtureSeed {
                 wifiSsid = item.wifiSsid,
             )
         }
+    }
+
+    // ------------------------------------------------------------------
+    // R9 P1 (Sol) — exact canonical transport envelope
+    // ------------------------------------------------------------------
+
+    /**
+     * The settings legs ConfigPrefsSync.buildFieldMapJson folds into the published
+     * envelope, read from the SAME SpoofSettings the seed just wrote (under the fence):
+     *  - [locationDeliveryMode]: LocationDeliveryMode.wireValue ("hook" | "system_mock");
+     *  - [spoofMode]: the ROOT "mode" — the spoof schedule mode (always_on | time_based |
+     *    off), NOT the delivery mode (R9: the old verifier compared root mode to "hook",
+     *    so a valid canonical payload deterministically failed);
+     *  - [activeHourStart]/[activeHourEnd]: always present — the settings cursor exposes
+     *    non-null ints, so the writer always emits `activeHours`.
+     */
+    data class TransportSettingsSnapshot(
+        val refreshIntervalSec: Int,
+        val locationDeliveryMode: String,
+        val spoofMode: String,
+        val activeHourStart: Int,
+        val activeHourEnd: Int,
+    )
+
+    /**
+     * Pure mirror of ConfigPrefsSync.buildFieldMapJson for ONE seeded profile row.
+     *
+     * Root keys: schemaVersion (the writer's constant, not a literal) / refreshIntervalSec /
+     * locationDeliveryMode / activeHours{start,end} / mode (spoof mode) / fields / unavailable.
+     * `fields` = every NON-NULL profile column except `id` and `unavailable_fields`, keyed by
+     * the DB COLUMN NAME (`wifi_ssid`, not the Kotlin property `wifiSsid`) and typed as the
+     * cursor delivers it (INTEGER→long, REAL→double — a Float is widened exactly as Room
+     * stores it — TEXT→string). The seeder sets exactly addname / latitude / longitude /
+     * altitude / accuracy / tac / wifi_ssid; every other column is NULL and skipped by the
+     * writer. Should the writer ever emit another column, the exact key-set comparison in
+     * [transportEnvelopeMismatch] fails loudly rather than silently accepting it.
+     * `unavailable` follows the writer verbatim: decode the row's stored set, validate it
+     * against the emitted field names. Every literal here is pinned against the writer by
+     * P10CollectorSurfaceGuardTest.r9_transportEnvelopeMirrorIsPinnedToTheCanonicalWriter.
+     */
+    fun expectedTransportEnvelope(row: ProfileEntity, settings: TransportSettingsSnapshot): JSONObject {
+        val fields = JSONObject()
+        row.addname?.let { fields.put("addname", it) }
+        row.latitude?.let { fields.put("latitude", it) }
+        row.longitude?.let { fields.put("longitude", it) }
+        row.altitude?.let { fields.put("altitude", it) }
+        row.accuracy?.let { fields.put("accuracy", it.toDouble()) }
+        row.tac?.let { fields.put("tac", it.toLong()) }
+        row.wifiSsid?.let { fields.put("wifi_ssid", it) }
+        val fieldNames = buildSet {
+            val keys = fields.keys()
+            while (keys.hasNext()) add(keys.next())
+        }
+        val requested = UnavailableFieldSet.decode(row.unavailableFields).toList()
+        val unavailable = UnavailablePayloadContract.validate(fieldNames, requested)
+        return JSONObject()
+            .put("schemaVersion", ConfigPrefsSync.SCHEMA_VERSION)
+            .put("refreshIntervalSec", settings.refreshIntervalSec)
+            .put("locationDeliveryMode", settings.locationDeliveryMode)
+            .put("activeHours", JSONObject().put("start", settings.activeHourStart).put("end", settings.activeHourEnd))
+            .put("mode", settings.spoofMode)
+            .put("fields", fields)
+            .put("unavailable", JSONArray(unavailable.asList()))
+    }
+
+    /**
+     * Structural equality of the published transport against [expected]: same root key set,
+     * same `fields` key set, every value equal (numbers compared NUMERICALLY, so a REAL 3.0
+     * rendered as `3` still matches), arrays element-wise. Returns null when identical,
+     * otherwise a path-qualified reason. Extra, missing, re-keyed or retyped legs are all
+     * mismatches — the verifier must never accept a payload that merely CONTAINS the seeded
+     * values.
+     */
+    fun transportEnvelopeMismatch(publishedJson: String, expected: JSONObject): String? {
+        val published = try {
+            JSONObject(publishedJson)
+        } catch (e: JSONException) {
+            return "published transport is not a JSON object: ${e.message}"
+        }
+        return jsonMismatch("$", published, expected)
+    }
+
+    private fun jsonMismatch(path: String, actual: Any?, expected: Any?): String? {
+        when (expected) {
+            is JSONObject -> {
+                if (actual !is JSONObject) return "$path: expected an object, published ${describe(actual)}"
+                val expectedKeys = expected.keys().asSequence().toSortedSet()
+                val actualKeys = actual.keys().asSequence().toSortedSet()
+                if (actualKeys != expectedKeys) {
+                    return "$path: key set differs (missing=${expectedKeys - actualKeys} extra=${actualKeys - expectedKeys})"
+                }
+                for (key in expectedKeys) {
+                    jsonMismatch("$path.$key", actual.get(key), expected.get(key))?.let { return it }
+                }
+                return null
+            }
+            is JSONArray -> {
+                if (actual !is JSONArray) return "$path: expected an array, published ${describe(actual)}"
+                if (actual.length() != expected.length()) {
+                    return "$path: array length ${actual.length()} != expected ${expected.length()}"
+                }
+                for (i in 0 until expected.length()) {
+                    jsonMismatch("$path[$i]", actual.get(i), expected.get(i))?.let { return it }
+                }
+                return null
+            }
+            is Number -> {
+                if (actual !is Number) return "$path: expected number $expected, published ${describe(actual)}"
+                if (java.math.BigDecimal(actual.toString()).compareTo(java.math.BigDecimal(expected.toString())) != 0) {
+                    return "$path: published $actual != expected $expected"
+                }
+                return null
+            }
+            else -> {
+                if (actual != expected) return "$path: published ${describe(actual)} != expected ${describe(expected)}"
+                return null
+            }
+        }
+    }
+
+    private fun describe(value: Any?): String = when (value) {
+        null -> "null"
+        is String -> "'$value'"
+        is JSONObject -> "object${value.keys().asSequence().toSortedSet()}"
+        is JSONArray -> "array(len=${value.length()})"
+        else -> "${value::class.java.simpleName} $value"
     }
 
     /**

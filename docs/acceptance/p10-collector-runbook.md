@@ -119,22 +119,32 @@ payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.
 ```
 # qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture——
 #      千网游是坐标唯一所有者，KB-8）
-#   ⚠️ 必须经**可执行 fail-closed 单飞门**（R8 P1-1），不要手敲 am start：owner fence 只
+#   ⚠️ 必须经**可执行 fail-closed 单飞门**（R8 P1-1 → R9 P1），不要手敲 am start：owner fence 只
 #      串行化 EnvironmentControlHandler 自身的 fenced ops；prepareKyiv / ProfileRepository /
 #      设置 UI 会在**不持该锁**下改同一 profile 表+transport。seed-10a-gate.sh 是唯一被认可的
-#      启动器——它取独占锁（原子 mkdir，拒并发）、force-stop、**断言旧 PID 已消失**（还活着即
-#      非零退出、绝不 seed）、再发这唯一一条 seed，最后在**同一受保护事务内**读取 seed 自身
-#      的 SEED_LOCAL_VERIFIED + SEED_CONTRACT_INCOMPLETE 判定才打 SEED_GATE_PASS。
-#      device-free 由 scripts/selftest-seed-10a-gate.sh 逐条 pin（存活 PID / 持锁 / SEED_FAILED /
-#      无判定 / 裸 local-verified 无 gap⑦ 拆分 全部 fail-closed）。
+#      启动器——它取独占锁（原子 mkdir + owner 元数据；只在 owner 进程已死**且**设备无存活包时
+#      回收陈旧锁，否则拒绝）、force-stop、**三态 PID 探测**（alive / absent / probe_failed——远端
+#      `echo __RC=$?` 显式回传 pidof 状态，adb 或探测失败一律 abort，绝不当成"进程已退出"）、
+#      再以**唯一 launch token**（`--es seed_token`）发这唯一一条 seed，只接受回显该 token 且恰好
+#      一组自洽的终态标记（SEED_LOCAL_VERIFIED + SEED_CONTRACT_INCOMPLETE，digest 回显须等于启动
+#      digest；同 token 同时出现 FAILED 与 VERIFIED、或重复标记 → FAIL；旧 launch 的陈旧成功/失败
+#      一律忽略），最后再次 force-stop 并断言静默完成交接，才打 SEED_GATE_PASS token=… digest=…。
+#      可选 --evidence-dir <dir>：PASS 后 run-as dump 设备上真实发布的 transport（spoof_config.xml
+#      + 提取出的 canonical JSON）留证。device-free 由 scripts/selftest-seed-10a-gate.sh 逐条 pin
+#      （存活 PID / 持锁 / SEED_FAILED / 无判定 / 裸 local-verified / 陈旧成功+新超时 / 陈旧成功+
+#      新失败 / 陈旧失败+新成功 / pidof 错误 / adb 传输失败 / 不自洽终态 / digest 不符 / 近似 token /
+#      死 owner 回收 / 死 owner 但设备存活拒回收 / 无 owner 记录拒回收 / 交接未静默）。
 apps/qianwangyou/scripts/seed-10a-gate.sh \
   --fixture <base64(a-plus-10a-fixture.json)> \
   --digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
 #   判据（R4 P1-1/gap⑦ + R7/R8 P1-1）：门打 SEED_GATE_PASS command=prepare_10a（=独占锁 +
-#   PID 静默 + seed 判定，三者齐全）。seed 自身在持 owner fence 下末尾对**全写入域**做终态回读——
-#   10 行 profile 逐字节（dao.getAll）+ 设置姿态（HOOK/cleanup=false）+ 已发布 transport
-#   的 profile-1 **完整** envelope（schemaVersion/mode + addname/lat/**lng**/alt/accuracy/tac/wifiSsid
-#   逐字段对种子期望；不是只比 addname+lat）；任一漂移 → SEED_FAILED（门转 SEED_GATE_FAIL，非零退出）。
+#   PID 静默 + token 绑定 seed 判定 + 静默交接，四者齐全）。seed 自身在持 owner fence 下末尾对**全写入域**
+#   做终态回读——10 行 profile 逐字节（dao.getAll）+ 设置姿态（HOOK/cleanup=false）+ 已发布 transport 与
+#   **精确 canonical 期望信封**结构相等（R9 P1：按 ConfigPrefsSync.buildFieldMapJson 镜像构造——
+#   schemaVersion=4、refreshIntervalSec、locationDeliveryMode="hook"、root mode = spoof mode
+#   （always_on|time_based|off，**不是** "hook"）、activeHours{start,end}、fields 用 DB 列名（wifi_ssid，
+#   非 wifiSsid）且键集恰好等于种子行的非空列、unavailable=[]；多键/少键/类型/值任一不同 → 不匹配）；
+#   任一漂移 → SEED_FAILED（门转 SEED_GATE_FAIL，非零退出）。
 #   非 canonical 手动 am start（绕过门）不被接受为可信 seed。
 #   **且** SEED_CONTRACT_INCOMPLETE command=prepare_10a gap=7（有序 discover() 回读当前
 #   无可执行命令——见末「gap⑦」）。**刻意不发 full-seed-PASS 的 READY**——§3 seed 契约
@@ -203,6 +213,14 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 #   耦合披露：sentinel 是产品无版本契约的可观测行为；P10CollectorSurfaceGuardTest r8_* 把 main 里的
 #   字面量 / 接受静默 / 同步直调 / 日志戳格式 pin 住——漂移即响亮红，而非安静地"全部 indeterminate"。
 #   ⚠️ 全局 isRunning、陈旧同-plan attempt、裸 session（无 attempt）都**不**满足本请求。
+#   ⚠️ R9 P1-2（Sol，显式 blocker，未闭合）：产品 `startWithPlan` 的 check-and-set **不是原子的**
+#      （读 `_isRunning` 与写 `true` 之间无监视器/CAS；UI 走主线程、harness 走工作线程），两条调用可同时
+#      穿过缝隙；且 accepted 的 run 可能在建 session 前提前退出（两阶段皆关闭）释放 isRunning，UI 在本请求
+#      10s poll 窗内起同-plan run 时其 session 会被误归因。debug-only 的日志观测**不能**证明请求→session
+#      的持久绑定；确定性闭合需要生产侧「全调用者原子 canonical start 迁移 + 每请求 typed receipt 持久绑定
+#      RunSession/首 attempt」。在生产冻结（零 src/main 改动）约束下，这一不变量保留为**显式 blocker**：
+#      RUN_STARTED 是 best-effort 归因，不作为 §5A 自动化的可信归因来源；解除条件 = 该生产变更作为独立
+#      feature 落地并跨族 review。
 #   cmd=state 现为单事务快照，running 行带 attemptStatus + aplusState + runSessionId +
 #   sessionStatus + taskPlanId + sessionPlanId，两 plan 腿不一致打 PLAN_BINDING_MISMATCH。
 ```
