@@ -3,7 +3,7 @@ feature_ids: [G2-66]
 topics: [issue-71, android, binder, authorization, emulator, regression]
 doc_kind: evidence
 created: 2026-09-03
-status: implementation-verified-independent-review-pending
+status: implementation-verified-independent-review-approved
 ---
 
 # Issue #71：真实跨进程 Binder 身份回归证据
@@ -250,15 +250,20 @@ env JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' \
 - Architecture cell：既有 QWY integration/v1；Map delta：none；没有新增生产存储/服务/授权入口。
 - 无 UI 变更、无匹配设计稿、无根目录媒体工件。Clowder 专用 pnpm ownership/tips/hotfix 脚本不在
   本仓库，使用仓库自己的 Android full gate，不伪报那些不存在的检查已运行。
-- 无本子问题未处置的实现验收项；非作者审查尚待完成。没有把 transport、readback、Moto 复验划成通过。
+- 无本子问题未处置的实现验收项；非作者 `/root/binder_fix_review` 已批准 `f10cbdf`，无未解决
+  P1/P2。唯一 P3 是清理回执来源说明，已在下节补齐。没有把 transport、readback、Moto 复验划成通过。
 
 ### 模拟器清理
 
 `cleanup-location-before.txt` 记录 GPS/network mock override 已移除且二者 last location=null。
 passive/fused 仍有此前 mock 样本的 last-known cache，所以**不宣称运行中所有位置缓存已清空**。
+以下具体命令返回值为**作者会话工具回执转录**，不是独立文件日志：清理命令回执 `765e1c`
+（exit 0），受管模拟器会话 `78278` 的终态回执 `177e4b`（exit 0）。`emulator.log` 另有退出记录，
+但该文件不能单独证明两次 pm clear 的返回值。
 随后只将本模拟器的 QWY mock app-op 复位为 default，清空两只测试包数据（各返回 `Success`），
 读取确认 `MOCK_LOCATION: default`，再 `emu kill` 返回 `OK: killing emulator, bye bye`；
 受管模拟器进程退出码为 0。临时 AVD 与本地日志保留，不复用于用户工作环境。
 
 原主工作区已有 `.cat-cafe/capabilities.json` 修改保持不动；本次没有任何 Moto 命令。
-独立审查结论由后续精确代码提交对应的 PR 评论记录，不能将本作者自检当作批准。
+独立审查结论见 [PR #72](https://github.com/TERRYYYC/fakexxx/pull/72) 的精确提交评论。
+此次审查后变更仅是本节证据来源及审查状态说明，生产代码与通过测试的 `be84974` 完全相同。
