@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="name.caiyao.fakegps.bench" />
+        <package android:name="name.caiyao.fakegps.codexbench" />
+    </queries>
+
+    <application>
+        <!--
+            The test APK's ordinary process has its own real Android UID. An isolated process
+            would have no package identity and could not exercise production caller pairing.
+            This component is absent from the tested APK and every production manifest; every
+            transaction additionally requires the tested QWY application's kernel-supplied UID.
+        -->
+        <service
+            android:name="name.caiyao.fakegps.integration.v1.RemoteBinderRelayService"
+            android:exported="true" />
+    </application>
+</manifest>
