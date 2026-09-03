@@ -286,8 +286,17 @@ class PlanRepository(private val db: AppDatabase) {
         db.testAttemptDao().getCurrentExecutionId(attemptId)
 
     // # R37 (Sol R36 P1-1): durable observation + receipt persist/read
-    suspend fun persistObservation(attemptId: Long, phase: String, snapshot: com.example.cellrebelauto.environment.ObservationSnapshot) =
-        db.durableObservationDao().insert(
+    /**
+     * Idempotent per (attemptId, phase). Device-observed 2026-09-03 (ZY22, first real A+ lease):
+     * APlusComposition.observeLive() persists the phase record "before returning" and the engine
+     * then calls this for the same snapshot; the table is UNIQUE(attemptId, phase) and the DAO is
+     * a bare @Insert, so the second write threw SQLiteConstraintException inside the engine
+     * transaction and every fresh attempt paused at PRE_OBSERVED with an unresolved lease. The
+     * first durable carrier wins; PR #65 replaces this pair with one carrier+phase transaction.
+     */
+    suspend fun persistObservation(attemptId: Long, phase: String, snapshot: com.example.cellrebelauto.environment.ObservationSnapshot): Long {
+        db.durableObservationDao().forAttemptPhase(attemptId, phase)?.let { return it.id }
+        return db.durableObservationDao().insert(
             com.example.cellrebelauto.model.ledger.DurableObservationRecord(
                 attemptId = attemptId, phase = phase,
                 leaseId = snapshot.leaseId,
@@ -309,6 +318,7 @@ class PlanRepository(private val db: AppDatabase) {
                 evidenceRefs = snapshot.evidenceRefs.joinToString(";")
             )
         )
+    }
 
     suspend fun getObservation(attemptId: Long, phase: String): com.example.cellrebelauto.model.ledger.DurableObservationRecord? =
         db.durableObservationDao().forAttemptPhase(attemptId, phase)
