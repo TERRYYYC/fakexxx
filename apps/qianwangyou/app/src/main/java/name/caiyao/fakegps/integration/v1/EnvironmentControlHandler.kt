@@ -166,12 +166,20 @@ class EnvironmentControlHandler(
 
         val requestDigest = RequestDigests.applyDigest(intentHash)
 
-        // Critical section: idempotency check + conflict predicate + lease
-        // creation + environment apply + receipt persist all run under a
-        // serialized transaction (M-CC-03/04: exactly one winner when racing).
-        // The owner fence additionally serializes this against the advance
-        // commit→external-apply window, so a lease can never be granted while a
-        // committed advance still has an unapplied pointer change (Terra round-3).
+        // FC-1 three-phase protocol under the process owner fence:
+        //   1. COMMIT admission (ACQUIRING owner + request identity/window)
+        //   2. mutate the external qwy environment
+        //   3. COMMIT ACTIVE + revision/coverage + receipt/audit atomically
+        // FileDurableKv buffers transaction writes until the block returns.
+        // Calling applyEnvironment inside that block let the external mutation
+        // happen while ACQUIRING existed only in txBuffer; a final persist
+        // failure then rolled back every durable owner. Splitting the commits
+        // closes that ownerless window while ownerLock preserves M-CC-03/04.
+        var replayedReceipt: ApplyReceiptV1? = null
+        var admittedLease: LeaseRecord? = null
+        var admittedAtEpochMs = 0L
+        var admittedAtElapsedRealtimeMs = 0L
+        val admissionStore = DurableApplyAdmissionStore(storage)
         storage.transaction {
             // §6.3.4: idempotency check
             val existing = idempotencyReceiptForCaller(
@@ -182,11 +190,77 @@ class EnvironmentControlHandler(
             )
             if (existing != null) {
                 if (existing.requestDigest == requestDigest) {
-                    return@transaction deserializeApplyReceipt(existing.receiptPayload)
+                    replayedReceipt = deserializeApplyReceipt(existing.receiptPayload)
+                    return@transaction
                 } else {
                     throw ContractException(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
                         "apply key=${request.idempotencyKey} replayed with different digest")
                 }
+            }
+
+            // A committed admission consumes the key before a receipt exists.
+            // Same digest resumes the exact server-generated lease through the
+            // public APPLY call; a different digest conflicts permanently even
+            // if an operator later releases the uncertain owner.
+            val priorAdmission = admissionStore.find(
+                caller.applicationId,
+                caller.signerDigest,
+                request.idempotencyKey,
+            )
+            if (priorAdmission != null) {
+                if (priorAdmission.requestDigest != requestDigest ||
+                    priorAdmission.acceptedIntentHash != intentHash
+                ) {
+                    throw ContractException(
+                        ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
+                        "apply key=${request.idempotencyKey} replayed with different digest",
+                    )
+                }
+
+                val priorLease = checkNotNull(leaseStore.get(priorAdmission.leaseId)) {
+                    "apply admission ${request.idempotencyKey} lost lease ${priorAdmission.leaseId}"
+                }
+                check(
+                    leaseBelongsToCaller(priorLease, caller) &&
+                        priorLease.applyIdempotencyKey == request.idempotencyKey &&
+                        priorLease.acceptedIntentHash == intentHash
+                ) { "apply admission and lease identity diverged" }
+
+                val otherBlocking = leaseStore.blockingLease()
+                if (otherBlocking != null && otherBlocking.leaseId != priorLease.leaseId) {
+                    throw ContractException(
+                        ContractErrorCodeV1.LEASE_CONFLICT,
+                        "device lease ${otherBlocking.leaseId} blocks admitted lease ${priorLease.leaseId}",
+                    )
+                }
+
+                val priorEffectiveState = leaseStore.effectiveState(
+                    priorLease.leaseId,
+                    tracker.generation,
+                )
+                if (priorEffectiveState !in APPLY_RESUMABLE_STATES) {
+                    throw ContractException(
+                        ContractErrorCodeV1.LEASE_CONFLICT,
+                        "admitted lease ${priorLease.leaseId} cannot resume from $priorEffectiveState",
+                    )
+                }
+
+                val resumedLease = priorLease.copy(
+                    state = LeaseState.ACQUIRING,
+                    releaseIdempotencyKey = null,
+                    residualReasonWires = emptyList(),
+                    // This newly authorized public APPLY now owns the lease.
+                    // Neither the explicit provider marker nor its legacy
+                    // revoke discriminator may survive into a later restart.
+                    revokeSource = null,
+                    recoveryEvidenceRef = null,
+                )
+                leaseStore.put(resumedLease)
+                admittedLease = resumedLease
+                admittedAtEpochMs = priorAdmission.admittedAtEpochMs
+                admittedAtElapsedRealtimeMs = priorAdmission.admittedAtElapsedRealtimeMs
+                storage.write(OBSERVE_WINDOW_NAMESPACE, observeWindowKey(caller), "")
+                return@transaction
             }
 
             // INV-28: conflict predicate — ANY non-RELEASED lease blocks.
@@ -196,19 +270,32 @@ class EnvironmentControlHandler(
             if (blocking != null) {
                 val effState = leaseStore.effectiveState(blocking.leaseId, tracker.generation)
                 if (effState != LeaseState.RELEASED) {
+                    // A failed external/finalize phase intentionally leaves a
+                    // durable blocking owner. Preserve the normal same-key
+                    // conflict species even before a receipt exists: the same
+                    // principal/key with a different intent is still an
+                    // idempotency conflict, never permission to create lease 2.
+                    if (leaseBelongsToCaller(blocking, caller) &&
+                        blocking.applyIdempotencyKey == request.idempotencyKey &&
+                        blocking.acceptedIntentHash != intentHash
+                    ) {
+                        throw ContractException(
+                            ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
+                            "apply key=${request.idempotencyKey} replayed with different digest",
+                        )
+                    }
                     throw ContractException(ContractErrorCodeV1.LEASE_CONFLICT,
                         "device lease ${blocking.leaseId} in state $effState")
                 }
             }
 
             // Deadline clock bridge (§8.4): snapshot ONCE
-            val nowEpoch = clock.epochMs()
-            val nowElapsed = clock.elapsedRealtimeMs()
-            val remainingMs = maxOf(0L, intent.deadlineEpochMs - nowEpoch)
-            val deadlineElapsed = nowElapsed + remainingMs
+            admittedAtEpochMs = clock.epochMs()
+            admittedAtElapsedRealtimeMs = clock.elapsedRealtimeMs()
+            val remainingMs = maxOf(0L, intent.deadlineEpochMs - admittedAtEpochMs)
+            val deadlineElapsed = admittedAtElapsedRealtimeMs + remainingMs
 
             val leaseId = UUID.randomUUID().toString()
-            val operationId = UUID.randomUUID().toString()
             val snap = tracker.snapshot()
 
             // Durable lease FIRST, then environment apply (§8.1 mirror)
@@ -238,65 +325,111 @@ class EnvironmentControlHandler(
                 earnedScheduleRef = environment.scheduleSnapshot()?.currentItemId,
             )
             leaseStore.put(lease)
+            admissionStore.record(
+                ApplyAdmissionRecord(
+                    callerApplicationId = caller.applicationId,
+                    callerSignerDigest = caller.signerDigest,
+                    idempotencyKey = request.idempotencyKey,
+                    requestDigest = requestDigest,
+                    acceptedIntentHash = intentHash,
+                    leaseId = leaseId,
+                    admittedAtEpochMs = admittedAtEpochMs,
+                    admittedAtElapsedRealtimeMs = admittedAtElapsedRealtimeMs,
+                ),
+            )
+            admittedLease = lease
 
             // §6.3.3 wire-8 observe exception: granting this caller a NEW lease
             // closes its post-advance verification window ("此后尚未有新 lease
             // 授予该 caller" leg) — same transaction as the grant itself.
             storage.write(OBSERVE_WINDOW_NAMESPACE, observeWindowKey(caller), "")
-
-            // Now apply environment — and CONSUME the computed outcome
-            // (F14/C5): the controller derives verificationLevelWire from the
-            // real publish result (ConfigPrefsSync failure → NONE; P1-2 fix).
-            // Discarding this return and stamping a constant into the receipt
-            // made every trusted-ledger entry's verification level a CLAIM,
-            // not a measurement (C5: receipt verif=1 while observe reported
-            // verified=false).
-            val applyOutcome = environment.applyEnvironment(intent)
-
-            // Transition to ACTIVE
-            val activeLease = lease.copy(state = LeaseState.ACTIVE)
-            leaseStore.put(activeLease)
-
-            // Bump revision for the environment change
-            tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
-            // Mark continuity established from now
-            tracker.markContinuityEstablished()
-
-            val receipt = ApplyReceiptV1(
-                operationId = operationId,
-                idempotencyKey = request.idempotencyKey,
-                leaseId = leaseId,
-                acceptedIntentHash = intentHash,
-                appliedAtEpochMs = nowEpoch,
-                environmentRevision = tracker.snapshot().revision,
-                verificationLevelWire = applyOutcome.verificationLevelWire,
-            )
-
-            // Persist receipt for idempotent replay
-            idempotency.record(OperationReceiptRecord(
-                callerApplicationId = caller.applicationId,
-                callerSignerDigest = caller.signerDigest,
-                operation = ContractOperation.APPLY,
-                idempotencyKey = request.idempotencyKey,
-                requestDigest = requestDigest,
-                resultDigest = "",
-                receiptPayload = serializeApplyReceipt(receipt),
-                createdAtElapsedRealtimeMs = nowElapsed,
-            ))
-
-            audit.append("apply",
-                callerApplicationId = caller.applicationId,
-                leaseId = leaseId,
-                operationId = operationId,
-            )
-
-            // Wire up relevant-change listener
-            environment.setRelevantChangeListener { reason ->
-                tracker.bump(reason)
-            }
-
-            receipt
         }
+
+        replayedReceipt?.let { return@withOwnerFence it }
+        val lease = checkNotNull(admittedLease) {
+            "apply admission committed neither replay nor ACQUIRING owner"
+        }
+
+        // External mutation is intentionally outside every DurableKv
+        // transaction, but still inside ownerLock. At this point a fresh
+        // durable handle can already resolve [lease] as ACQUIRING.
+        val applyOutcome: ApplyOutcome
+        val continuityCapability: ContinuityEvidenceCapability
+        try {
+            // F14/C5: consume the computed result; never stamp a constant.
+            applyOutcome = environment.applyEnvironment(intent)
+            continuityCapability = environment.continuityEvidenceCapability()
+        } catch (failure: Throwable) {
+            markApplyIncomplete(lease.leaseId, failure)
+            throw failure
+        }
+
+        val operationId = UUID.randomUUID().toString()
+        val receipt = try {
+            storage.transaction {
+                val durableLease = checkNotNull(leaseStore.get(lease.leaseId)) {
+                    "durable ACQUIRING owner ${lease.leaseId} disappeared before finalize"
+                }
+                check(durableLease == lease && durableLease.state == LeaseState.ACQUIRING) {
+                    "apply owner ${lease.leaseId} changed before finalize: $durableLease"
+                }
+
+                // Transition, revision/coverage and receipt are one commit.
+                leaseStore.put(durableLease.copy(state = LeaseState.ACTIVE))
+                tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+                // Endpoint readback and continuity history are separate proofs.
+                // Public AppOps/provider callbacks are asynchronous: they can
+                // verify the current endpoint but cannot prove an away→restore
+                // transition did not occur before their callback was delivered.
+                when (continuityCapability) {
+                    ContinuityEvidenceCapability.COMPLETE ->
+                        tracker.markContinuityEstablished()
+                    ContinuityEvidenceCapability.INCOMPLETE ->
+                        tracker.reportObserverGap(ContinuityCoverageV1.PARTIAL)
+                    ContinuityEvidenceCapability.UNAVAILABLE ->
+                        tracker.reportObserverGap(ContinuityCoverageV1.NONE)
+                }
+
+                val finalizedReceipt = ApplyReceiptV1(
+                    operationId = operationId,
+                    idempotencyKey = request.idempotencyKey,
+                    leaseId = lease.leaseId,
+                    acceptedIntentHash = intentHash,
+                    appliedAtEpochMs = admittedAtEpochMs,
+                    environmentRevision = tracker.snapshot().revision,
+                    verificationLevelWire = applyOutcome.verificationLevelWire,
+                )
+
+                // Persist receipt for idempotent replay in the same commit as ACTIVE.
+                idempotency.record(OperationReceiptRecord(
+                    callerApplicationId = caller.applicationId,
+                    callerSignerDigest = caller.signerDigest,
+                    operation = ContractOperation.APPLY,
+                    idempotencyKey = request.idempotencyKey,
+                    requestDigest = requestDigest,
+                    resultDigest = "",
+                    receiptPayload = serializeApplyReceipt(finalizedReceipt),
+                    createdAtElapsedRealtimeMs = admittedAtElapsedRealtimeMs,
+                ))
+
+                audit.append("apply",
+                    callerApplicationId = caller.applicationId,
+                    leaseId = lease.leaseId,
+                    operationId = operationId,
+                )
+
+                finalizedReceipt
+            }
+        } catch (failure: Throwable) {
+            markApplyIncomplete(lease.leaseId, failure)
+            throw failure
+        }
+
+        // No external callback registration is allowed inside the finalize
+        // transaction. A failure here is replay-safe because the receipt and
+        // ACTIVE owner have already committed together.
+        environment.setRelevantChangeListener(::recordRelevantChange)
+        receipt
     }
 
     fun observe(callingUid: Int, request: ObserveRequestV1): EnvironmentObservationV1 = withOwnerFence {
@@ -342,107 +475,184 @@ class EnvironmentControlHandler(
             }
         }
 
-        observer.observe(lease, request)
+        val observation = observer.observe(lease, request)
+        // §6.4.1: VERIFIED with no provenance is unverifiable and Auto must reject it. The
+        // production QwyEnvironmentController intentionally has no audit-store dependency, while
+        // this contract boundary owns both the durable audit stream and the authorized caller /
+        // lease identity. Append the exact observe event before returning and project its durable
+        // qwy:<store>:<id> reference into the wire response. An audit write failure therefore
+        // fails the observe call closed instead of emitting a false VERIFIED fact.
+        val auditEvent = audit.append(
+            event = "observe",
+            callerApplicationId = caller.applicationId,
+            leaseId = lease.leaseId,
+            operationId = request.operationId,
+            payloadDigest = request.expectedIntentHash,
+        )
+        observation.copy(
+            evidenceRefs = (
+                observation.evidenceRefs + "qwy:integration.v1.audit:${auditEvent.seq}"
+            ).distinct(),
+        )
     }
 
     fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {
         val caller = authorizer.authorize(callingUid)
-
-        val lease = leaseStore.get(request.leaseId)
-            ?: throw ContractException(ContractErrorCodeV1.STALE_LEASE, "unknown lease ${request.leaseId}")
-
-        if (!leaseBelongsToCaller(lease, caller)) {
-            throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                "lease ${request.leaseId} belongs to a different caller principal")
-        }
-
-        // §6.3.4 release idempotency check
         val requestDigest = RequestDigests.releaseDigest(request.leaseId)
-        val existing = idempotencyReceiptForCaller(
-            caller = caller,
-            operation = ContractOperation.RELEASE,
-            idempotencyKey = request.idempotencyKey,
-            requestDigest = requestDigest,
-            requestLeaseId = request.leaseId,
-        )
-        if (existing != null) {
-            if (existing.requestDigest == requestDigest) {
-                return@withOwnerFence deserializeReleaseReceipt(existing.receiptPayload)
-            } else {
-                throw ContractException(ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
-                    "release key=${request.idempotencyKey} replayed with different digest")
-            }
-        }
+        var replayedReceipt: ReleaseReceiptV1? = null
+        var admittedLease: LeaseRecord? = null
 
-        // Accept from ACTIVE/EXPIRED/RELEASE_INCOMPLETE (§6.3.3 carve-out)
-        val effState = leaseStore.effectiveState(request.leaseId, tracker.generation)
-        val allowedStates = setOf(LeaseState.ACTIVE, LeaseState.EXPIRED, LeaseState.RELEASE_INCOMPLETE)
-        if (effState !in allowedStates) {
-            throw ContractException(ContractErrorCodeV1.STALE_LEASE,
-                "lease ${request.leaseId} in state $effState, release requires ACTIVE/EXPIRED/RELEASE_INCOMPLETE")
-        }
-
-        // Entire mutation (state transition + cleanup + receipt) in ONE transaction
-        // so a crash between writes rolls back cleanly (release_crashBetweenWrites).
+        // Phase 1: the owner must be durably RELEASING before cleanup crosses
+        // the external boundary. A same-key replay can resume that exact state;
+        // a different key cannot take over an in-flight release.
         storage.transaction {
-            // Transition to RELEASING
-            leaseStore.put(lease.copy(state = LeaseState.RELEASING, releaseIdempotencyKey = request.idempotencyKey))
-
-            // Cleanup
-            val outcome = environment.cleanup(request.leaseId)
-            val nowEpoch = clock.epochMs()
-
-            val releaseComplete: Boolean
-            val residualWires: List<Int>
-            when (outcome) {
-                is CleanupOutcome.Complete -> {
-                    leaseStore.put(lease.copy(state = LeaseState.RELEASED, releaseIdempotencyKey = request.idempotencyKey))
-                    releaseComplete = true
-                    residualWires = emptyList()
-                }
-                is CleanupOutcome.Incomplete -> {
-                    leaseStore.put(lease.copy(
-                        state = LeaseState.RELEASE_INCOMPLETE,
-                        releaseIdempotencyKey = request.idempotencyKey,
-                        residualReasonWires = outcome.residualReasonWires,
-                    ))
-                    releaseComplete = false
-                    residualWires = outcome.residualReasonWires
-                }
+            val lease = leaseStore.get(request.leaseId)
+                ?: throw ContractException(
+                    ContractErrorCodeV1.STALE_LEASE,
+                    "unknown lease ${request.leaseId}",
+                )
+            if (!leaseBelongsToCaller(lease, caller)) {
+                throw ContractException(
+                    ContractErrorCodeV1.STALE_LEASE,
+                    "lease ${request.leaseId} belongs to a different caller principal",
+                )
             }
 
-            // Bump revision for the environment change
-            tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
-
-            val receipt = ReleaseReceiptV1(
-                operationId = request.operationId,
-                idempotencyKey = request.idempotencyKey,
-                leaseId = request.leaseId,
-                releasedAtEpochMs = nowEpoch,
-                environmentRevision = tracker.snapshot().revision,
-                releaseComplete = releaseComplete,
-                residualReasonWires = residualWires,
-            )
-
-            // Persist for idempotent replay — same transaction as state transition
-            idempotency.record(OperationReceiptRecord(
-                callerApplicationId = caller.applicationId,
-                callerSignerDigest = caller.signerDigest,
+            val existing = idempotencyReceiptForCaller(
+                caller = caller,
                 operation = ContractOperation.RELEASE,
                 idempotencyKey = request.idempotencyKey,
                 requestDigest = requestDigest,
-                resultDigest = "",
-                receiptPayload = serializeReleaseReceipt(receipt),
-                createdAtElapsedRealtimeMs = clock.elapsedRealtimeMs(),
-            ))
-
-            audit.append("release",
-                callerApplicationId = caller.applicationId,
-                leaseId = request.leaseId,
-                operationId = request.operationId,
+                requestLeaseId = request.leaseId,
             )
+            if (existing != null) {
+                if (existing.requestDigest != requestDigest) {
+                    throw ContractException(
+                        ContractErrorCodeV1.IDEMPOTENCY_CONFLICT,
+                        "release key=${request.idempotencyKey} replayed with different digest",
+                    )
+                }
+                replayedReceipt = deserializeReleaseReceipt(existing.receiptPayload)
+                return@transaction
+            }
 
-            receipt
+            val effectiveState = leaseStore.effectiveState(
+                request.leaseId,
+                tracker.generation,
+            )
+            val normalAdmission = effectiveState in setOf(
+                LeaseState.ACTIVE,
+                LeaseState.EXPIRED,
+                LeaseState.RELEASE_INCOMPLETE,
+            )
+            val exactResume = effectiveState == LeaseState.RELEASING &&
+                lease.releaseIdempotencyKey == request.idempotencyKey
+            if (!normalAdmission && !exactResume) {
+                throw ContractException(
+                    ContractErrorCodeV1.STALE_LEASE,
+                    "lease ${request.leaseId} in state $effectiveState cannot admit this release",
+                )
+            }
+
+            val releasing = lease.copy(
+                state = LeaseState.RELEASING,
+                releaseIdempotencyKey = request.idempotencyKey,
+                // A newly authorized public caller now owns receipt recovery.
+                // Stale provider-cleanup provenance must never override this
+                // non-null key after a process death.
+                recoveryEvidenceRef = null,
+                residualReasonWires = emptyList(),
+            )
+            leaseStore.put(releasing)
+            admittedLease = releasing
+        }
+
+        replayedReceipt?.let { return@withOwnerFence it }
+        val releasingLease = checkNotNull(admittedLease) {
+            "release admission committed neither replay nor RELEASING owner"
+        }
+
+        // Phase 2: cleanup is outside every buffered DurableKv transaction but
+        // remains serialized by ownerLock. A fresh durable handle can already
+        // see the exact RELEASING lease/key at this point.
+        val outcome = try {
+            environment.cleanup(request.leaseId)
+        } catch (failure: Throwable) {
+            markReleaseIncomplete(releasingLease, failure)
+            throw failure
+        }
+        val nowEpoch = clock.epochMs()
+        val nowElapsed = clock.elapsedRealtimeMs()
+
+        // Phase 3: terminal lease state, revision, receipt and audit are one
+        // commit. If it fails after external cleanup, preserve a public-retryable
+        // RELEASE_INCOMPLETE owner instead of rolling back to a false ACTIVE.
+        try {
+            storage.transaction {
+                val durable = checkNotNull(leaseStore.get(request.leaseId)) {
+                    "durable RELEASING owner ${request.leaseId} disappeared before finalize"
+                }
+                check(
+                    durable.state == LeaseState.RELEASING &&
+                        durable.releaseIdempotencyKey == request.idempotencyKey
+                ) { "release owner changed before finalize: $durable" }
+
+                val releaseComplete: Boolean
+                val residualWires: List<Int>
+                val terminal = when (outcome) {
+                    is CleanupOutcome.Complete -> {
+                        releaseComplete = true
+                        residualWires = emptyList()
+                        durable.copy(
+                            state = LeaseState.RELEASED,
+                            residualReasonWires = emptyList(),
+                        )
+                    }
+                    is CleanupOutcome.Incomplete -> {
+                        releaseComplete = false
+                        residualWires = outcome.residualReasonWires
+                        durable.copy(
+                            state = LeaseState.RELEASE_INCOMPLETE,
+                            residualReasonWires = residualWires,
+                        )
+                    }
+                }
+                leaseStore.put(terminal)
+
+                tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+                val receipt = ReleaseReceiptV1(
+                    operationId = request.operationId,
+                    idempotencyKey = request.idempotencyKey,
+                    leaseId = request.leaseId,
+                    releasedAtEpochMs = nowEpoch,
+                    environmentRevision = tracker.snapshot().revision,
+                    releaseComplete = releaseComplete,
+                    residualReasonWires = residualWires,
+                )
+
+                idempotency.record(OperationReceiptRecord(
+                    callerApplicationId = caller.applicationId,
+                    callerSignerDigest = caller.signerDigest,
+                    operation = ContractOperation.RELEASE,
+                    idempotencyKey = request.idempotencyKey,
+                    requestDigest = requestDigest,
+                    resultDigest = "",
+                    receiptPayload = serializeReleaseReceipt(receipt),
+                    createdAtElapsedRealtimeMs = nowElapsed,
+                ))
+
+                audit.append(
+                    "release",
+                    callerApplicationId = caller.applicationId,
+                    leaseId = request.leaseId,
+                    operationId = request.operationId,
+                )
+
+                receipt
+            }
+        } catch (failure: Throwable) {
+            markReleaseIncomplete(releasingLease, failure)
+            throw failure
         }
     }
 
@@ -638,10 +848,15 @@ class EnvironmentControlHandler(
             val outcomeWire =
                 if (toItemId == null) AdvanceOutcomeV1.EXHAUSTED.wire else AdvanceOutcomeV1.ADVANCED.wire
 
-            val snap = tracker.snapshot()
             // Step 3b proved the reference exists and is the caller's own —
             // reuse that read; a fallback here would silently mask a broken gate.
             val intentHash = attributedRow.acceptedIntentHash
+
+            // The receipt names the revision AFTER the committed schedule
+            // boundary. A pre-bump snapshot makes the mandatory immediate
+            // observe deterministically disagree by one.
+            val effectiveEnvironmentRevision =
+                tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
 
             val receipt = AdvanceReceiptV1(
                 outcomeWire = outcomeWire,
@@ -649,7 +864,7 @@ class EnvironmentControlHandler(
                 advancedToItemId = toItemId,
                 scheduleVersionAfter = schedule.scheduleVersion + 1, // spec v1.56: terminal/non-terminal both V+1
                 effectiveIntentHash = intentHash,
-                effectiveEnvironmentRevision = snap.revision,
+                effectiveEnvironmentRevision = effectiveEnvironmentRevision,
                 receiptDigest = "", // Placeholder, computed below
             )
 
@@ -679,8 +894,15 @@ class EnvironmentControlHandler(
             // committed advance from this slot.
             storage.write(
                 ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY,
-                // (fromItemId, toItemId?) — toItemId is codec-native null when exhausted.
-                DurableFieldCodec.encode(listOf(request.expectedCurrentItemId, toItemId)),
+                // (fromItemId, toItemId?, versionAfter). The full receipt tuple
+                // makes recovery idempotent without guessing from mutable state.
+                DurableFieldCodec.encode(
+                    listOf(
+                        request.expectedCurrentItemId,
+                        toItemId,
+                        finalReceipt.scheduleVersionAfter.toString(),
+                    ),
+                ),
             )
 
             // §6.3.3 wire-8 observe exception window opens only for a
@@ -701,9 +923,6 @@ class EnvironmentControlHandler(
                 operationId = request.idempotencyKey,
             )
 
-            // Bump revision for schedule boundary
-            tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
-
             finalReceipt
         }
         if (replayed) return@withOwnerFence committed
@@ -712,7 +931,11 @@ class EnvironmentControlHandler(
         // next. Apply the external mutation and clear the slot; any crash in
         // this window is finished by settlePendingAdvance() at the next fenced
         // entry or owner startup.
-        applyCommittedAdvance(committed.advancedFromItemId, committed.advancedToItemId)
+        applyCommittedAdvance(
+            committed.advancedFromItemId,
+            committed.advancedToItemId,
+            committed.scheduleVersionAfter,
+        )
         storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
         committed
     }
@@ -724,14 +947,24 @@ class EnvironmentControlHandler(
      * failure (fail loud), never a typed business answer — the receipt is
      * already durable truth.
      */
-    private fun applyCommittedAdvance(fromItemId: String, expectedToItemId: String?) {
-        val actual = when (val outcome = environment.advancePointer(fromItemId)) {
-            is AdvancePointerOutcome.Advanced -> outcome.toItemId
-            is AdvancePointerOutcome.Exhausted -> null
+    private fun applyCommittedAdvance(
+        fromItemId: String,
+        expectedToItemId: String?,
+        expectedVersionAfter: Long,
+    ) {
+        val outcome = environment.convergeAdvance(
+            fromItemId = fromItemId,
+            expectedToItemId = expectedToItemId,
+            expectedVersionAfter = expectedVersionAfter,
+        )
+        val (actualToItemId, actualVersionAfter) = when (outcome) {
+            is AdvancePointerOutcome.Advanced -> outcome.toItemId to outcome.versionAfter
+            is AdvancePointerOutcome.Exhausted -> null to outcome.versionAfter
         }
-        check(actual == expectedToItemId) {
+        check(actualToItemId == expectedToItemId && actualVersionAfter == expectedVersionAfter) {
             "committed advance diverged: receipt says ${expectedToItemId ?: "EXHAUSTED"}, " +
-                "environment answered ${actual ?: "EXHAUSTED"}"
+                "version=$expectedVersionAfter; environment answered " +
+                "${actualToItemId ?: "EXHAUSTED"}, version=$actualVersionAfter"
         }
     }
 
@@ -753,11 +986,21 @@ class EnvironmentControlHandler(
         val schedule = checkNotNull(environment.scheduleSnapshot()) {
             "pending advance slot present but environment has no schedule"
         }
-        val alreadyApplied =
-            if (toItemId != null) schedule.currentItemId == toItemId else schedule.exhausted
-        if (!alreadyApplied) {
-            applyCommittedAdvance(fromItemId, toItemId)
-        }
+        // Backward-compatible decode for a marker written before versionAfter
+        // was added. If the pointer already matches, its current version is the
+        // committed one; otherwise the pending logical advance is exactly V+1.
+        val expectedVersionAfter = parts.getOrNull(2)?.toLongOrNull()
+            ?: if (
+                (toItemId != null && schedule.currentItemId == toItemId) ||
+                (toItemId == null && schedule.exhausted)
+            ) {
+                schedule.scheduleVersion
+            } else {
+                schedule.scheduleVersion + 1L
+            }
+        // Never infer projection convergence from the pointer alone: the
+        // pointer may have committed immediately before process death.
+        applyCommittedAdvance(fromItemId, toItemId, expectedVersionAfter)
         storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
     }
 
@@ -766,25 +1009,41 @@ class EnvironmentControlHandler(
      * state-aware lease recovery (§8.4 recovery table). Invoked by the service
      * on create and by tests via harness restart.
      */
-    fun onOwnerProcessStart(cleanlinessProvable: Boolean) {
-        // §6.7.5 roll-forward FIRST: a committed advance whose external pointer
-        // apply was interrupted must be finished before ANY state is served or
-        // recovered — lease recovery and callers must never observe the
-        // forbidden middle (receipt durable, pointer stale). Startup is
-        // single-threaded, so this runs without the owner fence here.
+    fun onOwnerProcessStart(cleanlinessProvable: Boolean): Unit = synchronized(ownerLock) {
+        // Bind the OS source before pending convergence: production projection
+        // proof checks current AppOps ownership through this monitor. Binding
+        // later makes every real restart convergence fail while the fake passes.
+        // ownerLock serializes any immediately delivered callback with startup.
+        environment.setRelevantChangeListener(::recordRelevantChange)
+
+        // §6.7.5 roll-forward FIRST after the proof sources are live: a
+        // committed advance whose external pointer/projection was interrupted
+        // must finish before ANY state is served or lease recovery begins.
         settlePendingAdvance()
 
         // Tracker already allocated a new generation in its init block.
         // Now do state-aware lease recovery.
-        leaseStore.recoverAfterRestart(tracker.generation, cleanlinessProvable, environment)
+        val recoveredProviderCleanup = leaseStore.recoverAfterRestart(
+            tracker.generation,
+            cleanlinessProvable,
+            environment,
+        )
 
-        // Bump revision for generation discontinuity
-        tracker.bump(RevisionBumpReason.GENERATION_DISCONTINUITY)
-
-        // Re-wire relevant-change listener
-        environment.setRelevantChangeListener { reason ->
-            tracker.bump(reason)
+        storage.transaction {
+            recoveredProviderCleanup?.let { attempt ->
+                val terminal = leaseStore.finalizeProviderCleanup(attempt)
+                audit.append(
+                    event = "provider_revoked_cleanup",
+                    callerApplicationId = terminal.callerApplicationId,
+                    leaseId = terminal.leaseId,
+                    payloadDigest = terminal.state.name,
+                )
+            }
+            // Generation discontinuity and any recovered provider-cleanup
+            // terminal above are one durable publication.
+            tracker.bump(RevisionBumpReason.GENERATION_DISCONTINUITY)
         }
+
     }
 
     /**
@@ -793,12 +1052,24 @@ class EnvironmentControlHandler(
      * records the source. New calls from that identity fail typed immediately.
      */
     fun onCallerRevoked(applicationId: String, signerDigest: String): Unit = withOwnerFence {
-        // §6.5: revoke the pairing so authorize() rejects with CALLER_NOT_ALLOWED
-        // on any subsequent call from this identity (M-LS-04/09).
-        pairingStore.revoke(applicationId, signerDigest, clock.elapsedRealtimeMs())
-        // Mark the lease REVOKED (M-PA-09/M-LS-04)
-        leaseStore.markRevoked(applicationId, RevokeSource.QWY_REVOKED_CALLER)
-        audit.append("caller_revoked", callerApplicationId = applicationId)
+        // Pairing denial, lease ownership transfer to provider cleanup, and the
+        // success audit are ONE durable decision. Committing the pairing first
+        // creates an unrecoverable crash window: the former caller can no
+        // longer release while its lease is still ACTIVE, and provider cleanup
+        // only owns REVOKED rows. FileDurableKv and the fault-injection fake
+        // both guarantee rollback of this entire transaction.
+        storage.transaction {
+            // §6.5: revoke the pairing so authorize() rejects with
+            // CALLER_NOT_ALLOWED on subsequent calls (M-LS-04/09).
+            pairingStore.revoke(applicationId, signerDigest, clock.elapsedRealtimeMs())
+            // Mark the lease REVOKED (M-PA-09/M-LS-04).
+            leaseStore.markRevoked(
+                callerApplicationId = applicationId,
+                callerSignerDigest = signerDigest,
+                source = RevokeSource.QWY_REVOKED_CALLER,
+            )
+            audit.append("caller_revoked", callerApplicationId = applicationId)
+        }
     }
 
     /**
@@ -807,7 +1078,18 @@ class EnvironmentControlHandler(
      * RELEASED itself. No post-revoke capability is granted to the caller.
      */
     fun runRevokedLeaseCleanup(): Unit = withOwnerFence {
-        leaseStore.runProviderCleanupForRevoked(environment)
+        val attempt = leaseStore.runProviderCleanupForRevoked(environment)
+            ?: return@withOwnerFence
+        storage.transaction {
+            val terminal = leaseStore.finalizeProviderCleanup(attempt)
+            tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+            audit.append(
+                event = "provider_revoked_cleanup",
+                callerApplicationId = terminal.callerApplicationId,
+                leaseId = terminal.leaseId,
+                payloadDigest = terminal.state.name,
+            )
+        }
     }
 
     // --- Receipt serialization via the shared total codec (DurableFieldCodec) ---
@@ -821,6 +1103,82 @@ class EnvironmentControlHandler(
      * replay path able to observe the forbidden middle).
      */
     private val ownerLock = Any()
+
+    /**
+     * External apply/finalize failed after admission committed. Preserve the
+     * original owner and fail closed as RELEASE_INCOMPLETE so release() can
+     * converge it. If even this recovery commit fails, ACQUIRING remains the
+     * durable blocker; the recovery failure is attached without hiding the
+     * primary cause.
+     */
+    private fun markApplyIncomplete(leaseId: String, primaryFailure: Throwable) {
+        try {
+            storage.transaction {
+                val durable = leaseStore.get(leaseId) ?: return@transaction
+                if (durable.state == LeaseState.ACQUIRING) {
+                    leaseStore.put(
+                        durable.copy(
+                            state = LeaseState.RELEASE_INCOMPLETE,
+                            residualReasonWires = listOf(
+                                ContractErrorCodeV1.RELEASE_INCOMPLETE.wire,
+                            ),
+                        ),
+                    )
+                    tracker.reportObserverGap(ContinuityCoverageV1.NONE)
+                }
+            }
+        } catch (recoveryFailure: Throwable) {
+            primaryFailure.addSuppressed(recoveryFailure)
+        }
+    }
+
+    /**
+     * Cleanup/finalize failed after the RELEASING admission committed. Keep the
+     * exact lease and release key public-retryable and attach a typed durable
+     * reason. If this best-effort commit also fails, RELEASING itself remains a
+     * safe blocker that the same key can resume after storage recovers.
+     */
+    private fun markReleaseIncomplete(
+        releasingLease: LeaseRecord,
+        primaryFailure: Throwable,
+    ) {
+        try {
+            storage.transaction {
+                val durable = leaseStore.get(releasingLease.leaseId) ?: return@transaction
+                if (durable.state == LeaseState.RELEASING &&
+                    durable.releaseIdempotencyKey == releasingLease.releaseIdempotencyKey
+                ) {
+                    leaseStore.put(
+                        durable.copy(
+                            state = LeaseState.RELEASE_INCOMPLETE,
+                            residualReasonWires = listOf(
+                                ContractErrorCodeV1.RELEASE_INCOMPLETE.wire,
+                            ),
+                        ),
+                    )
+                    tracker.reportObserverGap(ContinuityCoverageV1.NONE)
+                }
+            }
+        } catch (recoveryFailure: Throwable) {
+            primaryFailure.addSuppressed(recoveryFailure)
+        }
+    }
+
+    /**
+     * A delivered callback is serialized with every handler response. This
+     * does not upgrade an asynchronous source to COMPLETE, but it guarantees
+     * an already-delivered bump cannot race between effective read and the
+     * observation's revision snapshot.
+     */
+    private fun recordRelevantChange(reason: RevisionBumpReason) {
+        synchronized(ownerLock) {
+            if (reason == RevisionBumpReason.OBSERVER_GAP) {
+                tracker.reportObserverGap(ContinuityCoverageV1.PARTIAL)
+            } else {
+                tracker.bump(reason)
+            }
+        }
+    }
 
     /**
      * Lease ownership uses the same full authorization principal as pairing:
@@ -904,6 +1262,12 @@ class EnvironmentControlHandler(
     }
 
     companion object {
+        private val APPLY_RESUMABLE_STATES: Set<LeaseState> = setOf(
+            LeaseState.ACQUIRING,
+            LeaseState.EXPIRED,
+            LeaseState.RELEASE_INCOMPLETE,
+        )
+
         /**
          * §6.7.5 single-commit protocol: the roll-forward slot for a committed
          * advance whose external pointer apply has not happened yet. Empty

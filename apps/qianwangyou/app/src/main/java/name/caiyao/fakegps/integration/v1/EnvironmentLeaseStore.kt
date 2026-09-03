@@ -17,7 +17,8 @@ package name.caiyao.fakegps.integration.v1
  *    (M-LS-12..14 — deliberate false-red policy).
  *  - State-aware restart recovery (§8.4 recovery table): REVOKED and
  *    RELEASE_INCOMPLETE are preserved verbatim (M-LS-15/16), RELEASING replays
- *    release (M-LS-17), only ACQUIRING/ACTIVE are subject to the
+ *    cleanup but cannot become RELEASED until the caller-visible receipt is
+ *    finalized (M-LS-17), only ACQUIRING/ACTIVE are subject to the
  *    cleanliness/generation rules (M-LS-07/12), EXPIRED/RELEASED untouched.
  *  - REVOKED is unreachable to its (former) caller; provider-driven internal
  *    cleanup pushes REVOKED → RELEASING → RELEASED (M-LS-04).
@@ -26,9 +27,16 @@ class EnvironmentLeaseStore(
     private val storage: DurableKv,
     private val clock: MonotonicClock,
 ) {
+    data class ProviderCleanupAttempt(
+        val releasingLease: LeaseRecord,
+        val outcome: CleanupOutcome,
+    )
+
     companion object {
         private const val LEASE_NS = "integration.v1.leases"
         private const val CURRENT_KEY = "__current_lease_id__"
+        private const val PROVIDER_REVOKED_CLEANUP_EVIDENCE =
+            "provider:revoked-cleanup:v1"
     }
 
     /**
@@ -76,11 +84,18 @@ class EnvironmentLeaseStore(
         storage.write(LEASE_NS, CURRENT_KEY, record.leaseId)
     }
 
-    /** Mark the caller's lease REVOKED when qwy revokes the caller (M-LS-04/M-PA-09). */
-    fun markRevoked(callerApplicationId: String, source: RevokeSource) {
+    /** Mark this exact caller principal's lease REVOKED (M-LS-04/M-PA-09). */
+    fun markRevoked(
+        callerApplicationId: String,
+        callerSignerDigest: String,
+        source: RevokeSource,
+    ) {
         val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return
         val record = get(leaseId) ?: return
-        if (record.callerApplicationId != callerApplicationId) return
+        if (
+            record.callerApplicationId != callerApplicationId ||
+            record.callerSignerDigest != callerSignerDigest
+        ) return
         if (record.state == LeaseState.RELEASED) return
         put(record.copy(state = LeaseState.REVOKED, revokeSource = source))
     }
@@ -89,22 +104,62 @@ class EnvironmentLeaseStore(
      * Provider-driven internal cleanup for REVOKED leases — the former caller
      * cannot call anymore, so qwy converges its own environment (M-LS-04).
      */
-    fun runProviderCleanupForRevoked(environment: QwyEnvironment) {
-        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return
-        val record = get(leaseId) ?: return
-        if (record.state != LeaseState.REVOKED) return
-        // Transition REVOKED → RELEASING → attempt cleanup → RELEASED or RELEASE_INCOMPLETE
-        put(record.copy(state = LeaseState.RELEASING))
-        val outcome = environment.cleanup(leaseId)
-        when (outcome) {
-            is CleanupOutcome.Complete ->
-                put(record.copy(state = LeaseState.RELEASED))
-            is CleanupOutcome.Incomplete ->
-                put(record.copy(
-                    state = LeaseState.RELEASE_INCOMPLETE,
-                    residualReasonWires = outcome.residualReasonWires,
-                ))
+    fun runProviderCleanupForRevoked(
+        environment: QwyEnvironment,
+    ): ProviderCleanupAttempt? {
+        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return null
+        val record = get(leaseId) ?: return null
+        val retryingProviderCleanup = record.state == LeaseState.RELEASE_INCOMPLETE &&
+            isProviderRevokedCleanup(record)
+        val resumingProviderCleanup = record.state == LeaseState.RELEASING &&
+            isProviderRevokedCleanup(record)
+        if (
+            record.state != LeaseState.REVOKED &&
+            !retryingProviderCleanup &&
+            !resumingProviderCleanup
+        ) return null
+        // Phase 1: the provider owns a durable RELEASING row before cleanup.
+        val releasing = if (resumingProviderCleanup) {
+            record
+        } else {
+            record.copy(
+                state = LeaseState.RELEASING,
+                // A revoked principal can never replay a caller release. Clear
+                // any interrupted caller key and persist provider ownership.
+                releaseIdempotencyKey = null,
+                recoveryEvidenceRef = PROVIDER_REVOKED_CLEANUP_EVIDENCE,
+                residualReasonWires = emptyList(),
+            ).also(::put)
         }
+        // Phase 2: the external boundary is deliberately outside the handler's
+        // transaction. A process death leaves RELEASING for restart/retry.
+        val outcome = environment.cleanup(leaseId)
+        return ProviderCleanupAttempt(releasing, outcome)
+    }
+
+    /**
+     * Phase 3 mutation only. The handler calls this inside the same durable
+     * transaction as revision and audit publication.
+     */
+    fun finalizeProviderCleanup(attempt: ProviderCleanupAttempt): LeaseRecord {
+        val durable = checkNotNull(get(attempt.releasingLease.leaseId)) {
+            "provider cleanup owner ${attempt.releasingLease.leaseId} disappeared"
+        }
+        check(durable.state == LeaseState.RELEASING && isProviderRevokedCleanup(durable)) {
+            "provider cleanup owner changed before finalize: $durable"
+        }
+        val terminal = when (val outcome = attempt.outcome) {
+            is CleanupOutcome.Complete -> durable.copy(
+                state = LeaseState.RELEASED,
+                residualReasonWires = emptyList(),
+            )
+            is CleanupOutcome.Incomplete -> durable.copy(
+                state = LeaseState.RELEASE_INCOMPLETE,
+                residualReasonWires = outcome.residualReasonWires,
+            )
+        }
+        put(terminal)
+        return terminal
     }
 
     /**
@@ -115,9 +170,10 @@ class EnvironmentLeaseStore(
         currentGeneration: Long,
         cleanlinessProvable: Boolean,
         environment: QwyEnvironment,
-    ) {
-        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return
-        val record = get(leaseId) ?: return
+    ): ProviderCleanupAttempt? {
+        val leaseId = storage.read(LEASE_NS, CURRENT_KEY) ?: return null
+        val record = get(leaseId) ?: return null
+        var providerCleanupAttempt: ProviderCleanupAttempt? = null
 
         when (record.state) {
             // RELEASED/EXPIRED: untouched
@@ -126,17 +182,28 @@ class EnvironmentLeaseStore(
             // REVOKED/RELEASE_INCOMPLETE: preserved verbatim (M-LS-15/16)
             LeaseState.REVOKED, LeaseState.RELEASE_INCOMPLETE -> { /* no-op */ }
 
-            // RELEASING: replay release (M-LS-17)
+            // RELEASING: replay cleanup (M-LS-17). Provider-driven revoked
+            // cleanup has no authorized caller and therefore MUST finish to
+            // RELEASED itself. Caller-driven cleanup retains its non-null
+            // release key and must stay RELEASING until that caller can commit
+            // RELEASED + receipt together.
             LeaseState.RELEASING -> {
                 val outcome = environment.cleanup(record.leaseId)
-                when (outcome) {
-                    is CleanupOutcome.Complete ->
-                        put(record.copy(state = LeaseState.RELEASED))
-                    is CleanupOutcome.Incomplete ->
-                        put(record.copy(
-                            state = LeaseState.RELEASE_INCOMPLETE,
-                            residualReasonWires = outcome.residualReasonWires,
-                        ))
+                if (isProviderRevokedCleanup(record)) {
+                    // Handler owns the phase-3 transaction so terminal state,
+                    // revision, and audit are published or rolled back together.
+                    providerCleanupAttempt = ProviderCleanupAttempt(record, outcome)
+                } else {
+                    when (outcome) {
+                        is CleanupOutcome.Complete -> {
+                            // Caller-driven: await exact public receipt replay.
+                        }
+                        is CleanupOutcome.Incomplete ->
+                            put(record.copy(
+                                state = LeaseState.RELEASE_INCOMPLETE,
+                                residualReasonWires = outcome.residualReasonWires,
+                            ))
+                    }
                 }
             }
 
@@ -155,7 +222,20 @@ class EnvironmentLeaseStore(
                 }
             }
         }
+        return providerCleanupAttempt
     }
+
+    /**
+     * Explicit marker for new rows plus a narrow legacy decoder for rows that
+     * predate it. Public release always carries a non-null idempotency key;
+     * provider cleanup is rooted in a QWY_REVOKED_CALLER lease and carries none.
+     */
+    private fun isProviderRevokedCleanup(record: LeaseRecord): Boolean =
+        record.releaseIdempotencyKey == null &&
+            (
+                record.recoveryEvidenceRef == PROVIDER_REVOKED_CLEANUP_EVIDENCE ||
+                    record.revokeSource == RevokeSource.QWY_REVOKED_CALLER
+            )
 
     // Shared total codec (Terra round-4/5): FREE strings frame without a
     // separator, and nullable fields (releaseIdempotencyKey, revokeSource,

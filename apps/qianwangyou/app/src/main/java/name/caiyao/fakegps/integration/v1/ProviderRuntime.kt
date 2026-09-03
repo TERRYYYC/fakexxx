@@ -180,13 +180,17 @@ object ProviderRuntime {
         // receipt to land or not land together, and a prefs-per-namespace store
         // commits each write on its own. See FileDurableKv's header.
         val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
-        kvRef = kv
-        return compose(
+        val handler = compose(
             kv = kv,
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
             environment = QwyEnvironmentController(appContext),
         )
+        // Publish the writer handle only after the whole owner graph has
+        // started successfully. A failed composition must not be discoverable
+        // by operator APIs while a retry constructs the replacement graph.
+        kvRef = kv
+        return handler
     }
 
     /**
@@ -215,7 +219,12 @@ object ProviderRuntime {
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
-        val observer = EnvironmentObserver(tracker, environment, clock)
+        val observer = EnvironmentObserver(
+            tracker,
+            environment,
+            clock,
+            VerifiedObservationWatermarkStore(kv),
+        )
 
         val handler = EnvironmentControlHandler(
             authorizer = authorizer,
@@ -242,7 +251,20 @@ object ProviderRuntime {
         // replace the handler's own listener with an identical-looking one —
         // two registrations racing to be the survivor. Composition's job is to
         // call onOwnerProcessStart, not to re-do what it does.
-        handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
+        try {
+            handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
+        } catch (startupFailure: Throwable) {
+            // Startup may already have bound AppOps and started the framework
+            // refresh loop while converging a pending advance. The handler is
+            // not cacheable when this call throws, so explicitly retire that
+            // partial graph before the next Binder call retries composition.
+            try {
+                environment.abortOwnerStart()
+            } catch (cleanupFailure: Throwable) {
+                startupFailure.addSuppressed(cleanupFailure)
+            }
+            throw startupFailure
+        }
 
         return handler
     }
@@ -294,44 +316,43 @@ object ProviderRuntime {
     }
 
     /**
-     * Called on orderly teardown of the provider service. Without this, [consume]
-     * below can only ever answer false.
-     *
-     * That was the bug: record() existed with no call site, so
-     * cleanlinessProvable was a constant false dressed up as a check. Every
-     * start took the unclean path — ACTIVE leases to RELEASE_INCOMPLETE even
-     * after a clean stop — while the code read as though §8.4's two cases were
-     * both live. A permanently-unreachable branch is worse than a missing one:
-     * it looks covered.
-     *
-     * A no-op when nothing has been composed yet: there is no owner state to
-     * describe as cleanly stopped.
+     * A Service lifecycle boundary is not an owner/process shutdown boundary.
+     * It can only revoke evidence, never mint it. A no-op before composition:
+     * without a composed owner there is no in-process proof to invalidate.
      */
-    fun recordCleanShutdown() {
+    fun invalidateCleanShutdownEvidence() {
         synchronized(bootLock) {
-            kvRef?.let { CleanShutdownMarker.record(it) }
+            kvRef?.let { CleanShutdownMarker.invalidate(it) }
         }
     }
 
     /**
-     * Clean-shutdown evidence. Written when the owner tears down in an orderly
-     * way and consumed (cleared) on the next start, so "provable" means "this
-     * exact marker survived and nothing else claimed it".
+     * Single-use evidence reserved for a future explicit protocol that first
+     * proves the device-global owner and its refresh session are quiescent.
      *
-     * The asymmetry is deliberate and fail-closed: an orderly stop gets to leave
-     * the marker, and anything else — process kill, low-memory reap, power loss
-     * — simply does not, so the next start correctly reports unclean. There is
-     * no reliable "process is exiting" callback on Android to lean on, and this
-     * design does not need one.
+     * Version 1 used Android Service.onDestroy as its producer. That callback is
+     * not process-exit evidence, so those persisted markers are intentionally
+     * ignored and cleared during migration. Until the explicit owner shutdown
+     * protocol exists, production has no path that calls [record].
      */
     object CleanShutdownMarker {
         private const val NS = "runtime"
-        private const val KEY = "clean_shutdown"
+        private const val KEY = "quiescent_owner_shutdown_v2"
+        private const val LEGACY_SERVICE_LIFECYCLE_KEY = "clean_shutdown"
 
-        fun record(kv: DurableKv) = kv.write(NS, KEY, "1")
+        fun record(kv: DurableKv) = kv.transaction {
+            kv.write(NS, LEGACY_SERVICE_LIFECYCLE_KEY, "0")
+            kv.write(NS, KEY, "1")
+        }
+
+        fun invalidate(kv: DurableKv) = kv.transaction {
+            kv.write(NS, LEGACY_SERVICE_LIFECYCLE_KEY, "0")
+            kv.write(NS, KEY, "0")
+        }
 
         fun consume(kv: DurableKv): Boolean = kv.transaction {
             val present = kv.read(NS, KEY) == "1"
+            kv.write(NS, LEGACY_SERVICE_LIFECYCLE_KEY, "0")
             kv.write(NS, KEY, "0")
             present
         }

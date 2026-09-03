@@ -12,10 +12,14 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_SIGNER
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_PKG
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.OTHER_UID
+import name.caiyao.fakegps.integration.v1.support.SimulatedWriteCrash
 import name.caiyao.fakegps.integration.v1.support.expectContractFailure
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 /**
@@ -98,6 +102,176 @@ class LeaseMatrixTest {
         assertEquals(LeaseState.RELEASED, h.leases.effectiveState(receipt.leaseId, h.tracker.generation))
         val next = h.apply(uid = OTHER_UID, key = "ls04-c")
         assertTrue(next.leaseId.isNotEmpty())
+    }
+
+    @Test
+    fun providerDrivenCleanupPublishesTerminalRevisionAndAudit() {
+        val h = pairedHarness()
+        val receipt = h.apply(key = "ls04-cleanup-evidence-apply")
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        val revisionBefore = h.tracker.snapshot().revision
+        val auditCountBefore = h.audit.all().size
+
+        h.handler.runRevokedLeaseCleanup()
+
+        assertEquals(LeaseState.RELEASED, h.leases.get(receipt.leaseId)?.state)
+        assertEquals(revisionBefore + 1L, h.tracker.snapshot().revision)
+        assertEquals(auditCountBefore + 1, h.audit.all().size)
+        val cleanupAudit = h.audit.all().last()
+        assertEquals("provider_revoked_cleanup", cleanupAudit.event)
+        assertEquals(AUTO_PKG, cleanupAudit.callerApplicationId)
+        assertEquals(receipt.leaseId, cleanupAudit.leaseId)
+    }
+
+    @Test
+    fun providerCleanupTerminalRevisionAndAuditRollbackTogether() {
+        val h = pairedHarness()
+        val receipt = h.apply(key = "ls04-cleanup-atomic-apply")
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        val revisionBefore = h.tracker.snapshot().revision
+        h.kv.failOnWrite = { namespace, _ -> namespace == "integration.v1.audit" }
+
+        assertThrows(SimulatedWriteCrash::class.java) {
+            h.handler.runRevokedLeaseCleanup()
+        }
+        h.kv.failOnWrite = null
+
+        assertEquals(
+            "terminal lease cannot commit without its revision and audit evidence",
+            LeaseState.RELEASING,
+            h.leases.get(receipt.leaseId)?.state,
+        )
+        assertEquals(revisionBefore, h.tracker.snapshot().revision)
+
+        h.handler.runRevokedLeaseCleanup()
+        assertEquals(LeaseState.RELEASED, h.leases.get(receipt.leaseId)?.state)
+        assertEquals(revisionBefore + 1L, h.tracker.snapshot().revision)
+        assertEquals("provider_revoked_cleanup", h.audit.all().last().event)
+    }
+
+    @Test
+    fun callerRevocationRollsBackPairingWhenLeaseTransitionCannotCommit() {
+        val h = pairedHarness()
+        val receipt = h.apply(key = "ls04-atomic-revoke-apply")
+        val auditBefore = h.audit.all()
+        h.kv.failOnWrite = { namespace, key ->
+            namespace == "integration.v1.leases" && key.startsWith("lease:")
+        }
+
+        assertThrows(SimulatedWriteCrash::class.java) {
+            h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        }
+        h.kv.failOnWrite = null
+
+        assertNotNull(
+            "a torn revoke must not strand an ACTIVE lease behind an already-revoked principal",
+            h.pairing.findActive(AUTO_PKG, AUTO_SIGNER),
+        )
+        assertEquals(
+            LeaseState.ACTIVE,
+            h.leases.effectiveState(receipt.leaseId, h.tracker.generation),
+        )
+        assertEquals("failed revoke must not append an audit success", auditBefore, h.audit.all())
+
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+
+        assertNull(h.pairing.findActive(AUTO_PKG, AUTO_SIGNER))
+        assertEquals(
+            LeaseState.REVOKED,
+            h.leases.effectiveState(receipt.leaseId, h.tracker.generation),
+        )
+        assertEquals("caller_revoked", h.audit.all().last().event)
+    }
+
+    @Test
+    fun revokingOneSignerDoesNotRevokeAnotherSignersLeaseForTheSamePackage() {
+        val h = ProviderHarness.create()
+        val rotatedSigner = "signer-auto-2"
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        h.pair(AUTO_PKG, rotatedSigner)
+        h.resolver.register(AUTO_UID, AUTO_PKG, rotatedSigner)
+        val receipt = h.apply(key = "ls04-principal-scope-apply")
+
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+
+        assertNull(h.pairing.findActive(AUTO_PKG, AUTO_SIGNER))
+        assertNotNull(h.pairing.findActive(AUTO_PKG, rotatedSigner))
+        assertEquals(
+            "lease ownership is the full (applicationId, signerDigest) principal",
+            LeaseState.ACTIVE,
+            h.leases.effectiveState(receipt.leaseId, h.tracker.generation),
+        )
+    }
+
+    @Test
+    fun revokedProviderCleanupCrashIsFinishedWithoutCallingTheRevokedPrincipal() {
+        val h = pairedHarness()
+        h.pair(OTHER_PKG, OTHER_SIGNER)
+        val receipt = h.apply(key = "ls04-provider-crash-apply")
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        h.env.beforeCleanup = {
+            throw IllegalStateException("process died after provider RELEASING commit")
+        }
+
+        try {
+            h.handler.runRevokedLeaseCleanup()
+            throw AssertionError("injected provider cleanup crash must surface")
+        } catch (expected: IllegalStateException) {
+            assertEquals(
+                "process died after provider RELEASING commit",
+                expected.message,
+            )
+        }
+        assertEquals(LeaseState.RELEASING, h.leases.get(receipt.leaseId)?.state)
+
+        h.env.beforeCleanup = null
+        val auditCountBeforeRestart = h.audit.all().size
+        h.restart(cleanlinessProvable = false)
+
+        assertEquals(
+            "provider-owned cleanup has no authorized caller receipt to wait for",
+            LeaseState.RELEASED,
+            h.leases.get(receipt.leaseId)?.state,
+        )
+        assertEquals(auditCountBeforeRestart + 1, h.audit.all().size)
+        assertEquals("provider_revoked_cleanup", h.audit.all().last().event)
+        assertEquals(receipt.leaseId, h.audit.all().last().leaseId)
+        val next = h.apply(uid = OTHER_UID, key = "ls04-provider-crash-next")
+        assertNotEquals(receipt.leaseId, next.leaseId)
+    }
+
+    @Test
+    fun startupProviderCleanupTerminalAndAuditRollbackTogether() {
+        val h = pairedHarness()
+        val receipt = h.apply(key = "ls04-startup-cleanup-atomic-apply")
+        h.handler.onCallerRevoked(AUTO_PKG, AUTO_SIGNER)
+        h.env.beforeCleanup = {
+            throw IllegalStateException("process died after provider phase one")
+        }
+        assertThrows(IllegalStateException::class.java) {
+            h.handler.runRevokedLeaseCleanup()
+        }
+        h.env.beforeCleanup = null
+        assertEquals(LeaseState.RELEASING, h.leases.get(receipt.leaseId)?.state)
+        val auditCountBeforeRestart = h.audit.all().size
+        h.kv.failOnWrite = { namespace, _ -> namespace == "integration.v1.audit" }
+
+        assertThrows(SimulatedWriteCrash::class.java) {
+            h.restart(cleanlinessProvable = false)
+        }
+        h.kv.failOnWrite = null
+
+        assertEquals(
+            "startup must not publish terminal lease without cleanup audit",
+            LeaseState.RELEASING,
+            h.leases.get(receipt.leaseId)?.state,
+        )
+        assertEquals(auditCountBeforeRestart, h.audit.all().size)
+
+        h.restart(cleanlinessProvable = false)
+        assertEquals(LeaseState.RELEASED, h.leases.get(receipt.leaseId)?.state)
+        assertEquals(auditCountBeforeRestart + 1, h.audit.all().size)
+        assertEquals("provider_revoked_cleanup", h.audit.all().last().event)
     }
 
     /** M-LS-05: same caller + same idempotencyKey replay → original receipt, no conflict, one real apply. */

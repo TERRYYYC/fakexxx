@@ -99,9 +99,24 @@ class EngineTrustedPathRedTest {
             calls++
             val template = if (queue.size > 1) queue.removeAt(0) else queue.first()
             return when (template) {
-                is AttemptOutcome.Success -> template.copy(startedAt = startedAt, endedAt = nowMs())
+                is AttemptOutcome.Success -> {
+                    // A successful run must have actually crossed RUNNING. This callback is also
+                    // where production captures the immutable monotonic running-confirmed clock.
+                    onRunningObserved(nowMs())
+                    template.copy(startedAt = startedAt, endedAt = nowMs())
+                }
                 is AttemptOutcome.Failure -> template.copy(startedAt = startedAt, endedAt = nowMs())
             }
+        }
+
+        override suspend fun runTest(
+            startedAt: Long,
+            testTimeoutMs: Long,
+            onStartDispatched: suspend () -> Unit,
+            onRunningObserved: suspend (Long) -> Unit
+        ): AttemptOutcome {
+            onStartDispatched()
+            return runTest(startedAt, testTimeoutMs, onRunningObserved)
         }
     }
 
@@ -147,6 +162,7 @@ class EngineTrustedPathRedTest {
         private val wire: Int,
         private val deliveryMode: String,
         private val present: Boolean = true,
+        private val throwOnCompletion: Boolean = false,
         // R44 (Sol GREEN-review-3 F2): the intent-hash preimage inputs must equal the engine's
         // recompute — plan/task refs + the attempt validity window. Defaults match this harness
         // (fresh-db plan 1, task 42, VirtualClock initial 1000, buildEngine timeout 90s).
@@ -189,13 +205,15 @@ class EngineTrustedPathRedTest {
                 observedAtEpochMs = 6500L
             )
 
-        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? =
-            if (!present) null else APlusCompletionEvidence(
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? {
+            if (throwOnCompletion) error("simulated process death before completion receipt")
+            return if (!present) null else APlusCompletionEvidence(
                 execution = fullEvidenceExecution(wire),
                 completionEvidenceWire = wire,
                 applyReceiptIntentHash = intentHash(attemptId, runSessionId),
                 applyReceiptLease = providerLease(attemptId)
             )
+        }
     }
 
     private class FakeBackend(
@@ -204,7 +222,7 @@ class EngineTrustedPathRedTest {
         private val observe: SeededObserve,
         private val revision: SeededRevision,
         private val quota: SeededQuota,
-        private val evidence: FakeEvidenceSource
+        private val evidence: APlusEvidenceSource
     ) : APlusBackend {
         override val executor: ExternalApplyExecutor = exec
         override val recoveryLog: DurableRecoveryLog = log
@@ -231,6 +249,18 @@ class EngineTrustedPathRedTest {
         // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
         val params = backend?.let { APlusComposition.engineAplusParams(it) }
         params?.first?.let { coordinators += it }
+        // Normal-path trust now evaluates the immutable execution row written at
+        // COMPLETION_OBSERVED. Give the fake monotonic seam the same valid per-attempt window as
+        // the fake PRE/POST observations instead of relying on the later live evidence object.
+        var elapsedRead = 0
+        val defaultElapsedClock = {
+            val window = longArrayOf(
+                EXEC_STARTED_AT_ELAPSED,
+                EXEC_RUNNING_CONFIRMED_AT_ELAPSED,
+                EXEC_COMPLETED_AT_ELAPSED
+            )
+            window[(elapsedRead++ % window.size)]
+        }
         return AutomationEngine(
             planId = planId,
             planRepository = repo,
@@ -241,7 +271,7 @@ class EngineTrustedPathRedTest {
             gpsSettleMs = 0L,
             nowMs = clock.nowMs,
             delayMs = clock.delayMs,
-            elapsedClockMs = elapsedClockMs ?: clock.nowMs,
+            elapsedClockMs = elapsedClockMs ?: defaultElapsedClock,
             attemptDriver = driver,
             recoveryCoordinator = params?.first,
             completionEvidenceSource = params?.second
@@ -354,6 +384,86 @@ class EngineTrustedPathRedTest {
         FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true)
     )
 
+    private data class ProductionObservationFixture(
+        val backend: APlusBackend,
+        val provider: RecordingExternalApplyExecutor,
+        val observationCount: () -> Int
+    )
+
+    /**
+     * Shipped-composition fixture whose provider returns the requested PRE/POST coordinate sequence.
+     * Invalid IEEE-754 values deliberately cross the real wire adapter and Room boundary.
+     */
+    private suspend fun productionObservationFixture(
+        coordinates: List<Pair<Double, Double>>
+    ): ProductionObservationFixture {
+        val trustedSigner = "sha256:production-invalid-coordinate-test"
+        db.providerPairingDao().insert(
+            com.example.cellrebelauto.model.plan.ProviderPairingRecord(
+                applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                currentSignerDigest = trustedSigner,
+                approvedAt = 1_000L,
+                revokedAt = null,
+                approvedVersionCode = 1
+            )
+        )
+        val provider = RecordingExternalApplyExecutor()
+        var observationOrdinal = 0
+        provider.observeAnswers = { leaseId, _, expectedIntentHash ->
+            val ordinal = observationOrdinal++
+            val (latitude, longitude) = coordinates.getOrElse(ordinal) { coordinates.last() }
+            val observedAtElapsed = if (ordinal == 0) 500L else 14_000L
+            io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1(
+                leaseId = leaseId,
+                acceptedIntentHash = expectedIntentHash,
+                observedAtEpochMs = observedAtElapsed,
+                observedAtElapsedRealtimeMs = observedAtElapsed,
+                environmentRevision = REVISION,
+                environmentFingerprint = FINGERPRINT,
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                continuitySinceEpochMs = 100L,
+                continuitySinceElapsedRealtimeMs = 100L,
+                deliveryModeWire = io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire,
+                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                effectiveLatitude = latitude,
+                effectiveLongitude = longitude,
+                isMock = true,
+                scheduleDecisionWire = io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire,
+                evidenceRefs = listOf("qwy:store:invalid-coordinate-$ordinal"),
+                scheduleItemId = "item-1",
+                scheduleVersion = 1L
+            )
+        }
+        val journeyExecutor = object : ExternalApplyExecutor by provider {
+            override fun apply(
+                attemptId: Long,
+                intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+                idempotencyKey: String,
+                requestDigest: String,
+                now: Long
+            ) = provider.apply(attemptId, intent, idempotencyKey, requestDigest, now).copy(
+                operationId = "op-$attemptId",
+                acceptedIntentHash = requestDigest,
+                appliedAtEpochMs = now,
+                environmentRevision = REVISION,
+                verificationLevelWire = WIRE_VERIFIED
+            )
+        }
+        return ProductionObservationFixture(
+            backend = APlusComposition.productionBackend(
+                ApplicationProvider.getApplicationContext(),
+                db,
+                providerSignerDigest = { trustedSigner },
+                providerApplicationId =
+                    io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                attemptValidityTimeoutMs = 90_000L,
+                serviceLifecycleExecutor = journeyExecutor
+            ),
+            provider = provider,
+            observationCount = { observationOrdinal }
+        )
+    }
+
     private fun applyKey(attemptId: Long): String = APlusOperationIdentity.applyIdempotencyKey(attemptId)
     private fun releaseKey(attemptId: Long): String = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
     private fun releaseDigest(leaseId: String): String = APlusOperationIdentity.releaseDigest(leaseId)
@@ -361,13 +471,23 @@ class EngineTrustedPathRedTest {
     // ---- R10-F1 positive: provider-driven apply→lease + decision RED + terminal-success ----
 
     @Test
-    fun `R10-F1 positive - the normal chain drives apply then decide then release, and a passing completion must populate evidence, mint, and terminalize as succeeded`() = runTest {
+    fun `R10-F1 positive - the normal chain accepts provider-verified KB-8 coordinates and terminalizes as succeeded`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         seedTerminalDummyAttempt(taskId = taskId, attemptId = 77L) // non-constant attempt identity (P1-6)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        val backend = FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
+        // KB-8 production-path discriminator: the plan still carries the legacy CSV coordinate
+        // (39.9, 116.4), while Qianwangyou reports a valid independently verified coordinate in
+        // Kyiv. Auto must not recreate a second distance oracle before the trust decision.
+        val backend = FakeBackend(
+            executor,
+            log,
+            SeededObserve(emptyMap()),
+            SeededRevision(emptyMap()),
+            SeededQuota(emptyMap()),
+            FakeEvidenceSource(50.4501, 30.5234, WIRE_VERIFIED, "SYSTEM_MOCK", present = true)
+        )
         val clock = VirtualClock()
         val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
@@ -394,6 +514,322 @@ class EngineTrustedPathRedTest {
         assertEquals(0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
     }
 
+    @Test
+    fun `R10-F1 production backend - one durable observation writer reaches KB-8 trust and mint`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val trustedSigner = "sha256:production-path-test"
+        db.providerPairingDao().insert(
+            com.example.cellrebelauto.model.plan.ProviderPairingRecord(
+                applicationId = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+                currentSignerDigest = trustedSigner,
+                approvedAt = 1_000L,
+                revokedAt = null,
+                approvedVersionCode = 1
+            )
+        )
+
+        val provider = RecordingExternalApplyExecutor()
+        var observationOrdinal = 0
+        provider.observeAnswers = { leaseId, _, expectedIntentHash ->
+            val observedAtElapsed = if (observationOrdinal++ == 0) 500L else 14_000L
+            io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1(
+                leaseId = leaseId,
+                acceptedIntentHash = expectedIntentHash,
+                observedAtEpochMs = observedAtElapsed,
+                observedAtElapsedRealtimeMs = observedAtElapsed,
+                environmentRevision = REVISION,
+                environmentFingerprint = FINGERPRINT,
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                continuitySinceEpochMs = 100L,
+                continuitySinceElapsedRealtimeMs = 100L,
+                deliveryModeWire = io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire,
+                verificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+                // The shipped composition must honor KB-8 too: QWY owns this valid coordinate,
+                // which is deliberately far from the legacy Auto plan coordinate (39.9, 116.4).
+                effectiveLatitude = 50.4501,
+                effectiveLongitude = 30.5234,
+                isMock = true,
+                scheduleDecisionWire = io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire,
+                evidenceRefs = listOf("qwy:store:production-path"),
+                scheduleItemId = "item-1",
+                scheduleVersion = 1L
+            )
+        }
+        val journeyExecutor = object : ExternalApplyExecutor by provider {
+            override fun apply(
+                attemptId: Long,
+                intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+                idempotencyKey: String,
+                requestDigest: String,
+                now: Long
+            ) = provider.apply(attemptId, intent, idempotencyKey, requestDigest, now).copy(
+                operationId = "op-$attemptId",
+                acceptedIntentHash = requestDigest,
+                appliedAtEpochMs = now,
+                environmentRevision = REVISION,
+                verificationLevelWire = WIRE_VERIFIED
+            )
+        }
+        val backend = APlusComposition.productionBackend(
+            ApplicationProvider.getApplicationContext(),
+            db,
+            providerSignerDigest = { trustedSigner },
+            providerApplicationId =
+                io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
+            attemptValidityTimeoutMs = 90_000L,
+            serviceLifecycleExecutor = journeyExecutor
+        )
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                clock.now = 2_000L
+                onRunningObserved(clock.now)
+                clock.now = 13_000L
+                return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
+            }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = backend
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("the shipped production composition must reach trusted terminal success", "succeeded", attempt.status)
+        assertNotNull("the shipped production composition must mint trusted quota", db.trustedQuotaDao().getByAttempt(attempt.id))
+        assertEquals("PRE has exactly one immutable durable carrier", 1, db.durableObservationDao().forAttempt(attempt.id).count { it.phase == "PRE" })
+        assertEquals("POST has exactly one immutable durable carrier", 1, db.durableObservationDao().forAttempt(attempt.id).count { it.phase == "POST" })
+        assertEquals("both live provider observations were consumed", 2, observationOrdinal)
+    }
+
+    @Test
+    fun `R10-F1 production backend - PRE NaN follows typed untrusted release instead of Room exception`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val fixture = productionObservationFixture(listOf(Double.NaN to 30.5234))
+        val clock = VirtualClock()
+        var runnerCalls = 0
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                runnerCalls += 1
+                return AttemptOutcome.Success(8.0, 7.0, startedAt, startedAt, startedAt + 11_000L)
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = fixture.backend
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("invalid PRE must be a typed terminal failure", "failed", attempt.status)
+        assertEquals("invalid PRE must retain the §8.1 reason", FailureReason.UNTRUSTED.name, attempt.failureReason)
+        assertEquals("CellRebel must never start after an invalid PRE", 0, runnerCalls)
+        assertEquals("the lease must be released exactly once", 1,
+            fixture.provider.releaseInvocationCount(releaseKey(attempt.id)))
+        assertEquals("invalid PRE must not be coerced into a durable trusted observation", 0,
+            db.durableObservationDao().countForAttempt(attempt.id))
+        assertEquals("invalid PRE must never mint", 0, db.trustedQuotaDao().countAll())
+        assertEquals("the invalid observation was consumed once, not retried in a pause loop", 1,
+            fixture.observationCount())
+    }
+
+    @Test
+    fun `R10-F1 production backend - POST NaN releases durably and cannot become persistently stuck`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val fixture = productionObservationFixture(
+            listOf(50.4501 to 30.5234, Double.NaN to 30.5234)
+        )
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                clock.now = 2_000L
+                onRunningObserved(clock.now)
+                clock.now = 13_000L
+                return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
+            }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = fixture.backend
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("invalid POST must be a typed terminal failure", "failed", attempt.status)
+        assertEquals("invalid POST must retain the §8.1 reason", FailureReason.UNTRUSTED.name, attempt.failureReason)
+        assertEquals("the lease must be released exactly once", 1,
+            fixture.provider.releaseInvocationCount(releaseKey(attempt.id)))
+        val durable = db.durableObservationDao().forAttempt(attempt.id)
+        assertEquals("the valid PRE remains durable", 1, durable.count { it.phase == "PRE" })
+        assertEquals("the invalid POST is not coerced through SQLite REAL", 0, durable.count { it.phase == "POST" })
+        assertEquals("invalid POST must never mint", 0, db.trustedQuotaDao().countAll())
+        assertEquals("PRE and POST were each consumed once, without a recovery retry loop", 2,
+            fixture.observationCount())
+    }
+
+    @Test
+    fun `R10-F1 production backend - signed zero survives Room canonicalization and remains trust-eligible`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val fixture = productionObservationFixture(
+            listOf(-0.0 to -0.0, -0.0 to -0.0)
+        )
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                clock.now = 2_000L
+                onRunningObserved(clock.now)
+                clock.now = 13_000L
+                return AttemptOutcome.Success(8.0, 7.0, 2_000L, startedAt, clock.now)
+            }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = fixture.backend
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("signed zero is a valid coordinate and must not self-conflict", "succeeded", attempt.status)
+        assertNotNull("signed zero remains eligible for the otherwise-valid trust tuple",
+            db.trustedQuotaDao().getByAttempt(attempt.id))
+        assertEquals("both observations cross the shipped source", 2, fixture.observationCount())
+        for (record in db.durableObservationDao().forAttempt(attempt.id)) {
+            assertEquals("SQLite storage canonicalizes signed zero to positive zero",
+                0.0.toRawBits(), record.effectiveLat!!.toRawBits())
+            assertEquals("SQLite storage canonicalizes signed zero to positive zero",
+                0.0.toRawBits(), record.effectiveLng!!.toRawBits())
+        }
+    }
+
+    @Test
+    fun `normal crash before completion receipt leaves POST pending and publishes no partial decision bundle`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val backend = FakeBackend(
+            executor,
+            log,
+            SeededObserve(emptyMap()),
+            SeededRevision(emptyMap()),
+            SeededQuota(emptyMap()),
+            FakeEvidenceSource(
+                TARGET_LAT,
+                TARGET_LNG,
+                WIRE_VERIFIED,
+                "SYSTEM_MOCK",
+                present = true,
+                throwOnCompletion = true
+            )
+        )
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                clock.now = EXEC_RUNNING_CONFIRMED_AT_ELAPSED
+                onRunningObserved(clock.now)
+                clock.now = EXEC_COMPLETED_AT_ELAPSED
+                return AttemptOutcome.Success(8.0, 7.0, clock.now, startedAt, clock.now)
+            }
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = backend
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals(
+            "a crash before the atomic bundle commit must leave the recoverable pre-decision phase",
+            "POST_OBSERVE_PENDING",
+            attempt.aplusState
+        )
+        assertNull("POST cannot become visible without its completion receipt",
+            db.durableObservationDao().forAttemptPhase(attempt.id, "POST"))
+        assertNull("the simulated crash happened before the receipt commit",
+            db.durableCompletionReceiptDao().forAttempt(attempt.id))
+        assertNull("an incomplete decision bundle must never mint",
+            db.trustedQuotaDao().getByAttempt(attempt.id))
+    }
+
     // ---- R44 (Sol GREEN-review-3 F3): the persisted execution evidence binds the ELAPSED domain ----
 
     @Test
@@ -413,6 +849,17 @@ class EngineTrustedPathRedTest {
                 onRunningObserved(clock.nowMs())
                 return AttemptOutcome.Success(webScore = 8.0, videoScore = 7.0, runningObservedAt = clock.nowMs(), startedAt = startedAt, endedAt = clock.nowMs())
             }
+
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
+            }
         }
         buildEngine(
             planId, runner, FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
@@ -427,6 +874,91 @@ class EngineTrustedPathRedTest {
         assertEquals(13000L - 2100L, row.runningDurationMs)
         assertEquals("2000;13000", row.roundTimestampsElapsed)
         assertNotNull("the journey still mints (only the persisted row's clock domain moved)", db.trustedQuotaDao().getByAttempt(realAttemptId))
+    }
+
+    @Test
+    fun `R46-F1 production order - PRE from the shared monotonic clock precedes the persisted CellRebel start`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val baseEvidence = FakeEvidenceSource(
+            TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true
+        )
+        // Model the real call order with one shared elapsedRealtime source. Qianwangyou stamps PRE
+        // when observe() is called; Auto must capture execution.startedAt only afterward, at the
+        // actual CellRebel start boundary. The previous fixture hard-coded PRE=1000/start=2000 and
+        // therefore could not detect an engine that captured "start" before discover/apply/PRE.
+        val sharedElapsed = ArrayDeque(
+            listOf(1000L, 1100L, 5000L, 5100L, 16_000L, 17_000L)
+        )
+        val nextElapsed = { sharedElapsed.removeFirst() }
+        val evidence = object : APlusEvidenceSource by baseEvidence {
+            override suspend fun acquirePreObservation(
+                attemptId: Long,
+                runSessionId: Long
+            ): ObservationSnapshot = baseEvidence.acquirePreObservation(attemptId, runSessionId)!!.copy(
+                observedAtElapsedRealtimeMs = nextElapsed()
+            )
+
+            override suspend fun acquirePostObservation(
+                attemptId: Long,
+                runSessionId: Long
+            ): ObservationSnapshot = baseEvidence.acquirePostObservation(attemptId, runSessionId)!!.copy(
+                observedAtElapsedRealtimeMs = nextElapsed()
+            )
+        }
+        val backend = FakeBackend(
+            RecordingExternalApplyExecutor(),
+            FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()),
+            SeededRevision(emptyMap()),
+            SeededQuota(emptyMap()),
+            evidence
+        )
+        val clock = VirtualClock()
+        var navigationFinishedAtElapsed = -1L
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome = error("A+ trust must use the start-aware runner entrypoint")
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                // launch/navigation finishes long after PRE, but still before the real Start click.
+                navigationFinishedAtElapsed = nextElapsed()
+                onStartDispatched()
+                onRunningObserved(clock.nowMs())
+                return AttemptOutcome.Success(8.0, 7.0, clock.nowMs(), startedAt, clock.nowMs())
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = backend,
+            elapsedClockMs = nextElapsed
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        val execution = db.attemptExecutionDao().forAttempt(attempt.id).single()
+        assertEquals(
+            "execution start must be captured at the actual click, after provider PRE and navigation",
+            5000L,
+            execution.startedAtElapsed
+        )
+        assertEquals("navigation is not execution start", 1100L, navigationFinishedAtElapsed)
+        assertNotNull(
+            "the real shared-clock order must satisfy PRE < start and mint trusted quota",
+            db.trustedQuotaDao().getByAttempt(attempt.id)
+        )
+        assertTrue("every expected production clock boundary must be consumed", sharedElapsed.isEmpty())
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----
@@ -600,6 +1132,17 @@ class EngineTrustedPathRedTest {
                     webScore = 8.0, videoScore = 7.0, runningObservedAt = 4242L,
                     startedAt = startedAt, endedAt = 4300L
                 )
+            }
+
+
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartDispatched: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onStartDispatched()
+                return runTest(startedAt, testTimeoutMs, onRunningObserved)
             }
         }
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))

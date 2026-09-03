@@ -25,10 +25,12 @@ import com.example.cellrebelauto.recovery.ObserveIntentAcquirer
 import com.example.cellrebelauto.recovery.OperationReceiptRow
 import com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer
 import com.example.cellrebelauto.recovery.RecoveryCoordinator
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
@@ -212,6 +214,18 @@ class AdvanceMatrixTest {
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
         )
+        if (phase.startsWith("ADVANCE_")) {
+            val leaseId = "lease-$attemptId"
+            db.releaseReceiptDao().insertIfAbsent(
+                ReleaseReceiptRow(
+                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+                    leaseId = leaseId,
+                    releaseDigest = APlusOperationIdentity.releaseDigest(leaseId),
+                    resultOutcome = "RELEASED",
+                    createdAt = 1000L
+                )
+            )
+        }
         return planId to task.id
     }
 
@@ -248,7 +262,7 @@ class AdvanceMatrixTest {
 
     private suspend fun seedDurableObservation(attemptId: Long, phase: String, intentHash: String) {
         val observedAt = if (phase == "PRE") PRE_OBSERVED_AT_ELAPSED else POST_OBSERVED_AT_ELAPSED
-        db.durableObservationDao().insert(
+        db.durableObservationDao().insertIfAbsent(
             DurableObservationRecord(
                 attemptId = attemptId, phase = phase,
                 leaseId = "lease-$attemptId",
@@ -271,7 +285,7 @@ class AdvanceMatrixTest {
     }
 
     private suspend fun seedDurableReceipt(attemptId: Long, intentHash: String) {
-        db.durableCompletionReceiptDao().insert(
+        db.durableCompletionReceiptDao().insertIfAbsent(
             DurableCompletionReceipt(
                 attemptId = attemptId,
                 completionEvidenceWire = WIRE_VERIFIED,
@@ -378,7 +392,8 @@ class AdvanceMatrixTest {
     @Test
     fun M_AD_16() = runTest {
         advanceAnswer = AdvanceReceiptV1(
-            outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null,
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId, advancedToItemId = null,
             scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-matrix",
             effectiveEnvironmentRevision = 7L, receiptDigest = "filled-at-call"
         )

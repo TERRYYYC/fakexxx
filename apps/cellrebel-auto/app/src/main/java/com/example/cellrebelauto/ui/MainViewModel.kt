@@ -107,9 +107,9 @@ class MainViewModel @JvmOverloads constructor(
             // appId means the signer rotated and the current signer is NOT approved (§6.5.4:
             // signer 变化即新 provider). The old `entries.any { it.isApproved }` kept showing
             // Trusted on a rotated-away principal.
-            val hasActiveProvider = currentPrincipalActive(
+            val hasActiveProvider = currentRunTargetActive(
                 entries,
-                com.example.cellrebelauto.automation.ProviderPrincipal.selected
+                com.example.cellrebelauto.BuildConfig.DEBUG,
             )
             val crashed = attempts.firstOrNull {
                 it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
@@ -149,6 +149,14 @@ class MainViewModel @JvmOverloads constructor(
         internal fun currentPrincipalActive(entries: List<ProviderEntry>, applicationId: String): Boolean =
             entries.any { it.applicationId == applicationId && it.isApproved } &&
                 entries.none { it.applicationId == applicationId && !it.isApproved }
+
+        internal fun currentRunTargetActive(
+            entries: List<ProviderEntry>,
+            debugBuild: Boolean,
+        ): Boolean = currentPrincipalActive(
+            entries,
+            com.example.cellrebelauto.automation.ProviderPrincipal.resolve(debugBuild),
+        )
 
         /**
          * Pure projection (R45, Sol R45 P2): approved principals are the ACTIVE pairing rows; a

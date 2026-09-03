@@ -8,6 +8,7 @@ import com.example.cellrebelauto.automation.GpsLocationSetter
 import com.example.cellrebelauto.automation.GpsOutcome
 import com.example.cellrebelauto.automation.APlusComposition
 import com.example.cellrebelauto.automation.AutomationEngine
+import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
 import com.example.cellrebelauto.automation.aplus.APlusBackend
 import com.example.cellrebelauto.automation.aplus.APlusCompletionEvidence
 import com.example.cellrebelauto.automation.aplus.APlusEvidenceSource
@@ -15,6 +16,7 @@ import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.environment.ObservationSnapshot
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
@@ -50,9 +52,9 @@ import org.robolectric.RobolectricTestRunner
  * Frozen §10.1 owner-red crash matrix entry (Issue #5, `matrix/CrashMatrixTest.kt`). Each `M_CR_NN()`
  * method maps to a §10 M-CR-xx row and drives the REAL recovery path.
  *
- * M-CR-03..06 are GREEN-body (re-preobserve / classify / post-observe / re-decide) — their recovery body is
- * not yet written, so these REDs assert the GREEN projection (attempt must NOT be collapsed to interrupted)
- * and genuinely FAIL pre-freeze. M-CR-07 (ledger truth → succeeded) and M-CR-08 (release replay) are banked.
+ * M-CR-03..06 cover recheck / classification / atomic POST decision bundle / durable re-decision.
+ * A recovery invocation may resume the plan only after the crashed lease is released and its owner
+ * is CLOSED; release failure remains RECOVERY_REQUIRED and blocks every fresh apply (INV-28).
  */
 @RunWith(RobolectricTestRunner::class)
 class CrashMatrixTest {
@@ -177,9 +179,43 @@ class CrashMatrixTest {
         private val post: ObservationSnapshot? = null,
         private val evidence: APlusCompletionEvidence? = null
     ) : APlusEvidenceSource {
-        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? = pre
-        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? = post
-        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? = evidence
+        val preCalls = mutableListOf<Long>()
+        val postCalls = mutableListOf<Long>()
+        val completionCalls = mutableListOf<Long>()
+
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? {
+            preCalls += attemptId
+            return pre
+        }
+
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? {
+            postCalls += attemptId
+            return post
+        }
+
+        override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? {
+            completionCalls += attemptId
+            return evidence
+        }
+    }
+
+    /** Mirrors the production source's durable-first contract while exposing live-provider calls. */
+    private class DurableFirstEvidenceSource(
+        private val repo: PlanRepository,
+        private val live: SeededEvidenceSource
+    ) : APlusEvidenceSource {
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
+            repo.getObservationSnapshot(attemptId, "PRE")
+                ?: live.acquirePreObservation(attemptId, runSessionId)
+
+        override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
+            repo.getObservationSnapshot(attemptId, "POST")
+                ?: live.acquirePostObservation(attemptId, runSessionId)
+
+        override suspend fun acquireCompletionEvidence(
+            attemptId: Long,
+            runSessionId: Long
+        ): APlusCompletionEvidence? = live.acquireCompletionEvidence(attemptId, runSessionId)
     }
 
     private class FakeBackend(
@@ -196,7 +232,8 @@ class CrashMatrixTest {
 
     private fun buildEngine(
         planId: Long, clock: VirtualClock, backend: APlusBackend,
-        commitClockOverride: (() -> Long)? = null
+        commitClockOverride: (() -> Long)? = null,
+        attemptDriver: APlusAttemptDriver? = null
     ): AutomationEngine {
         val params = APlusComposition.engineAplusParams(backend)
         lastCoordinator = params.first
@@ -209,7 +246,7 @@ class CrashMatrixTest {
             nowMs = clock.nowMs,
             commitClockMs = commitClockOverride ?: clock.nowMs,
             delayMs = clock.delayMs,
-            attemptDriver = null,
+            attemptDriver = attemptDriver,
             recoveryCoordinator = params.first,
             completionEvidenceSource = params.second
         )
@@ -257,7 +294,7 @@ class CrashMatrixTest {
 
     /** Seed a durable observation record in the DB (R37: recovery reads from here, NOT from a live source). */
     private suspend fun seedDurableObservation(attemptId: Long, phase: String, snapshot: ObservationSnapshot) {
-        db.durableObservationDao().insert(
+        db.durableObservationDao().insertIfAbsent(
             DurableObservationRecord(
                 attemptId = attemptId, phase = phase,
                 leaseId = snapshot.leaseId,
@@ -283,7 +320,7 @@ class CrashMatrixTest {
 
     /** Seed a durable completion receipt in the DB (R37: recovery reads acceptedIntentHash from here). */
     private suspend fun seedDurableReceipt(attemptId: Long, wire: Int, intentHash: String, leaseId: String) {
-        db.durableCompletionReceiptDao().insert(
+        db.durableCompletionReceiptDao().insertIfAbsent(
             DurableCompletionReceipt(
                 attemptId = attemptId, completionEvidenceWire = wire,
                 acceptedIntentHash = intentHash, leaseId = leaseId
@@ -334,24 +371,44 @@ class CrashMatrixTest {
 
     // ---- M-CR-03..06: recovery projections ----
     //
-    // R43 (Sol GREEN-review P1-2): each mid-observation phase has BOTH polarities:
-    //  - POSITIVE: the live source CAN re-acquire the phase evidence ⇒ the evidence is PERSISTED to
-    //    the durable carrier AND the phase ADVANCES (never interrupted, never discarded).
-    //  - NEGATIVE: the source cannot ⇒ UNTRUSTED typed failure, the release converges durably
-    //    (a non-durable release = PAUSE, never silent advance), still never interrupted.
+    // Each mid-observation phase has BOTH polarities. Re-acquiring evidence is not by itself a
+    // completed recovery: before the main loop may create another attempt, the crashed attempt's
+    // lease must have a durable release receipt and the attempt must be terminal + CLOSED (INV-28).
 
-    private suspend fun seedPhaseCrash(
+    private data class PhaseCrashResult(
+        val recovered: TestAttempt,
+        val executor: RecordingExternalApplyExecutor,
+        val log: FakeDurableRecoveryLog
+    )
+
+    private suspend fun runPhaseCrash(
         phase: String,
         reacquirable: Boolean
-    ): TestAttempt {
+    ): PhaseCrashResult {
         val planId = seedPlan(taskId = 42L)
-        seedAttempt(planId, 42L, attemptId = 77L, aplusState = phase, aplusLeaseId = "lease-77")
+        val hasExecutionOwner = phase in setOf(
+            "CELLREBEL_START_PENDING", "CELLREBEL_RUNNING", "POST_OBSERVE_PENDING"
+        )
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = phase,
+            aplusLeaseId = "lease-77",
+            currentExecutionId = if (hasExecutionOwner) "exec-owner-77" else null
+        )
+        if (hasExecutionOwner) {
+            seedDurableObservation(77L, "PRE", validPre("d"))
+        }
+        if (phase == "POST_OBSERVE_PENDING") {
+            seedDurableExecution("exec-owner-77", 77L, WIRE_VERIFIED, "reacq-digest")
+        }
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         // Reacquirable source: returns a valid §6.4 observation/evidence; null source: cannot.
         val evidence = if (!reacquirable) SeededEvidenceSource() else SeededEvidenceSource(
-            pre = validPre(), post = validPost(),
+            pre = validPre("d"), post = validPost("d"),
             evidence = APlusCompletionEvidence(
                 execution = fullEvidenceExecution("exec-reacq-77", 77L, WIRE_VERIFIED, "reacq-digest"),
                 completionEvidenceWire = WIRE_VERIFIED,
@@ -360,7 +417,745 @@ class CrashMatrixTest {
             )
         )
         buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence)).run()
-        return db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
+        val allAttempts = db.testAttemptDao().getAttemptsForTask(42L)
+        return PhaseCrashResult(
+            recovered = allAttempts.first { it.id == 77L },
+            executor = executor,
+            log = log
+        )
+    }
+
+    private suspend fun seedPhaseCrash(phase: String, reacquirable: Boolean): TestAttempt =
+        runPhaseCrash(phase, reacquirable).recovered
+
+    @Test
+    fun `ENV_APPLIED positive re-precheck releases and closes before another apply may start`() = runTest {
+        val result = runPhaseCrash("ENV_APPLIED", reacquirable = true)
+        val recovered = result.recovered
+
+        assertNotNull(
+            "the re-acquired PRE observation must be durable before recovery closes",
+            db.durableObservationDao().forAttemptPhase(77L, "PRE")
+        )
+        assertEquals("the crashed lease must have one provider release effect", 1, result.executor.releaseEffectCount(77L))
+        assertEquals("the release operation must be invoked once", 1, result.executor.releaseInvocationCount(releaseKey(77L)))
+        assertNotNull("the crashed lease release must be durable", result.log.releaseReceiptFor(LEASE_ID))
+        assertNotNull("the recovered attempt must be terminal", recovered.endedAt)
+        assertEquals("the recovered owner must be CLOSED before the main loop resumes", "CLOSED", recovered.aplusState)
+        val releaseIndex = result.executor.lifecycleEvents.indexOf("release:77:$LEASE_ID")
+        val freshApplyIndex = result.executor.lifecycleEvents.indexOfFirst {
+            it.startsWith("apply:") && it != "apply:77"
+        }
+        assertTrue("the old lease release must be observable", releaseIndex >= 0)
+        assertTrue("the plan should retry through a fresh attempt after recovery", freshApplyIndex >= 0)
+        assertTrue(
+            "INV-28: old release must happen before the fresh attempt apply",
+            releaseIndex < freshApplyIndex
+        )
+    }
+
+    @Test
+    fun `ENV_APPLIED crash with unavailable PRE becomes typed untrusted after durable release`() = runTest {
+        val result = runPhaseCrash("ENV_APPLIED", reacquirable = false)
+        val recovered = result.recovered
+
+        assertEquals("missing PRE after an ENV_APPLIED crash is a typed failure", "failed", recovered.status)
+        assertEquals("the failure must retain the trust reason", "UNTRUSTED", recovered.failureReason)
+        assertNotEquals("the crash must never be blindly interrupted", "interrupted", recovered.status)
+        assertEquals("the crashed lease must be released exactly once", 1, result.executor.releaseEffectCount(77L))
+        assertEquals("the release operation must be invoked once", 1, result.executor.releaseInvocationCount(releaseKey(77L)))
+        assertNotNull("the release receipt must be durable before terminalization", result.log.releaseReceiptFor(LEASE_ID))
+        assertEquals("typed failure recovery must close the owner lifecycle", "CLOSED", recovered.aplusState)
+        assertNotNull("typed failure recovery must be terminal", recovered.endedAt)
+        assertNull(
+            "missing PRE is an acquisition failure, not a completed trust decision; it must not fabricate an unverified carrier",
+            db.unverifiedAttemptRecordDao().getByAttempt(77L)
+        )
+    }
+
+    @Test
+    fun `recovery audit records the real untrusted source state and release close edge`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "ENV_APPLIED",
+            aplusLeaseId = LEASE_ID
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = "d",
+            now = 1_000L
+        )
+
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource()),
+            attemptDriver = APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val audit = db.auditEventDao().forAttempt(77L)
+        assertEquals(
+            "recovery must audit the actual ENV_APPLIED untrusted edge",
+            "ENV_APPLIED->RELEASE_PENDING",
+            audit.single { it.eventType == "OBSERVATION_UNTRUSTED" }.payloadDigest
+        )
+        assertEquals(
+            "the durable release receipt closes from RELEASE_PENDING",
+            "RELEASE_PENDING->RELEASED",
+            audit.single { it.eventType == "RELEASE_RECEIPT" }.payloadDigest
+        )
+    }
+
+    @Test
+    fun `generic unverified recovery audits its real source release chain and durable receipt`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "UNVERIFIED_RECORDED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = "d",
+            now = 1_000L
+        )
+
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource()),
+            attemptDriver = APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        val audit = db.auditEventDao().forAttempt(77L)
+        assertEquals("failed", recovered.status)
+        assertEquals("UNTRUSTED", recovered.failureReason)
+        assertEquals("CLOSED", recovered.aplusState)
+        assertNotNull("the exact old lease release must be durable", log.releaseReceiptFor(LEASE_ID))
+        assertEquals(
+            "generic recovery must expose the real durable decision carrier as the release source",
+            "UNVERIFIED_RECORDED->RELEASE_PENDING",
+            audit.single { it.eventType == "BEGIN_RELEASE" }.payloadDigest
+        )
+        assertEquals(
+            "the release receipt must close only from RELEASE_PENDING",
+            "RELEASE_PENDING->RELEASED",
+            audit.single { it.eventType == "RELEASE_RECEIPT" }.payloadDigest
+        )
+    }
+
+    @Test
+    fun `RELEASE_PENDING with durable receipt and audit converges without duplicating release provenance`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASE_PENDING",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = 1L,
+                attemptId = 77L,
+                correlationRef = null,
+                eventType = "RELEASE_RECEIPT",
+                payloadDigest = "RELEASE_PENDING->RELEASED",
+                recordedAt = 900L
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val expectedReleaseDigest = APlusOperationIdentity.releaseDigest(LEASE_ID)
+        log.seedReleaseReceipt(
+            idempotencyKey = releaseKey(77L),
+            leaseId = LEASE_ID,
+            releaseDigest = expectedReleaseDigest,
+            outcome = "RELEASED",
+            createdAt = 900L
+        )
+
+        // Kill point: the provider receipt and release audit are durable, but the owner checkpoint
+        // write did not reach RELEASED. Restart must recognize that exact historical proof and
+        // converge the checkpoint/terminal projection without manufacturing a second release edge.
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource()),
+            attemptDriver = APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("the proven release must converge the owner", "CLOSED", recovered.aplusState)
+        assertEquals("the durable negative carrier still owns terminal truth", "failed", recovered.status)
+        assertEquals(
+            "recovery of an already-proven release must stay provider-free",
+            0,
+            executor.releaseInvocationCount(releaseKey(77L))
+        )
+        assertEquals(
+            "the exact historical release tuple must remain unchanged",
+            com.example.cellrebelauto.recovery.RecordedReleaseReceipt(
+                releaseKey(77L), LEASE_ID, expectedReleaseDigest, "RELEASED", 900L
+            ),
+            log.releaseReceiptFor(LEASE_ID)
+        )
+        val releaseAudits = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        assertEquals(
+            "receipt plus release audit already proves the transition; restart must not append a duplicate",
+            1,
+            releaseAudits.size
+        )
+        assertEquals("RELEASE_PENDING->RELEASED", releaseAudits.single().payloadDigest)
+    }
+
+    @Test
+    fun `release receipt audit rolls back when RELEASED owner checkpoint is ignored`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASE_PENDING",
+            aplusLeaseId = LEASE_ID
+        )
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER ignore_released_owner_checkpoint
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN OLD.id = 77 AND NEW.aplusState = 'RELEASED'
+            BEGIN
+                SELECT RAISE(IGNORE);
+            END
+            """.trimIndent()
+        )
+
+        // RAISE(IGNORE) makes the owner update affect zero rows without surfacing a SQLite error.
+        // The repository must detect that failed checkpoint and abort its Room transaction, so the
+        // audit inserted earlier in the same transaction cannot escape on its own.
+        var checkpointFailure: Throwable? = null
+        try {
+            repo.commitReleaseReceiptCheckpoint(77L, recordedAt = 900L)
+        } catch (failure: Throwable) {
+            checkpointFailure = failure
+        }
+        val phaseAfterInjectedFailure = db.testAttemptDao().getAttemptById(77L)!!.aplusState
+        val auditsAfterInjectedFailure = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER ignore_released_owner_checkpoint")
+        repo.commitReleaseReceiptCheckpoint(77L, recordedAt = 901L)
+
+        assertEquals(
+            "the ignored owner update must leave the owner at the pre-transaction phase",
+            "RELEASE_PENDING",
+            phaseAfterInjectedFailure
+        )
+        assertEquals(
+            "the audit insert and owner checkpoint are one transaction; both must roll back",
+            emptyList<AutoAuditEvent>(),
+            auditsAfterInjectedFailure
+        )
+        assertNotNull(
+            "a zero-row RELEASED checkpoint must abort instead of reporting a successful commit",
+            checkpointFailure
+        )
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("after removing the fault the owner checkpoint may commit", "RELEASED", recovered.aplusState)
+        val finalReleaseAudits = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        assertEquals("the successful retry writes exactly one release audit", 1, finalReleaseAudits.size)
+        assertEquals("RELEASE_PENDING->RELEASED", finalReleaseAudits.single().payloadDigest)
+        assertEquals("the rolled-back timestamp must not leak", 901L, finalReleaseAudits.single().recordedAt)
+    }
+
+    @Test
+    fun `RELEASED recovery verifies the exact durable receipt without replaying release audit`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = 1L,
+                attemptId = 77L,
+                correlationRef = null,
+                eventType = "RELEASE_RECEIPT",
+                payloadDigest = "RELEASE_PENDING->RELEASED",
+                recordedAt = 900L
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val expectedReleaseDigest = APlusOperationIdentity.releaseDigest(LEASE_ID)
+        log.seedReleaseReceipt(
+            idempotencyKey = releaseKey(77L),
+            leaseId = LEASE_ID,
+            releaseDigest = expectedReleaseDigest,
+            outcome = "RELEASED",
+            createdAt = 900L
+        )
+
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource()),
+            attemptDriver = APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("the already-released owner must close from its durable checkpoint", "CLOSED", recovered.aplusState)
+        assertEquals("the durable decision carrier still owns terminal projection", "failed", recovered.status)
+        assertEquals("an exact durable receipt is verification, not a second provider release", 0, executor.releaseInvocationCount(releaseKey(77L)))
+        assertEquals(
+            "recovery must preserve the exact release tuple",
+            com.example.cellrebelauto.recovery.RecordedReleaseReceipt(
+                releaseKey(77L), LEASE_ID, expectedReleaseDigest, "RELEASED", 900L
+            ),
+            log.releaseReceiptFor(LEASE_ID)
+        )
+        val releaseAudits = db.auditEventDao().forAttempt(77L)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        assertEquals(
+            "RELEASED already means the release transition was audited; recovery must not append it again",
+            1,
+            releaseAudits.size
+        )
+        assertEquals("RELEASE_PENDING->RELEASED", releaseAudits.single().payloadDigest)
+    }
+
+    @Test
+    fun `RELEASED recovery never rewrites the durable checkpoint as RELEASE_PENDING`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(
+            idempotencyKey = releaseKey(77L),
+            leaseId = LEASE_ID,
+            releaseDigest = APlusOperationIdentity.releaseDigest(LEASE_ID),
+            outcome = "RELEASED",
+            createdAt = 900L
+        )
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER reject_released_checkpoint_regression
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN OLD.id = 77 AND OLD.aplusState = 'RELEASED' AND NEW.aplusState = 'RELEASE_PENDING'
+            BEGIN
+                SELECT RAISE(ABORT, 'RELEASED checkpoint regressed to RELEASE_PENDING');
+            END
+            """.trimIndent()
+        )
+
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource())
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals(
+            "recovery must validate RELEASED in place and then atomically project CLOSED",
+            "CLOSED",
+            recovered.aplusState
+        )
+        assertEquals("failed", recovered.status)
+        assertNotNull("the terminal projection must complete", recovered.endedAt)
+        assertEquals("checkpoint validation must not call release again", 0, executor.releaseInvocationCount(releaseKey(77L)))
+    }
+
+    @Test
+    fun `RELEASED recovery with no durable receipt pauses as RECOVERY_REQUIRED`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, SeededEvidenceSource())).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals(
+            "RELEASED without its exact durable receipt is an invariant break",
+            "RECOVERY_REQUIRED",
+            recovered.aplusState
+        )
+        assertNull("an unproven RELEASED checkpoint must remain non-terminal", recovered.endedAt)
+        assertEquals("the owner session must fail closed", "paused", db.runSessionDao().getLatest()!!.status)
+        assertEquals(
+            "recovery must not repair a missing RELEASED receipt by invoking the provider again",
+            0,
+            executor.releaseInvocationCount(releaseKey(77L))
+        )
+        assertNull("a missing historical receipt must not be fabricated", log.releaseReceiptFor(LEASE_ID))
+    }
+
+    @Test
+    fun `RELEASED recovery with a conflicting durable receipt pauses as RECOVERY_REQUIRED`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(
+            idempotencyKey = releaseKey(77L),
+            leaseId = LEASE_ID,
+            releaseDigest = "conflicting-release-digest",
+            outcome = "RELEASED",
+            createdAt = 900L
+        )
+
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, SeededEvidenceSource())).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("a conflicting receipt must fail closed", "RECOVERY_REQUIRED", recovered.aplusState)
+        assertNull("a conflicting receipt must never terminalize the owner", recovered.endedAt)
+        assertEquals("the owner session must pause for operator action", "paused", db.runSessionDao().getLatest()!!.status)
+        assertEquals("receipt conflict must be detected before any provider call", 0, executor.releaseInvocationCount(releaseKey(77L)))
+        assertEquals(
+            "the conflicting historical row remains immutable",
+            "conflicting-release-digest",
+            log.releaseReceiptFor(LEASE_ID)!!.releaseDigest
+        )
+    }
+
+    @Test
+    fun `RELEASED missing receipt remains fail closed across a second restart`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val backend = FakeBackend(executor, log, SeededEvidenceSource())
+        val driver = APlusAttemptDriver(db.auditEventDao())
+
+        // Restart 1 detects that RELEASED has no exact historical proof and freezes the owner.
+        buildEngine(planId, VirtualClock(), backend, attemptDriver = driver).run()
+        val afterFirstRestart = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("RECOVERY_REQUIRED", afterFirstRestart.aplusState)
+        assertEquals("RELEASED_RECEIPT_MISSING_OR_CONFLICT", afterFirstRestart.failureReason)
+        val auditAfterFirstRestart = db.auditEventDao().forAttempt(77L)
+
+        // Restart 2 must preserve that invariant failure. It may not reinterpret the sticky
+        // RECOVERY_REQUIRED marker as an ordinary release retry and manufacture the missing proof.
+        buildEngine(planId, VirtualClock(), backend, attemptDriver = driver).run()
+
+        val afterSecondRestart = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("the historical invariant failure must stay sticky", "RECOVERY_REQUIRED", afterSecondRestart.aplusState)
+        assertEquals(
+            "the typed RELEASED-proof failure must survive subsequent restarts",
+            "RELEASED_RECEIPT_MISSING_OR_CONFLICT",
+            afterSecondRestart.failureReason
+        )
+        assertNull("the unproven owner must remain non-terminal", afterSecondRestart.endedAt)
+        assertEquals("every restart must remain paused", "paused", db.runSessionDao().getLatest()!!.status)
+        assertEquals(
+            "a second restart must not route the sticky invariant through the generic release path",
+            0,
+            executor.releaseInvocationCount(releaseKey(77L))
+        )
+        assertNull("a missing historical receipt must never be fabricated", log.releaseReceiptFor(LEASE_ID))
+        assertNull("the operation-key index must also remain empty", log.releaseReceiptForKey(releaseKey(77L)))
+        assertEquals(
+            "a second restart must not append RELEASE_PENDING or RELEASE_RECEIPT audit edges",
+            auditAfterFirstRestart,
+            db.auditEventDao().forAttempt(77L)
+        )
+    }
+
+    @Test
+    fun `RELEASED conflicting receipt remains fail closed across a second restart`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "RELEASED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        log.seedReleaseReceipt(
+            idempotencyKey = releaseKey(77L),
+            leaseId = LEASE_ID,
+            releaseDigest = "conflicting-release-digest",
+            outcome = "RELEASED",
+            createdAt = 900L
+        )
+        val backend = FakeBackend(executor, log, SeededEvidenceSource())
+        val driver = APlusAttemptDriver(db.auditEventDao())
+
+        // Restart 1 detects the immutable conflict and freezes the owner without release effects.
+        buildEngine(planId, VirtualClock(), backend, attemptDriver = driver).run()
+        val afterFirstRestart = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("RECOVERY_REQUIRED", afterFirstRestart.aplusState)
+        assertEquals("RELEASED_RECEIPT_MISSING_OR_CONFLICT", afterFirstRestart.failureReason)
+        val auditAfterFirstRestart = db.auditEventDao().forAttempt(77L)
+
+        // Restart 2 must not enter the generic release state machine. Even though coordinator
+        // preflight blocks the provider call, entering that path would forge release audit edges.
+        buildEngine(planId, VirtualClock(), backend, attemptDriver = driver).run()
+
+        val afterSecondRestart = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("the conflicting historical proof must stay sticky", "RECOVERY_REQUIRED", afterSecondRestart.aplusState)
+        assertEquals(
+            "the typed RELEASED-proof failure must survive subsequent restarts",
+            "RELEASED_RECEIPT_MISSING_OR_CONFLICT",
+            afterSecondRestart.failureReason
+        )
+        assertNull("the conflicted owner must remain non-terminal", afterSecondRestart.endedAt)
+        assertEquals("every restart must remain paused", "paused", db.runSessionDao().getLatest()!!.status)
+        assertEquals("receipt conflict must stay provider-free", 0, executor.releaseInvocationCount(releaseKey(77L)))
+        assertEquals(
+            "the conflicting historical receipt must remain immutable",
+            "conflicting-release-digest",
+            log.releaseReceiptFor(LEASE_ID)!!.releaseDigest
+        )
+        assertEquals(
+            "a second restart must not append synthetic RELEASE_PENDING or RELEASE_RECEIPT audit edges",
+            auditAfterFirstRestart,
+            db.auditEventDao().forAttempt(77L)
+        )
+    }
+
+    @Test
+    fun `generic recovery terminal projection rolls back when CLOSED persistence aborts`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "UNVERIFIED_RECORDED",
+            aplusLeaseId = LEASE_ID
+        )
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(
+                attemptId = 77L,
+                reason = "UNTRUSTED",
+                evidenceDigest = "unverified-owner-digest"
+            )
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = "d",
+            now = 1_000L
+        )
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER abort_recovery_closed_projection
+            BEFORE UPDATE OF aplusState ON test_attempts
+            WHEN OLD.id = 77 AND NEW.aplusState = 'CLOSED'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected crash while persisting CLOSED');
+            END
+            """.trimIndent()
+        )
+
+        // AutomationEngine deliberately catches persistence exceptions and pauses. The durable row
+        // after that catch is therefore the crash-boundary oracle.
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource())
+        ).run()
+
+        assertNotNull("the provider release remains durably proven", log.releaseReceiptFor(LEASE_ID))
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertNull(
+            "CLOSED and terminal truth are one transaction: a failed CLOSED write must roll back endedAt",
+            recovered.endedAt
+        )
+        assertEquals(
+            "CLOSED and terminal truth are one transaction: a failed CLOSED write must roll back status",
+            "starting",
+            recovered.status
+        )
+        assertNotEquals(
+            "the failed atomic close must never expose CLOSED independently",
+            "CLOSED",
+            recovered.aplusState
+        )
+    }
+
+    @Test
+    fun `normal untrusted projection rolls back CLOSED when terminal persistence aborts`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val invalidPre = validPre("unused-for-structural-rejection").copy(effectiveLat = Double.NaN)
+        db.openHelper.writableDatabase.execSQL(
+            """
+            CREATE TRIGGER abort_normal_terminal_projection
+            BEFORE UPDATE OF status ON test_attempts
+            WHEN NEW.aplusState = 'CLOSED' AND NEW.status = 'failed'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected crash while persisting terminal failure');
+            END
+            """.trimIndent()
+        )
+
+        // AutomationEngine deliberately catches persistence exceptions and pauses. The durable row
+        // after that catch is therefore the crash-boundary oracle.
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource(pre = invalidPre))
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(42L).single()
+        assertNotNull("the provider release remains durably proven", log.releaseReceiptFor(attempt.aplusLeaseId!!))
+        assertNull(
+            "CLOSED and terminal truth are one transaction: a failed terminal write must leave endedAt unset",
+            attempt.endedAt
+        )
+        assertEquals(
+            "CLOSED and terminal truth are one transaction: a failed terminal write must leave status nonterminal",
+            "starting",
+            attempt.status
+        )
+        assertNotEquals(
+            "a failed terminal projection must roll back CLOSED instead of exposing CLOSED plus nonterminal",
+            "CLOSED",
+            attempt.aplusState
+        )
+    }
+
+    @Test
+    fun `recovery release failure pauses with the old owner unresolved and never starts a fresh apply`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "ENV_APPLIED",
+            aplusLeaseId = LEASE_ID
+        )
+        val executor = RecordingExternalApplyExecutor(outcome = "FAILED")
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = "d",
+            now = 1_000L
+        )
+
+        buildEngine(
+            planId,
+            VirtualClock(),
+            FakeBackend(executor, log, SeededEvidenceSource(pre = validPre("d")))
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertEquals("an unproven release must remain explicitly recoverable", "RECOVERY_REQUIRED", recovered.aplusState)
+        assertNull("an unresolved lease must not be terminalized", recovered.endedAt)
+        assertNull("a failed release must not fabricate a durable receipt", log.releaseReceiptFor(LEASE_ID))
+        assertEquals(
+            "the recovery must return before any fresh attempt apply",
+            emptyList<String>(),
+            executor.lifecycleEvents.filter { it.startsWith("apply:") && it != "apply:77" }
+        )
     }
 
     @Test
@@ -373,20 +1168,47 @@ class CrashMatrixTest {
     }
 
     @Test
-    fun `M_CR_03_positive_continuation`() = runTest {
-        val recovered = seedPhaseCrash("PRE_OBSERVED", reacquirable = true)
-        // POSITIVE (Sol GREEN-review P1-2): the re-acquired pre-observation is PERSISTED durably and
-        // the phase ADVANCES to CELLREBEL_START_PENDING — the continuation is observable, not discarded.
-        assertNotEquals("M-CR-03 positive: the crash is never interrupted", "interrupted", recovered.status)
-        assertEquals(
-            "M-CR-03 positive: the phase must ADVANCE to CELLREBEL_START_PENDING (re-acquired evidence consumed)",
-            "CELLREBEL_START_PENDING",
-            recovered.aplusState
-        )
+    fun `M_CR_03 positive re-precheck releases and closes the crashed owner`() = runTest {
+        val result = runPhaseCrash("PRE_OBSERVED", reacquirable = true)
+        val recovered = result.recovered
+
         assertNotNull(
             "M-CR-03 positive: the re-acquired PRE observation must be persisted to the durable carrier",
             db.durableObservationDao().forAttemptPhase(77L, "PRE")
         )
+        assertEquals("M-CR-03 positive: one release effect", 1, result.executor.releaseEffectCount(77L))
+        assertEquals("M-CR-03 positive: one release invocation", 1, result.executor.releaseInvocationCount(releaseKey(77L)))
+        assertNotNull("M-CR-03 positive: durable release receipt", result.log.releaseReceiptFor(LEASE_ID))
+        assertNotNull("M-CR-03 positive: terminal attempt", recovered.endedAt)
+        assertEquals("M-CR-03 positive: closed owner", "CLOSED", recovered.aplusState)
+    }
+
+    @Test
+    fun `ENV_APPLIED with durable PRE replays storage without a live PRE observation`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        seedAttempt(planId, 42L, attemptId = 77L, aplusState = "ENV_APPLIED", aplusLeaseId = LEASE_ID)
+        seedDurableObservation(77L, "PRE", validPre())
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = "d",
+            now = 1000L
+        )
+        val live = SeededEvidenceSource(pre = validPre())
+        val source = DurableFirstEvidenceSource(repo, live)
+
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, source)).run()
+
+        assertEquals(
+            "durable PRE must win; the provider must not be observed again for the crashed attempt",
+            0,
+            live.preCalls.count { it == 77L }
+        )
+        assertEquals("the replayed owner must still converge one release", 1, executor.releaseEffectCount(77L))
+        assertEquals("the replayed owner must close", "CLOSED", db.testAttemptDao().getAttemptById(77L)!!.aplusState)
     }
 
     @Test
@@ -417,10 +1239,12 @@ class CrashMatrixTest {
             planId, 42L, attemptId = 77L, aplusState = "CELLREBEL_RUNNING",
             aplusLeaseId = LEASE_ID, currentExecutionId = "exec-owner-77"
         )
+        seedDurableObservation(77L, "PRE", validPre("d"))
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = "d", now = 1000L)
         val evidence = SeededEvidenceSource(
+            post = validPost("d"),
             evidence = APlusCompletionEvidence(
                 execution = fullEvidenceExecution("exec-src-77", 77L, WIRE_VERIFIED, "src-digest"),
                 completionEvidenceWire = WIRE_VERIFIED,
@@ -445,16 +1269,15 @@ class CrashMatrixTest {
         assertEquals(EXEC_RUNNING_CONFIRMED_AT_ELAPSED, row.runningConfirmedAtElapsed)
         assertEquals(EXEC_COMPLETED_AT_ELAPSED, row.completedAtElapsed)
         val attempt = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
-        assertEquals("POST_OBSERVE_PENDING", attempt.aplusState)
-        assertNotEquals("interrupted", attempt.status)
+        assertEquals("recovery must finish the decision and release in one invocation", "CLOSED", attempt.aplusState)
+        assertNotNull("the recovered attempt must be terminal", attempt.endedAt)
     }
 
     @Test
     fun `M_CR_full_chain - a CELLREBEL_RUNNING crash recovers through production-written carriers to a DECIDING re-decide mint`() = runTest {
-        // R44 (Sol GREEN-review-3 F3): the strongest form — the durable bundle the DECIDING re-decide
-        // consumes was WRITTEN BY the recovery production chain (run 1), never hand-seeded. Run 2 is
-        // the process restart: POST re-observation → DECIDING → re-decide must PASS and mint.
-        val planId = seedPlan(taskId = 42L)
+        // The durable bundle the DECIDING re-decide consumes is written by one recovery invocation,
+        // never hand-seeded and never exposed as an incomplete intermediate owner state.
+        val planId = seedPlan(taskId = 42L, requiredSuccesses = 2)
         val sessionId = seedAttempt(
             planId, 42L, attemptId = 77L, aplusState = "CELLREBEL_RUNNING",
             aplusLeaseId = LEASE_ID, currentExecutionId = "exec-owner-77"
@@ -466,8 +1289,8 @@ class CrashMatrixTest {
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
 
-        // Run 1 (successor process): re-classify → persist receipt + execution evidence → advance.
-        val evidence1 = SeededEvidenceSource(
+        val evidence = SeededEvidenceSource(
+            post = validPost(intentDigest),
             evidence = APlusCompletionEvidence(
                 execution = fullEvidenceExecution("exec-src-77", 77L, WIRE_VERIFIED, "src-digest"),
                 completionEvidenceWire = WIRE_VERIFIED,
@@ -475,21 +1298,15 @@ class CrashMatrixTest {
                 applyReceiptLease = LEASE_ID
             )
         )
-        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence1)).run()
-        assertEquals(
-            "POST_OBSERVE_PENDING",
-            db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }.aplusState
-        )
-
-        // Run 2 (restart): POST_OBSERVE_PENDING re-observes POST, advances to DECIDING, re-decides
-        // from the durable bundle — which now includes the run-1-written execution evidence row.
-        val evidence2 = SeededEvidenceSource(post = validPost(intentDigest))
-        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence2)).run()
+        buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence)).run()
 
         assertNotNull(
             "the full recovery chain must mint (re-decide PASS over production-written carriers)",
             db.trustedQuotaDao().getByAttempt(77L)
         )
+        assertEquals("the full recovery chain must release once", 1, executor.releaseEffectCount(77L))
+        assertEquals("the full recovery chain must close", "CLOSED",
+            db.testAttemptDao().getAttemptById(77L)!!.aplusState)
     }
 
     @Test
@@ -502,31 +1319,136 @@ class CrashMatrixTest {
     @Test
     fun `M_CR_05_positive_continuation`() = runTest {
         val recovered = seedPhaseCrash("POST_OBSERVE_PENDING", reacquirable = true)
-        // POSITIVE: the re-acquired post-observation is persisted AND the phase advances into DECIDING
-        // (the trust decision then runs over the durable bundle — here it lacks the full §8.6 carrier,
-        // so the re-decide fail-closes to UNVERIFIED, which is the correct §8.1 outcome — the point
-        // is the phase ADVANCED and the evidence was CONSUMED, not discarded).
+        // POSITIVE: POST + completion receipt become one durable decision bundle; recovery then
+        // decides, releases, and closes before the plan loop may resume.
         assertNotEquals("M-CR-05 positive: the crash is never interrupted", "interrupted", recovered.status)
         assertNotNull(
             "M-CR-05 positive: the re-acquired POST observation must be persisted to the durable carrier",
             db.durableObservationDao().forAttemptPhase(77L, "POST")
         )
         val finalRow = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
-        assertTrue(
-            "M-CR-05 positive: the phase must leave POST_OBSERVE_PENDING (advanced into DECIDING → decided)",
-            finalRow.aplusState == "DECIDING" || finalRow.aplusState == "UNVERIFIED_RECORDED" || finalRow.aplusState == "QUOTA_COMMITTED" || finalRow.aplusState == "CLOSED"
+        assertEquals("M-CR-05 positive: recovery must not return an intermediate state", "CLOSED", finalRow.aplusState)
+        assertNotNull("M-CR-05 positive: the attempt is terminal", finalRow.endedAt)
+    }
+
+    @Test
+    fun `POST_OBSERVE_PENDING acquires a complete decision bundle before deciding then releases and closes`() = runTest {
+        val planId = seedPlan(taskId = 42L, requiredSuccesses = 2)
+        val sessionId = seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "POST_OBSERVE_PENDING",
+            aplusLeaseId = LEASE_ID,
+            currentExecutionId = "exec-owner-77"
+        )
+        val intentDigest = ownerIntentDigest(sessionId, planId)
+        val executionDigest = "post-recovery-owner-digest"
+        seedDurableObservation(77L, "PRE", validPre(intentDigest))
+        seedDurableExecution("exec-owner-77", 77L, WIRE_VERIFIED, executionDigest)
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = intentDigest,
+            now = 1000L
+        )
+        val evidence = SeededEvidenceSource(
+            post = validPost(intentDigest),
+            evidence = APlusCompletionEvidence(
+                execution = fullEvidenceExecution(
+                    "exec-owner-77",
+                    77L,
+                    WIRE_VERIFIED,
+                    executionDigest
+                ).copy(attemptId = 77L),
+                completionEvidenceWire = WIRE_VERIFIED,
+                applyReceiptIntentHash = intentDigest,
+                applyReceiptLease = LEASE_ID
+            )
+        )
+
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log, evidence)).run()
+
+        assertEquals("POST must be re-acquired once for the crashed owner", 1, evidence.postCalls.count { it == 77L })
+        assertEquals(
+            "completion evidence is part of the same decision bundle and must be acquired before DECIDING",
+            1,
+            evidence.completionCalls.count { it == 77L }
+        )
+        assertNotNull("the recovered POST carrier must be durable", db.durableObservationDao().forAttemptPhase(77L, "POST"))
+        assertNotNull("the completion receipt must be durable before DECIDING", db.durableCompletionReceiptDao().forAttempt(77L))
+        val trusted = db.trustedQuotaDao().getByAttempt(77L)
+        assertNotNull("a complete durable bundle must be re-decided", trusted)
+        assertEquals("the re-decision must bind the owner execution", executionDigest, trusted!!.evidenceDigest)
+        assertEquals("the crashed lease must be released once after the decision", 1, executor.releaseEffectCount(77L))
+        assertNotNull("the release receipt must be durable", log.releaseReceiptFor(LEASE_ID))
+        val recovered = db.testAttemptDao().getAttemptById(77L)!!
+        assertNotNull("the recovered attempt must be terminal", recovered.endedAt)
+        assertEquals("the recovered attempt must close before a later apply", "CLOSED", recovered.aplusState)
+    }
+
+    @Test
+    fun `POST_OBSERVE_PENDING without completion evidence never exposes an incomplete DECIDING state`() = runTest {
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(
+            planId,
+            42L,
+            attemptId = 77L,
+            aplusState = "POST_OBSERVE_PENDING",
+            aplusLeaseId = LEASE_ID,
+            currentExecutionId = "exec-owner-77"
+        )
+        val intentDigest = ownerIntentDigest(sessionId, planId)
+        seedDurableObservation(77L, "PRE", validPre(intentDigest))
+        seedDurableExecution("exec-owner-77", 77L, WIRE_VERIFIED, "missing-completion-digest")
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(
+            attemptId = 77L,
+            intent = testApplyIntent(),
+            idempotencyKey = applyKey(77L),
+            requestDigest = intentDigest,
+            now = 1000L
+        )
+        val evidence = SeededEvidenceSource(post = validPost(intentDigest), evidence = null)
+
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log, evidence)).run()
+
+        assertEquals("POST acquisition is attempted once", 1, evidence.postCalls.count { it == 77L })
+        assertEquals(
+            "the completion leg must be checked before the phase may enter DECIDING",
+            1,
+            evidence.completionCalls.count { it == 77L }
+        )
+        assertNull("no completion source means no durable completion receipt", db.durableCompletionReceiptDao().forAttempt(77L))
+        assertNotEquals(
+            "DECIDING implies a complete durable bundle; a missing receipt must keep the owner out of DECIDING",
+            "DECIDING",
+            db.testAttemptDao().getAttemptById(77L)!!.aplusState
         )
     }
 
     @Test
     fun `M_CR_06`() = runTest {
         // M-CR-06 (R38): positive trust PASS. CURRENT execution seeded FIRST, DECOY second (reversed
-        // from R37 to defeat .last() bypass). committedAt == RECOVERY_NOW (exact).
+        // from R37 to defeat .last() bypass). committedAt == RECOVERY_NOW (exact). KB-8 additionally
+        // keeps the durable plan at (39.9, 116.4) while the provider observations report a valid,
+        // independently verified Kyiv coordinate, proving recovery has no Auto-local distance gate.
         val planId = seedPlan(taskId = 42L)
         val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
         val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
         val intentDigest = ownerIntentDigest(sessionId, planId)
-        seedMcr06Fixture(sessionId, intentDigest, seededDigest, currentFirst = true)
+        seedMcr06Fixture(
+            sessionId,
+            intentDigest,
+            seededDigest,
+            currentFirst = true,
+            preOverride = { copy(effectiveLat = 50.4501, effectiveLng = 30.5234) },
+            postOverride = { copy(effectiveLat = 50.4501, effectiveLng = 30.5234) }
+        )
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
@@ -701,9 +1623,25 @@ class CrashMatrixTest {
     }
 
     @Test fun `M_CR_06_discriminator_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 coordinates discriminator", "effectiveLat/Lng ~20m off target (>1m tolerance)",
-            preOverride = { copy(effectiveLat = 39.9002) },
-            postOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 coordinates discriminator", "latitude outside the geographic range",
+            preOverride = { copy(effectiveLat = 91.0) },
+            postOverride = { copy(effectiveLat = 91.0) })
+    }
+
+    @Test fun `M_CR_06_discriminator_null_coords`() = runTest {
+        assertDiscriminatorReject("M-CR-06 null coordinates", "durable effective coordinates are absent",
+            preOverride = { copy(effectiveLat = null, effectiveLng = null) },
+            postOverride = { copy(effectiveLat = null, effectiveLng = null) })
+    }
+
+    @Test fun `M_CR_06_discriminator_pre_only_NaN`() = runTest {
+        assertDiscriminatorReject("M-CR-06 PRE-only NaN", "PRE latitude is non-finite, POST canonical",
+            preOverride = { copy(effectiveLat = Double.NaN) })
+    }
+
+    @Test fun `M_CR_06_discriminator_post_only_infinity`() = runTest {
+        assertDiscriminatorReject("M-CR-06 POST-only infinity", "POST longitude is non-finite, PRE canonical",
+            postOverride = { copy(effectiveLng = Double.POSITIVE_INFINITY) })
     }
 
     @Test fun `M_CR_06_discriminator_evidence_refs`() = runTest {
@@ -794,23 +1732,23 @@ class CrashMatrixTest {
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE lat off-target, POST canonical",
-            preOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE latitude out of range, POST canonical",
+            preOverride = { copy(effectiveLat = 91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_post_only_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST lat off-target, PRE canonical",
-            postOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST latitude out of range, PRE canonical",
+            postOverride = { copy(effectiveLat = -91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_lng`() = runTest {
-        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE lng off-target, POST canonical",
-            preOverride = { copy(effectiveLng = 116.4002) })
+        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE longitude out of range, POST canonical",
+            preOverride = { copy(effectiveLng = 181.0) })
     }
 
     @Test fun `M_CR_06_discriminator_post_only_lng`() = runTest {
-        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST lng off-target, PRE canonical",
-            postOverride = { copy(effectiveLng = 116.4002) })
+        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST longitude out of range, PRE canonical",
+            postOverride = { copy(effectiveLng = -181.0) })
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_evidence_refs`() = runTest {

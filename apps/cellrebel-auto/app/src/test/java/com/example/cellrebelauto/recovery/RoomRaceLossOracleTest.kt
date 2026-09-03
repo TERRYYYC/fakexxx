@@ -123,4 +123,112 @@ class RoomRaceLossOracleTest {
         assertNull("a different (lease, digest) tuple is a conflict — never the winner misread as replay", loser)
         assertEquals("prior preserved", "lease-1", log.releaseReceiptFor("lease-1")?.leaseId)
     }
+
+    @Test
+    fun `multiple durable release rows for one lease are ambiguous regardless of row order`() = runBlocking {
+        val executor = RecordingExternalApplyExecutor()
+        val coordinator = RecoveryCoordinator(executor, log)
+
+        suspend fun seedAmbiguity(leaseId: String, exactFirst: Boolean) {
+            val exact = ReleaseReceiptRow(
+                idempotencyKey = "release-exact-$leaseId",
+                leaseId = leaseId,
+                releaseDigest = "digest-exact-$leaseId",
+                resultOutcome = "RELEASED",
+                createdAt = 1000L
+            )
+            val conflicting = ReleaseReceiptRow(
+                idempotencyKey = "release-conflict-$leaseId",
+                leaseId = leaseId,
+                releaseDigest = "digest-conflict-$leaseId",
+                resultOutcome = "RELEASED",
+                createdAt = 1001L
+            )
+            if (exactFirst) {
+                db.releaseReceiptDao().insertIfAbsent(exact)
+                db.releaseReceiptDao().insertIfAbsent(conflicting)
+            } else {
+                db.releaseReceiptDao().insertIfAbsent(conflicting)
+                db.releaseReceiptDao().insertIfAbsent(exact)
+            }
+
+            assertNull(
+                "a lease with more than one durable row has no unique release proof",
+                log.releaseReceiptFor(leaseId)
+            )
+            assertNull(
+                "an ambiguous lease must never satisfy exact durable release readback",
+                coordinator.exactDurableReleaseReceipt(
+                    exact.idempotencyKey,
+                    exact.leaseId,
+                    exact.releaseDigest
+                )
+            )
+            assertNull(
+                "an ambiguous lease must fail closed before any provider replay",
+                coordinator.releaseLease(
+                    attemptId = if (exactFirst) 71L else 72L,
+                    idempotencyKey = exact.idempotencyKey,
+                    leaseId = exact.leaseId,
+                    releaseDigest = exact.releaseDigest,
+                    now = 2000L
+                )
+            )
+        }
+
+        seedAmbiguity("lease-exact-first", exactFirst = true)
+        seedAmbiguity("lease-conflict-first", exactFirst = false)
+        assertEquals("ambiguous readback is provider-free", 0, executor.releaseCallsFor(71L).size)
+        assertEquals("ambiguous readback is provider-free", 0, executor.releaseCallsFor(72L).size)
+    }
+
+    @Test
+    fun `release race-loss with same identity but FAILED outcome never publishes RELEASED`() = runBlocking {
+        val executor = RecordingExternalApplyExecutor()
+        val racingLog = object : DurableRecoveryLog by log {
+            override fun recordReleaseReceipt(
+                idempotencyKey: String,
+                leaseId: String,
+                releaseDigest: String,
+                outcome: String,
+                now: Long
+            ): RecordedReleaseReceipt? {
+                // Deterministic window: coordinator preflight saw both indexes empty and the provider
+                // returned RELEASED, but another writer wins INSERT IGNORE with the same identity and
+                // a contradictory outcome before this writer records its receipt.
+                runBlocking {
+                    db.releaseReceiptDao().insertIfAbsent(
+                        ReleaseReceiptRow(
+                            idempotencyKey = idempotencyKey,
+                            leaseId = leaseId,
+                            releaseDigest = releaseDigest,
+                            resultOutcome = "FAILED",
+                            createdAt = now - 1L
+                        )
+                    )
+                }
+                return log.recordReleaseReceipt(
+                    idempotencyKey, leaseId, releaseDigest, outcome, now
+                )
+            }
+        }
+        val coordinator = RecoveryCoordinator(executor, racingLog)
+
+        val result = coordinator.releaseLease(
+            attemptId = 73L,
+            idempotencyKey = "release-73",
+            leaseId = "lease-73",
+            releaseDigest = "digest-73",
+            now = 2_000L
+        )
+
+        assertNull(
+            "a raced FAILED durable winner must not be reinterpreted as the provider's RELEASED result",
+            result
+        )
+        assertEquals("the provider release was dispatched before the race window", 1,
+            executor.releaseCallsFor(73L).size)
+        assertEquals("the contradictory first writer stays authoritative", "FAILED",
+            db.releaseReceiptDao().byKey("release-73")?.resultOutcome)
+    }
 }

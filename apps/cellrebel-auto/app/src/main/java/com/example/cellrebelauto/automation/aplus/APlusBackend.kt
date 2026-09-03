@@ -38,23 +38,28 @@ interface APlusBackend {
 
 /**
  * What the backend can honestly supply for one attempt: pre/post observations and the classified
- * completion evidence + apply-receipt fields (contract DTO projections). It deliberately CANNOT
- * supply the target coordinates or the locally-recomputed intent hash — those are assembled from the
- * PERSISTED attempt intent (INV-23; Sol round-7 P1-2: a caller-self-consistent context would mint
- * evidence for the wrong address).
+ * completion evidence + apply-receipt fields (contract DTO projections). Qianwangyou exclusively
+ * owns target coordinates and distance validation (KB-8); Auto sees only the provider-reported
+ * effective coordinates carried by each observation. The backend cannot supply Auto's independently
+ * recomputed intent hash — that is assembled from persisted owner identity (INV-23).
  *
- * # A+ 证据获取 seam：只供观察/分类/回执字段；目标坐标与本地重算 hash 永远来自持久 intent
+ * # A+ 证据获取 seam：千网游独占目标坐标；Auto 只做 provider 生效坐标的结构/审计校验，并从持久 owner 身份重算 hash
  */
 interface APlusEvidenceSource {
     /**
-     * The §6.4 pre-observation for [attemptId], or null when observation is unavailable.
+     * The §6.4 pre-observation for [attemptId], or null when observation is unavailable. A non-null
+     * result is either a durable replay or a live candidate. AutomationEngine owns the transaction
+     * that commits the immutable carrier together with its owner phase.
      * R43 GREEN: [runSessionId] is the attempt's REAL owner session — the source recomputes the
-     * INV-23 intent hash from the same owner state the engine recompute uses (lat/lng/attemptId/session),
-     * so the three-way digest can actually agree.
+     * INV-23 intent hash from the same owner identity the engine uses, so the three-way digest can
+     * actually agree.
      */
     suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot?
 
-    /** The §6.4 post-observation for [attemptId], or null when observation is unavailable. */
+    /**
+     * The §6.4 post-observation for [attemptId], or null when unavailable. As with PRE, a non-null
+     * value may be a durable replay or a live candidate for the engine-owned decision transaction.
+     */
     suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot?
 
     /** The classified completion evidence + apply-receipt fields for [attemptId] (§8.6/§6.3). */

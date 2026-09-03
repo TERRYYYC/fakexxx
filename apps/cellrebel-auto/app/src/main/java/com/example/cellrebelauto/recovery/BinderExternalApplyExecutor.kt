@@ -30,7 +30,7 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  */
 class BinderExternalApplyExecutor(
     private val context: Context,
-    providerApplicationId: String = ProviderPrincipal.selected
+    providerApplicationId: String = com.example.cellrebelauto.automation.ProviderPrincipal.selected
 ) : ExternalApplyExecutor {
 
     val targetApplicationId: String = providerApplicationId

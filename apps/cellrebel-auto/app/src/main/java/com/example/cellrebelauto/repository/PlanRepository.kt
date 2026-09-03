@@ -7,7 +7,10 @@ import com.example.cellrebelauto.db.TaskAttemptCount
 import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
+import com.example.cellrebelauto.environment.hasStructurallyValidEffectiveCoordinates
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
+import com.example.cellrebelauto.model.execution.CellRebelExecution
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.AttemptWithTask
@@ -254,6 +257,56 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markRecoveryRequired(attemptId: Long, reason: String) =
         db.testAttemptDao().markRecoveryRequired(attemptId, reason)
 
+    /**
+     * Persist the terminal intent before release. If the process dies after RELEASED but before the
+     * terminal projection, recovery can still close with the original typed reason instead of
+     * silently downgrading it to interrupted.
+     */
+    suspend fun markFailureContinuationAndReleasePending(attemptId: Long, reason: String) {
+        val updated = db.testAttemptDao().markFailureContinuationAndReleasePending(attemptId, reason)
+        check(updated == 1) {
+            "FAILURE_RELEASE_BOUNDARY_OWNER_INVALID: attempt=$attemptId"
+        }
+    }
+
+    /**
+     * Publish the RELEASE_RECEIPT audit edge and RELEASED owner checkpoint in one Room transaction.
+     * An old crash window may already contain the exact audit while the owner is RELEASE_PENDING;
+     * that exact legacy replay is repaired without appending a duplicate. Any divergent/duplicate
+     * provenance is an invariant break.
+     */
+    suspend fun commitReleaseReceiptCheckpoint(attemptId: Long, recordedAt: Long) = db.withTransaction {
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)
+            ?: throw IllegalStateException("RELEASE_CHECKPOINT_ATTEMPT_MISSING: attempt=$attemptId")
+        if (attempt.aplusState != "RELEASE_PENDING") {
+            throw IllegalStateException(
+                "RELEASE_CHECKPOINT_OWNER_INVALID: attempt=$attemptId phase=${attempt.aplusState}"
+            )
+        }
+        val expectedPayload = "RELEASE_PENDING->RELEASED"
+        val existing = db.auditEventDao().forAttempt(attemptId)
+            .filter { it.eventType == "RELEASE_RECEIPT" }
+        when {
+            existing.isEmpty() -> db.auditEventDao().insert(
+                AutoAuditEvent(
+                    seq = db.auditEventDao().count().toLong() + 1L,
+                    attemptId = attemptId,
+                    correlationRef = null,
+                    eventType = "RELEASE_RECEIPT",
+                    payloadDigest = expectedPayload,
+                    recordedAt = recordedAt
+                )
+            )
+            existing.size == 1 && existing.single().payloadDigest == expectedPayload -> Unit
+            else -> throw IllegalStateException(
+                "RELEASE_CHECKPOINT_AUDIT_CONFLICT: attempt=$attemptId count=${existing.size}"
+            )
+        }
+        check(db.testAttemptDao().markReleasedFromPending(attemptId) == 1) {
+            "RELEASE_CHECKPOINT_OWNER_UPDATE_FAILED: attempt=$attemptId"
+        }
+    }
+
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
         db.testAttemptDao().markAplusLease(attemptId, leaseId)
 
@@ -286,29 +339,176 @@ class PlanRepository(private val db: AppDatabase) {
         db.testAttemptDao().getCurrentExecutionId(attemptId)
 
     // # R37 (Sol R36 P1-1): durable observation + receipt persist/read
-    suspend fun persistObservation(attemptId: Long, phase: String, snapshot: com.example.cellrebelauto.environment.ObservationSnapshot) =
-        db.durableObservationDao().insert(
-            com.example.cellrebelauto.model.ledger.DurableObservationRecord(
-                attemptId = attemptId, phase = phase,
-                leaseId = snapshot.leaseId,
-                acceptedIntentHash = snapshot.acceptedIntentHash,
-                coverage = snapshot.coverage,
-                verificationLevel = snapshot.verificationLevel,
-                deliveryMode = snapshot.deliveryMode,
-                isMock = snapshot.isMock,
-                scheduleDecision = snapshot.scheduleDecision,
-                effectiveLat = snapshot.effectiveLat,
-                effectiveLng = snapshot.effectiveLng,
-                environmentRevision = snapshot.environmentRevision,
-                environmentFingerprint = snapshot.environmentFingerprint,
-                observedAtElapsedRealtimeMs = snapshot.observedAtElapsedRealtimeMs,
-                observedAtEpochMs = snapshot.observedAtEpochMs,
-                continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
-                continuitySinceEpochMs = null,
-                evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
-                evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+    // One immutable storage authority: every engine phase-boundary write converges here. INSERT
+    // IGNORE alone would create two truths (live vs durable), so every replay reads the winning raw
+    // record back and requires exact payload equality after signed-zero canonicalization.
+    suspend fun persistObservation(
+        attemptId: Long,
+        phase: String,
+        snapshot: com.example.cellrebelauto.environment.ObservationSnapshot
+    ): com.example.cellrebelauto.environment.ObservationSnapshot = db.withTransaction {
+        persistObservationInTransaction(attemptId, phase, snapshot)
+    }
+
+    /**
+     * Atomically commit the observation carrier and its §8.1 owner phase. A process death can see
+     * either the old phase without the row or the new phase with the row, never
+     * `ENV_APPLIED + durable PRE` created by two separate commits.
+     */
+    suspend fun persistObservationAndMarkAplusState(
+        attemptId: Long,
+        phase: String,
+        snapshot: com.example.cellrebelauto.environment.ObservationSnapshot,
+        aplusState: String
+    ): com.example.cellrebelauto.environment.ObservationSnapshot = db.withTransaction {
+        val (requiredOwnerState, requiredNextState) = when (phase) {
+            "PRE" -> "ENV_APPLIED" to "PRE_OBSERVED"
+            else -> throw IllegalStateException(
+                "OBSERVATION_OWNER_PHASE_UNSUPPORTED: attempt=$attemptId phase=$phase"
             )
+        }
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)
+            ?: throw IllegalStateException(
+                "OBSERVATION_OWNER_ATTEMPT_MISSING: attempt=$attemptId phase=$phase"
+            )
+        if (attempt.aplusState != requiredOwnerState || aplusState != requiredNextState) {
+            throw IllegalStateException(
+                "OBSERVATION_OWNER_STATE_INVALID: attempt=$attemptId phase=$phase " +
+                    "owner=${attempt.aplusState} required=$requiredOwnerState next=$aplusState " +
+                    "requiredNext=$requiredNextState"
+            )
+        }
+        val durable = persistObservationInTransaction(attemptId, phase, snapshot)
+        check(
+            db.testAttemptDao().markAplusStateFrom(
+                attemptId = attemptId,
+                expectedState = requiredOwnerState,
+                nextState = aplusState
+            ) == 1
+        ) {
+            "OBSERVATION_OWNER_UPDATE_FAILED: attempt=$attemptId phase=$phase"
+        }
+        durable
+    }
+
+    /**
+     * Atomically publish the complete decision bundle. `DECIDING` is unreachable unless both the
+     * immutable POST carrier and immutable completion receipt are durable in the same transaction.
+     * A crash before commit remains `POST_OBSERVE_PENDING`; a crash after commit can re-decide from
+     * the complete durable bundle (M-CR-05/M-CR-06).
+     */
+    suspend fun persistDecisionBundleAndEnterDeciding(
+        attemptId: Long,
+        postObservation: com.example.cellrebelauto.environment.ObservationSnapshot,
+        completionEvidenceWire: Int,
+        acceptedIntentHash: String,
+        leaseId: String
+    ): Pair<
+        com.example.cellrebelauto.environment.ObservationSnapshot,
+        com.example.cellrebelauto.model.ledger.DurableCompletionReceipt
+    > = db.withTransaction {
+        requireOwnedExecutionInTransaction(
+            attemptId,
+            allowedPhases = setOf("POST_OBSERVE_PENDING", "DECIDING")
         )
+        val durablePreRecord = db.durableObservationDao().forAttemptPhase(attemptId, "PRE")
+            ?: throw IllegalStateException(
+                "DECISION_PRE_MISSING: attempt=$attemptId cannot enter DECIDING"
+            )
+        requireCanonicalObservationRecord(durablePreRecord)
+        val durablePost = persistObservationInTransaction(attemptId, "POST", postObservation)
+        val durableReceipt = persistCompletionReceiptInTransaction(
+            attemptId, completionEvidenceWire, acceptedIntentHash, leaseId
+        )
+        check(db.testAttemptDao().markDecidingFromPostBundle(attemptId) == 1) {
+            "DECISION_OWNER_UPDATE_FAILED: attempt=$attemptId"
+        }
+        durablePost to durableReceipt
+    }
+
+    private suspend fun persistObservationInTransaction(
+        attemptId: Long,
+        phase: String,
+        snapshot: com.example.cellrebelauto.environment.ObservationSnapshot
+    ): com.example.cellrebelauto.environment.ObservationSnapshot {
+        require(snapshot.hasStructurallyValidEffectiveCoordinates()) {
+            "DURABLE_OBSERVATION_INVALID_COORDINATES: attempt=$attemptId phase=$phase"
+        }
+        val canonical = snapshot.canonicalSignedZero()
+        val candidate = observationRecordFromSnapshot(attemptId, phase, canonical)
+        db.durableObservationDao().insertIfAbsent(candidate)
+        val winner = db.durableObservationDao().forAttemptPhase(attemptId, phase)
+            ?: throw IllegalStateException(
+                "DURABLE_OBSERVATION_MISSING: no row after insert for attempt=$attemptId phase=$phase"
+            )
+        if (winner.copy(id = 0).canonicalSignedZero() != candidate) {
+            throw IllegalStateException(
+                "DURABLE_OBSERVATION_CONFLICT: immutable replay mismatch for " +
+                    "attempt=$attemptId phase=$phase"
+            )
+        }
+        return observationSnapshotFromRecord(winner)
+    }
+
+    private fun observationRecordFromSnapshot(
+        attemptId: Long,
+        phase: String,
+        canonical: com.example.cellrebelauto.environment.ObservationSnapshot
+    ) = com.example.cellrebelauto.model.ledger.DurableObservationRecord(
+            attemptId = attemptId, phase = phase,
+            leaseId = canonical.leaseId,
+            acceptedIntentHash = canonical.acceptedIntentHash,
+            coverage = canonical.coverage,
+            verificationLevel = canonical.verificationLevel,
+            deliveryMode = canonical.deliveryMode,
+            isMock = canonical.isMock,
+            scheduleDecision = canonical.scheduleDecision,
+            effectiveLat = canonical.effectiveLat,
+            effectiveLng = canonical.effectiveLng,
+            environmentRevision = canonical.environmentRevision,
+            environmentFingerprint = canonical.environmentFingerprint,
+            observedAtElapsedRealtimeMs = canonical.observedAtElapsedRealtimeMs,
+            observedAtEpochMs = canonical.observedAtEpochMs,
+            continuitySinceElapsedRealtimeMs = canonical.continuitySinceElapsedRealtimeMs,
+            continuitySinceEpochMs = canonical.continuitySinceEpochMs,
+            evidenceRefsJson = org.json.JSONArray(canonical.evidenceRefs).toString(),
+            evidenceRefs = canonical.evidenceRefs.joinToString(";")
+        )
+
+    /** Reconstructing a snapshot must not erase conflicting raw append-only provenance columns. */
+    private fun requireCanonicalObservationRecord(
+        record: com.example.cellrebelauto.model.ledger.DurableObservationRecord
+    ): com.example.cellrebelauto.environment.ObservationSnapshot {
+        val snapshot = observationSnapshotFromRecord(record)
+        val expected = observationRecordFromSnapshot(
+            record.attemptId,
+            record.phase,
+            snapshot.canonicalSignedZero()
+        )
+        if (record.copy(id = 0).canonicalSignedZero() != expected) {
+            throw IllegalStateException(
+                "DURABLE_OBSERVATION_RAW_CONFLICT: attempt=${record.attemptId} phase=${record.phase}"
+            )
+        }
+        return snapshot.canonicalSignedZero()
+    }
+
+    /**
+     * SQLite REAL canonicalizes signed zero. No other payload is normalized: null/non-finite/out of
+     * range coordinates are rejected before Room so distinct invalid values can never collapse into
+     * one SQL NULL replay payload.
+     */
+    private fun com.example.cellrebelauto.environment.ObservationSnapshot.canonicalSignedZero() = copy(
+        effectiveLat = effectiveLat.canonicalSignedZero(),
+        effectiveLng = effectiveLng.canonicalSignedZero()
+    )
+
+    private fun com.example.cellrebelauto.model.ledger.DurableObservationRecord.canonicalSignedZero() = copy(
+        effectiveLat = effectiveLat.canonicalSignedZero(),
+        effectiveLng = effectiveLng.canonicalSignedZero()
+    )
+
+    private fun Double?.canonicalSignedZero(): Double? = if (this != null && this == 0.0) 0.0 else this
 
     suspend fun getObservation(attemptId: Long, phase: String): com.example.cellrebelauto.model.ledger.DurableObservationRecord? =
         db.durableObservationDao().forAttemptPhase(attemptId, phase)
@@ -318,8 +518,12 @@ class PlanRepository(private val db: AppDatabase) {
      * the crash-recovery re-decide reads observations from HERE, never from a live source.
      * `evidenceRefs` is parsed back from the JSON array column (round-trippable).
      */
-    suspend fun getObservationSnapshot(attemptId: Long, phase: String): com.example.cellrebelauto.environment.ObservationSnapshot? {
-        val r = db.durableObservationDao().forAttemptPhase(attemptId, phase) ?: return null
+    suspend fun getObservationSnapshot(attemptId: Long, phase: String): com.example.cellrebelauto.environment.ObservationSnapshot? =
+        db.durableObservationDao().forAttemptPhase(attemptId, phase)?.let(::observationSnapshotFromRecord)
+
+    private fun observationSnapshotFromRecord(
+        r: com.example.cellrebelauto.model.ledger.DurableObservationRecord
+    ): com.example.cellrebelauto.environment.ObservationSnapshot {
         val refs = try {
             val arr = org.json.JSONArray(r.evidenceRefsJson)
             (0 until arr.length()).map { arr.getString(it) }
@@ -341,18 +545,44 @@ class PlanRepository(private val db: AppDatabase) {
             environmentFingerprint = r.environmentFingerprint,
             observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
             observedAtEpochMs = r.observedAtEpochMs,
+            continuitySinceEpochMs = r.continuitySinceEpochMs,
             continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
             evidenceRefs = refs
         )
     }
 
-    suspend fun persistCompletionReceipt(attemptId: Long, wire: Int, acceptedIntentHash: String, leaseId: String) =
-        db.durableCompletionReceiptDao().insert(
-            com.example.cellrebelauto.model.ledger.DurableCompletionReceipt(
-                attemptId = attemptId, completionEvidenceWire = wire,
-                acceptedIntentHash = acceptedIntentHash, leaseId = leaseId
-            )
+    /** Same immutable replay rule as observations; a conflicting receipt is an invariant break. */
+    suspend fun persistCompletionReceipt(
+        attemptId: Long,
+        wire: Int,
+        acceptedIntentHash: String,
+        leaseId: String
+    ): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt = db.withTransaction {
+        persistCompletionReceiptInTransaction(attemptId, wire, acceptedIntentHash, leaseId)
+    }
+
+    private suspend fun persistCompletionReceiptInTransaction(
+        attemptId: Long,
+        wire: Int,
+        acceptedIntentHash: String,
+        leaseId: String
+    ): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt {
+        val candidate = com.example.cellrebelauto.model.ledger.DurableCompletionReceipt(
+            attemptId = attemptId, completionEvidenceWire = wire,
+            acceptedIntentHash = acceptedIntentHash, leaseId = leaseId
         )
+        db.durableCompletionReceiptDao().insertIfAbsent(candidate)
+        val winner = db.durableCompletionReceiptDao().forAttempt(attemptId)
+            ?: throw IllegalStateException(
+                "DURABLE_COMPLETION_RECEIPT_MISSING: no row after insert for attempt=$attemptId"
+            )
+        if (winner.copy(id = 0) != candidate) {
+            throw IllegalStateException(
+                "DURABLE_COMPLETION_RECEIPT_CONFLICT: immutable replay mismatch for attempt=$attemptId"
+            )
+        }
+        return winner
+    }
 
     suspend fun getCompletionReceipt(attemptId: Long): com.example.cellrebelauto.model.ledger.DurableCompletionReceipt? =
         db.durableCompletionReceiptDao().forAttempt(attemptId)
@@ -362,9 +592,9 @@ class PlanRepository(private val db: AppDatabase) {
         db.attemptExecutionDao().byExecutionId(executionId)
 
     /**
-     * R43 (Sol GREEN-review-2 F3): persist the §7.1 execution evidence AT the COMPLETION_OBSERVED
-     * phase boundary — conflict-ignoring (a re-observe or the later trusted-transaction persist
-     * over the same executionId is a no-op, never a UNIQUE rollback).
+     * Persist the immutable §7.1 execution carrier at COMPLETION_OBSERVED. A same-id replay is a
+     * no-op only when every stored field agrees; a foreign/different winner fails closed instead of
+     * allowing the later decision to evaluate a live payload that lost the storage race.
      */
     suspend fun persistExecutionEvidence(
         executionId: String,
@@ -380,9 +610,9 @@ class PlanRepository(private val db: AppDatabase) {
         webBrowsingScore: Double?,
         videoStreamingScore: Double?,
         roundTimestampsElapsed: String?
-    ) {
-        db.attemptExecutionDao().insertIfAbsent(
-            com.example.cellrebelauto.model.execution.CellRebelExecution(
+    ): CellRebelExecution = db.withTransaction {
+        persistExecutionInTransaction(
+            CellRebelExecution(
                 executionId = executionId,
                 attemptId = attemptId,
                 completionEvidenceWire = completionEvidenceWire,
@@ -402,6 +632,122 @@ class PlanRepository(private val db: AppDatabase) {
         )
     }
 
+    /**
+     * The owner pointer and immutable execution row are a prerequisite of DECIDING. This check is
+     * intentionally inside the POST+receipt transaction so a dangling/foreign owner rolls the whole
+     * bundle back and leaves POST_OBSERVE_PENDING intact.
+     */
+    private suspend fun requireOwnedExecutionInTransaction(
+        attemptId: Long,
+        allowedPhases: Set<String>
+    ): CellRebelExecution {
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)
+            ?: throw IllegalStateException("EXECUTION_OWNER_ATTEMPT_MISSING: attempt=$attemptId")
+        if (attempt.aplusState !in allowedPhases) {
+            throw IllegalStateException(
+                "EXECUTION_OWNER_PHASE_INVALID: attempt=$attemptId phase=${attempt.aplusState} " +
+                    "allowed=${allowedPhases.sorted().joinToString("|")}"
+            )
+        }
+        val ownerExecutionId = attempt.currentExecutionId
+            ?: throw IllegalStateException("EXECUTION_OWNER_MISSING: attempt=$attemptId")
+        val execution = db.attemptExecutionDao().byExecutionId(ownerExecutionId)
+            ?: throw IllegalStateException(
+                "EXECUTION_OWNER_ROW_MISSING: attempt=$attemptId execution=$ownerExecutionId"
+            )
+        if (execution.attemptId != attemptId) {
+            throw IllegalStateException(
+                "EXECUTION_OWNER_FOREIGN: attempt=$attemptId execution=$ownerExecutionId " +
+                    "belongsTo=${execution.attemptId}"
+            )
+        }
+        return canonicalExecution(execution)
+    }
+
+    /**
+     * Re-read the entire immutable DECIDING bundle inside the mint transaction. The repository trust
+     * entrypoint must defend its own phase boundary: a caller cannot substitute live PRE/POST or a
+     * live receipt, nor call it while the owner is still POST_OBSERVE_PENDING.
+     */
+    private suspend fun durableDecisionContextInTransaction(
+        live: CompletionTrustContext,
+        durableExecution: CellRebelExecution
+    ): CompletionTrustContext {
+        val attemptId = durableExecution.attemptId
+        val ownerExecution = requireOwnedExecutionInTransaction(
+            attemptId,
+            allowedPhases = setOf("DECIDING")
+        )
+        if (ownerExecution.executionId != durableExecution.executionId) {
+            throw IllegalStateException(
+                "EXECUTION_OWNER_MISMATCH: attempt=$attemptId " +
+                    "owner=${ownerExecution.executionId} candidate=${durableExecution.executionId}"
+            )
+        }
+        val durablePre = db.durableObservationDao().forAttemptPhase(attemptId, "PRE")
+            ?.let(::requireCanonicalObservationRecord)
+            ?: throw IllegalStateException("DECISION_PRE_MISSING: attempt=$attemptId")
+        val durablePost = db.durableObservationDao().forAttemptPhase(attemptId, "POST")
+            ?.let(::requireCanonicalObservationRecord)
+            ?: throw IllegalStateException("DECISION_POST_MISSING: attempt=$attemptId")
+        val durableReceipt = db.durableCompletionReceiptDao().forAttempt(attemptId)
+            ?: throw IllegalStateException("DECISION_RECEIPT_MISSING: attempt=$attemptId")
+
+        if (durablePre != live.preObservation.canonicalSignedZero()) {
+            throw IllegalStateException("DECISION_PRE_CONFLICT: attempt=$attemptId")
+        }
+        if (durablePost != live.postObservation.canonicalSignedZero()) {
+            throw IllegalStateException("DECISION_POST_CONFLICT: attempt=$attemptId")
+        }
+        if (durableReceipt.completionEvidenceWire != live.completionEvidenceWire ||
+            durableReceipt.acceptedIntentHash != live.applyReceiptIntentHash ||
+            durableReceipt.leaseId != live.applyReceiptLease
+        ) {
+            throw IllegalStateException("DECISION_RECEIPT_CONFLICT: attempt=$attemptId")
+        }
+        return live.copy(
+            execution = durableExecution,
+            completionEvidenceWire = durableReceipt.completionEvidenceWire,
+            applyReceiptIntentHash = durableReceipt.acceptedIntentHash,
+            applyReceiptLease = durableReceipt.leaseId,
+            preObservation = durablePre,
+            postObservation = durablePost
+        )
+    }
+
+    /** INSERT-IGNORE + exact readback equality is the single storage authority for executions. */
+    private suspend fun persistExecutionInTransaction(candidate: CellRebelExecution): CellRebelExecution {
+        val canonicalCandidate = canonicalExecution(candidate)
+        db.attemptExecutionDao().insertIfAbsent(canonicalCandidate)
+        val winner = db.attemptExecutionDao().byExecutionId(canonicalCandidate.executionId)
+            ?: throw IllegalStateException(
+                "DURABLE_EXECUTION_MISSING: execution=${canonicalCandidate.executionId}"
+            )
+        val canonicalWinner = canonicalExecution(winner)
+        if (canonicalWinner.copy(id = 0) != canonicalCandidate.copy(id = 0)) {
+            throw IllegalStateException(
+                "DURABLE_EXECUTION_CONFLICT: immutable replay mismatch for " +
+                    "execution=${canonicalCandidate.executionId}"
+            )
+        }
+        return canonicalWinner
+    }
+
+    /** SQLite-safe canonical form: reject non-finite scores; normalize only signed zero. */
+    private fun canonicalExecution(execution: CellRebelExecution): CellRebelExecution {
+        require(execution.webBrowsingScore == null || execution.webBrowsingScore.isFinite()) {
+            "DURABLE_EXECUTION_INVALID_WEB_SCORE: execution=${execution.executionId}"
+        }
+        require(execution.videoStreamingScore == null || execution.videoStreamingScore.isFinite()) {
+            "DURABLE_EXECUTION_INVALID_VIDEO_SCORE: execution=${execution.executionId}"
+        }
+        fun Double.canonicalSignedZero(): Double = if (this == 0.0) 0.0 else this
+        return execution.copy(
+            webBrowsingScore = execution.webBrowsingScore?.canonicalSignedZero(),
+            videoStreamingScore = execution.videoStreamingScore?.canonicalSignedZero()
+        )
+    }
+
     // # 恢复真相载体（Sol round-16 P1-1 / round-18 P1-1）：可信账本 / 未验证记录是 append-only 权威，
     // # 返回 typed entry 以绑定 attempt+task 并检测跨表矛盾，绝不信裸 phase 字符串
     suspend fun getTrustedEntry(attemptId: Long): TrustedQuotaEntry? =
@@ -416,16 +762,13 @@ class PlanRepository(private val db: AppDatabase) {
 
     // # A+ PASS 终态化（P1-5）：标记 attempt succeeded，successOrdinal 由可信计数投影 1-based（Sol round-9
     // # P1-6：绝不动 legacy completedSuccesses、绝不写 successOrdinal=0）。
-    suspend fun finalizeAplusSuccess(attemptId: Long, taskId: Long, endedAt: Long, webScore: Double?, videoScore: Double?) =
-        db.testAttemptDao().markSucceeded(
-            attemptId = attemptId,
-            successOrdinal = db.trustedQuotaDao().trustedCountForTask(taskId),
-            runningObservedAt = null,
-            endedAt = endedAt,
-            webScore = webScore,
-            videoScore = videoScore,
-            status = "succeeded"
-        )
+    suspend fun finalizeAplusSuccess(
+        attemptId: Long,
+        taskId: Long,
+        endedAt: Long,
+        webScore: Double?,
+        videoScore: Double?
+    ) = closeAplusSuccess(attemptId, taskId, endedAt, webScore, videoScore)
 
     // ---- Task lifecycle ----
 
@@ -488,6 +831,53 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markAttemptInterruptedIfNonTerminal(attemptId: Long, nowMs: Long) =
         db.testAttemptDao().markInterruptedIfNonTerminal(attemptId, nowMs)
 
+    /**
+     * Recovery-only terminal projection after the exact lease release receipt is durable. The owner
+     * phase and terminal attempt row commit together, so recovery never advertises CLOSED with a
+     * still-nonterminal attempt (or vice versa).
+     */
+    suspend fun closeRecoveredAttempt(
+        attemptId: Long,
+        endedAt: Long,
+        failureReason: String?
+    ) = db.withTransaction {
+        val updated = if (failureReason == null) {
+            db.testAttemptDao().closeAplusInterrupted(attemptId, endedAt)
+        } else {
+            db.testAttemptDao().closeAplusFailed(attemptId, failureReason, endedAt)
+        }
+        check(updated == 1) {
+            "RECOVERED_CLOSE_OWNER_INVALID: attempt=$attemptId"
+        }
+    }
+
+    /** Close the A+ owner and project trusted success in one transaction. */
+    suspend fun closeAplusSuccess(
+        attemptId: Long,
+        taskId: Long,
+        endedAt: Long,
+        webScore: Double?,
+        videoScore: Double?
+    ) = db.withTransaction {
+        check(db.testAttemptDao().closeAplusSucceeded(
+            attemptId = attemptId,
+            successOrdinal = db.trustedQuotaDao().trustedCountForTask(taskId),
+            endedAt = endedAt,
+            webScore = webScore,
+            videoScore = videoScore
+        ) == 1) {
+            "APLUS_SUCCESS_CLOSE_OWNER_INVALID: attempt=$attemptId"
+        }
+    }
+
+    /** Close the A+ owner and project a typed failure in one transaction. */
+    suspend fun closeAplusFailure(attemptId: Long, reason: String, endedAt: Long) =
+        db.withTransaction {
+            check(db.testAttemptDao().closeAplusFailed(attemptId, reason, endedAt) == 1) {
+                "APLUS_FAILURE_CLOSE_OWNER_INVALID: attempt=$attemptId"
+            }
+        }
+
     // ---- Trusted completion persistence (R4-F1, §11.2 / §11.4) ----
 
     /**
@@ -527,17 +917,59 @@ class PlanRepository(private val db: AppDatabase) {
      * never a default constant or execution.completedAtElapsed.
      */
     suspend fun recordTrustedCompletion(ctx: CompletionTrustContext, commitClockMs: Long): TrustDecision = db.withTransaction {
-        // (1) Persist the FULL §7.1 evidence detail — copied verbatim from ctx.execution. The insert
-        // is CONFLICT-IGNORING: the M-CR-06 recovery re-decide runs over an ALREADY-DURABLE execution
-        // row; re-persisting it must be a no-op, never a UNIQUE rollback that unwinds the mint.
-        db.attemptExecutionDao().insertIfAbsent(ctx.execution)
-        // (2) Evaluate the §6.4 predicate.
-        val decision = TrustPolicy().evaluate(ctx)
+        // (1) Persist/read back the FULL §7.1 carrier. INSERT IGNORE is only an idempotency primitive:
+        // exact readback equality decides whether the live candidate is the same immutable execution.
+        val durableExecution = persistExecutionInTransaction(ctx.execution)
         // Attribution: resolve attemptId → taskId by REAL DB lookup (never a constant, R5-F1).
         // An UNRESOLVABLE attempt cannot be attributed to any task — fail-closed: NO mint, NO
         // unverified record (neither can be bound to a nonexistent attempt); the persisted
         // execution row itself is the audit trail. Decision stays FAIL in that case.
-        val attempt = db.testAttemptDao().getAttemptById(ctx.execution.attemptId)
+        val attempt = db.testAttemptDao().getAttemptById(durableExecution.attemptId)
+        val durableCtx = if (attempt == null) {
+            ctx.copy(execution = durableExecution)
+        } else {
+            durableDecisionContextInTransaction(ctx, durableExecution)
+        }
+        // (2) Evaluate only the complete durable winner bundle, never a live payload that may have
+        // lost an execution/observation/receipt race.
+        val policyDecision = TrustPolicy().evaluate(durableCtx)
+        // The mutable attempt owner is the release authority. A semantically valid bundle that is
+        // internally self-consistent on lease A still cannot mint if the attempt owns lease B.
+        // Convert that attribution failure into an ordinary unverified decision so recovery has a
+        // durable negative carrier; structural/raw carrier conflicts above continue to throw.
+        val ownerLeaseMatches = attempt?.aplusLeaseId?.let { ownerLease ->
+            durableCtx.applyReceiptLease == ownerLease &&
+                durableCtx.preObservation.leaseId == ownerLease &&
+                durableCtx.postObservation.leaseId == ownerLease
+        } == true
+        val decision = if (attempt != null && policyDecision == TrustDecision.PASS && !ownerLeaseMatches) {
+            TrustDecision.FAIL
+        } else {
+            policyDecision
+        }
+        val existingTrusted = attempt?.let {
+            db.trustedQuotaDao().getByAttempt(durableExecution.attemptId)
+        }
+        val existingUnverified = attempt?.let {
+            db.unverifiedAttemptRecordDao().getByAttempt(durableExecution.attemptId)
+        }
+        if (existingTrusted != null && existingUnverified != null) {
+            throw IllegalStateException(
+                "DECISION_CARRIER_CONFLICT: attempt=${durableExecution.attemptId} has both carriers"
+            )
+        }
+        if (decision == TrustDecision.PASS && existingUnverified != null) {
+            throw IllegalStateException(
+                "DECISION_CARRIER_CONFLICT: trusted decision for attempt=${durableExecution.attemptId} " +
+                    "contradicts durable unverified carrier"
+            )
+        }
+        if (decision == TrustDecision.FAIL && existingTrusted != null) {
+            throw IllegalStateException(
+                "DECISION_CARRIER_CONFLICT: unverified decision for attempt=${durableExecution.attemptId} " +
+                    "contradicts durable trusted carrier"
+            )
+        }
         if (decision == TrustDecision.PASS && attempt != null) {
             // Recovery-safe (P1-2 Sol Issue #19/#20): the DECIDING crash window (ledger committed
             // but phase string not yet persisted as QUOTA_COMMITTED) causes redecideDecidingAttempt
@@ -552,36 +984,45 @@ class PlanRepository(private val db: AppDatabase) {
             // that the existing row is the SAME mint, not a corrupted/different one.
             val inserted = db.trustedQuotaDao().insertIfAbsent(
                 TrustedQuotaEntry(
-                    attemptId = ctx.execution.attemptId,
+                    attemptId = durableExecution.attemptId,
                     taskId = attempt.taskId,
-                    evidenceDigest = ctx.execution.evidencePayloadDigest,
+                    evidenceDigest = durableExecution.evidencePayloadDigest,
                     committedAt = commitClockMs
                 )
             )
             if (inserted == -1L) {
                 // IGNORE fired: row already exists. Read back and verify immutable fields match.
-                val existing = db.trustedQuotaDao().getByAttempt(ctx.execution.attemptId)
+                val existing = db.trustedQuotaDao().getByAttempt(durableExecution.attemptId)
                 if (existing == null || existing.taskId != attempt.taskId ||
-                    existing.evidenceDigest != ctx.execution.evidencePayloadDigest) {
+                    existing.evidenceDigest != durableExecution.evidencePayloadDigest) {
                     // Immutable field mismatch: a corrupted row exists. Fail-closed.
                     throw IllegalStateException(
                         "TRUSTED_LEDGER_CORRUPTION: existing TrustedQuotaEntry for attempt " +
-                        "${ctx.execution.attemptId} has mismatched immutable fields " +
+                        "${durableExecution.attemptId} has mismatched immutable fields " +
                         "(taskId=${existing?.taskId} vs ${attempt.taskId}, " +
-                        "evidenceDigest=${existing?.evidenceDigest} vs ${ctx.execution.evidencePayloadDigest})"
+                        "evidenceDigest=${existing?.evidenceDigest} vs ${durableExecution.evidencePayloadDigest})"
                     )
                 }
                 // Fields match: legitimate DECIDING crash window re-mint. No-op, proceed.
             }
         } else if (decision == TrustDecision.FAIL && attempt != null) {
             // FAIL for a REAL attempt: the exact unverified carrier (typed reason + evidence digest).
-            db.unverifiedAttemptRecordDao().insert(
-                UnverifiedAttemptRecord(
-                    attemptId = ctx.execution.attemptId,
-                    reason = "UNTRUSTED",
-                    evidenceDigest = ctx.execution.evidencePayloadDigest
-                )
+            val candidate = UnverifiedAttemptRecord(
+                attemptId = durableExecution.attemptId,
+                reason = "UNTRUSTED",
+                evidenceDigest = durableExecution.evidencePayloadDigest
             )
+            db.unverifiedAttemptRecordDao().insert(candidate)
+            val winner = db.unverifiedAttemptRecordDao().getByAttempt(durableExecution.attemptId)
+                ?: throw IllegalStateException(
+                    "UNVERIFIED_CARRIER_MISSING: attempt=${durableExecution.attemptId}"
+                )
+            if (winner.copy(id = 0) != candidate) {
+                throw IllegalStateException(
+                    "UNVERIFIED_CARRIER_CONFLICT: immutable replay mismatch for " +
+                        "attempt=${durableExecution.attemptId}"
+                )
+            }
         }
         if (attempt == null) return@withTransaction TrustDecision.FAIL
         decision

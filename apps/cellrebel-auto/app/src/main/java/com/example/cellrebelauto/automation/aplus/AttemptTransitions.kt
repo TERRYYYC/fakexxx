@@ -57,34 +57,48 @@ object AttemptTransitions {
             AttemptState.APPLY_PENDING -> when (event) {
                 AttemptEvent.APPLY_RECEIPT -> AttemptState.ENV_APPLIED
                 AttemptEvent.CRASH_RECOVER -> AttemptState.APPLY_PENDING // same-key replay / fetch old receipt
+                // Recovery obtained the idempotent apply receipt/lease and now closes the old owner;
+                // it must not skip the real APPLY_PENDING → RELEASE_PENDING audit edge.
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.ENV_APPLIED -> when (event) {
                 AttemptEvent.PRE_OBSERVATION_OK -> AttemptState.PRE_OBSERVED
                 AttemptEvent.OBSERVATION_UNTRUSTED -> AttemptState.RELEASE_PENDING
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.PRE_OBSERVED -> when (event) {
                 AttemptEvent.START_CELLREBEL -> AttemptState.CELLREBEL_START_PENDING
+                AttemptEvent.OBSERVATION_UNTRUSTED,
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.CELLREBEL_START_PENDING -> when (event) {
                 AttemptEvent.NEW_RUN_OBSERVED -> AttemptState.CELLREBEL_RUNNING
                 AttemptEvent.PRE_EXISTING_RUN -> AttemptState.CELLREBEL_RUNNING // §8.6.2 wire 2: classified, old result NOT counted
+                AttemptEvent.OBSERVATION_UNTRUSTED,
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.CELLREBEL_RUNNING -> when (event) {
                 AttemptEvent.COMPLETION_OBSERVED -> AttemptState.POST_OBSERVE_PENDING
                 AttemptEvent.TIMEOUT_INTERRUPTED -> AttemptState.RECOVERY_REQUIRED
+                AttemptEvent.OBSERVATION_UNTRUSTED,
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.POST_OBSERVE_PENDING -> when (event) {
                 AttemptEvent.POST_OBSERVATION_OK -> AttemptState.DECIDING
+                AttemptEvent.OBSERVATION_UNTRUSTED,
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.DECIDING -> when (event) {
                 AttemptEvent.TRUST_POLICY_PASS -> AttemptState.QUOTA_COMMITTED
                 AttemptEvent.TRUST_POLICY_FAIL -> AttemptState.UNVERIFIED_RECORDED
+                AttemptEvent.OBSERVATION_UNTRUSTED,
+                AttemptEvent.RECONCILE -> AttemptState.RELEASE_PENDING
                 else -> current
             }
             AttemptState.QUOTA_COMMITTED -> when (event) {

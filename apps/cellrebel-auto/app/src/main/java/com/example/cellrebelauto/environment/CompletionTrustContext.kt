@@ -25,7 +25,11 @@ data class ObservationSnapshot(
     val isMock: Boolean?,
     /** scheduleDecisionWire; must be ALLOWED_NOW (§6.4.1 — DENIED/WAIT_UNTIL + VERIFIED ⇒ fail). */
     val scheduleDecision: String,
-    /** Effective coords at observation time; non-null + within tolerance of intent (INV-23). */
+    /**
+     * Effective coords at observation time; non-null, finite, and geographically valid (§6.4.1).
+     * Qianwangyou owns the target and distance comparison (KB-8); Auto keeps these fields only as
+     * a structural predicate and audit projection.
+     */
     val effectiveLat: Double?,
     val effectiveLng: Double?,
     /** environmentRevision; pre must equal post (§6.4). */
@@ -39,6 +43,8 @@ data class ObservationSnapshot(
     val observedAtElapsedRealtimeMs: Long,
     /** Audit-only wall clock (§6.4.2); NEVER enters a trust predicate. */
     val observedAtEpochMs: Long,
+    /** Audit-only wall-clock continuity origin; preserved verbatim but never used for trust. */
+    val continuitySinceEpochMs: Long? = null,
     /**
      * §6.4.2 monotonic continuity-window start. Nullable so the §6.4.1 continuitySince=null 矛盾 tuple
      * is representable. pre/post must both be non-null, EQUAL, and <= pre.observedAtElapsedRealtimeMs.
@@ -47,6 +53,17 @@ data class ObservationSnapshot(
     /** Structural evidence refs (`qwy:<store>:<id>`); non-empty required (§6.4.1 — empty + VERIFIED ⇒ fail). */
     val evidenceRefs: List<String>
 )
+
+/**
+ * The storage boundary and [TrustPolicy] share this structural coordinate predicate. Keeping one
+ * definition prevents the pre/post phase guard from drifting away from the final trust decision.
+ * Target ownership and distance comparison remain exclusively in Qianwangyou (KB-8).
+ */
+internal fun ObservationSnapshot.hasStructurallyValidEffectiveCoordinates(): Boolean {
+    val lat = effectiveLat ?: return false
+    val lng = effectiveLng ?: return false
+    return lat.isFinite() && lng.isFinite() && lat in -90.0..90.0 && lng in -180.0..180.0
+}
 
 /**
  * The full input bundle [TrustPolicy] evaluates to decide whether a classified CellRebel completion
@@ -62,7 +79,8 @@ data class ObservationSnapshot(
  *  - cross-obs: revision/fingerprint equal, continuitySince equal + non-null + <= pre.observedAt;
  *  - window: pre.observedAt < execution.startedAtElapsed < ... < completedAtElapsed < post.observedAt;
  *  - intent three-way: applyReceiptIntentHash == locallyRecomputedIntentHash == observation hash;
- *  - coords within [locationToleranceMeters] (= TRUSTED_LOCATION_TOLERANCE_METERS = 1.0 m).
+ *  - provider effective coordinates are present, finite, and geographically valid. KB-8 assigns
+ *    the target-coordinate distance comparison exclusively to Qianwangyou.
  * Every §6.4.1 矛盾 tuple is a distinct must-fail case.
  *
  * # 完成信任上下文：携带 §6.4 全部判别项，杜绝单字段/错 tuple 通过（反 false-oracle）
@@ -82,17 +100,6 @@ data class CompletionTrustContext(
      * `pre.leaseId == post.leaseId` is a false oracle (two observations can agree on the wrong lease).
      */
     val applyReceiptLease: String,
-    /** Target coordinates the attempt was dispatched to (INV-23). */
-    val targetLat: Double,
-    val targetLng: Double,
-    /**
-     * Location tolerance in meters (INV-23, TRUSTED_LOCATION_TOLERANCE_METERS = 1.0). R6-F1 (§11.7): this
-     * is a CALLER-supplied field; the GREEN predicate MUST gate on the FROZEN 1.0 m constant, NOT on this
-     * value — otherwise a caller injects its own pass threshold (Sol's round-5 caller-tolerance false-oracle).
-     * Kept on the context for audit/projection only; the `R6-F1 caller-injected loose tolerance` negative
-     * pins GREEN to the frozen bound by passing 50.0 here with coords ~20 m off.
-     */
-    val locationToleranceMeters: Double,
     val preObservation: ObservationSnapshot,
     val postObservation: ObservationSnapshot
 )

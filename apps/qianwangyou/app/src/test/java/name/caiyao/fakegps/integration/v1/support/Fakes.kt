@@ -6,6 +6,7 @@ import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.integration.v1.AdvancePointerOutcome
 import name.caiyao.fakegps.integration.v1.ApplyOutcome
 import name.caiyao.fakegps.integration.v1.CleanupOutcome
+import name.caiyao.fakegps.integration.v1.ContinuityEvidenceCapability
 import name.caiyao.fakegps.integration.v1.DurableKv
 import name.caiyao.fakegps.integration.v1.EffectiveEnvironment
 import name.caiyao.fakegps.integration.v1.MonotonicClock
@@ -45,6 +46,19 @@ class InMemoryDurableKv : DurableKv {
 
     /** Write-fault injection: return true to crash this write (F-2 item 2). */
     var failOnWrite: ((namespace: String, key: String) -> Boolean)? = null
+
+    /**
+     * Fresh handle over committed backing only. Writes buffered by an open
+     * transaction are deliberately absent, matching what a restarted process
+     * or independent FileDurableKv handle can observe before commit.
+     */
+    fun reopenCommitted(): InMemoryDurableKv = synchronized(lock) {
+        val reopened = InMemoryDurableKv()
+        data.forEach { (namespace, entries) ->
+            reopened.data[namespace] = HashMap(entries)
+        }
+        reopened
+    }
 
     override fun read(namespace: String, key: String): String? = synchronized(lock) {
         txBuffer?.get(namespace to key) ?: data[namespace]?.get(key)
@@ -155,11 +169,32 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var isMock: Boolean? = true
     var fingerprint: String = "fp-1"
     var evidenceRefs: List<String> = listOf("qwy:audit:1")
+    /** Strong by default so existing matrix happy paths model a complete oracle. */
+    var continuityCapability: ContinuityEvidenceCapability =
+        ContinuityEvidenceCapability.COMPLETE
+    /** Test hook for revision/effective-read linearization regressions. */
+    var beforeObserveEffective: (() -> Unit)? = null
+    /** Runs at the external apply boundary, before any fake environment mutation. */
+    var beforeApplyEnvironment: (() -> Unit)? = null
+    /** Runs after the fake environment mutated but before apply returns. */
+    var afterApplyEnvironmentMutation: (() -> Unit)? = null
+    /** Runs at the external cleanup boundary, before any fake mutation. */
+    var beforeCleanup: (() -> Unit)? = null
+    /** Runs after cleanup mutated the fake environment but before it returns. */
+    var afterCleanupEnvironmentMutation: (() -> Unit)? = null
+    /**
+     * Explicit raw OS-sample seam for freshness regressions. Null keeps older
+     * matrix scenarios independent by modeling a live source that advances on
+     * every read; a non-null map is replayed byte-for-byte until the test moves it.
+     */
+    var verifiedSourceElapsedRealtimeMs: Map<String, Long>? = null
+    private var syntheticEvidenceElapsedRealtimeMs: Long = 1_000_000L
 
     // --- call-count instrumentation (memory by design; counts across restarts) ---
     var applyCount: Int = 0
     var cleanupCount: Int = 0
     var advanceCount: Int = 0
+    var projectionConvergenceCount: Int = 0
 
     /**
      * Crash injection at the qwy-side pointer mutation (Terra PR#22 round-2:
@@ -168,6 +203,12 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
      * then re-arms to false so the recovery/replay path runs normally.
      */
     var failNextAdvancePointer: Boolean = false
+
+    /**
+     * Production-parity crash seam: the durable schedule pointer has moved,
+     * but the target item's framework projection has not converged yet.
+     */
+    var failNextProjectionAfterPointer: Boolean = false
 
     /**
      * Test seam for the §6.7.5 window Terra's interleaving lives in: invoked at
@@ -223,25 +264,70 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             ScheduleSnapshot(scheduleId, scheduleVersion, currentItemId, itemIds.toList(), exhausted)
         }
 
-    override fun advancePointer(fromItemId: String): AdvancePointerOutcome {
+    override fun convergeAdvance(
+        fromItemId: String,
+        expectedToItemId: String?,
+        expectedVersionAfter: Long,
+    ): AdvancePointerOutcome {
         if (failNextAdvancePointer) {
             failNextAdvancePointer = false
             throw SimulatedWriteCrash(SCHEDULE_NAMESPACE, "advancePointer")
         }
         beforeAdvancePointer?.invoke()
-        advanceCount += 1
         val idx = itemIds.indexOf(fromItemId)
         check(idx >= 0) { "advancePointer from unknown item $fromItemId" }
-        // Spec v1.56: every advance (terminal and non-terminal) bumps the
-        // schedule version by exactly 1. Production QwyScheduleStore does this;
-        // the fake must model it or the fidelity gap hides V+1 evidence.
-        scheduleVersion += 1
-        return if (idx == itemIds.lastIndex) {
-            exhausted = true
+        val targetItemId = itemIds.getOrNull(idx + 1)
+        check(targetItemId == expectedToItemId) {
+            "expected target $expectedToItemId does not match schedule target $targetItemId"
+        }
+        val alreadyAdvanced = if (targetItemId == null) {
+            exhausted && currentItemId == fromItemId
+        } else {
+            currentItemId == targetItemId
+        }
+        if (!alreadyAdvanced) {
+            check(currentItemId == fromItemId && !exhausted) {
+                "cannot converge advance from=$fromItemId current=$currentItemId exhausted=$exhausted"
+            }
+            check(scheduleVersion + 1L == expectedVersionAfter) {
+                "expected version $expectedVersionAfter cannot follow $scheduleVersion"
+            }
+            advanceCount += 1
+            // Spec v1.56: every logical advance (terminal and non-terminal)
+            // bumps the schedule version exactly once.
+            scheduleVersion += 1
+            if (targetItemId == null) {
+                exhausted = true
+            } else {
+                currentItemId = targetItemId
+            }
+        } else {
+            check(scheduleVersion == expectedVersionAfter) {
+                "already-advanced version $scheduleVersion does not match $expectedVersionAfter"
+            }
+        }
+
+        if (failNextProjectionAfterPointer) {
+            failNextProjectionAfterPointer = false
+            throw SimulatedWriteCrash(SCHEDULE_NAMESPACE, "projectAdvancedEnvironment")
+        }
+
+        // Harness fidelity: release clears the old provider projection, while
+        // a successful non-terminal advance must establish the new item before
+        // the handler clears its pending marker.
+        if (targetItemId != null) {
+            val resolved = coordinateForItem(targetItemId)
+                ?: error("no qwy-owned coordinates for advanced item $targetItemId")
+            effectiveLatitude = resolved.first
+            effectiveLongitude = resolved.second
+            lastAppliedVerificationLevelWire = applyVerificationLevelWire
+            projectionConvergenceCount += 1
+        }
+
+        return if (targetItemId == null) {
             AdvancePointerOutcome.Exhausted(scheduleVersion)
         } else {
-            currentItemId = itemIds[idx + 1]
-            AdvancePointerOutcome.Advanced(itemIds[idx + 1], scheduleVersion)
+            AdvancePointerOutcome.Advanced(targetItemId, scheduleVersion)
         }
     }
 
@@ -273,6 +359,7 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     private var lastAppliedVerificationLevelWire: Int? = null
 
     override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
+        beforeApplyEnvironment?.invoke()
         applyCount += 1
         // KB-8 (v1.62): the intent no longer carries coordinates — the
         // provider resolves them from the current schedule item. The fake
@@ -281,6 +368,7 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         effectiveLatitude = resolved?.first
         effectiveLongitude = resolved?.second
         lastAppliedVerificationLevelWire = applyVerificationLevelWire
+        afterApplyEnvironmentMutation?.invoke()
         return ApplyOutcome(
             effectiveLatitude = resolved?.first,
             effectiveLongitude = resolved?.second,
@@ -300,11 +388,17 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         itemId?.let { itemCoordinates[it] }
 
     override fun cleanup(leaseId: String): CleanupOutcome {
+        beforeCleanup?.invoke()
         cleanupCount += 1
+        effectiveLatitude = null
+        effectiveLongitude = null
+        lastAppliedVerificationLevelWire = VerificationLevelV1.NONE.wire
+        afterCleanupEnvironmentMutation?.invoke()
         return cleanupOutcome
     }
 
     override fun observeEffective(): EffectiveEnvironment {
+        beforeObserveEffective?.invoke()
         // R4 P3 (C5 cross-surface): the fake publish outcome must drive BOTH
         // surfaces. Production: applyEnvironment records the publish result
         // (recordLastApplied(verified)); observeEffective reads it back. So a
@@ -316,6 +410,13 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         val level = lastAppliedVerificationLevelWire
             ?: VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         val verified = level == VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        val sourceTimes = verifiedSourceElapsedRealtimeMs ?: run {
+            syntheticEvidenceElapsedRealtimeMs += 1L
+            linkedMapOf(
+                "gps" to syntheticEvidenceElapsedRealtimeMs,
+                "network" to syntheticEvidenceElapsedRealtimeMs,
+            )
+        }
         return EffectiveEnvironment(
             latitude = effectiveLatitude,
             longitude = effectiveLongitude,
@@ -324,6 +425,8 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             verificationLevelWire = level,
             environmentFingerprint = fingerprint,
             evidenceRefs = evidenceRefs,
+            evidenceObservedAtElapsedRealtimeMs = sourceTimes.values.minOrNull(),
+            verifiedSourceElapsedRealtimeMs = if (verified) sourceTimes else emptyMap(),
         )
     }
 
@@ -342,8 +445,15 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             VerificationLevelV1.NONE.wire
         }
 
+    override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
+        continuityCapability
+
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
         relevantChangeListener = listener
+    }
+
+    override fun abortOwnerStart() {
+        relevantChangeListener = null
     }
 
     /**
@@ -353,6 +463,10 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     fun hijackAndRestoreMockOwner() {
         relevantChangeListener?.invoke(RevisionBumpReason.PERMISSION_OR_OWNER_CHANGED)
         relevantChangeListener?.invoke(RevisionBumpReason.PERMISSION_OR_OWNER_CHANGED)
+    }
+
+    fun emitRelevantChange(reason: RevisionBumpReason) {
+        relevantChangeListener?.invoke(reason)
     }
 }
 

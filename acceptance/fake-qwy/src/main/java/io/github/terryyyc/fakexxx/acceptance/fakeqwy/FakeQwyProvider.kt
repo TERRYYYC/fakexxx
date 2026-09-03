@@ -2,6 +2,10 @@ package io.github.terryyyc.fakexxx.acceptance.fakeqwy
 
 import io.github.terryyyc.fakexxx.contract.v1.*
 import java.util.UUID
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * Independent provider implementation for acceptance testing (#6, §10.1
@@ -383,7 +387,13 @@ class FakeQwyProvider(
             clock.elapsedRealtimeMs + (request.intent.deadlineEpochMs - clock.epochMs)
         }
 
-        val verificationWire = VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+        val currentItem = schedule?.currentItem
+        val (effectiveLat, effectiveLng) = effectiveCoordinates(currentItem)
+        val verificationWire = coordinateVerificationLevelWire(
+            effectiveLat = effectiveLat,
+            effectiveLng = effectiveLng,
+            targetItem = currentItem,
+        )
 
         // Create with ACQUIRING (production handler does ACQUIRING → apply → ACTIVE)
         val lease = LeaseRecord(
@@ -793,23 +803,18 @@ class FakeQwyProvider(
 
         // Coordinates: when overrideCoordinates is set (even to Pair(null, null)),
         // use its values directly — don't fall back to the schedule item.
-        val coords = overrideCoordinates
-        val lat = if (coords != null) coords.first else currentItem?.latitude
-        val lng = if (coords != null) coords.second else currentItem?.longitude
+        val (lat, lng) = effectiveCoordinates(currentItem)
 
         // ── Coordinate verification (KB-8): provider-side honesty gate ──
         // The provider holds both the target (schedule item) and effective
         // coordinates. If they disagree — or if effective coords are null —
         // the provider cannot honestly claim INDEPENDENTLY_VERIFIED.
-        val coordinatesVerified = verifyCoordinates(lat, lng, currentItem)
-
         // Wire codes
         val deliveryModeWire = overrideDeliveryModeWire
             ?: if (injectUnknownWireCodes) 999 else DeliveryModeV1.SYSTEM_MOCK.wire
         val verificationLevelWire = overrideVerificationLevelWire
             ?: if (injectUnknownWireCodes) 999
-            else if (!coordinatesVerified) VerificationLevelV1.NONE.wire
-            else VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+            else coordinateVerificationLevelWire(lat, lng, currentItem)
         val isMock = overrideIsMock ?: true
         val scheduleDecisionWire = forceScheduleDecisionWire
             ?: if (injectUnknownWireCodes) 999 else ScheduleDecisionV1.ALLOWED_NOW.wire
@@ -848,8 +853,8 @@ class FakeQwyProvider(
      * - effective coordinates diverge from the target (partial apply / stuck)
      * - no schedule item exists (no target to verify against)
      *
-     * Tolerance: 0.0001 degrees ≈ 11 meters. Generous enough for mock location
-     * precision, strict enough to catch (0,0) vs (31.23, 121.47).
+     * Tolerance is the contract's frozen 1.0 metres, measured as a geodesic
+     * distance rather than an axis-aligned degree box.
      */
     private fun verifyCoordinates(
         effectiveLat: Double?,
@@ -860,10 +865,53 @@ class FakeQwyProvider(
         if (effectiveLat == null || effectiveLng == null) return false
         // No target → cannot verify
         if (targetItem == null) return false
-        // Compare against target with tolerance
-        val latDelta = kotlin.math.abs(effectiveLat - targetItem.latitude)
-        val lngDelta = kotlin.math.abs(effectiveLng - targetItem.longitude)
-        return latDelta < COORDINATE_TOLERANCE && lngDelta < COORDINATE_TOLERANCE
+        if (!effectiveLat.isFinite() || !effectiveLng.isFinite()) return false
+        if (effectiveLat !in -90.0..90.0 || effectiveLng !in -180.0..180.0) return false
+        // KB-8 fake/production parity (Terra PR-#65 review P1): the TARGET must
+        // pass the same finite/range validity gate production Qianwangyou applies
+        // (SystemMockTrustPolicy.validCoordinates on the target) BEFORE any
+        // distance comparison. Without this, an out-of-domain target like
+        // (0.0, 360.0) wraps inside haversine (Δλ=2π ⇒ sin(Δλ/2)²≈1.5e-32) to a
+        // ~1.56e-9 m "distance" and mints INDEPENDENTLY_VERIFIED from a
+        // coordinate that can never exist.
+        if (!targetItem.latitude.isFinite() || !targetItem.longitude.isFinite()) return false
+        if (targetItem.latitude !in -90.0..90.0 || targetItem.longitude !in -180.0..180.0) return false
+        return distanceMeters(
+            effectiveLat,
+            effectiveLng,
+            targetItem.latitude,
+            targetItem.longitude,
+        ) <= ContractV1.TRUSTED_LOCATION_TOLERANCE_METERS
+    }
+
+    private fun effectiveCoordinates(targetItem: ScheduleItem?): Pair<Double?, Double?> =
+        overrideCoordinates ?: Pair(targetItem?.latitude, targetItem?.longitude)
+
+    private fun coordinateVerificationLevelWire(
+        effectiveLat: Double?,
+        effectiveLng: Double?,
+        targetItem: ScheduleItem?,
+    ): Int = if (verifyCoordinates(effectiveLat, effectiveLng, targetItem)) {
+        VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+    } else {
+        VerificationLevelV1.NONE.wire
+    }
+
+    private fun distanceMeters(
+        latitudeA: Double,
+        longitudeA: Double,
+        latitudeB: Double,
+        longitudeB: Double,
+    ): Double {
+        val latARadians = Math.toRadians(latitudeA)
+        val latBRadians = Math.toRadians(latitudeB)
+        val deltaLatitude = latBRadians - latARadians
+        val deltaLongitude = Math.toRadians(longitudeB - longitudeA)
+        val halfChord = sin(deltaLatitude / 2.0).let { it * it } +
+            cos(latARadians) * cos(latBRadians) *
+            sin(deltaLongitude / 2.0).let { it * it }
+        return 2.0 * EARTH_MEAN_RADIUS_METERS *
+            atan2(sqrt(halfChord), sqrt((1.0 - halfChord).coerceAtLeast(0.0)))
     }
 
     private fun fail(code: ContractErrorCodeV1, message: String? = null): EnvironmentControlResultV1 =
@@ -877,11 +925,6 @@ class FakeQwyProvider(
          */
         private const val UNSET_MARKER: Long = Long.MIN_VALUE
 
-        /**
-         * Coordinate verification tolerance (degrees).
-         * 0.0001° ≈ 11 meters at the equator — generous for mock location precision,
-         * strict enough to catch (0,0) vs (31.23, 121.47).
-         */
-        private const val COORDINATE_TOLERANCE: Double = 0.0001
+        private const val EARTH_MEAN_RADIUS_METERS = 6_371_008.8
     }
 }

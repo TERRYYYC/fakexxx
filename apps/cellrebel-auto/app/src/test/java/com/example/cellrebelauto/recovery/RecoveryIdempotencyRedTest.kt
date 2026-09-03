@@ -226,6 +226,106 @@ class RecoveryIdempotencyRedTest {
         )
     }
 
+    @Test
+    fun `dispatchApply replays the durable receipt lease instead of a new live lease`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog().apply {
+            seedReceipt(
+                idempotencyKey = "k-5",
+                requestDigest = "d-5",
+                outcome = "APPLIED",
+                createdAt = 900L,
+                leaseId = "lease-durable",
+                operationId = "op-durable",
+                acceptedIntentHash = "intent-durable",
+                appliedAtEpochMs = 800L,
+                environmentRevision = 7L,
+                verificationLevelWire = 1
+            )
+        }
+
+        val outcome = RecoveryCoordinator(executor, log).dispatchApply(
+            attemptId = 5L,
+            intent = testApplyIntent(),
+            idempotencyKey = "k-5",
+            requestDigest = "d-5",
+            now = 1_000L
+        )
+
+        assertEquals(
+            "the owner must consume the durable receipt lease, never a divergent live replay",
+            "lease-durable",
+            outcome.leaseId
+        )
+        assertEquals("an exact durable receipt replay must not dispatch apply again", 0, executor.invocationCount("k-5"))
+        assertEquals("op-durable", outcome.operationId)
+        assertEquals("intent-durable", outcome.acceptedIntentHash)
+    }
+
+    @Test
+    fun `dispatchApply fails closed when a concurrent durable winner differs from the live provider proof`() {
+        val executor = RecordingExternalApplyExecutor(
+            outcome = "APPLIED",
+            operationId = "op-live",
+            acceptedIntentHash = "intent-live",
+            appliedAtEpochMs = 1_000L,
+            environmentRevision = 9L,
+            verificationLevelWire = 1
+        )
+        val backing = FakeDurableRecoveryLog()
+        val racingLog = object : DurableRecoveryLog by backing {
+            override fun recordReceipt(
+                idempotencyKey: String,
+                requestDigest: String,
+                outcome: String,
+                now: Long,
+                leaseId: String?,
+                operationId: String?,
+                acceptedIntentHash: String?,
+                appliedAtEpochMs: Long?,
+                environmentRevision: Long?,
+                verificationLevelWire: Int?
+            ): RecordedReceipt? {
+                backing.seedReceipt(
+                    idempotencyKey = idempotencyKey,
+                    requestDigest = requestDigest,
+                    outcome = outcome,
+                    createdAt = now - 1L,
+                    leaseId = "lease-race-winner",
+                    operationId = "op-race-winner",
+                    acceptedIntentHash = acceptedIntentHash,
+                    appliedAtEpochMs = appliedAtEpochMs,
+                    environmentRevision = environmentRevision,
+                    verificationLevelWire = verificationLevelWire
+                )
+                return backing.recordReceipt(
+                    idempotencyKey,
+                    requestDigest,
+                    outcome,
+                    now,
+                    leaseId,
+                    operationId,
+                    acceptedIntentHash,
+                    appliedAtEpochMs,
+                    environmentRevision,
+                    verificationLevelWire
+                )
+            }
+        }
+
+        val outcome = RecoveryCoordinator(executor, racingLog).dispatchApply(
+            attemptId = 5L,
+            intent = testApplyIntent(),
+            idempotencyKey = "k-race",
+            requestDigest = "d-race",
+            now = 1_000L
+        )
+
+        assertNull("a split-brain race must never publish either lease as the attempt owner", outcome.leaseId)
+        assertEquals("RECEIPT_PROOF_CONFLICT", outcome.outcome)
+        assertEquals("lease-race-winner", backing.receiptFor("k-race")!!.leaseId)
+    }
+
     // ---- Schedule-advance consumer gate (Issue #5 addendum, §5 boundary; Sol round-6 §11.7 F2) ----
     //
     // R6-F2 (§11.7): the three readers are now CONSTRUCTOR-OWNED deps; scheduleAdvanced takes only the

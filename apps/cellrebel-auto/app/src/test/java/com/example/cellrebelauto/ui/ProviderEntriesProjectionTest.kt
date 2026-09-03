@@ -109,4 +109,19 @@ class ProviderEntriesProjectionTest {
         // Nothing installed at all ⇒ no active current principal:
         org.junit.Assert.assertFalse(MainViewModel.currentPrincipalActive(emptyList(), prod))
     }
+
+    @Test
+    fun `debug run status evaluates the same bench principal used by Binder`() {
+        val benchEntries = MainViewModel.computeProviderEntries(
+            listOf(row(bench, "sha256:bench")),
+        ) { appId -> if (appId == bench) "sha256:bench" else null }
+
+        org.junit.Assert.assertTrue(
+            "debug Binder targets .bench, so the Run status must not inspect production instead",
+            MainViewModel.currentRunTargetActive(benchEntries, debugBuild = true),
+        )
+        org.junit.Assert.assertFalse(
+            MainViewModel.currentRunTargetActive(benchEntries, debugBuild = false),
+        )
+    }
 }

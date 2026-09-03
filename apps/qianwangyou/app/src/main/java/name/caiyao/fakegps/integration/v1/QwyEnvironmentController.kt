@@ -1,24 +1,24 @@
 package name.caiyao.fakegps.integration.v1
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.location.LocationManager
+import android.os.SystemClock
+import io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
 import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.config.ConfigCodec
 import name.caiyao.fakegps.config.ConfigHolder
 import name.caiyao.fakegps.config.ConfigPrefsSync
-import name.caiyao.fakegps.config.PayloadRead
-import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.SpoofConfig
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
-import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolution
-import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolver
 import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
+import java.util.concurrent.ScheduledThreadPoolExecutor
 
 /**
  * Seam between the v1 provider and qianwangyou's existing capabilities.
@@ -27,7 +27,16 @@ import name.caiyao.fakegps.mockprovider.MockProviderGateway
 interface QwyEnvironment {
 
     fun scheduleSnapshot(): ScheduleSnapshot?
-    fun advancePointer(fromItemId: String): AdvancePointerOutcome
+    /**
+     * Idempotently converges both the durable schedule pointer and the target
+     * item's effective projection. Recovery with an already-moved pointer must
+     * still rebuild and verify the projection before returning.
+     */
+    fun convergeAdvance(
+        fromItemId: String,
+        expectedToItemId: String?,
+        expectedVersionAfter: Long,
+    ): AdvancePointerOutcome
     fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome
     fun cleanup(leaseId: String): CleanupOutcome
     fun observeEffective(): EffectiveEnvironment
@@ -40,13 +49,22 @@ interface QwyEnvironment {
      * coordinates for that item). Any known blocker → NONE — preflight must
      * never claim a level the environment cannot currently back (INV-08).
      *
-     * NOT a prediction of the apply outcome: the publish result is measured
-     * truth, knowable only at apply time. The apply receipt (F-14 fix:
-     * computed from the real ConfigPrefsSync result) and observeEffective()
-     * remain the only trusted sources of an ACHIEVED level.
+     * NOT a prediction of the apply outcome: command publication and fresh OS
+     * readback are measured truth, knowable only at apply/observe time. Those
+     * two surfaces remain the only sources of an ACHIEVED level.
      */
     fun achievableVerificationLevelWire(): Int
+    /** Strength of the installed transition-history sources (§6.4). */
+    fun continuityEvidenceCapability(): ContinuityEvidenceCapability
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
+
+    /**
+     * Releases every process-lifetime resource installed during owner startup
+     * when startup cannot finish. The failed graph must not survive a thrown
+     * [EnvironmentControlHandler.onOwnerProcessStart] and compete with the next
+     * composition attempt.
+     */
+    fun abortOwnerStart()
 }
 
 data class ScheduleSnapshot(
@@ -82,6 +100,10 @@ data class EffectiveEnvironment(
     val verificationLevelWire: Int,
     val environmentFingerprint: String,
     val evidenceRefs: List<String>,
+    /** Raw required-source evidence time; never the handler's current clock. */
+    val evidenceObservedAtElapsedRealtimeMs: Long? = null,
+    /** Present only when all required OS samples independently verified. */
+    val verifiedSourceElapsedRealtimeMs: Map<String, Long> = emptyMap(),
 )
 
 /**
@@ -91,10 +113,11 @@ data class EffectiveEnvironment(
  * P1 fixes (dsf round-1 review):
  * - P1-1: schedule initialized from profile DB on construction (synchronous
  *   SQLite query on the existing "temp" table)
- * - P1-2: verificationLevel reflects actual mockGateway state; fail-loud when
- *   the gateway is unavailable instead of hardcoding INDEPENDENTLY_VERIFIED
- * - P1-3: observeEffective reads from ConfigPrefsSync (persistent) not
- *   in-memory ConfigHolder, so restart does not lie about passthrough
+ * - P1-2: verificationLevel reflects fresh framework-provider readback;
+ *   fail-loud when the write gateway is unavailable and fail-closed when the
+ *   independent read side cannot corroborate the publish
+ * - P1-3: observeEffective reads LocationManager provider state, never
+ *   ConfigHolder, ConfigPrefs, or the persisted desired command coordinates
  *
  * KNOWN BOUNDARY: schedule items are derived from the existing profile DB
  * (ProfileEntity rows, id ASC). An operator-facing schedule editor with
@@ -107,7 +130,15 @@ class QwyEnvironmentController(
     private val appContext = context.applicationContext
     private val scheduleStore = QwyScheduleStore(appContext)
     private val configHolder = ConfigHolder()
-    private var changeListener: ((RevisionBumpReason) -> Unit)? = null
+    private val relevantChangeMonitor = QwyRelevantChangeMonitor(
+        (appContext.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager)?.let { manager ->
+            AndroidMockLocationOwnerChangeSource(
+                manager,
+                appContext.packageName,
+                appContext.applicationInfo.uid,
+            )
+        } ?: MockLocationOwnerChangeSource { false },
+    )
 
     init {
         // P1-1 fix: initialize schedule from existing profile DB.
@@ -138,45 +169,136 @@ class QwyEnvironmentController(
         }
     }
 
-    // P1-2 fix: mockGateway construction failure is tracked; apply/cleanup
-    // must report honestly when it is null.
-    private val mockGateway: MockProviderGateway? = try {
-        val lm = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        CoordinatedMockProviderGateway(
-            AndroidMockProviderGateway(lm),
-            NoopFusedGateway,
-        )
-    } catch (e: Throwable) {
+    private val locationManager: LocationManager? = try {
+        appContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+    } catch (_: Throwable) {
         null
     }
 
-    override fun scheduleSnapshot(): ScheduleSnapshot? {
-        val scheduleId = scheduleStore.getScheduleId() ?: return null
-        return ScheduleSnapshot(
-            scheduleId = scheduleId,
-            scheduleVersion = scheduleStore.getScheduleVersion(),
-            currentItemId = scheduleStore.getCurrentItemId(),
-            itemIds = scheduleStore.getItemIds(),
-            exhausted = scheduleStore.isExhausted(),
+    // P1-2 fix: mockGateway construction failure is tracked; apply/cleanup
+    // must report honestly when it is null.
+    private val mockGateway: MockProviderGateway? = locationManager?.let { manager ->
+        CoordinatedMockProviderGateway(
+            AndroidMockProviderGateway(manager),
+            NoopFusedGateway,
         )
     }
 
-    override fun advancePointer(fromItemId: String): AdvancePointerOutcome =
-        scheduleStore.advancePointer(fromItemId)
+    /**
+     * Fresh sample publisher for the active provider lease. Its one-second tick
+     * exists only to keep GPS/network evidence live; it is never counted as a
+     * continuity source (the public AppOps monitor remains INCOMPLETE).
+     */
+    private val mockRefreshSession: FrameworkMockRefreshSession? = mockGateway?.let { gateway ->
+        val executor = ScheduledThreadPoolExecutor(1) { runnable ->
+            Thread(runnable, "qwy-framework-mock-refresh").apply { isDaemon = true }
+        }.apply {
+            removeOnCancelPolicy = true
+        }
+        FrameworkMockRefreshSession(
+            gateway = gateway,
+            scheduler = ScheduledExecutorFrameworkMockRefreshScheduler(executor),
+            onRelevantChange = relevantChangeMonitor::reportRelevantChange,
+        )
+    }
+
+    /**
+     * KB-8 read side. This is intentionally independent of [scheduleStore]'s
+     * last-applied command record: requested coordinates are not observations.
+     */
+    private val systemMockTrustPolicy: SystemMockTrustPolicy? = locationManager?.let { manager ->
+        SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))
+    }
+
+    override fun scheduleSnapshot(): ScheduleSnapshot? {
+        return scheduleStore.readScheduleState()
+    }
+
+    override fun convergeAdvance(
+        fromItemId: String,
+        expectedToItemId: String?,
+        expectedVersionAfter: Long,
+    ): AdvancePointerOutcome {
+        val outcome = scheduleStore.convergeAdvance(
+            fromItemId = fromItemId,
+            expectedToItemId = expectedToItemId,
+            expectedVersionAfter = expectedVersionAfter,
+        )
+        if (expectedToItemId != null) {
+            convergeAdvancedProjection(expectedToItemId, expectedVersionAfter)
+        }
+        return outcome
+    }
+
+    /**
+     * Release removes the old framework providers and apply anchor. A
+     * non-terminal advance therefore owns a fresh projection convergence of
+     * the new qwy-owned item before the handler may clear its pending marker.
+     */
+    private fun convergeAdvancedProjection(itemId: String, expectedVersionAfter: Long) {
+        val refreshSession = mockRefreshSession
+            ?: throw IllegalStateException(
+                "mock provider refresh session unavailable; cannot project advanced item $itemId"
+            )
+        val coords = resolveItemCoordinates(itemId)
+            ?: throw IllegalStateException(
+                "advanced schedule item $itemId has no profile coordinates"
+            )
+        val trustPolicy = systemMockTrustPolicy
+            ?: throw IllegalStateException(
+                "system mock readback unavailable; cannot verify advanced item $itemId"
+            )
+
+        val config = SpoofConfig(
+            location = SpoofConfig.Location(
+                latitude = coords.first,
+                longitude = coords.second,
+            ),
+        )
+        configHolder.update(ConfigCodec.toJson(config))
+
+        val publishNotBeforeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        refreshSession.startOrReconfigure(
+            MockLocationConfig(latitude = coords.first, longitude = coords.second),
+        )
+        val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
+        val readback = trustPolicy.evaluate(
+            targetLatitude = coords.first,
+            targetLongitude = coords.second,
+            publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
+        )
+        scheduleStore.recordLastApplied(
+            latitude = coords.first,
+            longitude = coords.second,
+            publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
+            transportPublished = published,
+            scheduleItemId = itemId,
+            scheduleVersion = expectedVersionAfter,
+            purpose = ProjectionPurpose.POST_ADVANCE,
+        )
+
+        check(
+            relevantChangeMonitor.canVerifyCurrentOwner() &&
+                published && readback.verified
+        ) {
+            "advanced item $itemId did not converge to a verified system-mock projection"
+        }
+    }
 
     override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
         // P1-2 fix: fail loud when mockGateway is unavailable — never claim
         // verification the provider cannot back (INV-08).
-        if (mockGateway == null) {
-            throw IllegalStateException(
-                "mock provider gateway unavailable; cannot apply environment"
+        val refreshSession = mockRefreshSession
+            ?: throw IllegalStateException(
+                "mock provider refresh session unavailable; cannot apply environment"
             )
-        }
 
         // KB-8 (v1.62): coordinates are QWY-OWNED. The intent no longer carries
         // them — resolve from the CURRENT SCHEDULE ITEM's profile row, the
         // single coordinate owner. Auto supplies only the reference.
-        val currentItem = scheduleStore.getCurrentItemId()
+        val schedule = scheduleStore.readScheduleState()
+            ?: throw IllegalStateException("no active schedule; environment cannot be applied")
+        val currentItem = schedule.currentItemId
             ?: throw IllegalStateException("no current schedule item; environment cannot be applied without qwy-owned coordinates")
         val coords = resolveItemCoordinates(currentItem)
             ?: throw IllegalStateException(
@@ -191,34 +313,51 @@ class QwyEnvironmentController(
         )
         configHolder.update(ConfigCodec.toJson(config))
 
-        mockGateway!!.replaceGpsProvider()
-        mockGateway!!.publish(
-            MockLocationConfig(
-                latitude = coords.first,
-                longitude = coords.second,
-            ),
+        // Capture the lower freshness bound BEFORE the system mutation. A
+        // cached fix from an earlier address can never satisfy this apply.
+        val publishNotBeforeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        refreshSession.startOrReconfigure(
+            MockLocationConfig(latitude = coords.first, longitude = coords.second),
         )
 
         val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
 
-        // P2 fix (dsf round-3/4): persist the applied coordinates + publish
-        // outcome so observeEffective returns what the mock provider actually
-        // has, with verification level matching the real sync result.
-        scheduleStore.recordLastApplied(
-            coords.first, coords.second, android.os.SystemClock.elapsedRealtime(),
-            verified = published,
+        val readback = systemMockTrustPolicy?.evaluate(
+            targetLatitude = coords.first,
+            targetLongitude = coords.second,
+            publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
         )
 
-        // P1-2 fix: verification level reflects actual publish outcome.
-        val verificationLevel = if (published)
+        // Persist only the command/audit record and the freshness anchor. Its
+        // coordinates and transport flag are never reused as effective state.
+        scheduleStore.recordLastApplied(
+            latitude = coords.first,
+            longitude = coords.second,
+            publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
+            transportPublished = published,
+            scheduleItemId = currentItem,
+            scheduleVersion = schedule.scheduleVersion,
+            purpose = ProjectionPurpose.LEASE,
+        )
+
+        // Config transport success is necessary but not sufficient. The
+        // achieved level is VERIFIED only when fresh OS readback independently
+        // corroborates both framework providers within the frozen 1 m bound.
+        val verificationLevel = if (
+            relevantChangeMonitor.canVerifyCurrentOwner() && published && readback?.verified == true
+        )
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
             VerificationLevelV1.NONE.wire
 
         return ApplyOutcome(
-            effectiveLatitude = coords.first,
-            effectiveLongitude = coords.second,
-            deliveryModeWire = 1,
+            effectiveLatitude = readback?.latitude,
+            effectiveLongitude = readback?.longitude,
+            deliveryModeWire = if (readback?.isMock == true) {
+                DeliveryModeV1.SYSTEM_MOCK.wire
+            } else {
+                null
+            },
             verificationLevelWire = verificationLevel,
         )
     }
@@ -259,7 +398,11 @@ class QwyEnvironmentController(
         // before any verification could happen, so claiming VERIFIED over it
         // from preflight would be the same constant-lie F-14 killed in the
         // apply receipt (Handler:247), wearing preflight's clothes (Handler:113).
-        if (mockGateway == null) return VerificationLevelV1.NONE.wire
+        if (!relevantChangeMonitor.canVerifyCurrentOwner() ||
+            mockRefreshSession == null || systemMockTrustPolicy == null
+        ) {
+            return VerificationLevelV1.NONE.wire
+        }
         val currentItem = scheduleStore.getCurrentItemId()
             ?: return VerificationLevelV1.NONE.wire
         return if (resolveItemCoordinates(currentItem) != null) {
@@ -269,15 +412,17 @@ class QwyEnvironmentController(
         }
     }
 
+    override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
+        relevantChangeMonitor.continuityEvidenceCapability()
+
     override fun cleanup(leaseId: String): CleanupOutcome {
         // P3-1 fix: report honestly whether removal actually happened.
-        // P2-2 fix (dsf round-4): clear lastApplied so observe no longer
-        // reports stale mock coordinates after cleanup.
-        // P3-2 fix (dsf round-5): clear lastApplied in all branches, including
-        // when removeGpsProvider throws.
-        return if (mockGateway != null) {
+        // Clear the apply anchor in all branches, including when removal
+        // throws, so a cached provider sample cannot be attributed to a lease
+        // that has already been released.
+        return if (mockRefreshSession != null) {
             try {
-                mockGateway!!.removeGpsProvider()
+                mockRefreshSession.stop()
                 CleanupOutcome.Complete
             } catch (e: Throwable) {
                 CleanupOutcome.Incomplete(emptyList())
@@ -291,66 +436,97 @@ class QwyEnvironmentController(
     }
 
     override fun observeEffective(): EffectiveEnvironment {
-        // P2 fix (dsf round-3): prefer the last-applied intent coordinates
-        // (what the mock provider is actually publishing) over ConfigPrefsSync
-        // (which reads DB active-profile coords that may differ).
-        // Fall back to ConfigPrefsSync only when no intent was applied (cold
-        // start with a pre-existing hook config).
-        val lastApplied = scheduleStore.getLastApplied()
-        val payload = ConfigPrefsSync.readPublished(appContext)
+        val schedule = scheduleStore.readScheduleState()
+        var appliedCommand = scheduleStore.getLastApplied()
+        val currentTarget = schedule?.currentItemId?.let(::resolveItemCoordinates)
+        val refreshSession = mockRefreshSession
 
-        val lat: Double?
-        val lng: Double?
-        val isMock: Boolean
-        val fingerprint: String
-
-        if (lastApplied != null) {
-            // Intent coordinates are what the mock provider has right now.
-            lat = lastApplied.latitude
-            lng = lastApplied.longitude
-            // P2-1 fix (dsf round-4): verification must match the actual
-            // publish outcome recorded at apply time, not just "apply happened".
-            isMock = lastApplied.verified
-            fingerprint = "intent:${lastApplied.latitude},${lastApplied.longitude}@${lastApplied.atMs}:verified=${lastApplied.verified}"
-        } else {
-            // No intent applied yet — read what the hook transport says.
-            val published = when (payload) {
-                is PayloadRead.Raw -> PublishedConfig.parse(payload.text)
-                else -> null
-            }
-            val resolution = EffectiveMockLocationResolver.resolve(published)
-            when (resolution) {
-                is EffectiveMockLocationResolution.Ready -> {
-                    lat = resolution.config.latitude
-                    lng = resolution.config.longitude
-                    isMock = true
-                }
-                is EffectiveMockLocationResolution.Invalid -> {
-                    lat = null
-                    lng = null
-                    isMock = false
-                }
-            }
-            fingerprint = when (payload) {
-                is PayloadRead.Raw -> PublishedConfig.fingerprint(payload.text)
-                is PayloadRead.ReadError -> "read-error:${payload.cause}"
-                PayloadRead.Absent -> "passthrough"
+        // A completed non-terminal advance keeps a durable reconstruction
+        // contract until the next lease takes ownership. After process death the
+        // scheduled loop is gone even though the pending-advance marker was
+        // correctly cleared, so rebuild it lazily for the released-lease observe.
+        // This only republishes endpoint evidence; continuity remains capped by
+        // the independent AppOps source (INCOMPLETE in production).
+        if (schedule != null && refreshSession != null && !refreshSession.isActive) {
+            val restartable = scheduleStore.postAdvanceProjectionFor(schedule)
+            if (restartable != null && currentTarget != null) {
+                val publishNotBeforeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+                refreshSession.startOrReconfigure(
+                    MockLocationConfig(
+                        latitude = currentTarget.first,
+                        longitude = currentTarget.second,
+                    ),
+                )
+                val published = ConfigPrefsSync.sync(
+                    appContext,
+                    profileId = null,
+                    clearIfMissing = false,
+                )
+                scheduleStore.recordLastApplied(
+                    latitude = currentTarget.first,
+                    longitude = currentTarget.second,
+                    publishNotBeforeElapsedRealtimeMs = publishNotBeforeElapsedRealtimeMs,
+                    transportPublished = published,
+                    scheduleItemId = restartable.scheduleItemId,
+                    scheduleVersion = restartable.scheduleVersion,
+                    purpose = ProjectionPurpose.POST_ADVANCE,
+                )
+                appliedCommand = scheduleStore.getLastApplied()
             }
         }
+        // A production observe must advance the actual framework samples; the
+        // previous one-shot path could only replay apply's cache at POST.
+        val refreshed = runCatching {
+            mockRefreshSession?.refreshNow() == true
+        }.getOrDefault(false)
+        val readback = if (
+            refreshed && appliedCommand != null && currentTarget != null &&
+            systemMockTrustPolicy != null
+        ) {
+            systemMockTrustPolicy.evaluate(
+                targetLatitude = currentTarget.first,
+                targetLongitude = currentTarget.second,
+                publishNotBeforeElapsedRealtimeMs =
+                    appliedCommand.publishNotBeforeElapsedRealtimeMs,
+            )
+        } else {
+            null
+        }
 
-        val verificationLevel = if (isMock)
+        // `transportPublished` is a command-side prerequisite only. Effective
+        // coordinates, mock identity and distance come exclusively from the OS
+        // readback above; no lastApplied coordinate can enter this projection.
+        val verified = relevantChangeMonitor.canVerifyCurrentOwner() &&
+            appliedCommand?.transportPublished == true && readback?.verified == true
+        val verificationLevel = if (verified)
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
             VerificationLevelV1.NONE.wire
+        val fingerprint = when {
+            readback != null -> "${readback.fingerprint}:transport=${appliedCommand?.transportPublished == true}"
+            appliedCommand == null -> "system-mock:no-apply-anchor"
+            currentTarget == null -> "system-mock:no-current-target"
+            else -> "system-mock:readback-unavailable"
+        }
 
         return EffectiveEnvironment(
-            latitude = lat,
-            longitude = lng,
-            isMock = isMock,
-            deliveryModeWire = if (isMock) 1 else null,
+            latitude = readback?.latitude,
+            longitude = readback?.longitude,
+            isMock = readback?.isMock,
+            deliveryModeWire = if (readback?.isMock == true) {
+                DeliveryModeV1.SYSTEM_MOCK.wire
+            } else {
+                null
+            },
             verificationLevelWire = verificationLevel,
             environmentFingerprint = fingerprint,
             evidenceRefs = emptyList(),
+            evidenceObservedAtElapsedRealtimeMs = readback?.evidenceObservedAtElapsedRealtimeMs,
+            verifiedSourceElapsedRealtimeMs = if (verified) {
+                readback?.verifiedSourceElapsedRealtimeMs.orEmpty()
+            } else {
+                emptyMap()
+            },
         )
     }
 
@@ -366,7 +542,26 @@ class QwyEnvironmentController(
     }
 
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
-        changeListener = listener
+        relevantChangeMonitor.bind(listener)
+    }
+
+    override fun abortOwnerStart() {
+        var failure: Throwable? = null
+
+        // Detach the failed handler before provider removal can emit another
+        // AppOps callback into it.
+        try {
+            relevantChangeMonitor.shutdown()
+        } catch (caught: Throwable) {
+            failure = caught
+        }
+        try {
+            mockRefreshSession?.shutdown()
+        } catch (caught: Throwable) {
+            failure?.addSuppressed(caught) ?: run { failure = caught }
+        }
+
+        failure?.let { throw it }
     }
 }
 

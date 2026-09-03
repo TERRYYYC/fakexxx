@@ -949,6 +949,7 @@ class AdvanceProviderRedTest {
         val h = ProviderHarness.createWithExternalEnvStore()
         h.pair(AUTO_PKG, AUTO_SIGNER)
         h.env.itemIds = mutableListOf("item-1", "item\t2", "item-3")
+        h.env.itemCoordinates["item\t2"] = 31.2314000 to 121.4747000
         val leaseId = earnAndRelease(h, key = "tab-tgt-apply")
         val req = request(h, leaseId, "adv-tab-tgt")
 
@@ -1252,6 +1253,90 @@ class AdvanceProviderRedTest {
         )
         assertEquals("post-advance readback reflects the advanced schedule", "item-2", h.env.currentItemId)
         assertEquals("observation served for the advanced item", "item-2", observation.scheduleItemId)
+    }
+
+    @Test
+    fun advance_immediatePostAdvanceObservation_matchesReceiptRevisionAndTargetProjection() {
+        val h = harness()
+        val applyReceipt = h.apply(
+            key = "ad-projection-apply",
+            intent = h.intent(scheduleRef = "item-1", attemptId = "att-ad-projection"),
+        )
+        h.release(applyReceipt.leaseId, key = "ad-projection-release")
+
+        val receipt = h.handler.completeAndAdvance(
+            AUTO_UID,
+            request(h, applyReceipt.leaseId, "ad-projection-advance"),
+        )
+        val observation = h.handler.observe(
+            AUTO_UID,
+            io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1(
+                leaseId = applyReceipt.leaseId,
+                operationId = "op-ad-projection-observe",
+                expectedIntentHash = applyReceipt.acceptedIntentHash,
+            ),
+        )
+
+        assertEquals(receipt.effectiveEnvironmentRevision, observation.environmentRevision)
+        assertEquals("item-2", observation.scheduleItemId)
+        assertEquals(h.env.itemCoordinates.getValue("item-2").first, observation.effectiveLatitude)
+        assertEquals(h.env.itemCoordinates.getValue("item-2").second, observation.effectiveLongitude)
+        assertEquals(
+            io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
+                .SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            observation.verificationLevelWire,
+        )
+    }
+
+    @Test
+    fun advance_projectionCrashAfterPointerMove_restartConvergesWithoutSecondVersionBump() {
+        val h = ProviderHarness.createWithExternalEnvStore()
+        h.pair(AUTO_PKG, AUTO_SIGNER)
+        val leaseId = earnAndRelease(h, key = "ad-projection-crash-apply")
+        val request = request(h, leaseId, "ad-projection-crash-advance")
+        val versionBefore = h.env.scheduleVersion
+
+        h.env.failNextProjectionAfterPointer = true
+        try {
+            h.handler.completeAndAdvance(AUTO_UID, request)
+            fail("projection crash after pointer move must surface")
+        } catch (expected: RuntimeException) {
+            // Simulated process death after the external pointer write.
+        }
+
+        assertEquals("item-2", h.env.currentItemId)
+        assertEquals(versionBefore + 1L, h.env.scheduleVersion)
+        assertEquals(1, h.env.advanceCount)
+        assertEquals(0, h.env.projectionConvergenceCount)
+        assertNull(h.env.effectiveLatitude)
+        assertFalse(
+            "pending marker must survive until projection convergence succeeds",
+            h.kv.read(
+                EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+                EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+            ).isNullOrEmpty(),
+        )
+
+        h.restart(cleanlinessProvable = true)
+
+        assertEquals("item-2", h.env.currentItemId)
+        assertEquals("recovery must not advance the version twice", versionBefore + 1L, h.env.scheduleVersion)
+        assertEquals("pointer mutates once", 1, h.env.advanceCount)
+        assertEquals("projection is retried even when the pointer already matches", 1, h.env.projectionConvergenceCount)
+        assertEquals(h.env.itemCoordinates.getValue("item-2").first, h.env.effectiveLatitude)
+        assertEquals(h.env.itemCoordinates.getValue("item-2").second, h.env.effectiveLongitude)
+        assertEquals(
+            "pending marker clears only after schedule and projection converge",
+            "",
+            h.kv.read(
+                EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+                EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+            ),
+        )
+
+        val replay = h.handler.completeAndAdvance(AUTO_UID, request)
+        assertEquals("item-2", replay.advancedToItemId)
+        assertEquals(1, h.env.advanceCount)
     }
 
     /** The post-advance observe window is scoped to the full caller principal. */

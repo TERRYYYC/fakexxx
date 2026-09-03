@@ -61,16 +61,13 @@ class EnvironmentControlService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     /**
-     * §8.4 clean-shutdown evidence. An orderly teardown leaves a marker the next
-     * start consumes; a kill, a low-memory reap or power loss leaves nothing, so
-     * the next start correctly reports unclean and ACTIVE leases go to
-     * RELEASE_INCOMPLETE rather than being assumed released.
-     *
-     * This call site was missing, which made cleanlinessProvable a constant
-     * false — the clean branch of §8.4 was unreachable while looking implemented.
+     * Android may destroy this Service while the process-local provider owner
+     * and mock refresh session remain alive. Component teardown therefore cannot
+     * prove the owner quiesced. Invalidate any staged proof so a later process
+     * loss recovers ACTIVE leases fail-closed as RELEASE_INCOMPLETE.
      */
     override fun onDestroy() {
-        ProviderRuntime.recordCleanShutdown()
+        ProviderRuntime.invalidateCleanShutdownEvidence()
         super.onDestroy()
     }
 

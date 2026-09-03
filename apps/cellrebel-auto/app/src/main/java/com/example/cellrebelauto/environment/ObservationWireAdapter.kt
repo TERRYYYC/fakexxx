@@ -48,6 +48,7 @@ object ObservationWireAdapter {
         environmentFingerprint = wire.environmentFingerprint,
         observedAtElapsedRealtimeMs = wire.observedAtElapsedRealtimeMs,
         observedAtEpochMs = wire.observedAtEpochMs,
+        continuitySinceEpochMs = wire.continuitySinceEpochMs,
         continuitySinceElapsedRealtimeMs = wire.continuitySinceElapsedRealtimeMs,
         evidenceRefs = wire.evidenceRefs
     )

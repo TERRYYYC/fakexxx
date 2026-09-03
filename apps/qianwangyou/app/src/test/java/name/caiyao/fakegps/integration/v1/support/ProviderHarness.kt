@@ -17,6 +17,7 @@ import name.caiyao.fakegps.integration.v1.EnvironmentControlHandler
 import name.caiyao.fakegps.integration.v1.EnvironmentLeaseStore
 import name.caiyao.fakegps.integration.v1.EnvironmentObserver
 import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
+import name.caiyao.fakegps.integration.v1.VerifiedObservationWatermarkStore
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 
@@ -113,7 +114,12 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
         leases = EnvironmentLeaseStore(kv, clock)
         idempotency = DurableIdempotencyStore(kv)
         audit = DurableIntegrationAuditStore(kv, clock)
-        observerComponent = EnvironmentObserver(tracker, env, clock)
+        observerComponent = EnvironmentObserver(
+            tracker,
+            env,
+            clock,
+            VerifiedObservationWatermarkStore(kv),
+        )
         handler = EnvironmentControlHandler(
             authorizer = authorizer,
             pairingStore = pairing,

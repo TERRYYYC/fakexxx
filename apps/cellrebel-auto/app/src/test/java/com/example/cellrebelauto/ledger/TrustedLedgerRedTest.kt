@@ -42,8 +42,9 @@ import org.robolectric.RobolectricTestRunner
  * `SYSTEM_MOCK_INDEPENDENTLY_VERIFIED + deliveryMode=SYSTEM_MOCK + isMock=true + scheduleDecision=
  * ALLOWED_NOW + coverage=FULL + revision/fingerprint pre==post + continuitySince pre==post!=null &
  * <= pre.observedAt + observedAtElapsed brackets the execution window + evidenceRefs non-empty +
- * three-way intent hash + effective coord within 1.0 m`. Only ONE positive case may PASS (RED until
- * GREEN). EVERY §6.4 predicate field then has a dedicated "invert this field ⇒ FAIL" negative (the
+ * three-way intent hash + structurally valid provider effective coordinates`. The canonical bundle
+ * and its KB-8 coordinate-ownership variant may PASS. EVERY §6.4 predicate field then has a
+ * dedicated "invert this field ⇒ FAIL" negative (the
  * §6.4.1 矛盾 tuples plus per-field inversions), so a partial GREEN that forgets any field fails its
  * negative. This is what defeats Sol's round-2 counterexample (an impl that accepted the wrong
  * `gps + isMock=false` tuple greened all 16): the positive is now `isMock=true`, and there is an
@@ -166,7 +167,6 @@ class TrustedLedgerRedTest {
     private val FINGERPRINT = "fp-1"
     private val TARGET_LAT = 40.0
     private val TARGET_LNG = -74.0
-    private val TOLERANCE_M = 1.0 // §6.4.2 TRUSTED_LOCATION_TOLERANCE_METERS (frozen)
     // §6.4.2 monotonic execution window (elapsedRealtime; epoch audit fields are NOT predicates).
     // The RUN phase (completedAt − runningConfirmedAt) must be ≥ §6.4's 10000 ms floor — a sub-10 s run
     // is NOT a trusted completion (Sol round-3 Finding 1). 13000 − 2100 = 10900 ms ≥ 10000.
@@ -222,9 +222,6 @@ class TrustedLedgerRedTest {
         applyReceiptIntentHash = INTENT_HASH,
         locallyRecomputedIntentHash = INTENT_HASH,
         applyReceiptLease = LEASE,
-        targetLat = TARGET_LAT,
-        targetLng = TARGET_LNG,
-        locationToleranceMeters = TOLERANCE_M,
         preObservation = validPre(),
         postObservation = validPost()
     )
@@ -289,7 +286,8 @@ class TrustedLedgerRedTest {
                 attemptOrdinal = 1, successOrdinal = null, startedAt = 0L,
                 runningObservedAt = null, endedAt = null, status = "running",
                 failureReason = null, webBrowsingScore = null, videoStreamingScore = null,
-                latitude = TARGET_LAT, longitude = TARGET_LNG
+                latitude = TARGET_LAT, longitude = TARGET_LNG,
+                aplusLeaseId = LEASE
             )
         )
         val seededAttempt = db.testAttemptDao().getAttemptsForTask(seededTask.id)
@@ -308,7 +306,7 @@ class TrustedLedgerRedTest {
         // §6.4 positive tuple. Skeleton returns FAIL → RED until GREEN implements the full predicate.
         assertEquals(
             "the canonical §6.4 positive bundle (SYSTEM_MOCK + isMock=true + ALLOWED_NOW + FULL + " +
-                "bracketed + continuous + three-way intent + coord within 1.0 m) must PASS",
+                "bracketed + continuous + three-way intent + structurally valid provider coords) must PASS",
             TrustDecision.PASS,
             TrustPolicy().evaluate(validContext())
         )
@@ -393,7 +391,7 @@ class TrustedLedgerRedTest {
     fun `an observation intent hash disagreeing with the receipt fails`() =
         fail(validContext().copy(preObservation = validPre().copy(acceptedIntentHash = "other")))
 
-    // === Lease / coordinate (INV-07/23) inversions ===
+    // === Lease / provider-coordinate structure (INV-07/23, KB-8) ===
 
     @Test
     fun `pre and post observations bound to different leases fail`() =
@@ -404,9 +402,18 @@ class TrustedLedgerRedTest {
         fail(validContext().copy(preObservation = validPre().copy(effectiveLat = null, effectiveLng = null)))
 
     @Test
-    fun `a coordinate outside the 1_0 m tolerance fails`() =
-        // 0.001 deg latitude ≈ 111 m ≫ 1.0 m tolerance (§6.4.2).
-        fail(validContext().copy(preObservation = validPre().copy(effectiveLat = 40.001)))
+    fun `KB-8 provider-verified finite coordinates are not compared with an Auto-local target`() {
+        // Canonical spec §6.4.1 assigns Auto only a structural check for the provider-reported
+        // effective coordinates. Qianwangyou alone owns the schedule target and the distance
+        // comparison, so a second Auto-local coordinate oracle would recreate the retired KB-8
+        // dual-owner model. Every other trust predicate remains canonical in this tuple.
+        val providerVerifiedCoordinates = validContext().copy(
+            preObservation = validPre().copy(effectiveLat = 50.4501, effectiveLng = 30.5234),
+            postObservation = validPost().copy(effectiveLat = 50.4501, effectiveLng = 30.5234)
+        )
+
+        assertEquals(TrustDecision.PASS, TrustPolicy().evaluate(providerVerifiedCoordinates))
+    }
 
     // === Per-observation field inversions (every remaining §6.4 predicate field) ===
 
@@ -468,33 +475,11 @@ class TrustedLedgerRedTest {
     fun `post empty evidenceRefs fails`() =
         fail(validContext().copy(postObservation = validPost().copy(evidenceRefs = emptyList())))
 
-    @Test
-    fun `a post coordinate outside the 1_0 m tolerance fails`() =
-        // Same ~111 m displacement as the PRE coordinate negative, applied to post.
-        fail(validContext().copy(postObservation = validPost().copy(effectiveLat = 40.001)))
-
-    // === R6-F1（§11.7）: closes Sol's round-5 F1 residuals — caller-tolerance false-oracle + un-bound lease + POST intent ===
+    // === R6-F1（§11.7）: receipt-bound lease + symmetric POST intent ===
     //
-    // Sol's round-5 verdict: R5-F1 was still greenable via (a) the predicate using the CALLER-provided
-    // [CompletionTrustContext.locationToleranceMeters] as the pass threshold (grounding §11.7 line 528 — a
-    // caller injects its own loose bound); (b) observations bound to EACH OTHER but not to the receipt's
-    // lease (no applyReceiptLease field, so a `pre.leaseId == post.leaseId` oracle greened it); and
-    // (c) only the PRE observation's intent hash checked against the receipt. Each negative below defeats
-    // one residual. They all PASS under the FAIL skeleton (trivially) but stay RED under the F1 combined
-    // attack (full §6.4 predicate + caller-tolerance + wrong-lease-acceptance) — verified in the R6-C self-gate.
-
-    @Test
-    fun `R6-F1 a caller-injected loose tolerance does NOT override the frozen 1_0 m bound`() =
-        // §11.7 caller-tolerance false-oracle: caller passes locationToleranceMeters = 50.0 m and a PRE coord
-        // ~20 m off intent (≫ frozen 1.0 m, ≪ 50.0 m). GREEN MUST gate on the FROZEN
-        // TRUSTED_LOCATION_TOLERANCE_METERS (1.0 m), not the caller field ⇒ 20 m > 1.0 m ⇒ FAIL. A bad impl
-        // that does `haversine <= context.locationToleranceMeters` sees 20 m < 50.0 m ⇒ PASS ⇒ fails this.
-        fail(
-            validContext().copy(
-                locationToleranceMeters = 50.0,
-                preObservation = validPre().copy(effectiveLat = TARGET_LAT + 0.00018) // ≈ 20 m off
-            )
-        )
+    // Sol's round-5 verdict showed the observations could be bound to EACH OTHER but not to the receipt's
+    // lease, and only the PRE observation's intent hash could be checked against the receipt. Each negative below defeats
+    // one residual. They stay RED under partial implementations that accept the wrong lease or ignore POST.
 
     @Test
     fun `R6-F1 a POST observation intent hash disagreeing with the receipt fails`() =
@@ -518,8 +503,8 @@ class TrustedLedgerRedTest {
         fail(validContext().copy(preObservation = validPre().copy(leaseId = "L-pre-other")))
 
     // === Non-finite / out-of-range coordinates (Sol GREEN-review P1-3) ===
-    // NaN haversine is NaN and `NaN > 1.0` is false — without an isFinite gate a NaN coordinate
-    // silently PASSes. ±Infinity and out-of-range values are equally untrustworthy.
+    // Provider-reported effective coordinates remain a structural trust predicate. NaN, ±Infinity,
+    // and out-of-range values contradict the claimed verified observation and fail closed.
 
     @Test
     fun `a NaN latitude fails closed`() =
@@ -548,11 +533,6 @@ class TrustedLedgerRedTest {
     @Test
     fun `a POST NaN coordinate fails closed (symmetric polarity)`() =
         fail(validContext().copy(postObservation = validPost().copy(effectiveLng = Double.NaN)))
-
-    @Test
-    fun `a NaN TARGET coordinate fails closed even with valid observations`() =
-        // The target itself being non-finite makes the distance NaN ⇒ must fail closed, not pass.
-        fail(validContext().copy(targetLat = Double.NaN))
 
     // ---- AREA 5: production persist+mint entrypoint via PlanRepository (RED — §11.2 F1 / §11.4) ----
     //
@@ -609,6 +589,22 @@ class TrustedLedgerRedTest {
                 attemptId = aggregate.attemptId,
                 evidencePayloadDigest = DISTINCTIVE_DIGEST
             )
+        )
+        // Production reaches this entrypoint only after the immutable execution, PRE/POST and
+        // completion receipt have atomically published the DECIDING owner. Seed that complete
+        // durable boundary so the attribution assertion cannot mint through a live-context shortcut.
+        db.testAttemptDao().markAplusState(aggregate.attemptId, "POST_OBSERVE_PENDING")
+        db.testAttemptDao().markCurrentExecutionId(
+            aggregate.attemptId, ctx.execution.executionId
+        )
+        db.attemptExecutionDao().insert(ctx.execution)
+        repo.persistObservation(aggregate.attemptId, "PRE", ctx.preObservation)
+        repo.persistDecisionBundleAndEnterDeciding(
+            attemptId = aggregate.attemptId,
+            postObservation = ctx.postObservation,
+            completionEvidenceWire = ctx.completionEvidenceWire,
+            acceptedIntentHash = ctx.applyReceiptIntentHash,
+            leaseId = ctx.applyReceiptLease
         )
 
         val decision = repo.recordTrustedCompletion(ctx, REPO_COMMIT_CLOCK)

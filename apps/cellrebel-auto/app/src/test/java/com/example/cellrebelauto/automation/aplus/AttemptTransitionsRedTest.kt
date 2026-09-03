@@ -157,6 +157,26 @@ class AttemptTransitionsRedTest {
     }
 
     @Test
+    fun `an untrusted post-observation routes to RELEASE_PENDING before any decision`() {
+        assertEquals(
+            "POST evidence failure must release from its real source state, never fabricate DECIDING",
+            AttemptState.RELEASE_PENDING,
+            AttemptTransitions.next(
+                AttemptState.POST_OBSERVE_PENDING,
+                AttemptEvent.OBSERVATION_UNTRUSTED
+            )
+        )
+    }
+
+    @Test
+    fun `a successful PRE crash reconcile routes the old owner to release for a clean retry`() {
+        assertEquals(
+            AttemptState.RELEASE_PENDING,
+            AttemptTransitions.next(AttemptState.PRE_OBSERVED, AttemptEvent.RECONCILE)
+        )
+    }
+
+    @Test
     fun `a timeout or interruption during the run routes to RECOVERY_REQUIRED - it must not guess success`() {
         // §8.1 line 1777 (TIMEOUT/INTERRUPTED): CELLREBEL_RUNNING + TIMEOUT_INTERRUPTED ⇒
         // RECOVERY_REQUIRED (save typed outcome; forbidden: 猜成功 — guess success). RED: skeleton

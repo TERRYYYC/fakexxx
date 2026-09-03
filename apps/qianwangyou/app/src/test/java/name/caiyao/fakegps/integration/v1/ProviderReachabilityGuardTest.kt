@@ -5,6 +5,7 @@ import name.caiyao.fakegps.integration.v1.support.FakeMonotonicClock
 import name.caiyao.fakegps.integration.v1.support.InMemoryDurableKv
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -151,23 +152,95 @@ class ProviderReachabilityGuardTest {
         )
     }
 
+    @Test
+    fun ownerStartBindsRelevantChangeSourceBeforePendingAdvanceConvergence() {
+        val kv = InMemoryDurableKv()
+        kv.write(
+            EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+            EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+            DurableFieldCodec.encode(listOf("item-1", "item-2", "8")),
+        )
+        val env = WiringProbeEnvironment().apply {
+            scheduleSnapshotAnswer = ScheduleSnapshot(
+                scheduleId = "sched-1",
+                scheduleVersion = 8L,
+                currentItemId = "item-2",
+                itemIds = listOf("item-1", "item-2"),
+                exhausted = false,
+            )
+            requireListenerBeforeConvergence = true
+        }
+
+        ProviderRuntime.compose(
+            kv = kv,
+            clock = FakeMonotonicClock(),
+            resolver = FakeIdentityResolver(),
+            environment = env,
+        )
+
+        assertEquals(1, env.listenerRegistrations)
+        assertEquals(1, env.convergenceCalls)
+        assertEquals(
+            "pending marker clears only after startup convergence returns",
+            "",
+            kv.read(
+                EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+                EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+            ),
+        )
+    }
+
+    @Test
+    fun failedOwnerStartAbortsThePartiallyStartedEnvironment() {
+        val kv = InMemoryDurableKv()
+        val pending = DurableFieldCodec.encode(listOf("item-1", "item-2", "8"))
+        kv.write(
+            EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+            EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+            pending,
+        )
+        val env = WiringProbeEnvironment().apply {
+            scheduleSnapshotAnswer = ScheduleSnapshot(
+                scheduleId = "sched-1",
+                scheduleVersion = 8L,
+                currentItemId = "item-2",
+                itemIds = listOf("item-1", "item-2"),
+                exhausted = false,
+            )
+            failConvergence = true
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            ProviderRuntime.compose(
+                kv = kv,
+                clock = FakeMonotonicClock(),
+                resolver = FakeIdentityResolver(),
+                environment = env,
+            )
+        }
+
+        assertEquals(
+            "a failed graph must release its watcher/refresher ownership before build retries",
+            1,
+            env.abortOwnerStartCalls,
+        )
+        assertEquals(
+            "failed convergence remains durable for the next clean composition attempt",
+            pending,
+            kv.read(
+                EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+                EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+            ),
+        )
+    }
+
     /**
-     * §8.4 clean-shutdown evidence must be earned, single-use, and false by
-     * default.
-     *
-     * This existed as write/read helpers with NO call site for the write, so
-     * `cleanlinessProvable` was a constant false wearing the shape of a check:
-     * every start took the unclean path while §8.4 read as though both of its
-     * cases were live. A branch that can never be taken is worse than a missing
-     * one, because it looks covered.
-     *
-     * The third assertion is the one that bites: if the marker were sticky
-     * rather than consumed, a single orderly stop would make every later crash
-     * report itself as clean, and ACTIVE leases would be assumed released when
-     * the device state is actually unknown.
+     * §8.4 clean-shutdown evidence is false by default and single-use when a
+     * future explicit owner-quiescence protocol earns it. Android component
+     * lifecycle callbacks are deliberately not producers of this marker.
      */
     @Test
-    fun cleanShutdownEvidenceIsEarnedAndSingleUse() {
+    fun explicitOwnerQuiescenceEvidenceIsSingleUse() {
         val kv = InMemoryDurableKv()
 
         assertFalse(
@@ -177,13 +250,13 @@ class ProviderReachabilityGuardTest {
 
         ProviderRuntime.CleanShutdownMarker.record(kv)
         assertTrue(
-            "an orderly stop must be provable on the next start",
+            "an explicit quiescent-owner proof must be consumable on the next start",
             ProviderRuntime.CleanShutdownMarker.consume(kv)
         )
 
         assertFalse(
             "the marker is consumed, not sticky — otherwise one clean stop would " +
-                "make every later crash report itself clean",
+                "make a later crash report itself clean",
             ProviderRuntime.CleanShutdownMarker.consume(kv)
         )
     }
@@ -196,15 +269,34 @@ class ProviderReachabilityGuardTest {
      */
     private class WiringProbeEnvironment : QwyEnvironment {
         var listenerRegistrations = 0
+        var convergenceCalls = 0
+        var abortOwnerStartCalls = 0
+        var requireListenerBeforeConvergence = false
+        var failConvergence = false
+        var scheduleSnapshotAnswer: ScheduleSnapshot? = null
 
         override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
             listenerRegistrations++
         }
 
-        override fun scheduleSnapshot(): ScheduleSnapshot? = null
+        override fun scheduleSnapshot(): ScheduleSnapshot? = scheduleSnapshotAnswer
 
-        override fun advancePointer(fromItemId: String): AdvancePointerOutcome =
-            AdvancePointerOutcome.Exhausted(versionAfter = 0L)
+        override fun convergeAdvance(
+            fromItemId: String,
+            expectedToItemId: String?,
+            expectedVersionAfter: Long,
+        ): AdvancePointerOutcome {
+            check(!requireListenerBeforeConvergence || listenerRegistrations > 0) {
+                "pending projection convergence ran before relevant-change source binding"
+            }
+            convergenceCalls++
+            check(!failConvergence) { "injected startup convergence failure" }
+            return if (expectedToItemId == null) {
+                AdvancePointerOutcome.Exhausted(expectedVersionAfter)
+            } else {
+                AdvancePointerOutcome.Advanced(expectedToItemId, expectedVersionAfter)
+            }
+        }
 
         override fun applyEnvironment(
             intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
@@ -234,6 +326,13 @@ class ProviderReachabilityGuardTest {
         // constant trusted level (same rule the handler fix pins).
         override fun achievableVerificationLevelWire(): Int =
             io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.NONE.wire
+
+        override fun continuityEvidenceCapability(): ContinuityEvidenceCapability =
+            ContinuityEvidenceCapability.UNAVAILABLE
+
+        override fun abortOwnerStart() {
+            abortOwnerStartCalls++
+        }
     }
 
     /**
