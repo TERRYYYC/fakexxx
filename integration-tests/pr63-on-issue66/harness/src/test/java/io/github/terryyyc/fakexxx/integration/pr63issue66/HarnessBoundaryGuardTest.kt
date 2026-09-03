@@ -208,6 +208,8 @@ class HarnessBoundaryGuardTest {
             runner.replace(PINNED_QWY_HOOK_PLAN, "'*SomeOtherTest'"),
             runner.replace(PINNED_QWY_WIRING, "'*SomeOtherTest'"),
             runner.replace(PINNED_QWY_PRODUCTION, "'*SomeOtherTest'"),
+            runner.replace(PINNED_QWY_ADAPTER, "'*SomeOtherTest'"),
+            runner.replace(PINNED_QWY_CODEC, "'*SomeOtherTest'"),
             runner.replace(PINNED_QWY_ADVANCE, "'*SomeOtherTest'"),
             runner.replace(PINNED_FULL_HARNESS, "\"\$wrapper\" :harness:testDebugUnitTest"),
             runner.replace(MACHINE_READABLE_BLOCKED, "{}"),
@@ -284,6 +286,8 @@ class HarnessBoundaryGuardTest {
         expectExactlyOnce(script, PINNED_QWY_HOOK_PLAN, "QWY hook-plan production guard")
         expectExactlyOnce(script, PINNED_QWY_WIRING, "QWY installer wiring guard")
         expectExactlyOnce(script, PINNED_QWY_PRODUCTION, "QWY authoritative production guard")
+        expectExactlyOnce(script, PINNED_QWY_ADAPTER, "QWY evidence-health adapter regression")
+        expectExactlyOnce(script, PINNED_QWY_CODEC, "QWY evidence-health codec regression")
         expectExactlyOnce(script, PINNED_QWY_ADVANCE, "QWY authoritative revision suite")
         expectExactlyOnce(script, PINNED_FULL_HARNESS, "complete host harness")
         expectExactlyOnce(script, MACHINE_READABLE_BLOCKED, "machine-readable blocked receipt")
@@ -486,11 +490,13 @@ class HarnessBoundaryGuardTest {
         const val PINNED_QWY_HOOK_PLAN = "--tests '*Android15OracleHookPlanTest'"
         const val PINNED_QWY_WIRING = "--tests '*SystemServerOracleWiringGuardTest'"
         const val PINNED_QWY_PRODUCTION = "--tests '*AuthoritativeOracleProductionGuardTest'"
+        const val PINNED_QWY_ADAPTER = "--tests '*BinderAuthoritativeContinuitySourceTest'"
+        const val PINNED_QWY_CODEC = "--tests '*OracleBundleCodecTest'"
         const val PINNED_QWY_ADVANCE = "--tests '*AuthoritativeAdvanceProviderTest'"
         const val PINNED_FULL_HARNESS =
             "\"\$auto_wrapper\" -p \"\$script_dir\" :harness:testDebugUnitTest"
         const val MACHINE_READABLE_BLOCKED =
-            "{\"schemaVersion\":1,\"hostIntegration\":\"PASS\",\"issue66Ac7\":\"NOT_PASSED\",\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"BLOCKED_NO_AUTHORIZATION\",\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\",\"reason\":\"NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY\"}"
+            "{\"schemaVersion\":2,\"hostIntegration\":\"PASS\",\"issue66Ac7\":\"NOT_PASSED\",\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"NOT_RUN\",\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\",\"reason\":\"HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION\"}"
         const val JAVA_HOME_MARKER = "\${JAVA_HOME:-}"
         const val ANDROID_HOME_MARKER = "\${ANDROID_HOME:-}"
         val EXPECTED_DIRECT_DEPENDENCIES = listOf(

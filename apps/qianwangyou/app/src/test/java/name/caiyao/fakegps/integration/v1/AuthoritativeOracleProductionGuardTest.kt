@@ -28,12 +28,14 @@ class AuthoritativeOracleProductionGuardTest {
     }
 
     @Test
-    fun `empty production fingerprint allowlist keeps every real build unattested`() {
+    fun `empty evidence and production fingerprint lists keep every real build unlisted`() {
+        assertTrue(Android15OracleHookPlan.EVIDENCE_ONLY_FINGERPRINTS.isEmpty())
         assertTrue(Android15OracleHookPlan.ATTESTED_FINGERPRINTS.isEmpty())
 
-        val attested = Android15OracleHookPlan.isFingerprintAttested(
-            "vendor/product/device:15/production/fingerprint:user/release-keys",
-        )
+        val fingerprint =
+            "vendor/product/device:15/production/fingerprint:user/release-keys"
+        val admission = Android15OracleHookPlan.classifyFingerprint(fingerprint)
+        val attested = Android15OracleHookPlan.isFingerprintAttested(fingerprint)
         val health = Android15OracleHookPlan.classifyHealth(
             true,
             attested,
@@ -46,6 +48,8 @@ class AuthoritativeOracleProductionGuardTest {
             true,
         )
 
+        assertEquals(Android15OracleHookPlan.BuildAdmission.UNLISTED, admission)
+        assertFalse(Android15OracleHookPlan.mayInstallEvidenceHooks(fingerprint))
         assertFalse(attested)
         assertEquals(OracleWireHealth.BUILD_UNATTESTED, health)
         assertNotEquals(OracleWireHealth.HEALTHY, health)

@@ -47,6 +47,10 @@ private fun OracleWireSnapshot.toAuthoritativeSnapshot(): AuthoritativeContinuit
 
 private fun OracleWireHealth.toAuthoritativeHealth(): AuthoritativeOracleHealth = when (this) {
     OracleWireHealth.HEALTHY -> AuthoritativeOracleHealth.HEALTHY
+    // Evidence-only readiness is intentionally collapsed to the existing
+    // unattested domain state. Only the debug evidence reader may distinguish
+    // it; continuity and ContractV1 can never promote it to FULL.
+    OracleWireHealth.EVIDENCE_ONLY_READY -> AuthoritativeOracleHealth.BUILD_UNATTESTED
     OracleWireHealth.BUILD_UNATTESTED -> AuthoritativeOracleHealth.BUILD_UNATTESTED
     OracleWireHealth.UNSUPPORTED_PLATFORM -> AuthoritativeOracleHealth.HOOKS_INCOMPLETE
     OracleWireHealth.BOOT_ID_UNAVAILABLE -> AuthoritativeOracleHealth.UNINITIALIZED

@@ -66,20 +66,25 @@ public final class SystemServerOracleInstaller {
                 ? systemClassLoader
                 : SystemServerOracleInstaller.class.getClassLoader();
         boolean supportedPlatform = Build.VERSION.SDK_INT == Android15OracleHookPlan.API_LEVEL;
-        boolean buildAttested = Android15OracleHookPlan.isFingerprintAttested(Build.FINGERPRINT);
+        Android15OracleHookPlan.BuildAdmission buildAdmission =
+                Android15OracleHookPlan.classifyFingerprint(Build.FINGERPRINT);
 
         if (!supportedPlatform) {
             XposedBridge.log(TAG + ": unsupported SDK " + Build.VERSION.SDK_INT);
             return;
         }
-        if (!buildAttested) {
-            // Pilot safety gate: empty production allowlist means BUILD_UNATTESTED and no hooks.
+        if (buildAdmission == Android15OracleHookPlan.BuildAdmission.UNLISTED) {
+            // Both exact lists are empty by default. An unlisted build never
+            // constructs the Binder and never installs system-server hooks.
             XposedBridge.log(TAG + ": " + OracleWireHealth.BUILD_UNATTESTED
                     + " fingerprint=" + Build.FINGERPRINT);
             return;
         }
-        oracleBinder = SystemServerOracleBinder.create(
-                Build.FINGERPRINT, true, true);
+        oracleBinder = SystemServerOracleBinder.createForCurrentBuild();
+        if (buildAdmission == Android15OracleHookPlan.BuildAdmission.EVIDENCE_ONLY) {
+            XposedBridge.log(TAG + ": evidence-only exact build; hooks enabled, "
+                    + "authoritative health disabled fingerprint=" + Build.FINGERPRINT);
+        }
 
         tryInstallMutationGroup(
                 loader,

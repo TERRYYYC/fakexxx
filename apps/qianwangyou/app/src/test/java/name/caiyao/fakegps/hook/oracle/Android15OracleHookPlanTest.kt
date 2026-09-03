@@ -77,12 +77,95 @@ class Android15OracleHookPlanTest {
     fun `required mask is exact and distinguishes wrapper from delegate`() {
         assertTrue(Android15OracleHookPlan.COVERAGE_APP_OPS_WRAPPER != Android15OracleHookPlan.COVERAGE_ACCESS_CHECKING_DELEGATE)
         assertEquals(0x3ffL, Android15OracleHookPlan.REQUIRED_COVERAGE_MASK)
+        assertEquals(0x2ffL, Android15OracleHookPlan.REQUIRED_EVIDENCE_COVERAGE_MASK)
+        assertEquals(
+            0L,
+            Android15OracleHookPlan.REQUIRED_EVIDENCE_COVERAGE_MASK and
+                Android15OracleHookPlan.COVERAGE_BUILD_ATTESTED,
+        )
     }
 
     @Test
-    fun `production fingerprint allowlist is intentionally empty`() {
+    fun `admission state machine is exhaustive and only attested mints the build bit`() {
+        assertEquals(
+            setOf(
+                Android15OracleHookPlan.BuildAdmission.UNLISTED,
+                Android15OracleHookPlan.BuildAdmission.EVIDENCE_ONLY,
+                Android15OracleHookPlan.BuildAdmission.ATTESTED,
+            ),
+            Android15OracleHookPlan.BuildAdmission.values().toSet(),
+        )
+        assertEquals(0L, Android15OracleHookPlan.initialCoverageMask(null))
+        assertEquals(
+            0L,
+            Android15OracleHookPlan.initialCoverageMask(
+                Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            ),
+        )
+        assertEquals(
+            0L,
+            Android15OracleHookPlan.initialCoverageMask(
+                Android15OracleHookPlan.BuildAdmission.EVIDENCE_ONLY,
+            ),
+        )
+        assertEquals(
+            Android15OracleHookPlan.COVERAGE_BUILD_ATTESTED,
+            Android15OracleHookPlan.initialCoverageMask(
+                Android15OracleHookPlan.BuildAdmission.ATTESTED,
+            ),
+        )
+    }
+
+    @Test
+    fun `production and evidence fingerprint allowlists are intentionally empty`() {
+        assertTrue(Android15OracleHookPlan.EVIDENCE_ONLY_FINGERPRINTS.isEmpty())
         assertTrue(Android15OracleHookPlan.ATTESTED_FINGERPRINTS.isEmpty())
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint("any/real/device:fingerprint"),
+        )
+        assertFalse(Android15OracleHookPlan.mayInstallEvidenceHooks("any/real/device:fingerprint"))
         assertFalse(Android15OracleHookPlan.isFingerprintAttested("any/real/device:fingerprint"))
+    }
+
+    @Test
+    fun `fingerprint admission is exact and overlap fails closed`() {
+        val evidence = setOf("vendor/product/device:15/evidence:user/release-keys")
+        val attested = setOf("vendor/product/device:15/attested:user/release-keys")
+
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint(null, evidence, attested),
+        )
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint(" vendor/product/device:15/evidence:user/release-keys", evidence, attested),
+        )
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint(evidence.single().uppercase(), evidence, attested),
+        )
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint(evidence.single() + "/suffix", evidence, attested),
+        )
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint("*", evidence, attested),
+        )
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.EVIDENCE_ONLY,
+            Android15OracleHookPlan.classifyFingerprint(evidence.single(), evidence, attested),
+        )
+        assertEquals(
+            Android15OracleHookPlan.BuildAdmission.ATTESTED,
+            Android15OracleHookPlan.classifyFingerprint(attested.single(), evidence, attested),
+        )
+        assertEquals(
+            "one fingerprint in both lists is a configuration conflict, not attestation",
+            Android15OracleHookPlan.BuildAdmission.UNLISTED,
+            Android15OracleHookPlan.classifyFingerprint(evidence.single(), evidence, evidence),
+        )
     }
 
     @Test
@@ -110,6 +193,171 @@ class Android15OracleHookPlanTest {
             Android15OracleHookPlan.classifyHealth(
                 true,
                 false,
+                true,
+                false,
+                false,
+                Android15OracleHookPlan.REQUIRED_COVERAGE_MASK,
+                true,
+                true,
+                true,
+            ),
+        )
+    }
+
+    @Test
+    fun `evidence-only truth table exposes failures but can never become healthy`() {
+        val evidence = Android15OracleHookPlan.BuildAdmission.EVIDENCE_ONLY
+        val runtimeMask = Android15OracleHookPlan.REQUIRED_EVIDENCE_COVERAGE_MASK
+
+        assertEquals(
+            OracleWireHealth.EVIDENCE_ONLY_READY,
+            Android15OracleHookPlan.classifyHealth(
+                true, evidence, true, false, false, runtimeMask, true, true, true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.CALLBACK_POISONED,
+            Android15OracleHookPlan.classifyHealth(
+                true, evidence, true, false, true, runtimeMask, true, true, true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.BOOT_ID_UNAVAILABLE,
+            Android15OracleHookPlan.classifyHealth(
+                true, evidence, false, false, false, runtimeMask, true, true, true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.INVARIANT_FAILURE,
+            Android15OracleHookPlan.classifyHealth(
+                true, evidence, true, true, false, runtimeMask, true, true, true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.HOOKS_INCOMPLETE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                evidence,
+                true,
+                false,
+                false,
+                runtimeMask xor Android15OracleHookPlan.COVERAGE_LOCATION_SEMANTIC_COORDINATE,
+                true,
+                true,
+                true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.BRIDGE_UNAVAILABLE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                evidence,
+                true,
+                false,
+                false,
+                runtimeMask xor Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION,
+                false,
+                true,
+                true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.SESSION_UNAVAILABLE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                evidence,
+                true,
+                false,
+                false,
+                runtimeMask xor Android15OracleHookPlan.COVERAGE_QWY_SERVICE_GENERATION xor
+                    Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION,
+                true,
+                false,
+                true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.ENDPOINT_UNAVAILABLE,
+            Android15OracleHookPlan.classifyHealth(
+                true, evidence, true, false, false, runtimeMask, true, true, false,
+            ),
+        )
+        assertEquals(
+            "evidence-only may never carry the attestation bit",
+            OracleWireHealth.INVARIANT_FAILURE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                evidence,
+                true,
+                false,
+                false,
+                Android15OracleHookPlan.REQUIRED_COVERAGE_MASK,
+                true,
+                true,
+                true,
+            ),
+        )
+        assertEquals(
+            "callback poison cannot hide evidence-only attestation-bit laundering",
+            OracleWireHealth.INVARIANT_FAILURE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                evidence,
+                true,
+                false,
+                true,
+                Android15OracleHookPlan.REQUIRED_COVERAGE_MASK,
+                true,
+                true,
+                true,
+            ),
+        )
+        assertFalse(
+            Android15OracleHookPlan.classifyHealth(
+                true, evidence, true, false, false, runtimeMask, true, true, true,
+            ) == OracleWireHealth.HEALTHY,
+        )
+    }
+
+    @Test
+    fun `only complete attested coverage can become healthy`() {
+        val attested = Android15OracleHookPlan.BuildAdmission.ATTESTED
+
+        assertEquals(
+            OracleWireHealth.HOOKS_INCOMPLETE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                attested,
+                true,
+                false,
+                false,
+                Android15OracleHookPlan.REQUIRED_EVIDENCE_COVERAGE_MASK,
+                true,
+                true,
+                true,
+            ),
+        )
+        assertEquals(
+            "attested health keeps coverage failure ahead of the live bridge signal",
+            OracleWireHealth.HOOKS_INCOMPLETE,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                attested,
+                true,
+                false,
+                false,
+                Android15OracleHookPlan.REQUIRED_COVERAGE_MASK xor
+                    Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION,
+                false,
+                true,
+                true,
+            ),
+        )
+        assertEquals(
+            OracleWireHealth.HEALTHY,
+            Android15OracleHookPlan.classifyHealth(
+                true,
+                attested,
                 true,
                 false,
                 false,

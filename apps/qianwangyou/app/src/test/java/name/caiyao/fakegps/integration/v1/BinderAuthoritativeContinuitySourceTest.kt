@@ -44,6 +44,7 @@ class BinderAuthoritativeContinuitySourceTest {
     fun `every wire health has an explicit fail-closed domain mapping`() {
         val mappings = mapOf(
             OracleWireHealth.HEALTHY to AuthoritativeOracleHealth.HEALTHY,
+            OracleWireHealth.EVIDENCE_ONLY_READY to AuthoritativeOracleHealth.BUILD_UNATTESTED,
             OracleWireHealth.BUILD_UNATTESTED to AuthoritativeOracleHealth.BUILD_UNATTESTED,
             OracleWireHealth.UNSUPPORTED_PLATFORM to AuthoritativeOracleHealth.HOOKS_INCOMPLETE,
             OracleWireHealth.BOOT_ID_UNAVAILABLE to AuthoritativeOracleHealth.UNINITIALIZED,
@@ -62,6 +63,23 @@ class BinderAuthoritativeContinuitySourceTest {
             }
             assertEquals(wireHealth.name, expectedHealth, source.snapshot()?.health)
         }
+    }
+
+    @Test
+    fun `evidence-only readiness is never stable complete authority`() {
+        val source = BinderAuthoritativeContinuitySource {
+            validWire().copy(
+                installedCoverageMask = AuthoritativeCoverageMask.REQUIRED_V1 xor
+                    AuthoritativeCoverageMask.BUILD_ATTESTATION,
+                health = OracleWireHealth.EVIDENCE_ONLY_READY,
+            )
+        }
+
+        val snapshot = checkNotNull(source.snapshot())
+        assertEquals(AuthoritativeOracleHealth.BUILD_UNATTESTED, snapshot.health)
+        org.junit.Assert.assertFalse(
+            snapshot.isStableCompleteFor("name.caiyao.fakegps", 10_321),
+        )
     }
 
     @Test

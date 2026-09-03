@@ -29,9 +29,9 @@ import name.caiyao.fakegps.oracle.OracleWireHealth;
 import name.caiyao.fakegps.oracle.OracleWireSnapshot;
 
 /**
- * Private system-server producer. The pilot has an empty build allowlist, so the installer never
- * constructs this implementation in production; its state machine exists for host/emulator
- * evidence before any fingerprint can be admitted.
+ * Private system-server producer. Both exact-build lists are empty by default. A separately
+ * reviewed evidence-only fingerprint may construct it without setting build attestation, so
+ * runtime compatibility can be observed without granting authoritative health.
  */
 public final class SystemServerOracleBinder extends IAuthoritativeContinuityOracle.Stub {
     static final String KERNEL_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
@@ -42,7 +42,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     private final String oracleInstanceId = UUID.randomUUID().toString();
     private final String buildFingerprint;
     private final boolean supportedPlatform;
-    private final boolean buildAttested;
+    private final Android15OracleHookPlan.BuildAdmission buildAdmission;
 
     private long sequence;
     private long outerBaseSequence;
@@ -117,26 +117,23 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
         }
     }
 
-    public static SystemServerOracleBinder create(
-            String buildFingerprint,
-            boolean supportedPlatform,
-            boolean buildAttested) {
+    static SystemServerOracleBinder createForCurrentBuild() {
+        String buildFingerprint = Build.FINGERPRINT;
+        boolean supportedPlatform =
+                Build.VERSION.SDK_INT == Android15OracleHookPlan.API_LEVEL;
         return new SystemServerOracleBinder(
-                readKernelBootId(), buildFingerprint, supportedPlatform, buildAttested);
+                readKernelBootId(), buildFingerprint, supportedPlatform);
     }
 
-    SystemServerOracleBinder(
+    private SystemServerOracleBinder(
             String bootId,
             String buildFingerprint,
-            boolean supportedPlatform,
-            boolean buildAttested) {
+            boolean supportedPlatform) {
         this.bootId = bootId;
         this.buildFingerprint = buildFingerprint;
         this.supportedPlatform = supportedPlatform;
-        this.buildAttested = buildAttested;
-        if (buildAttested) {
-            installedCoverageMask |= Android15OracleHookPlan.COVERAGE_BUILD_ATTESTED;
-        }
+        this.buildAdmission = Android15OracleHookPlan.classifyFingerprint(buildFingerprint);
+        installedCoverageMask = Android15OracleHookPlan.initialCoverageMask(this.buildAdmission);
     }
 
     @Override
@@ -374,6 +371,10 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
 
     void markInstalled(long coverageBit) {
         synchronized (lock) {
+            if ((coverageBit & Android15OracleHookPlan.COVERAGE_BUILD_ATTESTED) != 0L) {
+                poisonInvariantLocked();
+                return;
+            }
             installedCoverageMask |= coverageBit;
         }
     }
@@ -699,7 +700,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
                 && networkProviderEnabled;
         return Android15OracleHookPlan.classifyHealth(
                 supportedPlatform,
-                buildAttested,
+                buildAdmission,
                 OracleBundleCodec.isKernelBootId(bootId),
                 invariantFailure,
                 callbackPoisoned,

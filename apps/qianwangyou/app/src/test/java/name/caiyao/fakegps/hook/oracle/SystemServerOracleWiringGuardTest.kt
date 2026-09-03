@@ -1,5 +1,6 @@
 package name.caiyao.fakegps.hook.oracle
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,20 +56,137 @@ class SystemServerOracleWiringGuardTest {
     }
 
     @Test
-    fun `API gated installer constructs and samples only behind explicit runtime guards`() {
+    fun `API and staged admission gates precede Binder construction and hooks`() {
         val installer = source("java/name/caiyao/fakegps/hook/oracle/SystemServerOracleInstaller.java")
         val binder = source("java/name/caiyao/fakegps/hook/oracle/SystemServerOracleBinder.java")
         val platformGate = installer.indexOf("if (!supportedPlatform)")
-        val attestationGate = installer.indexOf("if (!buildAttested)")
-        val binderConstruction = installer.indexOf("oracleBinder = SystemServerOracleBinder.create(")
+        val admissionResolution = installer.indexOf("Android15OracleHookPlan.classifyFingerprint(Build.FINGERPRINT)")
+        val unlistedGate = installer.indexOf(
+            "if (buildAdmission == Android15OracleHookPlan.BuildAdmission.UNLISTED)",
+        )
+        val binderConstruction = installer.indexOf(
+            "oracleBinder = SystemServerOracleBinder.createForCurrentBuild()",
+        )
         val hookInstallation = installer.indexOf("tryInstallMutationGroup(")
+        val productionFactory = braceDelimitedBlock(
+            binder,
+            "static SystemServerOracleBinder createForCurrentBuild()",
+        )
+        val productionClassifier = braceDelimitedBlock(
+            source("java/name/caiyao/fakegps/hook/oracle/Android15OracleHookPlan.java"),
+            "public static BuildAdmission classifyFingerprint(String fingerprint)",
+        )
+        val privateConstructor = braceDelimitedBlock(
+            binder,
+            "private SystemServerOracleBinder(",
+        )
+        val markInstalled = braceDelimitedBlock(
+            binder,
+            "void markInstalled(long coverageBit)",
+        )
+        val exactClassifierDelegation =
+            "classifyFingerprint(\n                fingerprint, " +
+                "EVIDENCE_ONLY_FINGERPRINTS, ATTESTED_FINGERPRINTS)"
+        val healthLocked = braceDelimitedBlock(
+            binder,
+            "private OracleWireHealth healthLocked()",
+        )
 
         assertTrue("the exact API gate must precede Binder construction",
             platformGate >= 0 && platformGate < binderConstruction)
-        assertTrue("build attestation must precede Binder construction",
-            attestationGate >= 0 && attestationGate < binderConstruction)
+        assertTrue("exact admission must be resolved before Binder construction",
+            admissionResolution >= 0 && admissionResolution < binderConstruction)
+        assertTrue("unlisted builds must return before Binder construction",
+            unlistedGate >= 0 && unlistedGate < binderConstruction)
         assertTrue("the guarded Binder must exist before any hook can invoke it",
             binderConstruction >= 0 && binderConstruction < hookInstallation)
+        assertTrue(installer.contains("SystemServerOracleBinder.createForCurrentBuild();"))
+        assertTrue(installer.contains("BuildAdmission.EVIDENCE_ONLY"))
+        assertTrue(productionFactory.contains("String buildFingerprint = Build.FINGERPRINT;"))
+        assertTrue(
+            productionFactory.contains(
+                "Build.VERSION.SDK_INT == Android15OracleHookPlan.API_LEVEL",
+            ),
+        )
+        assertTrue(
+            "the live factory may pass only its freshly read non-authority identity",
+            productionFactory.contains(
+                "new SystemServerOracleBinder(\n" +
+                    "                readKernelBootId(), buildFingerprint, supportedPlatform)",
+            ),
+        )
+        assertTrue(
+            "the private construction boundary must derive admission from the exact fingerprint",
+            privateConstructor.contains(
+                "this.buildAdmission = " +
+                    "Android15OracleHookPlan.classifyFingerprint(buildFingerprint);",
+            ),
+        )
+        assertFalse(
+            "no public factory may accept caller-supplied attestation authority",
+            productionFactory.substringBefore('{').contains(','),
+        )
+        assertTrue(
+            "there must be exactly one package-private live-build Binder factory",
+            binder.windowed("static SystemServerOracleBinder create".length)
+                .count { it == "static SystemServerOracleBinder create" } == 1,
+        )
+        assertFalse(
+            "the live-build Binder factory is not a public authority surface",
+            binder.contains("public static SystemServerOracleBinder create"),
+        )
+        assertTrue(
+            "the private constructor accepts identity only, never an admission tier",
+            binder.contains(
+                "private SystemServerOracleBinder(\n" +
+                    "            String bootId,\n" +
+                    "            String buildFingerprint,\n" +
+                    "            boolean supportedPlatform) {",
+            ),
+        )
+        assertFalse(privateConstructor.contains("BuildAdmission buildAdmission"))
+        assertTrue(
+            "the constructor must mint coverage only through the exhaustive admission helper",
+            privateConstructor.contains(
+                "installedCoverageMask = Android15OracleHookPlan.initialCoverageMask(" +
+                    "this.buildAdmission);",
+            ),
+        )
+        assertEquals(
+            "the Binder may mention the attestation bit only in markInstalled's rejection gate",
+            1,
+            binder.split("Android15OracleHookPlan.COVERAGE_BUILD_ATTESTED").size - 1,
+        )
+        val rejectAt = markInstalled.indexOf(
+            "(coverageBit & Android15OracleHookPlan.COVERAGE_BUILD_ATTESTED) != 0L",
+        )
+        val writeAt = markInstalled.indexOf("installedCoverageMask |= coverageBit")
+        assertTrue(
+            "runtime hook coverage must reject the authority bit before the generic write",
+            rejectAt >= 0 && rejectAt < writeAt,
+        )
+        assertEquals(
+            "the production classifier must contain one exact-list delegation",
+            1,
+            productionClassifier.split(exactClassifierDelegation).size - 1,
+        )
+        assertEquals(
+            "the production classifier must have no target-specific authority branch",
+            1,
+            productionClassifier.windowed("return ".length).count { it == "return " },
+        )
+        assertFalse(productionClassifier.contains("if ("))
+        assertTrue(
+            "health must consume the same immutable admission derived at construction",
+            healthLocked.contains("supportedPlatform,\n                buildAdmission,"),
+        )
+        assertTrue(
+            "any future admission tier must fail closed before health evaluation",
+            source("java/name/caiyao/fakegps/hook/oracle/Android15OracleHookPlan.java").contains(
+                "if (buildAdmission != BuildAdmission.EVIDENCE_ONLY\n" +
+                    "                && buildAdmission != BuildAdmission.ATTESTED) {",
+            ),
+        )
         assertTrue("endpoint sampling must independently fail closed below its API floor",
             binder.contains("Build.VERSION.SDK_INT < Build.VERSION_CODES.Q"))
         assertTrue(binder.contains("effective AppOps sampling requires API 29 or newer"))

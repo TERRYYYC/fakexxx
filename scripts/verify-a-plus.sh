@@ -135,11 +135,18 @@ import sys
 
 receipt_path = sys.argv[1]
 expected = {
+    "schemaVersion": 2,
     "hostIntegration": "PASS",
     "issue66Ac7": "NOT_PASSED",
+    "emulator": "NOT_RUN",
+    "physicalDevice": "NOT_RUN",
     "deviceFull": "BLOCKED",
     "overall": "BLOCKED",
-    "reason": "NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY",
+    "reason": (
+        "HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__"
+        "ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_"
+        "ADDITIONAL_AUTHORIZATION"
+    ),
 }
 
 try:
@@ -166,8 +173,9 @@ if mismatches:
     raise SystemExit(1)
 
 print(
-    "     receipt: VALID — hostIntegration=PASS; "
-    "issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED"
+    "     receipt: VALID — schemaVersion=2; hostIntegration=PASS; "
+    "issue66Ac7=NOT_PASSED; physicalDevice=NOT_RUN; "
+    "deviceFull=BLOCKED; overall=BLOCKED"
 )
 PY
 }
@@ -241,8 +249,8 @@ fi
 if [ "$FAILED" -eq 0 ]; then
   if [ "$HOST_RECEIPT_VALIDATED" -eq 1 ]; then
     printf '\nRESULT: repository host gates required at stage=%s passed.\n' "$STAGE"
-    printf 'PRODUCT/DEVICE RESULT: BLOCKED — issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED.\n'
-    printf 'REASON: NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY\n'
+    printf 'PRODUCT/DEVICE RESULT: BLOCKED — issue66Ac7=NOT_PASSED; physicalDevice=NOT_RUN; deviceFull=BLOCKED; overall=BLOCKED.\n'
+    printf 'REASON: HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION\n'
   else
     printf '\nRESULT: all gates required at stage=%s passed.\n' "$STAGE"
   fi

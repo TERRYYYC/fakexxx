@@ -110,7 +110,31 @@ One central writer runtime covers the semantic settings, profile repository, con
 
 ## Production health gate
 
-For this pilot, the exact-build fingerprint allowlist is intentionally empty. The system hook and bridge can be compiled and exercised with fakes, but production snapshots report `BUILD_UNATTESTED`, the central semantic writer runtime cannot be installed as an authoritative healthy lane, and QWY returns NONE. Adding a fingerprint requires separate exact-build emulator plus explicitly authorized rooted-device evidence and independent review; issue #66 stays open until then. This implementation records no real-device PASS.
+Exact-build admission has three fail-closed states:
+
+| Admission | System-server hooks | Maximum wire health | Authority |
+|---|---|---|---|
+| `UNLISTED` | not installed | absent / `BUILD_UNATTESTED` | none |
+| `EVIDENCE_ONLY` | installed for one exact fingerprint | `EVIDENCE_ONLY_READY` | none; the QWY adapter maps it to `BUILD_UNATTESTED` |
+| `ATTESTED` | installed for one exact fingerprint | `HEALTHY`, only when every runtime predicate passes | eligible for FULL |
+
+For this pilot, both exact-build fingerprint lists are intentionally empty. Every real build is
+therefore `UNLISTED`: the installer returns before Binder construction and before every
+system-server hook. A later evidence-only list change may expose real hook, bridge, session, and
+endpoint failures without setting the build-attestation coverage bit. Even a completely ready
+evidence-only runtime cannot become authoritative, produce FULL, or be accepted by Auto. Promotion
+to `ATTESTED` requires a separate exact-build change backed by explicitly authorized rooted-device
+evidence and independent review. Issue #66 stays open until then; this implementation records no
+real-device PASS.
+
+Evidence-only admission does not relax the production semantic-session bootstrap. If the bridge is
+not registered before the normal owner-start registration, the existing retry path remains gated by
+build-attested stable-complete proof and the evidence run stops at `SESSION_UNAVAILABLE`. A later
+read-only collector records `STOP_LATE_BRIDGE` and stops; it never registers a session or restarts a
+process. An isolated debug-only diagnostic registration or controlled QWY process restart belongs
+to a separate, independently reviewed diagnostic component and requires itemized authorization for
+the concrete mutation. Neither path may weaken the production baseline, durable ACK, FULL, or Auto
+trust predicates.
 
 LSPosed's scope key is `system`, although its legacy callback identity is `(packageName=android, processName=android)`. `MainHook` must take that exact branch before normal spoof/config/scheduler setup. Hooks install at the early callback, but the separate QWY registrar is not bound until Android boot phase `PHASE_THIRD_PARTY_APPS_CAN_START` (600). Before registration and baseline completion, health is not healthy. Any callback exception poisons health before returning because LSPosed otherwise logs the exception and lets the platform mutation continue.
 
@@ -124,6 +148,8 @@ LSPosed's scope key is `system`, although its legacy callback identity is `(pack
 | boot or same-boot oracle instance changes | revision bump+ACK; current observation NONE |
 | same-instance sequence regression | sticky fail-closed NONE |
 | hook/coverage/build/session missing | unhealthy/incomplete; NONE |
+| exact build is evidence-only and otherwise complete | wire `EVIDENCE_ONLY_READY`; domain `BUILD_UNATTESTED`; NONE |
+| evidence-only build carries the attestation bit | sticky `INVARIANT_FAILURE`; NONE |
 | crash before revision+ACK commit | retry cannot lose the bump |
 | exact normal reserved completion | same identity, exact `start+2`, exact mutation ID; commit `R+1` |
 | exact owner-recovery completion | same identity, exact `start+6`, exact mutation ID; commit `R+1`; first stable window NONE |
@@ -135,4 +161,4 @@ LSPosed's scope key is `system`, although its legacy callback identity is `(pack
 
 ## Deferred acceptance
 
-**Issue #66 AC7: NOT PASSED — quarantined/deferred.** No real phone is touched by this change, and no real-device PASS is claimed. Exact-build emulator and explicitly authorized rooted-device proof remain the final blocker before production health, merge/issue closure, or any real-device PASS claim.
+**Issue #66 AC7: NOT PASSED — quarantined/deferred.** No real phone is touched by this change, and no real-device PASS is claimed. Framework-positive emulator evidence exists, but live exact-build rooted-device evidence, evidence-only runtime validation, separate attestation promotion, and the final adversarial matrix remain blockers before production health, issue closure, or any real-device PASS claim.
