@@ -30,14 +30,17 @@ if [[ "$#" -eq 0 ]]; then
     --tests '*Android15OracleHookPlanTest' \
     --tests '*SystemServerOracleWiringGuardTest' \
     --tests '*AuthoritativeOracleProductionGuardTest' \
+    --tests '*BinderAuthoritativeContinuitySourceTest' \
+    --tests '*OracleBundleCodecTest' \
     --tests '*AuthoritativeAdvanceProviderTest'
   "$auto_wrapper" -p "$script_dir" :harness:testDebugUnitTest
   echo "HOST integration gate: PASS"
-  echo "DEVICE/FULL evidence: BLOCKED (no device run; production fingerprint allowlist stays empty)"
-  echo "OVERALL: BLOCKED pending the separately authorized device gate"
+  echo "PHYSICAL DEVICE: NOT_RUN (this host gate emits no device evidence)"
+  echo "DEVICE/FULL evidence: BLOCKED (both exact-build admission lists stay empty)"
+  echo "OVERALL: BLOCKED pending additional authorization for activation/cleanup reboots and adversarial mutations"
   receipt_dir="$script_dir/harness/build/reports/pr63-on-issue66"
   mkdir -p "$receipt_dir"
-  receipt='{"schemaVersion":1,"hostIntegration":"PASS","issue66Ac7":"NOT_PASSED","emulator":"NOT_RUN","physicalDevice":"BLOCKED_NO_AUTHORIZATION","deviceFull":"BLOCKED","overall":"BLOCKED","reason":"NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY"}'
+  receipt='{"schemaVersion":2,"hostIntegration":"PASS","issue66Ac7":"NOT_PASSED","emulator":"NOT_RUN","physicalDevice":"NOT_RUN","deviceFull":"BLOCKED","overall":"BLOCKED","reason":"HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION"}'
   printf '%s\n' "$receipt" | tee "$receipt_dir/host-gate-receipt.json"
   exit 0
 fi

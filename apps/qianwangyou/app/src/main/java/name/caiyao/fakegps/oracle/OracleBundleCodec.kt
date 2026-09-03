@@ -26,6 +26,8 @@ data class OracleWireSnapshot(
 
 enum class OracleWireHealth {
     HEALTHY,
+    /** Hooks may be observed on one exact evidence build, but authority stays unattested. */
+    EVIDENCE_ONLY_READY,
     BUILD_UNATTESTED,
     UNSUPPORTED_PLATFORM,
     BOOT_ID_UNAVAILABLE,

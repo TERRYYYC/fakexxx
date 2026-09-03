@@ -28,6 +28,19 @@ class OracleBundleCodecTest {
     }
 
     @Test
+    fun `evidence-only readiness round trips without becoming healthy`() {
+        val evidenceOnly = valid.copy(
+            installedCoverageMask = 0x2ffL,
+            health = OracleWireHealth.EVIDENCE_ONLY_READY,
+        )
+
+        val decoded = OracleBundleCodec.decodeFields(OracleBundleCodec.encodeFields(evidenceOnly))
+
+        assertEquals(evidenceOnly, decoded)
+        assertEquals(OracleWireHealth.EVIDENCE_ONLY_READY, decoded?.health)
+    }
+
+    @Test
     fun `missing required field fails closed`() {
         val fields = OracleBundleCodec.encodeFields(valid).toMutableMap()
         fields.remove(OracleBundleCodec.KEY_SEQUENCE)

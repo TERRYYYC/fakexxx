@@ -23,7 +23,9 @@ tips_exempt:
 
 ## Finish line and exclusions
 
-Finish line B is a draft implementation that is JVM-proven, builds as debug/release, keeps the production fingerprint allowlist empty, and cannot reach production FULL before a separately reviewed exact-build evidence change.
+Finish line B is a draft implementation that is JVM-proven, builds as debug/release, keeps both
+exact-build fingerprint lists empty, and cannot reach production FULL before separately reviewed
+evidence-only validation and a later attestation-promotion change.
 
 **Issue #66 AC7 status: NOT PASSED — quarantined/deferred.** Exact-build emulator and authorized rooted-device evidence are outside this implementation pass and must not be reported as complete.
 
@@ -238,9 +240,13 @@ Owner: `QwySemanticMutationCoordinator`; token is remote and carries a client-de
 - Test: `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/hook/oracle/Android15OracleHookPlanTest.kt`
 - Test: `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleWiringGuardTest.kt`
 
-1. Write RED static/pure tests for exact `(android,android)` early return, `system` scope, API-35 Access Checking wrapper+delegate+lifecycle symbols, location enabled symbol, phase-600 bridge, empty attestation allowlist, exact mask, and callback-poison behavior.
+1. Write RED static/pure tests for exact `(android,android)` early return, `system` scope, API-35 Access Checking wrapper+delegate+lifecycle symbols, location enabled symbol, phase-600 bridge, empty evidence/attestation lists, exact masks, and callback-poison behavior.
 2. Run targeted tests; expect missing hook plan/branch/resources.
-3. Add the dedicated early branch and exact resolver manifest. Install only on an allowlisted fingerprint; because the allowlist is empty, runtime health is `BUILD_UNATTESTED` and required hook bits remain absent.
+3. Add the dedicated early branch and exact resolver manifest. Classify exact fingerprints as
+   `UNLISTED`, `EVIDENCE_ONLY`, or `ATTESTED`. Unlisted builds return before Binder construction or
+   hooks. Evidence-only builds may expose specific runtime failures but never set the attestation
+   bit or exceed `EVIDENCE_ONLY_READY`; only attested builds can become healthy. Keep both lists
+   empty in this implementation pass.
 4. Add phase-600 explicit service binding, kernel boot-ID validation, effective owner/provider sampling, locked Bundle snapshot, UID checks, and internal callback poison handling.
 5. Re-run hook tests and debug/release assemble; expect PASS. Inspect release mapping/DEX guards so R8 keeps the AIDL stubs and hook entry.
 
@@ -252,7 +258,7 @@ Owner: `QwySemanticMutationCoordinator`; token is remote and carries a client-de
 - Modify: `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/QwyActualReadbackWiringTest.kt`
 - Test: `apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/AuthoritativeOracleProductionGuardTest.kt`
 
-1. Write RED source/composition guards proving production observer reads the registry, public callbacks remain INCOMPLETE, required coverage is exact, allowlist is empty, and refresh does not call semantic mutation.
+1. Write RED source/composition guards proving production observer reads the registry, public callbacks remain INCOMPLETE, required coverage is exact, both admission lists are empty, evidence-only health collapses to `BUILD_UNATTESTED`, and refresh does not call semantic mutation.
 2. Run targeted guards; expect missing composition.
 3. Wire registry source/coordinator at the one ProviderRuntime composition root; registration/death/startup failure stays NONE.
 4. Re-run all QWY JVM tests; expect PASS.
@@ -267,10 +273,10 @@ Owner: `QwySemanticMutationCoordinator`; token is remote and carries a client-de
 2. Run `./gradlew testDebugUnitTest assembleDebug assembleRelease --no-daemon` from `apps/qianwangyou`; expect PASS.
 3. Run `./scripts/check-contract-v1.sh`; expect PASS and no contract diff.
 4. Run risk-matched repository checks from the quality gate; record inherited/deferred failures separately and never call them feature green.
-5. Confirm the exact fingerprint allowlist is still empty and record that no real phone was operated and no real-device PASS is claimed.
+5. Confirm both exact fingerprint lists are still empty and record that no real phone was operated and no real-device PASS is claimed.
 6. Commit with the required `Thread-Context: threadId=01a0551d-0e1b-7a11-abbb-c3be783df747 catId=codex` footer.
 7. Obtain a non-author fresh-context review, fix findings through RED→GREEN, and create/update a draft PR linked to #66. Do not merge or close the issue.
 
 ## Open questions
 
-All remaining questions are technical and fail closed: exact target fingerprint/method set, target SELinux/system scope, bridge reconnect behavior, and vendor mutation paths. They are resolved only by deferred exact-build evidence; none requires a value decision or permits a non-empty allowlist in this pass.
+All remaining questions are technical and fail closed: exact target fingerprint/method set, target SELinux/system scope, bridge reconnect behavior, read-only late-bridge detection, and vendor mutation paths. They are resolved first by a separately reviewed `EVIDENCE_ONLY` exact-build change and authorized device evidence, then by a distinct independently reviewed promotion to `ATTESTED`. The read-only collector only emits `STOP_LATE_BRIDGE`; any diagnostic registration or controlled process restart is a separate component requiring itemized additional authorization. That diagnostic lane must not relax production semantic registration, stable-complete, ACK, FULL, or Auto trust. None permits a non-empty list in this pass.
