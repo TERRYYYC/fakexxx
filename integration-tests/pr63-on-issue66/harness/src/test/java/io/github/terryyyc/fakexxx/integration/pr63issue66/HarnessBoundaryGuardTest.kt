@@ -39,6 +39,7 @@ class HarnessBoundaryGuardTest {
     fun `boundary checker rejects every prohibited harness mutation`() {
         val repo = findRepoRoot()
         val original = repo.resolve("integration-tests/pr63-on-issue66/harness/build.gradle.kts").readText()
+        assertEquals("Mutation baseline must be valid", emptyList<String>(), violations(original))
 
         val mutations = listOf(
             original.replace(FRIEND_SCOPE, "if (name.contains(\"UnitTest\")) {"),
@@ -85,6 +86,7 @@ class HarnessBoundaryGuardTest {
         )
 
         mutations.forEachIndexed { index, mutated ->
+            assertTrue("mutation $index is a no-op", mutated != original)
             assertTrue("mutation $index escaped the integration boundary", violations(mutated).isNotEmpty())
         }
     }
@@ -96,6 +98,10 @@ class HarnessBoundaryGuardTest {
         val qwyService = repo.resolve(QWY_ENVIRONMENT_SERVICE).readText()
         val durableBridge = repo.resolve(DURABLE_BRIDGE).readText()
         val runner = repo.resolve("integration-tests/pr63-on-issue66/run-host-gate.sh").readText()
+        assertEquals(emptyList<String>(), serviceRouteViolations(service))
+        assertEquals(emptyList<String>(), qwyServiceRouteViolations(qwyService))
+        assertEquals(emptyList<String>(), durableBridgeViolations(durableBridge))
+        assertEquals(emptyList<String>(), runnerViolations(runner))
 
         listOf(
             service.replace(SERVICE_PLAN_READ, "planRepository.getPlanFromCurrentBuild(planId)"),
@@ -124,6 +130,7 @@ class HarnessBoundaryGuardTest {
             service.replace(SERVICE_ENGINE_FACTORY, "AutomationEngine("),
             service + "\nval forbidden = ProviderPrincipal.selected\n",
         ).forEachIndexed { index, mutated ->
+            assertTrue("production service route mutation $index is a no-op", mutated != service)
             assertTrue(
                 "production service route mutation $index escaped",
                 serviceRouteViolations(mutated).isNotEmpty(),
@@ -137,9 +144,19 @@ class HarnessBoundaryGuardTest {
             qwyService.replace(QWY_OBSERVE_ROUTE, "handler().apply(callingUid(), request)"),
             qwyService.replace(QWY_RELEASE_ROUTE, "handler().observe(callingUid(), request)"),
             qwyService.replace(QWY_ADVANCE_ROUTE, "handler().release(callingUid(), request)"),
-            qwyService.replace(QWY_CALLING_UID, "private fun callingUid(): Int = 10101"),
-            qwyService.replace(QWY_APPLY_ROUTE, "handler().apply(10101, request)"),
+            qwyService.replace(QWY_CALLING_UID, "val callerUid = 10101"),
+            qwyService.replace(QWY_APPLY_ROUTE, QWY_APPLY_ROUTE.replace("apply(uid, request)", "apply(10101, request)")),
+            qwyService.replace(QWY_TYPED_SCOPE, "toTypedResult { block(Binder.getCallingUid()) }"),
+            qwyService.replace(QWY_CLEAR_IDENTITY, "val token = 0L"),
+            qwyService.replace(QWY_RESTORE_IDENTITY, "Unit"),
+            qwyService.replace("} finally {", "} catch (e: RuntimeException) {"),
+            qwyService.replace(
+                "$QWY_CALLING_UID\n    $QWY_CLEAR_IDENTITY",
+                "$QWY_CLEAR_IDENTITY\n    $QWY_CALLING_UID",
+            ),
+            qwyService.replace("block(callerUid)\n    } finally", "block(Binder.getCallingUid())\n    } finally"),
         ).forEachIndexed { index, mutated ->
+            assertTrue("QWY Service route/uid mutation $index is a no-op", mutated != qwyService)
             assertTrue(
                 "QWY Service route/uid mutation $index escaped",
                 qwyServiceRouteViolations(mutated).isNotEmpty(),
@@ -174,6 +191,7 @@ class HarnessBoundaryGuardTest {
                 "long planId, String durableProviderApplicationId,",
             ),
         ).forEachIndexed { index, mutated ->
+            assertTrue("durable bridge route mutation $index is a no-op", mutated != durableBridge)
             assertTrue(
                 "durable bridge route mutation $index escaped",
                 durableBridgeViolations(mutated).isNotEmpty(),
@@ -196,6 +214,7 @@ class HarnessBoundaryGuardTest {
             runner.replace(JAVA_HOME_MARKER, "\${UNPINNED_JAVA_HOME:-}"),
             runner.replace(ANDROID_HOME_MARKER, "\${UNPINNED_ANDROID_HOME:-}"),
         ).forEachIndexed { index, mutated ->
+            assertTrue("runner mutation $index is a no-op", mutated != runner)
             assertTrue(
                 "runner mutation $index escaped",
                 runnerViolations(mutated).isNotEmpty(),
@@ -310,8 +329,20 @@ class HarnessBoundaryGuardTest {
             QWY_RELEASE_ROUTE,
             QWY_ADVANCE_ROUTE,
             QWY_CALLING_UID,
+            QWY_TYPED_SCOPE,
         ).forEach { marker ->
             expectExactlyOnce(source, marker, "missing exact QWY Service route/uid marker: $marker")
+        }
+        // Static wiring supplement only; real Android UID/exception restoration is exercised
+        // by BinderIdentityInstrumentedTest, not inferred from source text or host mocks.
+        val scope = source.substringAfter("internal inline fun <T> withProviderBinderIdentity", "")
+            .substringBefore("\n}\n", "")
+        val ordered = listOf(QWY_CALLING_UID, QWY_CLEAR_IDENTITY, "return try {",
+            "block(callerUid)", "} finally {", QWY_RESTORE_IDENTITY)
+        ordered.forEach { marker -> expectExactlyOnce(scope, marker, "missing identity scope marker: $marker") }
+        val positions = ordered.map(scope::indexOf)
+        if (positions.any { it < 0 } || positions.zipWithNext().any { (left, right) -> left >= right }) {
+            add("identity scope must capture caller -> clear -> try block -> finally restore")
         }
     }
 
@@ -433,13 +464,16 @@ class HarnessBoundaryGuardTest {
         const val BRIDGE_PRINCIPAL_GUARD = "repository.guardRecoveryProviderPrincipal("
         const val BRIDGE_ACQUIRE = "registry.acquire(durableProviderApplicationId, durableProviderSignerDigest)"
         const val BRIDGE_ENGINE_PARAMS = "engineAplusParams\$app_release"
-        const val QWY_DISCOVER_ROUTE = "handler().discover(callingUid())"
-        const val QWY_PREFLIGHT_ROUTE = "handler().preflight(callingUid(), request)"
-        const val QWY_APPLY_ROUTE = "handler().apply(callingUid(), request)"
-        const val QWY_OBSERVE_ROUTE = "handler().observe(callingUid(), request)"
-        const val QWY_RELEASE_ROUTE = "handler().release(callingUid(), request)"
-        const val QWY_ADVANCE_ROUTE = "handler().completeAndAdvance(callingUid(), request)"
-        const val QWY_CALLING_UID = "private fun callingUid(): Int = Binder.getCallingUid()"
+        const val QWY_DISCOVER_ROUTE = "typedResult { uid -> EnvironmentControlResultV1.discover(handler().discover(uid)) }"
+        const val QWY_PREFLIGHT_ROUTE = "typedResult { uid -> EnvironmentControlResultV1.preflight(handler().preflight(uid, request)) }"
+        const val QWY_APPLY_ROUTE = "typedResult { uid -> EnvironmentControlResultV1.apply(handler().apply(uid, request)) }"
+        const val QWY_OBSERVE_ROUTE = "typedResult { uid -> EnvironmentControlResultV1.observe(handler().observe(uid, request)) }"
+        const val QWY_RELEASE_ROUTE = "typedResult { uid -> EnvironmentControlResultV1.release(handler().release(uid, request)) }"
+        const val QWY_ADVANCE_ROUTE = "typedResult { uid -> EnvironmentControlResultV1.completeAndAdvance(handler().completeAndAdvance(uid, request)) }"
+        const val QWY_CALLING_UID = "val callerUid = Binder.getCallingUid()"
+        const val QWY_CLEAR_IDENTITY = "val token = Binder.clearCallingIdentity()"
+        const val QWY_RESTORE_IDENTITY = "Binder.restoreCallingIdentity(token)"
+        const val QWY_TYPED_SCOPE = "withProviderBinderIdentity { callerUid -> toTypedResult { block(callerUid) } }"
         const val PINNED_AUTO_WRAPPER =
             "auto_wrapper=\"\$repo_root/apps/cellrebel-auto/gradlew\""
         const val PINNED_QWY_WRAPPER =
