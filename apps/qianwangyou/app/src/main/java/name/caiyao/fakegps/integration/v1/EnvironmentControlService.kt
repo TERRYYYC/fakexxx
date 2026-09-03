@@ -4,7 +4,6 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
-import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentControlResultV1
 import io.github.terryyyc.fakexxx.contract.v1.ApplyRequestV1
@@ -19,7 +18,8 @@ import io.github.terryyyc.fakexxx.contract.v1.ReleaseRequestV1
  * applicationId, production or .bench, each pairing independently).
  *
  * Glue only:
- *  - resolves Binder.getCallingUid() per call and passes it to the handler
+ *  - captures the incoming UID for authorization, then runs QWY-owned work
+ *    under QWY's identity, restoring the incoming identity on every exit
  *  - Binder death / RemoteException stay transport failures (recovery path),
  *    never ContractErrorCodeV1 values
  *  - exported across apps, no network surface
@@ -40,22 +40,22 @@ class EnvironmentControlService : Service() {
     private val binder: IEnvironmentControlV1.Stub = object : IEnvironmentControlV1.Stub() {
 
         override fun discover(): EnvironmentControlResultV1 =
-            typedResult { EnvironmentControlResultV1.discover(handler().discover(callingUid())) }
+            typedResult { uid -> EnvironmentControlResultV1.discover(handler().discover(uid)) }
 
         override fun preflight(request: PreflightRequestV1): EnvironmentControlResultV1 =
-            typedResult { EnvironmentControlResultV1.preflight(handler().preflight(callingUid(), request)) }
+            typedResult { uid -> EnvironmentControlResultV1.preflight(handler().preflight(uid, request)) }
 
         override fun apply(request: ApplyRequestV1): EnvironmentControlResultV1 =
-            typedResult { EnvironmentControlResultV1.apply(handler().apply(callingUid(), request)) }
+            typedResult { uid -> EnvironmentControlResultV1.apply(handler().apply(uid, request)) }
 
         override fun observe(request: ObserveRequestV1): EnvironmentControlResultV1 =
-            typedResult { EnvironmentControlResultV1.observe(handler().observe(callingUid(), request)) }
+            typedResult { uid -> EnvironmentControlResultV1.observe(handler().observe(uid, request)) }
 
         override fun release(request: ReleaseRequestV1): EnvironmentControlResultV1 =
-            typedResult { EnvironmentControlResultV1.release(handler().release(callingUid(), request)) }
+            typedResult { uid -> EnvironmentControlResultV1.release(handler().release(uid, request)) }
 
         override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1): EnvironmentControlResultV1 =
-            typedResult { EnvironmentControlResultV1.completeAndAdvance(handler().completeAndAdvance(callingUid(), request)) }
+            typedResult { uid -> EnvironmentControlResultV1.completeAndAdvance(handler().completeAndAdvance(uid, request)) }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -77,14 +77,6 @@ class EnvironmentControlService : Service() {
     private fun handler(): EnvironmentControlHandler = ProviderRuntime.handler(this)
 
     /**
-     * INV-02: identity is resolved from the kernel-supplied calling uid on every
-     * call. A request never gets to state who it is, and the value is read
-     * inside the Binder transaction — reading it later (e.g. from a worker
-     * thread) would return the provider's own uid.
-     */
-    private fun callingUid(): Int = Binder.getCallingUid()
-
-    /**
      * §6.3.3 typed-failure mapping (KB-7=A, v1.59): a [ContractException] from
      * the handler is an EXPECTED business failure and travels inside the
      * [EnvironmentControlResultV1] carrier as ERROR + the frozen wire code.
@@ -92,8 +84,27 @@ class EnvironmentControlService : Service() {
      * The mapping itself lives in [toTypedResult] (top-level, JVM-testable —
      * this service is Binder glue and cannot be instantiated in a unit lane).
      */
-    private inline fun typedResult(crossinline block: () -> EnvironmentControlResultV1): EnvironmentControlResultV1 =
-        toTypedResult { block() }
+    private inline fun typedResult(crossinline block: (Int) -> EnvironmentControlResultV1): EnvironmentControlResultV1 =
+        withProviderBinderIdentity { callerUid -> toTypedResult { block(callerUid) } }
+}
+
+/**
+ * Keep the kernel-supplied principal separate from the identity used for local
+ * QWY work (including deferred handler initialization and owner recovery).
+ * Handler authorization/lease checks MUST use the captured UID, not re-read it
+ * after clearing. A caller never supplies this value in request data.
+ *
+ * Synchronous, same-thread scope only: never move the token across an async
+ * boundary. Restore even when initialization, authorization or execution throws.
+ */
+internal inline fun <T> withProviderBinderIdentity(block: (callerUid: Int) -> T): T {
+    val callerUid = Binder.getCallingUid()
+    val token = Binder.clearCallingIdentity()
+    return try {
+        block(callerUid)
+    } finally {
+        Binder.restoreCallingIdentity(token)
+    }
 }
 
 /**
