@@ -11,7 +11,7 @@ class RuntimeSelfHookPolicyTest {
     fun `release main process remains unhooked`() {
         assertFalse(
             RuntimeSelfHookPolicy.shouldHook(
-                debugBuild = false,
+                allowNonProbeSelfHook = false,
                 packageName = RuntimeSelfHookPolicy.MODULE_PACKAGE,
                 processName = RuntimeSelfHookPolicy.MODULE_PACKAGE,
             ),
@@ -22,7 +22,7 @@ class RuntimeSelfHookPolicyTest {
     fun `release verification process is deliberately hook eligible`() {
         assertTrue(
             RuntimeSelfHookPolicy.shouldHook(
-                debugBuild = false,
+                allowNonProbeSelfHook = false,
                 packageName = RuntimeSelfHookPolicy.MODULE_PACKAGE,
                 processName = RuntimeSelfHookPolicy.PROBE_PROCESS,
             ),
@@ -33,7 +33,7 @@ class RuntimeSelfHookPolicyTest {
     fun `debug main process keeps the controlled self hook`() {
         assertTrue(
             RuntimeSelfHookPolicy.shouldHook(
-                debugBuild = true,
+                allowNonProbeSelfHook = true,
                 packageName = RuntimeSelfHookPolicy.MODULE_PACKAGE,
                 processName = RuntimeSelfHookPolicy.MODULE_PACKAGE,
             ),
@@ -44,7 +44,7 @@ class RuntimeSelfHookPolicyTest {
     fun `unrelated scoped packages remain eligible`() {
         assertTrue(
             RuntimeSelfHookPolicy.shouldHook(
-                debugBuild = false,
+                allowNonProbeSelfHook = false,
                 packageName = "com.example.target",
                 processName = "com.example.target:worker",
             ),

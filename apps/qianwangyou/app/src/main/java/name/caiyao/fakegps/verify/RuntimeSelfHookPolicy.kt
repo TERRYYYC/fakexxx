@@ -13,18 +13,24 @@ object RuntimeSelfHookPolicy {
     @JvmField val MODULE_PACKAGE: String = BuildConfig.APPLICATION_ID
     @JvmField val PROBE_PROCESS: String = "$MODULE_PACKAGE:hook_verify"
 
+    /** Production entry: uses this APK's generated build policy. */
+    @JvmStatic
+    fun shouldHook(packageName: String?, processName: String?): Boolean =
+        shouldHook(BuildConfig.ALLOW_NON_PROBE_SELF_HOOK, packageName, processName)
+
     /**
-     * Release main stays real so configuration screens never echo spoofed values as truth.
-     * The private probe process is the sole release self-hook exception. Other scoped packages
-     * keep the module's normal behaviour.
+     * Release and codexBench ordinary self processes stay unhooked by this module. DEBUG is
+     * not an independence policy: ordinary debug deliberately permits a controlled self-hook,
+     * while codexBench must preserve its raw-reader process. Only the exact private probe is
+     * exempt when non-probe self hooks are disabled. Other scoped packages keep normal behavior.
      */
     @JvmStatic
     fun shouldHook(
-        debugBuild: Boolean,
+        allowNonProbeSelfHook: Boolean,
         packageName: String?,
         processName: String?,
     ): Boolean {
         if (packageName != MODULE_PACKAGE) return true
-        return debugBuild || processName == PROBE_PROCESS
+        return allowNonProbeSelfHook || processName == PROBE_PROCESS
     }
 }

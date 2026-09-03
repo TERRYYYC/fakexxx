@@ -1,12 +1,18 @@
 package name.caiyao.fakegps.verify;
 
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import org.junit.Test;
 
 /** Compiled production census for the private release probe path. */
@@ -21,6 +27,11 @@ public class RuntimeProbeWiringContractTest {
         assertTrue(hook.contains("reloadHookSnapshot"));
         assertTrue(hook.contains("reloadSnapshotForProbe"));
         assertTrue(hook.contains("CURRENT_FINGERPRINT"));
+        // Pin the real compiled call, not a decoy source string or a simulated debug Boolean.
+        // Only the two-argument entry consumes the actual generated build policy.
+        assertEquals(Set.of("(Ljava/lang/String;Ljava/lang/String;)Z"),
+                referencedMethodDescriptors("name.caiyao.fakegps.hook.MainHook",
+                        "name/caiyao/fakegps/verify/RuntimeSelfHookPolicy", "shouldHook"));
     }
 
     @Test
@@ -88,6 +99,59 @@ public class RuntimeProbeWiringContractTest {
                 output.write(buffer, 0, read);
             }
             return new String(output.toByteArray(), StandardCharsets.ISO_8859_1);
+        }
+    }
+
+    /** Read method references from the JVM constant pool without loading Xposed on the host. */
+    private static Set<String> referencedMethodDescriptors(
+            String className, String owner, String method) throws Exception {
+        String resource = className.replace('.', '/') + ".class";
+        try (InputStream input = RuntimeProbeWiringContractTest.class
+                .getClassLoader().getResourceAsStream(resource)) {
+            assertNotNull(resource, input);
+            DataInputStream data = new DataInputStream(input);
+            assertEquals(0xCAFEBABE, data.readInt());
+            data.readUnsignedShort();
+            data.readUnsignedShort();
+            int count = data.readUnsignedShort();
+            String[] text = new String[count];
+            int[] classes = new int[count];
+            int[][] namesAndTypes = new int[count][];
+            List<int[]> references = new ArrayList<>();
+            for (int i = 1; i < count; i++) {
+                int tag = data.readUnsignedByte();
+                switch (tag) {
+                    case 1: text[i] = data.readUTF(); break;
+                    case 7: classes[i] = data.readUnsignedShort(); break;
+                    case 12: namesAndTypes[i] = new int[] {
+                            data.readUnsignedShort(), data.readUnsignedShort()}; break;
+                    case 10:
+                    case 11: references.add(new int[] {
+                            data.readUnsignedShort(), data.readUnsignedShort()}); break;
+                    case 3:
+                    case 4:
+                    case 9:
+                    case 17:
+                    case 18: data.readInt(); break;
+                    case 5:
+                    case 6: data.readLong(); i++; break;
+                    case 8:
+                    case 16:
+                    case 19:
+                    case 20: data.readUnsignedShort(); break;
+                    case 15: data.readUnsignedByte(); data.readUnsignedShort(); break;
+                    default: throw new AssertionError("Unknown classfile constant tag " + tag);
+                }
+            }
+            Set<String> result = new HashSet<>();
+            for (int[] reference : references) {
+                int[] nameAndType = namesAndTypes[reference[1]];
+                if (owner.equals(text[classes[reference[0]]])
+                        && method.equals(text[nameAndType[0]])) {
+                    result.add(text[nameAndType[1]]);
+                }
+            }
+            return result;
         }
     }
 }
