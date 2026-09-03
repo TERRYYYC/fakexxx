@@ -153,6 +153,10 @@ Files: QWY app/build.gradle, verify/RuntimeSelfHookPolicy.kt, hook/MainHook.java
 observation-scope classification only if needed to keep it truthful; focused tests under verify/.
 Enable and execute the actual codexBench unit-test variant if currently missing. Add narrowly
 scoped compiled/wiring checks where needed; avoid changing shared CI/scripts until coordinated.
+The coordinator owns the codex-bench CI step and test-report artifact additions. Release
+actual-variant testing exposed four existing tests that depend on debug-only probe classes;
+move those tests without content changes to src/testDebug and reuse them for codexBench so
+release can compile without reducing debug/codexBench coverage.
 
 Steps: (1) document the existing config root-cause evidence and uncertainty;
 (2) run a RED demonstrating codexBench main self-hook eligibility;
@@ -171,7 +175,7 @@ test tasks come from the existing workflows and previous acceptance recipe, not 
 
 - In apps/qianwangyou: `./gradlew :app:testDebugUnitTest --tests '*SystemMockTrustPolicyTest' --tests '*QwyActualReadbackWiringTest'`.
 - Targeted new tests: `./gradlew :app:testDebugUnitTest --tests '*SystemMock*DiagnosticsTest'`.
-- Actual variant: `./gradlew :app:testCodexBenchUnitTest --tests '*RuntimeSelfHookPolicy*' --tests '*ObservationScope*'` after enabling the task if required.
+- Actual variants: run `:app:testCodexBenchUnitTest` and `:app:testReleaseUnitTest` with `--tests '*RuntimeSelfHook*' --tests '*ObservationScope*'` after enabling the tasks if required.
 - Android adapter: `./integration-tests/pr63-on-issue66/run-host-gate.sh :harness:testDebugUnitTest --tests '*AndroidSystemMockLocationReaderDiagnosticsTest'`.
 - Full affected-app and repository gate: `bash scripts/verify-a-plus.sh` using its documented environment; retain inherited lint debt rather than claim raw lint is clean.
 - APK build: `./gradlew :app:assembleDebug :app:assembleCodexBench :app:assembleDebugAndroidTest`.
@@ -190,6 +194,7 @@ AC4 actual runtime wiring, AC5 exact codexBench isolation with unchanged old var
 AC6 evidence-backed config prerequisite report, AC7 independent non-author exact-HEAD review,
 AC8 committed/pushed reports with explicit host/emulator/Moto boundaries.
 
-Each lane has its own tests and review; root combines only reviewed, non-overlapping commits
-and tests the combined state before publishing a combined-build claim. Keep PRs draft and
+Each lane has its own tests. A non-author reviews both lanes and coordinator changes at the
+exact combined HEAD; root combines only non-overlapping commits and tests the combined state
+before publishing a combined-build claim. Keep PRs draft and
 unmerged. Do not alter #73 review custody or close #71/#66.
