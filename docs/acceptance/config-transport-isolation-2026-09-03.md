@@ -115,7 +115,8 @@ match the committed signer:
 
 `7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41`
 
-Built local SHA-256 values (not Moto-installed artifacts):
+Initial lane B SHA-256 values, before the P2 presentation correction below
+(historical host-built artifacts, not Moto-installed artifacts):
 
 | Artifact under QWY `app/build/outputs/apk` | SHA-256 |
 | --- | --- |
@@ -175,3 +176,50 @@ not silently substituted with JVM tests. There is no new UI layout/design. No ma
 `designs/**/*.pen` or root media artifacts were found. Clowder-specific pnpm hotfix,
 architecture/tips/fallback checkers are not present in this external Android repository;
 its actual Gradle gates and `git diff --check` were used. Temporary evidence stayed in `/tmp`.
+
+## Independent-review P2: process baseline is not physical truth
+
+The reviewer found that the new codexBench REAL_BASELINE path reached old copy that
+equated release/non-self-hooked observations with physical truth. The coordinator
+verified the issue against lane B commit `10b10abcd5c0138e0895193ac91f4a6a9ef068b3`.
+The policy was correct; its presentation consumers retained an obsolete assumption.
+Not self-hooking this module does not rule out system mock locations or another module.
+
+The narrow correction introduces a pure `ui/ObservationScopePresentation.kt` mapper,
+used by VerifyScreen's ScopeCard and FieldRow and both text/boolean reference labels
+in ProfileEditorScreen. It says “本进程读取基线 / 本模块未自 hook”, describes the system
+mock/other-module limitation, and preserves “不能证明目标 App 内的 hook 是否生效”.
+HOOK_PROBE no longer assumes a release build, while retaining its exact private
+process, framework injection and matching request/configuration requirements.
+SELF_HOOKED copy now distinguishes build eligibility from actual framework injection.
+
+Sibling sweep in those same two screens narrows passthrough to “系统 API 返回值” and
+collision comparison to “读取基线”. Related editor comments and VerifyViewModel's
+“untouched device values” comment are narrowed. No enum, classification, verification
+engine, trust decision, data selection or UI layout changed. No readback/controller/
+service/oracle/config-transport behavior changed.
+
+Evidence directory: `/tmp/fakexxx-scope-copy.RL38JT/` (temporary, author machine).
+
+- RED: first extract the old copy unchanged into the shared mapper and wire all four
+  consumption sites. `red-copy.log`: actual `:app:testCodexBenchUnitTest --tests
+  '*ObservationScopePresentationTest' --tests '*VerifyUiContractTest'` executed
+  **9 cases, 5 assertion failures**, not a compilation or missing-task failure.
+  Four new tests exercised returned presentation values, including the real generated
+  variant's scope; one existing partial-copy behavior assertion was tightened.
+- GREEN: `green-all.log`: `:app:testDebugUnitTest :app:testCodexBenchUnitTest
+  :app:testReleaseUnitTest :app:assembleCodexBench` passed. XML totals are debug
+  **1,039/1,039**, codexBench **1,039/1,039**, release **1,003/1,003**, all with zero
+  failures/errors/skips. All four added tests are shared across all three variants.
+- The mapper tests assert executed output, not source-string presence. Source diff
+  establishes the four consumers use it; actual rendered UI is a separate coordinator/
+  reviewer gate, not a claim made by these JVM tests. The unchanged field-value routing
+  remains covered by VerifyUiContractTest.
+- P2 codexBench APK SHA-256: `7fe478924175161462adaa42243ac8f56256434b4872cb92f935758c399cfe3d`.
+  Only the codexBench APK was rebuilt for this text correction; the earlier table is
+  explicitly historical. This lane performed no adb, install, push, merge or self-review.
+
+Next owner: coordinator cherry-picks this P2 fix into the combined branch, supplies
+the owned-emulator screenshots and obtains the non-author reviewer's exact-HEAD verdict.
+The author does not claim that runtime UI review, cross-UID publication or Moto FULL
+acceptance has passed.
