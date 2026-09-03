@@ -99,7 +99,10 @@ class QwyActualReadbackWiringTest {
         assertTrue(digest.contains("ProcessMockProviderOwnership.projectionOwnershipSnapshot()"))
         assertTrue(controllerSource.contains("MockProviderStartupProjectionReconciler("))
         assertTrue(controllerSource.contains("override fun reconcileProjectionOnOwnerStart()"))
-        assertTrue(serviceSource.contains("SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))"))
+        assertTrue(serviceSource.contains("SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager), diagnosticSink = {"))
+        assertTrue(serviceSource.contains("AndroidSystemMockDiagnosticLogger.record(SystemMockDiagnosticOrigin.SERVICE, it)"))
+        assertTrue(controllerSource.contains("SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager), diagnosticSink = {"))
+        assertTrue(controllerSource.contains("AndroidSystemMockDiagnosticLogger.record(SystemMockDiagnosticOrigin.INTEGRATION, it)"))
         assertTrue(serviceSource.contains("projectionMatchesExactly = { config ->"))
         assertTrue(serviceSource.contains("matchesExactTargetProjection"))
     }

@@ -26,6 +26,8 @@ import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.data.SpoofSettings
 import name.caiyao.fakegps.integration.v1.AndroidSystemMockLocationReader
+import name.caiyao.fakegps.integration.v1.AndroidSystemMockDiagnosticLogger
+import name.caiyao.fakegps.integration.v1.SystemMockDiagnosticOrigin
 import name.caiyao.fakegps.integration.v1.SystemMockTrustPolicy
 import name.caiyao.fakegps.ui.ComposeActivity
 
@@ -61,7 +63,9 @@ class MockProviderService : Service() {
             completion = Executor(handler::post),
         )
         val settings = SpoofSettings.getInstance(this)
-        val trustPolicy = SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))
+        val trustPolicy = SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager), diagnosticSink = {
+            AndroidSystemMockDiagnosticLogger.record(SystemMockDiagnosticOrigin.SERVICE, it)
+        })
         orchestrator = LocationDeliveryOrchestrator(
             controller = controller,
             readPublished = {

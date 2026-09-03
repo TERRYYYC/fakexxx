@@ -238,7 +238,9 @@ class QwyEnvironmentController(
      * last-applied command record: requested coordinates are not observations.
      */
     private val systemMockTrustPolicy: SystemMockTrustPolicy? = locationManager?.let { manager ->
-        SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager))
+        SystemMockTrustPolicy(AndroidSystemMockLocationReader(manager), diagnosticSink = {
+            AndroidSystemMockDiagnosticLogger.record(SystemMockDiagnosticOrigin.INTEGRATION, it)
+        })
     }
 
     override fun scheduleSnapshot(): ScheduleSnapshot? {
