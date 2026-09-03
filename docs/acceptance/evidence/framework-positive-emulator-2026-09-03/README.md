@@ -3,7 +3,7 @@ feature_ids: [G2-66, G2-71]
 topics: [android, magisk, vector, xsharedpreferences, system-mock, evidence]
 doc_kind: evidence-manifest
 created: 2026-09-03
-status: review-pending
+status: reviewed-pass
 application_code_head: e1a00eab462b2d5e9355a51f5fdd4da0f77b7709
 ---
 

@@ -3,7 +3,7 @@ feature_ids: [G2-66, G2-71]
 topics: [android, magisk, vector, config-transport, system-mock, acceptance]
 doc_kind: acceptance
 created: 2026-09-03
-status: independent-review-pending
+status: reviewed-pass
 application_code_head: e1a00eab462b2d5e9355a51f5fdd4da0f77b7709
 ---
 
@@ -150,9 +150,10 @@ recreated from the pinned plan. Full receipts remain outside the AVD.
 Portable evidence: [manifest and extracts](evidence/framework-positive-emulator-2026-09-03/README.md).
 Unmodified local receipts: `/tmp/fakexxx-framework.wofmpO/receipts/`.
 
-Independent non-author review is required before this report changes from review-pending.
-After approval, publish the report and review to draft PR #74. Keep the PR draft and do not
-merge or close #66/#71 from this emulator result.
+Independent non-author review found no P0/P1/P2 and issued a scoped approval for the exact
+seven-file evidence snapshot; see [the final review](evidence/framework-positive-emulator-2026-09-03/review-final.md).
+Publish the report and review to draft PR #74. Keep the PR draft and do not merge or close
+#66/#71 from this emulator result.
 
 Recommended next action: add the minimal real publication-anchor propagation needed for a
 fresh dual-source assertion, independently review it, then run the separately authorized Moto
