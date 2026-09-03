@@ -1,0 +1,48 @@
+All phases below use boot_id=7c78851c-bd41-4221-9bc4-272e87542dd0,
+QWY package=name.caiyao.fakegps.codexbench UID=10208 PID=10461, and
+Auto package=com.example.cellrebelauto.codexbench UID=10209.
+
+[profile setup; excluded from A/B]
+1788457936.462 PID=10461 ConfigPrefsSync: published=true readable=true transportAccepted=true commit=true outcomeDurable=true profileId=1 fp=sha256:8ec81333fde99f48 bytes=248
+
+[A = 5 seconds]
+1788457994.879 PID=10461 ConfigPrefsSync: published=true readable=true transportAccepted=true commit=true outcomeDurable=true profileId=1 fp=sha256:a3a533ccaa78289f bytes=247
+Auto process birth: PID=11468 UID=10209 process=com.example.cellrebelauto.codexbench
+1788458026.980 PID=11468 VectorLegacyBridge: FakeGPS: transport accepted schema=4 fp=sha256:a3a533ccaa78289f
+1788458026.980 PID=11468 VectorLegacyBridge: FakeGPS: Loaded config for com.example.cellrebelauto.codexbench | location=true | cellRebuild=false
+1788458027.022 PID=11468 VectorLegacyBridge: FakeGPS-Hook: event=scheduler_owned process=com.example.cellrebelauto.codexbench intervalMs=5000
+1788458030.036 PID=11468 VectorLegacyBridge: FakeGPS: [DIAG] fingerprint and hour unchanged (sha256:a3a533ccaa78289f) -> skip parse
+
+[hot B = 10 seconds; Auto PID remains 11468]
+pre_hot_qwy_pid=10461
+pre_hot_auto_pid=11468
+1788458080.645 PID=11468/TID=11486 VectorLegacyBridge: FakeGPS: [DIAG] no prefs json -> keep last-known-good
+1788458080.648 PID=11468/TID=11486 VectorLegacyBridge: FakeGPS: transport accepted schema=4 fp=sha256:84132f3abcb368be
+1788458080.648 PID=11468/TID=11486 VectorLegacyBridge: FakeGPS-Hook: event=interval_changed process=com.example.cellrebelauto.codexbench fromMs=5000 toMs=10000
+1788458080.648 PID=10461 ConfigPrefsSync: published=true readable=true transportAccepted=true commit=true outcomeDurable=true profileId=1 fp=sha256:84132f3abcb368be bytes=248
+1788458085.168 PID=11468 VectorLegacyBridge: FakeGPS: [DIAG] fingerprint and hour unchanged (sha256:84132f3abcb368be) -> skip parse
+post_hot_qwy_pid=10461
+post_hot_auto_pid=11468
+
+The 3 ms missing-file observation is the expected atomic replacement window. The reader kept
+last-known-good and then accepted B in the same PID; it is retained rather than hidden.
+
+[cold B = 10 seconds; no QWY republish]
+old_auto_pid=11468
+force_stop_old_auto_exit=0
+old_pid_probe=OLD_PID_GONE
+new_auto_pid=11919
+new_auto_uid=10209
+b_cold_ConfigPrefsSync_lines=0
+b_cold_fp_B_lines=2
+b_cold_fp_A_lines=0
+1788458114.921 PID=11919 VectorLegacyBridge: FakeGPS: transport accepted schema=4 fp=sha256:84132f3abcb368be
+1788458114.923 PID=11919 VectorLegacyBridge: FakeGPS: Loaded config for com.example.cellrebelauto.codexbench | location=true | cellRebuild=false
+1788458114.965 PID=11919 VectorLegacyBridge: FakeGPS-Hook: event=scheduler_owned process=com.example.cellrebelauto.codexbench intervalMs=10000
+1788458117.983 PID=11919 VectorLegacyBridge: FakeGPS: [DIAG] fingerprint and hour unchanged (sha256:84132f3abcb368be) -> skip parse
+
+Primary receipts: profile-save-logcat.stdout, a-pre-identity.stdout,
+a-writer-logcat.stdout, a-reader-identity.stdout, a-reader-logcat.stdout,
+b-pre-hot-identities.stdout, b-hot-logcat.stdout, b-post-hot-identities.stdout,
+b-cold-force-stop-auto.meta, b-cold-old-pid-gone.stdout,
+b-cold-post-identities.stdout, b-cold-logcat.stdout.

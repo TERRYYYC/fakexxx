@@ -1,0 +1,53 @@
+application_code_head=e1a00eab462b2d5e9355a51f5fdd4da0f77b7709
+execution_plan_commit=8d0914860e2fcbc4142b99bd602931d8295ac037
+avd=codex_framework_api35
+serial=emulator-5580
+sdk=35
+abi=arm64-v8a
+debuggable=1
+private_adb_server_port=5040
+boot_id=7c78851c-bd41-4221-9bc4-272e87542dd0
+
+[pinned inputs]
+magisk_source_commit=e8a58776f1d7bdf852072ad0baa6eceb9a1e4aac
+magisk_apk_sha256=e0d32d2123532860f97123d927b1bb86c4e08e6fd8a48bfc6b5bee0afae9ebd5
+vector_zip_sha256=d0c1bf2ca0f1b32e80eb1979e86316656137ac74dff9fe7d25ab624c83715ad7
+qwy_codexbench_sha256=208898ce2bad69f735dab0883f0e591413b9038b30d5d98d3ec1e88ca9e55075
+auto_codexbench_sha256=304efe65e27f246c55cd2d36e5a5ce148acbe0484d7dec2732de65980cd1e9f1
+shared_apk_signer_sha256=7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41
+
+[live Magisk / Vector]
+Magisk=30.7:MAGISK:R
+MagiskVersionCode=30700
+VectorModule=id=zygisk_vector version="v2.2 (3080-88f8e1fa-JingMatrix-Vector)" versionCode=3080
+VectorStatus={"Framework Version":"2.2","Version Code":3080,"API Version":102,"Enabled Modules":1,"success":true}
+VectorModuleState={"PACKAGE":"name.caiyao.fakegps.codexbench","UID":10208,"STATUS":"enabled"}
+VectorScope=com.example.cellrebelauto.codexbench/0,name.caiyao.fakegps.codexbench/0
+MagiskLiveSetup32BitWarning="magisk32: No such file or directory"
+arm64_target_injection_observed=true
+
+[installed packages]
+name.caiyao.fakegps.codexbench uid=10208 installed_sha256=208898ce2bad69f735dab0883f0e591413b9038b30d5d98d3ec1e88ca9e55075
+com.example.cellrebelauto.codexbench uid=10209 installed_sha256=304efe65e27f246c55cd2d36e5a5ce148acbe0484d7dec2732de65980cd1e9f1
+
+[runtime self-isolation observation]
+[2026-09-03T20:50:37.230 guest] UID=10208 PID=10461 VectorLegacyBridge: Loading legacy module name.caiyao.fakegps.codexbench
+[2026-09-03T20:50:37.329 guest] UID=10208 PID=10461 VectorLegacyBridge: Loading class name.caiyao.fakegps.hook.MainHook
+[2026-09-03T20:50:37.331 guest] UID=10208 PID=10461 VectorNative: Injected Vector framework into name.caiyao.fakegps.codexbench
+qwy_pid_10461_generic_hook_registration_lines=0
+auto_pid_11468_generic_hook_registration_lines=16
+[2026-09-03T20:53:46.997 guest] UID=10209 PID=11468 VectorLegacyBridge: FakeGPS: Location hooks registered
+[2026-09-03T20:53:47.022 guest] UID=10209 PID=11468 VectorLegacyBridge: FakeGPS-Hook: event=scheduler_owned process=com.example.cellrebelauto.codexbench intervalMs=5000
+
+Boundary: Vector/Xposed and MainHook did load in the QWY process. The bounded observation is
+that QWY PID 10461 emitted none of this module's generic spoof-hook registration lines while
+the scoped Auto PID emitted 16. This corroborates the already-tested self-isolation policy;
+it does not claim that the QWY process contained no framework plumbing or no hooks of any kind.
+The Magisk live script's missing-magisk32 warning prevents extending this result to a 32-bit
+target; both applications in this run were observed on the arm64 path.
+
+Primary receipts: magisk-version.stdout, magisk-version-code.stdout,
+vector-module-prop-before-live.stdout, raw-vector-status-final.stdout,
+raw-vector-modules-final.stdout, raw-vector-scope-final.stdout,
+installed-packages-uids.stdout, installed-byte-hashes.stdout, a-vector-log.stdout,
+magisk-live-2-vector.stderr.
