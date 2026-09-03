@@ -308,6 +308,89 @@ object APlus10APlanSeed {
         return StartRunVerdict.AwaitingMilestone
     }
 
+    // ------------------------------------------------------------------
+    // R8 P1-2 (Option D) — OBSERVED start receipt
+    // ------------------------------------------------------------------
+
+    /**
+     * The product's reject line. `AutomationService.startWithPlan` is the
+     * canonical check-and-set: when a run is active it publishes exactly this
+     * message through `addLog` (stamped "[HH:mm:ss] ") on the public `logs`
+     * StateFlow and returns; when it accepts it sets `isRunning = true` and
+     * publishes NOTHING before launching the engine coroutine. Both facts are
+     * pinned in main by P10CollectorSurfaceGuardTest (r8_*): drift there goes
+     * loudly red instead of quietly reading as indeterminate on the device.
+     */
+    const val PRODUCT_REJECT_SENTINEL = "Already running, ignoring start request"
+
+    /** `addLog` entry shape: "[HH:mm:ss] " + message, and nothing else on the line. */
+    private val PRODUCT_REJECT_ENTRY =
+        Regex("""^\[\d{2}:\d{2}:\d{2}\] """ + Regex.escape(PRODUCT_REJECT_SENTINEL) + "$")
+
+    /**
+     * What the product published about THIS call, read after `startAutomation`
+     * returned (the call is a synchronous direct call: the check-and-set has
+     * already run — happens-before, not a poll).
+     *
+     *  - [AcceptedObserved]       logs unchanged AND isRunning=true after the call.
+     *                             The accept branch is the only path that flips
+     *                             isRunning without publishing a line.
+     *  - [RejectedAlreadyRunning] logs == before + exactly one product reject entry.
+     *                             A foreign start owns the engine slot; nothing that
+     *                             appears after pre-max belongs to this request.
+     *  - [Indeterminate]          ANY other shape. Not defensive padding: once a
+     *                             foreign run's engine exists its log forwarder
+     *                             OVERWRITES `logs` wholesale, wiping a reject entry —
+     *                             "sentinel absent ⇒ accepted" would turn that true
+     *                             REJECT into a false ACCEPT (fail-open). Unknown
+     *                             shapes therefore never attribute (RUN_NOT_STARTED).
+     *                             Also covers a no-op call (service not connected
+     *                             publishes nothing and leaves isRunning=false), the
+     *                             coroutine's ERROR line, and the log cap trimming
+     *                             the oldest entry (fail-closed by design).
+     */
+    sealed interface StartReceipt {
+        data object AcceptedObserved : StartReceipt
+        data object RejectedAlreadyRunning : StartReceipt
+        data class Indeterminate(val reason: String) : StartReceipt
+    }
+
+    fun observeStartReceipt(
+        logsBefore: List<String>,
+        logsAfter: List<String>,
+        runningAfter: Boolean,
+    ): StartReceipt {
+        if (logsAfter == logsBefore) {
+            return if (runningAfter) {
+                StartReceipt.AcceptedObserved
+            } else {
+                StartReceipt.Indeterminate(
+                    "logs unchanged but isRunning=false after the call — the product published no " +
+                        "verdict (service not connected / no-op); nothing was accepted",
+                )
+            }
+        }
+        val grewByExactlyOne = logsAfter.size == logsBefore.size + 1 &&
+            logsAfter.subList(0, logsBefore.size) == logsBefore
+        if (grewByExactlyOne && PRODUCT_REJECT_ENTRY.matches(logsAfter.last())) {
+            return StartReceipt.RejectedAlreadyRunning
+        }
+        return StartReceipt.Indeterminate(
+            "log window is neither unchanged nor exactly one appended product reject entry " +
+                "(before=${logsBefore.size} after=${logsAfter.size} last=" +
+                (logsAfter.lastOrNull()?.let { "'$it'" } ?: "<none>") + ") — a concurrent writer or the " +
+                "engine log forwarder touched the window; refusing to attribute",
+        )
+    }
+
+    /**
+     * The request-owned generation may be polled ONLY after an observed accept.
+     * Every other receipt yields no verdict — the caller prints RUN_NOT_STARTED
+     * and never consults sessions/attempts that a foreign start may have made.
+     */
+    fun <T> onlyIfAccepted(receipt: StartReceipt, poll: () -> T): T? =
+        if (receipt is StartReceipt.AcceptedObserved) poll() else null
+
     /**
      * R6 P1-2 "mismatched task/session plan legs": a running attempt binds a
      * task (→ task.planId) AND a session (→ session.planId). If the two legs

@@ -327,10 +327,20 @@ class P10CollectorSurfaceGuardTest {
             "start_run must hold the single-flight lock across receipt+start+poll",
             code.contains("synchronized(START_RUN_LOCK)"),
         )
-        // Atomic typed receipt BEFORE the engine call.
-        for (receipt in listOf("START_RECEIPT accepted", "START_RECEIPT already_running", "START_RECEIPT not_connected")) {
-            assertTrue("start_run must emit the atomic receipt '$receipt'", code.contains(receipt))
+        // R8 P1-2 (Option D): the prechecks are fast-path REFUSALS only; the
+        // receipt is OBSERVED after the product call (r8_* guards below).
+        for (precheck in listOf("START_PRECHECK not_connected", "START_PRECHECK already_running")) {
+            assertTrue("start_run must keep the fast-path refusal '$precheck'", code.contains(precheck))
         }
+        for (receipt in listOf("START_RECEIPT accepted_observed", "START_RECEIPT rejected_already_running", "START_RECEIPT indeterminate")) {
+            assertTrue("start_run must emit the observed receipt '$receipt'", code.contains(receipt))
+        }
+        assertEquals(
+            "the pre-call predicted receipt 'START_RECEIPT accepted' must be gone — R8: printed before the " +
+                "call it was a prediction, not an observation",
+            false,
+            code.contains("\"START_RECEIPT accepted\""),
+        )
         // Typed verdict vocabulary — including R7 degenerate/awaiting failures.
         for (token in listOf("RUN_STARTED", "RUN_START_CONFLICT", "RUN_START_DEGENERATE", "RUN_NOT_STARTED")) {
             assertTrue("start_run must emit the typed token $token", code.contains(token))
@@ -406,6 +416,123 @@ class P10CollectorSurfaceGuardTest {
                 "seed/run has no adb entry point",
             Regex("""<activity\b[^>]*?APlusSeedActivity""").containsMatchIn(noComments),
         )
+    }
+
+    // ------------------------------------------------------------------
+    // R8 P1-2 (Option D) — the start receipt is OBSERVED after the product
+    // call on the product's own PUBLISHED verdict. Wiring-sensitive pins:
+    // the pure classifier is behaviourally tested in APlus10APlanSeedTest;
+    // these guards pin what the shipped activity feeds it and when.
+    // ------------------------------------------------------------------
+
+    /**
+     * Ordering: snapshot the public logs BEFORE the call, call the product,
+     * read logs + isRunning AFTER, classify, and only then print the receipt;
+     * the request-owned poll is reachable ONLY through onlyIfAccepted(receipt).
+     * Moving `accepted_observed` (or the poll) in front of the call turns the
+     * observation back into the R7 prediction Sol's counterexample beat.
+     */
+    @Test
+    fun r8_startReceiptIsObservedAfterTheProductCallAndGatesThePoll() {
+        val code = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "APlusSeedActivity.kt" }.second
+        fun at(token: String): Int {
+            val i = code.indexOf(token)
+            assertTrue("start_run must contain '$token'", i >= 0)
+            return i
+        }
+        val before = at("val logsBefore = AutomationService.logs.value")
+        // The product call must be a bare statement (the runbook echo line also
+        // contains the text inside a string literal — that is not the call).
+        val startStatement = Regex("""(?m)^\s*AutomationService\.startAutomation\(planId\)\s*$""")
+        val callMatch = startStatement.find(code)
+        assertTrue("start_run must call AutomationService.startAutomation(planId) as a bare statement", callMatch != null)
+        val call = callMatch!!.range.first
+        val after = at("val logsAfter = AutomationService.logs.value")
+        val running = at("val runningAfter = AutomationService.isRunning.value")
+        val classify = at("APlus10APlanSeed.observeStartReceipt(")
+        val accepted = at("\"START_RECEIPT accepted_observed")
+        val gate = at("APlus10APlanSeed.onlyIfAccepted(receipt)")
+        assertTrue("logs must be snapshotted BEFORE the product call", before < call)
+        assertTrue("logs must be re-read AFTER the product call", call < after)
+        assertTrue("isRunning must be read AFTER the product call", call < running)
+        assertTrue("classification must follow both post-call reads", after < classify && running < classify)
+        assertTrue("the receipt line may be printed only after classification", classify < accepted)
+        assertTrue("the poll gate must follow the receipt", accepted < gate)
+        assertTrue(
+            "the request-owned poll must be invoked ONLY inside onlyIfAccepted(receipt) { ... }",
+            Regex("""onlyIfAccepted\(receipt\)\s*\{\s*pollStartVerdict\(""").containsMatchIn(code),
+        )
+        assertEquals(
+            "pollStartVerdict must have exactly one call site (inside the gate) besides its declaration",
+            2,
+            Regex("""pollStartVerdict\(""").findAll(code).count(),
+        )
+        assertEquals(
+            "exactly one product start call per request",
+            1,
+            startStatement.findAll(code).count(),
+        )
+        assertTrue(
+            "rejected and indeterminate receipts must both terminate in RUN_NOT_STARTED before the gate",
+            Regex("""rejected_already_running[\s\S]{0,700}RUN_NOT_STARTED[\s\S]{0,900}indeterminate[\s\S]{0,700}RUN_NOT_STARTED""")
+                .containsMatchIn(code.substring(0, gate)),
+        )
+    }
+
+    /**
+     * The receipt couples to an UNVERSIONED product behaviour: the reject
+     * branch of AutomationService.startWithPlan publishes one exact log line;
+     * the accept branch flips isRunning and publishes nothing before launch.
+     * Pin every fact the classifier relies on so drift in main goes loudly
+     * red here instead of quietly reading as "indeterminate" on the device.
+     */
+    @Test
+    fun r8_productRejectSentinelAndAcceptSilenceArePinnedInMain() {
+        val service = File(mainSourceDir, "automation/AutomationService.kt")
+        assertTrue("AutomationService.kt must exist", service.isFile)
+        val sources = kotlinSourcesWithoutComments(mainSourceDir)
+        val code = sources.first { it.first == service }.second
+        val sentinel = APlus10APlanSeed.PRODUCT_REJECT_SENTINEL
+        // 1. reject branch: check → exactly this log line → return
+        assertTrue(
+            "startWithPlan's reject branch must publish exactly '$sentinel' and return",
+            Regex("""if\s*\(_isRunning\.value\)\s*\{\s*addLog\("${Regex.escape(sentinel)}"\)\s*return\s*\}""")
+                .containsMatchIn(code),
+        )
+        // 2. the literal exists ONCE in all of main — no other main writer can forge it
+        val mainAll = sources.joinToString("\n") { it.second }
+        assertEquals(
+            "the reject sentinel must occur exactly once in src/main",
+            1,
+            Regex(Regex.escape(sentinel)).findAll(mainAll).count(),
+        )
+        // 3. accept branch: _isRunning := true BEFORE launch, NO synchronous addLog (lambda wiring only)
+        val rejectLog = code.indexOf("addLog(\"$sentinel\")")
+        val launch = code.indexOf("automationJob = serviceScope.launch")
+        assertTrue("the reject branch must precede the launch", rejectLog in 0 until launch)
+        val acceptRegion = code.substring(rejectLog + 1, launch)
+        assertTrue(
+            "the accept branch must set _isRunning.value = true before launching",
+            acceptRegion.contains("_isRunning.value = true"),
+        )
+        assertEquals(
+            "the accept branch must publish no log before launch (every addLog( there must be lambda wiring)",
+            Regex("""\{\s*addLog\(it\)\s*\}""").findAll(acceptRegion).count(),
+            Regex("""addLog\(""").findAll(acceptRegion).count(),
+        )
+        // 4. the entry point is a synchronous direct call, and logs are public
+        assertTrue(
+            "startAutomation must call startWithPlan synchronously (happens-before, not poll)",
+            Regex("""fun startAutomation\(planId: Long\)\s*\{\s*instance\?\.startWithPlan\(planId\)""").containsMatchIn(code),
+        )
+        assertTrue(
+            "logs must be published as a public StateFlow",
+            code.contains("val logs: StateFlow<List<String>> = _logs"),
+        )
+        // 5. the entry format the classifier matches: "[HH:mm:ss] $message"
+        assertTrue(code.contains("SimpleDateFormat(\"HH:mm:ss\""))
+        assertTrue(code.contains("\"[\$timestamp] \$message\""))
     }
 
     // ------------------------------------------------------------------

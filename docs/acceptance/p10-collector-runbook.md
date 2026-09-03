@@ -178,18 +178,30 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 #   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
 #   （sourceFileName=FX-G2-10A / 10 行 / quota 冻结向量 [2,1,3,1,2,1,1,3,1,2] / csvRow 1..10 /
 #   坐标列仍是 KB-8 占位），拓扑不符（外来 CSV import、错 id、同总额再分配）即 REFUSED（P2/P4）。
-#   判据（R7 P1-2 typed receipt + verdict，替代 R6 的裸 verdict）：start_run 全程持 process-wide
+#   判据（R8 P1-2 observed receipt + verdict，替代 R7 的"调用前"回执）：start_run 全程持 process-wide
 #   单飞锁（=本请求的 owner token，输掉的同-plan 竞争者只能在赢家 verdict 后进入，pre-max 已含
-#   赢家 session → 永远拿不到 RUN_STARTED）。先发原子受理回执，再走 pre-max=MAX(id) 隔离 +
-#   读全部 id>pre-max 的 session：
-#     START_RECEIPT accepted|already_running|not_connected   —— 触引擎前的原子受理判定
+#   赢家 session → 永远拿不到 RUN_STARTED）。回执**在产品调用之后观测**，不是调用前预测：产品的
+#   check-and-set 自己会说话——拒绝 → 公开 logs 恰好追加一条 "Already running, ignoring start request"；
+#   接受 → isRunning=true 且 launch 前零日志。调用前快照 logs，调用后立读 logs+isRunning，只认两种可证
+#   形状，其余一律 indeterminate（引擎 log forwarder 会整体覆写 logs，"sentinel 不在 ⇒ 接受"是 fail-open）：
+#     START_PRECHECK not_connected|already_running   —— 快速路径拒绝：只省一次无意义调用，不参与 verdict
+#     START_RECEIPT accepted_observed               —— logs 未变 且 调用后 isRunning=true：产品接受了本次调用
+#     START_RECEIPT rejected_already_running        —— logs == 前 + 恰一条产品拒绝行：外来 start 占了引擎槽
+#     START_RECEIPT indeterminate: <reason>         —— 其它任何形状（覆写 / ERROR 行 / no-op / 日志上限裁剪）
+#   只有 accepted_observed 才进入 pre-max=MAX(id) 隔离 + 读全部 id>pre-max 的 session：
 #     RUN_STARTED sessionId=<S> planId=<P> firstAttemptId=<A> —— 唯一绿：恰一条新右 plan session
 #                                              **且**有 durable 首 attempt 里程碑；归因锚 sessionId=<S>
 #     RUN_START_CONFLICT                    —— 新 session 属别的 plan，或出现 ≥2 条新 session（竞争
 #                                              歧义，拒绝归因）
 #     RUN_START_DEGENERATE sessionId=<S> status=<st> —— session 建了但 0 attempt 就 paused/terminal
 #                                              （provider discovery 失败 / plan 已完成）——非可用 run
-#     RUN_NOT_STARTED                       —— 无新 session，或有 session 但超时仍无首 attempt 里程碑。
+#     RUN_NOT_STARTED                       —— 回执非 accepted_observed；或无新 session；或有 session
+#                                              但超时仍无首 attempt 里程碑。
+#   归因闭合链：accepted_observed 证明产品的 check-and-set 接受的是**本次**调用（同步直调，happens-before），
+#   此后 isRunning 归本请求——后到的 UI 点击被产品拒绝，先到的外来 start 会让本请求被拒。故
+#   accepted_observed + 恰一条新 session>pre-max + plan 绑定 + 首 attempt 里程碑 ⇒ 该 session 归本请求。
+#   耦合披露：sentinel 是产品无版本契约的可观测行为；P10CollectorSurfaceGuardTest r8_* 把 main 里的
+#   字面量 / 接受静默 / 同步直调 / 日志戳格式 pin 住——漂移即响亮红，而非安静地"全部 indeterminate"。
 #   ⚠️ 全局 isRunning、陈旧同-plan attempt、裸 session（无 attempt）都**不**满足本请求。
 #   cmd=state 现为单事务快照，running 行带 attemptStatus + aplusState + runSessionId +
 #   sessionStatus + taskPlanId + sessionPlanId，两 plan 腿不一致打 PLAN_BINDING_MISMATCH。

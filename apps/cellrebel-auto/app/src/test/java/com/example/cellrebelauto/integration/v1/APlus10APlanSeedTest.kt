@@ -3,6 +3,7 @@ package com.example.cellrebelauto.integration.v1
 import java.io.File
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -435,5 +436,126 @@ class APlus10APlanSeedTest {
         } catch (e: IllegalArgumentException) {
             // expected
         }
+    }
+
+    // ------------------------------------------------------------------
+    // observeStartReceipt / onlyIfAccepted — R8 P1-2 (Option D): the start
+    // receipt is OBSERVED after the product call, never predicted before it.
+    //
+    // Product facts (AutomationService; pinned by P10CollectorSurfaceGuardTest):
+    //   reject branch  → addLog("Already running, ignoring start request"); return
+    //   accept branch  → _isRunning.value = true, NO log before launch
+    //   addLog         → "[HH:mm:ss] $message", published on the public `logs`
+    //   engine forwarder OVERWRITES `_logs` wholesale once a run's engine exists
+    // ------------------------------------------------------------------
+
+    private fun stamped(message: String) = "[12:34:56] $message"
+    private val rejectEntry = stamped(APlus10APlanSeed.PRODUCT_REJECT_SENTINEL)
+    private val l0 = listOf(stamped("Accessibility service connected"), stamped("A+ provider service bind requested"))
+
+    @Test
+    fun observeStartReceipt_unchangedLogsAndRunning_isAcceptedObserved() {
+        // The accept branch publishes nothing and flips isRunning synchronously
+        // before startAutomation returns: unchanged logs + running == the
+        // product's check-and-set accepted THIS call (happens-before, not poll).
+        val r = APlus10APlanSeed.observeStartReceipt(logsBefore = l0, logsAfter = l0.toList(), runningAfter = true)
+        assertEquals(APlus10APlanSeed.StartReceipt.AcceptedObserved, r)
+    }
+
+    @Test
+    fun observeStartReceipt_unchangedLogsButNotRunning_isNotAccepted() {
+        // startAutomation with instance == null is a Log.e no-op: it publishes
+        // NOTHING on `logs`. "Unchanged" alone would read as accept — the
+        // isRunning leg (set synchronously only by the accept branch) is required.
+        val r = APlus10APlanSeed.observeStartReceipt(logsBefore = l0, logsAfter = l0.toList(), runningAfter = false)
+        assertTrue("a no-op call must not be accepted, got $r", r is APlus10APlanSeed.StartReceipt.Indeterminate)
+    }
+
+    @Test
+    fun observeStartReceipt_exactlyOneRejectEntryAppended_isRejected() {
+        val r = APlus10APlanSeed.observeStartReceipt(logsBefore = l0, logsAfter = l0 + rejectEntry, runningAfter = true)
+        assertEquals(APlus10APlanSeed.StartReceipt.RejectedAlreadyRunning, r)
+    }
+
+    @Test
+    fun observeStartReceipt_emptyBeforeThenReject_isRejected() {
+        val r = APlus10APlanSeed.observeStartReceipt(logsBefore = emptyList(), logsAfter = listOf(rejectEntry), runningAfter = true)
+        assertEquals(APlus10APlanSeed.StartReceipt.RejectedAlreadyRunning, r)
+    }
+
+    @Test
+    fun observeStartReceipt_forwarderClobber_isIndeterminate_neverAccepted() {
+        // THE clobber: the product rejected us (sentinel appended), then the
+        // foreign run's engine forwarder overwrote `_logs` with ITS list — the
+        // sentinel is GONE. "Sentinel absent ⇒ accepted" would flip a true
+        // REJECT into a false ACCEPT (fail-open). The shape is neither
+        // unchanged nor one-appended, so it must be indeterminate.
+        val clobbered = listOf(stamped("Engine: plan #7 loaded"), stamped("Engine: task 1/10"))
+        val r = APlus10APlanSeed.observeStartReceipt(logsBefore = l0, logsAfter = clobbered, runningAfter = true)
+        assertTrue("a clobbered window must be indeterminate, got $r", r is APlus10APlanSeed.StartReceipt.Indeterminate)
+        assertFalse(r is APlus10APlanSeed.StartReceipt.AcceptedObserved)
+    }
+
+    @Test
+    fun observeStartReceipt_rejectPlusAnotherEntry_isIndeterminate() {
+        val r = APlus10APlanSeed.observeStartReceipt(
+            logsBefore = l0, logsAfter = l0 + rejectEntry + stamped("Stopping automation..."), runningAfter = true)
+        assertTrue(r is APlus10APlanSeed.StartReceipt.Indeterminate)
+    }
+
+    @Test
+    fun observeStartReceipt_appendedEntryIsNotTheProductRejectLine_isIndeterminate() {
+        // Same text without the product's "[HH:mm:ss] " stamp, a near-miss
+        // text, and the coroutine's ERROR line: none is the reject entry.
+        val unstamped = APlus10APlanSeed.observeStartReceipt(l0, l0 + APlus10APlanSeed.PRODUCT_REJECT_SENTINEL, true)
+        assertTrue(unstamped is APlus10APlanSeed.StartReceipt.Indeterminate)
+        val nearMiss = APlus10APlanSeed.observeStartReceipt(l0, l0 + stamped("Already running"), true)
+        assertTrue(nearMiss is APlus10APlanSeed.StartReceipt.Indeterminate)
+        val errorLine = APlus10APlanSeed.observeStartReceipt(l0, l0 + stamped("ERROR: plan #7 not found"), false)
+        assertTrue(errorLine is APlus10APlanSeed.StartReceipt.Indeterminate)
+    }
+
+    @Test
+    fun observeStartReceipt_prefixDriftWithRejectTail_isIndeterminate() {
+        // addLog trims to the last 200 entries: at the cap a real reject drops
+        // the oldest entry. That shape is NOT recognised on purpose — without
+        // knowing the cap it is indistinguishable from an overwritten window,
+        // so it fails closed (RUN_NOT_STARTED, never a false accept).
+        val r = APlus10APlanSeed.observeStartReceipt(logsBefore = l0, logsAfter = l0.drop(1) + rejectEntry, runningAfter = true)
+        assertTrue(r is APlus10APlanSeed.StartReceipt.Indeterminate)
+    }
+
+    @Test
+    fun solR8Counterexample_uiWinsSamePlan_harnessRejected_neverPollsNeverStarted() {
+        // Sol R8 P1-2, step by step, against the canonical product entry's
+        // PUBLISHED verdict (not an emptyList() stand-in):
+        //   1. harness fast path sees isRunning=false, pre-max M=41
+        //   2. the UI starts the SAME plan: the product accepts (no log,
+        //      isRunning=true) and creates session 42 + its first attempt
+        //   3. the harness's product call is rejected: exactly one reject entry
+        //      is appended to the public logs
+        //   4. session 42 > M with a milestone now exists — the OLD harness
+        //      polled it and printed RUN_STARTED for its rejected request.
+        val receipt = APlus10APlanSeed.observeStartReceipt(logsBefore = l0, logsAfter = l0 + rejectEntry, runningAfter = true)
+        assertEquals(APlus10APlanSeed.StartReceipt.RejectedAlreadyRunning, receipt)
+        var polled = false
+        val verdict = APlus10APlanSeed.onlyIfAccepted(receipt) {
+            polled = true
+            APlus10APlanSeed.startRunVerdict(
+                newSessions = listOf(row(42L, 7L)), requestedPlanId = 7L, firstAttemptId = 900L)
+        }
+        assertFalse("a rejected request must never poll the generation", polled)
+        assertNull("a rejected request has no verdict — RUN_NOT_STARTED", verdict)
+    }
+
+    @Test
+    fun onlyIfAccepted_pollsOnlyAfterAnObservedAccept() {
+        var polled = 0
+        val ok = APlus10APlanSeed.onlyIfAccepted(APlus10APlanSeed.StartReceipt.AcceptedObserved) { polled++; "v" }
+        assertEquals("v", ok)
+        assertEquals(1, polled)
+        val ind = APlus10APlanSeed.onlyIfAccepted(APlus10APlanSeed.StartReceipt.Indeterminate("x")) { polled++; "v" }
+        assertNull(ind)
+        assertEquals(1, polled)
     }
 }

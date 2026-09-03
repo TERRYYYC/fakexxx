@@ -39,15 +39,17 @@ import kotlinx.coroutines.runBlocking
  *   start_run — call the SAME companion the UI calls
  *               (AutomationService.startAutomation) for a planId that must be
  *               the seeded FX-G2-10A plan/topology. R7 P1-2: single-flight
- *               (process-wide lock = the request's owner token), an atomic
- *               typed START_RECEIPT (accepted/already_running/not_connected)
- *               BEFORE the engine call, then a verdict bound to a
- *               request-owned durable generation — exactly ONE new RunSession
- *               (MAX(id) fence, cardinality != 1 rejected) with the requested
- *               planId AND the durable first-attempt milestone. Zero-attempt
+ *               (process-wide lock = the request's owner token). R8 P1-2
+ *               (Option D): the START_RECEIPT is OBSERVED after the product
+ *               call on the product's own published verdict (public `logs`
+ *               shape + isRunning), never predicted before it; only an
+ *               observed accept reaches the verdict bound to a request-owned
+ *               durable generation — exactly ONE new RunSession (MAX(id)
+ *               fence, cardinality != 1 rejected) with the requested planId
+ *               AND the durable first-attempt milestone. Zero-attempt
  *               paused/terminal sessions are typed RUN_START_DEGENERATE,
- *               never RUN_STARTED; a stale same-plan attempt or a racing
- *               loser can never borrow the winner's session.
+ *               never RUN_STARTED; a stale same-plan attempt, a racing loser,
+ *               or a rejected request can never borrow a foreign session.
  *
  * src/debug ONLY — production carries none of this.
  */
@@ -159,23 +161,36 @@ class APlusSeedActivity : Activity() {
             appendLine("REFUSED: $topologyMismatch")
             return
         }
-        // R7 P1-2 — request-owned start with atomic typed receipt.
+        // R7 P1-2 → R8 P1-2 (Option D) — request-owned start with an OBSERVED receipt.
         //
         // (1) SINGLE-FLIGHT: processIntent spawns one thread per intent, so two
         //     start_run callers could race the same pre-max snapshot and the
-        //     loser could borrow the winner's session (Sol's counterexample).
-        //     All of receipt + pre-max + startAutomation + poll runs under one
-        //     process-wide lock — the equivalent owner token for this entry:
-        //     the loser enters only after the winner's verdict, its pre-max
-        //     already contains the winner's session, and only the ACCEPTED
-        //     request ever polls.
-        // (2) RECEIPT: typed accepted / already_running / not_connected BEFORE
-        //     touching the engine (instance reflected — the production field
-        //     is private and must stay untouched).
-        // (3) GENERATION: pre-max via MAX(id) (getLatest orders by startedAt —
-        //     clock skew could hide a newer id); ALL rows id > pre-max are
-        //     read and any cardinality other than one is rejected; Started
+        //     loser could borrow the winner's session (Sol's R6 counterexample).
+        //     All of precheck + pre-max + startAutomation + receipt + poll runs
+        //     under one process-wide lock: the loser enters only after the
+        //     winner's verdict, and only an ACCEPTED request ever polls.
+        // (2) PRECHECKS are fast-path REFUSALS only (instance reflected — the
+        //     production field is private and must stay untouched). They save a
+        //     pointless call; the verdict never depends on them.
+        // (3) RECEIPT is OBSERVED, not predicted (Sol R8 P1-2: "accepted" printed
+        //     BEFORE the call was the check half of a check-then-act — the UI
+        //     could start the same plan in between and the harness would have
+        //     attributed the UI's session). startAutomation is a synchronous
+        //     direct call into the product's check-and-set, which publishes its
+        //     own verdict: reject → exactly one "Already running…" entry on the
+        //     public logs StateFlow; accept → isRunning=true and NO entry before
+        //     launch. Snapshot logs before, read logs+isRunning immediately
+        //     after, and accept ONLY the two provable shapes; anything else (a
+        //     foreign engine's log forwarder overwriting the window, an ERROR
+        //     line, a no-op call) is indeterminate and never attributes.
+        // (4) GENERATION (unchanged): pre-max via MAX(id); ALL rows id > pre-max
+        //     are read and any cardinality other than one is rejected; Started
         //     additionally requires the durable first-attempt milestone.
+        //     Closure: accepted_observed proves the product's check-and-set took
+        //     THIS call, so isRunning is ours from here — a later UI click is
+        //     rejected by the product, an earlier foreign start would have
+        //     rejected US. Hence accepted_observed + exactly one new session > M
+        //     + plan-bound + first-attempt milestone ⇒ the session is ours.
         synchronized(START_RUN_LOCK) {
             appendLine("[start_run] AutomationService.startAutomation(plan=$planId) — the product's own run entry.")
             val serviceInstance = AutomationService::class.java
@@ -183,60 +198,51 @@ class APlusSeedActivity : Activity() {
                 .apply { isAccessible = true }
                 .get(null)
             if (serviceInstance == null) {
-                appendLine("START_RECEIPT not_connected")
+                appendLine("START_PRECHECK not_connected")
                 appendLine("RUN_NOT_STARTED: accessibility service not connected — startAutomation " +
                     "would be a silent no-op. Enable the service, then re-run.")
                 return
             }
             if (AutomationService.isRunning.value) {
-                appendLine("START_RECEIPT already_running")
+                appendLine("START_PRECHECK already_running")
                 appendLine("RUN_NOT_STARTED: a run is already active (isRunning=true) — one run at a " +
                     "time; stop it first. A pre-existing run NEVER satisfies this request.")
                 return
             }
-            appendLine("START_RECEIPT accepted")
             val db = AppDatabase.getInstance(applicationContext)
             val preMaxSessionId = db.query("SELECT COALESCE(MAX(id), 0) FROM run_sessions", null).use { c ->
                 c.moveToFirst(); c.getLong(0)
             }
+            val logsBefore = AutomationService.logs.value
             AutomationService.startAutomation(planId)
-            val deadline = System.currentTimeMillis() + START_CONFIRM_TIMEOUT_MS
-            var verdict: APlus10APlanSeed.StartRunVerdict = APlus10APlanSeed.StartRunVerdict.NoNewSession
-            while (System.currentTimeMillis() < deadline) {
-                val newSessions = db.query(
-                    "SELECT id, planId, status FROM run_sessions WHERE id > ? ORDER BY id ASC",
-                    arrayOf(preMaxSessionId),
-                ).use { c ->
-                    buildList {
-                        while (c.moveToNext()) {
-                            add(APlus10APlanSeed.NewSessionRow(
-                                id = c.getLong(0),
-                                planId = if (c.isNull(1)) null else c.getLong(1),
-                                status = c.getString(2),
-                            ))
-                        }
-                    }
+            val logsAfter = AutomationService.logs.value
+            val runningAfter = AutomationService.isRunning.value
+            val receipt = APlus10APlanSeed.observeStartReceipt(logsBefore, logsAfter, runningAfter)
+            when (receipt) {
+                APlus10APlanSeed.StartReceipt.AcceptedObserved -> {
+                    appendLine("START_RECEIPT accepted_observed (product check-and-set published no reject; " +
+                        "isRunning=true after the call — this request owns the engine slot)")
                 }
-                val firstAttemptId = newSessions.singleOrNull()?.let { s ->
-                    db.query(
-                        "SELECT id FROM test_attempts WHERE runSessionId = ? ORDER BY id ASC LIMIT 1",
-                        arrayOf(s.id),
-                    ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+                APlus10APlanSeed.StartReceipt.RejectedAlreadyRunning -> {
+                    appendLine("START_RECEIPT rejected_already_running (product published " +
+                        "'${APlus10APlanSeed.PRODUCT_REJECT_SENTINEL}' for THIS call)")
+                    appendLine("RUN_NOT_STARTED: a foreign start won the engine slot between precheck and call — " +
+                        "any session that appears after pre-max $preMaxSessionId belongs to it, NOT to this request.")
+                    return
                 }
-                verdict = APlus10APlanSeed.startRunVerdict(
-                    newSessions = newSessions,
-                    requestedPlanId = planId,
-                    firstAttemptId = firstAttemptId,
-                )
-                val nonTerminal = verdict is APlus10APlanSeed.StartRunVerdict.AwaitingMilestone ||
-                    verdict is APlus10APlanSeed.StartRunVerdict.NoNewSession
-                if (!nonTerminal) break
-                Thread.sleep(START_CONFIRM_POLL_MS)
+                is APlus10APlanSeed.StartReceipt.Indeterminate -> {
+                    appendLine("START_RECEIPT indeterminate: ${receipt.reason}")
+                    appendLine("RUN_NOT_STARTED: the product's verdict for this call is unobservable — refusing to " +
+                        "attribute any session after pre-max $preMaxSessionId. Stop any run, then re-run.")
+                    return
+                }
             }
+            val verdict = APlus10APlanSeed.onlyIfAccepted(receipt) { pollStartVerdict(db, planId, preMaxSessionId) }
+                ?: return
             when (val v = verdict) {
                 is APlus10APlanSeed.StartRunVerdict.Started -> {
                     appendLine("RUN_STARTED sessionId=${v.sessionId} planId=${v.planId} firstAttemptId=${v.firstAttemptId} " +
-                        "(request-owned generation: single NEW RunSession > pre-max $preMaxSessionId, " +
+                        "(request-owned generation: accepted_observed + single NEW RunSession > pre-max $preMaxSessionId, " +
                         "plan-bound, durable first-attempt milestone present)")
                     appendLine("Attribute everything to sessionId=${v.sessionId}: cmd=state lines carry " +
                         "runSessionId + task/session plan legs; rows bound to another session are NOT this run.")
@@ -270,6 +276,48 @@ class APlusSeedActivity : Activity() {
         } // synchronized(START_RUN_LOCK)
     }
 
+    /**
+     * Request-owned generation poll (R7 P1-2). Reachable ONLY through
+     * [APlus10APlanSeed.onlyIfAccepted] after an observed accept — a rejected
+     * or indeterminate request never reads the sessions a foreign start made.
+     */
+    private fun pollStartVerdict(db: AppDatabase, planId: Long, preMaxSessionId: Long): APlus10APlanSeed.StartRunVerdict {
+        val deadline = System.currentTimeMillis() + START_CONFIRM_TIMEOUT_MS
+        var verdict: APlus10APlanSeed.StartRunVerdict = APlus10APlanSeed.StartRunVerdict.NoNewSession
+        while (System.currentTimeMillis() < deadline) {
+            val newSessions = db.query(
+                "SELECT id, planId, status FROM run_sessions WHERE id > ? ORDER BY id ASC",
+                arrayOf(preMaxSessionId),
+            ).use { c ->
+                buildList {
+                    while (c.moveToNext()) {
+                        add(APlus10APlanSeed.NewSessionRow(
+                            id = c.getLong(0),
+                            planId = if (c.isNull(1)) null else c.getLong(1),
+                            status = c.getString(2),
+                        ))
+                    }
+                }
+            }
+            val firstAttemptId = newSessions.singleOrNull()?.let { s ->
+                db.query(
+                    "SELECT id FROM test_attempts WHERE runSessionId = ? ORDER BY id ASC LIMIT 1",
+                    arrayOf(s.id),
+                ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+            }
+            verdict = APlus10APlanSeed.startRunVerdict(
+                newSessions = newSessions,
+                requestedPlanId = planId,
+                firstAttemptId = firstAttemptId,
+            )
+            val nonTerminal = verdict is APlus10APlanSeed.StartRunVerdict.AwaitingMilestone ||
+                verdict is APlus10APlanSeed.StartRunVerdict.NoNewSession
+            if (!nonTerminal) break
+            Thread.sleep(START_CONFIRM_POLL_MS)
+        }
+        return verdict
+    }
+
     private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it) }
@@ -295,7 +343,7 @@ class APlusSeedActivity : Activity() {
 
         /**
          * R7 P1-2 single-flight owner token: every start_run request holds
-         * this process-wide monitor across receipt + pre-max + start + poll,
+         * this process-wide monitor across precheck + pre-max + start + observed receipt + poll,
          * so a losing same-plan racer enters only after the winner's verdict
          * and can never borrow the winner's session.
          */
