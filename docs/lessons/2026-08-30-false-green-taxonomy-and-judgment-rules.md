@@ -270,3 +270,38 @@ stat -f "%Sm" <改动文件>                      # 找③：最后编辑时间�
 **为什么这条难自查**：双方都在认真工作，每轮都有真实交付、CI 每轮真绿。
 **「两个人都很努力」和「这个循环在收敛」是两回事。**
 
+---
+
+## 10. 「不存在 seam」是缺席断言——必须由"产品发布面枚举"支撑，不能由"预期形状未命中"支撑
+
+**实证（2026-09-02，PR #62 R8 P1-2）**
+
+Sol 要求 start 回执落在产品的 canonical atomic start transition 上。作者查了 `createSession`
+（只盖 `configSnapshot`，无 caller token）和 `startWithPlan`（返回 `Unit`，内部单飞）后断言
+「**无 debug-only seam**，确定性闭合必须改生产」，升级成 Decision Packet（A 改生产 / B 归 operator / C 弱化）。
+
+@opus5 没照单裁决，先翻代码，三个 grep 推翻大前提：产品的 check-and-set **自己会说话**——
+reject 分支 `addLog("Already running, ignoring start request")` 发布在公开 `logs: StateFlow` 上，
+accept 分支在 launch 前零日志且同步置 `isRunning=true`，`startAutomation` 是同步直调。
+调用返回时裁决已在 flow 上（happens-before，不是 poll）。于是「价值取舍题」变回「技术题」：
+调用前快照 → 调用 → 调用后读 → 只认可证形状，其余 fail-closed。零 src/main 改动。
+
+**失效机制**：作者按「返回值 / caller token」这一种预期形状搜，搜空即下结论。
+这是「碎片够了」病的缺席变体——高置信度命中（`startWithPlan: Unit`）之后停手，
+没换角度枚举**产品实际发布了什么**（StateFlow / DB 副作用 / 日志 / 返回值 / 异常）。
+
+```
+缺席断言「X 不存在」的判据：
+  枚举被观察对象【实际发布】的全部通道，逐一说明为何不构成 X
+  ——而不是按【我预期 X 长什么样】搜一遍没命中
+```
+
+**连带判据（同一实证）**：借用无版本契约的可观测行为（字符串 sentinel）时，必须
+(a) 只认能证明的形状，未知形状一律 fail-closed——引擎 log forwarder 会整体覆写 logs，
+    「sentinel 不在 ⇒ 接受」会把真 REJECT 翻成假 ACCEPT；
+(b) 用静态 guard 把对方源码里的字面量与前提（接受静默 / 同步直调 / 戳格式）pin 住——
+    漂移要**响亮地红**，不能安静地"全部 indeterminate"；
+(c) 接手者复核裁决时要再找裁决**没覆盖**的通道：本例 `instance == null` 时 `startAutomation`
+    只走 `Log.e`、不写 logs，「logs 未变」单独不是 accept，需加 `isRunning` 腿。
+
+> 判据一句话：**「无 seam」必须由"产品发布面枚举"支撑，不能由"预期形状未命中"支撑。**
