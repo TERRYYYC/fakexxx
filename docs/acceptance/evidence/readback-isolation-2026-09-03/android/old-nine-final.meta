@@ -1,0 +1,6 @@
+utc_started=2026-09-03T13:59:28Z
+serial=emulator-5584
+expected_avd=codex_readback_clean_api35
+command=/Users/terry/Library/Android/sdk/platform-tools/adb -s emulator-5584 shell am instrument -w -e notClass name.caiyao.fakegps.integration.v1.SystemMockReadbackInstrumentedTest\,name.caiyao.fakegps.config.ConfigTransportCacheInstrumentedTest name.caiyao.fakegps.bench.test/androidx.test.runner.AndroidJUnitRunner 
+exit=0
+utc_completed=2026-09-03T13:59:29Z

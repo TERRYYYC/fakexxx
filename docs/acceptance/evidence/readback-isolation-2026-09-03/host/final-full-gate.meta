@@ -1,0 +1,6 @@
+utc_started=2026-09-03T13:59:06Z
+cwd=/Users/terry/Desktop/coding/fakexxx-location-readback
+head=6691bcb00305615676ef8d6856561ba3c23d61ab
+command=env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ANDROID_HOME=/Users/terry/Library/Android/sdk PATH=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/homebrew/bin:/Users/terry/.codex/tmp/arg0/codex-arg04t1I5J:/Users/terry/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/terry/.kimi-code/bin:/Users/terry/Library/pnpm/bin:/Users/terry/.nvm/versions/node/v24.18.0/bin:/Users/terry/.local/bin:/Users/terry/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources bash scripts/verify-a-plus.sh --stage full 
+exit=0
+utc_completed=2026-09-03T14:00:13Z

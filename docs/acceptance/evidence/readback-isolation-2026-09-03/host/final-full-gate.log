@@ -1,0 +1,1461 @@
+verify-a-plus: stage=full
+
+---- provenance
+     $ ./scripts/check-provenance.sh --stage $STAGE
+
+== 0a. frozen record set ==
+  PASS  frozen record set carries exactly the expected prefixes (first-field set equality)
+  PASS  record for apps/cellrebel-auto has 5 fields
+  PASS  record for apps/qianwangyou has 5 fields
+
+== 0. fetch upstream objects ==
+  PASS  upstream object 48d8ec93a already present
+  PASS  upstream object 285e4cae4 already present
+
+== 1. provenance document ==
+  PASS  docs/provenance/upstream-imports.md exists
+  PASS  row first cell is exactly 'apps/cellrebel-auto'
+  PASS  row for apps/cellrebel-auto records url https://github.com/TERRYYYC/Faketest.git
+  PASS  row for apps/cellrebel-auto records branch main
+  PASS  row for apps/cellrebel-auto records upstream sha 48d8ec93a
+  PASS  row first cell is exactly 'apps/qianwangyou'
+  PASS  row for apps/qianwangyou records url https://github.com/TERRYYYC/FakeGps-test.git
+  PASS  row for apps/qianwangyou records branch master
+  PASS  row for apps/qianwangyou records upstream sha 285e4cae4
+  PASS  docs/provenance/upstream-imports.md row for apps/cellrebel-auto records root tree 0553fcb46f02e7211f4496e4a98b846ec70ef9a2, equal to Faketest.git@48d8ec93a
+  PASS  docs/provenance/upstream-imports.md row for apps/qianwangyou records root tree f4bdce23c65e6227cf43dab5fe0416120b95134e, equal to FakeGps-test.git@285e4cae4
+  PASS  row for apps/cellrebel-auto records the canonical import commit 301da0f29
+  PASS  import commit 301da0f2925373dfe40cfd2a51d53ddaca4bba93 for apps/cellrebel-auto is not an ancestor of HEAD (squash/rebase merge); this specific commit is no longer the ancestry carrier
+  PASS  row for apps/qianwangyou records the canonical import commit 5687e319f
+  PASS  import commit 5687e319f978dcd9b76e413c06b2b0da91627518 for apps/qianwangyou is not an ancestor of HEAD (squash/rebase merge); this specific commit is no longer the ancestry carrier
+
+== 1b. baseline ancestry ==
+  PASS  apps/cellrebel-auto: reachable ancestor 5c5ba3a carries the upstream tree 0553fcb46f02e7211f4496e4a98b846ec70ef9a2 (ancestry proven; merge-method independent)
+  PASS  apps/qianwangyou: reachable ancestor 5c5ba3a carries the upstream tree f4bdce23c65e6227cf43dab5fe0416120b95134e (ancestry proven; merge-method independent)
+
+== 2. current HEAD state (stage=full) ==
+  PASS  apps/cellrebel-auto has diverged from upstream (allowed at stage full; ancestry proven in section 1b — this gate does not bound WHICH paths diverged, that is the scope gate's job)
+  PASS  apps/cellrebel-auto working tree matches HEAD
+  PASS  apps/qianwangyou has diverged from upstream (allowed at stage full; ancestry proven in section 1b — this gate does not bound WHICH paths diverged, that is the scope gate's job)
+  PASS  apps/qianwangyou working tree matches HEAD
+
+== 3. entry files ==
+  PASS  apps/cellrebel-auto/gradlew exists
+  PASS  apps/cellrebel-auto/app/build.gradle.kts exists
+  PASS  apps/cellrebel-auto/app/src/main/AndroidManifest.xml exists
+  PASS  apps/qianwangyou/gradlew exists
+  PASS  apps/qianwangyou/app/build.gradle exists
+  PASS  apps/qianwangyou/app/src/main/AndroidManifest.xml exists
+
+== 4. frozen record set unchanged ==
+  PASS  record set identical to the one vetted in section 0a
+
+check-provenance: PASS (all checks)
+     -> PASS
+
+---- auto-unit-tests
+     $ cd apps/cellrebel-auto && ./gradlew testDebugUnitTest
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:kspDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:kspDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :app:testDebugUnitTest
+> Task :environment-control-v1:preDebugUnitTestBuild UP-TO-DATE
+> Task :environment-control-v1:checkDebugUnitTestAarMetadata UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestResValues UP-TO-DATE
+> Task :environment-control-v1:mapDebugUnitTestSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:mergeDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestManifest UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :environment-control-v1:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :environment-control-v1:generateDebugUnitTestAssets UP-TO-DATE
+> Task :environment-control-v1:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugUnitTestAssets UP-TO-DATE
+> Task :environment-control-v1:packageDebugUnitTestForUnitTest UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestConfig UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:testDebugUnitTest UP-TO-DATE
+
+BUILD SUCCESSFUL in 6s
+61 actionable tasks: 1 executed, 60 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+     -> PASS
+
+---- auto-assemble
+     $ cd apps/cellrebel-auto && ./gradlew assembleDebug
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:kspDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:compressDebugAssets UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :app:desugarDebugFileDependencies UP-TO-DATE
+> Task :app:dexBuilderDebug UP-TO-DATE
+> Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:checkDebugDuplicateClasses UP-TO-DATE
+> Task :app:mergeExtDexDebug UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToDirDebug UP-TO-DATE
+> Task :app:mergeProjectDexDebug UP-TO-DATE
+> Task :app:mergeDebugJniLibFolders UP-TO-DATE
+> Task :environment-control-v1:mergeDebugJniLibFolders UP-TO-DATE
+> Task :app:mergeLibDexDebug UP-TO-DATE
+> Task :environment-control-v1:mergeDebugNativeLibs NO-SOURCE
+> Task :environment-control-v1:copyDebugJniLibsProjectOnly UP-TO-DATE
+> Task :app:mergeDebugNativeLibs UP-TO-DATE
+> Task :app:stripDebugDebugSymbols UP-TO-DATE
+> Task :app:validateSigningDebug UP-TO-DATE
+> Task :app:writeDebugAppMetadata UP-TO-DATE
+> Task :app:writeDebugSigningConfigVersions UP-TO-DATE
+> Task :app:packageDebug UP-TO-DATE
+> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
+> Task :app:assembleDebug UP-TO-DATE
+> Task :environment-control-v1:checkDebugAarMetadata UP-TO-DATE
+> Task :environment-control-v1:stripDebugDebugSymbols NO-SOURCE
+> Task :environment-control-v1:copyDebugJniLibsProjectAndLocalJars UP-TO-DATE
+> Task :environment-control-v1:extractDebugAnnotations UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksForAarDebug UP-TO-DATE
+> Task :environment-control-v1:mergeDebugGeneratedProguardFiles UP-TO-DATE
+> Task :environment-control-v1:mergeDebugConsumerProguardFiles UP-TO-DATE
+> Task :environment-control-v1:prepareDebugArtProfile UP-TO-DATE
+> Task :environment-control-v1:prepareLintJarForPublish UP-TO-DATE
+> Task :environment-control-v1:mergeDebugJavaResource UP-TO-DATE
+> Task :environment-control-v1:syncDebugLibJars UP-TO-DATE
+> Task :environment-control-v1:bundleDebugAar UP-TO-DATE
+> Task :environment-control-v1:assembleDebug UP-TO-DATE
+
+BUILD SUCCESSFUL in 578ms
+72 actionable tasks: 72 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+     -> PASS
+
+---- qwy-unit-tests
+     $ cd apps/qianwangyou && ./gradlew testDebugUnitTest
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableJetifier=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :app:compileDebugAidl UP-TO-DATE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:kspDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:kspDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :app:testDebugUnitTest UP-TO-DATE
+> Task :environment-control-v1:preDebugUnitTestBuild UP-TO-DATE
+> Task :environment-control-v1:checkDebugUnitTestAarMetadata UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestResValues UP-TO-DATE
+> Task :environment-control-v1:mapDebugUnitTestSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:mergeDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestManifest UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :environment-control-v1:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :environment-control-v1:generateDebugUnitTestAssets UP-TO-DATE
+> Task :environment-control-v1:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugUnitTestAssets UP-TO-DATE
+> Task :environment-control-v1:packageDebugUnitTestForUnitTest UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestConfig UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:testDebugUnitTest UP-TO-DATE
+
+[Incubating] Problems report is available at: file:///Users/terry/Desktop/coding/fakexxx-location-readback/apps/qianwangyou/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 1s
+63 actionable tasks: 63 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+     -> PASS
+
+---- qwy-assemble
+     $ cd apps/qianwangyou && ./gradlew assembleDebug
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableJetifier=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :app:compileDebugAidl UP-TO-DATE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:kspDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:compressDebugAssets UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :app:desugarDebugFileDependencies UP-TO-DATE
+> Task :app:dexBuilderDebug UP-TO-DATE
+> Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:checkDebugDuplicateClasses UP-TO-DATE
+> Task :app:mergeExtDexDebug UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToDirDebug UP-TO-DATE
+> Task :app:mergeProjectDexDebug UP-TO-DATE
+> Task :app:mergeLibDexDebug UP-TO-DATE
+> Task :app:mergeDebugJniLibFolders UP-TO-DATE
+> Task :environment-control-v1:mergeDebugJniLibFolders UP-TO-DATE
+> Task :environment-control-v1:mergeDebugNativeLibs NO-SOURCE
+> Task :environment-control-v1:copyDebugJniLibsProjectOnly UP-TO-DATE
+> Task :app:mergeDebugNativeLibs UP-TO-DATE
+> Task :app:stripDebugDebugSymbols UP-TO-DATE
+> Task :app:validateSigningDebug UP-TO-DATE
+> Task :app:writeDebugAppMetadata UP-TO-DATE
+> Task :app:writeDebugSigningConfigVersions UP-TO-DATE
+> Task :app:packageDebug UP-TO-DATE
+> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
+> Task :app:assembleDebug UP-TO-DATE
+> Task :environment-control-v1:checkDebugAarMetadata UP-TO-DATE
+> Task :environment-control-v1:stripDebugDebugSymbols NO-SOURCE
+> Task :environment-control-v1:copyDebugJniLibsProjectAndLocalJars UP-TO-DATE
+> Task :environment-control-v1:extractDebugAnnotations UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksForAarDebug UP-TO-DATE
+> Task :environment-control-v1:mergeDebugGeneratedProguardFiles UP-TO-DATE
+> Task :environment-control-v1:mergeDebugConsumerProguardFiles UP-TO-DATE
+> Task :environment-control-v1:prepareDebugArtProfile UP-TO-DATE
+> Task :environment-control-v1:prepareLintJarForPublish UP-TO-DATE
+> Task :environment-control-v1:mergeDebugJavaResource UP-TO-DATE
+> Task :environment-control-v1:syncDebugLibJars UP-TO-DATE
+> Task :environment-control-v1:bundleDebugAar UP-TO-DATE
+> Task :environment-control-v1:assembleDebug UP-TO-DATE
+
+[Incubating] Problems report is available at: file:///Users/terry/Desktop/coding/fakexxx-location-readback/apps/qianwangyou/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 619ms
+73 actionable tasks: 73 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+     -> PASS
+
+---- inherited-lint-debt
+     $ ./scripts/check-inherited-lint-debt.sh
+
+== cellrebel-auto ==
+  total errors: 0 (frozen budget 0)
+
+== qianwangyou ==
+  PASS  MissingPermission: 3 error(s) == frozen budget
+  PASS  MissingTranslation: 6 error(s) == frozen budget
+  PASS  NewApi: 9 error(s) == frozen budget
+  PASS  Range: 5 error(s) == frozen budget
+  total errors: 23 (frozen budget 23)
+
+check-inherited-lint-debt: PASS (2 app(s) checked; no app increased its lint error debt)
+NOTE: passing means the debt did not grow. It does NOT mean lintDebug exits 0.
+     -> PASS
+
+---- contract-v1
+     $ ./scripts/check-contract-v1.sh
+
+== 1. no enum type inside any @Parcelize class ==
+  ----  enum types known to the guard: AdvanceOutcomeV1, ContinuityCoverageV1, ContractErrorCodeV1, ContractResultKindV1, DeliveryModeV1, ScheduleDecisionV1, VerificationLevelV1
+  PASS  14 @Parcelize class(es) scanned, none carries an enum-typed field
+
+== 2. compatibility.yaml matches the Kotlin wire codes ==
+  PASS  AdvanceOutcomeV1: 2 wire code(s) match compatibility.yaml
+  PASS  ContinuityCoverageV1: 3 wire code(s) match compatibility.yaml
+  PASS  ContractErrorCodeV1: 17 wire code(s) match compatibility.yaml
+  PASS  ContractResultKindV1: 7 wire code(s) match compatibility.yaml
+  PASS  DeliveryModeV1: 2 wire code(s) match compatibility.yaml
+  PASS  ScheduleDecisionV1: 3 wire code(s) match compatibility.yaml
+  PASS  VerificationLevelV1: 3 wire code(s) match compatibility.yaml
+
+== 3. every v1 DTO has a .kt and a .aidl declaration ==
+  PASS  14 DTO(s) declared in BOTH carriers (derived, not a hardcoded list)
+  PASS  DTO .kt <-> .aidl parity
+  PASS  ContractEnumsV1.kt present
+  PASS  ContractErrorCodeV1.kt present
+  PASS  CanonicalIntentDigestV1.kt present
+  PASS  IEnvironmentControlV1 declares discover
+  PASS  IEnvironmentControlV1 declares preflight
+  PASS  IEnvironmentControlV1 declares apply
+  PASS  IEnvironmentControlV1 declares observe
+  PASS  IEnvironmentControlV1 declares release
+  PASS  IEnvironmentControlV1 declares completeAndAdvance
+
+== 4. contract module builds and tests green from BOTH app roots ==
+  PASS  apps/cellrebel-auto :environment-control-v1:testDebugUnitTest
+  PASS  apps/qianwangyou :environment-control-v1:testDebugUnitTest
+
+== 5. canonical spec <-> Kotlin <-> compatibility.yaml (spec binding) ==
+  PASS  enum set identical across all three carriers: 7 enum(s)
+  PASS  AdvanceOutcomeV1: 2 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  ContinuityCoverageV1: 3 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  ContractErrorCodeV1: 17 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  ContractResultKindV1: 7 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  DeliveryModeV1: 2 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  ScheduleDecisionV1: 3 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  VerificationLevelV1: 3 (name, code) pair(s) agree across canonical/kotlin/yaml
+  PASS  every wire domain is bound across canonical / Kotlin / compatibility.yaml
+
+== 5b. inline NAME(wire) references in prose match the authoritative enum ==
+  PASS  48 inline wire reference(s) match ContractErrorCodeV1
+  PASS  prose wire references are bound to the authoritative enum
+
+== 5c. error-code KDoc carries the canonical scope of its 6.3.3 row ==
+  PASS  17 row(s) checked: 4 method-scoped, 2 carrying a correction note
+  PASS  error-code KDoc agrees with the canonical scope of its 6.3.3 row
+
+== 6. the method surface agrees across all four carriers ==
+  PASS  aidl <-> yaml: 6 method(s) match in both directions
+  PASS  aidl <-> readme: 6 method(s) match in both directions
+  PASS  aidl <-> spec-6.1: 6 method(s) match in both directions
+  PASS  method surface identical across aidl / compatibility.yaml / README / spec §6.1
+
+== 6b. AIDL and canonical 6.1 agree on the ORDERED full signature ==
+  PASS  6 method(s) identical in return, name, params and order
+  PASS  ordered full method signature agrees between AIDL and canonical 6.1
+
+== 7b. canonical digest preimages declare the same domain the module frames ==
+  PASS  4 preimage block(s), 5 domain(s) frozen in canonical: fakexxx.contract.v1.apply, fakexxx.contract.v1.release, fakexxx:contract:v1:advance-receipt, fakexxx:contract:v1:advance-request, fakexxx:contract:v1:intent
+  PASS  all 3 module DOMAIN_* constants are backed by canonical text
+  PASS  canonical preimages and the module agree on the domain tag
+
+== 7. DTO schemas agree between canonical §6.3 and Kotlin (name, type, order) ==
+  PASS  class set identical: 14 DTO(s) in canonical and Kotlin
+  PASS  14 DTO(s), 103 field(s) identical in name, type, nullability, default-presence and declaration order
+  PASS  DTO schemas bound to canonical §6.3, ordering included
+
+== 7c. no v1 wire enum defines 0 -- 0 is permanently illegal on the wire ==
+  ....  7c: VerificationLevelV1       3 constant(s), min wire = 1  [ContractEnumsV1.kt]
+  ....  7c: ContinuityCoverageV1      3 constant(s), min wire = 1  [ContractEnumsV1.kt]
+  ....  7c: DeliveryModeV1            2 constant(s), min wire = 1  [ContractEnumsV1.kt]
+  ....  7c: ScheduleDecisionV1        3 constant(s), min wire = 1  [ContractEnumsV1.kt]
+  ....  7c: AdvanceOutcomeV1          2 constant(s), min wire = 1  [ContractEnumsV1.kt]
+  ....  7c: ContractResultKindV1      7 constant(s), min wire = 1  [ContractEnumsV1.kt]
+  ....  7c: ContractErrorCodeV1      17 constant(s), min wire = 1  [ContractErrorCodeV1.kt]
+  ....  7c: 7 wire enum(s) enumerated above, 37 constant(s) total
+  PASS  every v1 wire enum starts at 1; 0 is defined by none of them
+
+check-contract-v1: PASS (all checks)
+     -> PASS
+
+---- acceptance-scenarios
+     $ cd acceptance && ./gradlew test
+
+> Configure project :environment-control-v1
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableJetifier=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :fake-qwy
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :scenarios
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :environment-control-v1:preDebugUnitTestBuild UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :environment-control-v1:checkDebugUnitTestAarMetadata UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestResValues UP-TO-DATE
+> Task :environment-control-v1:mapDebugUnitTestSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:mergeDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestManifest UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :environment-control-v1:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :environment-control-v1:generateDebugUnitTestAssets UP-TO-DATE
+> Task :environment-control-v1:generateDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugAssets UP-TO-DATE
+> Task :environment-control-v1:mergeDebugUnitTestAssets UP-TO-DATE
+> Task :environment-control-v1:packageDebugUnitTestForUnitTest UP-TO-DATE
+> Task :environment-control-v1:generateDebugUnitTestConfig UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :environment-control-v1:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:testDebugUnitTest UP-TO-DATE
+> Task :environment-control-v1:test UP-TO-DATE
+> Task :fake-qwy:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :fake-qwy:preBuild UP-TO-DATE
+> Task :fake-qwy:preDebugBuild UP-TO-DATE
+> Task :fake-qwy:generateDebugResValues UP-TO-DATE
+> Task :fake-qwy:generateDebugResources UP-TO-DATE
+> Task :fake-qwy:packageDebugResources UP-TO-DATE
+> Task :fake-qwy:processDebugNavigationResources UP-TO-DATE
+> Task :fake-qwy:parseDebugLocalResources UP-TO-DATE
+> Task :fake-qwy:generateDebugRFile UP-TO-DATE
+> Task :fake-qwy:compileDebugKotlin UP-TO-DATE
+> Task :fake-qwy:javaPreCompileDebug UP-TO-DATE
+> Task :fake-qwy:compileDebugJavaWithJavac NO-SOURCE
+> Task :fake-qwy:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :fake-qwy:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :fake-qwy:preDebugUnitTestBuild UP-TO-DATE
+> Task :fake-qwy:generateDebugUnitTestStubRFile UP-TO-DATE
+> Task :fake-qwy:compileDebugUnitTestKotlin NO-SOURCE
+> Task :fake-qwy:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :fake-qwy:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :fake-qwy:processDebugJavaRes UP-TO-DATE
+> Task :fake-qwy:processDebugUnitTestJavaRes NO-SOURCE
+> Task :fake-qwy:testDebugUnitTest NO-SOURCE
+> Task :fake-qwy:test UP-TO-DATE
+> Task :scenarios:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :scenarios:preBuild UP-TO-DATE
+> Task :scenarios:preDebugBuild UP-TO-DATE
+> Task :scenarios:generateDebugResValues UP-TO-DATE
+> Task :scenarios:generateDebugResources UP-TO-DATE
+> Task :scenarios:packageDebugResources UP-TO-DATE
+> Task :scenarios:processDebugNavigationResources UP-TO-DATE
+> Task :scenarios:parseDebugLocalResources UP-TO-DATE
+> Task :scenarios:generateDebugRFile UP-TO-DATE
+> Task :scenarios:compileDebugKotlin UP-TO-DATE
+> Task :scenarios:javaPreCompileDebug UP-TO-DATE
+> Task :scenarios:compileDebugJavaWithJavac NO-SOURCE
+> Task :scenarios:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :scenarios:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :scenarios:preDebugUnitTestBuild UP-TO-DATE
+> Task :scenarios:generateDebugUnitTestStubRFile UP-TO-DATE
+> Task :scenarios:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :scenarios:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :scenarios:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :scenarios:processDebugJavaRes UP-TO-DATE
+> Task :scenarios:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :scenarios:testDebugUnitTest UP-TO-DATE
+> Task :scenarios:test UP-TO-DATE
+
+BUILD SUCCESSFUL in 1s
+62 actionable tasks: 62 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+     -> PASS
+
+---- matrix-coverage
+     $ ./scripts/check-matrix-coverage.sh
+✅ MATRIX COVERAGE OK — all 6 M-AD IDs verified at exact coordinate:
+   ✓ M_AD_14 → matrix/AdvanceMatrixTest.kt
+   ✓ M_AD_15 → matrix/AdvanceMatrixTest.kt
+   ✓ M_AD_16 → matrix/AdvanceMatrixTest.kt
+   ✓ M_AD_17 → matrix/AdvanceMatrixTest.kt
+   ✓ M_AD_18 → matrix/AdvanceMatrixTest.kt
+   ✓ M_AD_19 → matrix/AdvanceMatrixTest.kt
+     -> PASS
+
+---- forbidden-boundaries
+     $ ./acceptance/scripts/check-forbidden-boundaries.sh
+═══════════════════════════════════════════════════════════════════
+  check-forbidden-boundaries.sh — §10.1 static-guard
+  Rows: M-BP-01, M-BP-02
+  Invariants: INV-01, INV-20
+
+  Scanning:
+    Auto:       /Users/terry/Desktop/coding/fakexxx-location-readback/apps/cellrebel-auto/app/src
+    fake-qwy:   /Users/terry/Desktop/coding/fakexxx-location-readback/acceptance/fake-qwy/src
+    scenarios:   /Users/terry/Desktop/coding/fakexxx-location-readback/acceptance/scenarios/src
+═══════════════════════════════════════════════════════════════════
+
+── M-BP-01: Auto ≠ write qwy prefs/DB (INV-01, INV-20) ──────────
+
+✅ PASS [BP-01.1]: Auto source must NOT import qwy internals (name.caiyao.fakegps.*)
+✅ PASS [BP-01.2]: Auto source must NOT reference qwy's provider/storage/db packages
+✅ PASS [BP-01.3]: Auto source must NOT reference qwy's ContentProvider authority
+
+── M-BP-02: Auto ≠ Accessibility-target qwy (INV-01, INV-20) ────
+
+✅ PASS [BP-02.1]: Accessibility service config must NOT target qwy package
+✅ PASS [BP-02.2]: Auto Kotlin/Java source must NOT reference qwy package as a string literal (Accessibility/launch target)
+✅ PASS [BP-02.3]: Auto must NOT have an Accessibility handler class for qwy
+
+── Acceptance boundary: no app-internal imports ──────────────────
+
+✅ PASS [ACC-01]: Acceptance must NOT import qwy internals (name.caiyao.fakegps.*)
+✅ PASS [ACC-02]: Acceptance must NOT import Auto internals (com.example.cellrebelauto.*)
+✅ PASS [ACC-03]: Acceptance must NOT reference qwy integration.v1 production package
+✅ PASS [ACC-04]: Acceptance must NOT reference Auto package
+
+── Acceptance boundary: no #4 test support references ────────────
+
+✅ PASS [ACC-05]: Acceptance must NOT reference #4's production test doubles
+
+── Acceptance boundary: Gradle dependency whitelist ──────────────
+
+✅ PASS [ACC-06]: No Gradle dependency on app modules
+✅ PASS [ACC-07]: acceptance/ only depends on allowed modules
+
+── Writing evidence manifest ─────────────────────────────────────
+
+  Written: /Users/terry/Desktop/coding/fakexxx-location-readback/acceptance/build/matrix-evidence-guard.json
+
+═══════════════════════════════════════════════════════════════════
+  RESULT: ALL 13 CHECKS PASSED ✅
+  M-BP-01: PASS (Auto ≠ write qwy prefs/DB)
+  M-BP-02: PASS (Auto ≠ Accessibility-target qwy)
+  Acceptance boundary: CLEAN
+═══════════════════════════════════════════════════════════════════
+     -> PASS
+
+---- auto-qwy-host
+     $ bash ./integration-tests/pr63-on-issue66/run-host-gate.sh
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:kspDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:kspDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :app:testDebugUnitTest
+
+BUILD SUCCESSFUL in 2s
+46 actionable tasks: 1 executed, 45 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+
+> Configure project :app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableJetifier=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :app:compileDebugAidl UP-TO-DATE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :app:kspDebugKotlin UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:kspDebugUnitTestKotlin UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :app:testDebugUnitTest
+
+[Incubating] Problems report is available at: file:///Users/terry/Desktop/coding/fakexxx-location-readback/apps/qianwangyou/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 2s
+48 actionable tasks: 1 executed, 47 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+
+> Configure project :environment-control-v1
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableJetifier=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :harness
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :cellrebel-auto:app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :cellrebel-auto:environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :qianwangyou:app
+WARNING: The option setting 'android.usesSdkInManifest.disallowed=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.sdk.defaultTargetSdkToCompileSdkIfUnset=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableAppCompileTimeRClass=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.builtInKotlin=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.newDsl=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.r8.optimizedResourceShrinking=false' is deprecated.
+The current default is 'true'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.defaults.buildfeatures.resvalues=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The option setting 'android.enableJetifier=true' is deprecated.
+The current default is 'false'.
+It will be removed in version 10.0 of the Android Gradle plugin.
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Configure project :qianwangyou:environment-control-v1
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+WARNING: The property android.dependency.excludeLibraryComponentsFromConstraints improves project import performance for very large projects. It should be enabled to improve performance.
+To suppress this warning, add android.generateSyncIssueWhenLibraryConstraintsAreEnabled=false to gradle.properties
+
+> Task :qianwangyou:app:preBuild UP-TO-DATE
+> Task :environment-control-v1:preBuild UP-TO-DATE
+> Task :environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :qianwangyou:app:preDebugBuild UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:preBuild UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:preDebugBuild UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :environment-control-v1:compileDebugAidl UP-TO-DATE
+> Task :environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :qianwangyou:app:compileDebugAidl UP-TO-DATE
+> Task :qianwangyou:app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :qianwangyou:app:generateDebugBuildConfig UP-TO-DATE
+> Task :environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:writeDebugAarMetadata UP-TO-DATE
+> Task :qianwangyou:app:checkDebugAarMetadata UP-TO-DATE
+> Task :qianwangyou:app:generateDebugResValues UP-TO-DATE
+> Task :qianwangyou:app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:processDebugNavigationResources UP-TO-DATE
+> Task :cellrebel-auto:app:buildKotlinToolingMetadata UP-TO-DATE
+> Task :cellrebel-auto:app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :cellrebel-auto:app:preBuild UP-TO-DATE
+> Task :cellrebel-auto:app:preReleaseBuild UP-TO-DATE
+> Task :qianwangyou:app:processDebugNavigationResources UP-TO-DATE
+> Task :qianwangyou:app:compileDebugNavigationResources UP-TO-DATE
+> Task :cellrebel-auto:app:generateReleaseBuildConfig UP-TO-DATE
+> Task :qianwangyou:app:generateDebugResources UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:generateDebugResValues UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:preBuild UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:preReleaseBuild UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:generateDebugResources UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:writeReleaseAarMetadata UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:packageDebugResources UP-TO-DATE
+> Task :qianwangyou:app:mergeDebugResources UP-TO-DATE
+> Task :qianwangyou:app:packageDebugResources UP-TO-DATE
+> Task :qianwangyou:app:parseDebugLocalResources UP-TO-DATE
+> Task :qianwangyou:app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :qianwangyou:app:extractDeepLinksDebug UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:extractDeepLinksDebug UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:processDebugManifest UP-TO-DATE
+> Task :cellrebel-auto:app:checkReleaseAarMetadata UP-TO-DATE
+> Task :cellrebel-auto:app:generateReleaseResValues UP-TO-DATE
+> Task :cellrebel-auto:app:mapReleaseSourceSetPaths UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:processReleaseNavigationResources UP-TO-DATE
+> Task :qianwangyou:app:processDebugMainManifest UP-TO-DATE
+> Task :cellrebel-auto:app:processReleaseNavigationResources UP-TO-DATE
+> Task :qianwangyou:app:processDebugManifest UP-TO-DATE
+> Task :qianwangyou:app:processDebugManifestForPackage UP-TO-DATE
+> Task :cellrebel-auto:app:compileReleaseNavigationResources UP-TO-DATE
+> Task :cellrebel-auto:app:generateReleaseResources UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:mapDebugSourceSetPaths UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:generateReleaseResValues UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:compileDebugLibraryResources UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:generateReleaseResources UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:parseDebugLocalResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:generateDebugRFile UP-TO-DATE
+> Task :environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:packageReleaseResources UP-TO-DATE
+> Task :environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :cellrebel-auto:app:mergeReleaseResources UP-TO-DATE
+> Task :environment-control-v1:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :cellrebel-auto:app:packageReleaseResources UP-TO-DATE
+> Task :environment-control-v1:processDebugJavaRes UP-TO-DATE
+> Task :harness:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :harness:preBuild UP-TO-DATE
+> Task :cellrebel-auto:app:parseReleaseLocalResources UP-TO-DATE
+> Task :harness:preDebugBuild UP-TO-DATE
+> Task :harness:generateDebugResValues UP-TO-DATE
+> Task :harness:generateDebugResources UP-TO-DATE
+> Task :cellrebel-auto:app:createReleaseCompatibleScreenManifests UP-TO-DATE
+> Task :cellrebel-auto:app:extractDeepLinksRelease UP-TO-DATE
+> Task :harness:packageDebugResources UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:extractDeepLinksRelease UP-TO-DATE
+> Task :harness:processDebugNavigationResources UP-TO-DATE
+> Task :harness:parseDebugLocalResources UP-TO-DATE
+> Task :qianwangyou:app:processDebugResources UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:processReleaseManifest UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :harness:generateDebugRFile UP-TO-DATE
+> Task :harness:compileDebugKotlin NO-SOURCE
+> Task :harness:javaPreCompileDebug UP-TO-DATE
+> Task :cellrebel-auto:app:processReleaseMainManifest UP-TO-DATE
+> Task :harness:compileDebugJavaWithJavac NO-SOURCE
+> Task :harness:bundleLibRuntimeToJarDebug UP-TO-DATE
+> Task :cellrebel-auto:app:processReleaseManifest UP-TO-DATE
+> Task :environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :harness:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :harness:preDebugUnitTestBuild UP-TO-DATE
+> Task :cellrebel-auto:app:processReleaseManifestForPackage UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:mapReleaseSourceSetPaths UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:compileReleaseLibraryResources UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:parseReleaseLocalResources UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:generateReleaseRFile UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:compileDebugKotlin UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:javaPreCompileDebug UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:compileDebugJavaWithJavac UP-TO-DATE
+> Task :qianwangyou:environment-control-v1:bundleLibCompileToJarDebug UP-TO-DATE
+> Task :harness:generateDebugUnitTestStubRFile UP-TO-DATE
+> Task :cellrebel-auto:app:processReleaseResources UP-TO-DATE
+> Task :harness:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :harness:processDebugJavaRes NO-SOURCE
+> Task :harness:verifyResolvedIntegrationBoundary
+> Task :cellrebel-auto:environment-control-v1:compileReleaseAidl UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :qianwangyou:app:kspDebugKotlin UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:compileReleaseKotlin UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:javaPreCompileRelease UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:compileReleaseJavaWithJavac UP-TO-DATE
+> Task :qianwangyou:app:compileDebugKotlin UP-TO-DATE
+> Task :cellrebel-auto:environment-control-v1:bundleLibCompileToJarRelease UP-TO-DATE
+> Task :qianwangyou:app:javaPreCompileDebug UP-TO-DATE
+> Task :qianwangyou:app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :qianwangyou:app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :qianwangyou:app:processDebugJavaRes UP-TO-DATE
+> Task :qianwangyou:app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :cellrebel-auto:app:kspReleaseKotlin UP-TO-DATE
+> Task :cellrebel-auto:app:compileReleaseKotlin UP-TO-DATE
+> Task :cellrebel-auto:app:javaPreCompileRelease UP-TO-DATE
+> Task :cellrebel-auto:app:compileReleaseJavaWithJavac UP-TO-DATE
+> Task :cellrebel-auto:app:bundleReleaseClassesToCompileJar UP-TO-DATE
+> Task :cellrebel-auto:app:processReleaseJavaRes UP-TO-DATE
+> Task :cellrebel-auto:app:bundleReleaseClassesToRuntimeJar UP-TO-DATE
+> Task :harness:compileDebugUnitTestKotlin
+> Task :harness:compileDebugUnitTestJavaWithJavac UP-TO-DATE
+> Task :harness:processDebugUnitTestJavaRes UP-TO-DATE
+> Task :harness:testDebugUnitTest
+
+[Incubating] Problems report is available at: file:///Users/terry/Desktop/coding/fakexxx-location-readback/integration-tests/pr63-on-issue66/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.3.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 7s
+109 actionable tasks: 3 executed, 106 up-to-date
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.3.1/userguide/configuration_cache_enabling.html
+HOST integration gate: PASS
+DEVICE/FULL evidence: BLOCKED (no device run; production fingerprint allowlist stays empty)
+OVERALL: BLOCKED pending the separately authorized device gate
+{"schemaVersion":1,"hostIntegration":"PASS","issue66Ac7":"NOT_PASSED","emulator":"NOT_RUN","physicalDevice":"BLOCKED_NO_AUTHORIZATION","deviceFull":"BLOCKED","overall":"BLOCKED","reason":"NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY"}
+     receipt: VALID — hostIntegration=PASS; issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED
+     -> PASS (repository host integration only; product/device remains BLOCKED)
+
+---- release-debt
+     $ ./scripts/check-release-debt.sh
+check-release-debt: PASS — no open release-blocking debt issues
+     -> PASS
+
+========================================
+verify-a-plus summary (stage=full)
+  ran     : 12
+  passed  : 12
+  failed  : 0
+  pending : 0
+
+RESULT: repository host gates required at stage=full passed.
+PRODUCT/DEVICE RESULT: BLOCKED — issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED.
+REASON: NO_DEVICE_RUN_AND_PRODUCTION_FINGERPRINT_ALLOWLIST_EMPTY

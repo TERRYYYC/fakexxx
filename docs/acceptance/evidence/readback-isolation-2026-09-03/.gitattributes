@@ -1,0 +1,7 @@
+# Preserve generated receipts byte-for-byte, including adb CRLF and command trailing spaces.
+# This exception is confined to this dated raw-evidence bundle, not source or prose.
+host/*.log -whitespace
+host/*.meta -whitespace
+android/*.stdout -whitespace
+android/*.meta -whitespace
+android/*.avd -whitespace

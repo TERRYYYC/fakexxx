@@ -1,0 +1,6 @@
+utc_started=2026-09-03T14:00:52Z
+cwd=/Users/terry/Desktop/coding/fakexxx-location-readback
+head=6691bcb00305615676ef8d6856561ba3c23d61ab
+command=env JAVA_HOME=/Applications/Android\ Studio.app/Contents/jbr/Contents/Home ANDROID_HOME=/Users/terry/Library/Android/sdk bash scripts/check-codex-bench-apks.sh apps/qianwangyou/app/build/outputs/apk/codexBench/app-codexBench.apk apps/cellrebel-auto/app/build/outputs/apk/codexBench/app-codexBench.apk 
+exit=0
+utc_completed=2026-09-03T14:00:53Z

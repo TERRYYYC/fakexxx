@@ -1,0 +1,11 @@
+
+name.caiyao.fakegps.data.AppInfoProviderInstrumentedTest:..
+name.caiyao.fakegps.data.db.AppDatabaseMigrationTest:.
+name.caiyao.fakegps.data.db.ProfileImportTransactionTest:....
+name.caiyao.fakegps.integration.v1.BinderIdentityInstrumentedTest:..
+
+Time: 0.438
+
+OK (9 tests)
+
+
