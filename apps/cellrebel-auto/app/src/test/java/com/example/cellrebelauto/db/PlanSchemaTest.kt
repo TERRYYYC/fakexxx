@@ -138,6 +138,53 @@ class PlanSchemaTest {
     }
 
     @Test
+    fun `A plus attempt id reservation commits the sequence and admission persists a recoverable owner`() = runTest {
+        val repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        val (_, taskIds) = seedPlanWithTasks()
+        val taskId = taskIds[0]
+        val sessionId = seedSession()
+        val template = attempt(taskId, sessionId, 1, "starting")
+
+        val reservedId = repo.reserveAplusAttemptId(template)
+        val nextReservedId = repo.reserveAplusAttemptId(template.copy(attemptOrdinal = 2))
+
+        assertEquals("reservation commits no attempt row", 0, db.testAttemptDao().countAttemptsForTask(taskId))
+        assertEquals(null, db.testAttemptDao().getAttemptById(reservedId))
+        assertEquals(null, db.testAttemptDao().getAttemptById(nextReservedId))
+        assertTrue(
+            "a committed delete-only reservation advances sqlite_sequence without an explicit reinsert",
+            nextReservedId > reservedId
+        )
+        val admittedId = repo.insertAdmittedAplusAttempt(
+            template.copy(id = reservedId),
+            activateTask = true,
+            scheduleId = "schedule-reserved",
+            itemId = "item-reserved",
+            version = 7L
+        )
+        assertEquals(reservedId, admittedId)
+        assertEquals("active", db.locationTaskDao().getTaskById(taskId)!!.status)
+        val anchor = db.testAttemptDao().getAplusAdvanceAnchor(reservedId)!!
+        assertEquals("schedule-reserved", anchor.aplusAnchorScheduleId)
+        assertEquals("item-reserved", anchor.aplusAnchorItemId)
+        assertEquals(7L, anchor.aplusAnchorVersion)
+        assertEquals(
+            "the admitted owner is recoverable across a crash before BEGIN_APPLY",
+            "CREATED",
+            db.testAttemptDao().getAttemptById(reservedId)!!.aplusState
+        )
+        assertEquals(
+            "the recovery query sees the admitted pre-apply owner instead of blind-sweeping it",
+            listOf(reservedId),
+            repo.findAPlusRecoverableAttempts(db.locationTaskDao().getTaskById(taskId)!!.planId).map { it.id }
+        )
+
+        val thirdReservedId = repo.reserveAplusAttemptId(template.copy(attemptOrdinal = 2))
+        assertTrue("explicit insertion of an older reservation cannot rewind AUTOINCREMENT", thirdReservedId > nextReservedId)
+        assertEquals("a later reservation also leaves no row", 1, db.testAttemptDao().countAttemptsForTask(taskId))
+    }
+
+    @Test
     fun `attempt with unknown task id violates foreign key`() = runTest {
         val sessionId = seedSession()
         try {

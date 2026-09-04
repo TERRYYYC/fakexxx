@@ -20,6 +20,11 @@ import com.example.cellrebelauto.recovery.ReconcileResult
 import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.ScheduleAdvanceState
 import com.example.cellrebelauto.repository.PlanRepository
+import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
+import io.github.terryyyc.fakexxx.contract.v1.ContractV1
+import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
+import io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1
+import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
@@ -131,6 +136,12 @@ class AutomationEngine(
         EXHAUSTED
     }
 
+    private data class APlusAttemptAdmission(
+        val applyIntent: EnvironmentIntentV1,
+        val intentDigest: String,
+        val preflight: PreflightReportV1?
+    )
+
     companion object {
         private const val TAG = "AutoEngine"
         // # 单步操作失败后的最大重试次数
@@ -212,7 +223,12 @@ class AutomationEngine(
                         return@coroutineScope
                     }
                     for (crashed in recoverableAttempts) {
-                        if (!recoverCrashedAttempt(crashed, aplusCoordinator)) {
+                        if (!recoverCrashedAttempt(
+                                crashed,
+                                aplusCoordinator,
+                                recoveryCapabilities
+                            )
+                        ) {
                             return@coroutineScope
                         }
                     }
@@ -385,32 +401,72 @@ class AutomationEngine(
                     null
                 }
 
-                // # 新选中的 pending 任务只有越过所有 attempt admission gate 后才 → active。
-                if (advancingToNewTask) {
-                    planRepository.markTaskActive(task.id)
-                }
-
-                // # 创建尝试行（starting），ordinal = 任务内计数 + 1
                 val startedAt = nowMs()
                 val attemptOrdinal = planRepository.countAttemptsForTask(task.id) + 1
-                val attemptId = planRepository.insertAttempt(
-                    TestAttempt(
-                        taskId = task.id,
-                        runSessionId = runSessionId,
-                        attemptOrdinal = attemptOrdinal,
-                        successOrdinal = null,
-                        startedAt = startedAt,
-                        runningObservedAt = null,
-                        endedAt = null,
-                        status = "starting",
-                        failureReason = null,
-                        webBrowsingScore = null,
-                        videoStreamingScore = null,
-                        latitude = task.latitude,
-                        longitude = task.longitude,
-                        stageNotes = stageNotes
-                    )
+                val attemptTemplate = TestAttempt(
+                    taskId = task.id,
+                    runSessionId = runSessionId,
+                    attemptOrdinal = attemptOrdinal,
+                    successOrdinal = null,
+                    startedAt = startedAt,
+                    runningObservedAt = null,
+                    endedAt = null,
+                    status = "starting",
+                    failureReason = null,
+                    webBrowsingScore = null,
+                    videoStreamingScore = null,
+                    latitude = task.latitude,
+                    longitude = task.longitude,
+                    stageNotes = stageNotes
                 )
+
+                val aplusAdmission: APlusAttemptAdmission?
+                val attemptId: Long
+                if (aplusCoord != null && aplusEvidenceSrc != null) {
+                    val anchorProjection = checkNotNull(aplusAnchorProjection)
+                    // #88: preflight's wire identity must be the eventual durable attempt id, but
+                    // explicit EXHAUSTED must leave zero attempt rows. Reserve an AUTOINCREMENT id
+                    // in a short local transaction, then run the READ-ONLY Binder preflight with no
+                    // Room lock held. The provider never sees a guessed/reusable identity, and a
+                    // crash before admission leaves only a harmless id gap.
+                    val reservedAttemptId = planRepository.reserveAplusAttemptId(attemptTemplate)
+                    val intent = APlusOperationIdentity.intent(
+                        runSessionId,
+                        reservedAttemptId,
+                        planId,
+                        anchorProjection.currentScheduleId!!,
+                        startedAt,
+                        startedAt + testTimeoutMs
+                    )
+                    val digest = APlusOperationIdentity.requestDigest(intent)
+                    val preflight = aplusCoord.executorBackend()?.preflight(
+                        intent,
+                        APlusOperationIdentity.applyIdempotencyKey(reservedAttemptId),
+                        digest
+                    )
+                    if (preflight?.exhausted == true) {
+                        aplusPause(
+                            "provider schedule became EXHAUSTED during preflight — " +
+                                "reserved identity discarded with no attempt"
+                        )
+                        return@coroutineScope
+                    }
+                    attemptId = planRepository.insertAdmittedAplusAttempt(
+                        attemptTemplate.copy(id = reservedAttemptId),
+                        activateTask = advancingToNewTask,
+                        scheduleId = anchorProjection.currentScheduleId!!,
+                        itemId = anchorProjection.currentItemId!!,
+                        version = anchorProjection.scheduleVersion!!
+                    )
+                    aplusAdmission = APlusAttemptAdmission(intent, digest, preflight)
+                } else {
+                    if (advancingToNewTask) {
+                        planRepository.markTaskActive(task.id)
+                    }
+                    attemptId = planRepository.insertAttempt(attemptTemplate)
+                    aplusAdmission = null
+                }
+
                 currentAttemptId = attemptId
                 _cycleCount.value = _cycleCount.value + 1
                 _currentTask.value = EngineTaskSnapshot(
@@ -430,26 +486,10 @@ class AutomationEngine(
                 // # 只驱动 §8.1 迁移 + 持久化 owner 态，判定路径（recordTrustedCompletion）保持可达。
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
                     var aplusState = AttemptState.CREATED
-                    // R45 (Sol R45 P1-3 / spec §4.3 step 1): ANCHOR — the advance CAS triple
-                    // (expectedScheduleId, expectedCurrentItemId, expectedScheduleVersion) is taken
-                    // from a discover() projection group NOW and persisted to the attempt's durable
-                    // owner row BEFORE any external execution starts (§4.3: 先落库，再启动外部执行).
-                    // completeAndAdvance later replays this triple BYTE-FOR-BYTE and must never
-                    // re-discover at advance time (§6.7.3 v1.72 / M-AD-28: a refreshed precondition
-                    // would push a previous generation's completion onto a NEW schedule).
-                    // F12: discover MUST precede intent construction — the provider's currentScheduleId
-                    // feeds into scheduleRef (the intent digest preimage), not Auto's task PK.
                     val anchorProjection = checkNotNull(aplusAnchorProjection)
-                    planRepository.markAplusAdvanceAnchor(
-                        attemptId, anchorProjection.currentScheduleId!!, anchorProjection.currentItemId!!, anchorProjection.scheduleVersion!!
-                    )
-                    // # intent 身份由持久 attempt owner 态重算（INV-23，Sol round-8 P1-2）。R44 (Sol
-                    // # GREEN-review-3 F2)：intent 只构造一次——digest 与 Binder request 共用同一对象，绝不各自重算。
-                    // # F12：scheduleRef 来自 anchorProjection.currentScheduleId（provider 权威），不是 task.id。
-                    val applyIntent = APlusOperationIdentity.intent(
-                        runSessionId, attemptId, planId, anchorProjection.currentScheduleId!!, startedAt, startedAt + testTimeoutMs
-                    )
-                    val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
+                    val admitted = checkNotNull(aplusAdmission)
+                    val applyIntent = admitted.applyIntent
+                    val intentDigest = admitted.intentDigest
                     // R44 (DSF review P1-2): PREFLIGHT — the provider's schedule decision for THIS
                     // intent is consulted BEFORE the apply (§6.7): a DENIED/WAIT_UNTIL preflight
                     // fail-closes the attempt BEFORE any external apply is dispatched. This is the
@@ -467,21 +507,24 @@ class AutomationEngine(
                     // would add a second, weaker denial path without adding safety. Soft-logging
                     // achievable=NONE divergences later would be an observability change, not a
                     // trust change.
-                    val preflight = aplusCoord.executorBackend()?.preflight(
-                        applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest
-                    )
+                    val preflight = admitted.preflight
                     if (preflight == null ||
                         preflight.scheduleDecisionWire !=
                         io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire ||
-                        preflight.exhausted == true
+                        preflight.scheduleItemId != anchorProjection.currentItemId ||
+                        preflight.scheduleVersion != anchorProjection.scheduleVersion
                     ) {
-                        // §6.7 / #88: not allowed now, unavailable, or explicitly terminal ⇒ typed
-                        // failure with no apply and no quota. QWY's schedule identity decision can
-                        // remain ALLOWED_NOW after exhaustion, so the terminal bit is an independent
-                        // admission leg. Null retains the PR's compatibility boundary.
+                        // §6.7 / #88: unavailable, denied, or a live item/version different from
+                        // the discover anchor ⇒ typed failure with no apply and no quota. Explicit
+                        // terminal was already rejected before durable attempt admission above;
+                        // exhausted=null remains compatible, but never acts as a wildcard for the
+                        // identity tuple.
                         val why = when {
                             preflight == null -> "unavailable (fail-closed)"
-                            preflight.exhausted == true -> "provider schedule exhausted"
+                            preflight.scheduleItemId != anchorProjection.currentItemId ->
+                                "item changed (${anchorProjection.currentItemId} -> ${preflight.scheduleItemId})"
+                            preflight.scheduleVersion != anchorProjection.scheduleVersion ->
+                                "version changed (${anchorProjection.scheduleVersion} -> ${preflight.scheduleVersion})"
                             else -> "decision=${preflight.scheduleDecisionWire}"
                         }
                         planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
@@ -1071,15 +1114,115 @@ class AutomationEngine(
     }
 
     /**
+     * Re-admit a durable CREATED owner after a crash between the admission transaction and
+     * BEGIN_APPLY. No provider mutation is allowed until both the fresh discovery and the fresh
+     * preflight still name the exact persisted anchor. An explicit terminal bit, protocol skew,
+     * or identity drift preserves CREATED for a later retry and pauses without external effects.
+     */
+    private suspend fun promoteCreatedOwnerToApplyPending(
+        crashed: TestAttempt,
+        coordinator: RecoveryCoordinator,
+        recoveryCapabilities: CapabilitySnapshotV1?
+    ): Boolean {
+        if (recoveryCapabilities == null ||
+            recoveryCapabilities.protocolVersion != ContractV1.PROTOCOL_VERSION
+        ) {
+            aplusPause(
+                "CREATED recovery discovery unavailable or protocol incompatible for " +
+                    "attempt ${crashed.id}"
+            )
+            return false
+        }
+        if (recoveryCapabilities.exhausted == true) {
+            aplusPause(
+                "provider schedule is EXHAUSTED while attempt ${crashed.id} is CREATED — " +
+                    "owner preserved without replay"
+            )
+            return false
+        }
+        val anchor = planRepository.getAplusAdvanceAnchor(crashed.id)
+        if (anchor == null) {
+            planRepository.markRecoveryRequired(crashed.id, "CREATED_RECOVERY_ANCHOR_MISSING")
+            aplusPause("CREATED recovery attempt ${crashed.id} has no complete durable anchor")
+            return false
+        }
+        if (recoveryCapabilities.currentScheduleId != anchor.first ||
+            recoveryCapabilities.currentItemId != anchor.second ||
+            recoveryCapabilities.scheduleVersion != anchor.third
+        ) {
+            aplusPause(
+                "CREATED recovery discovery drifted from the durable anchor for attempt " +
+                    "${crashed.id}"
+            )
+            return false
+        }
+
+        val intent = APlusOperationIdentity.intent(
+            crashed.runSessionId,
+            crashed.id,
+            planId,
+            anchor.first,
+            crashed.startedAt,
+            crashed.startedAt + testTimeoutMs
+        )
+        val requestDigest = APlusOperationIdentity.requestDigest(intent)
+        val preflight = coordinator.executorBackend().preflight(
+            intent,
+            APlusOperationIdentity.applyIdempotencyKey(crashed.id),
+            requestDigest
+        )
+        if (preflight == null ||
+            preflight.scheduleDecisionWire != ScheduleDecisionV1.ALLOWED_NOW.wire ||
+            preflight.exhausted == true ||
+            preflight.scheduleItemId != anchor.second ||
+            preflight.scheduleVersion != anchor.third
+        ) {
+            aplusPause(
+                "CREATED recovery preflight no longer admits the durable anchor for attempt " +
+                    "${crashed.id}"
+            )
+            return false
+        }
+
+        // Keep the existing state-before-audit ordering: external replay cannot start unless the
+        // owner already says APPLY_PENDING. Atomic state+audit is the separate #86/#89 concern.
+        planRepository.markAplusState(crashed.id, AttemptState.APPLY_PENDING.name)
+        val transitioned = driveAplusTransition(
+            crashed.id,
+            AttemptState.CREATED,
+            AttemptEvent.BEGIN_APPLY
+        )
+        if (transitioned != AttemptState.APPLY_PENDING) {
+            planRepository.markRecoveryRequired(
+                crashed.id,
+                "CREATED_RECOVERY_TRANSITION:${transitioned.name}"
+            )
+            aplusPause(
+                "CREATED recovery transition did not reach APPLY_PENDING for attempt ${crashed.id}"
+            )
+            return false
+        }
+        return true
+    }
+
+    /**
      * Recover ONE crashed A+ attempt, branching on its PERSISTED current operation (Sol round-8 P1-3 /
-     * round-9 P1-4 full phase). Only `APPLY_PENDING` re-reconciles the apply (its receipt may not be
-     * durable yet); every LATER state (ENV_APPLIED … DECIDING / QUOTA_COMMITTED / UNVERIFIED_RECORDED /
-     * RELEASE_PENDING) has a durable lease and is release-converged, NEVER re-applied — so a crash after
-     * a trusted mint (DECIDING) is not re-applied and its minted attempt is not clobbered as interrupted.
+     * round-9 P1-4 full phase). `CREATED` must re-pass discovery+preflight before it can enter the
+     * existing APPLY_PENDING same-key reconciliation. Every LATER state (ENV_APPLIED … DECIDING /
+     * QUOTA_COMMITTED / UNVERIFIED_RECORDED / RELEASE_PENDING) has a durable lease and is
+     * release-converged, NEVER re-applied — so a crash after a trusted mint (DECIDING) is not re-applied
+     * and its minted attempt is not clobbered as interrupted.
      *
      * @return true to continue the plan; false = fail-closed PAUSED (caller returns).
      */
-    private suspend fun recoverCrashedAttempt(crashed: TestAttempt, coordinator: RecoveryCoordinator): Boolean {
+    private suspend fun recoverCrashedAttempt(
+        crashed: TestAttempt,
+        coordinator: RecoveryCoordinator,
+        recoveryCapabilities: CapabilitySnapshotV1?
+    ): Boolean {
+        val recoveryAdvanceProtocolCompatible =
+            recoveryCapabilities?.protocolVersion == ContractV1.PROTOCOL_VERSION
+        var recoveryOwnerState = crashed.aplusState
         // CLOSED is the §8.1 terminal sink, but attempt status is projected in a following Room write.
         // A process death between those writes leaves CLOSED + starting/running, so the recovery DAO
         // intentionally still selects the row. Project only from append-only decision authority here;
@@ -1088,13 +1231,25 @@ class AutomationEngine(
             return projectClosedAttempt(crashed)
         }
 
+        if (recoveryOwnerState == AttemptState.CREATED.name) {
+            if (!promoteCreatedOwnerToApplyPending(
+                    crashed,
+                    coordinator,
+                    recoveryCapabilities
+                )
+            ) {
+                return false
+            }
+            recoveryOwnerState = AttemptState.APPLY_PENDING.name
+        }
+
         // ==================== DECIDING: re-decide from DURABLE DB carriers (M-CR-06, R43 GREEN) ====================
         // The §8.1 TRUST_POLICY_PASS transaction crashed before commit. At DECIDING the durable
         // execution evidence + pre/post observations + completion receipt ALL persist in DB (the
         // normal path persisted them at their phase boundaries); only the ledger mint is missing.
         // Recovery re-assembles CompletionTrustContext from the DURABLE data (never a live source
         // re-acquiring stale observations) and re-runs recordTrustedCompletion with the commit clock.
-        if (crashed.aplusState == "DECIDING") {
+        if (recoveryOwnerState == "DECIDING") {
             if (!redecideDecidingAttempt(crashed)) {
                 // R7 (glm52 P1-1c): distinguish "missing carrier" (benign — fall through to
                 // release convergence) from "invariant break" (anchor null — already marked
@@ -1122,7 +1277,7 @@ class AutomationEngine(
         //  - FAILURE (source null): the attempt is finalized UNTRUSTED (typed failure) — still never
         //    interrupted — AND the release MUST converge durably before continuing; a non-durable
         //    release is a fail-closed PAUSE (the lease is unresolved — §8.1 RELEASE_INCOMPLETE).
-        when (crashed.aplusState) {
+        when (recoveryOwnerState) {
             // ---- R46 (Sol R46 P1-1): mid-advance crash recovery. The trusted mint is durable
             // (QUOTA_COMMITTED preceded the advance) and the lease was already RELEASED (release
             // precedes advance). Recovery REPLAYS the same durable advance request — identical
@@ -1131,6 +1286,13 @@ class AutomationEngine(
             // verification + receipt-digest binding. The provider's idempotency returns the
             // STORED receipt for the same key; a crash never pushes a second advance.
             "ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK" -> {
+                if (!recoveryAdvanceProtocolCompatible) {
+                    aplusPause(
+                        "provider discovery unavailable or protocol incompatible during " +
+                            "ADVANCE_* recovery — same-key replay deferred"
+                    )
+                    return false
+                }
                 // INV-23: the intent digest recompute from the persisted attempt owner state —
                 // the same inputs the original apply digested.
                 // F12: scheduleRef comes from the persisted anchor, not taskId.
@@ -1148,7 +1310,7 @@ class AutomationEngine(
                         crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
                     )
                 )
-                val persistedAdvanceState = AttemptState.valueOf(crashed.aplusState!!)
+                val persistedAdvanceState = AttemptState.valueOf(recoveryOwnerState)
                 val replayState = if (persistedAdvanceState == AttemptState.ADVANCE_PENDING) {
                     driveAplusTransition(
                         crashed.id,
@@ -1301,7 +1463,7 @@ class AutomationEngine(
 
         // APPLY_PENDING = apply dispatched, receipt/lease not yet durable → reconcile the apply (idempotent
         // replay) to obtain the lease, which comes BACK from the apply — never pre-seeded (Sol round-9 P1-3).
-        if (crashed.aplusState == "APPLY_PENDING") {
+        if (recoveryOwnerState == "APPLY_PENDING") {
             val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
             // R44 (Sol GREEN-review-3 F2): the SAME intent object feeds the digest and the wire
             // request — all inputs from the durable owner state (attempt row + plan config).
@@ -1378,7 +1540,11 @@ class AutomationEngine(
             return false
         }
         planRepository.markAplusState(crashed.id, postReleaseState.name)
-        return advanceAfterRelease(crashed, postReleaseState)
+        return advanceAfterRelease(
+            crashed,
+            postReleaseState,
+            recoveryAdvanceProtocolCompatible
+        )
     }
 
     private suspend fun canConvergeSingleExhaustedOwner(
@@ -1684,7 +1850,8 @@ class AutomationEngine(
     /** After a durable release receipt, project the terminal truth from the append-only carrier, then gate resume. */
     private suspend fun advanceAfterRelease(
         crashed: TestAttempt,
-        postReleaseState: AttemptState
+        postReleaseState: AttemptState,
+        recoveryAdvanceProtocolCompatible: Boolean
     ): Boolean {
         // Terminal truth projection FIRST, sourced from the append-only carrier (Sol round-16/18 P1-1/2):
         // the trusted ledger / unverified record is the durable authority — never the bare phase string.
@@ -1727,6 +1894,13 @@ class AutomationEngine(
                         aplusPause(
                             "trusted quota-reached attempt ${crashed.id} is $postReleaseState after release " +
                                 "(expected ADVANCE_PENDING)"
+                        )
+                        return false
+                    }
+                    if (!recoveryAdvanceProtocolCompatible) {
+                        aplusPause(
+                            "provider discovery unavailable or protocol incompatible after " +
+                                "release convergence — advance replay deferred for attempt ${crashed.id}"
                         )
                         return false
                     }
@@ -2207,6 +2381,9 @@ class AutomationEngine(
             // P1-3 (Sol Issue #19/#20 R2): typed reason for exhausted readback mismatch.
             val readbackMismatchLeg: String? = when {
                 readback == null -> "READBACK_NULL"
+                readback.protocolVersion !=
+                    io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION ->
+                    "protocolVersion"
                 readback.currentScheduleId == null -> "currentScheduleId_null"
                 readback.currentItemId == null -> "currentItemId_null"
                 readback.scheduleVersion == null -> "scheduleVersion_null"

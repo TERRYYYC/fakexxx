@@ -451,6 +451,60 @@ class PlanRepository(private val db: AppDatabase) {
 
     // ---- Attempt lifecycle ----
 
+    /**
+     * Durably reserves the next AUTOINCREMENT attempt id without retaining an attempt row.
+     * The insert+guarded-delete commit as one short local transaction: `sqlite_sequence` advances,
+     * while readers see no attempt. This lets the provider preflight use the exact eventual owner
+     * id without holding a Room transaction across Binder IPC or guessing `MAX(id)+1`.
+     */
+    suspend fun reserveAplusAttemptId(template: TestAttempt): Long = db.withTransaction {
+        check(template.id == 0L) { "attempt id reservation requires an auto-generated template" }
+        val reservedId = db.testAttemptDao().insert(template)
+        check(
+            db.testAttemptDao().deletePristineIdReservation(
+                reservedId,
+                template.taskId,
+                template.runSessionId
+            ) == 1
+        ) { "attempt id reservation was not pristine" }
+        reservedId
+    }
+
+    /** Persists a preflight-admitted A+ owner and its CAS anchor before any external execution. */
+    suspend fun insertAdmittedAplusAttempt(
+        attempt: TestAttempt,
+        activateTask: Boolean,
+        scheduleId: String,
+        itemId: String,
+        version: Long
+    ): Long = db.withTransaction {
+        check(attempt.id > 0L) { "admitted A+ attempt requires a reserved id" }
+        check(
+            attempt.status == "starting" &&
+                attempt.runningObservedAt == null &&
+                attempt.endedAt == null &&
+                attempt.aplusState == null &&
+                attempt.aplusLeaseId == null &&
+                attempt.currentExecutionId == null &&
+                attempt.aplusAnchorScheduleId == null &&
+                attempt.aplusAnchorItemId == null &&
+                attempt.aplusAnchorVersion == null
+        ) { "admitted A+ attempt must start from a pristine reservation template" }
+        if (activateTask) {
+            db.locationTaskDao().updateTaskStatus(attempt.taskId, "active")
+        }
+        val insertedId = db.testAttemptDao().insert(
+            attempt.copy(
+                aplusState = "CREATED",
+                aplusAnchorScheduleId = scheduleId,
+                aplusAnchorItemId = itemId,
+                aplusAnchorVersion = version
+            )
+        )
+        check(insertedId == attempt.id) { "reserved attempt id changed during admission" }
+        insertedId
+    }
+
     suspend fun insertAttempt(attempt: TestAttempt): Long = db.testAttemptDao().insert(attempt)
 
     // # C2：观察到 RUNNING 的瞬间持久化 starting -> running 迁移（仅自 starting）
