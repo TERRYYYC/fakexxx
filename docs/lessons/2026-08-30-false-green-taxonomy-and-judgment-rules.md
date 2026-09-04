@@ -133,6 +133,7 @@ git merge-tree --write-tree <a> <b>     # exit=0 且产出 tree = 无文本冲�
 - review lease 可能绑旧 head，replace 锁死在 issuer 身份（非 thread）。**别为账本卡住审查。**
 - `cross_post_message` freshness gate 可能返回自相矛盾的 HELD（「0 unseen」却拦），且文档写明的 `acknowledgeHeld: true` 逃生门不兑现。改用 `post_message` + `targetCats`。
 - mission header 会传染：派实现 / review 必须显式写明「『只做编排不做 review』是调度线约束，**不约束你**」。
+- `cat_cafe_hold_ball(wakeWhen)` 返回 503 `HOLD_OWNER_FENCE_UNAVAILABLE`（2026-09-04 连续两次；同一 invocation 内还遇到 `complete_a2a_dispatch` 409 `source_missing`、`ack_mentions` 500 `UNRESOLVED_VISIBILITY_CURSOR`）——托管命令不可用时退到独立 session 的后台进程（见 §11 形状 B），别当猫的问题
 
 ---
 
@@ -305,3 +306,31 @@ accept 分支在 launch 前零日志且同步置 `isRunning=true`，`startAutoma
     只走 `Log.e`、不写 logs，「logs 未变」单独不是 accept，需加 `isRunning` 腿。
 
 > 判据一句话：**「无 seam」必须由"产品发布面枚举"支撑，不能由"预期形状未命中"支撑。**
+
+---
+
+## 11. 「有输出 ≠ 有终态」——三种"看起来在跑 / 跑完了"的假绿
+
+**实证（2026-09-04，#76 合入后按 exact main `4577abc9` 重切 Auto 候选）**
+
+- **形状 A：wrapper 吞退出码。** `script.sh > out; echo EXIT=$?; tail out` —— 外层 `tail` 成功，harness 报 exit 0，
+  脚本内 gradle 其实 rc=1（`SDK location not found`：fresh worktree 无 gitignored `local.properties`、脚本环境无 `ANDROID_HOME`）。
+  作者自己中招；Sol 只读复核时按「有没有 `BUILD SUCCESSFUL` + 有没有 APK」判，而不是按 exit code 判，才拆穿。
+- **形状 B：后台进程随 invocation 拆除。** `run_in_background` 的构建走到 `:app:kspDebugKotlin` 时 CLI 进程收尾——
+  log 无终态行、无 APK、daemon 消失，半截 log「看起来在跑」。此时托管 hold（`hold_ball wakeWhen`）2×503（见 §6）。
+  解：`start_new_session` 起独立 session + 前台轮询到终态；产物落盘不依赖 invocation 生命周期。
+- **形状 C：`settings put secure enabled_accessibility_services …` 设的无障碍绑定不活过 Auto force-stop。**
+  设置读回是「已启用」，按钮 tap 却无效；同一晚复发两次（glm52 记档）。「设置读回=值」≠「系统还在用这个值」。
+
+**失效机制**：三者同一内核——把「进程有输出 / 命令返回了 / 设置读回了」当成终态。
+终态是**被观察对象自己发布的终结信号**（`BUILD SUCCESSFUL` + 产物 sha；脚本末行显式 `DONE rc=0`；服务 `bound=true` 由系统侧读出），
+不是管道里最后一个命令的退出码，也不是 harness 的 "completed"。
+
+```
+判据：
+  长命令的「完成」 = 对象自己的终结行 + 产物存在 + 退出码 三者同时成立；缺一按「未完成」处理
+  后台任务的「在跑」 = 进程活着（kill -0）且 log 在增长；半截 log 不是进行时，是死亡现场
+  环境设置的「生效」 = 消费方行为可观察（tap 生效 / bound=true），不是 settings 读回
+```
+
+> 判据一句话：**有输出 ≠ 有终态；终态由对象自己发布，不由管道尾巴代言。**
