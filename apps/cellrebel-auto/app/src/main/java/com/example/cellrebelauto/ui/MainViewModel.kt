@@ -51,7 +51,9 @@ data class PlanUiState(
     // # taskId -> 尝试总数
     val attemptCounts: Map<Long, Int> = emptyMap(),
     // # taskId -> 可信成功数（§7.3 进度唯一投影；legacy completedSuccesses 列在可信路径下冻结不写）
-    val trustedCounts: Map<Long, Int> = emptyMap()
+    val trustedCounts: Map<Long, Int> = emptyMap(),
+    // # #12：本计划是否存在终态卡死的 RECOVERY_REQUIRED 尝试（死车道标志）
+    val hasRecoveryRequired: Boolean = false
 ) {
     // # 已验证成功总数（计划级进度）——可信计数求和，不读 legacy 列
     val completedSuccesses: Int get() = trustedCounts.values.sum()
@@ -67,6 +69,14 @@ data class PlanUiState(
     // # 计划全部完成
     val isComplete: Boolean
         get() = plan != null && tasks.isNotEmpty() && tasks.all { it.status == "completed" }
+
+    /**
+     * #12：重置入口可见性 —— 计划已全部完成，或存在 RECOVERY_REQUIRED 终态死尝试
+     * （此时车道无前进路径、无人工兜底，只剩重置）。仅是投影；真正的守卫在
+     * PlanRepository.resetPlanAsFreshGeneration 的事务内再判一次（UI 隐藏不是安全边界）。
+     */
+    val canResetPlan: Boolean
+        get() = plan != null && (isComplete || hasRecoveryRequired)
 }
 
 /** A validated but not-yet-durable #97 replacement proposal. */
@@ -333,13 +343,16 @@ class MainViewModel @JvmOverloads constructor(
             } else {
                 combine(
                     planRepository.observeTasksWithTrustedCounts(plan.id),
-                    planRepository.observeAttemptCounts(plan.id)
-                ) { tasksWithTrusted, counts ->
+                    planRepository.observeAttemptCounts(plan.id),
+                    // #12：RECOVERY_REQUIRED 死尝试投影（重置入口可见性的第二支）
+                    planRepository.observeRecoveryRequiredCount(plan.id)
+                ) { tasksWithTrusted, counts, recoveryRequired ->
                     PlanUiState(
                         plan = plan,
                         tasks = PlanScheduler.executionOrder(tasksWithTrusted.map { it.task }),
                         attemptCounts = counts.associate { it.taskId to it.count },
-                        trustedCounts = tasksWithTrusted.associate { it.task.id to it.trustedSuccesses }
+                        trustedCounts = tasksWithTrusted.associate { it.task.id to it.trustedSuccesses },
+                        hasRecoveryRequired = recoveryRequired > 0
                     )
                 }
             }
@@ -667,6 +680,55 @@ class MainViewModel @JvmOverloads constructor(
             if (it.moveToFirst() && idx >= 0) return it.getString(idx)
         }
         return null
+    }
+
+    // ---- #12 plan-reset（计划重置 / 重跑入口） ----
+
+    /**
+     * The provider-side half of the #12 reset sequence, rendered into the
+     * confirm dialog for the operator to copy. Built from THIS build's
+     * selected provider principal so lane builds (glmbench) print their own
+     * package, not the production one.
+     */
+    val providerScheduleResetCommand: String
+        get() = "adb shell am start -n " +
+            "${com.example.cellrebelauto.automation.ProviderPrincipal.selected}" +
+            "/name.caiyao.fakegps.integration.v1.FaultCollectorActivity --es cmd schedule_reset"
+
+    /** Re-approval entry after the reset (pairing is wiped with the durable layer). */
+    val providerPairingApprovalCommand: String
+        get() = "adb shell am start -n " +
+            "${com.example.cellrebelauto.automation.ProviderPrincipal.selected}" +
+            "/name.caiyao.fakegps.integration.v1.PairingApprovalActivity"
+
+    /**
+     * Resets the current plan as a fresh generation (#12): copies the same
+     * worklist rows into a NEW plan (all tasks pending, zero attempts/quota —
+     * the old attempts stay in History as the audit trail) and appends a
+     * PLAN_RESET audit event. The provider side (schedule + contract durable
+     * layer) is reset separately by the operator via the adb command shown in
+     * the confirm dialog; this method does NOT touch the provider.
+     *
+     * # 重置计划为新一代：同清单新计划行 + PLAN_RESET 审计；
+     * # provider 侧 schedule_reset 由操作者按确认框中的命令执行
+     */
+    fun resetPlan() {
+        viewModelScope.launch {
+            _importErrors.value = emptyList()
+            when (val outcome = withContext(Dispatchers.IO) {
+                planRepository.resetPlanAsFreshGeneration()
+            }) {
+                is PlanRepository.PlanResetOutcome.Reset -> {
+                    _importNotice.value =
+                        "Plan reset — ${outcome.rows} rows re-imported as a new plan. " +
+                            "Next: run the provider schedule_reset command, re-approve pairing, then Start."
+                }
+                is PlanRepository.PlanResetOutcome.Refused ->
+                    _importNotice.value = "Reset refused — ${outcome.reason}"
+                PlanRepository.PlanResetOutcome.NoPlan ->
+                    _importNotice.value = "No plan to reset"
+            }
+        }
     }
 
     /**
