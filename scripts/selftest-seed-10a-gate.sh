@@ -52,6 +52,7 @@ run_gate() { # -> OUT / RC / EVENTS ; first arg = lock dir
     # mis-parses a `case` pattern's `)` inside command substitution.
     (
         export SEED_GATE_SOURCE_ONLY=1
+        export VE_LIB_PATH="$HERE/../apps/qianwangyou/scripts/vector-evidence.sh"
         export PATH="$SHIM:$PATH"
         export FAKE_EVENTS="$EVENTS"
         export SEED_GATE_LOCK_DIR="$lock"
@@ -95,6 +96,18 @@ run_gate() { # -> OUT / RC / EVENTS ; first arg = lock dir
                         sed "s/@TOKEN@/${tok:-NOTOKEN}/g" "$FAKE_LOGS_AFTER" 2>/dev/null
                     fi ;;
                 "shell run-as "*) printf '%s' "${FAKE_PREFS_XML:-}" ;;
+                "shell su "*)
+                    # #90 Vector-aware evidence: the resolver reads the LIVE zone via root.
+                    case "$*" in
+                        *"ls -d /data/misc"*|*"ls -d \"/data/misc"*)
+                            if [ -n "${FAKE_SU_UNAVAILABLE:-}" ]; then return 1; fi
+                            printf '%s\n' "${FAKE_VECTOR_PATHS:-}" | grep -c . >/dev/null 2>&1
+                            printf '%s\n' "${FAKE_VECTOR_PATHS:-}" ;;
+                        *"cat /data/misc"*|*"cat \"/data/misc"*)
+                            if [ -n "${FAKE_SU_UNAVAILABLE:-}" ]; then return 1; fi
+                            printf '%s' "${FAKE_VECTOR_CONTENT:-}" ;;
+                        *) return 0 ;;
+                    esac ;;
                 *) return 0 ;;
             esac
         }
@@ -236,6 +249,78 @@ FAKE_PID_MODE=absent FAKE_PID_MODE_AFTER_LAUNCH=alive FAKE_LOGS_BEFORE="$NOISE" 
 { [ "$RC" -ne 0 ] && ! grep -q "SEED_GATE_PASS" <<<"$OUT" && grep -q "handoff" <<<"$OUT"; } &&
     report ok "g16 live writer at handoff -> SEED_GATE_FAIL (no PASS released over a live package)" ||
     report fail "g16 handoff must be quiescent" "rc=$RC out=$OUT"
+
+# ---- #90 Vector-aware evidence capture (--evidence-dir). RED-first family. ----
+VE_LIVE_PATH="/data/misc/vd/prefs/name.caiyao.fakegps.bench/spoof_config.xml"
+VE_LIVE_XML="<?xml version='1.0'?><map><string name=\"json\">{live}</string></map>"
+VE_MIRROR_OLD="<?xml version='1.0'?><map><string name=\"json\">{stale-pre-vector}</string></map>"
+VE_MIRROR_SAME="$VE_LIVE_XML"
+EVDIR=""
+
+# ---- g17 (#90): exactly 1 live Vector source + divergent app-private mirror -> PASS, canonical=vector-live, divergence reported
+EVDIR="$WORK/ev17"
+FAKE_PID_MODE=absent FAKE_LOGS_BEFORE="$NOISE" FAKE_LOGS_AFTER="$NEW_OK" \
+FAKE_VECTOR_PATHS="$VE_LIVE_PATH" FAKE_VECTOR_CONTENT="$VE_LIVE_XML" FAKE_PREFS_XML="$VE_MIRROR_OLD" \
+EXTRA_ARGS="--evidence-dir $EVDIR" run_gate "$WORK/lock17"
+{ [ "$RC" -eq 0 ] && grep -q "SEED_GATE_PASS" <<<"$OUT" && grep -q "VE_OK" <<<"$OUT" && grep -q "VE_DIVERGENCE" <<<"$OUT" \
+  && [ -s "$EVDIR/vector-prefs/spoof_config.xml" ] && [ -s "$EVDIR/vector-prefs/spoof_config.xml.provenance" ] \
+  && [ -s "$EVDIR/app-private-mirror/spoof_config.xml" ] \
+  && grep -q "sourceZone=vector-live" "$EVDIR/vector-prefs/spoof_config.xml.provenance" \
+  && grep -q "cardinality=1/1" "$EVDIR/vector-prefs/spoof_config.xml.provenance" \
+  && grep -q "{live}" "$EVDIR/vector-prefs/spoof_config.xml" \
+  && ! grep -q "{stale-pre-vector}" "$EVDIR/vector-prefs/spoof_config.xml" ; } &&
+    report ok "g17 1 live source + divergent mirror -> PASS, canonical=vector-live, divergence reported" ||
+    report fail "g17 evidence capture must use the live zone" "rc=$RC out=$OUT dir=$(ls "$EVDIR" 2>/dev/null | tr '\n' ' ')"
+
+# ---- g18 (#90): ZERO live Vector sources -> --evidence-dir FAILS CLOSED (never falls back to the mirror)
+EVDIR="$WORK/ev18"
+FAKE_PID_MODE=absent FAKE_LOGS_BEFORE="$NOISE" FAKE_LOGS_AFTER="$NEW_OK" \
+FAKE_VECTOR_PATHS="" FAKE_PREFS_XML="$VE_MIRROR_OLD" \
+EXTRA_ARGS="--evidence-dir $EVDIR" run_gate "$WORK/lock18"
+{ [ "$RC" -ne 0 ] && ! grep -q "SEED_GATE_PASS" <<<"$OUT" && grep -q "VE_FAIL" <<<"$OUT" \
+  && [ ! -e "$EVDIR/vector-prefs/spoof_config.xml" ] ; } &&
+    report ok "g18 zero live sources -> SEED_GATE_FAIL fail-closed, no canonical emitted" ||
+    report fail "g18 zero-source must fail closed" "rc=$RC out=$OUT dir=$(ls "$EVDIR/vector-prefs" 2>/dev/null | tr '\n' ' ')"
+
+# ---- g19 (#90): MULTIPLE live Vector sources (ambiguous package zone) -> fail closed
+EVDIR="$WORK/ev19"
+FAKE_PID_MODE=absent FAKE_LOGS_BEFORE="$NOISE" FAKE_LOGS_AFTER="$NEW_OK" \
+FAKE_VECTOR_PATHS="/data/misc/a/prefs/name.caiyao.fakegps.bench/spoof_config.xml
+/data/misc/b/prefs/name.caiyao.fakegps.bench/spoof_config.xml" \
+EXTRA_ARGS="--evidence-dir $EVDIR" run_gate "$WORK/lock19"
+{ [ "$RC" -ne 0 ] && ! grep -q "SEED_GATE_PASS" <<<"$OUT" && grep -q "VE_FAIL" <<<"$OUT" \
+  && [ ! -e "$EVDIR/vector-prefs/spoof_config.xml" ] ; } &&
+    report ok "g19 multiple live sources -> SEED_GATE_FAIL fail-closed (no silent pick)" ||
+    report fail "g19 ambiguity must fail closed" "rc=$RC out=$OUT"
+
+# ---- g20 (#90): mirror identical to live -> PASS, mirror=identical, NO divergence noise
+EVDIR="$WORK/ev20"
+FAKE_PID_MODE=absent FAKE_LOGS_BEFORE="$NOISE" FAKE_LOGS_AFTER="$NEW_OK" \
+FAKE_VECTOR_PATHS="$VE_LIVE_PATH" FAKE_VECTOR_CONTENT="$VE_LIVE_XML" FAKE_PREFS_XML="$VE_MIRROR_SAME" \
+EXTRA_ARGS="--evidence-dir $EVDIR" run_gate "$WORK/lock20"
+{ [ "$RC" -eq 0 ] && grep -q "VE_OK" <<<"$OUT" && grep -q "mirror=identical" <<<"$OUT" && ! grep -q "VE_DIVERGENCE" <<<"$OUT" ; } &&
+    report ok "g20 identical mirror -> PASS, mirror=identical, no divergence noise" ||
+    report fail "g20 identical mirror must not warn" "rc=$RC out=$OUT"
+
+# ---- g21 (#90): root (su) unavailable -> fail closed, never fall back to app-private
+EVDIR="$WORK/ev21"
+FAKE_PID_MODE=absent FAKE_LOGS_BEFORE="$NOISE" FAKE_LOGS_AFTER="$NEW_OK" \
+FAKE_SU_UNAVAILABLE=1 FAKE_PREFS_XML="$VE_MIRROR_OLD" \
+EXTRA_ARGS="--evidence-dir $EVDIR" run_gate "$WORK/lock21"
+{ [ "$RC" -ne 0 ] && ! grep -q "SEED_GATE_PASS" <<<"$OUT" && grep -q "VE_FAIL" <<<"$OUT" \
+  && [ ! -e "$EVDIR/vector-prefs/spoof_config.xml" ] ; } &&
+    report ok "g21 su unavailable -> SEED_GATE_FAIL fail-closed (no root, no canonical)" ||
+    report fail "g21 root loss must fail closed" "rc=$RC out=$OUT"
+
+# ---- g22 (#90): mirror unreadable/absent -> live capture still canonical, mirror noted absent
+EVDIR="$WORK/ev22"
+FAKE_PID_MODE=absent FAKE_LOGS_BEFORE="$NOISE" FAKE_LOGS_AFTER="$NEW_OK" \
+FAKE_VECTOR_PATHS="$VE_LIVE_PATH" FAKE_VECTOR_CONTENT="$VE_LIVE_XML" FAKE_PREFS_XML="" \
+EXTRA_ARGS="--evidence-dir $EVDIR" run_gate "$WORK/lock22"
+{ [ "$RC" -eq 0 ] && grep -q "SEED_GATE_PASS" <<<"$OUT" && grep -q "mirror=absent" <<<"$OUT" \
+  && [ -s "$EVDIR/vector-prefs/spoof_config.xml" ] ; } &&
+    report ok "g22 mirror absent -> PASS, canonical live intact, mirror=absent note" ||
+    report fail "g22 missing mirror must not block canonical" "rc=$RC out=$OUT"
 
 printf 'seed-10a-gate selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
