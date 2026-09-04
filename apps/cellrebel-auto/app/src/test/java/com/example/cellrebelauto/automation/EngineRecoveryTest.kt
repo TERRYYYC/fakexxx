@@ -59,10 +59,12 @@ class EngineRecoveryTest {
         override suspend fun runTest(
             startedAt: Long,
             testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
             onRunningObserved: suspend (Long) -> Unit
         ): AttemptOutcome {
             calls++
             val template = if (queue.size > 1) queue.removeAt(0) else queue.first()
+            if (template is AttemptOutcome.Success) onStartInteraction()
             return when (template) {
                 is AttemptOutcome.Success -> template.copy(startedAt = startedAt, endedAt = nowMs())
                 is AttemptOutcome.Failure -> template.copy(startedAt = startedAt, endedAt = nowMs())
@@ -293,9 +295,11 @@ class EngineRecoveryTest {
             override suspend fun runTest(
                 startedAt: Long,
                 testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
                 onRunningObserved: suspend (Long) -> Unit
             ): AttemptOutcome {
                 events.add("run-test")
+                onStartInteraction()
                 return successTemplate.copy(startedAt = startedAt, endedAt = clock.nowMs())
             }
         }
@@ -325,8 +329,10 @@ class EngineRecoveryTest {
             override suspend fun runTest(
                 startedAt: Long,
                 testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
                 onRunningObserved: suspend (Long) -> Unit
             ): AttemptOutcome {
+                onStartInteraction()
                 onRunningObserved(4242L)
                 // # 回调返回后立刻读库：engine 必须已同步持久化 running 迁移
                 val row = db.testAttemptDao().getAttemptsForTask(taskId).single()
@@ -354,8 +360,10 @@ class EngineRecoveryTest {
             override suspend fun runTest(
                 startedAt: Long,
                 testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
                 onRunningObserved: suspend (Long) -> Unit
             ): AttemptOutcome {
+                onStartInteraction()
                 onRunningObserved(5555L)
                 throw RuntimeException("process died mid-run")
             }

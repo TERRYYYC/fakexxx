@@ -30,6 +30,11 @@ interface CellRebelDriver {
  */
 interface CellRebelRunner {
     /**
+     * @param onStartInteraction fired once, immediately after the first Start
+     * interaction was successfully dispatched. The caller samples its
+     * monotonic clock at this boundary for §6.4.2 execution bracketing.
+     * # 首次 Start 交互成功派发后立即触发；调用方在此边界采样单调时钟
+     *
      * @param onRunningObserved C2: fired the instant RUNNING evidence is
      * observed, so the caller can persist the starting -> running transition
      * immediately (spec O3 state table). Default: no-op.
@@ -38,6 +43,7 @@ interface CellRebelRunner {
     suspend fun runTest(
         startedAt: Long,
         testTimeoutMs: Long,
+        onStartInteraction: suspend () -> Unit,
         onRunningObserved: suspend (runningAtMs: Long) -> Unit = {}
     ): AttemptOutcome
 }
@@ -96,6 +102,7 @@ class CellRebelAttemptFlow(
         driver: CellRebelDriver,
         startedAt: Long,
         testTimeoutMs: Long,
+        onStartInteraction: suspend () -> Unit = {},
         onRunningObserved: suspend (runningAtMs: Long) -> Unit = {}
     ): AttemptOutcome {
         // # 预算锚点：进入验证生命周期的时刻（审计 startedAt 不动）
@@ -137,10 +144,20 @@ class CellRebelAttemptFlow(
         }
 
         // # 第 1 步：ACTION_CLICK 启动测试；返回 false（未找到按钮）→ 立即坐标兜底（AC-B3）
+        var startInteractionReported = false
+        suspend fun reportStartInteraction() {
+            if (!startInteractionReported) {
+                startInteractionReported = true
+                onStartInteraction()
+            }
+        }
+
         var fallbackTapDone = false
-        if (!driver.clickStart()) {
+        if (driver.clickStart()) {
+            reportStartInteraction()
+        } else {
             fallbackTapDone = true
-            driver.dispatchStartTap()
+            if (driver.dispatchStartTap()) reportStartInteraction()
         }
         val clickedAt = nowMs()
 
@@ -150,7 +167,7 @@ class CellRebelAttemptFlow(
             // # 兜底窗口已过仍无 running 证据 → 坐标点按一次（AC-B3）
             if (!fallbackTapDone && nowMs() - clickedAt >= START_FALLBACK_WINDOW_MS) {
                 fallbackTapDone = true
-                driver.dispatchStartTap()
+                if (driver.dispatchStartTap()) reportStartInteraction()
             }
             val nodes = driver.snapshot()?.flatten()
             if (nodes != null && detector.classify(nodes) == CellRebelScreenState.RUNNING) {

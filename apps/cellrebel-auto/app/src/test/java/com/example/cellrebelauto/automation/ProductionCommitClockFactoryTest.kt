@@ -140,9 +140,12 @@ class ProductionCommitClockFactoryTest {
                 override suspend fun runTest(
                     startedAt: Long,
                     testTimeoutMs: Long,
+                    onStartInteraction: suspend () -> Unit,
                     onRunningObserved: suspend (Long) -> Unit
-                ): com.example.cellrebelauto.automation.AttemptOutcome =
-                    com.example.cellrebelauto.automation.AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 0L)
+                ): com.example.cellrebelauto.automation.AttemptOutcome {
+                    onStartInteraction()
+                    return com.example.cellrebelauto.automation.AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 0L)
+                }
             },
             gpsSetter = object : com.example.cellrebelauto.automation.GpsLocationSetter {
                 override suspend fun setLocation(lat: Double, lng: Double) =

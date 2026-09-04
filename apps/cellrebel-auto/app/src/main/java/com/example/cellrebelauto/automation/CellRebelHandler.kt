@@ -51,6 +51,7 @@ class CellRebelHandler(
     override suspend fun runTest(
         startedAt: Long,
         testTimeoutMs: Long,
+        onStartInteraction: suspend () -> Unit,
         onRunningObserved: suspend (Long) -> Unit
     ): AttemptOutcome {
         // # 第 1 步：启动应用并等待前台 + 导航到测试页面
@@ -77,6 +78,7 @@ class CellRebelHandler(
             AndroidCellRebelDriver(bridge, onLog = ::log),
             startedAt,
             testTimeoutMs,
+            onStartInteraction,
             onRunningObserved
         )
     }

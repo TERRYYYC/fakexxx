@@ -78,7 +78,15 @@ class CrashMatrixTest {
     // ---- minimal engine harness (mirrors EngineTrustedPathRedTest) ----
 
     private class FakeCellRebelRunner(private val outcome: AttemptOutcome) : CellRebelRunner {
-        override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome = outcome
+        override suspend fun runTest(
+            startedAt: Long,
+            testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
+            onRunningObserved: suspend (Long) -> Unit
+        ): AttemptOutcome {
+            if (outcome is AttemptOutcome.Success) onStartInteraction()
+            return outcome
+        }
     }
 
     private class FakeGpsSetter : GpsLocationSetter {

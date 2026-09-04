@@ -77,10 +77,12 @@ class MmG02EngineSelectionRedTest {
         override suspend fun runTest(
             startedAt: Long,
             testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
             onRunningObserved: suspend (Long) -> Unit
         ): AttemptOutcome {
             calls++
             val template = if (queue.size > 1) queue.removeAt(0) else queue.first()
+            if (template is AttemptOutcome.Success) onStartInteraction()
             return when (template) {
                 is AttemptOutcome.Success -> template.copy(startedAt = startedAt, endedAt = nowMs())
                 is AttemptOutcome.Failure -> template.copy(startedAt = startedAt, endedAt = nowMs())

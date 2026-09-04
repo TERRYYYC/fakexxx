@@ -94,10 +94,12 @@ class EngineTrustedPathRedTest {
         override suspend fun runTest(
             startedAt: Long,
             testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
             onRunningObserved: suspend (Long) -> Unit
         ): AttemptOutcome {
             calls++
             val template = if (queue.size > 1) queue.removeAt(0) else queue.first()
+            if (template is AttemptOutcome.Success) onStartInteraction()
             return when (template) {
                 is AttemptOutcome.Success -> template.copy(startedAt = startedAt, endedAt = nowMs())
                 is AttemptOutcome.Failure -> template.copy(startedAt = startedAt, endedAt = nowMs())
@@ -153,7 +155,10 @@ class EngineTrustedPathRedTest {
         private val planId: Long = 1L,
         private val scheduleRef: String = "qwy-default-schedule",
         private val attemptStartedAt: Long = 1000L,
-        private val testTimeoutMs: Long = 90_000L
+        private val testTimeoutMs: Long = 90_000L,
+        private val executionForAttempt: suspend (attemptId: Long) -> CellRebelExecution? = {
+            fullEvidenceExecution(wire)
+        }
     ) : APlusEvidenceSource {
         // R43 GREEN: the INV-23 three-way hash is recomputed from the REAL owner session id the
         // engine passes in — the placeholder run id (0L) could never agree with the engine recompute.
@@ -190,12 +195,14 @@ class EngineTrustedPathRedTest {
             )
 
         override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? =
-            if (!present) null else APlusCompletionEvidence(
-                execution = fullEvidenceExecution(wire),
-                completionEvidenceWire = wire,
-                applyReceiptIntentHash = intentHash(attemptId, runSessionId),
-                applyReceiptLease = providerLease(attemptId)
-            )
+            if (!present) null else executionForAttempt(attemptId)?.let { execution ->
+                APlusCompletionEvidence(
+                    execution = execution,
+                    completionEvidenceWire = wire,
+                    applyReceiptIntentHash = intentHash(attemptId, runSessionId),
+                    applyReceiptLease = providerLease(attemptId)
+                )
+            }
     }
 
     private class FakeBackend(
@@ -402,31 +409,97 @@ class EngineTrustedPathRedTest {
         val planId = seedPlan(taskId = taskId, quota = 1)
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        val backend = FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
+        val evidence = FakeEvidenceSource(
+            TARGET_LAT,
+            TARGET_LNG,
+            WIRE_VERIFIED,
+            "SYSTEM_MOCK",
+            present = true,
+            executionForAttempt = { attemptId ->
+                val ownerExecutionId = db.testAttemptDao().getCurrentExecutionId(attemptId)
+                    ?: return@FakeEvidenceSource null
+                db.attemptExecutionDao().byExecutionId(ownerExecutionId)
+            }
+        )
+        val backend = FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), evidence)
         val clock = VirtualClock()
-        // The elapsed seam: a distinct value per capture point (attempt start / RUNNING-confirmed /
-        // completion), deliberately NOTHING like the wall stamps the outcome carries — a revert to
-        // AttemptOutcome.startedAt/endedAt (the pre-fix wall-domain bug) fails every assertion below.
-        val elapsedCaptures = ArrayDeque(listOf(2000L, 2100L, 13000L))
+        // Real ordering: attempt entry (900) < PRE (1000) < runTest entry (1500)
+        // < Start interaction (2000)
+        // < RUNNING confirmation (2100) < completion (13000) < POST (14000).
+        // The completion source deliberately reads the engine-owned durable execution row; a
+        // synthetic always-valid execution would hide a producer timestamp bug.
+        var elapsedNow = 900L
+        var actualStartInteractionAtElapsed = -1L
         val runner = object : CellRebelRunner {
-            override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                elapsedNow = 1500L // launch/navigation still happens after runTest entry
+                actualStartInteractionAtElapsed = 2000L
+                elapsedNow = actualStartInteractionAtElapsed
+                onStartInteraction()
+                elapsedNow = 2100L
                 onRunningObserved(clock.nowMs())
+                elapsedNow = 13000L
                 return AttemptOutcome.Success(webScore = 8.0, videoScore = 7.0, runningObservedAt = clock.nowMs(), startedAt = startedAt, endedAt = clock.nowMs())
             }
         }
         buildEngine(
             planId, runner, FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
-            backend = backend, elapsedClockMs = { elapsedCaptures.removeFirst() }
+            backend = backend, elapsedClockMs = { elapsedNow }
         ).run()
 
         val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
         val row = db.attemptExecutionDao().forAttempt(realAttemptId).single()
-        assertEquals("startedAtElapsed binds the elapsed seam, not AttemptOutcome.startedAt (wall)", 2000L, row.startedAtElapsed)
+        assertEquals("startedAtElapsed is the actual Start interaction, not attempt entry or runTest entry", actualStartInteractionAtElapsed, row.startedAtElapsed)
+        assertTrue("PRE observation must bracket the actual Start interaction", PRE_OBSERVED_AT_ELAPSED < row.startedAtElapsed)
+        assertTrue("the actual Start interaction must precede RUNNING confirmation", row.startedAtElapsed < row.runningConfirmedAtElapsed)
         assertEquals("runningConfirmedAtElapsed binds the elapsed seam, not runningObservedAt (wall)", 2100L, row.runningConfirmedAtElapsed)
         assertEquals("completedAtElapsed binds the elapsed seam, not AttemptOutcome.endedAt (wall)", 13000L, row.completedAtElapsed)
         assertEquals(13000L - 2100L, row.runningDurationMs)
         assertEquals("2000;13000", row.roundTimestampsElapsed)
         assertNotNull("the journey still mints (only the persisted row's clock domain moved)", db.trustedQuotaDao().getByAttempt(realAttemptId))
+    }
+
+    @Test
+    fun `a successful runner without Start interaction evidence fails closed before persisting execution`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome {
+                onRunningObserved(clock.nowMs())
+                return AttemptOutcome.Success(
+                    webScore = 8.0,
+                    videoScore = 7.0,
+                    runningObservedAt = clock.nowMs(),
+                    startedAt = startedAt,
+                    endedAt = clock.nowMs()
+                )
+            }
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = passingBackend()
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("no semantic-invalid wire-1 execution row", 0, db.attemptExecutionDao().forAttempt(attempt.id).size)
+        assertNull("missing Start evidence can never mint quota", db.trustedQuotaDao().getByAttempt(attempt.id))
+        assertEquals(FailureReason.UNTRUSTED.name, attempt.failureReason)
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----
@@ -588,12 +661,14 @@ class EngineTrustedPathRedTest {
             override suspend fun runTest(
                 startedAt: Long,
                 testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
                 onRunningObserved: suspend (Long) -> Unit
             ): AttemptOutcome {
                 // P1-6: query the REAL attempt's audit (never global auditDao.all()), so a wrong-id
                 // prefix attack cannot green the in-step checks.
                 realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id != 77L }.id
                 atRunEntry = auditDao.forAttempt(realAttemptId).map { it.eventType }
+                onStartInteraction()
                 onRunningObserved(4242L)
                 afterRunningObserved = auditDao.forAttempt(realAttemptId).map { it.eventType }
                 return AttemptOutcome.Success(
