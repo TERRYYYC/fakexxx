@@ -9,28 +9,33 @@ created: 2026-09-04
 
 ## Verdict
 
-The Task 2A **host-only slice** passes its author quality gate and is ready for an
-independent exact-HEAD review. This is not a feature-completion or device-pass claim:
+The Task 2A **host-only slice** is in a review-fix cycle and is not yet ready for device use. The
+first independent exact-HEAD review returned `REQUEST_CHANGES`; its repaired successor must have a
+complete exact-commit host-gate artifact and a new approval that publishes both the exact HEAD and
+collector SHA-256. This is not a feature-completion or device-pass claim:
 
 - issue #66 remains open and AC7 remains `NOT_PASSED`;
 - no emulator or physical-device command was run by this branch;
 - Task 2B privileged inspection is not implemented;
 - both exact-build admission lists remain empty, so device `FULL` remains blocked;
-- the live Task 2A collection may run only after an independent review approves the exact
-  collector command surface.
+- the live Task 2A collection may run only after an independent review publishes the exact HEAD,
+  collector SHA-256 and approved command surface.
 
 The original requirement is [issue #66](https://github.com/TERRYYYC/fakexxx/issues/66): an
 authoritative continuity oracle must fail closed and receive exact-build emulator plus authorized
-rooted-device evidence before the blocker can close. The operator explicitly authorized staged
-work on only Moto `ZY22JHW9M4` and repeatedly asked this plan to continue. This slice extends that
-plan; it does not need to be rewritten when the later device and privileged stages are added.
+rooted-device evidence before the blocker can close. The operator's exact device scope, allowed
+mutations and explicit exclusions are durably recorded in the
+[2026-09-04 authorization checkpoint](https://github.com/TERRYYYC/fakexxx/issues/66#issuecomment-5535947347).
+Only Moto `ZY22JHW9M4` is in scope. This slice consumes none of the authorized mutations and does
+not infer authority for the excluded reboot, provider, lifecycle, adversarial or unrelated-private-
+state operations.
 
 ## Vision and delivery coverage
 
 | Requirement | Slice status | Evidence |
 | --- | --- | --- |
-| Never turn public callbacks or static presence into `FULL` | PASS | Collector manifest, redacted summary, checker JSON and host receipt all freeze device/FULL/AC7 claims as blocked. |
-| Bind future evidence to the exact authorized Moto/build | HOST READY | Collector rejects another serial/device/manufacturer/API and binds a transcript's fingerprint, boot, framework/APK bytes and tool hashes. The live transport/source is not yet proven. |
+| Preserve issue #66 AC6 runtime classification | OUTSIDE THIS SLICE; CLAIM CEILING ONLY | Task 2A never executes the runtime callback/oracle path. The base runtime contract and `AuthoritativeOracleProductionGuardTest`/`ProductionFullBoundaryTest` remain the earlier evidence; this slice only freezes its own device/FULL/AC7 claims as blocked and does not revalidate AC6. |
+| Bind future evidence to the exact authorized Moto/build | TARGETED PASS; EXACT-COMMIT GATE AND REVIEW REQUIRED | Collector rejects another serial/device/manufacturer/API and binds a transcript's fingerprint, boot, framework/APK bytes and tool hashes. The repaired external reviewed-HEAD/digest binding passed its 1473-assertion fake-ADB selftest before the later host-tool pinning repair, whose focused regression is green; a clean exact-commit gate artifact and independent approval are still required, and the live transport/source is not yet proven. |
 | Detect PRE-to-POST continuity mutations authoritatively | OUTSIDE THIS SLICE | Runtime oracle work is inherited from earlier slices; no Task 2A result claims to exercise it. |
 | Exact-build emulator plus authorized rooted-device proof | BLOCKED | Neither environment was run. This remains required for issue #66 AC7. |
 | Do not collide with existing app identities | PRESERVED | This slice installs no APK and names only the already-separated `.codexbench` identities as future mutable targets. |
@@ -40,20 +45,30 @@ Delivery completeness: this is an explicitly staged Task 2A host slice, not the 
 It leaves durable expansion points (live collection, Task 2B, evidence-only admission and runtime
 proof) rather than placeholders that require rewriting this collector.
 
+## Independent review history
+
+The first exact-HEAD review of `6d06be5f68c1fce3e6fd5f88d1ab889898d5aa68` returned
+[`REQUEST_CHANGES`](https://github.com/TERRYYYC/fakexxx/pull/81#issuecomment-5536023752).
+It prohibited a Moto run until the reviewed HEAD/collector bytes are bound at execution, aggregate
+receipt publication and validation are race-safe and source-bound, and the declared Ubuntu gate is
+green. It also required honest AC6/AC7 mapping, durable authorization provenance and complete shell
+UID/GID parsing. That verdict is retained as history; only a new exact-HEAD review after all fixes
+and fresh gates may supersede it. No device action is justified by an author selftest alone.
+
 ## Functional acceptance
 
 | Task 2A requirement | Status | Verification |
 | --- | --- | --- |
-| Device-free fake-ADB RED/green matrix | PASS | 1423 assertions, including positive-control fixture use, poisoned bare `adb`, first-targeted-command shell identity, source/snapshot replacement detection, exact Android 15 output grammars, archive validation and cleanup of frozen test evidence. |
+| Device-free fake-ADB RED/green matrix | BASELINE PASS; LATEST EXACT-COMMIT GATE REQUIRED | The repaired collector recorded 1473 assertions with zero failures before the final host-tool pinning change, including positive-control fixture use, poisoned bare `adb`, mandatory reviewed-HEAD/digest binding, first-targeted-command shell identity, source/snapshot replacement detection, exact Android 15 output grammars, archive validation and cleanup of frozen test evidence. The final PATH/Git portability regression is separately green; the independently consumable complete result must come from the clean exact commit. |
 | Exact serial-qualified operational-read-only allowlist | PASS | Mutating, generic-shell, wrong-serial and broad-query variants are refused before execution. |
 | New mode-0700 evidence root and atomic STOP/final manifest | PASS | The parent walk uses no-follow directory descriptors; repository/worktree aliases, macOS firmlinks, inherited ACLs and inode/path replacement are refused. Initial-write, summary-write and final-replacement failures are covered. |
 | One typed six-file receipt per ADB command | PASS | Exact stem graph, carrier type, argv, time, exit and undeclared-file checks are covered. |
-| Shell identity, boot and monotonic-uptime binding | PASS | `shell id` is the first serial-targeted query and must be uid 2000 before other device observations. Malformed/change/decreasing boot cases fail closed; inventory and the identity preflight are explicitly outside the later evidence bracket. |
+| Shell identity, boot and monotonic-uptime binding | TARGETED PASS | `shell id` is the first serial-targeted query and must have primary `uid=2000(shell) gid=2000(shell)` plus only accepted supplementary/context fields before other device observations. The repaired fake-ADB matrix rejects primary root GID, supplementary root groups and malformed context; inventory and the identity preflight are explicitly outside the later evidence bracket. |
 | Fixed package/process/AppOps and framework byte capture | PASS | API-35 missing-package semantics, every process row, exact AOSP AppOps/TimeUtils grammar (including UID overrides), safe split-APK paths, binary carriers and a whole-receipt-tree SHA-256 binding are covered. |
-| Offline receipt verification | PASS WITH CLAIM CEILING | It opens each authenticated file no-follow and reads it from one inode-checked descriptor, then validates exact internal structure without ADB; it cannot authenticate that copied receipts came from a genuine Moto transport. |
+| Offline receipt verification | TARGETED PASS; CLAIM CEILING | It opens each authenticated file no-follow and reads it from one inode-checked descriptor, validates exact internal structure without ADB and rechecks the reviewed source binding before returning. It cannot authenticate that copied receipts came from a genuine Moto transport; the independently consumable result must come from the clean exact-commit gate. |
 | Static Android 15 services compatibility checker | PASS, PRODUCTION STOP | 93 assertions bind required members, inputs and output FD. The independently approved dexdump digest list is intentionally empty, so a host SDK tool returns `STOP_TOOL_NOT_ATTESTED`; the pinned fake can emit only `SELFTEST_STATIC_MEMBERS_PRESENT`, never a production candidate. |
 | Repository-pinned production ADB client | PASS, SERVER UNATTESTED | The production lane accepts only the reviewed platform-tools 37.0.0 universal Mach-O client SHA-256 `9fdf861259dc807937b13afdd5f053c7fda9f3b7726933fe0e0f45130ecb8dc7`; the local ADB server/transport remains explicitly `NOT_ATTESTED`. |
-| Stale or concurrent host PASS receipt cannot remain authoritative | PASS | Runner records exclusive-lock ownership, unlinks a prior receipt, and publishes `RUNNING/BLOCKED` before host work. The aggregate validator atomically takes the same sibling lock with a random owner token, rejects any pre-existing lock, holds ownership through receipt parsing/contract validation, and returns PASS only after owner/inode-checked cleanup. Any ownership or cleanup mismatch preserves the lock as a fail-closed fence. |
+| Cooperating runner/validator stale and concurrent receipt protection | TARGETED PASS; EXACT-COMMIT GATE REQUIRED | The repair keeps one owner-token lock while publishing `RUNNING/BLOCKED` and later PASS through a private no-follow same-directory transaction; it binds source HEAD/tree, runner digest and run ID. The aggregate validator owns the same sibling lock while strictly parsing and rechecking the receipt. The expanded boundary suites pass 48/48, including Ubuntu mode reads, fixed host lookup, index-hidden changes and Darwin extended ACLs. This protects the enumerated accidental/cooperating races, not malicious same-host-UID mutation after lock release; authority remains the exact-commit CI run/artifact plus independent review. |
 | Coordinate/private-state minimization | PASS | Summary whitelist excludes coordinates; root and private LSPosed/Vector observations remain `NOT_COLLECTED_PRIVILEGED`. |
 
 ## Close and follow-up audit
@@ -66,8 +81,8 @@ with its owner/trigger boundary in the plan and runbook.
 
 This slice was developed on `codex/issue66-moto-readonly-collector`, based on
 `02574d210cc0`. The report deliberately does not predict the hash of the commit that contains it;
-the review packet must bind the exact resulting HEAD and pull request. GitHub issue #66 was still
-OPEN with P0/release-blocking labels at gate time.
+the review packet must bind the exact resulting HEAD, collector SHA-256 and pull request. GitHub
+issue #66 was still OPEN with P0/release-blocking labels at gate time.
 
 The external repository does not contain `scripts/check-hotfix-pattern.mjs`,
 `scripts/check-fallback-layers.mjs`, a root `package.json`, or a pnpm lockfile, so the Cat Cafe
@@ -92,9 +107,10 @@ Scope verdict: exempt from real-device author dogfood before review because this
 high-risk device-evidence harness whose live command surface is itself the object that must first
 receive independent approval. The available end-to-end path was nevertheless exercised with an
 explicit fake ADB: collect a complete bundle, verify it offline, mutate receipts and prove each
-case fails closed. The persistent post-review trigger is: exact-HEAD approval plus the sole visible
-device being `ZY22JHW9M4`; then run Task 2A once and review its evidence. This exception does not
-unblock feature close or AC7.
+case fails closed. The persistent post-review trigger is: a published exact-HEAD plus collector-
+SHA-256 approval, the local entry point matching both values, and the sole visible device being
+`ZY22JHW9M4`; then run Task 2A once and review its evidence. Locally calculating substitute values
+is not approval. This exception does not unblock feature close or AC7.
 
 ## Five-axis risk and fresh verification
 
@@ -118,10 +134,34 @@ RED test and a fail-closed fix. A subsequent scan found that the aggregate recei
 accept stale PASS while a concurrent runner lock existed; RED tests reproduced pre-existing-lock,
 handoff, owner-token, inode-replacement and cleanup races. The validator now owns the runner's same
 lock for its full read/validation lifetime, and structural guards freeze the canonical sibling
-receipt/lock assignments. The final finding-generator rescan reported no remaining P1/P2 on this
-surface. All fresh-context scans remain finding-generator results, not formal review approval.
+receipt/lock assignments. A pre-review finding-generator rescan reported no remaining P1/P2, but
+the subsequent exact-HEAD formal review found the binding, publication, portability and
+traceability gaps recorded above. The current repair has not yet earned a replacement verdict.
+Finding-generator scans are never formal review approval.
 
-Fresh commands run from
+The post-review finding-generator then caught four additional host-boundary defects. GNU `stat -f`
+could contaminate the Ubuntu mode result before its GNU fallback; production PATH and two embedded
+Git calls were caller-controlled before the first ADB receipt; Git `assume-unchanged` or
+`skip-worktree` could conceal a modified runner behind a clean status; and Darwin extended ACLs
+could grant access not represented by mode `0700`/`0600`. Each was reproduced by a RED regression.
+The repair now uses one Python mode reader, fixed production Bash/PATH/Git, rejects noncanonical
+index flags and compares the no-follow runner digest with its HEAD blob, and checks ACLs throughout
+receipt creation, publication, validation and release. The combined focused suites are green.
+
+Current repaired-source author checks, before the clean exact-commit full gate, are:
+
+| Verification | Result | Claim covered |
+| --- | --- | --- |
+| Collector selftest before final host-tool pinning | `1473 passed, 0 failed`, exit 0 | reviewed-source binding, allowlist, receipts, identity parsing, topology, exact API-35 parsers, archive structure, hashes, cleanup and fail-closed states; exact final-source rerun is delegated to the clean host gate |
+| Services compatibility selftest | `93 passed, 0 failed`, exit 0 | unchanged source/tool/member/output-FD compatibility boundary |
+| Targeted collector/runner/validator suites | 48 tests, 0 failures/errors | no-follow component walk, atomic publication, source provenance, stale/concurrent receipt, cleanup fencing, host-tool pinning, hidden index flags and Darwin/Linux mode/ACL portability |
+| Relevant shell syntax plus patch whitespace | exit 0 | all changed executable scripts parse and `git diff --check` is clean |
+
+These are author-side repair checks, not exact-commit gate evidence and not independent approval.
+
+The following commands were recorded for the rejected `6d06be5` packet. They are historical and do
+not validate the current repair. The next review packet must supersede them with the machine receipt
+and CI/artifact association from the clean exact commit. Commands ran from
 `/Users/terry/Desktop/coding/fakexxx-moto-readonly-collector` on 2026-09-04:
 
 | Verification | Result | Claim covered |

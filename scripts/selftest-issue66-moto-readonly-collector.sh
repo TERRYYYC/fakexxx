@@ -9,10 +9,14 @@
 #
 # Expected production CLI (to be implemented after this RED is observed):
 #   collect-issue66-moto-readonly-preflight.sh \
+#       --reviewed-head <40-lowercase-hex> \
+#       --reviewed-collector-sha256 <64-lowercase-hex> \
 #       --adb <absolute-fake-or-real-adb> --serial <serial> --output <new-dir>
 #   collect-issue66-moto-readonly-preflight.sh \
 #       --adb <path> --classify-adb -- <adb argv...>
 #   collect-issue66-moto-readonly-preflight.sh \
+#       --reviewed-head <40-lowercase-hex> \
+#       --reviewed-collector-sha256 <64-lowercase-hex> \
 #       --verify-receipts <existing-evidence-root>
 #
 # The classify mode is pure policy evaluation. It must not execute adb. The
@@ -72,16 +76,27 @@ report() { # ok|fail name [detail]
   fi
 }
 
-for dependency in rg; do
+for dependency in grep; do
   if ! command -v "$dependency" >/dev/null 2>&1; then
     printf 'selftest dependency missing: %s\n' "$dependency" >&2
     exit 2
   fi
 done
-if [[ ! -f $PYTHON_BIN || ! -x $PYTHON_BIN || -L $PYTHON_BIN ]]; then
-  printf 'selftest requires the fixed non-symlink Python runtime: %s\n' "$PYTHON_BIN" >&2
+if [[ ! -f $PYTHON_BIN || ! -x $PYTHON_BIN ]]; then
+  printf 'selftest requires the fixed Python runtime: %s\n' "$PYTHON_BIN" >&2
   exit 2
 fi
+
+file_mode() { # one no-follow implementation across Darwin and Linux
+  "$PYTHON_BIN" -I - "$1" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+print(format(stat.S_IMODE(os.lstat(path).st_mode), "o"))
+PY
+}
 
 if [ ! -f "$COLLECTOR" ]; then
   printf 'RED: collector target missing: %s\n' "$COLLECTOR" >&2
@@ -92,10 +107,44 @@ if [ ! -x "$FAKE_ADB" ]; then
   printf 'selftest fixture is not executable: %s\n' "$FAKE_ADB" >&2
   exit 2
 fi
+if grep -Eq -- 'PYTHON_BIN.*! -L|GIT_BIN.*! -L' "$COLLECTOR"; then
+  printf 'selftest portability stop: fixed system Python/Git entrypoints must permit distro symlinks\n' >&2
+  exit 2
+else
+  report ok "fixed system Python/Git entrypoints permit distro symlinks"
+fi
+if ! grep -Fq -- '/usr/bin/git --no-replace-objects' "$COLLECTOR" \
+    || ! grep -Fq -- 'GIT_CONFIG_NOSYSTEM=1' "$COLLECTOR" \
+    || ! grep -Fq -- 'GIT_CONFIG_SYSTEM=/dev/null' "$COLLECTOR" \
+    || ! grep -Fq -- 'GIT_CONFIG_GLOBAL=/dev/null' "$COLLECTOR" \
+    || ! grep -Fq -- '-c core.fsmonitor=false' "$COLLECTOR"; then
+  printf 'selftest review-binding stop: production Git reads must disable replacement objects, ambient configs, and fsmonitor\n' >&2
+  exit 2
+else
+  report ok "production Git binding disables replacement objects, ambient configs, and fsmonitor"
+fi
+
+SELFTEST_REVIEWED_HEAD="$(/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+  /usr/bin/git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
+  || { printf 'selftest cannot resolve the repository HEAD\n' >&2; exit 2; }
+SELFTEST_REVIEWED_COLLECTOR_SHA256="$("$PYTHON_BIN" -I - "$COLLECTOR" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)" || { printf 'selftest cannot hash the collector\n' >&2; exit 2; }
+if [[ ! $SELFTEST_REVIEWED_HEAD =~ ^[0-9a-f]{40}$ \
+    || ! $SELFTEST_REVIEWED_COLLECTOR_SHA256 =~ ^[0-9a-f]{64}$ ]]; then
+  printf 'selftest review-binding fixture is malformed\n' >&2
+  exit 2
+fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/issue66-moto-collector-selftest.XXXXXX")"
 UNSAFE_OUT="$REPO_ROOT/scripts/fixtures/issue66-moto-readonly-collector/.unsafe-output-$$"
 UNSAFE_COMMON_OUT=""
+SHELL_ID_FIXTURE_ROOT=""
 prepare_cleanup_root() { # root created exclusively by this selftest
   local root=$1
   [ -e "$root" ] || return 0
@@ -113,6 +162,11 @@ cleanup() {
   if [[ -n $UNSAFE_COMMON_OUT && ${UNSAFE_COMMON_OUT##*/} == .issue66-unsafe-output-* ]]; then
     prepare_cleanup_root "$UNSAFE_COMMON_OUT"
     rm -rf "$UNSAFE_COMMON_OUT"
+  fi
+  if [[ -n $SHELL_ID_FIXTURE_ROOT \
+      && $SHELL_ID_FIXTURE_ROOT == "$REPO_ROOT"/.issue66-shell-id-fixture-* ]]; then
+    prepare_cleanup_root "$SHELL_ID_FIXTURE_ROOT"
+    rm -rf "$SHELL_ID_FIXTURE_ROOT"
   fi
 }
 trap cleanup EXIT
@@ -244,6 +298,8 @@ run_collect() { # scenario serial output-dir [adb-binary]
     FAKE_ADB_SCENARIO="$scenario" \
     FAKE_ADB_LOG="$ADB_LOG" \
       "$COLLECTOR" --selftest-fixture --adb "$adb_binary" \
+        --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+        --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256" \
         --serial "$serial" --output "$output_dir" 2>&1
   )"
   RC=$?
@@ -262,6 +318,8 @@ run_collect_production() { # intentionally omits the selftest trust lane
     FAKE_ADB_SCENARIO=target \
     FAKE_ADB_LOG="$ADB_LOG" \
       "$COLLECTOR" --adb "$adb_binary" --serial "$AUTHORIZED_SERIAL" \
+        --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+        --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256" \
         --output "$output_dir" 2>&1
   )"
   RC=$?
@@ -293,7 +351,10 @@ run_verify() { # evidence-root
     SELFTEST_WORK_ROOT="$WORK" \
     FAKE_ADB_SCENARIO=target \
     FAKE_ADB_LOG="$ADB_LOG" \
-      "$COLLECTOR" --selftest-fixture --verify-receipts "$1" 2>&1
+      "$COLLECTOR" --selftest-fixture \
+        --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+        --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256" \
+        --verify-receipts "$1" 2>&1
   )"
   RC=$?
 }
@@ -305,7 +366,40 @@ run_verify_production() { # evidence-root; intentionally omits selftest lane
     PATH="$BASE_SELFTEST_PATH" \
     ADB="$POISON_ADB" \
     POISON_BARE_ADB_LOG="$POISON_ADB_LOG" \
-      "$COLLECTOR" --verify-receipts "$1" 2>&1
+      "$COLLECTOR" --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+        --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256" \
+        --verify-receipts "$1" 2>&1
+  )"
+  RC=$?
+}
+
+run_review_binding_collection_probe() { # output-dir [review-binding args...]
+  local output_dir="$1"
+  shift
+  : >"$ADB_LOG"
+  : >"$POISON_ADB_LOG"
+  OUT="$(
+    PATH="$BASE_SELFTEST_PATH" \
+    ADB="$POISON_ADB" \
+    POISON_BARE_ADB_LOG="$POISON_ADB_LOG" \
+    FAKE_ADB_LOG="$ADB_LOG" \
+      "$COLLECTOR" "$@" --adb /usr/bin/false \
+        --serial "$AUTHORIZED_SERIAL" --output "$output_dir" 2>&1
+  )"
+  RC=$?
+}
+
+run_review_binding_verify_probe() { # evidence-dir [review-binding args...]
+  local evidence_dir="$1"
+  shift
+  : >"$ADB_LOG"
+  : >"$POISON_ADB_LOG"
+  OUT="$(
+    PATH="$BASE_SELFTEST_PATH" \
+    ADB="$POISON_ADB" \
+    POISON_BARE_ADB_LOG="$POISON_ADB_LOG" \
+    FAKE_ADB_LOG="$ADB_LOG" \
+      "$COLLECTOR" "$@" --verify-receipts "$evidence_dir" 2>&1
   )"
   RC=$?
 }
@@ -508,7 +602,8 @@ PY
 
 assert_tool_hash_binding() { # manifest summary adb collector allowlist report-label
   local check_out check_rc
-  check_out="$("$PYTHON_BIN" -I - "$1" "$2" "$3" "$4" "$5" <<'PY' 2>&1
+  check_out="$("$PYTHON_BIN" -I - "$1" "$2" "$3" "$4" "$5" \
+    "$SELFTEST_REVIEWED_HEAD" <<'PY' 2>&1
 import hashlib
 import json
 import pathlib
@@ -520,6 +615,7 @@ summary_path = pathlib.Path(sys.argv[2])
 adb_path = pathlib.Path(sys.argv[3])
 collector_path = pathlib.Path(sys.argv[4])
 allowlist_path = pathlib.Path(sys.argv[5])
+expected_source_head = sys.argv[6]
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 summary = json.loads(summary_path.read_text(encoding="utf-8"))
 digest_re = re.compile(r"^[0-9a-f]{64}$")
@@ -552,6 +648,14 @@ if manifest.get("adbClientTrust") != "SELFTEST_FIXTURE_ONLY__NOT_DEVICE_EVIDENCE
     errors.append(f"unexpected selftest client trust: {manifest.get('adbClientTrust')!r}")
 if manifest.get("adbApprovalLane") != "SELFTEST":
     errors.append(f"unexpected selftest approval lane: {manifest.get('adbApprovalLane')!r}")
+if manifest.get("sourceHead") != expected_source_head:
+    errors.append(
+        f"manifest sourceHead mismatch: {manifest.get('sourceHead')!r} != {expected_source_head!r}"
+    )
+if manifest.get("sourceHead") != summary.get("sourceHead"):
+    errors.append("summary sourceHead does not match manifest")
+if not re.fullmatch(r"[0-9a-f]{40}", str(manifest.get("sourceHead", ""))):
+    errors.append(f"manifest sourceHead is malformed: {manifest.get('sourceHead')!r}")
 rows = []
 for line in allowlist_path.read_text(encoding="ascii").splitlines():
     if line.startswith("#"):
@@ -727,6 +831,7 @@ allowed_keys = {
     "deviceFull",
     "durableAck",
     "fullClaim",
+    "sourceHead",
     "knownPackages",
     "servicesJarSha256",
     "packageApkSha256",
@@ -742,7 +847,7 @@ if set(summary) != allowed_keys:
     )
 
 expected_exact = {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "mode": "READ_ONLY_PREFLIGHT",
     "readOnlySemantics": "OPERATIONAL_NOT_BIT_FOR_BIT",
     "incidentalEffects": [
@@ -767,6 +872,7 @@ expected_exact = {
     "deviceFull": "BLOCKED",
     "durableAck": "NOT_CREATED",
     "fullClaim": "NOT_CREATED",
+    "sourceHead": manifest.get("sourceHead"),
 }
 wrong = {
     key: (summary.get(key), expected)
@@ -782,6 +888,7 @@ for key in (
     "packageApkSha256",
     "adbSha256",
     "collectorSha256",
+    "sourceHead",
     "receiptTreeSha256",
 ):
     if summary.get(key) != manifest.get(key):
@@ -1081,8 +1188,8 @@ PY
 }
 
 assert_no_privileged_fallback() { # adb-log report-label
-  if rg -i -q -- '(^| )su( |$)|(^| )root( |$)|logcat|/data/adb|dumpsys location' "$1"; then
-    report fail "$2" "privileged/private fallback found: $(rg -i -- '(^| )su( |$)|(^| )root( |$)|logcat|/data/adb|dumpsys location' "$1" | tr '\n' ';')"
+  if grep -Eiq -- '(^| )su( |$)|(^| )root( |$)|logcat|/data/adb|dumpsys location' "$1"; then
+    report fail "$2" "privileged/private fallback found: $(grep -Ei -- '(^| )su( |$)|(^| )root( |$)|logcat|/data/adb|dumpsys location' "$1" | tr '\n' ';')"
   else
     report ok "$2"
   fi
@@ -1132,6 +1239,84 @@ PY
   fi
 }
 
+# Device collection and offline verification are both authorized against an
+# independently reviewed Git commit plus the exact collector bytes. Missing,
+# malformed, or stale bindings fail before an output directory or adb process
+# can exist. A valid production binding proceeds to the independent ADB-client
+# approval gate; /usr/bin/false is deliberately not enrolled there.
+BINDING_MISSING_OUT="$WORK/out-review-binding-missing"
+run_review_binding_collection_probe "$BINDING_MISSING_OUT"
+expect_stop "collection requires an external review binding" STOP_REVIEW_BINDING_REQUIRED
+expect_exit_code "missing collection review binding uses local-safety rc=22" 22
+expect_no_adb_call "missing collection review binding performs no adb call"
+if [ -e "$BINDING_MISSING_OUT" ]; then
+  report fail "missing collection review binding creates no evidence root" \
+    "unexpected output=$BINDING_MISSING_OUT"
+else
+  report ok "missing collection review binding creates no evidence root"
+fi
+
+BINDING_WRONG_HEAD_OUT="$WORK/out-review-binding-wrong-head"
+run_review_binding_collection_probe "$BINDING_WRONG_HEAD_OUT" \
+  --reviewed-head "0000000000000000000000000000000000000000" \
+  --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256"
+expect_stop "collection rejects a stale reviewed HEAD" STOP_REVIEW_BINDING_MISMATCH
+expect_exit_code "stale reviewed HEAD uses local-safety rc=22" 22
+expect_no_adb_call "stale reviewed HEAD performs no adb call"
+
+BINDING_WRONG_DIGEST_OUT="$WORK/out-review-binding-wrong-digest"
+run_review_binding_collection_probe "$BINDING_WRONG_DIGEST_OUT" \
+  --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+  --reviewed-collector-sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+expect_stop "collection rejects stale reviewed collector bytes" STOP_REVIEW_BINDING_MISMATCH
+expect_exit_code "stale reviewed collector digest uses local-safety rc=22" 22
+expect_no_adb_call "stale reviewed collector digest performs no adb call"
+
+BINDING_UPPERCASE_OUT="$WORK/out-review-binding-uppercase"
+BINDING_UPPERCASE_HEAD="$(printf '%s' "$SELFTEST_REVIEWED_HEAD" | tr '[:lower:]' '[:upper:]')"
+run_review_binding_collection_probe "$BINDING_UPPERCASE_OUT" \
+  --reviewed-head "$BINDING_UPPERCASE_HEAD" \
+  --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256"
+expect_stop "collection rejects noncanonical reviewed HEAD text" STOP_REVIEW_BINDING_MISMATCH
+expect_exit_code "noncanonical reviewed HEAD uses local-safety rc=22" 22
+expect_no_adb_call "noncanonical reviewed HEAD performs no adb call"
+
+BINDING_ACCEPTED_OUT="$WORK/out-review-binding-accepted"
+printf '[broken git config\n' >"$WORK/hostile-gitconfig"
+export GIT_DIR="$WORK/ambient-git-dir-must-be-ignored"
+export GIT_WORK_TREE="$WORK/ambient-work-tree-must-be-ignored"
+export GIT_OBJECT_DIRECTORY="$WORK/ambient-object-dir-must-be-ignored"
+export GIT_ALTERNATE_OBJECT_DIRECTORIES="$WORK/ambient-alternates-must-be-ignored"
+export GIT_REPLACE_REF_BASE="refs/ambient-replacements-must-be-ignored"
+export GIT_CONFIG_NOSYSTEM=0
+export GIT_CONFIG_SYSTEM="$WORK/hostile-gitconfig"
+export GIT_CONFIG_GLOBAL="$WORK/hostile-gitconfig"
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=include.path
+export GIT_CONFIG_VALUE_0="$WORK/hostile-gitconfig"
+run_review_binding_collection_probe "$BINDING_ACCEPTED_OUT" \
+  --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+  --reviewed-collector-sha256 "$SELFTEST_REVIEWED_COLLECTOR_SHA256"
+unset GIT_DIR GIT_WORK_TREE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_REPLACE_REF_BASE GIT_CONFIG_NOSYSTEM GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL \
+  GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+expect_stop "valid review binding ignores hostile Git environment and reaches ADB approval" \
+  STOP_ADB_CLIENT_UNAPPROVED
+expect_exit_code "valid review binding reaches ADB approval rc=22" 22
+expect_no_adb_call "review binding acceptance does not execute an unapproved adb"
+if [ -e "$BINDING_ACCEPTED_OUT" ]; then
+  report fail "review binding is checked before evidence-root creation" \
+    "unexpected output=$BINDING_ACCEPTED_OUT"
+else
+  report ok "review binding is checked before evidence-root creation"
+fi
+
+run_review_binding_verify_probe "$WORK/absent-review-binding-evidence"
+expect_stop "offline verification also requires an external review binding" \
+  STOP_REVIEW_BINDING_REQUIRED
+expect_exit_code "missing verifier review binding uses local-safety rc=22" 22
+expect_no_adb_call "missing verifier review binding performs no adb call"
+
 # Client trust is separate from command classification. The device-facing lane
 # accepts only the repo-enrolled production ADB digest; the fake is usable only
 # through the explicit SELFTEST lane and can never masquerade as device proof.
@@ -1160,11 +1345,20 @@ expect_exit_code "modified fake adb rejection uses local-safety rc=22" 22
 expect_no_adb_call "modified fake adb is rejected before execution"
 
 ATTESTATION_COPY="$WORK/attestation-copy"
+ATTESTATION_COLLECTOR="$ATTESTATION_COPY/collect-issue66-moto-readonly-preflight.sh"
 mkdir -p "$ATTESTATION_COPY/fixtures/issue66-moto-readonly-collector"
-cp "$COLLECTOR" "$ATTESTATION_COPY/collector.sh"
+cp "$COLLECTOR" "$ATTESTATION_COLLECTOR"
 cp "$ADB_ALLOWLIST" \
   "$ATTESTATION_COPY/fixtures/issue66-moto-readonly-collector/approved-adb-sha256.tsv"
-chmod 700 "$ATTESTATION_COPY/collector.sh"
+chmod 700 "$ATTESTATION_COLLECTOR"
+ATTESTATION_COPY_DIGEST="$("$PYTHON_BIN" -I - "$ATTESTATION_COLLECTOR" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
 printf '# unauthorized allowlist rewrite\n' >> \
   "$ATTESTATION_COPY/fixtures/issue66-moto-readonly-collector/approved-adb-sha256.tsv"
 : >"$ADB_LOG"
@@ -1175,13 +1369,181 @@ OUT="$(
   ADB="$POISON_ADB" \
   POISON_BARE_ADB_LOG="$POISON_ADB_LOG" \
   FAKE_ADB_LOG="$ADB_LOG" \
-    "$ATTESTATION_COPY/collector.sh" --selftest-fixture --adb "$FAKE_ADB" \
+    "$ATTESTATION_COLLECTOR" --selftest-fixture --adb "$FAKE_ADB" \
+      --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+      --reviewed-collector-sha256 "$ATTESTATION_COPY_DIGEST" \
       --serial "$AUTHORIZED_SERIAL" --output "$BROKEN_ALLOWLIST_OUT" 2>&1
 )"
 RC=$?
 expect_stop "modified repo ADB allowlist fails closed" STOP_INTERNAL_ADB_ALLOWLIST
 expect_exit_code "modified repo ADB allowlist uses internal rc=70" 70
 expect_no_adb_call "modified repo ADB allowlist is rejected before execution"
+
+# Exercise the online shell-identity gate with an independently enrolled,
+# device-free wrapper. The copied collector remains in the SELFTEST lane; its
+# private allowlist pins only this wrapper digest. A shell UID paired with a
+# root primary GID must stop after the identity command even when the trailing
+# groups/context fields otherwise look like canonical Android toybox output.
+SHELL_ID_FIXTURE_ROOT="$REPO_ROOT/.issue66-shell-id-fixture-$$"
+SHELL_ID_FIXTURE_COLLECTOR="$SHELL_ID_FIXTURE_ROOT/collect-issue66-moto-readonly-preflight.sh"
+SHELL_ID_FIXTURE_ADB="$SHELL_ID_FIXTURE_ROOT/shell-id-fake-adb.sh"
+SHELL_ID_FIXTURE_ALLOWLIST="$SHELL_ID_FIXTURE_ROOT/fixtures/issue66-moto-readonly-collector/approved-adb-sha256.tsv"
+mkdir -p "$SHELL_ID_FIXTURE_ROOT/fixtures/issue66-moto-readonly-collector"
+cp "$COLLECTOR" "$SHELL_ID_FIXTURE_COLLECTOR"
+cat >"$SHELL_ID_FIXTURE_ADB" <<'SHELL_ID_ADB'
+#!/usr/bin/env bash
+if [ "$*" = 'devices -l' ] && [ -n "${SELFTEST_COLLECTOR_TAMPER_TARGET:-}" ]; then
+  target="${SELFTEST_COLLECTOR_TAMPER_TARGET}"
+  marker="${SELFTEST_COLLECTOR_TAMPER_MARKER:?SELFTEST_COLLECTOR_TAMPER_MARKER is required}"
+  case "$target:$marker" in
+    "${SELFTEST_COLLECTOR_TAMPER_ROOT:?SELFTEST_COLLECTOR_TAMPER_ROOT is required}"/*:"$SELFTEST_COLLECTOR_TAMPER_ROOT"/*) ;;
+    *) printf 'unsafe collector-tamper fixture path\n' >&2; exit 96 ;;
+  esac
+  if [ ! -e "$marker" ]; then
+    : >"$marker" || exit 96
+    printf '\n# selftest runtime collector tamper\n' >>"$target" || exit 96
+  fi
+fi
+if [ "$*" = '-s ZY22JHW9M4 shell id' ]; then
+  printf '%s\n' "$*" >>"${FAKE_ADB_LOG:?FAKE_ADB_LOG is required}"
+  printf '%s\n' "${SELFTEST_SHELL_ID_OVERRIDE:?SELFTEST_SHELL_ID_OVERRIDE is required}"
+  exit 0
+fi
+exec "${SELFTEST_DELEGATE_ADB:?SELFTEST_DELEGATE_ADB is required}" "$@"
+SHELL_ID_ADB
+chmod 700 "$SHELL_ID_FIXTURE_COLLECTOR" "$SHELL_ID_FIXTURE_ADB"
+SHELL_ID_FIXTURE_ADB_DIGEST="$("$PYTHON_BIN" -I - "$SHELL_ID_FIXTURE_ADB" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+"$PYTHON_BIN" -I - "$ADB_ALLOWLIST" "$SHELL_ID_FIXTURE_ALLOWLIST" \
+  "$SHELL_ID_FIXTURE_ADB_DIGEST" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="ascii")
+destination = pathlib.Path(sys.argv[2])
+digest = sys.argv[3]
+lines = []
+replaced = 0
+for line in source.splitlines():
+    if line.startswith("SELFTEST\t"):
+        line = f"SELFTEST\tissue66-shell-id-online\t{digest}"
+        replaced += 1
+    lines.append(line)
+if replaced != 1:
+    raise SystemExit("expected one SELFTEST allowlist row")
+destination.write_text("\n".join(lines) + "\n", encoding="ascii")
+PY
+SHELL_ID_FIXTURE_ALLOWLIST_DIGEST="$("$PYTHON_BIN" -I - "$SHELL_ID_FIXTURE_ALLOWLIST" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+"$PYTHON_BIN" -I - "$SHELL_ID_FIXTURE_COLLECTOR" \
+  "$SHELL_ID_FIXTURE_ALLOWLIST_DIGEST" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+replacement = f'ADB_ALLOWLIST_EXPECTED_SHA256="{sys.argv[2]}"'
+text, count = re.subn(
+    r'ADB_ALLOWLIST_EXPECTED_SHA256="[0-9a-f]{64}"',
+    replacement,
+    text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("collector allowlist digest assignment not found exactly once")
+path.write_text(text, encoding="utf-8")
+PY
+SHELL_ID_FIXTURE_COLLECTOR_DIGEST="$("$PYTHON_BIN" -I - "$SHELL_ID_FIXTURE_COLLECTOR" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+: >"$ADB_LOG"
+: >"$POISON_ADB_LOG"
+SHELL_ID_MIXED_OUT="$WORK/out-shell-id-mixed-primary-root"
+OUT="$(
+  PATH="$BASE_SELFTEST_PATH" \
+  ADB="$POISON_ADB" \
+  POISON_BARE_ADB_LOG="$POISON_ADB_LOG" \
+  SELFTEST_REAL_MKDIR="$REAL_MKDIR" \
+  SELFTEST_REAL_MV="$REAL_MV" \
+  SELFTEST_REAL_PYTHON="$REAL_PYTHON" \
+  SELFTEST_WORK_ROOT="$WORK" \
+  SELFTEST_MANIFEST_MV_LOG="$MANIFEST_MV_LOG" \
+  SELFTEST_SUMMARY_ORDER_LOG="$SUMMARY_ORDER_LOG" \
+  SELFTEST_COLLECTOR_TAMPER_ROOT="$SHELL_ID_FIXTURE_ROOT" \
+  SELFTEST_DELEGATE_ADB="$FAKE_ADB" \
+  SELFTEST_SHELL_ID_OVERRIDE='uid=2000(shell) gid=0(root) groups=2000(shell) context=u:r:shell:s0' \
+  FAKE_ADB_SCENARIO=target \
+  FAKE_ADB_LOG="$ADB_LOG" \
+    "$SHELL_ID_FIXTURE_COLLECTOR" --selftest-fixture \
+      --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+      --reviewed-collector-sha256 "$SHELL_ID_FIXTURE_COLLECTOR_DIGEST" \
+      --adb "$SHELL_ID_FIXTURE_ADB" --serial "$AUTHORIZED_SERIAL" \
+      --output "$SHELL_ID_MIXED_OUT" 2>&1
+)"
+RC=$?
+expect_stop "shell uid with root primary gid is refused online" \
+  STOP_UNPRIVILEGED_SHELL_REQUIRED
+expect_exit_code "mixed shell/root identity uses topology/identity rc=20" 20
+assert_no_adb_after "$ADB_LOG" "-s $AUTHORIZED_SERIAL shell id" \
+  "mixed shell/root identity stops every later device read"
+expect_only_authorized_target "mixed shell/root identity remains exact-serial scoped"
+
+: >"$ADB_LOG"
+: >"$POISON_ADB_LOG"
+COLLECTOR_TAMPER_OUT="$WORK/out-runtime-collector-tamper"
+COLLECTOR_TAMPER_MARKER="$SHELL_ID_FIXTURE_ROOT/runtime-collector-tampered.marker"
+OUT="$(
+  PATH="$BASE_SELFTEST_PATH" \
+  ADB="$POISON_ADB" \
+  POISON_BARE_ADB_LOG="$POISON_ADB_LOG" \
+  SELFTEST_REAL_MKDIR="$REAL_MKDIR" \
+  SELFTEST_REAL_MV="$REAL_MV" \
+  SELFTEST_REAL_PYTHON="$REAL_PYTHON" \
+  SELFTEST_WORK_ROOT="$WORK" \
+  SELFTEST_MANIFEST_MV_LOG="$MANIFEST_MV_LOG" \
+  SELFTEST_SUMMARY_ORDER_LOG="$SUMMARY_ORDER_LOG" \
+  SELFTEST_COLLECTOR_TAMPER_ROOT="$SHELL_ID_FIXTURE_ROOT" \
+  SELFTEST_DELEGATE_ADB="$FAKE_ADB" \
+  SELFTEST_COLLECTOR_TAMPER_TARGET="$SHELL_ID_FIXTURE_COLLECTOR" \
+  SELFTEST_COLLECTOR_TAMPER_MARKER="$COLLECTOR_TAMPER_MARKER" \
+  FAKE_ADB_SCENARIO=target \
+  FAKE_ADB_LOG="$ADB_LOG" \
+    "$SHELL_ID_FIXTURE_COLLECTOR" --selftest-fixture \
+      --reviewed-head "$SELFTEST_REVIEWED_HEAD" \
+      --reviewed-collector-sha256 "$SHELL_ID_FIXTURE_COLLECTOR_DIGEST" \
+      --adb "$SHELL_ID_FIXTURE_ADB" --serial "$AUTHORIZED_SERIAL" \
+      --output "$COLLECTOR_TAMPER_OUT" 2>&1
+)"
+RC=$?
+expect_stop "collector bytes changed after the first ADB receipt are refused" \
+  STOP_REVIEW_BINDING_CHANGED
+expect_exit_code "runtime collector change uses local-safety rc=22" 22
+assert_no_adb_after "$ADB_LOG" "devices -l" \
+  "runtime collector change stops before the next ADB receipt"
+if [ -e "$COLLECTOR_TAMPER_MARKER" ]; then
+  report ok "runtime collector-change fixture actually changed the reviewed entrypoint"
+else
+  report fail "runtime collector-change fixture actually changed the reviewed entrypoint" \
+    "tamper marker missing"
+fi
 
 # G-00 is the non-vacuous positive control. A fully valid fake identity may
 # complete only as a compatibility candidate, never as device/#66/FULL proof.
@@ -1200,7 +1562,7 @@ else
 fi
 assert_boot_brackets "$ADB_LOG" "G-00 brackets collection with boot_id and uptime"
 if [ -d "$G00_OUT" ]; then
-  g00_mode="$(stat -f '%Lp' "$G00_OUT" 2>/dev/null || stat -c '%a' "$G00_OUT")"
+  g00_mode="$(file_mode "$G00_OUT")"
   if [ "$g00_mode" = 700 ]; then
     report ok "G-00 evidence root is mode 0700"
   else
@@ -1210,8 +1572,8 @@ else
   report fail "G-00 evidence root is mode 0700" "output directory missing"
 fi
 if [ -d "$G00_OUT/tooling" ] && [ -f "$G00_OUT/tooling/adb" ]; then
-  tooling_mode="$(stat -f '%Lp' "$G00_OUT/tooling" 2>/dev/null || stat -c '%a' "$G00_OUT/tooling")"
-  adb_snapshot_mode="$(stat -f '%Lp' "$G00_OUT/tooling/adb" 2>/dev/null || stat -c '%a' "$G00_OUT/tooling/adb")"
+  tooling_mode="$(file_mode "$G00_OUT/tooling")"
+  adb_snapshot_mode="$(file_mode "$G00_OUT/tooling/adb")"
   if [ "$tooling_mode" = 500 ] && [ "$adb_snapshot_mode" = 500 ]; then
     report ok "G-00 freezes the private adb snapshot and tooling directory at mode 0500"
   else
@@ -1475,6 +1837,40 @@ else
 fi
 expect_no_adb_call "intact host verification performs no adb call"
 
+SHELL_CONTEXT_OUT="$WORK/verify-shell-id-canonical-context"
+cp -R "$G00_OUT" "$SHELL_CONTEXT_OUT"
+printf '%s\n' \
+  'uid=2000(shell) gid=2000(shell) groups=1003(graphics),2000(shell),3003(inet) context=u:r:shell:s0' \
+  >"$SHELL_CONTEXT_OUT/receipts/shell-id.stdout.txt"
+rebind_receipt_tree "$SHELL_CONTEXT_OUT"
+run_verify "$SHELL_CONTEXT_OUT"
+if [ "$RC" -eq 0 ]; then
+  report ok "host verifier accepts canonical Android shell groups/context identity"
+else
+  report fail "host verifier accepts canonical Android shell groups/context identity" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "canonical shell groups/context verification performs no adb call"
+
+shell_identity_cases=(
+  'mixed-primary-root|uid=2000(shell) gid=0(root) groups=2000(shell) context=u:r:shell:s0|mixed shell uid/root primary gid'
+  'supplemental-root|uid=2000(shell) gid=2000(shell) groups=0(root),2000(shell) context=u:r:shell:s0|root supplemental group'
+  'wrong-selinux-domain|uid=2000(shell) gid=2000(shell) groups=2000(shell) context=u:r:su:s0|non-shell SELinux domain'
+  'arbitrary-suffix|uid=2000(shell) gid=2000(shell) groups=2000(shell) root=true|arbitrary shell-id suffix'
+)
+for shell_identity_case in "${shell_identity_cases[@]}"; do
+  IFS='|' read -r shell_identity_name shell_identity_value shell_identity_label \
+    <<<"$shell_identity_case"
+  broken="$WORK/verify-shell-id-$shell_identity_name"
+  cp -R "$G00_OUT" "$broken"
+  printf '%s\n' "$shell_identity_value" >"$broken/receipts/shell-id.stdout.txt"
+  rebind_receipt_tree "$broken"
+  run_verify "$broken"
+  expect_stop "host verifier rejects $shell_identity_label" STOP_INCOMPLETE_RECEIPT
+  expect_exit_code "$shell_identity_label uses evidence rc=21" 21
+  expect_no_adb_call "$shell_identity_label verification performs no adb call"
+done
+
 PYTHON_SHADOW_MARKER="$WORK/python-shadow-executed.marker"
 PYTHON_SHADOW_ROOT="$WORK/verify-python-module-shadow"
 cp -R "$G00_OUT" "$PYTHON_SHADOW_ROOT"
@@ -1619,6 +2015,29 @@ PY
   expect_no_adb_call "$label performs no adb call"
 done
 
+WRONG_SOURCE_HEAD="$WORK/verify-wrong-source-head"
+if ! cp -R "$G00_OUT" "$WRONG_SOURCE_HEAD"; then
+  printf 'selftest could not copy source-HEAD mutation fixture\n' >&2
+  exit 2
+fi
+"$PYTHON_BIN" -I - "$WRONG_SOURCE_HEAD/manifest.json" \
+  "$WRONG_SOURCE_HEAD/summary.json" <<'PY'
+import json
+import pathlib
+import sys
+
+for raw_path in sys.argv[1:]:
+    path = pathlib.Path(raw_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["sourceHead"] = "0" * 40
+    path.write_text(json.dumps(document, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+run_verify "$WRONG_SOURCE_HEAD"
+expect_stop "host verifier rejects a self-consistent but unreviewed sourceHead" \
+  STOP_INCOMPLETE_RECEIPT
+expect_exit_code "unreviewed sourceHead uses evidence rc=21" 21
+expect_no_adb_call "unreviewed sourceHead verification performs no adb call"
+
 FIRST_STEM="$(sed -n '1p' "$G00_OUT/receipts/stems.txt")"
 if [[ $FIRST_STEM =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   report ok "receipt mutation matrix has a safe baseline stem"
@@ -1643,6 +2062,7 @@ for manifest_field in \
     adbApprovalLane \
     adbApprovalLabel \
     adbAllowlistSha256 \
+    sourceHead \
     authorizedSerial \
     targetSerial \
     status \
@@ -1668,6 +2088,7 @@ mutations = {
     "adbApprovalLane": "PRODUCTION",
     "adbApprovalLabel": "unapproved-label",
     "adbAllowlistSha256": "0" * 64,
+    "sourceHead": "0" * 40,
     "authorizedSerial": "OTHER_SERIAL",
     "targetSerial": "OTHER_SERIAL",
     "status": "FULL",
@@ -2225,9 +2646,9 @@ for path_scenario in \
   expect_exit_code "$path_scenario uses local-safety rc=22" 22
   expect_only_authorized_target "$path_scenario stays on the authorized target"
   assert_no_privileged_fallback "$ADB_LOG" "$path_scenario has no privileged fallback"
-  if rg -q -- "exec-out cat /data/app/" "$ADB_LOG"; then
+  if grep -Eq -- "exec-out cat /data/app/" "$ADB_LOG"; then
     report fail "$path_scenario never reads an unvalidated APK path" \
-      "apk byte read escaped: $(rg -- 'exec-out cat /data/app/' "$ADB_LOG" | tr '\n' ';')"
+      "apk byte read escaped: $(grep -E -- 'exec-out cat /data/app/' "$ADB_LOG" | tr '\n' ';')"
   else
     report ok "$path_scenario never reads an unvalidated APK path"
   fi
@@ -2586,13 +3007,13 @@ else
   report fail "NOT_INSTALLED preserves AOSP pm-path rc=1 with empty stdout/stderr" \
     "missing or altered pm-path receipt"
 fi
-if rg -q -- "shell (dumpsys package|pidof|appops get).*${MISSING_FIXTURE_PACKAGE}|exec-out cat /data/app/.*/${MISSING_FIXTURE_PACKAGE}-" "$ADB_LOG"; then
+if grep -Eq -- "shell (dumpsys package|pidof|appops get).*${MISSING_FIXTURE_PACKAGE}|exec-out cat /data/app/.*/${MISSING_FIXTURE_PACKAGE}-" "$ADB_LOG"; then
   report fail "NOT_INSTALLED skips package-specific follow-up reads" \
-    "unexpected follow-up: $(rg -- "$MISSING_FIXTURE_PACKAGE" "$ADB_LOG" | tr '\n' ';')"
+    "unexpected follow-up: $(grep -E -- "$MISSING_FIXTURE_PACKAGE" "$ADB_LOG" | tr '\n' ';')"
 else
   report ok "NOT_INSTALLED skips package-specific follow-up reads"
 fi
-if rg -q -- "exec-out cat /data/app/.*/$MISSING_FIXTURE_PACKAGE-" "$ADB_LOG"; then
+if grep -Eq -- "exec-out cat /data/app/.*/$MISSING_FIXTURE_PACKAGE-" "$ADB_LOG"; then
   report fail "NOT_INSTALLED package has no APK byte read" "unexpected exec-out cat"
 else
   report ok "NOT_INSTALLED package has no APK byte read"
@@ -2640,7 +3061,7 @@ else
   report fail "failed device inventory manifest exists" "missing manifest.json"
 fi
 if [ "$(tr -d '\r\n' <"$DEVICES_FAIL_OUT/receipts/devices.exit.txt" 2>/dev/null)" = 7 ] \
-    && rg -q -- 'fixture devices inventory transport failure' \
+    && grep -Eq -- 'fixture devices inventory transport failure' \
       "$DEVICES_FAIL_OUT/receipts/devices.stderr.bin"; then
   report ok "failed device inventory preserves rc=7 and stderr"
 else
@@ -3030,7 +3451,7 @@ expect_stop "empty core identity receipt is refused" "STOP_INCOMPLETE_CORE_RECEI
 expect_exit_code "empty core identity uses evidence rc=21" 21
 expect_only_authorized_target "incomplete-core adb surface stays scoped"
 if [ -d "$WORK/out-incomplete" ]; then
-  mode="$(stat -f '%Lp' "$WORK/out-incomplete" 2>/dev/null || stat -c '%a' "$WORK/out-incomplete")"
+  mode="$(file_mode "$WORK/out-incomplete")"
   if [ "$mode" = 700 ]; then
     report ok "partial evidence directory stays mode 0700"
   else

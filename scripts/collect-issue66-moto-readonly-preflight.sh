@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Operational-read-only, exact-device preflight for issue #66.
 #
 # This first gate binds all device reads to the sole authorized Moto serial,
@@ -9,6 +9,22 @@
 
 set -uo pipefail
 umask 077
+
+# Production must not resolve reviewed host-side operations through a caller-
+# controlled PATH. The internal fake-ADB lane deliberately keeps its injected
+# poison PATH so the selftest can prove that no bare `adb` invocation escapes.
+STARTUP_SELFTEST_FIXTURE=0
+for startup_argument in "$@"; do
+  case "$startup_argument" in
+    --) break ;;
+    --selftest-fixture) STARTUP_SELFTEST_FIXTURE=1 ;;
+  esac
+done
+if (( STARTUP_SELFTEST_FIXTURE == 0 )); then
+  PATH=/usr/bin:/bin
+  export PATH
+fi
+unset startup_argument
 
 AUTHORIZED_SERIAL="ZY22JHW9M4"
 EXPECTED_MANUFACTURER="motorola"
@@ -36,6 +52,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SELF_DIR/.." && pwd -P)"
 COLLECTOR_PATH="$SELF_DIR/collect-issue66-moto-readonly-preflight.sh"
 PYTHON_BIN="/usr/bin/python3"
+GIT_BIN="/usr/bin/git"
 ADB_ALLOWLIST_PATH="$SELF_DIR/fixtures/issue66-moto-readonly-collector/approved-adb-sha256.tsv"
 ADB_ALLOWLIST_EXPECTED_SHA256="a52061a3a5410b7fea4703ae51c20e3525f1c4d467c36155f0d556100a63930e"
 
@@ -54,22 +71,30 @@ CLASSIFY_ONLY=0
 SELFTEST_FIXTURE=0
 CLASSIFY_ARGV=()
 VERIFY_DIR=""
+REVIEWED_HEAD=""
+REVIEWED_COLLECTOR_SHA256=""
+SOURCE_HEAD=""
 EVIDENCE_READY=0
 LAST_STDOUT=""
 LAST_RC=0
 ADB_SHA256=""
 ADB_SNAPSHOT_IDENTITY=""
 COLLECTOR_SHA256=""
+COLLECTOR_SOURCE_IDENTITY=""
 RECEIPT_TREE_SHA256=""
 
 usage() {
   cat >&2 <<'EOF'
 usage:
   collect-issue66-moto-readonly-preflight.sh \
+    --reviewed-head <40-lowercase-hex> \
+    --reviewed-collector-sha256 <64-lowercase-hex> \
     --adb <absolute-path> --serial ZY22JHW9M4 --output <new-absolute-directory>
   collect-issue66-moto-readonly-preflight.sh \
     --adb <absolute-path> --classify-adb -- <adb arguments...>
   collect-issue66-moto-readonly-preflight.sh \
+    --reviewed-head <40-lowercase-hex> \
+    --reviewed-collector-sha256 <64-lowercase-hex> \
     --verify-receipts <absolute-evidence-directory>
 
 The internal --selftest-fixture flag selects the repo-pinned fake-ADB lane and
@@ -100,6 +125,150 @@ with path.open("rb") as stream:
         digest.update(chunk)
 print(digest.hexdigest())
 PY
+}
+
+stable_collector_binding() { # stable SHA-256 + inode state for the exact entrypoint
+  "$PYTHON_BIN" -I - "$COLLECTOR_PATH" <<'PY'
+import hashlib
+import os
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1])
+
+def identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_uid,
+        stat.S_IMODE(value.st_mode),
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+descriptor = -1
+try:
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("O_NOFOLLOW unavailable")
+    before = path.lstat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) & 0o022
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > 2 * 1024 * 1024
+    ):
+        raise OSError("unsafe collector identity")
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    descriptor = os.open(path, flags)
+    opened_before = os.fstat(descriptor)
+    if identity(before) != identity(opened_before):
+        raise OSError("collector changed before open")
+    digest = hashlib.sha256()
+    byte_count = 0
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        byte_count += len(chunk)
+        if byte_count > 2 * 1024 * 1024:
+            raise OSError("collector exceeds size limit")
+        digest.update(chunk)
+    opened_after = os.fstat(descriptor)
+    after = path.lstat()
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+
+if (
+    identity(before) != identity(opened_before)
+    or identity(before) != identity(opened_after)
+    or identity(before) != identity(after)
+    or byte_count != opened_after.st_size
+):
+    raise SystemExit(1)
+print(digest.hexdigest() + "\t" + ":".join(str(item) for item in identity(before)))
+PY
+}
+
+isolated_git() { # fixed Git with no caller, system, global, replacement, or fsmonitor controls
+  /usr/bin/env -i \
+    PATH=/usr/bin:/bin \
+    LC_ALL=C \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    /usr/bin/git --no-replace-objects -c core.fsmonitor=false "$@"
+}
+
+production_git_binding() { # physical repo root + exact HEAD, with no ambient Git controls
+  [[ -f $GIT_BIN && -x $GIT_BIN ]] || return 1
+  local top head
+  top="$(isolated_git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)" \
+    || return 1
+  head="$(isolated_git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
+    || return 1
+  [[ $top == "$REPO_ROOT" && $head =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\t%s\n' "$top" "$head"
+}
+
+validate_review_binding() {
+  [[ -n $REVIEWED_HEAD && -n $REVIEWED_COLLECTOR_SHA256 ]] \
+    || stop_now STOP_REVIEW_BINDING_REQUIRED
+  [[ $REVIEWED_HEAD =~ ^[0-9a-f]{40}$ \
+      && $REVIEWED_COLLECTOR_SHA256 =~ ^[0-9a-f]{64}$ ]] \
+    || stop_now STOP_REVIEW_BINDING_MISMATCH
+
+  local collector_record actual_digest actual_identity git_record actual_root actual_head
+  collector_record="$(stable_collector_binding)" \
+    || stop_now STOP_REVIEW_BINDING_MISMATCH
+  IFS=$'\t' read -r actual_digest actual_identity <<<"$collector_record"
+  [[ $actual_digest == "$REVIEWED_COLLECTOR_SHA256" && -n $actual_identity ]] \
+    || stop_now STOP_REVIEW_BINDING_MISMATCH
+
+  if (( SELFTEST_FIXTURE )); then
+    actual_head=$REVIEWED_HEAD
+  else
+    git_record="$(production_git_binding)" \
+      || stop_now STOP_REVIEW_BINDING_MISMATCH
+    IFS=$'\t' read -r actual_root actual_head <<<"$git_record"
+    [[ $actual_root == "$REPO_ROOT" && $actual_head == "$REVIEWED_HEAD" ]] \
+      || stop_now STOP_REVIEW_BINDING_MISMATCH
+  fi
+
+  SOURCE_HEAD=$actual_head
+  COLLECTOR_SHA256=$actual_digest
+  COLLECTOR_SOURCE_IDENTITY=$actual_identity
+}
+
+review_binding_intact() {
+  [[ -n $SOURCE_HEAD && -n $COLLECTOR_SHA256 \
+      && -n $COLLECTOR_SOURCE_IDENTITY ]] || return 1
+  local collector_record actual_digest actual_identity git_record actual_root actual_head
+  collector_record="$(stable_collector_binding)" || return 1
+  IFS=$'\t' read -r actual_digest actual_identity <<<"$collector_record"
+  [[ $actual_digest == "$REVIEWED_COLLECTOR_SHA256" \
+      && $actual_digest == "$COLLECTOR_SHA256" \
+      && $actual_identity == "$COLLECTOR_SOURCE_IDENTITY" ]] || return 1
+  if (( SELFTEST_FIXTURE )); then
+    [[ $SOURCE_HEAD == "$REVIEWED_HEAD" ]]
+    return
+  fi
+  git_record="$(production_git_binding)" || return 1
+  IFS=$'\t' read -r actual_root actual_head <<<"$git_record"
+  [[ $actual_root == "$REPO_ROOT" && $actual_head == "$REVIEWED_HEAD" \
+      && $actual_head == "$SOURCE_HEAD" ]]
 }
 
 sha256_receipt_tree() { # flat receipts directory, deterministic name+byte binding
@@ -158,7 +327,7 @@ render_manifest() { # status reason destination
     package_hashes_json+="$separator\"$(json_escape "$package")\":\"$(json_escape "$package_hash")\""
     separator=,
   done
-  if ! printf '{"schemaVersion":2,"mode":"READ_ONLY_PREFLIGHT","readOnlySemantics":"OPERATIONAL_NOT_BIT_FOR_BIT","incidentalEffects":["ADB_TRANSPORT","TRANSIENT_QUERY_PROCESSES","DEVICE_AUDIT_ACCOUNTING"],"adbServerTrust":"DEFAULT_LOCAL_ENDPOINT_NOT_ATTESTED__INHERITED_ROUTING_REJECTED","adbClientTrust":"%s","adbApprovalLane":"%s","adbApprovalLabel":"%s","adbAllowlistSha256":"%s","adbSnapshotPath":"tooling/adb","status":"%s","terminalStatus":"%s","reason":"%s","collectionStatus":"%s","compatibility":"STATIC_ANALYSIS_PENDING","privilegedInspection":"NOT_COLLECTED_PRIVILEGED","coordinateCaptured":false,"authorizedSerial":"%s","targetSerial":"%s","devicePass":false,"issue66Ac7":"NOT_PASSED","deviceFull":"BLOCKED","durableAck":"NOT_CREATED","fullClaim":"NOT_CREATED","adbSha256":"%s","collectorSha256":"%s","receiptTreeSha256":"%s","knownPackages":{%s},"servicesJarSha256":"%s","packageApkSha256":{%s},"receiptStems":[%s]}\n' \
+  if ! printf '{"schemaVersion":3,"mode":"READ_ONLY_PREFLIGHT","readOnlySemantics":"OPERATIONAL_NOT_BIT_FOR_BIT","incidentalEffects":["ADB_TRANSPORT","TRANSIENT_QUERY_PROCESSES","DEVICE_AUDIT_ACCOUNTING"],"adbServerTrust":"DEFAULT_LOCAL_ENDPOINT_NOT_ATTESTED__INHERITED_ROUTING_REJECTED","adbClientTrust":"%s","adbApprovalLane":"%s","adbApprovalLabel":"%s","adbAllowlistSha256":"%s","adbSnapshotPath":"tooling/adb","status":"%s","terminalStatus":"%s","reason":"%s","collectionStatus":"%s","compatibility":"STATIC_ANALYSIS_PENDING","privilegedInspection":"NOT_COLLECTED_PRIVILEGED","coordinateCaptured":false,"authorizedSerial":"%s","targetSerial":"%s","devicePass":false,"issue66Ac7":"NOT_PASSED","deviceFull":"BLOCKED","durableAck":"NOT_CREATED","fullClaim":"NOT_CREATED","sourceHead":"%s","adbSha256":"%s","collectorSha256":"%s","receiptTreeSha256":"%s","knownPackages":{%s},"servicesJarSha256":"%s","packageApkSha256":{%s},"receiptStems":[%s]}\n' \
     "$(json_escape "$ADB_CLIENT_TRUST")" \
     "$(json_escape "$ADB_APPROVAL_LANE")" \
     "$(json_escape "$ADB_APPROVAL_LABEL")" \
@@ -169,6 +338,7 @@ render_manifest() { # status reason destination
     "$collection_status" \
     "$AUTHORIZED_SERIAL" \
     "$AUTHORIZED_SERIAL" \
+    "$(json_escape "$SOURCE_HEAD")" \
     "$(json_escape "$ADB_SHA256")" \
     "$(json_escape "$COLLECTOR_SHA256")" \
     "$(json_escape "$RECEIPT_TREE_SHA256")" \
@@ -223,6 +393,7 @@ keys = (
     "deviceFull",
     "durableAck",
     "fullClaim",
+    "sourceHead",
     "knownPackages",
     "servicesJarSha256",
     "packageApkSha256",
@@ -244,6 +415,7 @@ PY
 
 publish_collected_bundle() {
   local final_manifest="$OUTPUT_DIR/.manifest.final.json.tmp"
+  review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED
   output_binding_intact || stop_now STOP_OUTPUT_CHANGED
   render_manifest "COLLECTED" \
     "PUBLIC_STATIC_EVIDENCE_COLLECTED__STATIC_ANALYSIS_PENDING" \
@@ -252,6 +424,7 @@ publish_collected_bundle() {
   output_binding_intact || stop_now STOP_OUTPUT_CHANGED
   [[ ! -d $OUTPUT_DIR/manifest.json && ! -L $OUTPUT_DIR/manifest.json ]] \
     || fatal_manifest_write
+  review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED
   mv -f "$final_manifest" "$OUTPUT_DIR/manifest.json" || fatal_manifest_write
 }
 
@@ -792,16 +965,30 @@ try:
         raise OSError("output parent is writable without sticky protection")
 
     git_env = {
-        key: value for key, value in os.environ.items()
-        if not key.startswith("GIT_")
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PATH": "/usr/bin:/bin",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_COUNT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
     }
+    git_prefix = [
+        "/usr/bin/git",
+        "--no-replace-objects",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.untrackedCache=false",
+        "-C", str(repo),
+    ]
     common = pathlib.Path(subprocess.check_output(
-        ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        [*git_prefix, "rev-parse", "--path-format=absolute", "--git-common-dir"],
         text=True,
         env=git_env,
     ).strip()).resolve()
     listing = subprocess.check_output(
-        ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+        [*git_prefix, "worktree", "list", "--porcelain"],
         text=True,
         env=git_env,
     )
@@ -1035,6 +1222,7 @@ timestamp_utc() {
 run_text_receipt() { # stem adb-argv...
   local stem=$1
   shift
+  review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED
   adb_snapshot_intact || stop_now STOP_ADB_SNAPSHOT_CHANGED
   [[ $stem =~ ^[a-z0-9][a-z0-9-]*$ ]] || stop_now STOP_INTERNAL_RECEIPT_NAME
   CLASSIFY_ARGV=("$@")
@@ -1081,6 +1269,7 @@ PY
 run_binary_receipt() { # stem adb-argv...
   local stem=$1
   shift
+  review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED
   adb_snapshot_intact || stop_now STOP_ADB_SNAPSHOT_CHANGED
   [[ $stem =~ ^[a-z0-9][a-z0-9-]*$ ]] || stop_now STOP_INTERNAL_RECEIPT_NAME
   CLASSIFY_ARGV=("$@")
@@ -1134,7 +1323,8 @@ verify_receipts() { # existing evidence root; host-only, no adb
   }
   detail="$("$PYTHON_BIN" -I - . "$COLLECTOR_PATH" "$root" "$verify_identity" \
     "$ADB_ALLOWLIST_PATH" "$ADB_ALLOWLIST_EXPECTED_SHA256" \
-    "$ADB_APPROVAL_LANE" "$ADB_CLIENT_TRUST" <<'PY' 2>&1
+    "$ADB_APPROVAL_LANE" "$ADB_CLIENT_TRUST" \
+    "$REVIEWED_HEAD" "$REVIEWED_COLLECTOR_SHA256" <<'PY' 2>&1
 import datetime
 import decimal
 import hashlib
@@ -1159,6 +1349,8 @@ allowlist_path = pathlib.Path(sys.argv[5])
 expected_allowlist_digest = sys.argv[6]
 expected_approval_lane = sys.argv[7]
 expected_client_trust = sys.argv[8]
+expected_source_head = sys.argv[9]
+expected_collector_digest = sys.argv[10]
 manifest_path = root / "manifest.json"
 summary_path = root / "summary.json"
 receipts = root / "receipts"
@@ -1365,14 +1557,14 @@ manifest_keys = {
     "adbAllowlistSha256", "adbSnapshotPath", "status", "terminalStatus", "reason",
     "collectionStatus", "compatibility", "privilegedInspection",
     "coordinateCaptured", "authorizedSerial", "targetSerial", "devicePass",
-    "issue66Ac7", "deviceFull", "durableAck", "fullClaim", "adbSha256",
+    "issue66Ac7", "deviceFull", "durableAck", "fullClaim", "sourceHead", "adbSha256",
     "collectorSha256", "receiptTreeSha256", "knownPackages", "servicesJarSha256",
     "packageApkSha256", "receiptStems",
 }
 if not isinstance(manifest, dict) or set(manifest) != manifest_keys:
     raise SystemExit("manifest key whitelist mismatch")
 expected_scalars = {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "mode": "READ_ONLY_PREFLIGHT",
     "readOnlySemantics": "OPERATIONAL_NOT_BIT_FOR_BIT",
     "incidentalEffects": [
@@ -1397,6 +1589,7 @@ expected_scalars = {
     "deviceFull": "BLOCKED",
     "durableAck": "NOT_CREATED",
     "fullClaim": "NOT_CREATED",
+    "sourceHead": expected_source_head,
 }
 for key, expected in expected_scalars.items():
     if manifest.get(key) != expected or type(manifest.get(key)) is not type(expected):
@@ -1419,6 +1612,11 @@ if any(status not in {"INSTALLED", "NOT_INSTALLED"} for status in statuses.value
 installed = {package for package in known_packages if statuses[package] == "INSTALLED"}
 
 digest_re = re.compile(r"^[0-9a-f]{64}$")
+head_re = re.compile(r"^[0-9a-f]{40}$")
+if not head_re.fullmatch(expected_source_head):
+    raise SystemExit("expected source HEAD is malformed")
+if not digest_re.fullmatch(expected_collector_digest):
+    raise SystemExit("expected collector digest is malformed")
 adb_digest = manifest.get("adbSha256")
 collector_digest = manifest.get("collectorSha256")
 receipt_tree_digest = manifest.get("receiptTreeSha256")
@@ -1431,6 +1629,8 @@ for name, value in (
 ):
     if not isinstance(value, str) or not digest_re.fullmatch(value):
         raise SystemExit(f"{name} missing or malformed")
+if collector_digest != expected_collector_digest:
+    raise SystemExit("collector digest does not match the reviewed digest")
 
 try:
     allowlist_text = allowlist_bytes.decode("ascii")
@@ -1490,7 +1690,7 @@ summary_keys = {
     "adbAllowlistSha256", "adbSnapshotPath", "status", "collectionStatus", "compatibility",
     "redacted", "coordinateCaptured", "authorizedSerial", "targetSerial",
     "privilegedInspection", "devicePass", "issue66Ac7", "deviceFull",
-    "durableAck", "fullClaim", "knownPackages", "servicesJarSha256",
+    "durableAck", "fullClaim", "sourceHead", "knownPackages", "servicesJarSha256",
     "packageApkSha256", "adbSha256", "collectorSha256", "receiptTreeSha256",
     "receiptCount",
 }
@@ -1626,6 +1826,30 @@ def scalar(stem):
         raise SystemExit(f"{stem}: scalar stdout has edge whitespace")
     return value
 
+def valid_shell_identity(value):
+    group = r"[0-9]+(?:\([A-Za-z0-9_.-]+\))?"
+    shell_id_re = re.compile(
+        r"uid=2000\(shell\) gid=2000\(shell\)"
+        rf"(?: groups=(?P<groups>{group}(?:,{group})*))?"
+        r"(?: context=(?P<context>u:r:shell:s[0-9]+(?:-s[0-9]+)?"
+        r"(?::c[0-9]+(?:,c[0-9]+)*)?))?"
+    )
+    match = shell_id_re.fullmatch(value)
+    if match is None:
+        return False
+    groups = match.group("groups")
+    if groups:
+        for entry in groups.split(","):
+            parsed = re.fullmatch(
+                r"(?P<id>[0-9]+)(?:\((?P<name>[A-Za-z0-9_.-]+)\))?",
+                entry,
+            )
+            if parsed is None:
+                return False
+            if int(parsed.group("id")) == 0 or parsed.group("name") == "root":
+                return False
+    return True
+
 def require_rc(stem, expected=0):
     if carriers[stem]["rc"] != expected:
         raise SystemExit(f"{stem}: exit={carriers[stem]['rc']} expected={expected}")
@@ -1697,9 +1921,7 @@ if scalar("api") != "35":
 for stem in ("fingerprint", "model", "device", "release", "abilist", "zygote", "boot-completed"):
     if not scalar(stem):
         raise SystemExit(f"{stem}: empty core identity")
-if carriers["shell-id"]["stderr"] or not re.fullmatch(
-    r"uid=2000\(shell\)(?:\s+.*)?", scalar("shell-id")
-):
+if carriers["shell-id"]["stderr"] or not valid_shell_identity(scalar("shell-id")):
     raise SystemExit("shell identity mismatch")
 if scalar("selinux") not in {"Enforcing", "Permissive", "Disabled"}:
     raise SystemExit("SELinux state malformed")
@@ -1963,6 +2185,8 @@ if sha256_bytes(adb_bytes) != adb_digest:
     raise SystemExit("adb executable digest mismatch")
 if sha256_bytes(collector_bytes) != collector_digest:
     raise SystemExit("collector executable digest mismatch")
+if sha256_bytes(collector_bytes) != expected_collector_digest:
+    raise SystemExit("current collector does not match the reviewed digest")
 if sha256_bytes(carriers["services-jar"]["stdout"]) != services_digest:
     raise SystemExit("services.jar digest mismatch")
 for package in installed:
@@ -2023,7 +2247,6 @@ PY
     printf 'STOP_INCOMPLETE_RECEIPT: %s\n' "$detail" >&2
     return 21
   fi
-  printf 'RECEIPTS_COMPLETE\n'
   return 0
 }
 
@@ -2049,6 +2272,33 @@ if any(
 if value != value.strip():
     raise SystemExit(1)
 sys.stdout.write(value)
+PY
+}
+
+valid_shell_identity() { # complete canonical Android toybox `id` scalar
+  "$PYTHON_BIN" -I - "$1" <<'PY' >/dev/null 2>&1
+import re
+import sys
+
+value = sys.argv[1]
+group = r"[0-9]+(?:\([A-Za-z0-9_.-]+\))?"
+shell_id_re = re.compile(
+    r"uid=2000\(shell\) gid=2000\(shell\)"
+    rf"(?: groups=(?P<groups>{group}(?:,{group})*))?"
+    r"(?: context=(?P<context>u:r:shell:s[0-9]+(?:-s[0-9]+)?"
+    r"(?::c[0-9]+(?:,c[0-9]+)*)?))?"
+)
+match = shell_id_re.fullmatch(value)
+if match is None:
+    raise SystemExit(1)
+groups = match.group("groups")
+if groups:
+    for entry in groups.split(","):
+        parsed = re.fullmatch(r"(?P<id>[0-9]+)(?:\((?P<name>[A-Za-z0-9_.-]+)\))?", entry)
+        if parsed is None:
+            raise SystemExit(1)
+        if int(parsed.group("id")) == 0 or parsed.group("name") == "root":
+            raise SystemExit(1)
 PY
 }
 
@@ -2317,6 +2567,12 @@ parse_args() {
       --adb) (( $# >= 2 )) || { usage; exit 2; }; ADB_BIN=$2; shift 2 ;;
       --serial) (( $# >= 2 )) || { usage; exit 2; }; REQUESTED_SERIAL=$2; shift 2 ;;
       --output) (( $# >= 2 )) || { usage; exit 2; }; OUTPUT_DIR=$2; shift 2 ;;
+      --reviewed-head) (( $# >= 2 )) || { usage; exit 2; }; REVIEWED_HEAD=$2; shift 2 ;;
+      --reviewed-collector-sha256)
+        (( $# >= 2 )) || { usage; exit 2; }
+        REVIEWED_COLLECTOR_SHA256=$2
+        shift 2
+        ;;
       --classify-adb) CLASSIFY_ONLY=1; shift ;;
       --selftest-fixture)
         (( SELFTEST_FIXTURE == 0 )) || { usage; exit 2; }
@@ -2332,19 +2588,25 @@ parse_args() {
 
 main() {
   parse_args "$@"
-  [[ -f $PYTHON_BIN && -x $PYTHON_BIN && ! -L $PYTHON_BIN ]] \
+  [[ -f $PYTHON_BIN && -x $PYTHON_BIN ]] \
     || stop_now STOP_INTERNAL_PYTHON_RUNTIME
   select_adb_approval_lane
 
   if [[ -n $VERIFY_DIR ]]; then
     [[ -z $ADB_BIN && -z $REQUESTED_SERIAL && -z $OUTPUT_DIR ]] || { usage; exit 2; }
+    validate_review_binding
     verify_receipts "$VERIFY_DIR"
-    exit $?
+    local verify_rc=$?
+    (( verify_rc == 0 )) || exit "$verify_rc"
+    review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED
+    printf 'RECEIPTS_COMPLETE\n'
+    exit 0
   fi
 
   [[ -n $ADB_BIN ]] || { usage; exit 2; }
 
   if (( CLASSIFY_ONLY )); then
+    [[ -z $REVIEWED_HEAD && -z $REVIEWED_COLLECTOR_SHA256 ]] || { usage; exit 2; }
     validate_adb_binary
     validate_adb_approval
     (( ${#CLASSIFY_ARGV[@]} > 0 )) || { usage; exit 2; }
@@ -2356,6 +2618,8 @@ main() {
     esac
   fi
 
+  validate_review_binding
+
   if [[ -n ${ADB_SERVER_SOCKET+x} || -n ${ANDROID_ADB_SERVER_ADDRESS+x} \
       || -n ${ANDROID_ADB_SERVER_PORT+x} ]]; then
     stop_now STOP_UNSAFE_ADB_SERVER_ENV
@@ -2365,11 +2629,7 @@ main() {
   [[ -n $OUTPUT_DIR ]] || { usage; exit 2; }
   validate_adb_binary
   validate_adb_approval
-  [[ -f $COLLECTOR_PATH && ! -L $COLLECTOR_PATH ]] \
-    || stop_now STOP_INTERNAL_COLLECTOR_IDENTITY
-  COLLECTOR_SHA256="$(sha256_file "$COLLECTOR_PATH")" \
-    || stop_now STOP_INTERNAL_HASH_FAILED
-  [[ $COLLECTOR_SHA256 =~ ^[0-9a-f]{64}$ ]] || stop_now STOP_INTERNAL_HASH_FAILED
+  review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED
   local output_record
   output_record="$(create_output_dir)" || stop_now STOP_UNSAFE_OUTPUT
   IFS=$'\t' read -r OUTPUT_DISPLAY_PATH OUTPUT_IDENTITY <<<"$output_record"
@@ -2413,7 +2673,7 @@ main() {
     || stop_now STOP_UNPRIVILEGED_SHELL_REQUIRED
   [[ ! -s $OUTPUT_DIR/receipts/shell-id.stderr.bin ]] \
     || stop_now STOP_UNPRIVILEGED_SHELL_REQUIRED
-  [[ $shell_identity =~ ^uid=2000\(shell\)([[:space:]].*)?$ ]] \
+  valid_shell_identity "$shell_identity" \
     || stop_now STOP_UNPRIVILEGED_SHELL_REQUIRED
 
   run_text_receipt boot-id-start \

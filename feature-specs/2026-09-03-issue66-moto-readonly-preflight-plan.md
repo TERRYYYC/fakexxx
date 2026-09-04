@@ -37,8 +37,9 @@ blocked.
 - The first device phase is `operational-read-only` and never requests privilege escalation: it
   may establish an ADB transport, run inventory, then issue exact `shell id` as its first
   serial-targeted query. That identity probe necessarily uses the already-negotiated adbd
-  principal; unless it returns exactly `uid=2000(shell)`, no boot/build/package/framework query is
-  allowed. After that gate it runs exact, serial-qualified queries as shell, but it never requests
+  principal; unless the complete result has primary `uid=2000(shell) gid=2000(shell)` and only the
+  accepted supplementary-group/context grammar, no boot/build/package/framework query is allowed.
+  After that gate it runs exact, serial-qualified queries as shell, but it never requests
   `su`, launches an app component, changes configuration/data/lifecycle state, or captures raw
   location/log output. Incidental transport, transient query-process, and device audit/accounting
   effects are outside a literal bit-for-bit no-change claim and must be disclosed in the receipt.
@@ -46,9 +47,10 @@ blocked.
   publicly observable LSPosed/Magisk/Vector package or process state, and exact system framework
   bytes. It may not install, clear, stop, configure, register, crash, restart, reboot, toggle a
   provider, invoke `su`, run `logcat` or `dumpsys location`, or read a private LSPosed database.
-- The existing authorization covers installing/overwriting the two non-colliding `codexBench`
-  debug APKs, setting mock location, inspecting/configuring LSPosed scope, and cleaning that test
-  state on the named Moto. The shell-gated collector intentionally consumes none of those
+- The [2026-09-04 authorization checkpoint](https://github.com/TERRYYYC/fakexxx/issues/66#issuecomment-5535947347)
+  covers installing/overwriting the two non-colliding `codexBench` debug APKs, setting mock
+  location, inspecting/configuring LSPosed scope, and cleaning that test state on the named Moto.
+  The shell-gated collector intentionally consumes none of those
   mutations. A later privileged LSPosed inspection on that same Moto is within the stated
   inspection authorization, but its exact `su`/LSPosed-scope private-file command surface must receive an
   independent review before execution; the broader configuration authority is not consumed by
@@ -131,6 +133,11 @@ blocked.
    LSPosed scope configuration, global Location/provider toggle, diagnostic registration,
    force-stop, crash, restart, or reboot, even when a different phase may later be authorized to
    perform some of them.
+   Before creating output or invoking ADB, require the exact Git HEAD and collector SHA-256 pair
+   published by the independent review as external arguments. Verify that the current repository
+   HEAD and a stable read of the collector entry-point bytes respectively match those two values,
+   and recheck that binding before each receipt and final publication. Values calculated locally
+   at execution time are not independent approval.
 3. Keep bridge timing out of this public/static collector. A later oracle-observation stage must
    first add device-free timing tests for bridge-before-owner-start and bridge-after-owner-start;
    only that reviewed stage may emit `STOP_LATE_BRIDGE`. This collector records no bridge verdict,
@@ -164,6 +171,11 @@ blocked.
    random ownership token through the full JSON/contract read, and return PASS only after
    inode/token-checked cleanup. Any ownership, inode or cleanup ambiguity leaves a fail-closed
    manual-inspection fence rather than trusting an otherwise valid PASS receipt.
+   This local protocol covers cooperating runner/validator concurrency, accidental rewrites and
+   the enumerated pathname/inode races. It is not a cryptographic seal against a malicious process
+   running as the same host user, which can change user-owned files after any lock is released.
+   Review authority therefore remains the externally associated CI run, exact commit/artifact and
+   independent review; a standalone local JSON receipt is never sufficient authority.
 
 ## Task 2B — independently reviewed privileged inspection substage
 
@@ -189,31 +201,57 @@ blocked.
 5. Its maximum result is `PRIVILEGED_OBSERVATION_ONLY`. It cannot turn the Task 2A collection into
    runtime hook success, `HEALTHY`, durable ACK, `FULL`, or issue #66 acceptance.
 
+## Issue #66 AC1–AC7 evidence map
+
+No collector or static-framework result satisfies AC1–AC6. The same reviewed app binaries must be
+used in both device environments below; an emulator fingerprint is recorded separately and is not
+represented as the Moto fingerprint.
+
+| AC | Required environment | Trigger / operation | Required artifact | Claim boundary |
+| --- | --- | --- | --- | --- |
+| AC1 owner away→restore | Exact-build API-35 emulator, then authorized Moto | Controlled owner transition inside PRE→POST | PRE/raw/POST oracle snapshots, sequence/revision and trust result | No Moto run until this adversarial mutation is separately authorized. |
+| AC2 GPS/network disable→enable | Exact-build API-35 emulator, then authorized Moto | Controlled provider transition inside PRE→POST | Provider/oracle sequence receipts and rejected trust result | A global provider toggle is not currently authorized on Moto. |
+| AC3 mutation concurrent with observation | Exact-build API-35 emulator, then authorized Moto | Deterministically fenced concurrent mutation | Odd/mismatched double snapshots and rejected trust result | Moto adversarial execution requires itemized authorization. |
+| AC4 restart/boot/missing hook/read-or-ACK crash | Exact-build API-35 emulator for the complete matrix; authorized Moto only for separately approved cases | Oracle restart, reboot, missing-coverage and crash seams | Per-case fail-closed health, revision/ACK and replay receipts | Reboot, process restart and deliberate crash are not currently authorized on Moto. |
+| AC5 same-coordinate refresh | Exact-build API-35 emulator and authorized Moto | Ordinary same-bit coordinate refresh | Stable sequence plus successful observation without a false mutation bump | This proves only AC5 for the exact reviewed APK/build pair. |
+| AC6 authoritative-only FULL | Existing host/runtime tests, then both exact-build runtime environments | Public-source and complete-authoritative-source observations | Source classification, complete coverage/health and durable reconciliation receipts | Task 2A/static presence is not AC6 evidence; public callbacks remain PARTIAL/NONE. |
+| AC7 production proof | Exact-build API-35 emulator **and** authorized rooted Moto | Complete nominal path plus the authorized subset of AC1–AC6 | Exact HEAD/APK hashes, emulator bundle, Moto bundle, cleanup receipts and independent review | Both bundles are mandatory before device PASS, FULL, issue closure or merge. |
+
 ## Task 3 — deferred authorized device sequence
 
-1. Connect/unlock the Moto and run Task 2A only. Stop on any identity, framework, or publicly
-   observable current-state mismatch. Preserve `NOT_COLLECTED_PRIVILEGED` until Task 2B has passed
-   its independent command-surface review.
+1. Only after an independent review publishes the approved exact Git HEAD and collector SHA-256,
+   confirm that the current repository HEAD and a stable read of the collector entry-point bytes
+   respectively match those external values, connect/unlock the Moto, and run Task 2A only. Values
+   calculated locally at execution time are not substitutes for that approval. Stop on any
+   identity, framework, or publicly observable current-state mismatch.
+   Preserve `NOT_COLLECTED_PRIVILEGED` until Task 2B has passed its independent command-surface
+   review.
 2. If root/LSPosed DB-WAL-SHM evidence is required to prove scope, run Task 2B as its own
    inspection-only execution and preserve its separate receipts. Do not treat the existing LSPosed
    inspection/configuration authorization as permission for unrelated Vector private-state reads,
    reboot, global provider toggles, or process restart.
-3. Review the live fingerprint/framework receipts. Add that exact fingerprint only to
-   `EVIDENCE_ONLY`, obtain independent review, rebuild and freeze both APK hashes/signers.
-4. If a late bridge needs investigation, design a separate debug-only diagnostic component. Ask
+3. Review the live fingerprint/framework receipts. Add that exact Moto fingerprint only to
+   `EVIDENCE_ONLY`, obtain independent review, rebuild and freeze both APK hashes/signers. Record a
+   separate clean API-35 emulator fingerprint in the evidence-only lane; do not represent it as the
+   Moto build.
+4. Run the same exact reviewed commit and frozen APK hashes through the AC1–AC6 matrix on the clean
+   API-35 emulator. Preserve its fingerprint, boot, APK/signer, oracle, revision/ACK and cleanup
+   receipts as the emulator half of AC7. Emulator success does not substitute for Moto evidence.
+5. If a late bridge needs investigation, design a separate debug-only diagnostic component. Ask
    separately for every required diagnostic registration, force-stop, deliberate crash, or process
    restart; without that itemized authorization, preserve `STOP_LATE_BRIDGE` and do not execute it.
-5. Ask separately for activation and cleanup reboot/soft-reboot authorization. Also ask separately
+6. Ask separately for activation and cleanup reboot/soft-reboot authorization. Also ask separately
    before any global Location/provider toggle; setting a mock-location app does not authorize that
    global mutation.
-6. Only after the relevant authorization, use the supported LSPosed/Vector manager to set only
+7. Only after the relevant authorization, use the supported LSPosed/Vector manager to set only
    `{system, QWY codexBench, Auto codexBench}`, perform the activation reboot, and collect runtime
    oracle evidence.
-7. Promote to `ATTESTED` only in a separate reviewed delta after the evidence-only run proves the
+8. Promote to `ATTESTED` only in a separate reviewed delta after the emulator and authorized Moto
+   evidence-only runs prove the
    exact method set, `0x3ff`-minus-attestation coverage, bridge/session/endpoint behavior, and safe
    cleanup. Then rebuild and run the nominal and only those adversarial #66 mutations that were
    individually authorized.
-8. Restore only the authorized AppOps/module/scope/mock/application state. Restore global provider
+9. Restore only the authorized AppOps/module/scope/mock/application state. Restore global provider
    state only if its mutation was separately authorized, perform the separately authorized cleanup
    reboot, and independently verify the final baseline before any `FULL` claim.
 
@@ -222,9 +260,12 @@ blocked.
 This plan does not merge PR #74, close #66, modify the phone, or claim Moto readiness. The first
 publishable slice is only the staged admission mechanism. The device-free selftested,
 operational-read-only shell-gated collector is a second slice after that mechanism is independently
-reviewed; device execution is a third slice and remains blocked until `adb devices -l` contains the
-exact authorized Moto. Task 2A may then run. Task 2B remains separately blocked on independent
-review of its exact privileged command surface, even though the existing user authorization covers
-LSPosed inspection/configuration on the named Moto. Neither substage authorizes activation/cleanup
-reboots, global provider toggles, diagnostic registration, force-stop/crash/restart, or adversarial
-mutations; each required operation remains a STOP boundary until separately authorized.
+reviewed; device execution is a third slice and remains blocked until the independent review has
+published the approved exact Git HEAD and collector SHA-256, the current repository HEAD and a
+stable read of the collector entry-point bytes respectively match those external values, and
+`adb devices -l` contains the exact authorized Moto. Task 2A may then run.
+Task 2B remains separately blocked on independent review of its exact privileged command surface,
+even though the existing user authorization covers LSPosed inspection/configuration on the named
+Moto. Neither substage authorizes activation/cleanup reboots, global provider toggles, diagnostic
+registration, force-stop/crash/restart, or adversarial mutations; each required operation remains
+a STOP boundary until separately authorized.

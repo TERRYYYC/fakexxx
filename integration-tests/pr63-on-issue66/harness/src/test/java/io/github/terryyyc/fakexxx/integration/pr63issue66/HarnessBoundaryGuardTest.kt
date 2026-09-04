@@ -3,6 +3,9 @@ package io.github.terryyyc.fakexxx.integration.pr63issue66
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.PosixFilePermission
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.isDirectory
 import kotlin.io.path.readText
 import org.junit.Assert.assertEquals
@@ -239,19 +242,24 @@ class HarnessBoundaryGuardTest {
             runner.replace(PINNED_QWY_CODEC, "'*SomeOtherTest'"),
             runner.replace(PINNED_QWY_ADVANCE, "'*SomeOtherTest'"),
             runner.replace(PINNED_FULL_HARNESS, "\"\$wrapper\" :harness:testDebugUnitTest"),
-            runner.replace(MACHINE_READABLE_BLOCKED, "{}"),
-            runner.replace(MACHINE_READABLE_RUNNING, "{}"),
+            runner.replace(PINNED_PASS_RECEIPT_SCHEMA, "\\\"hostIntegration\\\":\\\"RUNNING\\\""),
+            runner.replace(PINNED_RUNNING_RECEIPT_SCHEMA, "\\\"hostIntegration\\\":\\\"PASS\\\""),
+            runner.replace(PINNED_PRIVATE_UMASK, "umask 022"),
+            runner.replace(PINNED_RECEIPT_DIR_PREPARE, "  : # private receipt directory deleted"),
             runner.replace(PINNED_LOCK_ACQUIRE, "  if false; then"),
             runner.replace(PINNED_LOCK_CLEANUP_TRAP, "  : # owner cleanup trap deleted"),
-            runner.replace(PINNED_STALE_RECEIPT_INVALIDATION, "  : # stale PASS invalidation deleted"),
+            runner.replace(PINNED_ATOMIC_RECEIPT_REPLACE, "    : # atomic replace deleted"),
             runner.replace(PINNED_LOCK_OWNER_WRITE, "  : # lock owner write deleted"),
             runner.replace(PINNED_LOCK_RELEASE_DISARM, "  lock_releasable=1"),
             runner.replace(PINNED_LOCK_RELEASE_ARM, "  : # lock release arm deleted"),
             runner.replace(PINNED_LOCK_RELEASE_GUARD, "  if [[ \"\${lock_owned:-0}\" -eq 1 ]]; then"),
             runner.replace(PINNED_LOCK_OWNER_CLEANUP_GUARD, "    if true; then"),
-            runner.replace(PINNED_RECEIPT_MOVE_FAILURE_CLEANUP, "  mv -f \"\$receipt_tmp\" \"\$receipt_path\""),
+            runner.replace(PINNED_TEMP_IDENTITY_CLEANUP, "            if True:"),
+            runner.replace(PINNED_POST_PUBLISH_BYTES_CHECK, "        or published_bytes == payload"),
             runner.replace(PINNED_RUNNING_RECEIPT_WRITE, "  : # RUNNING write deleted"),
             runner.replace(PINNED_PASS_RECEIPT_WRITE, "  : # PASS write deleted"),
+            runner.replace(PINNED_POST_PASS_SOURCE_CHECK, "  if false; then"),
+            runner.replace(PINNED_POST_PASS_RUNNER_CHECK, "  if false; then"),
             runner.replace(JAVA_HOME_MARKER, "\${UNPINNED_JAVA_HOME:-}"),
             runner.replace(ANDROID_HOME_MARKER, "\${UNPINNED_ANDROID_HOME:-}"),
         ).forEachIndexed { index, mutated ->
@@ -260,6 +268,181 @@ class HarnessBoundaryGuardTest {
                 "runner mutation $index escaped",
                 runnerViolations(mutated).isNotEmpty(),
             )
+        }
+    }
+
+    @Test
+    fun `Moto collector selftest uses portable grep rather than ripgrep`() {
+        val source = findRepoRoot()
+            .resolve("scripts/selftest-issue66-moto-readonly-collector.sh")
+            .readText()
+
+        assertTrue(
+            "device-free host selftest must not depend on the nonstandard rg executable",
+            !Regex("(?<![A-Za-z0-9_])rg(?![A-Za-z0-9_])").containsMatchIn(source),
+        )
+        assertTrue(
+            "device-free host selftest must explicitly preflight portable grep",
+            "for dependency in grep; do" in source,
+        )
+    }
+
+    @Test
+    fun `Moto collector selftest reads modes without mixing stat dialects`() {
+        val source = findRepoRoot()
+            .resolve("scripts/selftest-issue66-moto-readonly-collector.sh")
+            .readText()
+
+        assertTrue(
+            "BSD stat fallback can emit filesystem text before GNU stat succeeds",
+            "stat -f '%Lp'" !in source,
+        )
+        assertTrue(
+            "GNU stat fallback must not be parsed after a noisy BSD-form probe",
+            "stat -c '%a'" !in source,
+        )
+        assertTrue(
+            "mode checks must use one cross-platform no-follow implementation",
+            "file_mode()" in source && "stat.S_IMODE(os.lstat(path).st_mode)" in source,
+        )
+    }
+
+    @Test
+    fun `production collector pins host command lookup before external tools`() {
+        val collector = findRepoRoot()
+            .resolve("scripts/collect-issue66-moto-readonly-preflight.sh")
+        val source = collector.readText()
+        assertTrue("collector must use a fixed Bash interpreter", source.startsWith("#!/bin/bash\n"))
+        val pathPin = source.indexOf("PATH=/usr/bin:/bin")
+        val firstHostLookup = source.indexOf("SELF_DIR=")
+        assertTrue(
+            "production PATH must be pinned before the first host command lookup",
+            pathPin >= 0 && firstHostLookup >= 0 && pathPin < firstHostLookup,
+        )
+        assertTrue(
+            "embedded output-boundary Git calls must use the fixed reviewed client",
+            "\"/usr/bin/git\"" in source && "[\"git\", " !in source,
+        )
+        assertTrue(
+            "embedded output-boundary Git calls must ignore ambient Git configuration",
+            "\"GIT_CONFIG_GLOBAL\": \"/dev/null\"" in source &&
+                "\"GIT_OPTIONAL_LOCKS\": \"0\"" in source,
+        )
+
+        val poisonDir = Files.createTempDirectory("issue66-collector-path-poison-")
+        val marker = poisonDir.resolve("unexpected-host-tool")
+        val poison = poisonDir.resolve("dirname")
+        try {
+            Files.write(
+                poison,
+                (
+                    "#!/bin/bash\n" +
+                        "printf 'unexpected dirname execution\\n' >>\"\$ISSUE66_PATH_MARKER\"\n" +
+                        "exec /usr/bin/dirname \"\$@\"\n"
+                    ).toByteArray(),
+            )
+            Files.setPosixFilePermissions(
+                poison,
+                setOf(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE,
+                ),
+            )
+            val probe = ProcessBuilder(collector.toString())
+                .redirectErrorStream(true)
+            probe.environment()["PATH"] = "$poisonDir:/usr/bin:/bin"
+            probe.environment()["ISSUE66_PATH_MARKER"] = marker.toString()
+            val process = probe.start()
+            process.inputStream.bufferedReader().use { it.readText() }
+            assertEquals("usage-only probe must stop before collection", 2, process.waitFor())
+            assertTrue("ambient dirname shim executed before argument refusal", !Files.exists(marker))
+        } finally {
+            poisonDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `Moto collector requires an externally reviewed head and digest`() {
+        val repo = findRepoRoot()
+        val collector = repo.resolve("scripts/collect-issue66-moto-readonly-preflight.sh")
+        val source = collector.readText()
+        assertTrue(source, "--reviewed-head" in source)
+        assertTrue(source, "--reviewed-collector-sha256" in source)
+        assertTrue(source, "\"sourceHead\"" in source)
+        assertTrue(source, "\"schemaVersion\":3" in source)
+        assertTrue(
+            "collector source must be rechecked before every live ADB call",
+            "review_binding_intact || stop_now STOP_REVIEW_BINDING_CHANGED" in source,
+        )
+
+        val headProcess = ProcessBuilder(
+            "/usr/bin/git",
+            "-C",
+            repo.toString(),
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+        ).redirectErrorStream(true).start()
+        val reviewedHead = headProcess.inputStream.bufferedReader().use { it.readText() }.trim()
+        assertEquals(reviewedHead, 0, headProcess.waitFor())
+        assertTrue(reviewedHead, reviewedHead.matches(Regex("[0-9a-f]{40}")))
+        val reviewedDigest = MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(collector))
+            .joinToString("") { "%02x".format(it) }
+        val stateDir = Files.createTempDirectory("issue66-review-binding-")
+
+        fun invoke(vararg arguments: String): Pair<Int, String> {
+            val process = ProcessBuilder(collector.toString(), *arguments)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            return process.waitFor() to output
+        }
+
+        try {
+            val common = arrayOf(
+                "--adb", "/usr/bin/false",
+                "--serial", "ZY22JHW9M4",
+                "--output", stateDir.resolve("must-not-exist").toString(),
+            )
+            val missing = invoke(*common)
+            assertEquals(missing.second, 22, missing.first)
+            assertTrue(missing.second, missing.second.contains("STOP_REVIEW_BINDING_REQUIRED"))
+            assertTrue("missing binding created evidence", !Files.exists(stateDir.resolve("must-not-exist")))
+
+            val wrongHead = invoke(
+                "--reviewed-head", "0".repeat(40),
+                "--reviewed-collector-sha256", reviewedDigest,
+                *common,
+            )
+            assertEquals(wrongHead.second, 22, wrongHead.first)
+            assertTrue(wrongHead.second, wrongHead.second.contains("STOP_REVIEW_BINDING_MISMATCH"))
+
+            val wrongDigest = invoke(
+                "--reviewed-head", reviewedHead,
+                "--reviewed-collector-sha256", "0".repeat(64),
+                *common,
+            )
+            assertEquals(wrongDigest.second, 22, wrongDigest.first)
+            assertTrue(wrongDigest.second, wrongDigest.second.contains("STOP_REVIEW_BINDING_MISMATCH"))
+
+            val accepted = invoke(
+                "--reviewed-head", reviewedHead,
+                "--reviewed-collector-sha256", reviewedDigest,
+                *common,
+            )
+            assertEquals(accepted.second, 22, accepted.first)
+            assertTrue(accepted.second, accepted.second.contains("STOP_ADB_CLIENT_UNAPPROVED"))
+
+            val verifyMissing = invoke("--verify-receipts", stateDir.resolve("absent").toString())
+            assertEquals(verifyMissing.second, 22, verifyMissing.first)
+            assertTrue(
+                verifyMissing.second,
+                verifyMissing.second.contains("STOP_REVIEW_BINDING_REQUIRED"),
+            )
+        } finally {
+            stateDir.toFile().deleteRecursively()
         }
     }
 
@@ -338,7 +521,7 @@ class HarnessBoundaryGuardTest {
                 .start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
             assertEquals(output, 23, process.waitFor())
-            assertEquals(MACHINE_READABLE_RUNNING, receipt.readText().trim())
+            assertRunnerReceipt(isolated, "RUNNING")
         } finally {
             fakeBin.toFile().deleteRecursively()
             isolated.close()
@@ -364,39 +547,78 @@ class HarnessBoundaryGuardTest {
             val output = process.inputStream.bufferedReader().use { it.readText() }
             assertEquals(output, 1, process.waitFor())
             assertTrue(output, output.contains("JAVA_HOME must point to a JDK 17 runtime."))
-            assertEquals(MACHINE_READABLE_RUNNING, receipt.readText().trim())
+            assertRunnerReceipt(isolated, "RUNNING")
         } finally {
             isolated.close()
         }
     }
 
     @Test
-    fun `failed first RUNNING replace cannot preserve a stale pass`() {
+    fun `post replace RUNNING failure cannot expose a stale pass without its lock fence`() {
         val repo = findRepoRoot()
-        val isolated = isolatedRunner(repo)
-        val fakeBin = Files.createTempDirectory("issue66-host-gate-mv-fail-")
-        val fakeMv = fakeBin.resolve("mv")
+        val postReplaceMarker = "    committed = True\n    os.lseek(temp_fd, 0, os.SEEK_SET)"
+        val isolated = isolatedRunner(repo) { source ->
+            check(source.windowed(postReplaceMarker.length).count { it == postReplaceMarker } == 1) {
+                "atomic receipt post-replace marker changed"
+            }
+            source.replace(
+                postReplaceMarker,
+                "    committed = True\n" +
+                    "    raise OSError(\"forced post-replace failure\")\n" +
+                    "    os.lseek(temp_fd, 0, os.SEEK_SET)",
+            )
+        }
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-replace-fail-")
         try {
-            Files.write(fakeMv, "#!/bin/sh\nexit 41\n".toByteArray())
-            assertTrue("fake mv must be executable", fakeMv.toFile().setExecutable(true))
             Files.write(isolated.receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
 
-            val process = ProcessBuilder("/bin/bash", isolated.script.toString())
-                .redirectErrorStream(true)
-                .apply {
-                    environment()["PATH"] = fakeBin.toString() + ":" + System.getenv("PATH")
-                    environment()["JAVA_HOME"] = System.getProperty("java.home")
-                    environment()["ANDROID_HOME"] = requireNotNull(System.getenv("ANDROID_HOME"))
-                }
-                .start()
+            val process = hostGateProcess(isolated.script, fakeBin, emptyMap()).start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
-            assertEquals(output, 41, process.waitFor())
-            assertTrue(
-                "failed RUNNING replace preserved an authoritative stale PASS",
-                !Files.exists(isolated.receipt) ||
-                    isolated.receipt.readText().trim() != MACHINE_READABLE_BLOCKED,
+            assertTrue(output, process.waitFor() != 0)
+            assertTrue(output, output.contains("forced post-replace failure"))
+            assertRunnerReceipt(isolated, "RUNNING")
+            assertTrue("ambiguous RUNNING publication must retain its owner lock", Files.exists(isolated.lock))
+        } finally {
+            fakeBin.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    @Test
+    fun `RUNNING publisher detects same inode byte mutation before releasing its lock fence`() {
+        val repo = findRepoRoot()
+        val postReplaceMarker = "    committed = True\n    os.lseek(temp_fd, 0, os.SEEK_SET)"
+        val isolated = isolatedRunner(repo) { source ->
+            check(source.windowed(postReplaceMarker.length).count { it == postReplaceMarker } == 1) {
+                "atomic receipt post-replace marker changed"
+            }
+            source.replace(
+                postReplaceMarker,
+                "    committed = True\n" +
+                    "    os.lseek(temp_fd, 0, os.SEEK_SET)\n" +
+                    "    tampered_payload = payload.replace(b'\\\"RUNNING\\\"', b'\\\"PASS___\\\"', 1)\n" +
+                    "    remaining_tampered = memoryview(tampered_payload)\n" +
+                    "    while remaining_tampered:\n" +
+                    "        written_tampered = os.write(temp_fd, remaining_tampered)\n" +
+                    "        if written_tampered <= 0:\n" +
+                    "            raise OSError(\"short injected tamper write\")\n" +
+                    "        remaining_tampered = remaining_tampered[written_tampered:]\n" +
+                    "    os.ftruncate(temp_fd, len(tampered_payload))\n" +
+                    "    os.fsync(temp_fd)\n" +
+                    "    os.lseek(temp_fd, 0, os.SEEK_SET)",
             )
-            assertTrue("failed RUNNING publication must leave its owner lock", Files.exists(isolated.lock))
+        }
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-byte-tamper-")
+        try {
+            val process = hostGateProcess(isolated.script, fakeBin, emptyMap()).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            assertTrue(output, process.waitFor() != 0)
+            assertTrue(
+                output,
+                output.contains("published receipt identity, size, bytes, or extended ACL changed"),
+            )
+            assertTrue(isolated.receipt.readText(), isolated.receipt.readText().contains("PASS___"))
+            assertTrue("byte-ambiguous RUNNING publication must retain its lock", Files.exists(isolated.lock))
         } finally {
             fakeBin.toFile().deleteRecursively()
             isolated.close()
@@ -418,7 +640,7 @@ class HarnessBoundaryGuardTest {
             val process = hostGateProcess(isolated.script, fakeBin, emptyMap()).start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
             assertEquals(output, 23, process.waitFor())
-            assertEquals(MACHINE_READABLE_RUNNING, isolated.receipt.readText().trim())
+            assertRunnerReceipt(isolated, "RUNNING")
             assertTrue("ordinary failure must release the owned lock", !Files.exists(isolated.lock))
         } finally {
             fakeBin.toFile().deleteRecursively()
@@ -429,27 +651,19 @@ class HarnessBoundaryGuardTest {
     @Test
     fun `failed lock owner publication preserves a stale pass behind the lock fence`() {
         val repo = findRepoRoot()
-        val isolated = isolatedRunner(repo)
-        val fakeBin = Files.createTempDirectory("issue66-host-gate-owner-fail-")
-        val fakeMkdir = fakeBin.resolve("mkdir")
-        try {
-            Files.write(
-                fakeMkdir,
-                (
-                    "#!/bin/sh\n" +
-                        "/bin/mkdir \"\$@\"\n" +
-                        "rc=\$?\n" +
-                        "if [ \"\$rc\" -eq 0 ]; then\n" +
-                        "  for arg in \"\$@\"; do\n" +
-                        "    case \"\$arg\" in\n" +
-                        "      *host-gate.lock) /bin/mkdir \"\$arg/owner\" ;;\n" +
-                        "    esac\n" +
-                        "  done\n" +
-                        "fi\n" +
-                        "exit \"\$rc\"\n"
-                    ).toByteArray(),
+        val ownerOpenMarker =
+            "    output_fd = os.open(output_name, output_flags, 0o600, dir_fd=lock_fd)"
+        val isolated = isolatedRunner(repo) { source ->
+            check(source.windowed(ownerOpenMarker.length).count { it == ownerOpenMarker } == 1) {
+                "exclusive lock-owner open marker changed"
+            }
+            source.replace(
+                ownerOpenMarker,
+                "    os.mkdir(output_name, 0o700, dir_fd=lock_fd)\n" + ownerOpenMarker,
             )
-            assertTrue("fake mkdir must be executable", fakeMkdir.toFile().setExecutable(true))
+        }
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-owner-fail-")
+        try {
             Files.write(isolated.receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
 
             val process = hostGateProcess(isolated.script, fakeBin, emptyMap()).start()
@@ -468,7 +682,7 @@ class HarnessBoundaryGuardTest {
     }
 
     @Test
-    fun `failed stale receipt unlink leaves the host gate lock as a fence`() {
+    fun `failed atomic replacement of a nonfile receipt leaves the host gate lock as a fence`() {
         val repo = findRepoRoot()
         val isolated = isolatedRunner(repo)
         val fakeBin = Files.createTempDirectory("issue66-host-gate-unlink-fail-")
@@ -481,11 +695,350 @@ class HarnessBoundaryGuardTest {
             val output = process.inputStream.bufferedReader().use { it.readText() }
             assertTrue(output, process.waitFor() != 0)
             assertEquals(MACHINE_READABLE_BLOCKED, stalePass.readText().trim())
-            assertTrue("failed unlink must retain the lock", Files.exists(isolated.lock))
+            assertTrue("failed atomic replacement must retain the lock", Files.exists(isolated.lock))
             assertTrue(
-                "lock owner must have been published before unlink",
+                "lock owner must have been published before replacement",
                 Files.isRegularFile(isolated.lock.resolve("owner")),
             )
+        } finally {
+            fakeBin.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    @Test
+    fun `zero argument runner creates private state without following precreated files`() {
+        val repo = findRepoRoot()
+        val canonical = repo.resolve("integration-tests/pr63-on-issue66/run-host-gate.sh")
+        val source = canonical.readText()
+        val publisherStart = source.indexOf("write_receipt_atomically() {")
+        val publisherEnd = source.indexOf("\n}\n\nrelease_host_gate_lock() {", publisherStart)
+        assertTrue("atomic receipt publisher is missing", publisherStart >= 0 && publisherEnd > publisherStart)
+        val publisher = source.substring(publisherStart, publisherEnd)
+        val directoryPrep = source
+            .substringAfter("prepare_private_directory() {")
+            .substringBefore("\n}\n\ncreate_host_gate_lock() {")
+        val lockCreator = source
+            .substringAfter("create_host_gate_lock() {")
+            .substringBefore("\n}\n\nwrite_private_file_exclusively() {")
+        val cleanupStart = source.indexOf("release_host_gate_lock() {")
+        val cleanupEnd = source.indexOf("\n}\n\ncleanup_host_gate_lock() {", cleanupStart)
+        assertTrue("lock cleanup helper is missing", cleanupStart >= 0 && cleanupEnd > cleanupStart)
+        val cleanup = source.substring(cleanupStart, cleanupEnd)
+        val provenance = source
+            .substringAfter("read_source_provenance() {")
+            .substringBefore("\n}\n\nnew_run_id() {")
+        val runnerReader = source
+            .substringAfter("read_runner_sha256() {")
+            .substringBefore("\n}\n\nwrite_receipt_atomically() {")
+
+        assertEquals("host gate must set exactly one private umask", 1, source.lines().count { it == "umask 077" })
+        assertTrue(
+            "private umask must precede creation of the receipt directory",
+            source.indexOf("umask 077") < source.indexOf(PINNED_RECEIPT_DIR_PREPARE),
+        )
+        assertTrue("pathname mkdir -p must not create receipt state", "mkdir -p \"\$receipt_dir\"" !in source)
+        assertTrue(
+            "receipt directories must be created by a no-follow descriptor walk and tightened to 0700",
+            "directory_state.st_uid != os.geteuid()" in directoryPrep &&
+                "os.mkdir(component, 0o700, dir_fd=parent_fd)" in directoryPrep &&
+                "os.open(component, directory_flags, dir_fd=parent_fd)" in directoryPrep &&
+                "os.fchmod(directory_fd, 0o700)" in directoryPrep &&
+                "follow_symlinks=False" in directoryPrep,
+        )
+        assertTrue(
+            "host lock itself must be created relative to the pinned receipt parent",
+            "os.mkdir(lock_name, 0o700, dir_fd=parent_fd)" in lockCreator &&
+                "os.open(lock_name, directory_flags, dir_fd=parent_fd)" in lockCreator,
+        )
+        assertTrue(
+            "host gate state writer must use fixed isolated Python",
+            "/usr/bin/python3 -I -" in source,
+        )
+        assertTrue(
+            "receipt publisher itself must reserve a private read-write no-follow temp",
+            "temp_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW" in publisher,
+        )
+        assertTrue(
+            "receipt publisher itself must force private temp mode",
+            "os.fchmod(temp_fd, 0o600)" in publisher,
+        )
+        assertTrue(
+            "receipt commit must stay relative to one pinned parent descriptor",
+            "os.replace(" in publisher &&
+                "src_dir_fd=parent_fd" in publisher &&
+                "dst_dir_fd=parent_fd" in publisher,
+        )
+        assertTrue(
+            "post-publication check must bind destination identity and exact open-FD bytes",
+            "file_identity(receipt_state) != file_identity(published_fd_state)" in publisher &&
+                "published_bytes != payload" in publisher &&
+                "published_fd_state.st_size != len(payload)" in publisher,
+        )
+        assertTrue(
+            "failed publication may unlink only the temp inode it created",
+            "dev_inode(current_temp_state) == temp_identity" in publisher &&
+                "os.unlink(temp_name, dir_fd=parent_fd)" in publisher,
+        )
+        assertTrue(
+            "lock cleanup must bind parent, lock, owner, and current receipt identity plus exact bytes",
+            "len(expected_identity) != 6" in cleanup &&
+                "len(expected_receipt_identity) != 7" in cleanup &&
+                "os.O_NOFOLLOW" in cleanup &&
+                "parent_state.st_uid != os.geteuid()" in cleanup &&
+                "stat.S_IMODE(parent_state.st_mode) != 0o700" in cleanup &&
+                "read_owner(owner_fd, len(expected_owner)) != expected_owner" in cleanup &&
+                "file_identity(receipt_state) != expected_receipt_identity" in cleanup &&
+                "read_owner(receipt_fd, len(expected_receipt)) != expected_receipt" in cleanup,
+        )
+        assertTrue(
+            "source provenance must use isolated fixed git and prove the exact repository root",
+            "/usr/bin/git --no-replace-objects" in provenance &&
+                "GIT_CONFIG_NOSYSTEM=1" in provenance &&
+                "GIT_CONFIG_GLOBAL=/dev/null" in provenance &&
+                "rev-parse --show-toplevel" in provenance &&
+                "[[ \"\$source_top\" == \"\$repo_root\" ]]" in provenance,
+        )
+        assertTrue(
+            "runner digest must bind a current-user non-writable regular file and parent",
+            "runner_state.st_uid != os.geteuid()" in runnerReader &&
+                "parent_state.st_uid != os.geteuid()" in runnerReader &&
+                "stat.S_IMODE(runner_state.st_mode) & 0o022" in runnerReader &&
+                "stat.S_IMODE(parent_state.st_mode) & 0o022" in runnerReader,
+        )
+        assertTrue(
+            "predictable shell-redirection receipt temp is forbidden",
+            "\$receipt_path.tmp.\$\$" !in source,
+        )
+        assertTrue("receipt publication must not delegate to ambient mv", !Regex("(?m)^\\s*mv\\b").containsMatchIn(source))
+        assertTrue("RUNNING publication must atomically replace an old PASS", "/bin/rm -f -- \"\$receipt_path\"" !in source)
+
+        val isolated = isolatedRunner(repo)
+        val fakeBin = Files.createTempDirectory("issue66-host-private-state-")
+        val fakeBash = fakeBin.resolve("bash")
+        val holderReady = fakeBin.resolve("holder-ready")
+        val holderRelease = fakeBin.resolve("holder-release")
+        var holder: Process? = null
+        try {
+            Files.write(
+                fakeBash,
+                (
+                    "#!/bin/sh\n" +
+                        "/usr/bin/touch \"\$HOST_GATE_HOLDER_READY\"\n" +
+                        "while [ ! -e \"\$HOST_GATE_HOLDER_RELEASE\" ]; do /bin/sleep 0.02; done\n" +
+                        "exit 23\n"
+                    ).toByteArray(),
+            )
+            assertTrue("fake bash must be executable", fakeBash.toFile().setExecutable(true))
+            Files.setPosixFilePermissions(
+                isolated.stateDir,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwxrwxrwx"),
+            )
+            holder = ProcessBuilder(
+                "/bin/bash",
+                "-c",
+                "umask 000; exec /bin/bash \"\$1\"",
+                "host-gate-private-state",
+                isolated.script.toString(),
+            ).redirectErrorStream(true).apply {
+                environment()["PATH"] = fakeBin.toString() + ":" + System.getenv("PATH")
+                environment()["JAVA_HOME"] = System.getProperty("java.home")
+                environment()["ANDROID_HOME"] = requireNotNull(System.getenv("ANDROID_HOME"))
+                environment()["HOST_GATE_HOLDER_READY"] = holderReady.toString()
+                environment()["HOST_GATE_HOLDER_RELEASE"] = holderRelease.toString()
+            }.start()
+            waitForPath(holderReady)
+
+            assertEquals(
+                "[OWNER_EXECUTE, OWNER_READ, OWNER_WRITE]",
+                Files.getPosixFilePermissions(isolated.stateDir).sortedBy { it.name }.toString(),
+            )
+            assertEquals(
+                "[OWNER_EXECUTE, OWNER_READ, OWNER_WRITE]",
+                Files.getPosixFilePermissions(isolated.lock).sortedBy { it.name }.toString(),
+            )
+            assertEquals(
+                "[OWNER_READ, OWNER_WRITE]",
+                Files.getPosixFilePermissions(isolated.lock.resolve("owner"))
+                    .sortedBy { it.name }.toString(),
+            )
+            assertEquals(
+                "[OWNER_READ, OWNER_WRITE]",
+                Files.getPosixFilePermissions(isolated.receipt).sortedBy { it.name }.toString(),
+            )
+
+            Files.createFile(holderRelease)
+            val output = holder.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 23, holder.waitFor())
+            assertTrue("ordinary failure must release its private lock", !Files.exists(isolated.lock))
+        } finally {
+            if (!Files.exists(holderRelease)) Files.createFile(holderRelease)
+            holder?.let { process ->
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor()
+                }
+            }
+            fakeBin.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    @Test
+    fun `runner refuses intermediate receipt directory symlinks without touching their targets`() {
+        val repo = findRepoRoot()
+        val canonical = repo.resolve("integration-tests/pr63-on-issue66/run-host-gate.sh")
+        listOf("build", "reports").forEach { symlinkComponent ->
+            val isolatedRepo = Files.createTempDirectory("issue66-host-gate-intermediate-symlink-")
+            val scriptDir = isolatedRepo.resolve("integration-tests/pr63-on-issue66")
+            val harnessDir = scriptDir.resolve("harness")
+            val external = Files.createTempDirectory("issue66-host-gate-external-state-")
+            try {
+                Files.createDirectories(harnessDir)
+                if (symlinkComponent == "build") {
+                    Files.createSymbolicLink(harnessDir.resolve("build"), external)
+                } else {
+                    Files.createDirectory(harnessDir.resolve("build"))
+                    Files.createSymbolicLink(harnessDir.resolve("build/reports"), external)
+                }
+                val runner = scriptDir.resolve("run-host-gate.sh")
+                Files.copy(canonical, runner)
+                check(runner.toFile().setExecutable(true, true)) {
+                    "intermediate-symlink fixture runner must be executable"
+                }
+
+                val process = ProcessBuilder("/bin/bash", runner.toString())
+                    .redirectErrorStream(true)
+                    .start()
+                val output = process.inputStream.bufferedReader().use { it.readText() }
+                assertEquals(output, 1, process.waitFor())
+                assertTrue(output, output.contains("receipt directory is not private"))
+                assertEquals(
+                    "intermediate $symlinkComponent symlink redirected host-gate state outside the repo",
+                    emptyList<String>(),
+                    Files.list(external).use { entries ->
+                        entries.map { it.fileName.toString() }.sorted().toList()
+                    },
+                )
+            } finally {
+                isolatedRepo.toFile().deleteRecursively()
+                external.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun `runner source provenance accepts only the exact clean repository root`() {
+        val canonical = findRepoRoot()
+            .resolve("integration-tests/pr63-on-issue66/run-host-gate.sh")
+            .readText()
+        val functionStart = canonical.indexOf("read_source_provenance() {")
+        val functionEnd = canonical.indexOf("\n}\n\nnew_run_id() {", functionStart)
+        assertTrue("source provenance helper is missing", functionStart >= 0 && functionEnd > functionStart)
+        val functionSource = canonical.substring(functionStart, functionEnd + 2)
+        val stateRoot = Files.createTempDirectory("issue66-source-provenance-").toRealPath()
+        val repo = stateRoot.resolve("repo")
+        val probe = stateRoot.resolve("probe.sh")
+
+        fun git(vararg arguments: String): String {
+            val process = ProcessBuilder("/usr/bin/git", "-C", repo.toString(), *arguments)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 0, process.waitFor())
+            return output.trim()
+        }
+
+        fun probe(repoRoot: Path): Pair<Int, String> {
+            val process = ProcessBuilder("/bin/bash", probe.toString(), repoRoot.toString())
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            return process.waitFor() to output.trim()
+        }
+
+        try {
+            Files.createDirectory(repo)
+            git("init")
+            git("config", "user.name", "Host Gate Test")
+            git("config", "user.email", "host-gate@example.invalid")
+            Files.write(repo.resolve("tracked.txt"), "clean\n".toByteArray())
+            git("add", "tracked.txt")
+            git("-c", "commit.gpgSign=false", "commit", "-m", "fixture")
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -euo pipefail\n" +
+                        "repo_root=\"\$1\"\n" +
+                        functionSource + "\n" +
+                        "read_source_provenance\n"
+                    ).toByteArray(),
+            )
+
+            val expected = git("rev-parse", "HEAD^{commit}") + ":" + git("rev-parse", "HEAD^{tree}")
+            val clean = probe(repo)
+            assertEquals(clean.second, 0, clean.first)
+            assertEquals(expected, clean.second)
+
+            val nested = Files.createDirectory(repo.resolve("nested"))
+            val wrongRoot = probe(nested)
+            assertTrue(wrongRoot.second, wrongRoot.first != 0)
+            Files.delete(nested)
+
+            Files.write(repo.resolve("untracked.txt"), "dirty\n".toByteArray())
+            val dirty = probe(repo)
+            assertTrue(dirty.second, dirty.first != 0)
+        } finally {
+            stateRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `runner cannot substitute a forged pass between temp creation and receipt publication`() {
+        val repo = findRepoRoot()
+        val isolated = isolatedRunner(repo)
+        val fakeBin = Files.createTempDirectory("issue66-host-receipt-substitution-")
+        val fakeBash = fakeBin.resolve("bash")
+        val fakeMv = fakeBin.resolve("mv")
+        val forgedPass = fakeBin.resolve("forged-pass.json")
+        val mvInvoked = fakeBin.resolve("mv-invoked")
+        try {
+            Files.write(fakeBash, "#!/bin/sh\nexit 23\n".toByteArray())
+            assertTrue("fake bash must be executable", fakeBash.toFile().setExecutable(true))
+            Files.write(forgedPass, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
+            Files.write(
+                fakeMv,
+                (
+                    "#!/bin/sh\n" +
+                        "/usr/bin/touch \"\$HOST_GATE_MV_INVOKED\"\n" +
+                        "if [ \"\$#\" -eq 3 ] && [ \"\$1\" = -f ]; then\n" +
+                        "  /bin/rm -f -- \"\$2\"\n" +
+                        "  /bin/cp \"\$HOST_GATE_FORGED_PASS\" \"\$2\"\n" +
+                        "fi\n" +
+                        "exec /bin/mv \"\$@\"\n"
+                    ).toByteArray(),
+            )
+            assertTrue("fake mv must be executable", fakeMv.toFile().setExecutable(true))
+
+            val process = hostGateProcess(
+                isolated.script,
+                fakeBin,
+                mapOf(
+                    "HOST_GATE_FORGED_PASS" to forgedPass.toString(),
+                    "HOST_GATE_MV_INVOKED" to mvInvoked.toString(),
+                ),
+            ).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 23, process.waitFor())
+            assertEquals(
+                "a substituted PASS escaped the RUNNING publication transaction",
+                "RUNNING",
+                Regex("\\\"hostIntegration\\\":\\\"([^\"]+)\\\"")
+                    .find(isolated.receipt.readText())?.groupValues?.get(1),
+            )
+            assertTrue("receipt publication delegated its commit to ambient mv", !Files.exists(mvInvoked))
+            assertTrue("ordinary failure must release the owned lock", !Files.exists(isolated.lock))
         } finally {
             fakeBin.toFile().deleteRecursively()
             isolated.close()
@@ -504,7 +1057,7 @@ class HarnessBoundaryGuardTest {
         val functionSource = verifier.substring(functionStart, functionEnd + 2)
         assertTrue(
             "validator must atomically own the runner lock while reading the receipt",
-            functionSource.contains("os.mkdir(lock_path"),
+            functionSource.contains("os.mkdir(lock_name, 0o700, dir_fd=parent_fd)"),
         )
         assertEquals(emptyList<String>(), aggregateReceiptSurfaceViolations(verifier))
         listOf(
@@ -532,28 +1085,24 @@ class HarnessBoundaryGuardTest {
             )
         }
 
-        val stateDir = Files.createTempDirectory("issue66-host-receipt-validator-")
+        val stateDir = Files.createTempDirectory("issue66-host-receipt-validator-").toRealPath()
+        val binding = createValidatorBinding(stateDir)
         val receipt = stateDir.resolve("host-gate-receipt.json")
         val lock = stateDir.resolve("host-gate.lock")
         val probe = stateDir.resolve("verify-host-receipt.sh")
         try {
-            Files.write(receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
+            Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
             Files.write(
                 probe,
                 (
                     "#!/bin/bash\n" +
                         "set -uo pipefail\n" +
                         functionSource + "\n" +
-                        "verify_host_receipt \"\$1\" \"\$2\"\n"
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
                     ).toByteArray(),
             )
 
-            val unlocked = ProcessBuilder(
-                "/bin/bash",
-                probe.toString(),
-                receipt.toString(),
-                lock.toString(),
-            ).redirectErrorStream(true).start()
+            val unlocked = validatorProcessBuilder(probe, receipt, lock, binding).start()
             val unlockedOutput = unlocked.inputStream.bufferedReader().use { it.readText() }
             assertEquals(unlockedOutput, 0, unlocked.waitFor())
             assertTrue(unlockedOutput, unlockedOutput.contains("receipt: VALID"))
@@ -566,12 +1115,7 @@ class HarnessBoundaryGuardTest {
                 preexistingOwner,
                 java.nio.file.attribute.BasicFileAttributes::class.java,
             ).fileKey()
-            val locked = ProcessBuilder(
-                "/bin/bash",
-                probe.toString(),
-                receipt.toString(),
-                lock.toString(),
-            ).redirectErrorStream(true).start()
+            val locked = validatorProcessBuilder(probe, receipt, lock, binding).start()
             val lockedOutput = locked.inputStream.bufferedReader().use { it.readText() }
             assertEquals(lockedOutput, 1, locked.waitFor())
             assertTrue(lockedOutput, lockedOutput.contains("host-gate lock"))
@@ -588,30 +1132,363 @@ class HarnessBoundaryGuardTest {
             Files.delete(preexistingOwner)
             Files.delete(lock)
             Files.write(receipt, "{malformed\n".toByteArray())
-            val malformed = ProcessBuilder(
-                "/bin/bash",
-                probe.toString(),
-                receipt.toString(),
-                lock.toString(),
-            ).redirectErrorStream(true).start()
+            val malformed = validatorProcessBuilder(probe, receipt, lock, binding).start()
             val malformedOutput = malformed.inputStream.bufferedReader().use { it.readText() }
             assertEquals(malformedOutput, 1, malformed.waitFor())
             assertTrue(malformedOutput, malformedOutput.contains("invalid host-gate JSON receipt"))
             assertTrue("failed validation leaked its owned lock", !Files.exists(lock))
 
-            Files.write(receipt, (MACHINE_READABLE_RUNNING + "\n").toByteArray())
-            val running = ProcessBuilder(
-                "/bin/bash",
-                probe.toString(),
-                receipt.toString(),
-                lock.toString(),
-            ).redirectErrorStream(true).start()
+            Files.write(receipt, (binding.receipt("RUNNING") + "\n").toByteArray())
+            val running = validatorProcessBuilder(probe, receipt, lock, binding).start()
             val runningOutput = running.inputStream.bufferedReader().use { it.readText() }
             assertEquals(runningOutput, 1, running.waitFor())
             assertTrue(runningOutput, runningOutput.contains("receipt contract mismatch"))
             assertTrue("contract failure leaked its owned lock", !Files.exists(lock))
         } finally {
             stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `aggregate validator rejects duplicate and extra receipt fields`() {
+        val repo = findRepoRoot()
+        val functionSource = verifyHostReceiptFunction(repo)
+        val stateDir = Files.createTempDirectory("issue66-host-receipt-schema-").toRealPath()
+        val binding = createValidatorBinding(stateDir)
+        val receipt = stateDir.resolve("host-gate-receipt.json")
+        val lock = stateDir.resolve("host-gate.lock")
+        val probe = stateDir.resolve("verify-host-receipt.sh")
+        try {
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -uo pipefail\n" +
+                        functionSource + "\n" +
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
+                    ).toByteArray(),
+            )
+            val validReceipt = binding.receipt("PASS")
+            val invalidReceipts = listOf(
+                "duplicate key" to validReceipt.dropLast(1) +
+                    ",\"overall\":\"BLOCKED\"}",
+                "extra field" to validReceipt.dropLast(1) +
+                    ",\"devicePass\":true}",
+                "numeric type substitution" to validReceipt.replace(
+                    "\"schemaVersion\":3",
+                    "\"schemaVersion\":3.0",
+                ),
+            )
+            invalidReceipts.forEach { (label, payload) ->
+                Files.write(receipt, (payload + "\n").toByteArray())
+                val validation = validatorProcessBuilder(probe, receipt, lock, binding).start()
+                val output = validation.inputStream.bufferedReader().use { it.readText() }
+                assertEquals("$label escaped:\n$output", 1, validation.waitFor())
+                assertTrue(output, output.contains("receipt schema mismatch"))
+                assertTrue("$label leaked the validator lock", !Files.exists(lock))
+            }
+        } finally {
+            stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `aggregate validator rejects a symlink receipt`() {
+        val repo = findRepoRoot()
+        val functionSource = verifyHostReceiptFunction(repo)
+        assertTrue(
+            "receipt open must use no-follow semantics",
+            functionSource.contains("receipt_flags") &&
+                functionSource.contains("os.O_NOFOLLOW") &&
+                functionSource.contains("os.O_NONBLOCK"),
+        )
+        assertTrue(
+            "receipt descriptor must be proven regular",
+            functionSource.contains("receipt_fd_state") &&
+                functionSource.contains("stat.S_ISREG(receipt_fd_state.st_mode)"),
+        )
+
+        val stateDir = Files.createTempDirectory("issue66-host-receipt-symlink-").toRealPath()
+        val binding = createValidatorBinding(stateDir)
+        val target = stateDir.resolve("valid-target.json")
+        val receipt = stateDir.resolve("host-gate-receipt.json")
+        val lock = stateDir.resolve("host-gate.lock")
+        val probe = stateDir.resolve("verify-host-receipt.sh")
+        try {
+            Files.write(target, (binding.receipt("PASS") + "\n").toByteArray())
+            Files.createSymbolicLink(receipt, target.fileName)
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -uo pipefail\n" +
+                        functionSource + "\n" +
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
+                    ).toByteArray(),
+            )
+            val validation = validatorProcessBuilder(probe, receipt, lock, binding).start()
+            val output = validation.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 1, validation.waitFor())
+            assertTrue(output, output.contains("invalid host-gate JSON receipt"))
+            assertTrue("symlink rejection leaked the validator lock", !Files.exists(lock))
+
+            Files.delete(receipt)
+            val fifo = stateDir.resolve("host-gate-receipt.fifo")
+            val mkfifo = ProcessBuilder("/usr/bin/mkfifo", fifo.toString())
+                .redirectErrorStream(true)
+                .start()
+            val mkfifoOutput = mkfifo.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(mkfifoOutput, 0, mkfifo.waitFor())
+            val fifoValidation = validatorProcessBuilder(probe, fifo, lock, binding).start()
+            assertTrue("FIFO receipt open blocked", fifoValidation.waitFor(5, TimeUnit.SECONDS))
+            val fifoOutput = fifoValidation.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(fifoOutput, 1, fifoValidation.exitValue())
+            assertTrue(fifoOutput, fifoOutput.contains("invalid host-gate JSON receipt"))
+            assertTrue("FIFO rejection leaked the validator lock", !Files.exists(lock))
+        } finally {
+            stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `aggregate validator rejects a receipt inode replacement during read`() {
+        val repo = findRepoRoot()
+        val functionSource = verifyHostReceiptFunction(repo)
+        val oldOpenMarker = "    with open(receipt_path, encoding=\"utf-8\") as receipt_file:\n"
+        val pinnedOpenMarker =
+            "    receipt_fd = os.open(receipt_name, receipt_flags, dir_fd=parent_fd)\n"
+        val openMarker = when {
+            oldOpenMarker in functionSource -> oldOpenMarker
+            pinnedOpenMarker in functionSource -> pinnedOpenMarker
+            else -> error("host receipt open marker changed")
+        }
+        val indent = if (openMarker == oldOpenMarker) "        " else "    "
+        val rendezvous = openMarker +
+            indent + "with open(os.environ[\"HOST_RECEIPT_READ_READY\"], \"w\") as ready_file:\n" +
+            indent + "    ready_file.write(\"ready\\n\")\n" +
+            indent + "while not os.path.exists(os.environ[\"HOST_RECEIPT_READ_RELEASE\"]):\n" +
+            indent + "    __import__(\"time\").sleep(0.01)\n"
+        val instrumented = functionSource.replace(openMarker, rendezvous)
+        assertTrue("receipt-read rendezvous mutation is a no-op", instrumented != functionSource)
+
+        val stateDir = Files.createTempDirectory("issue66-host-receipt-swap-").toRealPath()
+        val binding = createValidatorBinding(stateDir)
+        val receipt = stateDir.resolve("host-gate-receipt.json")
+        val lock = stateDir.resolve("host-gate.lock")
+        val probe = stateDir.resolve("verify-host-receipt-rendezvous.sh")
+        val ready = stateDir.resolve("receipt-read-ready")
+        val release = stateDir.resolve("receipt-read-release")
+        var validator: Process? = null
+        try {
+            Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -uo pipefail\n" +
+                        instrumented + "\n" +
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
+                    ).toByteArray(),
+            )
+            validator = validatorProcessBuilder(probe, receipt, lock, binding).apply {
+                environment()["HOST_RECEIPT_READ_READY"] = ready.toString()
+                environment()["HOST_RECEIPT_READ_RELEASE"] = release.toString()
+            }.start()
+            waitForPath(ready)
+            val originalKey = Files.readAttributes(
+                receipt,
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+            ).fileKey()
+            Files.delete(receipt)
+            Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
+            val replacementKey = Files.readAttributes(
+                receipt,
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+            ).fileKey()
+            assertTrue("receipt inode replacement was not reached", originalKey != replacementKey)
+            Files.createFile(release)
+
+            val output = validator.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 1, validator.waitFor())
+            assertTrue(output, output.contains("receipt identity changed"))
+            assertTrue("receipt replacement rejection leaked the validator lock", !Files.exists(lock))
+        } finally {
+            if (!Files.exists(release)) Files.createFile(release)
+            validator?.let { process ->
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor()
+                }
+            }
+            stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `aggregate validator rechecks the receipt after contract validation`() {
+        val repo = findRepoRoot()
+        val functionSource = verifyHostReceiptFunction(repo)
+        val recheckMarker = if ("receipt_recheck_error = None\n" in functionSource) {
+            "receipt_recheck_error = None\n"
+        } else {
+            "cleanup_error = None\n"
+        }
+        val rendezvous =
+            "with open(os.environ[\"HOST_RECEIPT_POST_CONTRACT_READY\"], \"w\") as ready_file:\n" +
+                "    ready_file.write(\"ready\\n\")\n" +
+                "while not os.path.exists(os.environ[\"HOST_RECEIPT_POST_CONTRACT_RELEASE\"]):\n" +
+                "    __import__(\"time\").sleep(0.01)\n" +
+                recheckMarker
+        val instrumented = functionSource.replace(recheckMarker, rendezvous)
+        assertTrue("post-contract rendezvous mutation is a no-op", instrumented != functionSource)
+
+        val stateDir = Files.createTempDirectory("issue66-host-receipt-post-contract-").toRealPath()
+        val binding = createValidatorBinding(stateDir)
+        val receipt = stateDir.resolve("host-gate-receipt.json")
+        val lock = stateDir.resolve("host-gate.lock")
+        val probe = stateDir.resolve("verify-host-receipt-rendezvous.sh")
+        val ready = stateDir.resolve("post-contract-ready")
+        val release = stateDir.resolve("post-contract-release")
+        var validator: Process? = null
+        try {
+            Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -uo pipefail\n" +
+                        instrumented + "\n" +
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
+                    ).toByteArray(),
+            )
+            validator = validatorProcessBuilder(probe, receipt, lock, binding).apply {
+                environment()["HOST_RECEIPT_POST_CONTRACT_READY"] = ready.toString()
+                environment()["HOST_RECEIPT_POST_CONTRACT_RELEASE"] = release.toString()
+            }.start()
+            waitForPath(ready)
+            val originalKey = Files.readAttributes(
+                receipt,
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+            ).fileKey()
+            Files.delete(receipt)
+            Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
+            val replacementKey = Files.readAttributes(
+                receipt,
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+            ).fileKey()
+            assertTrue("post-contract inode replacement was not reached", originalKey != replacementKey)
+            Files.createFile(release)
+
+            val output = validator.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 1, validator.waitFor())
+            assertTrue(output, output.contains("receipt identity changed"))
+            assertTrue("post-contract rejection leaked the validator lock", !Files.exists(lock))
+        } finally {
+            if (!Files.exists(release)) Files.createFile(release)
+            validator?.let { process ->
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor()
+                }
+            }
+            stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `aggregate validator isolates its fixed Python parser`() {
+        val repo = findRepoRoot()
+        val functionSource = verifyHostReceiptFunction(repo)
+        assertTrue(
+            "aggregate receipt parsing must use the fixed isolated Python runtime",
+            functionSource.contains("/usr/bin/python3 -I -"),
+        )
+
+        val stateDir = Files.createTempDirectory("issue66-host-receipt-python-shadow-").toRealPath()
+        val binding = createValidatorBinding(stateDir)
+        val receipt = stateDir.resolve("host-gate-receipt.json")
+        val lock = stateDir.resolve("host-gate.lock")
+        val probe = stateDir.resolve("verify-host-receipt.sh")
+        val shadowMarker = stateDir.resolve("python-shadow-executed")
+        try {
+            Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
+            Files.write(
+                stateDir.resolve("json.py"),
+                (
+                    "open(${shadowMarker.toString().quoteForPython()}, \"w\").write(\"executed\")\n" +
+                        "raise SystemExit(0)\n"
+                    ).toByteArray(),
+            )
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -uo pipefail\n" +
+                        functionSource + "\n" +
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
+                    ).toByteArray(),
+            )
+            val validation = validatorProcessBuilder(probe, receipt, lock, binding)
+                .directory(stateDir.toFile()).apply {
+                environment()["PYTHONPATH"] = stateDir.toString()
+            }.start()
+            val output = validation.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 0, validation.waitFor())
+            assertTrue(output, output.contains("receipt: VALID"))
+            assertTrue("ambient json.py replaced the receipt parser", !Files.exists(shadowMarker))
+            assertTrue("isolated parser leaked the validator lock", !Files.exists(lock))
+        } finally {
+            stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `aggregate validator pins one nofollow parent for receipt and lock`() {
+        val repo = findRepoRoot()
+        val functionSource = verifyHostReceiptFunction(repo)
+        assertTrue(
+            "receipt and lock must share a parent reached by a no-follow component walk",
+            functionSource.contains("def open_directory_nofollow(directory_path):") &&
+                functionSource.contains("next_fd = os.open(component, flags, dir_fd=current_fd)") &&
+                functionSource.contains("parent_fd = open_directory_nofollow(parent_path)") &&
+                functionSource.contains("dir_fd=parent_fd") &&
+                functionSource.contains("receipt_name") &&
+                functionSource.contains("lock_name"),
+        )
+
+        val stateRoot = Files.createTempDirectory("issue66-host-receipt-parent-").toRealPath()
+        val binding = createValidatorBinding(stateRoot)
+        val realParent = stateRoot.resolve("real-parent")
+        val aliasParent = stateRoot.resolve("alias-parent")
+        val receipt = aliasParent.resolve("host-gate-receipt.json")
+        val lock = aliasParent.resolve("host-gate.lock")
+        val probe = stateRoot.resolve("verify-host-receipt.sh")
+        try {
+            Files.createDirectory(realParent)
+            Files.write(
+                realParent.resolve("host-gate-receipt.json"),
+                (binding.receipt("PASS") + "\n").toByteArray(),
+            )
+            Files.createSymbolicLink(aliasParent, realParent.fileName)
+            Files.write(
+                probe,
+                (
+                    "#!/bin/bash\n" +
+                        "set -uo pipefail\n" +
+                        functionSource + "\n" +
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
+                    ).toByteArray(),
+            )
+            val validation = validatorProcessBuilder(probe, receipt, lock, binding).start()
+            val output = validation.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 1, validation.waitFor())
+            assertTrue(output, output.contains("cannot pin host-gate receipt parent"))
+            assertTrue(
+                "parent-symlink rejection created a lock through the alias",
+                !Files.exists(realParent.resolve("host-gate.lock")),
+            )
+        } finally {
+            stateRoot.toFile().deleteRecursively()
         }
     }
 
@@ -639,7 +1516,7 @@ class HarnessBoundaryGuardTest {
         val withHelper = functionSource.replace(helperMarker, helper)
         assertTrue("validator rendezvous helper mutation is a no-op", withHelper != functionSource)
         val preOpenMarker = "validation_error = None\n"
-        val preLoadMarker = "        receipt = json.load(receipt_file)"
+        val preLoadMarker = "    receipt_text = receipt_bytes.decode(\"utf-8\")"
         val postContractMarker = "cleanup_error = None\n"
         val withPreOpen = withHelper.replace(
             preOpenMarker,
@@ -647,7 +1524,7 @@ class HarnessBoundaryGuardTest {
         )
         val withPreLoad = withPreOpen.replace(
             preLoadMarker,
-            "        receipt_lock_rendezvous(\"pre-load\")\n" + preLoadMarker,
+            "    receipt_lock_rendezvous(\"pre-load\")\n" + preLoadMarker,
         )
         val instrumented = withPreLoad.replace(
             postContractMarker,
@@ -658,28 +1535,29 @@ class HarnessBoundaryGuardTest {
         assertTrue("post-contract rendezvous mutation is a no-op", instrumented != withPreLoad)
 
         val isolated = isolatedRunner(repo)
+        val binding = createValidatorBinding(isolated.stateDir)
         val fakeBin = Files.createTempDirectory("issue66-host-validator-lifetime-")
         val probe = isolated.stateDir.resolve("verify-host-receipt-rendezvous.sh")
         val rendezvousPrefix = isolated.stateDir.resolve("validator")
         val stages = listOf("pre-open", "pre-load", "post-contract")
         var validator: Process? = null
         try {
-            Files.write(isolated.receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
+            Files.write(isolated.receipt, (binding.receipt("PASS") + "\n").toByteArray())
             Files.write(
                 probe,
                 (
                     "#!/bin/bash\n" +
                         "set -uo pipefail\n" +
                         instrumented + "\n" +
-                        "verify_host_receipt \"\$1\" \"\$2\"\n"
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
                     ).toByteArray(),
             )
-            validator = ProcessBuilder(
-                "/bin/bash",
-                probe.toString(),
-                isolated.receipt.toString(),
-                isolated.lock.toString(),
-            ).redirectErrorStream(true).apply {
+            validator = validatorProcessBuilder(
+                probe,
+                isolated.receipt,
+                isolated.lock,
+                binding,
+            ).apply {
                 environment()["HOST_RECEIPT_VALIDATOR_RENDEZVOUS"] = rendezvousPrefix.toString()
             }.start()
 
@@ -710,7 +1588,7 @@ class HarnessBoundaryGuardTest {
                 val contenderOutput = contender.inputStream.bufferedReader().use { it.readText() }
                 assertEquals(contenderOutput, HOST_GATE_ALREADY_RUNNING_EXIT, contender.waitFor())
                 assertTrue(contenderOutput, contenderOutput.contains("already running"))
-                assertEquals(MACHINE_READABLE_BLOCKED, isolated.receipt.readText().trim())
+                assertEquals(binding.receipt("PASS"), isolated.receipt.readText().trim())
                 Files.createFile(release)
             }
 
@@ -744,20 +1622,19 @@ class HarnessBoundaryGuardTest {
         assertTrue("host receipt validator function is missing", functionStart >= 0)
         assertTrue("host receipt validator end marker is missing", functionEnd >= 0)
         val functionSource = verifier.substring(functionStart, functionEnd + 2)
-        val readMarker = "validation_error = None\ntry:\n    with open(receipt_path"
+        val readMarker = "validation_error = None\nsource_binding_before = None\n"
         val rendezvous =
-            "validation_error = None\n" +
+            readMarker +
                 "with open(os.environ[\"HOST_RECEIPT_VALIDATOR_READY\"], \"w\") as ready_file:\n" +
                 "    ready_file.write(\"ready\\n\")\n" +
                 "while not os.path.exists(os.environ[\"HOST_RECEIPT_VALIDATOR_RELEASE\"]):\n" +
-                "    __import__(\"time\").sleep(0.01)\n" +
-                "try:\n" +
-                "    with open(receipt_path"
+                "    __import__(\"time\").sleep(0.01)\n"
         val instrumented = functionSource.replace(readMarker, rendezvous)
         assertTrue("receipt-read rendezvous mutation is a no-op", instrumented != functionSource)
 
         listOf("inode-replaced", "token-overwritten").forEach { mutation ->
-            val stateDir = Files.createTempDirectory("issue66-host-validator-$mutation-")
+            val stateDir = Files.createTempDirectory("issue66-host-validator-$mutation-").toRealPath()
+            val binding = createValidatorBinding(stateDir)
             val receipt = stateDir.resolve("host-gate-receipt.json")
             val lock = stateDir.resolve("host-gate.lock")
             val probe = stateDir.resolve("verify-host-receipt-rendezvous.sh")
@@ -765,22 +1642,17 @@ class HarnessBoundaryGuardTest {
             val release = stateDir.resolve("validator-release")
             var validator: Process? = null
             try {
-                Files.write(receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
+                Files.write(receipt, (binding.receipt("PASS") + "\n").toByteArray())
                 Files.write(
                     probe,
                     (
                         "#!/bin/bash\n" +
                             "set -uo pipefail\n" +
                             instrumented + "\n" +
-                            "verify_host_receipt \"\$1\" \"\$2\"\n"
+                        "verify_host_receipt \"\$1\" \"\$2\" \"\$3\" \"\$4\"\n"
                         ).toByteArray(),
                 )
-                validator = ProcessBuilder(
-                    "/bin/bash",
-                    probe.toString(),
-                    receipt.toString(),
-                    lock.toString(),
-                ).redirectErrorStream(true).apply {
+                validator = validatorProcessBuilder(probe, receipt, lock, binding).apply {
                     environment()["HOST_RECEIPT_VALIDATOR_READY"] = ready.toString()
                     environment()["HOST_RECEIPT_VALIDATOR_RELEASE"] = release.toString()
                 }.start()
@@ -872,7 +1744,7 @@ class HarnessBoundaryGuardTest {
             val contenderOutput = contender.inputStream.bufferedReader().use { it.readText() }
             assertEquals(contenderOutput, HOST_GATE_ALREADY_RUNNING_EXIT, contender.waitFor())
             assertTrue(contenderOutput, contenderOutput.contains("already running"))
-            assertEquals(MACHINE_READABLE_RUNNING, isolated.receipt.readText().trim())
+            assertRunnerReceipt(isolated, "RUNNING")
 
             Files.createFile(holderRelease)
             val holderOutput = holder.inputStream.bufferedReader().use { it.readText() }
@@ -891,23 +1763,383 @@ class HarnessBoundaryGuardTest {
         }
     }
 
-    private fun isolatedRunner(repo: Path): IsolatedHostGate {
-        val stateDir = Files.createTempDirectory("issue66-host-gate-state-")
+    @Test
+    fun `ordinary failure retains the lock when the RUNNING receipt bytes were forged`() {
+        val repo = findRepoRoot()
+        val isolated = isolatedRunner(repo)
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-running-forgery-")
+        val fakeBash = fakeBin.resolve("bash")
+        val holderReady = fakeBin.resolve("holder-ready")
+        val holderRelease = fakeBin.resolve("holder-release")
+        var holder: Process? = null
+        try {
+            Files.write(
+                fakeBash,
+                (
+                    "#!/bin/sh\n" +
+                        "/usr/bin/touch \"\$HOST_GATE_HOLDER_READY\"\n" +
+                        "while [ ! -e \"\$HOST_GATE_HOLDER_RELEASE\" ]; do /bin/sleep 0.02; done\n" +
+                        "exit 23\n"
+                    ).toByteArray(),
+            )
+            assertTrue("fake bash must be executable", fakeBash.toFile().setExecutable(true))
+            holder = hostGateProcess(
+                isolated.script,
+                fakeBin,
+                mapOf(
+                    "HOST_GATE_HOLDER_READY" to holderReady.toString(),
+                    "HOST_GATE_HOLDER_RELEASE" to holderRelease.toString(),
+                ),
+            ).start()
+            waitForPath(holderReady)
+            assertRunnerReceipt(isolated, "RUNNING")
+
+            Files.write(isolated.receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
+            Files.createFile(holderRelease)
+            val output = holder.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 23, holder.waitFor())
+            assertTrue(output, output.contains("retained an ambiguous owner lock"))
+            assertTrue("cleanup removed the lock around a forged receipt", Files.exists(isolated.lock))
+            assertEquals(MACHINE_READABLE_BLOCKED, isolated.receipt.readText().trim())
+        } finally {
+            if (!Files.exists(holderRelease)) Files.createFile(holderRelease)
+            holder?.let { process ->
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor()
+                }
+            }
+            fakeBin.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    @Test
+    fun `runner cleanup retains a same token replacement owner as a foreign lock fence`() {
+        val repo = findRepoRoot()
+        val isolated = isolatedRunner(repo)
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-owner-replace-")
+        val fakeBash = fakeBin.resolve("bash")
+        val holderReady = fakeBin.resolve("holder-ready")
+        val holderRelease = fakeBin.resolve("holder-release")
+        var holder: Process? = null
+        try {
+            Files.write(
+                fakeBash,
+                (
+                    "#!/bin/sh\n" +
+                        "/usr/bin/touch \"\$HOST_GATE_HOLDER_READY\"\n" +
+                        "while [ ! -e \"\$HOST_GATE_HOLDER_RELEASE\" ]; do /bin/sleep 0.02; done\n" +
+                        "exit 23\n"
+                    ).toByteArray(),
+            )
+            assertTrue("fake bash must be executable", fakeBash.toFile().setExecutable(true))
+            holder = hostGateProcess(
+                isolated.script,
+                fakeBin,
+                mapOf(
+                    "HOST_GATE_HOLDER_READY" to holderReady.toString(),
+                    "HOST_GATE_HOLDER_RELEASE" to holderRelease.toString(),
+                ),
+            ).start()
+            waitForPath(holderReady)
+
+            val owner = isolated.lock.resolve("owner")
+            val originalToken = owner.readText()
+            val originalKey = Files.readAttributes(
+                owner,
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+            ).fileKey()
+            Files.delete(owner)
+            Files.write(owner, originalToken.toByteArray())
+            val replacementKey = Files.readAttributes(
+                owner,
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+            ).fileKey()
+            assertTrue("owner inode replacement was not reached", replacementKey != originalKey)
+
+            Files.createFile(holderRelease)
+            val output = holder.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 23, holder.waitFor())
+            assertTrue(output, output.contains("retained an ambiguous owner lock"))
+            assertTrue("cleanup removed a replacement owner lock", Files.exists(isolated.lock))
+            assertEquals(originalToken, owner.readText())
+        } finally {
+            if (!Files.exists(holderRelease)) Files.createFile(holderRelease)
+            holder?.let { process ->
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor()
+                }
+            }
+            fakeBin.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    @Test
+    fun `runner cleanup rejects a replaced receipt parent even when its lock inode is moved back`() {
+        val repo = findRepoRoot()
+        val isolated = isolatedRunner(repo)
+        val movedParent = isolated.stateDir.resolveSibling(isolated.stateDir.fileName.toString() + "-moved")
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-parent-replace-")
+        val fakeBash = fakeBin.resolve("bash")
+        val holderReady = fakeBin.resolve("holder-ready")
+        val holderRelease = fakeBin.resolve("holder-release")
+        var holder: Process? = null
+        try {
+            Files.write(
+                fakeBash,
+                (
+                    "#!/bin/sh\n" +
+                        "/usr/bin/touch \"\$HOST_GATE_HOLDER_READY\"\n" +
+                        "while [ ! -e \"\$HOST_GATE_HOLDER_RELEASE\" ]; do /bin/sleep 0.02; done\n" +
+                        "exit 23\n"
+                    ).toByteArray(),
+            )
+            assertTrue("fake bash must be executable", fakeBash.toFile().setExecutable(true))
+            holder = hostGateProcess(
+                isolated.script,
+                fakeBin,
+                mapOf(
+                    "HOST_GATE_HOLDER_READY" to holderReady.toString(),
+                    "HOST_GATE_HOLDER_RELEASE" to holderRelease.toString(),
+                ),
+            ).start()
+            waitForPath(holderReady)
+
+            Files.move(isolated.stateDir, movedParent)
+            Files.createDirectory(isolated.stateDir)
+            Files.setPosixFilePermissions(
+                isolated.stateDir,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"),
+            )
+            Files.move(movedParent.resolve("host-gate.lock"), isolated.lock)
+            Files.write(isolated.receipt, (MACHINE_READABLE_BLOCKED + "\n").toByteArray())
+
+            Files.createFile(holderRelease)
+            val output = holder.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 23, holder.waitFor())
+            assertTrue(output, output.contains("retained an ambiguous owner lock"))
+            assertTrue("cleanup trusted a moved lock under a replacement parent", Files.exists(isolated.lock))
+            assertEquals(MACHINE_READABLE_BLOCKED, isolated.receipt.readText().trim())
+        } finally {
+            if (!Files.exists(holderRelease)) Files.createFile(holderRelease)
+            holder?.let { process ->
+                if (process.isAlive) {
+                    process.destroyForcibly()
+                    process.waitFor()
+                }
+            }
+            fakeBin.toFile().deleteRecursively()
+            movedParent.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    @Test
+    fun `post PASS provenance change retains the lock around the published PASS`() {
+        val repo = findRepoRoot()
+        val isolated = isolatedRunner(repo) { source ->
+            val provenanceStart = source.indexOf("read_source_provenance() {")
+            val provenanceEnd = source.indexOf("\n}\n\nnew_run_id() {", provenanceStart)
+            check(provenanceStart >= 0 && provenanceEnd > provenanceStart) {
+                "isolated source-provenance stub changed"
+            }
+            val statefulProvenance =
+                "read_source_provenance() {\n" +
+                    "  local count_file=\"\$receipt_dir/.test-provenance-count\" count=0\n" +
+                    "  if [[ -f \"\$count_file\" ]]; then count=\"\$(<\"\$count_file\")\"; fi\n" +
+                    "  count=\$((count + 1))\n" +
+                    "  printf '%s\\n' \"\$count\" >\"\$count_file\"\n" +
+                    "  if [[ \"\$count\" -ge 3 ]]; then\n" +
+                    "    printf '%s:%s\\n' '$TEST_CHANGED_SOURCE_HEAD' '$TEST_CHANGED_SOURCE_TREE'\n" +
+                    "  else\n" +
+                    "    printf '%s:%s\\n' '$TEST_SOURCE_HEAD' '$TEST_SOURCE_TREE'\n" +
+                    "  fi\n" +
+                    "}"
+            val withStatefulProvenance = source.replaceRange(
+                provenanceStart,
+                provenanceEnd + 2,
+                statefulProvenance,
+            )
+            val verificationStart = withStatefulProvenance.indexOf(PINNED_MOTO_READONLY_SELFTEST_LINE)
+            val verificationLast = withStatefulProvenance.indexOf(PINNED_FULL_HARNESS, verificationStart)
+            val verificationEnd = withStatefulProvenance.indexOf('\n', verificationLast)
+            check(
+                verificationStart >= 0 && verificationLast > verificationStart &&
+                    verificationEnd > verificationLast,
+            ) {
+                "isolated successful host-verification block changed"
+            }
+            withStatefulProvenance.replaceRange(
+                verificationStart,
+                verificationEnd,
+                "  : # injected successful host verification",
+            )
+        }
+        val fakeBin = Files.createTempDirectory("issue66-host-gate-post-pass-source-")
+        try {
+            val process = hostGateProcess(isolated.script, fakeBin, emptyMap()).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            assertEquals(output, 1, process.waitFor())
+            assertTrue(output, output.contains("source changed across PASS publication"))
+            assertRunnerReceipt(isolated, "PASS")
+            assertTrue("post-PASS provenance ambiguity must retain the lock", Files.exists(isolated.lock))
+        } finally {
+            fakeBin.toFile().deleteRecursively()
+            isolated.close()
+        }
+    }
+
+    private fun isolatedRunner(
+        repo: Path,
+        transform: (String) -> String = { it },
+    ): IsolatedHostGate {
         val canonical = repo.resolve("integration-tests/pr63-on-issue66/run-host-gate.sh")
-        val marker = "  receipt_dir=\"\$script_dir/harness/build/reports/pr63-on-issue66\""
+        val reportsDir = canonical.parent.resolve("harness/build/reports")
+        Files.createDirectories(reportsDir)
+        val stateDir = Files.createTempDirectory(reportsDir, "pr63-on-issue66-test-").toRealPath()
+        val relativeStateDir = canonical.parent.toRealPath().relativize(stateDir)
+            .joinToString("/") { it.toString() }
+        val marker = "  receipt_relative_dir=\"harness/build/reports/pr63-on-issue66\""
         val source = canonical.readText()
         check(source.windowed(marker.length).count { it == marker } == 1) {
             "canonical host gate receipt directory marker changed"
         }
-        val isolatedSource = source.replace(marker, "  receipt_dir='${stateDir.toAbsolutePath()}'")
+        val provenanceStart = source.indexOf("read_source_provenance() {")
+        val provenanceEndMarker = "\n}\n\nnew_run_id() {"
+        val provenanceEnd = source.indexOf(provenanceEndMarker, provenanceStart)
+        check(provenanceStart >= 0 && provenanceEnd > provenanceStart) {
+            "canonical host gate source-provenance function changed"
+        }
+        val testProvenance =
+            "read_source_provenance() {\n" +
+                "  printf '%s:%s\\n' '$TEST_SOURCE_HEAD' '$TEST_SOURCE_TREE'\n" +
+                "}"
+        val sourceWithTestProvenance = source.replaceRange(
+            provenanceStart,
+            provenanceEnd + 2,
+            testProvenance,
+        )
+        val reviewedRunnerStart = sourceWithTestProvenance.indexOf("read_head_runner_sha256() {")
+        val reviewedRunnerEndMarker = "\n}\n\nwrite_receipt_atomically() {"
+        val reviewedRunnerEnd = sourceWithTestProvenance.indexOf(
+            reviewedRunnerEndMarker,
+            reviewedRunnerStart,
+        )
+        check(reviewedRunnerStart >= 0 && reviewedRunnerEnd > reviewedRunnerStart) {
+            "canonical HEAD-runner digest helper changed"
+        }
+        val testReviewedRunner =
+            "read_head_runner_sha256() {\n" +
+                "  read_runner_sha256 \"\$2\"\n" +
+                "}"
+        val sourceWithTestBindings = sourceWithTestProvenance.replaceRange(
+            reviewedRunnerStart,
+            reviewedRunnerEnd + 2,
+            testReviewedRunner,
+        )
+        val sourceWithIsolatedState = sourceWithTestBindings.replace(
+            marker,
+            "  receipt_relative_dir='$relativeStateDir'",
+        )
+        val isolatedSource = transform(sourceWithIsolatedState)
+            .replace(
+                "PATH=/usr/bin:/bin\nexport PATH",
+                ": # isolated fixture preserves the injected command PATH",
+            )
+            .replace(
+                PINNED_MOTO_READONLY_SELFTEST_LINE,
+                "  bash \"\$repo_root/scripts/selftest-issue66-moto-readonly-collector.sh\"",
+            )
+            .replace(
+                PINNED_SERVICES_COMPATIBILITY_SELFTEST_LINE,
+                "  bash \"\$repo_root/scripts/selftest-issue66-services-compatibility.sh\"",
+            )
         val script = Files.createTempFile(canonical.parent, ".run-host-gate-test-", ".sh")
         Files.write(script, isolatedSource.toByteArray())
+        check(script.toFile().setExecutable(true, true)) { "isolated host gate must be executable" }
         return IsolatedHostGate(
             script = script,
             stateDir = stateDir,
             receipt = stateDir.resolve("host-gate-receipt.json"),
             lock = stateDir.resolve("host-gate.lock"),
         )
+    }
+
+    private fun createValidatorBinding(parent: Path): ValidatorBinding {
+        val requestedRepo = parent.resolve("validator-source-repo")
+        Files.createDirectories(
+            requestedRepo.resolve("integration-tests/pr63-on-issue66"),
+        )
+        val sourceRepo = requestedRepo.toRealPath()
+        val runner = sourceRepo.resolve("integration-tests/pr63-on-issue66/run-host-gate.sh")
+        Files.write(runner, "#!/bin/bash\nexit 0\n".toByteArray())
+        check(runner.toFile().setExecutable(true, true)) { "validator fixture runner must be executable" }
+
+        fun git(vararg arguments: String): String {
+            val process = ProcessBuilder("/usr/bin/git", "-C", sourceRepo.toString(), *arguments)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            check(process.waitFor() == 0) { "validator fixture git failed: $output" }
+            return output.trim()
+        }
+
+        git("init", "-q")
+        git("config", "user.name", "Host Receipt Test")
+        git("config", "user.email", "host-receipt@example.invalid")
+        git("add", "integration-tests/pr63-on-issue66/run-host-gate.sh")
+        git("-c", "commit.gpgSign=false", "commit", "-q", "-m", "validator fixture")
+        return ValidatorBinding(
+            repo = sourceRepo,
+            runner = runner,
+            sourceHead = git("rev-parse", "HEAD^{commit}"),
+            sourceTree = git("rev-parse", "HEAD^{tree}"),
+            runnerSha256 = sha256(runner),
+        )
+    }
+
+    private fun validatorProcessBuilder(
+        probe: Path,
+        receipt: Path,
+        lock: Path,
+        binding: ValidatorBinding,
+    ): ProcessBuilder = ProcessBuilder(
+        "/bin/bash",
+        probe.toString(),
+        receipt.toString(),
+        lock.toString(),
+        binding.repo.toString(),
+        binding.runner.toString(),
+    ).redirectErrorStream(true)
+
+    private fun assertRunnerReceipt(isolated: IsolatedHostGate, expectedHostIntegration: String) {
+        val actual = isolated.receipt.readText().trim()
+        val runId = Regex("\\\"runId\\\":\\\"([0-9a-f]{32})\\\"")
+            .find(actual)?.groupValues?.get(1)
+            ?: error("runner receipt has no canonical runId: $actual")
+        val reason = if (expectedHostIntegration == "RUNNING") {
+            "HOST_GATE_RUNNING_NO_PASS_RECEIPT"
+        } else {
+            "HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__" +
+                "ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION"
+        }
+        val expected =
+            "{\"schemaVersion\":3,\"sourceHead\":\"$TEST_SOURCE_HEAD\",\"sourceTree\":\"$TEST_SOURCE_TREE\"," +
+                "\"sourceState\":\"CLEAN\",\"runnerSha256\":\"${sha256(isolated.script)}\"," +
+                "\"runId\":\"$runId\",\"hostIntegration\":\"$expectedHostIntegration\"," +
+                "\"issue66Ac7\":\"NOT_PASSED\",\"emulator\":\"NOT_RUN\"," +
+                "\"physicalDevice\":\"NOT_RUN\",\"deviceFull\":\"BLOCKED\"," +
+                "\"overall\":\"BLOCKED\",\"reason\":\"$reason\"}"
+        assertEquals(expected, actual)
+    }
+
+    private fun sha256(path: Path): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(Files.readAllBytes(path))
+        return digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     private fun hostGateProcess(
@@ -940,6 +2172,30 @@ class HarnessBoundaryGuardTest {
         override fun close() {
             Files.deleteIfExists(script)
             stateDir.toFile().deleteRecursively()
+        }
+    }
+
+    private data class ValidatorBinding(
+        val repo: Path,
+        val runner: Path,
+        val sourceHead: String,
+        val sourceTree: String,
+        val runnerSha256: String,
+    ) {
+        fun receipt(hostIntegration: String): String {
+            val reason = if (hostIntegration == "RUNNING") {
+                "HOST_GATE_RUNNING_NO_PASS_RECEIPT"
+            } else {
+                "HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__" +
+                    "ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_" +
+                    "ADDITIONAL_AUTHORIZATION"
+            }
+            return "{\"schemaVersion\":3,\"sourceHead\":\"$sourceHead\"," +
+                "\"sourceTree\":\"$sourceTree\",\"sourceState\":\"CLEAN\"," +
+                "\"runnerSha256\":\"$runnerSha256\",\"runId\":\"${"a".repeat(32)}\"," +
+                "\"hostIntegration\":\"$hostIntegration\",\"issue66Ac7\":\"NOT_PASSED\"," +
+                "\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"NOT_RUN\"," +
+                "\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\",\"reason\":\"$reason\"}"
         }
     }
 
@@ -1030,14 +2286,20 @@ class HarnessBoundaryGuardTest {
         expectExactlyOnce(script, PINNED_QWY_CODEC, "QWY evidence-health codec regression")
         expectExactlyOnce(script, PINNED_QWY_ADVANCE, "QWY authoritative revision suite")
         expectExactlyOnce(script, PINNED_FULL_HARNESS, "complete host harness")
-        expectExactlyOnce(script, MACHINE_READABLE_BLOCKED, "machine-readable blocked receipt")
-        expectExactlyOnce(script, MACHINE_READABLE_RUNNING, "stale PASS receipt invalidation")
+        expectExactlyOneLine(script, PINNED_PRIVATE_UMASK, "private host-gate umask")
+        expectExactlyOnce(script, PINNED_RECEIPT_DIR_PREPARE, "private receipt directory preparation")
+        expectExactlyOnce(script, PINNED_RUNNING_RECEIPT_SCHEMA, "schema-v3 RUNNING receipt")
+        expectExactlyOnce(script, PINNED_PASS_RECEIPT_SCHEMA, "schema-v3 PASS receipt")
         expectExactlyOnce(script, PINNED_LOCK_ACQUIRE, "exclusive host-gate lock acquisition")
         expectExactlyOnce(script, PINNED_LOCK_CLEANUP_TRAP, "host-gate lock cleanup trap")
-        expectExactlyOnce(script, PINNED_STALE_RECEIPT_INVALIDATION, "stale PASS invalidation")
+        expectExactlyOnce(script, PINNED_ATOMIC_RECEIPT_REPLACE, "descriptor-relative atomic receipt replace")
         expectExactlyOnce(script, PINNED_LOCK_OWNER_WRITE, "host-gate run ownership")
-        expectExactlyOnce(script, PINNED_LOCK_RELEASE_DISARM, "host-gate lock release disarm")
-        expectExactlyOnce(script, PINNED_LOCK_RELEASE_ARM, "host-gate lock release arm")
+        if (script.lines().count { it == PINNED_LOCK_RELEASE_DISARM } != 3) {
+            add("host-gate lock must start disarmed and disarm both receipt publications")
+        }
+        if (script.lines().count { it == PINNED_LOCK_RELEASE_ARM } != 2) {
+            add("host-gate lock must rearm only after both receipt publications")
+        }
         expectExactlyOnce(script, PINNED_LOCK_RELEASE_GUARD, "host-gate lock release guard")
         expectExactlyOnce(
             script,
@@ -1046,31 +2308,64 @@ class HarnessBoundaryGuardTest {
         )
         expectExactlyOnce(
             script,
-            PINNED_RECEIPT_MOVE_FAILURE_CLEANUP,
-            "failed atomic receipt move cleanup",
+            PINNED_COOPERATIVE_RELEASE_BOUNDARY,
+            "host-gate cooperative release boundary",
         )
+        expectExactlyOnce(
+            script,
+            PINNED_TEMP_IDENTITY_CLEANUP,
+            "failed atomic receipt temp identity cleanup",
+        )
+        expectExactlyOnce(script, PINNED_POST_PUBLISH_BYTES_CHECK, "post-publish exact bytes check")
         expectExactlyOnce(script, PINNED_RUNNING_RECEIPT_WRITE, "atomic RUNNING receipt write")
         expectExactlyOnce(script, PINNED_PASS_RECEIPT_WRITE, "atomic PASS receipt write")
+        expectExactlyOnce(script, PINNED_POST_PASS_SOURCE_CHECK, "post-PASS source recheck")
+        expectExactlyOnce(script, PINNED_POST_PASS_RUNNER_CHECK, "post-PASS runner recheck")
         val zeroArgStart = script.indexOf(PINNED_ZERO_ARG_RUNNING_PREFIX)
+        val receiptPrepare = script.indexOf(PINNED_RECEIPT_DIR_PREPARE)
         val lockAcquire = script.indexOf(PINNED_LOCK_ACQUIRE)
         val lockTrap = script.indexOf(PINNED_LOCK_CLEANUP_TRAP)
-        val staleInvalidation = script.indexOf(PINNED_STALE_RECEIPT_INVALIDATION)
         val ownerWrite = script.indexOf(PINNED_LOCK_OWNER_WRITE)
+        val runningSchema = script.indexOf(PINNED_RUNNING_RECEIPT_SCHEMA)
         val runningWrite = script.indexOf(PINNED_RUNNING_RECEIPT_WRITE)
-        val lockReleaseArm = script.indexOf(PINNED_LOCK_RELEASE_ARM)
+        val initialDisarm = script.indexOf(PINNED_LOCK_RELEASE_DISARM)
+        val runningDisarm = script.indexOf(
+            PINNED_LOCK_RELEASE_DISARM,
+            initialDisarm + PINNED_LOCK_RELEASE_DISARM.length,
+        )
+        val passDisarm = script.indexOf(
+            PINNED_LOCK_RELEASE_DISARM,
+            runningDisarm + PINNED_LOCK_RELEASE_DISARM.length,
+        )
+        val runningArm = script.indexOf(PINNED_LOCK_RELEASE_ARM)
+        val passArm = script.indexOf(
+            PINNED_LOCK_RELEASE_ARM,
+            runningArm + PINNED_LOCK_RELEASE_ARM.length,
+        )
         val wrapperPreflight = script.indexOf(PINNED_WRAPPER_PREFLIGHT)
         val firstSelftest = script.indexOf(PINNED_MOTO_READONLY_SELFTEST_LINE)
         val fullHarness = script.indexOf(PINNED_FULL_HARNESS)
+        val passSchema = script.indexOf(PINNED_PASS_RECEIPT_SCHEMA)
         val passWrite = script.indexOf(PINNED_PASS_RECEIPT_WRITE)
-        if (!(zeroArgStart >= 0 && lockAcquire > zeroArgStart && lockTrap > lockAcquire &&
-                ownerWrite > lockTrap && staleInvalidation > ownerWrite &&
-                runningWrite > staleInvalidation && lockReleaseArm > runningWrite &&
-                wrapperPreflight > lockReleaseArm && firstSelftest > wrapperPreflight)
+        val postPassSourceCheck = script.indexOf(PINNED_POST_PASS_SOURCE_CHECK)
+        val postPassRunnerCheck = script.indexOf(PINNED_POST_PASS_RUNNER_CHECK)
+        if (!(zeroArgStart >= 0 && receiptPrepare >= zeroArgStart && lockAcquire > receiptPrepare &&
+                initialDisarm in (receiptPrepare + 1) until lockAcquire && lockTrap > lockAcquire &&
+                ownerWrite > lockTrap && runningSchema > ownerWrite &&
+                runningDisarm > runningSchema && runningWrite > runningDisarm &&
+                runningArm > runningWrite && wrapperPreflight > runningArm &&
+                firstSelftest > wrapperPreflight)
         ) {
             add("lock ownership and RUNNING invalidation must precede host preflight and selftests")
         }
-        if (passWrite <= fullHarness || fullHarness <= firstSelftest) {
+        if (!(fullHarness > firstSelftest && passDisarm > fullHarness && passSchema > passDisarm &&
+                passWrite > passSchema && postPassSourceCheck > passWrite &&
+                postPassRunnerCheck > postPassSourceCheck && passArm > postPassRunnerCheck)
+        ) {
             add("PASS receipt may be written only after complete host verification")
+        }
+        if ("/bin/rm -f -- \"\$receipt_path\"" in script || Regex("(?m)^\\s*mv\\b").containsMatchIn(script)) {
+            add("receipt publication must not use pathname unlink or ambient mv handoff")
         }
         expectExactlyOnce(script, JAVA_HOME_MARKER, "JDK must be explicit")
         expectExactlyOnce(script, ANDROID_HOME_MARKER, "Android SDK must be explicit")
@@ -1089,7 +2384,7 @@ class HarnessBoundaryGuardTest {
             PINNED_SERVICES_COMPATIBILITY_SELFTEST_LINE.trim(),
         )
         val shellInterpreterLines = executableLines.filter {
-            Regex("^(?:bash|sh|zsh)\\b").containsMatchIn(it)
+            Regex("^(?:/bin/)?(?:bash|sh|zsh)\\b").containsMatchIn(it)
         }
         if (shellInterpreterLines != allowedShellScripts) {
             add("host gate shell-script execution surface changed")
@@ -1098,7 +2393,10 @@ class HarnessBoundaryGuardTest {
             Regex("(?:^|[\\s\\\"'])(?:[^\\s\\\"']+/)?[^\\s\\\"']+\\.sh(?:[\\s\\\"']|$)")
                 .containsMatchIn(it)
         }
-        if (scriptPathLines != allowedShellScripts) {
+        val allowedScriptPaths = listOf(
+            "local runner_relative_path=\"integration-tests/pr63-on-issue66/run-host-gate.sh\"",
+        ) + allowedShellScripts
+        if (scriptPathLines != allowedScriptPaths) {
             add("host gate indirect script surface changed")
         }
         if (executableLines.any { Regex("^(?:source|\\.)\\s").containsMatchIn(it) }) {
@@ -1237,6 +2535,19 @@ class HarnessBoundaryGuardTest {
         }
     }
 
+    private fun verifyHostReceiptFunction(repo: Path): String {
+        val verifier = repo.resolve("scripts/verify-a-plus.sh").readText()
+        val functionStart = verifier.indexOf("verify_host_receipt() {")
+        val functionEndMarker = "\n}\n\nprintf 'verify-a-plus: stage=%s\\n'"
+        val functionEnd = verifier.indexOf(functionEndMarker, functionStart)
+        check(functionStart >= 0) { "host receipt validator function is missing" }
+        check(functionEnd >= 0) { "host receipt validator end marker is missing" }
+        return verifier.substring(functionStart, functionEnd + 2)
+    }
+
+    private fun String.quoteForPython(): String =
+        "'" + replace("\\", "\\\\").replace("'", "\\'") + "'"
+
     private fun findRepoRoot(): Path {
         var candidate = Paths.get("").toAbsolutePath().normalize()
         while (candidate.parent != null) {
@@ -1337,38 +2648,80 @@ class HarnessBoundaryGuardTest {
         const val PINNED_FAIL_CLOSED_SHELL = "set -euo pipefail"
         const val PINNED_PROJECT = "exec \"\$auto_wrapper\" -p \"\$script_dir\" \"\$@\""
         const val PINNED_MOTO_READONLY_SELFTEST_LINE =
-            "  bash \"\$repo_root/scripts/selftest-issue66-moto-readonly-collector.sh\""
+            "  /bin/bash \"\$repo_root/scripts/selftest-issue66-moto-readonly-collector.sh\""
         const val PINNED_SERVICES_COMPATIBILITY_SELFTEST_LINE =
-            "  bash \"\$repo_root/scripts/selftest-issue66-services-compatibility.sh\""
+            "  /bin/bash \"\$repo_root/scripts/selftest-issue66-services-compatibility.sh\""
+        const val TEST_SOURCE_HEAD = "1111111111111111111111111111111111111111"
+        const val TEST_SOURCE_TREE = "2222222222222222222222222222222222222222"
+        const val TEST_CHANGED_SOURCE_HEAD = "3333333333333333333333333333333333333333"
+        const val TEST_CHANGED_SOURCE_TREE = "4444444444444444444444444444444444444444"
         const val MACHINE_READABLE_RUNNING =
-            "{\"schemaVersion\":2,\"hostIntegration\":\"RUNNING\",\"issue66Ac7\":\"NOT_PASSED\",\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"NOT_RUN\",\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\",\"reason\":\"HOST_GATE_RUNNING_NO_PASS_RECEIPT\"}"
+            "{\"schemaVersion\":3,\"sourceHead\":\"0000000000000000000000000000000000000000\"," +
+                "\"sourceTree\":\"0000000000000000000000000000000000000000\"," +
+                "\"sourceState\":\"CLEAN\"," +
+                "\"runnerSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"," +
+                "\"runId\":\"00000000000000000000000000000000\"," +
+                "\"hostIntegration\":\"RUNNING\",\"issue66Ac7\":\"NOT_PASSED\"," +
+                "\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"NOT_RUN\"," +
+                "\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\"," +
+                "\"reason\":\"HOST_GATE_RUNNING_NO_PASS_RECEIPT\"}"
+        const val PINNED_RUNNING_RECEIPT_SCHEMA =
+            "\\\"runId\\\":\\\"\$run_id\\\",\\\"hostIntegration\\\":\\\"RUNNING\\\""
+        const val PINNED_PASS_RECEIPT_SCHEMA =
+            "\\\"runId\\\":\\\"\$run_id\\\",\\\"hostIntegration\\\":\\\"PASS\\\""
         const val PINNED_RUNNING_RECEIPT_WRITE =
-            "  write_receipt_atomically \"\$running_receipt\""
+            "  if ! active_receipt_identity=\"\$(write_receipt_atomically \"\$running_receipt\")\" ||"
         const val PINNED_PASS_RECEIPT_WRITE =
-            "  write_receipt_atomically \"\$receipt\""
+            "  if ! pass_receipt_identity=\"\$(write_receipt_atomically \"\$receipt\")\" ||"
+        const val PINNED_POST_PASS_SOURCE_CHECK =
+            "  if ! published_source_identity=\"\$(read_source_provenance)\" ||"
+        const val PINNED_POST_PASS_RUNNER_CHECK =
+            "  if ! published_runner_sha256=\"\$(read_runner_sha256 \"\$runner_path\")\" ||"
         const val PINNED_WRAPPER_PREFLIGHT =
             "for pinned_wrapper in \"\$auto_wrapper\" \"\$qwy_wrapper\"; do"
         const val PINNED_ZERO_ARG_RUNNING_PREFIX =
             "if [[ \"\$#\" -eq 0 ]]; then\n" +
-                "  receipt_dir=\"\$script_dir/harness/build/reports/pr63-on-issue66\"\n" +
-                "  mkdir -p \"\$receipt_dir\"\n" +
-                "  receipt_path=\"\$receipt_dir/host-gate-receipt.json\"\n" +
-                "  lock_dir=\"\$receipt_dir/host-gate.lock\"\n" +
-                "  lock_owner_path=\"\$lock_dir/owner\""
-        const val PINNED_LOCK_ACQUIRE = "  if ! mkdir \"\$lock_dir\" 2>/dev/null; then"
+                "  receipt_relative_dir=\"harness/build/reports/pr63-on-issue66\"\n" +
+                "  receipt_dir=\"\$script_dir/\$receipt_relative_dir\"\n" +
+                "  if ! prepare_private_directory \"\$script_dir\" \"\$receipt_relative_dir\"; then"
+        const val PINNED_PRIVATE_UMASK = "umask 077"
+        const val PINNED_RECEIPT_DIR_PREPARE =
+            "  if ! prepare_private_directory \"\$script_dir\" \"\$receipt_relative_dir\"; then"
+        const val PINNED_LOCK_ACQUIRE =
+            "  if lock_base_identity=\"\$(\n" +
+                "    create_host_gate_lock \"\$script_dir\" \"\$receipt_relative_dir\" \"\$lock_dir\"\n" +
+                "  )\"; then"
         const val PINNED_LOCK_CLEANUP_TRAP = "  trap cleanup_host_gate_lock EXIT"
-        const val PINNED_STALE_RECEIPT_INVALIDATION =
-            "  /bin/rm -f -- \"\$receipt_path\"\n  [[ ! -e \"\$receipt_path\" ]]"
         const val PINNED_LOCK_OWNER_WRITE =
-            "  printf '%s\\n' \"\$run_owner\" >\"\$lock_owner_path\""
+            "  if ! lock_identity=\"\$(\n" +
+                "    write_private_file_exclusively \\\n" +
+                "      \"\$script_dir\" \"\$receipt_relative_dir\" \"\$lock_owner_path\" \"\$run_owner\" \\\n" +
+                "      \"\$lock_base_identity\"\n" +
+                "  )\"; then"
         const val PINNED_LOCK_RELEASE_DISARM = "  lock_releasable=0"
         const val PINNED_LOCK_RELEASE_GUARD =
             "  if [[ \"\${lock_owned:-0}\" -eq 1 && \"\${lock_releasable:-0}\" -eq 1 ]]; then"
         const val PINNED_LOCK_OWNER_CLEANUP_GUARD =
-            "    if [[ ! -e \"\$lock_owner_path\" || \"\$current_owner\" == \"\$run_owner\" ]]; then"
+            "    if release_host_gate_lock; then"
+        const val PINNED_COOPERATIVE_RELEASE_BOUNDARY =
+            "    # POSIX cannot atomically bind this sibling receipt check to rmdir.  This\n" +
+                "    # fence covers cooperating runners and accidental path/inode races, not a\n" +
+                "    # hostile same-EUID process; authority comes from the exact-HEAD CI artifact.\n" +
+                "    validate_bound_receipt()\n" +
+                "    os.close(lock_fd)\n" +
+                "    lock_fd = None\n" +
+                "    os.rmdir(lock_name, dir_fd=parent_fd)"
         const val PINNED_LOCK_RELEASE_ARM = "  lock_releasable=1"
-        const val PINNED_RECEIPT_MOVE_FAILURE_CLEANUP =
-            "  mv -f \"\$receipt_tmp\" \"\$receipt_path\" || {"
+        const val PINNED_ATOMIC_RECEIPT_REPLACE =
+            "    os.replace(\n" +
+                "        temp_name,\n" +
+                "        receipt_name,\n" +
+                "        src_dir_fd=parent_fd,\n" +
+                "        dst_dir_fd=parent_fd,\n" +
+                "    )"
+        const val PINNED_TEMP_IDENTITY_CLEANUP =
+            "            if temp_identity is not None and dev_inode(current_temp_state) == temp_identity:"
+        const val PINNED_POST_PUBLISH_BYTES_CHECK = "        or published_bytes != payload"
         const val PINNED_ZERO_ARG_SELFTEST_BLOCK =
             "if [[ \"\$#\" -eq 0 ]]; then\n" +
                 PINNED_MOTO_READONLY_SELFTEST_LINE + "\n" +
@@ -1387,7 +2740,16 @@ class HarnessBoundaryGuardTest {
         const val PINNED_FULL_HARNESS =
             "\"\$auto_wrapper\" -p \"\$script_dir\" :harness:testDebugUnitTest"
         const val MACHINE_READABLE_BLOCKED =
-            "{\"schemaVersion\":2,\"hostIntegration\":\"PASS\",\"issue66Ac7\":\"NOT_PASSED\",\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"NOT_RUN\",\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\",\"reason\":\"HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION\"}"
+            "{\"schemaVersion\":3,\"sourceHead\":\"0000000000000000000000000000000000000000\"," +
+                "\"sourceTree\":\"0000000000000000000000000000000000000000\"," +
+                "\"sourceState\":\"CLEAN\"," +
+                "\"runnerSha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"," +
+                "\"runId\":\"00000000000000000000000000000000\"," +
+                "\"hostIntegration\":\"PASS\",\"issue66Ac7\":\"NOT_PASSED\"," +
+                "\"emulator\":\"NOT_RUN\",\"physicalDevice\":\"NOT_RUN\"," +
+                "\"deviceFull\":\"BLOCKED\",\"overall\":\"BLOCKED\"," +
+                "\"reason\":\"HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__" +
+                "ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION\"}"
         const val JAVA_HOME_MARKER = "\${JAVA_HOME:-}"
         const val ANDROID_HOME_MARKER = "\${ANDROID_HOME:-}"
         const val HOST_GATE_ALREADY_RUNNING_EXIT = 75
@@ -1398,7 +2760,7 @@ class HarnessBoundaryGuardTest {
         const val PINNED_HOST_LOCK_DERIVATION =
             "readonly HOST_RECEIPT_LOCK=\"\${HOST_RECEIPT%/*}/host-gate.lock\""
         const val PINNED_HOST_RECEIPT_VALIDATION_CALL =
-            "      if verify_host_receipt \"\$HOST_RECEIPT\" \"\$HOST_RECEIPT_LOCK\"; then"
+            "      if verify_host_receipt \"\$HOST_RECEIPT\" \"\$HOST_RECEIPT_LOCK\" \"\$REPO_ROOT\" \"\$HOST_GATE_RUNNER\"; then"
         const val PRODUCTION_MOTO_COLLECTOR =
             "scripts/collect-issue66-moto-readonly-preflight.sh"
         val DIRECT_ADB_COMMAND =

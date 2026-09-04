@@ -17,20 +17,22 @@ A completed bundle can prove that its internally consistent ADB transcript repor
 unambiguous inventory containing only the named Motorola serial and an Android API-35 build. It
 cannot independently prove that the transcript came from a genuine Moto transport because the
 local ADB server, daemon peer and USB transport are not attested. Inventory selection is a topology
-preflight. The exact `shell id` query is then the first serial-targeted command and must report
-`uid=2000(shell)`; matching boot-ID and monotonic-uptime pairs bracket every later build, package,
-process and framework observation.
+preflight. The exact `shell id` query is then the first serial-targeted command and must report the
+Android shell as both primary UID and GID (`uid=2000(shell) gid=2000(shell)`) under the collector's
+complete accepted grammar; matching boot-ID and monotonic-uptime pairs bracket every later build,
+package, process and framework observation.
 It captures:
 
 - serial, manufacturer, model, device, release, API, ABI, zygote, fingerprint and boot state;
-- the unprivileged `uid=2000(shell)` identity, SELinux state and Android user 0;
+- the primary `uid=2000(shell) gid=2000(shell)` identity, SELinux state and Android user 0;
 - a column-bounded raw process list and a coordinate-free Location-enabled boolean;
 - installation, package dump, process and exact mock-location AppOp state for the fixed package
   set;
 - each installed package's validated base APK bytes and SHA-256;
 - `/system/framework/services.jar` bytes and SHA-256;
 - a mode-`0500` private snapshot of the selected regular ADB executable, plus the exact snapshot
-  and collector SHA-256.
+  and collector SHA-256; and
+- the independently approved `sourceHead` plus collector SHA-256 supplied to the entry point.
 
 The evidence directory is newly created with mode `0700`, outside every linked worktree and the
 repository's common Git metadata. The collector resolves and opens the existing parent through
@@ -98,25 +100,42 @@ JAVA_HOME=<jdk-17> ANDROID_HOME=<android-sdk> \
   ./integration-tests/pr63-on-issue66/run-host-gate.sh
 ```
 
-At startup it acquires an exclusive lock, records its owner, removes any older receipt from the
-authoritative pathname, and then atomically publishes a `RUNNING`/`BLOCKED` receipt. A mode-`0400`
-old PASS cannot block that unlink. If owner recording, unlink or RUNNING publication fails, the
-owned lock deliberately remains as a fail-closed fence; after RUNNING exists, ordinary failures
-may release the lock because the canonical receipt is already non-PASS. A lock left by such an
-early failure or a hard process kill must be manually inspected before removal. Only a completely
-successful host run may atomically publish a new PASS receipt, which still says physical-device
-and FULL evidence are blocked.
+At startup it acquires an exclusive lock, records its owner, and atomically replaces any older
+authoritative receipt with a `RUNNING`/`BLOCKED` receipt from a private same-directory temporary
+file. A mode-`0400` old PASS cannot block that replacement. If owner recording or atomic RUNNING
+publication fails, the owned lock deliberately remains as a fail-closed fence; after RUNNING
+exists, ordinary failures may release the lock because the canonical receipt is already non-PASS.
+A lock left by such an early failure or a hard process kill must be manually inspected before
+removal. Only a completely successful host run may atomically publish a new PASS receipt, which
+still says physical-device and FULL evidence are blocked.
 
 The aggregate receipt validator is a second participant in that same lock protocol. It derives a
 readonly sibling lock path from the canonical receipt path, atomically creates the lock, writes a
-random `validator-pid`/parent-pid/nonce owner record, and holds that ownership while it opens,
-parses and validates the complete JSON contract. It refuses to read behind any pre-existing lock
-and reports success only after verifying the same lock inode and owner token and removing its own
-lock. If the owner record, inode or cleanup result changes, it suppresses PASS and leaves the
-foreign lock as a manual-inspection fence. A hard-killed validator may therefore leave a
+random mode-`0600` `validator-pid`/parent-pid/nonce owner record, and holds that ownership while it
+opens, parses and validates the complete JSON contract. Receipt and lock operations share one
+pinned no-follow parent descriptor. The receipt itself is opened no-follow/nonblocking, must be a
+single regular file owned by the current host user without group/world write authority, and stays
+open on one descriptor through duplicate-key rejection, exact-key/type/value validation and a
+post-contract byte/inode reread. It refuses to read behind any pre-existing lock and reports
+success only after verifying the same lock inode and owner token and removing its own lock. If the
+receipt, parent, owner record, lock inode or cleanup result changes, it suppresses PASS and leaves
+foreign lock state as a manual-inspection fence. A hard-killed validator may therefore leave a
 `validator-pid=` lock; do not remove it merely because a PASS receipt exists.
 
+This is a cooperative local lock and race-detection protocol, not a cryptographic signature. It
+detects the tested runner/validator overlap, path replacement and same-inode mutation cases, but it
+cannot authenticate a user-owned receipt against a malicious process running as that same host
+user after the lock is released. Treat the exact-commit CI run/artifact association and independent
+review as the authority; never use a copied standalone JSON receipt to authorize device work.
+
 ## Authorized read-only collection
+
+The durable authorization source is the
+[2026-09-04 issue #66 checkpoint](https://github.com/TERRYYYC/fakexxx/issues/66#issuecomment-5535947347).
+It limits all later device work to Moto `ZY22JHW9M4`, records the two non-colliding APK/mock-location/
+LSPosed/cleanup permissions, and lists the reboot, provider, lifecycle, adversarial and unrelated
+private-state exclusions. This Task 2A run is narrower and operational-read-only; it consumes none
+of those mutation permissions.
 
 Preconditions:
 
@@ -124,8 +143,9 @@ Preconditions:
 2. No emulator or second offline, unauthorized or online device is attached.
 3. ADB is not running as root, and Android user 0 is current. The collector never requests root or
    `su`; its first serial-targeted `shell id` query necessarily runs under the already-negotiated
-   adbd principal and stops the run before every other device observation unless that identity is
-   exactly `uid=2000(shell)`.
+   adbd principal and stops the run before every other device observation unless the complete
+   result has primary `uid=2000(shell) gid=2000(shell)` and only accepted supplementary/context
+   fields.
 4. The output path is absolute, outside every worktree/common Git directory, has a safe parent,
    contains no control separators, and does not exist. Its physical parent must be stable through
    the no-follow walk; the created directory must not inherit an extended ACL.
@@ -133,15 +153,27 @@ Preconditions:
 6. The selected production ADB bytes match the checked-in `PRODUCTION` allowlist row. For the
    reviewed host, use the exact path and digest recorded above; a same-named or newer SDK client is
    not accepted automatically.
+7. An independent exact-HEAD review has published the approved 40-hex commit and 64-hex collector
+   SHA-256. Copy those two values from that review checkpoint. Do not derive or substitute them at
+   execution time; a locally computed pair is not independent approval.
 
 Run only the exact collector entry point:
 
 ```bash
 ./scripts/collect-issue66-moto-readonly-preflight.sh \
+  --reviewed-head <independently-approved-40-hex-head> \
+  --reviewed-collector-sha256 <independently-approved-64-hex-collector-digest> \
   --adb /Users/terry/Library/Android/sdk/platform-tools/adb \
   --serial ZY22JHW9M4 \
   --output <new-absolute-evidence-directory>
 ```
+
+Before it creates the output directory or invokes ADB, the collector stably reads its current
+entry-point bytes and requires their SHA-256 plus the repository's current HEAD to match those two
+external review values. It repeats that binding before every ADB receipt and before final
+publication. A missing, malformed or changed binding stops with
+`STOP_REVIEW_BINDING_REQUIRED`/`STOP_REVIEW_BINDING_MISMATCH` and cannot be repaired by editing the
+local verifier.
 
 Once the evidence directory and initial `STOP_RUNNING` manifest exist, any later topology,
 identity, package-path, framework-read or receipt failure updates that manifest with a typed
@@ -153,11 +185,15 @@ Verify a completed bundle without invoking ADB:
 
 ```bash
 ./scripts/collect-issue66-moto-readonly-preflight.sh \
+  --reviewed-head <the-same-independently-approved-head> \
+  --reviewed-collector-sha256 <the-same-independently-approved-collector-digest> \
   --verify-receipts <absolute-evidence-directory>
 ```
 
 This pins one private mode-`0700` evidence tree, reads each authenticated file from a stable inode,
-then rechecks every byte and inode before success. It verifies the exact ordered stem/ADB-argv
+then rechecks every byte and inode before success. It requires the manifest `sourceHead` and
+`collectorSha256`, current repository HEAD and current stable entry-point bytes all to match the
+same external review values. It also verifies the exact ordered stem/ADB-argv
 graph, private ADB snapshot, device-identity and package-output semantics, boot/uptime bracket,
 fixed claim ceiling, typed six-file carriers, whole-receipt-tree and binary SHA-256 bindings,
 known-package terminal states and the redacted summary. Every authenticated file is opened with
@@ -214,6 +250,9 @@ The frozen parser baselines are the official AOSP
 
 Only after this collector, its exact command surface and the resulting evidence are independently
 reviewed may the live fingerprint be proposed for the separate `EVIDENCE_ONLY` admission change.
+Task 2A is not AC1–AC6 runtime evidence and cannot satisfy AC7 alone. AC7 requires both the same
+exact reviewed app build on an API-35 emulator **and** the authorized rooted Moto, with separate
+fingerprints and evidence bundles from both environments.
 Privileged LSPosed inspection remains Task 2B with its own reviewed entry point and evidence tree.
 Late-bridge classification is also not observable from this public/static preflight; it belongs to
 a later, independently reviewed oracle-observation stage after an exact build is admitted for
