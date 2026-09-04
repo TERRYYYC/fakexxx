@@ -1,9 +1,24 @@
 package com.example.cellrebelauto.db
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Query
 import com.example.cellrebelauto.model.plan.LocationTask
 import kotlinx.coroutines.flow.Flow
+
+/**
+ * Task row + its TRUSTED success count (§7.3 projection) for progress surfaces.
+ *
+ * The legacy `completedSuccesses` column is frozen at its pre-A+ semantics — the trusted path
+ * deliberately never writes it — so every progress display must read the trusted-count
+ * subquery instead. Reading the legacy column was the "Success 0/1 forever" UI bug.
+ *
+ * # 任务行 + 可信成功计数（§7.3 投影）：进度展示的唯一真相是 trusted 子查询
+ */
+data class TaskWithTrustedCount(
+    @Embedded val task: LocationTask,
+    val trustedSuccesses: Int,
+)
 
 /**
  * DAO for location_tasks.
@@ -19,6 +34,13 @@ interface LocationTaskDao {
     // # 观察某计划的任务列表（执行顺序），供 Plan 页卡片实时刷新
     @Query("SELECT * FROM location_tasks WHERE planId = :planId ORDER BY priority ASC, csvRow ASC")
     fun observeTasksForPlan(planId: Long): Flow<List<LocationTask>>
+
+    // # 观察任务 + 每任务可信成功计数（§7.3：进度 UI 的唯一投影；与 observeTasksForPlan 同序）
+    @Query(
+        "SELECT t.*, (SELECT COUNT(*) FROM trusted_quota_entries e WHERE e.taskId = t.id) AS trustedSuccesses " +
+            "FROM location_tasks t WHERE t.planId = :planId ORDER BY t.priority ASC, t.csvRow ASC"
+    )
+    fun observeTasksForPlanWithTrustedCounts(planId: Long): Flow<List<TaskWithTrustedCount>>
 
     @Query("SELECT * FROM location_tasks WHERE planId = :planId AND status = 'active' LIMIT 1")
     suspend fun getActiveTaskForPlan(planId: Long): LocationTask?

@@ -48,10 +48,12 @@ data class PlanUiState(
     // # 已按执行顺序（priority ASC, csvRow ASC）排序
     val tasks: List<LocationTask> = emptyList(),
     // # taskId -> 尝试总数
-    val attemptCounts: Map<Long, Int> = emptyMap()
+    val attemptCounts: Map<Long, Int> = emptyMap(),
+    // # taskId -> 可信成功数（§7.3 进度唯一投影；legacy completedSuccesses 列在可信路径下冻结不写）
+    val trustedCounts: Map<Long, Int> = emptyMap()
 ) {
-    // # 已验证成功总数（计划级进度）
-    val completedSuccesses: Int get() = tasks.sumOf { it.completedSuccesses }
+    // # 已验证成功总数（计划级进度）——可信计数求和，不读 legacy 列
+    val completedSuccesses: Int get() = trustedCounts.values.sum()
 
     // # 计划未完成：存在未 completed 的任务
     val isUnfinished: Boolean
@@ -242,13 +244,14 @@ class MainViewModel @JvmOverloads constructor(
                 flowOf(PlanUiState())
             } else {
                 combine(
-                    planRepository.observeTasks(plan.id),
+                    planRepository.observeTasksWithTrustedCounts(plan.id),
                     planRepository.observeAttemptCounts(plan.id)
-                ) { tasks, counts ->
+                ) { tasksWithTrusted, counts ->
                     PlanUiState(
                         plan = plan,
-                        tasks = PlanScheduler.executionOrder(tasks),
-                        attemptCounts = counts.associate { it.taskId to it.count }
+                        tasks = PlanScheduler.executionOrder(tasksWithTrusted.map { it.task }),
+                        attemptCounts = counts.associate { it.taskId to it.count },
+                        trustedCounts = tasksWithTrusted.associate { it.task.id to it.trustedSuccesses }
                     )
                 }
             }

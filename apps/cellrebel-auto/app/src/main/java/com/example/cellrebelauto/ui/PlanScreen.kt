@@ -231,7 +231,8 @@ fun PlanScreen(
                 TaskCard(
                     executionIndex = index + 1,
                     task = task,
-                    attempts = planState.attemptCounts[task.id] ?: 0
+                    attempts = planState.attemptCounts[task.id] ?: 0,
+                    trustedSuccesses = planState.trustedCounts[task.id] ?: 0
                 )
             }
         }
@@ -515,7 +516,8 @@ private fun AdvancedIntField(
 private fun TaskCard(
     executionIndex: Int,
     task: LocationTask,
-    attempts: Int
+    attempts: Int,
+    trustedSuccesses: Int = 0
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -551,7 +553,9 @@ private fun TaskCard(
                 fontSize = 13.sp
             )
             Text(
-                "Success ${task.completedSuccesses}/${task.requiredSuccesses} · Attempts $attempts",
+                // §7.3: trusted-count projection — the legacy completedSuccesses column is frozen
+                // on the trusted path and must never be displayed as progress.
+                "Success $trustedSuccesses/${task.requiredSuccesses} · Attempts $attempts",
                 fontSize = 12.sp,
                 color = Color.Gray
             )

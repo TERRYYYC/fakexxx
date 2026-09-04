@@ -98,6 +98,10 @@ class PlanRepository(private val db: AppDatabase) {
     fun observeTasks(planId: Long): Flow<List<LocationTask>> =
         db.locationTaskDao().observeTasksForPlan(planId)
 
+    // # 观察任务 + 每任务可信成功计数（§7.3 进度 UI 投影）
+    fun observeTasksWithTrustedCounts(planId: Long): Flow<List<com.example.cellrebelauto.db.TaskWithTrustedCount>> =
+        db.locationTaskDao().observeTasksForPlanWithTrustedCounts(planId)
+
     // # 观察某计划每个任务的尝试总数
     fun observeAttemptCounts(planId: Long): Flow<List<TaskAttemptCount>> =
         db.testAttemptDao().observeAttemptCountsForPlan(planId)

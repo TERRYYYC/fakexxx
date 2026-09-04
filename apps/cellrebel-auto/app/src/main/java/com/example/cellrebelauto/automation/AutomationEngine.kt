@@ -425,7 +425,10 @@ class AutomationEngine(
                     priority = task.priority,
                     latitude = task.latitude,
                     longitude = task.longitude,
-                    completedSuccesses = task.completedSuccesses,
+                    // §7.3: the Run-page "Verified successes" chip reads the TRUSTED projection —
+                    // the legacy completedSuccesses column is frozen on the trusted path and would
+                    // render a permanent 0 (the "UI never refreshes progress" bug).
+                    completedSuccesses = planRepository.trustedCountForTask(task.id),
                     requiredSuccesses = task.requiredSuccesses,
                     attemptOrdinal = attemptOrdinal
                 )
@@ -833,7 +836,7 @@ class AutomationEngine(
                     val updated = planRepository.getTask(task.id)
                     if (updated != null) {
                         _currentTask.value = _currentTask.value
-                            ?.copy(completedSuccesses = updated.completedSuccesses)
+                            ?.copy(completedSuccesses = planRepository.trustedCountForTask(task.id))
                         if (updated.status == "completed") {
                             log("Location csvRow=${task.csvRow} quota complete ✔")
                         }
@@ -875,9 +878,9 @@ class AutomationEngine(
                         }
                         val updated = planRepository.getTask(task.id)
                         if (updated != null) {
-                            // # 刷新 Run 页状态卡上的成功计数
+                            // # 刷新 Run 页状态卡上的成功计数（§7.3 可信投影）
                             _currentTask.value = _currentTask.value
-                                ?.copy(completedSuccesses = updated.completedSuccesses)
+                                ?.copy(completedSuccesses = planRepository.trustedCountForTask(task.id))
                             // # F5：配额达成 → completed 已在 finalize 事务内完成
                             if (updated.status == "completed") {
                                 log("Location csvRow=${task.csvRow} quota complete ✔")
