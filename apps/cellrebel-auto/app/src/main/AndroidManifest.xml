@@ -22,7 +22,7 @@
     <application
         android:name=".CellRebelAutoApp"
         android:allowBackup="true"
-        android:label="CellRebel Auto"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.CellRebelAuto">
 
