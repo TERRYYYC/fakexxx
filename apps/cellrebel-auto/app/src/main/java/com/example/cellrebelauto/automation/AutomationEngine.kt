@@ -247,7 +247,18 @@ class AutomationEngine(
                 if (capabilities == null ||
                     capabilities.protocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
                 ) {
-                    aplusPause("provider discover failed or protocol incompatible (v1 required)")
+                    // # Issue #10：discover=null 的一个高频真因是信任门拒绝（撤销/签名轮转）。
+                    // # gate 每次拒绝都会记录 typed 原因（ProviderTrustRejections）；此处把最近
+                    // # 一次拒绝并入暂停文案，让现场日志直接指向“重新批准”而不是裸的 discover 失败。
+                    val gateRejection =
+                        com.example.cellrebelauto.environment.ProviderTrustRejections.latestRejection()
+                    aplusPause(
+                        "provider discover failed or protocol incompatible (v1 required)" +
+                            (gateRejection?.let {
+                                " — trust gate rejected ${it.applicationId} " +
+                                    "signer=${it.signerDigest ?: "unresolvable"} (${it.because})"
+                            } ?: ""),
+                    )
                     return@coroutineScope
                 }
                 if (capabilities.exhausted == true &&

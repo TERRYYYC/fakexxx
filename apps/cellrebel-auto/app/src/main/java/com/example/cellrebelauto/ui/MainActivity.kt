@@ -119,12 +119,22 @@ fun MainApp(vm: MainViewModel = viewModel()) {
             // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
             androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshProviders() }
             val entries by vm.providerEntries.collectAsState()
+            // # Issue #10：撤销走 暂存→确认对话框→执行；撤销后横幅说明引擎影响
+            val revokeCandidate by vm.revokeCandidate.collectAsState()
+            val revokeNotice by vm.revokeImpactNotice.collectAsState()
             ProviderApprovalScreen(
                 pending = entries.filter { !it.isApproved },
                 approved = entries.filter { it.isApproved },
                 onApprove = { vm.approveProvider(it) },
-                onRevoke = { vm.revokeProvider(it) },
+                onRevoke = { vm.requestRevoke(it) },
                 onBack = { vm.navigateTo(Screen.PLAN) },
+                revokeDialog = revokeCandidate?.let {
+                    ProviderRevokeDialogState(candidate = it)
+                },
+                onRevokeConfirmed = { vm.confirmRevoke() },
+                onRevokeDismissed = { vm.dismissRevokeDialog() },
+                revokeImpactNotice = revokeNotice,
+                onRevokeNoticeDismissed = { vm.dismissRevokeNotice() },
                 modifier = Modifier
             )
         }

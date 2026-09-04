@@ -208,6 +208,44 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    // ---- Issue #10: revoke is irreversible and bricks every provider call — confirm first. ----
+
+    /** The staged revoke awaiting operator confirmation; null = no dialog shown. */
+    private val _revokeCandidate = MutableStateFlow<ProviderEntry?>(null)
+    val revokeCandidate: StateFlow<ProviderEntry?> = _revokeCandidate
+
+    /** Post-revoke impact banner (the engine will refuse ALL calls from this provider). */
+    private val _revokeImpactNotice = MutableStateFlow<String?>(null)
+    val revokeImpactNotice: StateFlow<String?> = _revokeImpactNotice
+
+    /** Stage ONLY: the principal stays active until confirmRevoke (no silent one-touch revoke). */
+    fun requestRevoke(entry: ProviderEntry) {
+        _revokeCandidate.value = entry
+    }
+
+    /** Perform the staged revoke and post the impact notice. */
+    fun confirmRevoke() {
+        val entry = _revokeCandidate.value ?: return
+        _revokeCandidate.value = null
+        viewModelScope.launch {
+            trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
+            refreshProviders()
+            _revokeImpactNotice.value =
+                "已撤销 ${entry.applicationId}（signer ${entry.signerDigest}）：" +
+                    "引擎的信任门将拒绝该 provider 的一切契约调用（discover/preflight/apply/observe/" +
+                    "completeAndAdvance），进行中的 attempt 只走 release/恢复。如需恢复请重新批准。"
+        }
+    }
+
+    /** Dismiss the dialog WITHOUT revoking. */
+    fun dismissRevokeDialog() {
+        _revokeCandidate.value = null
+    }
+
+    fun dismissRevokeNotice() {
+        _revokeImpactNotice.value = null
+    }
+
     // ---- Navigation ----
 
     // # F001：Plan 页为首页（设计稿 v2.1 §1.1）
