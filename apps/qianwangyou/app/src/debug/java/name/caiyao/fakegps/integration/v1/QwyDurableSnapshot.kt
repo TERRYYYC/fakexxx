@@ -36,6 +36,26 @@ data class QwyCollectorSnapshot(
     val auditTail: List<QwyAuditEvent>,
     /** True when the audit stream contains a caller_revoked event for the appId. */
     val revokeAudited: Boolean?,
+    /**
+     * §8.4 EXPIRED precondition (M-LS-12): true when the durable clean-shutdown
+     * marker is set (recorded, not yet consumed). Read NON-destructively — the
+     * production [ProviderRuntime.CleanShutdownMarker.consume] would clear it,
+     * which is exactly what a readback must never do. The executor confirms
+     * `cleanShutdownMarkerSet=true` BEFORE restart so the clean-shutdown +
+     * generation-mismatch → EXPIRED branch is entered on purpose, not blind.
+     */
+    val cleanShutdownMarkerSet: Boolean,
+    /**
+     * R5 P1 durable witnesses for the seed's owner-quiescence bracket:
+     * a non-empty ADVANCE_PENDING slot is a committed advance the next fenced
+     * entry/boot will REPLAY (refuse to seed over it); maxAuditSeq is the
+     * owner's own monotonic side-effect counter — every fenced mutation
+     * (apply/release/advance/revoke) appends an audit row, so an unchanged
+     * maxAuditSeq across the whole seed proves no fenced owner write
+     * interleaved (the racing writer cannot avoid self-incriminating).
+     */
+    val advancePendingRaw: String?,
+    val maxAuditSeq: Long,
 )
 
 object QwyDurableSnapshot {
@@ -60,6 +80,16 @@ object QwyDurableSnapshot {
      */
     const val DURABLE_DIR_NAME = "environment-control-v1"
 
+    /**
+     * The namespace/key [ProviderRuntime.CleanShutdownMarker] writes the clean
+     * shutdown flag under. Duplicated as literals because they are `private
+     * const` in production; QwyDurableSnapshotTest pins them against drift by
+     * writing through the REAL `record()` and reading them back here — if the
+     * production literals move, that read returns absent and the test fails.
+     */
+    const val CLEAN_SHUTDOWN_NS = "runtime"
+    const val CLEAN_SHUTDOWN_KEY = "clean_shutdown"
+
     fun durableDir(context: android.content.Context): File =
         File(context.applicationContext.filesDir, DURABLE_DIR_NAME)
 
@@ -83,6 +113,19 @@ object QwyDurableSnapshot {
         val pairing = DurablePairingStore(kv)
         val audit = DurableIntegrationAuditStore(kv, FrozenClock).all()
 
+        // NON-destructive read of the clean-shutdown marker. `read` never
+        // clears (only production `consume` does), so dumping the marker cannot
+        // corrupt the very EXPIRED precondition it reports.
+        val cleanMarkerSet = kv.read(CLEAN_SHUTDOWN_NS, CLEAN_SHUTDOWN_KEY) == "1"
+
+        // R5 P1 witnesses. ADVANCE_PENDING namespace/key are PUBLIC handler
+        // consts — referenced directly, no drift-prone literal duplication.
+        val advancePendingRaw = kv.read(
+            EnvironmentControlHandler.ADVANCE_PENDING_NAMESPACE,
+            EnvironmentControlHandler.ADVANCE_PENDING_KEY,
+        )?.takeIf { it.isNotEmpty() }
+        val maxAuditSeq = audit.maxOfOrNull { it.seq } ?: 0L
+
         val stillActive = if (appId != null && signer != null) {
             pairing.findActive(appId, signer) != null
         } else null
@@ -102,6 +145,9 @@ object QwyDurableSnapshot {
             pairingStillActive = stillActive,
             auditTail = audit.takeLast(auditTailLimit),
             revokeAudited = revokedAudited,
+            cleanShutdownMarkerSet = cleanMarkerSet,
+            advancePendingRaw = advancePendingRaw,
+            maxAuditSeq = maxAuditSeq,
         )
     }
 
@@ -115,6 +161,9 @@ object QwyDurableSnapshot {
         if (snapshot.revokeAudited != null) {
             appendLine("caller_revoked audit row present: ${snapshot.revokeAudited}")
         }
+        appendLine("clean-shutdown marker set (§8.4 EXPIRED precondition): ${snapshot.cleanShutdownMarkerSet}")
+        appendLine("advance-pending slot: ${snapshot.advancePendingRaw ?: "—"}")
+        appendLine("max audit seq: ${snapshot.maxAuditSeq}")
         appendLine("pending callers: ${snapshot.pendingCallers.size}")
         snapshot.auditTail.lastOrNull()?.let {
             appendLine("audit tail (last of ${snapshot.auditTail.size}): seq=${it.seq} ${it.event} ${it.callerApplicationId ?: ""}")

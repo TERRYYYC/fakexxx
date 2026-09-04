@@ -332,6 +332,25 @@ jobs:
         # "runs the production script, never a copy" argument as above.
         run: ./scripts/selftest-test-hook-package-identity.sh
 
+      - name: selftest-test-hook-evidence-carrier
+        # G2 §5.G (PR #62 R3 P1-4): the raw acceptance report must be preserved
+        # in a caller-owned directory this script never deletes, bound with
+        # session/path/sha/apk — and cleanup must delete ONLY TEMP_ROOT. c1-c4
+        # exercise the shipped preserve_report + assert cleanup_transaction
+        # never references the evidence dir. Device-free (fixture files).
+        run: ./scripts/selftest-test-hook-evidence-carrier.sh
+
+      - name: selftest-seed-10a-gate
+        # G2 §5A (PR #62 R8 P1-1): the seed's in-app owner fence does not cover
+        # the prepareKyiv/UI/ProfileRepository writer domain, so the SOLE
+        # sanctioned launcher is an executable fail-closed host gate — exclusive
+        # lock, force-stop, assert no surviving PID, then the sole seed launch,
+        # with SEED_GATE_PASS owned by that protected transaction. This drives
+        # the shipped gate functions with a faked device seam and pins each
+        # fail-closed branch (surviving PID, held lock, SEED_FAILED, no verdict,
+        # bare local-verified without the gap⑦ split). Device-free.
+        run: ./scripts/selftest-seed-10a-gate.sh
+
       - name: selftest-test-hook-acceptance-readiness
         # G2 §3.3-3 last sentence / S1 block: without a transaction-free
         # readiness path, an on-device run has no canonical way to prove it
@@ -340,6 +359,15 @@ jobs:
         # the negative matrix; M1/M2 prove the guards load-bearing — a
         # selftest that exists but never runs is not a guard.
         run: ./scripts/selftest-test-hook-acceptance-readiness.sh
+
+      - name: hook-matrix-contract (python payload/verdict suites)
+        # PR #62 P1-4: these suites existed but were wired into NO gate, so
+        # the matrix tool emitted schemaVersion 3 for a writer contract at 4
+        # and every --cellular-matrix scenario would abort on-device before
+        # report_ready — §G unexecutable while all checks stayed green. The
+        # version pin reads ConfigPrefsSync.SCHEMA_VERSION from source, so a
+        # future writer bump red-fails HERE instead of on a device lease.
+        run: cd apps/qianwangyou && python3 -m unittest scripts.test_cellular_acceptance_matrix scripts.test_hook_verdict
 
   row2-exec:
     # G2 Row 2 execution plane (host-side lane of the PR #55 evidence

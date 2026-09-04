@@ -190,10 +190,330 @@ class P10CollectorSurfaceGuardTest {
     }
 
     /**
+     * §8.4 EXPIRED (M-LS-12) needs a DETERMINISTIC clean-shutdown marker: the
+     * only production writer is EnvironmentControlService.onDestroy, which is
+     * not guaranteed on force-stop. The collector must expose a command that
+     * records the marker on a live runtime AND actually drive the production
+     * writer — a log-only stub would green a presence check while the clean→
+     * EXPIRED branch stays unreachable.
+     */
+    @Test
+    fun markCleanShutdownIsReachableAndDrivesTheProductionWriter() {
+        val fault = File(debugSourceDir, "FaultCollectorActivity.kt")
+        assertTrue("FaultCollectorActivity.kt must exist", fault.isFile)
+        val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == fault }.second
+        assertTrue(
+            "collector must freeze the mark_clean_shutdown command token",
+            code.contains("\"mark_clean_shutdown\""),
+        )
+        assertTrue(
+            "mark_clean_shutdown must call the production ProviderRuntime.recordCleanShutdown() — " +
+                "a log-only stub cannot set the §8.4 EXPIRED precondition",
+            code.contains("ProviderRuntime.recordCleanShutdown("),
+        )
+    }
+
+    /**
+     * §5A 10-address seed must be adb-reachable AND use the explicit-id seeder.
+     * MockProviderAcceptanceActivity is the shell-only seam; prepare_10a must
+     * route through [APlus10AFixtureSeed] (whose EXPLICIT ids defeat the
+     * autoGenerate/deleteAll drift that would silently misbind profile-N).
+     */
+    @Test
+    fun prepare10aSeedIsReachableAndUsesTheExplicitIdSeeder() {
+        val seam = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/MockProviderAcceptanceActivity.kt",
+        )
+        assertTrue("MockProviderAcceptanceActivity.kt must exist in the debug seam", seam.isFile)
+        val seamCode = seam.readText()
+            .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+            .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
+        assertTrue("seam must freeze the prepare_10a command", seamCode.contains("prepare_10a"))
+        assertTrue(
+            "prepare_10a must route through APlus10AFixtureSeed (explicit-id seeder)",
+            seamCode.contains("APlus10AFixtureSeed."),
+        )
+        val seeder = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AFixtureSeed.kt",
+        )
+        assertTrue("APlus10AFixtureSeed.kt must exist in the debug source set", seeder.isFile)
+    }
+
+    /**
+     * PR #62 P1-3 (R3) + P1-2 (R4) — seed lifecycle honesty. Coupled false-greens:
+     *
+     *  (a) MONOTONIC generation via APlus10AScheduleReset.plan + readback,
+     *      never wholesale clear() (R3: a clear re-Initializes at version 1).
+     *  (a2) OWNER QUIESCENCE brackets the write before AND after (R4: a
+     *      concurrent owner reinit/advance would otherwise reuse the version).
+     *  (a3) PRIOR STATE is CLASSIFIED so a partial store fails closed, never
+     *      laundered into V=1 (R4).
+     *  (b) the publish outcome (ConfigPrefsSync.sync) is load-bearing; its
+     *      boolean must gate the seed outcome, not be dropped.
+     *  (c) READY must be success-gated: the runbook predicate greps READY, so
+     *      an unconditional READY makes every failure a false green. The
+     *      failure path must emit SEED_FAILED instead.
+     */
+    @Test
+    fun p13_p12_seedLifecycleIsMonotonicQuiescentAndReadyGated() {
+        val seam = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/MockProviderAcceptanceActivity.kt",
+        )
+        assertTrue("MockProviderAcceptanceActivity.kt must exist", seam.isFile)
+        val code = seam.readText()
+            .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+            .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
+
+        // (a) MONOTONIC generation reset (R3 P1-2: wholesale clear() caused a
+        // version-1 rollback on the next boot; M-AD-24 / spec L1895-2056
+        // require V → V+1 on every reinit). The seed must go through the
+        // pure plan + atomic write + readback verification — never clear().
+        assertTrue(
+            "seed must compute the monotonic generation via APlus10AScheduleReset.plan",
+            code.contains("APlus10AScheduleReset.plan("),
+        )
+        assertTrue(
+            "seed must verify the written generation via APlus10AScheduleReset.verifyReadback",
+            code.contains("APlus10AScheduleReset.verifyReadback("),
+        )
+        assertEquals(
+            "the seed path must NOT wholesale-clear the schedule store (version rollback)",
+            false,
+            Regex("""edit\(\)\.clear\(\)""").containsMatchIn(code),
+        )
+        // (a2) R4 P1-2: owner-quiescence must bracket the write (before AND
+        // after) so a concurrent owner reinit/advance cannot reuse the version.
+        assertTrue(
+            "quiescence must be checked BEFORE the write",
+            code.contains("fencedPreconditionOrThrow(\"before write\")"),
+        )
+        assertTrue(
+            "quiescence must be checked AFTER the write (a fence that went live mid-seed is stale)",
+            code.contains("fencedPreconditionOrThrow(\"after write\")"),
+        )
+        // R5 P1: the bracket must extend over the WHOLE seed (reset + profile
+        // rewrite + publish) and close on the owner's DURABLE witnesses — the
+        // audit seq a fenced mutation cannot avoid bumping, plus a final
+        // schedule re-verify. Observational timing alone cannot close TOCTOU.
+        assertTrue(
+            "an end-of-seed quiescence bracket must exist",
+            code.contains("fencedPreconditionOrThrow(\"end of seed\")"),
+        )
+        assertTrue(
+            "the audit-seq witness must be compared across the whole seed",
+            code.contains("auditSeqEnd == auditSeqBefore"),
+        )
+        assertTrue(
+            "the durable ADVANCE_PENDING slot must be consulted (a committed advance replays onto a fresh seed)",
+            code.contains("advancePendingPresent = snap.advancePendingRaw != null"),
+        )
+        // R6 P1: REAL owner serialization — boot first, then hold the SAME
+        // monitor withOwnerFence uses, across the entire seed region.
+        assertTrue(
+            "seed must boot the handler BEFORE locking (construction reinit happens-before)",
+            code.contains("ProviderRuntime.handler(applicationContext)"),
+        )
+        assertTrue(
+            "seed must hold the reflected owner monitor across the region",
+            code.contains("APlus10AOwnerFence.lockOf(") && code.contains("synchronized(ownerLock)"),
+        )
+        assertTrue(
+            "preconditions must consult fencedSeedPreconditionMismatch",
+            code.contains("APlus10AScheduleReset.fencedSeedPreconditionMismatch("),
+        )
+        // R7 P1-1 → R8 P2: SEED_LOCAL_VERIFIED must terminally re-read the FULL
+        // written domain (profile rows + settings + transport). Wiring-sensitive
+        // by OCCURRENCE COUNT: a bare contains("verifyWrittenDomainOrThrow(")
+        // stayed true after deleting the call because the declaration remains
+        // (Sol R8 P2: count 2 -> 1). Require BOTH the declaration and at least
+        // one invocation — deleting the call drops the count to 1 and reddens.
+        val verifierOccurrences = Regex(Regex.escape("verifyWrittenDomainOrThrow(")).findAll(code).count()
+        assertTrue(
+            "seed must both DECLARE and CALL verifyWrittenDomainOrThrow (>=2 occurrences; " +
+                "deleting the invocation drops to 1)",
+            verifierOccurrences >= 2,
+        )
+        val callInSeed = code.substringBefore("private fun verifyWrittenDomainOrThrow")
+        assertTrue(
+            "the seed body (not just the declaration) must invoke verifyWrittenDomainOrThrow",
+            callInSeed.contains("verifyWrittenDomainOrThrow("),
+        )
+        val verifyBody = code.substringAfter("private fun verifyWrittenDomainOrThrow", "")
+        assertTrue(
+            "the written-domain readback must re-read the durable profile rows (dao.getAll)",
+            verifyBody.contains("dao.getAll()"),
+        )
+        assertTrue(
+            "the written-domain readback must re-read the settings posture (delivery mode + cleanup flag)",
+            verifyBody.contains("readLocationDeliveryMode()") && verifyBody.contains("isMockProviderCleanupRequired()"),
+        )
+        assertTrue(
+            "the written-domain readback must re-read the published transport (ConfigPrefsSync.readPublished)",
+            verifyBody.contains("ConfigPrefsSync.readPublished("),
+        )
+        // R8 P1-1 → R9 P1 (Sol): the transport compare must be the EXACT canonical
+        // envelope — built from the seeded row + the live settings snapshot by the
+        // pure mirror (APlus10AFixtureSeed.expectedTransportEnvelope) and compared
+        // structurally (transportEnvelopeMismatch: same key sets, typed values,
+        // unavailable set). Token-presence pins ("longitude" appears somewhere)
+        // stayed green while root `mode` was compared to "hook" and `wifiSsid`
+        // was read instead of the canonical `wifi_ssid` column — pin the WIRING.
+        assertTrue(
+            "the transport readback must build the exact canonical expectation via APlus10AFixtureSeed.expectedTransportEnvelope(",
+            verifyBody.contains("APlus10AFixtureSeed.expectedTransportEnvelope("),
+        )
+        assertTrue(
+            "the transport readback must compare via APlus10AFixtureSeed.transportEnvelopeMismatch(",
+            verifyBody.contains("APlus10AFixtureSeed.transportEnvelopeMismatch("),
+        )
+        for (leg in listOf(
+            "readRefreshIntervalSec()", "readLocationDeliveryMode().wireValue",
+            "getRawMode()", "getRawHourStart()", "getRawHourEnd()",
+        )) {
+            assertTrue("the settings snapshot fed to the mirror must read $leg", verifyBody.contains(leg))
+        }
+        assertEquals(
+            "root `mode` is the spoof mode; it must never be compared to the HOOK delivery wire value",
+            false,
+            verifyBody.contains("optString(\"mode\""),
+        )
+        assertEquals(
+            "the canonical column is wifi_ssid; the Kotlin property name must not be used as a JSON key",
+            false,
+            verifyBody.contains("\"wifiSsid\""),
+        )
+        // Field-name drift pin (the runtime half is the latch race test).
+        val handlerSource = File(
+            moduleRoot,
+            "src/main/java/name/caiyao/fakegps/integration/v1/EnvironmentControlHandler.kt",
+        ).readText()
+        assertTrue(
+            "production handler must still declare the ownerLock field APlus10AOwnerFence reflects",
+            handlerSource.contains("private val ownerLock"),
+        )
+        // (a3) R4 P1-2: prior state must be CLASSIFIED (partial fail-closed),
+        // never a raw getLong(..., 0L) default that launders a partial store.
+        assertTrue(
+            "the seed must classify the prior state via APlus10AScheduleReset.classifyPriorState",
+            code.contains("APlus10AScheduleReset.classifyPriorState("),
+        )
+        // Literal drift guard: every duplicated prefs key in the reset object
+        // must still exist verbatim in QwyScheduleStore — if production moves
+        // the store or renames a key, the reset silently writes the wrong file.
+        val storeSource = File(
+            moduleRoot,
+            "src/main/java/name/caiyao/fakegps/integration/v1/QwyScheduleStore.kt",
+        ).readText()
+        val resetSource = File(
+            moduleRoot,
+            "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AScheduleReset.kt",
+        ).readText()
+        listOf(
+            "qwy_schedule_v1", "scheduleId", "scheduleVersion", "currentItemId",
+            "itemIds", "exhausted", "advanceCount",
+            "lastAppliedLat", "lastAppliedLng", "lastAppliedAtMs", "lastAppliedVerified",
+        ).forEach { literal ->
+            assertTrue(
+                "reset object must carry the literal \"$literal\"",
+                resetSource.contains("\"$literal\""),
+            )
+            assertTrue(
+                "duplicated literal \"$literal\" must still match QwyScheduleStore — production moved/renamed it",
+                storeSource.contains("\"$literal\""),
+            )
+        }
+
+        // (b) sync outcome is checked, not dropped.
+        assertTrue(
+            "ConfigPrefsSync.sync's boolean must gate the seed outcome",
+            Regex("""val published = ConfigPrefsSync\.sync""").containsMatchIn(code) &&
+                code.contains("check(published)"),
+        )
+
+        // (c) R4 P1-1 / gap⑦: prepare_10a must NOT emit the full-seed-PASS
+        // "READY" marker (a complete §3 seed PASS). The §3 contract's ordered
+        // discover() readback has no executable command today, so a READY here
+        // is the false green opus5 ruled blocks merge. The success path emits
+        // the honest split markers instead; the failure path emits SEED_FAILED.
+        assertEquals(
+            "prepare_10a must NOT call complete() (which emits the full-seed-PASS READY)",
+            false,
+            Regex("""complete\(COMMAND_PREPARE_10A\)""").containsMatchIn(code),
+        )
+        assertTrue(
+            "success path must emit SEED_LOCAL_VERIFIED (local legs) …",
+            code.contains("SEED_LOCAL_VERIFIED command="),
+        )
+        assertTrue(
+            "… AND SEED_CONTRACT_INCOMPLETE naming gap⑦ (ordered-readback unavailable)",
+            code.contains("SEED_CONTRACT_INCOMPLETE command=") && code.contains("gap=7"),
+        )
+        assertTrue(
+            "the failure path must emit SEED_FAILED (and no success marker)",
+            code.contains("SEED_FAILED command="),
+        )
+        assertTrue(
+            "success/failure must be branched (fold/onSuccess+onFailure), not linear",
+            code.contains("onSuccess") && code.contains("onFailure"),
+        )
+    }
+
+    /**
      * The qwy-side collector activity must be adb-reachable (exported, declared
      * in the debug manifest) — an entry that cannot be started by
      * `adb shell am start` is not a triggerable surface.
      */
+    /**
+     * R9 P1 (Sol): the seed's transport verifier mirrors ConfigPrefsSync.buildFieldMapJson.
+     * The mirror is pure and behaviourally tested in APlus10AFixtureSeedTest against a
+     * canonical fixture plus mutations; THIS guard pins every writer literal the mirror
+     * relies on, so a writer change reddens here instead of silently desynchronising the
+     * mirror (which would then reject every valid payload — fail-closed, but blind).
+     */
+    @Test
+    fun r9_transportEnvelopeMirrorIsPinnedToTheCanonicalWriter() {
+        val writer = File(moduleRoot, "src/main/java/name/caiyao/fakegps/config/ConfigPrefsSync.kt").readText()
+            .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+            .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
+        listOf(
+            "const val SCHEMA_VERSION = 4",
+            "root.put(\"schemaVersion\", SCHEMA_VERSION)",
+            "\"refreshIntervalSec\"",
+            "\"locationDeliveryMode\"",
+            "root.put(\"mode\", mode)",
+            "root.put(\"activeHours\", JSONObject().put(\"start\", s).put(\"end\", e))",
+            "root.put(\"fields\", fields)",
+            "root.put(\"unavailable\", JSONArray(unavailable.asList()))",
+            "if (name == \"unavailable_fields\")",
+            "if (c.isNull(i)) continue",
+            "if (name == \"id\") continue",
+            "Cursor.FIELD_TYPE_INTEGER -> fields.put(name, c.getLong(i))",
+            "Cursor.FIELD_TYPE_FLOAT   -> fields.put(name, c.getDouble(i))",
+            "Cursor.FIELD_TYPE_STRING  -> fields.put(name, c.getString(i))",
+        ).forEach { literal ->
+            assertTrue("canonical writer must still contain the literal the mirror relies on: $literal", writer.contains(literal))
+        }
+        val entity = File(moduleRoot, "src/main/java/name/caiyao/fakegps/data/db/ProfileEntity.kt").readText()
+        assertTrue(
+            "the wifi ssid column must stay wifi_ssid (the mirror keys by DB column name)",
+            entity.contains("@ColumnInfo(name = \"wifi_ssid\") val wifiSsid"),
+        )
+        val provider = File(moduleRoot, "src/main/java/name/caiyao/fakegps/data/AppInfoProvider.java").readText()
+        for (col in listOf("SpoofSettings.KEY_SPOOF_MODE", "SpoofSettings.KEY_ACTIVE_HOUR_START", "SpoofSettings.KEY_ACTIVE_HOUR_END")) {
+            assertTrue("the settings cursor must expose $col (root mode + activeHours legs)", provider.contains(col))
+        }
+        val mirror = File(moduleRoot, "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AFixtureSeed.kt").readText()
+        assertTrue("the mirror must key the ssid by the canonical column", mirror.contains("\"wifi_ssid\""))
+        assertEquals("the mirror must never use the property name as a JSON key", false, mirror.contains("put(\"wifiSsid\""))
+        assertTrue(
+            "the mirror must reference the writer's schema constant, not a literal 4",
+            mirror.contains("ConfigPrefsSync.SCHEMA_VERSION"),
+        )
+    }
+
     @Test
     fun faultCollectorActivityIsDeclaredInDebugManifest() {
         val manifest = File(moduleRoot, "src/debug/AndroidManifest.xml").readText()
@@ -225,6 +545,7 @@ class P10CollectorSurfaceGuardTest {
             collectorMarker,
             "lease_active",
             "lease_releasing",
+            "mark_clean_shutdown",
         ).forEach { symbol ->
             assertEquals(
                 "production main source must not contain '$symbol' — the P10 collector " +

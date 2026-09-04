@@ -67,6 +67,50 @@ class QwyDurableSnapshotTest {
         assertNull(snap.lease.leaseState)
         assertTrue(snap.pendingCallers.isEmpty())
         assertTrue(snap.auditTail.isEmpty())
+        assertFalse(
+            "an untouched store has no clean-shutdown marker — the EXPIRED " +
+                "precondition must read false, never a default true",
+            snap.cleanShutdownMarkerSet,
+        )
+    }
+
+    /**
+     * §8.4 EXPIRED precondition (M-LS-12) + DRIFT GUARD for the clean-shutdown
+     * marker literals. Writes the marker through the REAL production writer
+     * ([ProviderRuntime.CleanShutdownMarker.record]) and reads it back through
+     * [QwyDurableSnapshot]. If the production NS/KEY literals ever move, the
+     * duplicated debug literals no longer match and this read returns false —
+     * so the snapshot's non-destructive marker read is pinned to production.
+     */
+    @Test
+    fun captureReadsCleanShutdownMarkerWrittenByProduction() {
+        val dir = tempDir()
+        val kv = FileDurableKv(dir)
+        ProviderRuntime.CleanShutdownMarker.record(kv)
+
+        val snap = QwyDurableSnapshot.capture(dir)
+        assertTrue(
+            "the clean-shutdown marker written by production record() must read " +
+                "back set — if this fails, the debug literals drifted from ProviderRuntime",
+            snap.cleanShutdownMarkerSet,
+        )
+    }
+
+    /**
+     * The marker read must be NON-destructive: production `consume` clears the
+     * marker on the next start, but a dump must not. Read twice; the second
+     * read must still see it set (a consuming read would flip it to false).
+     */
+    @Test
+    fun cleanShutdownMarkerReadDoesNotConsumeIt() {
+        val dir = tempDir()
+        ProviderRuntime.CleanShutdownMarker.record(FileDurableKv(dir))
+
+        assertTrue(QwyDurableSnapshot.capture(dir).cleanShutdownMarkerSet)
+        assertTrue(
+            "reading the marker must not clear it — only production consume() may",
+            QwyDurableSnapshot.capture(dir).cleanShutdownMarkerSet,
+        )
     }
 
     /**

@@ -105,6 +105,13 @@ class ScheduleReinitPolicyTest {
      * the complement of M-AD-24: since the policy refuses to "reinit" without
      * a topology change, there is no same-topology clear to bump for.
      */
+    // NOTE (PR #62 R3 P1-2): an earlier revision added a test here blessing
+    // the seed path "clear the store → Rule 1 re-initializes at version 1".
+    // That baked a version ROLLBACK into the suite — M-AD-24 / spec
+    // L1895/2056 require every reinit to advance V → V+1. The seed's
+    // monotonic reset now lives in APlus10AScheduleReset (with its own
+    // suite); this file again tests ONLY the production policy.
+
     @Test
     fun sameTopologyReinitIsNoOp_exhaustedSurvives() {
         val items = listOf("profile-1", "profile-2")

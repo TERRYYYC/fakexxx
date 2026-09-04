@@ -122,5 +122,72 @@ run_fn "$D"
 grep -q "HARNESS_ACTION" <<<"$OUT" &&
     report ok "c3 preserves LSPosed lifecycle stop" || report fail "c3 preserves LSPosed lifecycle stop" "$OUT"
 
+# --- PR #62 P1-5: pm path cardinality — split installs must not false-pass ---
+# A fake adb whose pm path answers with configurable lines, plus a root_shell
+# that reports a matching sha for ANY path: if the guard ever byte-checks only
+# the first line, the split case would pass — the exact false green under test.
+make_fake_adb_paths() { # dir pathfile
+    local dir="$1"
+    mkdir -p "$dir"
+    cat >"$dir/adb" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *"pm path"*)
+    cat "$dir/pm.out"
+    exit 0
+    ;;
+  *"install"*)
+    echo "fake adb: install must not be reached in this case" >&2
+    exit 98
+    ;;
+esac
+echo "fake adb: unhandled: \$*" >&2
+exit 99
+EOF
+    chmod +x "$dir/adb"
+}
+
+run_fn_sha() { # dir sha -> sets OUT / RC  (root_shell answers sha256sum with $2)
+    OUT="$(cd "$WORK" && PATH="$1:$PATH" BENCH_PACKAGE="name.caiyao.fakegps.bench" FAKE_SHA="$2" bash -c '
+        root_shell() { printf "%s  device\n" "$FAKE_SHA"; }
+        APK="$1"
+        '"$FN"'
+        install_debug_apk_if_changed
+    ' _ "$APK" 2>&1)"
+    RC=$?
+}
+
+LOCAL_SHA="$(shasum -a 256 "$APK" | awk '{print $1}')"
+
+# case 4: base + split, both hypothetically byte-matching -> MUST be rc=2
+D="$WORK/c4"; make_fake_adb_paths "$D"
+printf 'package:/data/app/x/base.apk\npackage:/data/app/x/split_config.arm64_v8a.apk\n' >"$D/pm.out"
+run_fn_sha "$D" "$LOCAL_SHA"
+[ "$RC" -eq 2 ] && report ok "c4 split install -> rc=2 (no first-line false pass)" ||
+    report fail "c4 split install -> rc=2 (no first-line false pass)" "rc=$RC out=$OUT"
+grep -q "HARNESS_ERROR" <<<"$OUT" && grep -q "2 APK entries" <<<"$OUT" &&
+    report ok "c4 names the cardinality violation" ||
+    report fail "c4 names the cardinality violation" "$OUT"
+grep -q "VERIFIED install.apk" <<<"$OUT" &&
+    report fail "c4 must not emit the byte-identity line" "$OUT" ||
+    report ok "c4 does not claim byte identity"
+
+# case 5: sole base.apk with matching bytes -> rc=0 AND the SHA evidence line
+D="$WORK/c5"; make_fake_adb_paths "$D"
+printf 'package:/data/app/x/base.apk\n' >"$D/pm.out"
+run_fn_sha "$D" "$LOCAL_SHA"
+[ "$RC" -eq 0 ] && report ok "c5 identical sole base.apk -> rc=0" ||
+    report fail "c5 identical sole base.apk -> rc=0" "rc=$RC out=$OUT"
+grep -q "VERIFIED install.apk sha256=$LOCAL_SHA" <<<"$OUT" &&
+    report ok "c5 emits the installed-sha evidence line" ||
+    report fail "c5 emits the installed-sha evidence line" "$OUT"
+
+# case 6: sole path that is not a base.apk -> rc=2
+D="$WORK/c6"; make_fake_adb_paths "$D"
+printf 'package:/data/app/x/split_config.arm64_v8a.apk\n' >"$D/pm.out"
+run_fn_sha "$D" "$LOCAL_SHA"
+[ "$RC" -eq 2 ] && report ok "c6 sole non-base path -> rc=2" ||
+    report fail "c6 sole non-base path -> rc=2" "rc=$RC out=$OUT"
+
 printf 'test-hook install-guard selftest: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

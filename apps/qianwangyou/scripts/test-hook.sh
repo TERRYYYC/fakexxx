@@ -12,7 +12,7 @@
 #                       probe's own missing-extra abort (identity proof).
 #                       Never installs, publishes, or writes business state.
 #   --cellular-matrix   Strict, isolated acceptance transaction. Publishes
-#                       debug-only exact and behavioral schema-v3 payloads,
+#                       debug-only exact and behavioral current-schema (v4) payloads,
 #                       verifies every supported cellular field, and restores the
 #                       database-backed payload.
 #   --runtime-verify    Read-only validation of release probe/scheduler evidence already present
@@ -60,6 +60,21 @@ PY=$(command -v python3 || command -v python) ||
     { echo "HARNESS_ERROR python3 not found" >&2; exit 2; }
 
 TEMP_ROOT=""
+# G2 §5.G evidence carrier (PR #62 R3 P1-4): raw acceptance reports are
+# preserved OUTSIDE the transaction's temp area, in a caller-owned directory
+# this script never deletes — success or failure. Override with
+# HOOK_EVIDENCE_DIR; default is a timestamped directory under the repo's
+# c5-evidence/ tree.
+EVIDENCE_DIR=""
+INSTALLED_APK_SHA=""
+# In-flight scenario coordinates (R5 P1): set by run_scenario so the EXIT/
+# signal cleanup can SALVAGE a report_ready report that was not yet captured —
+# previously a SIGINT/SIGTERM between report_ready and the poll's capture
+# deleted TEMP_ROOT (the only local copy) via the EXIT trap.
+CURRENT_SESSION=""
+CURRENT_REMOTE_REPORT=""
+CURRENT_LOCAL_REPORT=""
+REPORT_CAPTURED=0
 TRANSACTION_ACTIVE=0
 DB_BEFORE=""
 PREFS_BEFORE=""
@@ -205,6 +220,15 @@ cleanup_transaction() {
     rc=$?
     trap - EXIT INT TERM
 
+    # R5 P1: salvage BEFORE anything else — a SIGINT/SIGTERM (or any exit)
+    # after report_ready but before the poll captured it must not let the
+    # TEMP_ROOT removal below destroy the only local copy. Best-effort; never
+    # masks the exit code.
+    if [ "$TRANSACTION_ACTIVE" -eq 1 ] && [ -n "$CURRENT_SESSION" ] && [ "$REPORT_CAPTURED" -eq 0 ]; then
+        try_capture_report ||
+            echo "HARNESS_ERROR salvage on exit failed for $CURRENT_SESSION (primary rc=$rc preserved)" >&2
+    fi
+
     if [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
         if ! restore_database_payload; then
             RESTORE_FAILED=1
@@ -292,15 +316,42 @@ install_debug_apk_if_changed() {
     local_sha=$(shasum -a 256 "$APK" 2>/dev/null | awk '{print $1}')
     [ -n "$local_sha" ] ||
         { echo "HARNESS_ERROR could not fingerprint debug APK" >&2; return 2; }
-    installed_path=$(adb shell pm path "$BENCH_PACKAGE" 2>/dev/null |
-        sed -n 's/^package://p' | tr -d '\r' | head -1)
+    # §4.2-1 requires `pm path` to return EXACTLY one base.apk. The previous
+    # `head -1` silently discarded extra lines, so a split install
+    # (base.apk + split_config.*.apk) could pass the byte check on the base
+    # while the device actually runs bytes the single-APK build never produced
+    # (PR #62 review P1-5). Capture ALL lines and assert cardinality; only the
+    # empty case (not installed) may fall through to the install branch.
+    installed_paths=$(adb shell pm path "$BENCH_PACKAGE" 2>/dev/null |
+        sed -n 's/^package://p' | tr -d '\r')
+    path_count=$(printf '%s' "$installed_paths" | grep -c .)
+    if [ "$path_count" -gt 1 ]; then
+        echo "HARNESS_ERROR pm path returned $path_count APK entries for $BENCH_PACKAGE — §4.2 requires exactly one base.apk (split install is not the built artifact). Paths:" >&2
+        printf '%s\n' "$installed_paths" >&2
+        return 2
+    fi
     installed_sha=""
-    if [ -n "$installed_path" ]; then
+    if [ "$path_count" -eq 1 ]; then
+        installed_path=$installed_paths
+        case "$installed_path" in
+            */base.apk) ;;
+            *)
+                echo "HARNESS_ERROR sole installed path is not a base.apk: $installed_path" >&2
+                return 2
+                ;;
+        esac
         installed_sha=$(root_shell "sha256sum $installed_path" 2>/dev/null |
             awk '{print $1}' | tr -d '\r')
     fi
     if [ "$installed_sha" = "$local_sha" ]; then
         echo "[install] identical debug APK already installed"
+        # §4.2 installed identity, claimed narrowly: this line asserts BYTE
+        # IDENTITY of the sole on-device base.apk against the built debug APK
+        # (path cardinality proven above). Signer/applicationId legs stay with
+        # their own §4.2 steps — this echo does not claim them.
+        echo "VERIFIED install.apk sha256=$installed_sha (sole base.apk bytes == built debug APK)"
+        # §5.G (P1-4): exported for the per-report EVIDENCE binding lines.
+        INSTALLED_APK_SHA="$installed_sha"
         return 0
     fi
 
@@ -380,13 +431,13 @@ preflight_matrix() {
             grep -F 'FakeGPS: [DIAG] prefs loaded fields=' >/dev/null
         then
             wait_for_profile_schema || return $?
-            echo "VERIFIED preflight.xposed self-hook loaded schema-v3 prefs"
+            echo "VERIFIED preflight.xposed self-hook loaded schema-v4 prefs"
             return 0
         fi
         sleep 1
         attempt=$((attempt + 1))
     done
-    echo "HARNESS_ERROR Xposed self-hook did not load schema-v3 prefs" >&2
+    echo "HARNESS_ERROR Xposed self-hook did not load schema-v4 prefs" >&2
     return 2
 }
 
@@ -525,6 +576,118 @@ run_acceptance_readiness() {
     echo "READINESS_PASS $ACCEPTANCE_ACT is the signature-gated bench acceptance component; no transaction entered"
 }
 
+# G2 §5.G evidence carrier (PR #62 R3 P1-4). Previously every raw report
+# lived only in TEMP_ROOT and cleanup_transaction deleted it — the run could
+# not bind session id + result file + installed APK SHA (acceptance package
+# §5.G), and a failure destroyed its own only raw carrier. Every report is
+# now copied into EVIDENCE_DIR (never deleted by this script) and bound on
+# stdout as one EVIDENCE line. Guarded device-free by
+# scripts/selftest-test-hook-evidence-carrier.sh.
+preserve_report() { # session local_report
+    session=$1
+    local_report=$2
+    # §5.G requires the report BOUND to the installed APK SHA. An empty or
+    # non-64-hex apk sha means the install-identity step never ran (or its
+    # export was dropped) — the binding would be a lie ("apk_sha256=unknown").
+    # Fail closed BEFORE writing any copy we could not bind (R4 P2).
+    if ! printf '%s' "$INSTALLED_APK_SHA" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        echo "HARNESS_ERROR installed APK SHA not bound (got '${INSTALLED_APK_SHA:-<empty>}'); §5.G requires a 64-hex installed sha before preserving evidence" >&2
+        return 2
+    fi
+    [ -n "$EVIDENCE_DIR" ] && [ -d "$EVIDENCE_DIR" ] || {
+        echo "HARNESS_ERROR evidence directory missing; cannot preserve raw report for $session" >&2
+        return 2
+    }
+    preserved="$EVIDENCE_DIR/$session.json"
+    # R7 P1-3 commit protocol: the FINAL paths appear only after bytes and
+    # both hashes are bound. Work happens on .partial names; the durable
+    # commit record (sidecar carrying the exact EVIDENCE line) is renamed
+    # into place LAST. Any interruption before that rename leaves partials
+    # a retry overwrites — never a final file that re-entry could mistake
+    # for a completed binding.
+    cp -- "$local_report" "$preserved.partial" 2>/dev/null || {
+        echo "HARNESS_ERROR could not preserve raw report for $session into $EVIDENCE_DIR" >&2
+        return 2
+    }
+    report_sha=$(shasum -a 256 "$preserved.partial" 2>/dev/null | awk '{print $1}')
+    # R5 P2: 64-hex, not merely non-empty — a mangled shasum output line would
+    # otherwise bind garbage into the EVIDENCE line and stay green. With the
+    # commit protocol this fails BEFORE any final file exists.
+    printf '%s' "$report_sha" | grep -Eq '^[0-9a-f]{64}$' || {
+        echo "HARNESS_ERROR could not fingerprint preserved report for $session (got '$report_sha')" >&2
+        rm -f -- "$preserved.partial"
+        return 2
+    }
+    evidence_line="EVIDENCE session=$session report=$preserved report_sha256=$report_sha apk_sha256=$INSTALLED_APK_SHA"
+    printf '%s\n' "$evidence_line" >"$preserved.evidence.partial" || {
+        echo "HARNESS_ERROR could not stage evidence record for $session" >&2
+        return 2
+    }
+    # Commit order: report first, record LAST (rename is atomic on one fs).
+    # A crash between the two leaves report-without-record = NOT captured.
+    mv -f -- "$preserved.partial" "$preserved" &&
+        mv -f -- "$preserved.evidence.partial" "$preserved.evidence" || {
+        echo "HARNESS_ERROR could not commit evidence record for $session" >&2
+        return 2
+    }
+    printf '%s\n' "$evidence_line"
+}
+
+# §5.G evidence carrier (R4 P1-4 + R5 P1): whenever report_ready is observed,
+# fetch + preserve the on-device bytes BEFORE any failure/exit path can drop
+# them. Idempotent; driven off the CURRENT_* globals so the EXIT/signal
+# cleanup can invoke the SAME capture for an interrupted scenario.
+try_capture_report() {
+    [ "$REPORT_CAPTURED" -eq 1 ] && return 0
+    [ -n "$CURRENT_SESSION" ] || return 0
+    # DURABLE idempotency (R6 P2 -> R7 P1-3 -> R8 P1-3): the durable key is the
+    # COMMIT RECORD ($session.json.evidence, written atomically only after bytes
+    # and both hashes were bound), NEVER the raw report file. Replay does NOT
+    # trust the stored record's contents — it RECONSTRUCTS the exact canonical
+    # four-field line from the current session, the canonical preserved path,
+    # the RECOMPUTED report sha, and the VALIDATED installed APK sha, then
+    # requires byte-exact single-line equality (cmp). This fails closed on a
+    # wrong report= path, a stale apk_sha256, extra fields, or an embedded
+    # newline (Sol R8: a correct report hash with report=/wrong.json + record
+    # apk bbbb… under installed aaaa… previously replayed a false §5.G line).
+    if [ -n "$EVIDENCE_DIR" ] && [ -f "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence" ]; then
+        preserved="$EVIDENCE_DIR/$CURRENT_SESSION.json"
+        # (a) installed APK sha must be a bound 64-hex — the canonical line
+        #     cannot be reconstructed against an unbound/foreign apk identity.
+        if ! printf '%s' "$INSTALLED_APK_SHA" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+            echo "HARNESS_ERROR cannot validate evidence record for $CURRENT_SESSION: installed APK SHA not bound (got '${INSTALLED_APK_SHA:-<empty>}')" >&2
+            return 2
+        fi
+        # (b) recompute the preserved report's sha — the record must match the
+        #     bytes actually on disk, not a stored claim.
+        actual_sha=$(shasum -a 256 "$preserved" 2>/dev/null | awk '{print $1}')
+        if ! printf '%s' "$actual_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "HARNESS_ERROR cannot fingerprint preserved report for $CURRENT_SESSION on replay (got '${actual_sha:-<missing>}')" >&2
+            return 2
+        fi
+        # (c) the ONE canonical four-field line this session must carry.
+        expected_line="EVIDENCE session=$CURRENT_SESSION report=$preserved report_sha256=$actual_sha apk_sha256=$INSTALLED_APK_SHA"
+        # (d) byte-exact single-line equality: cmp against expected_line + "\n".
+        #     Any extra field, wrong path, stale apk, embedded newline, or extra
+        #     trailing bytes makes the stored record differ -> loud rc=2.
+        if printf '%s\n' "$expected_line" | cmp -s - "$EVIDENCE_DIR/$CURRENT_SESSION.json.evidence"; then
+            printf '%s\n' "$expected_line"
+            REPORT_CAPTURED=1
+            return 0
+        fi
+        echo "HARNESS_ERROR evidence record for $CURRENT_SESSION is not the exact canonical binding (expected: $expected_line; stored differs — wrong path/apk/sha, extra fields, or embedded newline)" >&2
+        return 2
+    fi
+    has_state "$CURRENT_SESSION" "report_ready" || return 0
+    root_shell "cat $CURRENT_REMOTE_REPORT" >"$CURRENT_LOCAL_REPORT" 2>/dev/null || {
+        echo "HARNESS_ERROR report_ready seen but could not read on-device report for $CURRENT_SESSION" >&2
+        return 2
+    }
+    preserve_report "$CURRENT_SESSION" "$CURRENT_LOCAL_REPORT" || return $?
+    REPORT_CAPTURED=1
+    return 0
+}
+
 run_scenario() {
     scenario=$1
     session="acceptance-$(date +%s)-$$-$scenario"
@@ -538,6 +701,11 @@ run_scenario() {
         'import base64,os; print(base64.urlsafe_b64encode(os.environ["PAYLOAD"].encode()).decode().rstrip("="))')
     remote_report="/data/user/0/$BENCH_PACKAGE/cache/hook-acceptance-$session.json"
     local_report="$TEMP_ROOT/$session.json"
+    # Register the in-flight scenario for the EXIT/signal salvage path (R5 P1).
+    CURRENT_SESSION="$session"
+    CURRENT_REMOTE_REPORT="$remote_report"
+    CURRENT_LOCAL_REPORT="$local_report"
+    REPORT_CAPTURED=0
 
     echo "[scenario] $scenario session=$session"
     adb shell am force-stop "$BENCH_PACKAGE" >/dev/null 2>&1
@@ -555,6 +723,8 @@ run_scenario() {
             has_state "$session" "restore_failed" ||
             has_state "$session" "aborted"
         then
+            # Preserve any report_ready bytes BEFORE surfacing the failure.
+            try_capture_report || return $?
             echo "HARNESS_ERROR acceptance activity failed for $session" >&2
             read_acceptance_logs >&2
             return 1
@@ -571,15 +741,15 @@ run_scenario() {
     if ! has_state "$session" "report_ready" ||
         ! has_state "$session" "restored"
     then
+        # A report-ready/restore-timeout run may still have a device report.
+        try_capture_report || return $?
         echo "HARNESS_ERROR timed out waiting for report_ready + restored: $session" >&2
         read_acceptance_logs >&2
         return 1
     fi
 
-    root_shell "cat $remote_report" >"$local_report" 2>/dev/null || {
-        echo "HARNESS_ERROR could not read acceptance report for $session" >&2
-        return 2
-    }
+    # Success path: capture is idempotent (no-op if the failure path already ran).
+    try_capture_report || return $?
 
     control_args=()
     if [ "$scenario" = "unavailable" ]; then
@@ -699,12 +869,21 @@ run_cellular_matrix() {
         { echo "HARNESS_ERROR no saved profile to protect" >&2; return 2; }
     PREFS_BEFORE=$(snapshot_prefs)
     [ -n "$PREFS_BEFORE" ] ||
-        { echo "HARNESS_ERROR schema-v3 safe-zone prefs not found" >&2; return 2; }
+        { echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2; return 2; }
     PREFS_BEFORE_FINGERPRINT=$(prefs_payload_fingerprint "$PREFS_BEFORE") ||
         { echo "HARNESS_ERROR could not fingerprint protected transport payload" >&2; return 2; }
 
     TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fakegps-acceptance.XXXXXX") ||
         { echo "HARNESS_ERROR could not create temporary directory" >&2; return 2; }
+    # §5.G (P1-4): the preserved evidence directory outlives this run — only
+    # TEMP_ROOT (the working area) is cleaned up. Fail loud if it cannot exist:
+    # a run without a durable carrier must not proceed to scenarios.
+    EVIDENCE_DIR="${HOOK_EVIDENCE_DIR:-$REPO_ROOT/c5-evidence/hook-acceptance-$(date -u +%Y%m%dT%H%M%SZ)}"
+    mkdir -p -- "$EVIDENCE_DIR" 2>/dev/null && [ -w "$EVIDENCE_DIR" ] || {
+        echo "HARNESS_ERROR could not create writable evidence directory: $EVIDENCE_DIR" >&2
+        return 2
+    }
+    echo "[evidence] preserved directory: $EVIDENCE_DIR (never deleted by this script)"
     TRANSACTION_ACTIVE=1
     trap cleanup_transaction EXIT
     trap 'signal_exit INT' INT
@@ -729,7 +908,7 @@ run_runtime_verify() {
     }
     prefs=$(snapshot_prefs)
     [ -n "$prefs" ] || {
-        echo "HARNESS_ERROR schema-v3 safe-zone prefs not found" >&2
+        echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2
         return 2
     }
     fingerprint=$(prefs_payload_fingerprint "$prefs") || {

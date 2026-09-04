@@ -55,9 +55,19 @@ adb shell am start -n .../FaultCollectorActivity \
 # REVOKED lease 的 provider 内部自清理（独立命令）
 adb shell am start -n .../FaultCollectorActivity --es cmd cleanup_revoked
 
+# §8.4 EXPIRED 前置（M-LS-12）：确定性写 clean-shutdown marker。
+# onDestroy 不保证在 force-stop 时触发，此命令在 LIVE provider（如 hold_lease 窗口内）
+# 直接调 ProviderRuntime.recordCleanShutdown()，再 dump 回读确认 marker=true 再重启。
+# 无 provider 运行时（kvRef null）为 no-op，dump 会 loud 显示 marker 未置位。
+adb shell am start -n .../FaultCollectorActivity --es cmd mark_clean_shutdown
+
 # 取消 pending arm
 adb shell am start -n .../FaultCollectorActivity --es cmd disarm
 ```
+
+`cmd=dump` 现额外回读 `clean-shutdown marker set (§8.4 EXPIRED precondition): <bool>`
+（非破坏性读——`consume` 只在下次进程启动时清，dump 不清），供执行者在重启前确认
+EXPIRED 分支前置已成立、不盲跑。
 
 arm 全生命周期写 `filesDir/debug-collector/arm.log`（ARMED/FIRED/TIMEOUT/
 DISARMED/OUTCOME，`ArmRecordCodec` 行格式）。
@@ -92,6 +102,154 @@ adb shell am start -n .../FullLoopProbeActivity --es fault crash_after_apply
 adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es lease_id <id>
 ```
 
+## §5A seed 命令面（10-address backfill）
+
+§5A 十地址块的前置：Auto 产品 run 从 device shell 不可达（plan 只能 UI `importCsv`
+文件选择器；run 只能 `AutomationService`，`exported=false`+`BIND_ACCESSIBILITY_SERVICE`）。
+下列 debug seed 面关闭该缺口（A/B/C 共享的缺口①）。**seed 面是 seed，不是 §5B/§5C 故障注入。**
+
+payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.json`，digest
+`cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`）。执行者 host 侧
+`base64 < a-plus-10a-fixture.json` 生成 payload、`shasum -a 256` 记 digest；两侧 seeder
+各自对解码 payload 重算 SHA-256，与传入 digest 不等即 REFUSED。digest 与 payload 同源于
+执行者，故 seeder **另行独立绑定注册结构**（恰好 10 项、fixtureIndex 1..10 连续同序、
+`profile-N` 对齐、`scheduleId=qwy-default-schedule`、quota 和=17=声明值）——篡改/截断/乱序
+即使带对 digest 也 REFUSED（PR #62 P1-2）。
+
+```
+# qwy：种 10 个 .bench profile（EXPLICIT id=1..10，坐标/tac/wifiSsid 逐项来自 fixture——
+#      千网游是坐标唯一所有者，KB-8）
+#   ⚠️ 必须经**可执行 fail-closed 单飞门**（R8 P1-1 → R9 P1），不要手敲 am start：owner fence 只
+#      串行化 EnvironmentControlHandler 自身的 fenced ops；prepareKyiv / ProfileRepository /
+#      设置 UI 会在**不持该锁**下改同一 profile 表+transport。seed-10a-gate.sh 是唯一被认可的
+#      启动器——它取独占锁（原子 mkdir + owner 元数据；只在 owner 进程已死**且**设备无存活包时
+#      回收陈旧锁，否则拒绝）、force-stop、**三态 PID 探测**（alive / absent / probe_failed——远端
+#      `echo __RC=$?` 显式回传 pidof 状态，adb 或探测失败一律 abort，绝不当成"进程已退出"）、
+#      再以**唯一 launch token**（`--es seed_token`）发这唯一一条 seed，只接受回显该 token 且恰好
+#      一组自洽的终态标记（SEED_LOCAL_VERIFIED + SEED_CONTRACT_INCOMPLETE，digest 回显须等于启动
+#      digest；同 token 同时出现 FAILED 与 VERIFIED、或重复标记 → FAIL；旧 launch 的陈旧成功/失败
+#      一律忽略），最后再次 force-stop 并断言静默完成交接，才打 SEED_GATE_PASS token=… digest=…。
+#      可选 --evidence-dir <dir>：PASS 后 run-as dump 设备上真实发布的 transport（spoof_config.xml
+#      + 提取出的 canonical JSON）留证。device-free 由 scripts/selftest-seed-10a-gate.sh 逐条 pin
+#      （存活 PID / 持锁 / SEED_FAILED / 无判定 / 裸 local-verified / 陈旧成功+新超时 / 陈旧成功+
+#      新失败 / 陈旧失败+新成功 / pidof 错误 / adb 传输失败 / 不自洽终态 / digest 不符 / 近似 token /
+#      死 owner 回收 / 死 owner 但设备存活拒回收 / 无 owner 记录拒回收 / 交接未静默）。
+apps/qianwangyou/scripts/seed-10a-gate.sh \
+  --fixture <base64(a-plus-10a-fixture.json)> \
+  --digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
+#   判据（R4 P1-1/gap⑦ + R7/R8 P1-1）：门打 SEED_GATE_PASS command=prepare_10a（=独占锁 +
+#   PID 静默 + token 绑定 seed 判定 + 静默交接，四者齐全）。seed 自身在持 owner fence 下末尾对**全写入域**
+#   做终态回读——10 行 profile 逐字节（dao.getAll）+ 设置姿态（HOOK/cleanup=false）+ 已发布 transport 与
+#   **精确 canonical 期望信封**结构相等（R9 P1：按 ConfigPrefsSync.buildFieldMapJson 镜像构造——
+#   schemaVersion=4、refreshIntervalSec、locationDeliveryMode="hook"、root mode = spoof mode
+#   （always_on|time_based|off，**不是** "hook"）、activeHours{start,end}、fields 用 DB 列名（wifi_ssid，
+#   非 wifiSsid）且键集恰好等于种子行的非空列、unavailable=[]；多键/少键/类型/值任一不同 → 不匹配）；
+#   任一漂移 → SEED_FAILED（门转 SEED_GATE_FAIL，非零退出）。
+#   非 canonical 手动 am start（绕过门）不被接受为可信 seed。
+#   **且** SEED_CONTRACT_INCOMPLETE command=prepare_10a gap=7（有序 discover() 回读当前
+#   无可执行命令——见末「gap⑦」）。**刻意不发 full-seed-PASS 的 READY**——§3 seed 契约
+#   含有序回读腿，未满足前发 READY 即假绿（opus5 裁定该假绿阻塞 merge）。
+#   失败发 SEED_FAILED command=prepare_10a，无任何 success 标记。
+#   seed 内部对 schedule store 做**单调 generation reset**（R3 P1-2）：读当前 version、
+#   写 V+1 + pointer=profile-1 + exhausted=false（单原子 commit）、再回读校验。
+#   ⚠️ 不是 clear()——clear 会让下次 boot 重置回 version 1（回滚），违反 M-AD-24/spec
+#   L1895-2056「每次 reinit 必须 V→V+1」，旧 (schedule,item,version) 身份会与新 run 撞车。
+#   ⚠️ 真实 owner fence（R6 P1-1，替代 R5 的观测式 quiescence——观测计时消不掉 TOCTOU）：
+#   seed 先 boot-first 取 ProviderRuntime.handler(context)（吃掉 handler 构造期 reinit，
+#   使其发生在 seed 之前而非中间），再反射取 owner 的**同一把 private ownerLock**，整个
+#   seed 临界区（precondition 检查 + reset + profile 重写 + publish + 回读）都在
+#   synchronized(ownerLock) 内执行——与 withOwnerFence 的所有 fenced owner 写真互斥，
+#   包括 debug surface 直调 handler() 触发的路径。锁内前置：无非 converged lease（仅
+#   absent/RELEASED 放行，REVOKED/RELEASE_INCOMPLETE/EXPIRED 拒）、durable ADVANCE_PENDING
+#   slot 必须为空（否则已 commit 的 advance 会回放到新 seed 上）。belt：owner durable
+#   audit seq 在临界区首尾必须不变 + 最终 schedule 回读一致（防未走锁的 owner 写路径）。
+#   前置不满足即 SEED_FAILED——执行者须先确认无 pending advance / 无 blocking lease。
+#   报告发 SCHEDULE_GENERATION priorState=.. versionAfter=..。seed 后须 force-stop
+#   name.caiyao.fakegps.bench 再 bind，随后 discover() 回读 currentItemId=profile-1 +
+#   scheduleVersion（可执行子集）——完整有序 profile-1..10 list 回读依赖 profileRefs
+#   projection scope 决定（见 §5A 末「已知 product/spec 缺口」）。
+
+# Auto：种 plan + 10 task（csvRow/priority=fixtureIndex → 执行序=fixture 序）
+#   KB-8（spec v1.62，operator 裁定）：Auto 只消费 {顺序, journeyCaseId, requiredSuccesses}，
+#   **不导入坐标**——坐标千网游独占，Auto 无独立位置验证面（KB-8 永久 limit）。
+#   LocationTask 的遗留 non-null 坐标列种入**结构性超界占位**（999.0，双轴均超出合法
+#   地理域——不可能被误当真 target；isFiniteGeo 族校验一律直接拒绝而非算出一个
+#   "看似合理"的距离）。冻结谓词不消费这些列。
+adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity \
+  --es cmd seed_plan \
+  --es fixture_payload_base64 <base64(a-plus-10a-fixture.json)> \
+  --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852 \
+  [--el global_buffer_seconds 60]
+#   判据：logcat ECAPlusSeed 出 fixtureIndex↔taskId↔journeyCaseId↔requiredSuccesses 映射
+#   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId + `SEED_BOUND … seed_token=`（下一步 start_run 的唯一凭据）。
+
+# Auto：启动 run（产品自身入口 AutomationService.startAutomation；无障碍服务须已启用）
+adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity --es cmd start_run --el plan_id <planId> --es seed_token <seed_token>
+#   plan_id + seed_token 都来自最近一次 seed_plan 报告的 `SEED_BOUND generation=N plan=<id> seed_token=<token>` 行。
+#   start_run 只接受「最新一次 seed」的 (plan_id, seed_token)（merge-gate P1 3898022696：seed_plan 每次 insert 新 plan、
+#   旧 plan 不删，拓扑相同的旧 planId 会启动旧 task/attempt/quota 状态却自称 plan-bound）——无记录 / 旧 id / 错 token
+#   一律 REFUSED（fail-closed；pm clear 会连记录一起清，需重新 seed）。
+#   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
+#   （sourceFileName=FX-G2-10A / 10 行 / quota 冻结向量 [2,1,3,1,2,1,1,3,1,2] / csvRow 1..10 /
+#   坐标列仍是 KB-8 占位），拓扑不符（外来 CSV import、错 id、同总额再分配）即 REFUSED（P2/P4）。
+#   判据（R8 P1-2 observed receipt + verdict，替代 R7 的"调用前"回执）：start_run 全程持 process-wide
+#   单飞锁（=本请求的 owner token，输掉的同-plan 竞争者只能在赢家 verdict 后进入，pre-max 已含
+#   赢家 session → 永远拿不到 RUN_STARTED）。回执**在产品调用之后观测**，不是调用前预测：产品的
+#   check-and-set 自己会说话——拒绝 → 公开 logs 恰好追加一条 "Already running, ignoring start request"；
+#   接受 → isRunning=true 且 launch 前零日志。调用前快照 logs，调用后立读 logs+isRunning，只认两种可证
+#   形状，其余一律 indeterminate（引擎 log forwarder 会整体覆写 logs，"sentinel 不在 ⇒ 接受"是 fail-open）：
+#     START_PRECHECK not_connected|already_running   —— 快速路径拒绝：只省一次无意义调用，不参与 verdict
+#     START_RECEIPT accepted_observed               —— logs 未变 且 调用后 isRunning=true：产品接受了本次调用
+#     START_RECEIPT rejected_already_running        —— logs == 前 + 恰一条产品拒绝行：外来 start 占了引擎槽
+#     START_RECEIPT indeterminate: <reason>         —— 其它任何形状（覆写 / ERROR 行 / no-op / 日志上限裁剪）
+#   只有 accepted_observed 才进入 pre-max=MAX(id) 隔离 + 读全部 id>pre-max 的 session：
+#     RUN_STARTED sessionId=<S> planId=<P> firstAttemptId=<A> —— 唯一绿：恰一条新右 plan session
+#                                              **且**有 durable 首 attempt 里程碑；归因锚 sessionId=<S>
+#     RUN_START_CONFLICT                    —— 新 session 属别的 plan，或出现 ≥2 条新 session（竞争
+#                                              歧义，拒绝归因）
+#     RUN_START_DEGENERATE sessionId=<S> status=<st> —— session 建了但 0 attempt 就 paused/terminal
+#                                              （provider discovery 失败 / plan 已完成）——非可用 run
+#     RUN_NOT_STARTED                       —— 回执非 accepted_observed；或无新 session；或有 session
+#                                              但超时仍无首 attempt 里程碑。
+#   归因闭合链：accepted_observed 证明产品的 check-and-set 接受的是**本次**调用（同步直调，happens-before），
+#   此后 isRunning 归本请求——后到的 UI 点击被产品拒绝，先到的外来 start 会让本请求被拒。故
+#   accepted_observed + 恰一条新 session>pre-max + plan 绑定 + 首 attempt 里程碑 ⇒ 该 session 归本请求。
+#   耦合披露：sentinel 是产品无版本契约的可观测行为；P10CollectorSurfaceGuardTest r8_* 把 main 里的
+#   字面量 / 接受静默 / 同步直调 / 日志戳格式 pin 住——漂移即响亮红，而非安静地"全部 indeterminate"。
+#   ⚠️ 全局 isRunning、陈旧同-plan attempt、裸 session（无 attempt）都**不**满足本请求。
+#   ⚠️ R9 P1-2（Sol，显式 blocker，未闭合）：产品 `startWithPlan` 的 check-and-set **不是原子的**
+#      （读 `_isRunning` 与写 `true` 之间无监视器/CAS；UI 走主线程、harness 走工作线程），两条调用可同时
+#      穿过缝隙；且 accepted 的 run 可能在建 session 前提前退出（两阶段皆关闭）释放 isRunning，UI 在本请求
+#      10s poll 窗内起同-plan run 时其 session 会被误归因。debug-only 的日志观测**不能**证明请求→session
+#      的持久绑定；确定性闭合需要生产侧「全调用者原子 canonical start 迁移 + 每请求 typed receipt 持久绑定
+#      RunSession/首 attempt」。在生产冻结（零 src/main 改动）约束下，这一不变量保留为**显式 blocker**：
+#      RUN_STARTED 是 best-effort 归因，不作为 §5A 自动化的可信归因来源；解除条件 = 该生产变更作为独立
+#      feature 落地并跨族 review。
+#   cmd=state 现为单事务快照，running 行带 attemptStatus + aplusState + runSessionId +
+#   sessionStatus + taskPlanId + sessionPlanId，两 plan 腿不一致打 PLAN_BINDING_MISMATCH。
+```
+
+**跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider
+schedule item `profile-(i+1)` 必须同序——二者都按 fixture items[] 数组序 seed（qwy 显式
+id=N、Auto csvRow/priority=fixtureIndex 双向锁死，双侧 parser 各自强校验该序）。位置腿
+按 §6.4.1 由千网游独占求值（KB-8）；Auto 侧承重的是身份腿（acceptedIntentHash /
+scheduleItemId / scheduleVersion 独立重算）。
+
+> **已知 product/spec drift（gap⑥，编排前置）**：当前 `TrustPolicy` 仍在 Auto 侧对
+> task 坐标列求 haversine（spec v1.62 L1757 明令退役的「旧文」形状）。产品修复合入前，
+> **任何** seed 方案都无法在真机产出 trusted completion——A 块 device 场次必须排在该
+> 产品修复之后。修复归 canonical fix owner 独立 PR（opus5 已派 @glm52 实现 / @codex-terra
+> 审），不在本 debug-only backfill 内。
+>
+> **已知 product/spec 缺口（gap⑦，R3 P1-3 暴露，scope 待裁）**：种子契约第 3 条要求
+> discover() 回读**有序 profile-1..profile-10** 作 seed PASS 前置，但
+> `EnvironmentControlHandler` 的 `CapabilitySnapshotV1.profileRefs` 硬编码 `emptyList()`，
+> `HandshakeProbeActivity` 也不投影 profileRefs——**当前没有任何可执行命令能回读有序 item
+> 列表**。本 backfill 只把可执行子集（`currentItemId=profile-1` + `scheduleVersion` 单调）
+> 纳入 seed 判据；完整有序回读需要一个 authorized 的 profileRefs/schedule projection
+> （生产改动，超 debug-only scope）。**在该 projection 落地前，种子契约第 3 条的「完整有序
+> 回读」不得当作已满足**——它是 device 编排的显式前置，不是本 PR 声称已闭合的判据。
+
 ## 门控词表（冻结）
 
 | 侧 | token | 语义 |
@@ -103,6 +261,20 @@ adb shell am start -n .../FullLoopProbeActivity --es fault rerelease_stuck --es 
 
 fault 名（冻结）：`hold_lease` / `release_receipt_loss` / `crash_after_apply` /
 `rerelease_stuck`（恢复工具，非注入）。
+
+非注入 debug 命令（冻结）：qwy `mark_clean_shutdown`（§8.4 EXPIRED 前置写 marker）；
+seed 面 `prepare_10a`（qwy）/ `seed_plan` / `start_run`（Auto，§5A backfill，见上节）。
+它们改名同样重开矩阵。
+
+### §8.4 EXPIRED 注入（M-LS-12，clean-shutdown 分支）
+
+`self_kill` 的 `lease_active/acquiring/releasing` 覆盖 **unclean** 分支（→ RELEASE_INCOMPLETE，
+M-LS-07）。EXPIRED 是 **clean** 分支（ACTIVE + clean shutdown + generation 变更 → EXPIRED），
+需另一条 recipe：
+
+| 场景 | injection（触发与开火证据） | exit | direct-state | restore |
+|---|---|---|---|---|
+| `clean_shutdown → EXPIRED` | Auto `FullLoopProbeActivity --es fault hold_lease --el hold_ms <N>` 开 ACTIVE 窗口 → 窗口内 qwy `FaultCollectorActivity --es cmd mark_clean_shutdown`（须 LIVE provider，dump 回读 `clean-shutdown marker set: true`）→ `adb shell am force-stop name.caiyao.fakegps.bench` → 重新 bind（新 generation）。开火证据：mark 后 `Q-DUMP` marker=true，重启后 `Q-DUMP` 同 lease 落盘 `EXPIRED`（非 RELEASE_INCOMPLETE）。 | 无同步出口；clean-boot 后的 EXPIRED 保留态即出口。EXPIRED 继续阻挡新 apply，caller 可 release 收敛。 | mark 前/后、重启后三次 `Q-DUMP`（marker + lease state）；`MOCK-STATE`。 | EXPIRED 走 `rerelease_stuck`（release 接受 ACTIVE/EXPIRED/RELEASE_INCOMPLETE）；after `Q-DUMP` 无 blocking lease 且 `MOCK-STATE=0`。marker 未置位（dump=false）即前置不成立，停止，不当 EXPIRED 场跑。 |
 
 ## extra 类型纪律（R2 起）
 
@@ -216,4 +388,10 @@ durable readback 不在读时改写 qwy bytes、错误 principal 不会假绿、
   读回诚实性：`QwyDurableSnapshotTest`（未落盘必须读回缺失 + capture 不改
   durable 字节 + 目录漂移守卫）。
 - 纯度：`check-debug-only-collector.sh`（源 + APK 双查）+ 负矩阵
-  `selftest-debug-only-collector.sh`（6 case）。
+  `selftest-debug-only-collector.sh`（9 case，含新增 seed 符号）。
+- §5A seed backfill：`APlus10AFixtureSeedTest`（qwy，显式 id / digest pin / 结构绑定 +
+  篡改负测）+ `APlus10APlanSeedTest`（Auto，KB-8 去坐标 / 占位超界语义 / 拓扑校验 / 映射）+
+  `APlus10AScheduleResetTest`（qwy，单调 V+1 + 回读校验，R3 P1-2）——纯 JVM。
+  §5.G evidence carrier：`selftest-test-hook-evidence-carrier.sh`（raw report 保全 +
+  session/path/sha/apk 绑定 + cleanup 只删 TEMP_ROOT，R3 P1-4）。§8.4 EXPIRED：
+  `QwyDurableSnapshotTest` clean-shutdown marker 生产 `record()` 写、debug 非破坏性读回。

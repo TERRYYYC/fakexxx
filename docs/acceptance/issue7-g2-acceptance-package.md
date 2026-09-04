@@ -144,6 +144,19 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 1. `docs/acceptance/a-plus-device-matrix.md` 目前只登记 `M-CO-06` 与 `M-VS-01`；它**没有**
    枚举 10 个地址、各自 quota 或旅程 case ID。调度前必须冻结一份 10 项 fixture（稳定 item id、
    顺序、公开测试位置、每项 `requiredSuccesses`）并记录其 digest；模板存在不能代替这一步。
+   **fixture 已冻结**：`docs/acceptance/a-plus-10a-fixture.json`（digest
+   `cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852`，10 项 profile-1..10，
+   `totalRequiredSuccesses=17`）。**设备可达消费面已补**（harness backfill PR）：起草时
+   fixture 无任何代码消费者、Auto 产品 run 从 shell 不可达（plan 仅文件选择器 `importCsv`、
+   run 仅 `exported=false` 的 `AutomationService`）——这是 A/B/C 共享的缺口①。backfill 加
+   debug-only seed 面（qwy `prepare_10a` 显式 id=1..10、含 fresh-state schedule reset；Auto
+   `APlusSeedActivity` `seed_plan`/`start_run`——按 KB-8 只消费 {顺序, journeyCaseId,
+   requiredSuccesses}，**不导入坐标**，遗留 non-null 列种惰性占位），payload 即 fixture 文件
+   本身、双侧 seeder 重算 digest **并独立绑定注册结构**（10 项/序/profile-N/quota=17）。
+   命令面见 `p10-collector-runbook.md` §5A seed 节。**这只是 host-green 的可达性**，不表示 A
+   块已在真机 PASS——真机 10 项旅程仍由 §5 block A 承重，且当前存在已知 product/spec
+   drift（`TrustPolicy` 仍含 spec v1.62 L1757 退役的 Auto 侧 haversine 旧文形状）：该产品
+   修复（独立 PR，canonical fix owner）合入前，A 块无法产出 trusted completion。
 2. `docs/acceptance/matrix-evidence-device.json` 当前不存在。实际 device row 执行前必须按 canonical
    §10.1 schema 创建；Markdown 模板不是 executed evidence。
 3. ~~`apps/qianwangyou/scripts/test-hook.sh` 当前硬编码 `PKG=name.caiyao.fakegps`，但它构建并安装的
@@ -282,8 +295,17 @@ HEAD、APK 字节、signer、设备、LSPosed scope、mock-location app 或测�
 ### E. Exact-build provenance（硬准出）
 
 - §4 的 candidate/artifact/installed 三层身份完整，checksum manifest 全量校验通过。
-- current candidate 上 machine CI 与 `./scripts/verify-a-plus.sh --lane pr-6` 的完整报告可定位；
+- current candidate 上 machine CI 与 `./scripts/verify-a-plus.sh --stage full` 的完整报告可定位；
   若 candidate 与 CI HEAD 不同，结果作废。
+  > **登记（spec drift 修正，不静默改写）**：本行起草时写作 `--lane pr-6`，但
+  > `scripts/verify-a-plus.sh` 从无 `--lane` 参数（`git log -S lane` 对该脚本全历史零命中，
+  > 起草基线 `85346a3` 亦然）。它只有 `--stage import|contract|full`。`lane`/`pr-6` 实为
+  > `docs/acceptance/a-plus-device-matrix.md` §10.1 evidence-ledger 的泳道语汇
+  > （`check-derived-counts.sh` 的 `CELL_KEYS` 含 `pr-6`；device-matrix `"lane":"device"`），
+  > 起草时被误缝合成一个 CLI 参数。可执行等价物是最严档 `--stage full`（含
+  > acceptance-scenarios / matrix-coverage 等全部 gate）。此为纯文档修正，不改脚本；
+  > **不改任何 APK 构建产物字节**——但本提交与仓库任何提交一样会改变 candidate 的
+  > commit/tree SHA，candidate 冻结照常绑定包含本修正的 exact HEAD，不因"仅文档"豁免。
 - canonical device ledger 行与真实 raw report 一一绑定；没有“文档说跑过”或作者口头结论。
 - evidence-validity reviewer 先核 evidence carrier，再判 product behavior；证据坏时修证据，不改产品迎合。
 

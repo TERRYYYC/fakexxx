@@ -1,0 +1,448 @@
+package name.caiyao.fakegps.mockprovider
+
+import java.io.File
+import java.security.MessageDigest
+import name.caiyao.fakegps.config.ConfigPrefsSync
+import name.caiyao.fakegps.data.db.ProfileEntity
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Test
+
+/**
+ * Pure-logic unit test for the G2 §5A 10-address fixture seeder (FX-G2-10A).
+ *
+ * TWO false-green families are pinned here:
+ *
+ * 1. EXPLICIT-ID drift (opus5 抽验①): ProfileEntity autoGenerates ids and
+ *    `deleteAll()` does not reset sqlite_sequence, so implicit-id seeding
+ *    yields profile-11.. while the fixture froze profile-1..10 — a green seed
+ *    binding every journey to the WRONG schedule item.
+ *
+ * 2. CALLER-CHOSEN payloads (PR #62 review P1-2): the payload AND its digest
+ *    arrive from the same caller, so the digest alone cannot stop a
+ *    hand-built "FX-G2-10A" with the wrong shape. The parser must bind
+ *    independently to the REGISTERED fixture structure (exactly 10, ordered,
+ *    profile-N aligned, schedule id, quota sum 17) — verified positive
+ *    against the committed fixture file (whose registered sha256 is pinned
+ *    here) and negative against tampered/truncated/reordered payloads.
+ */
+class APlus10AFixtureSeedTest {
+
+    // ------------------------------------------------------------------
+    // Payload builder — the registered fixture's exact structure, mutable
+    // per-test so each negative changes ONE thing.
+    // ------------------------------------------------------------------
+
+    /** Per-item quotas of the frozen fixture (sum 17). */
+    private val frozenQuotas = listOf(2, 1, 3, 1, 2, 1, 1, 3, 1, 2)
+
+    private fun itemJson(index: Int, quota: Int, scheduleItemId: String = "profile-$index"): String = """
+        {
+          "fixtureIndex": $index, "journeyCaseId": "J10A-${"%02d".format(index)}",
+          "expectedScheduleItemId": "$scheduleItemId", "requiredSuccesses": $quota,
+          "addname": "G2-A10-${"%02d".format(index)} Place", "latitude": ${50.4 + index * 0.001},
+          "longitude": ${30.5 + index * 0.001}, "altitude": 150.0, "accuracy": 3.0,
+          "tac": ${27100 + index}, "wifiSsid": "G2-A10-${"%02d".format(index)}"
+        }
+    """.trimIndent()
+
+    private fun payload(
+        items: List<String> = (1..10).map { itemJson(it, frozenQuotas[it - 1]) },
+        fixtureId: String = "FX-G2-10A",
+        scheduleId: String = "qwy-default-schedule",
+        declaredTotal: Int = 17,
+    ): String = """
+        {
+          "fixtureId": "$fixtureId",
+          "scheduleId": "$scheduleId",
+          "totalRequiredSuccesses": $declaredTotal,
+          "items": [${items.joinToString(",")}]
+        }
+    """.trimIndent()
+
+    // ------------------------------------------------------------------
+    // POSITIVE — the committed, registered fixture file itself
+    // ------------------------------------------------------------------
+
+    private fun repoFixtureFile(): File {
+        val moduleRoot = sequenceOf(File("."), File("app"), File("../app"))
+            .map { it.absoluteFile.normalize() }
+            .firstOrNull { File(it, "src/debug/AndroidManifest.xml").isFile }
+            ?: error("cannot locate the app module root")
+        return File(moduleRoot, "../../../docs/acceptance/a-plus-10a-fixture.json").normalize()
+    }
+
+    @Test
+    fun committedFixtureFileParsesAndMatchesTheRegisteredStructure() {
+        val bytes = repoFixtureFile().readBytes()
+        // Pin the REGISTERED digest (a-plus-device-matrix.md). If the fixture
+        // file changes, this test goes red and forces the re-registration
+        // protocol (version bump + digest re-registration) plus a deliberate
+        // update here — the structure bind and the registration can never
+        // drift apart silently.
+        val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        assertEquals(
+            "committed fixture must be the registered frozen bytes",
+            "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852",
+            sha,
+        )
+
+        val items = APlus10AFixtureSeed.parsePayload(String(bytes, Charsets.UTF_8))
+        assertEquals(10, items.size)
+        assertEquals((1..10).map { "profile-$it" }, items.map { it.expectedScheduleItemId })
+        assertEquals(17, items.sumOf { it.requiredSuccesses })
+        assertEquals("frozen quota vector", listOf(2, 1, 3, 1, 2, 1, 1, 3, 1, 2), items.map { it.requiredSuccesses })
+        val rows = APlus10AFixtureSeed.toProfileRows(items)
+        assertEquals((1L..10L).toList(), rows.map { it.id })
+    }
+
+    @Test
+    fun committedFileSha_feedsThroughRequireRegisteredDigest() {
+        // R4 P2: the previous test compared bytes to a DUPLICATED literal while
+        // the runtime-pin test passed REGISTERED_FIXTURE_DIGEST to itself —
+        // mutating only the runtime constant left both green. Feed the COMPUTED
+        // committed-file SHA through requireRegisteredDigest and require it to
+        // equal the runtime constant. If the constant drifts from the file,
+        // THIS goes red.
+        val bytes = repoFixtureFile().readBytes()
+        val computed = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        // Passes iff the committed-file SHA == REGISTERED_FIXTURE_DIGEST (both
+        // legs of the pin); throws otherwise.
+        APlus10AFixtureSeed.requireRegisteredDigest(computed, computed)
+    }
+
+    @Test
+    fun builderPayloadParses_andRowsCarryExplicitIdsAndFixtureFields() {
+        val items = APlus10AFixtureSeed.parsePayload(payload())
+        val rows = APlus10AFixtureSeed.toProfileRows(items)
+        assertEquals(10, rows.size)
+        // The load-bearing assertion: every row carries its FIXTURE id, never 0.
+        assertEquals((1L..10L).toList(), rows.map { it.id })
+        rows.forEach {
+            assertTrue("no seeded row may keep the autoGenerate sentinel id=0", it.id != 0L)
+        }
+        val first = rows.first { it.id == 1L }
+        assertEquals(50.401, first.latitude!!, 1e-9)
+        assertEquals(27101, first.tac)
+        assertEquals("G2-A10-01", first.wifiSsid)
+    }
+
+    // ------------------------------------------------------------------
+    // NEGATIVES — each mutates exactly one structural fact (P1-2)
+    // ------------------------------------------------------------------
+
+    private fun assertRejected(reason: String, json: String) {
+        try {
+            APlus10AFixtureSeed.parsePayload(json)
+            fail("parser must reject: $reason")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun rejectsTruncatedFixture() = assertRejected(
+        "9 items (truncated)",
+        payload(items = (1..9).map { itemJson(it, frozenQuotas[it - 1]) }, declaredTotal = 15),
+    )
+
+    @Test
+    fun rejectsReorderedItems() {
+        val items = (1..10).map { itemJson(it, frozenQuotas[it - 1]) }
+        assertRejected("items 1 and 2 swapped", payload(items = listOf(items[1], items[0]) + items.drop(2)))
+    }
+
+    @Test
+    fun rejectsTamperedQuota() = assertRejected(
+        "item 2 quota 1→2 (sum 18)",
+        payload(items = (1..10).map { itemJson(it, if (it == 2) 2 else frozenQuotas[it - 1]) }, declaredTotal = 18),
+    )
+
+    @Test
+    fun rejectsQuotaSumDisagreeingWithDeclaredTotal() = assertRejected(
+        "declared total 16 vs actual 17",
+        payload(declaredTotal = 16),
+    )
+
+    @Test
+    fun rejectsWrongScheduleId() = assertRejected(
+        "foreign schedule id",
+        payload(scheduleId = "some-other-schedule"),
+    )
+
+    @Test
+    fun rejectsWrongFixtureId() = assertRejected("foreign fixtureId", payload(fixtureId = "FX-OTHER"))
+
+    @Test
+    fun rejectsMisalignedScheduleItemId() = assertRejected(
+        "item 3 targeting profile-7",
+        payload(items = (1..10).map { itemJson(it, frozenQuotas[it - 1], if (it == 3) "profile-7" else "profile-$it") }),
+    )
+
+    @Test
+    fun rejectsNonContiguousFixtureIndex() {
+        val items = (1..10).map { itemJson(if (it == 5) 6 else it, frozenQuotas[it - 1]) }
+        assertRejected("fixtureIndex 5 skipped", payload(items = items))
+    }
+
+    @Test
+    fun rejectsSameTotalQuotaRedistribution() {
+        // R4 P1-4: items 1 and 2 quotas swapped (2,1 → 1,2). Sum stays 17 and
+        // the declared total is still 17, so a sum-only check would pass — but
+        // per-address attribution would be wrong. The exact ordered vector
+        // must catch it.
+        val swapped = frozenQuotas.toMutableList().also { it[0] = frozenQuotas[1]; it[1] = frozenQuotas[0] }
+        assertRejected(
+            "items 1↔2 quota redistribution (same total 17)",
+            payload(items = (1..10).map { itemJson(it, swapped[it - 1]) }),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // scheduleItemDbId — "profile-N" → N, everything else rejected
+    // ------------------------------------------------------------------
+
+    @Test
+    fun scheduleItemDbId_parsesProfilePrefix() {
+        assertEquals(1L, APlus10AFixtureSeed.scheduleItemDbId("profile-1"))
+        assertEquals(10L, APlus10AFixtureSeed.scheduleItemDbId("profile-10"))
+    }
+
+    @Test
+    fun scheduleItemDbId_rejectsIdZeroAndMalformed() {
+        listOf("profile-0", "", "profile-", "profile-x", "7", "profile-1x", "PROFILE-1", "profile--1", "profile-01")
+            .forEach { bad ->
+                try {
+                    APlus10AFixtureSeed.scheduleItemDbId(bad)
+                    fail("malformed schedule item id must be rejected: '$bad'")
+                } catch (e: IllegalArgumentException) {
+                    // expected — profile-0 collides with the autoGenerate sentinel,
+                    // the rest are not canonical profile-N spellings
+                }
+            }
+    }
+
+    // ------------------------------------------------------------------
+    // seedReport — the fixtureIndex ↔ dbId map + drift refusal
+    // ------------------------------------------------------------------
+
+    @Test
+    fun seedReport_emitsMappingAndEchoesDigest() {
+        val items = APlus10AFixtureSeed.parsePayload(payload())
+        val report = APlus10AFixtureSeed.seedReport(
+            items = items,
+            insertedIds = (1L..10L).toList(),
+            fixtureDigest = "cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852",
+        )
+        assertTrue(report.contains("fixtureIndex=1"))
+        assertTrue(report.contains("J10A-01"))
+        assertTrue(report.contains("profile-10"))
+        assertTrue(report.contains("cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852"))
+    }
+
+    @Test
+    fun seedReport_failsOnInsertedIdDrift() {
+        val items = APlus10AFixtureSeed.parsePayload(payload())
+        try {
+            APlus10AFixtureSeed.seedReport(items, insertedIds = (11L..20L).toList(), fixtureDigest = "x")
+            fail("seedReport must reject inserted ids that differ from the fixture ids")
+        } catch (e: IllegalStateException) {
+            // expected — AUTOINCREMENT drift must never render a green mapping
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // PR #62 P1-1 — registered-digest pin (both runtime paths)
+    // ------------------------------------------------------------------
+
+    /** The registered fixture bytes hash to the pin — the positive anchor. */
+    @Test
+    fun requireRegisteredDigest_acceptsTheRegisteredPin() {
+        APlus10AFixtureSeed.requireRegisteredDigest(
+            APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST,
+            APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST,
+        )
+    }
+
+    /**
+     * changed-bytes: a fabricated payload (e.g. item-1 coordinate edit or a
+     * same-total quota swap) hashes to something OTHER than the pin. The
+     * structure bind would pass it; the digest pin must not.
+     */
+    @Test
+    fun requireRegisteredDigest_rejectsChangedBytes() {
+        val fabricatedHash = MessageDigest.getInstance("SHA-256")
+            .digest("fabricated FX-G2-10A payload with edited item-1 coords".toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        try {
+            // recomputed-digest attack: caller supplies its OWN self-consistent
+            // digest, so computed == declared. A `computed == declared` check
+            // would pass; the pin must still reject.
+            APlus10AFixtureSeed.requireRegisteredDigest(fabricatedHash, fabricatedHash)
+            fail("a payload that does not hash to the registered digest must be rejected")
+        } catch (e: IllegalArgumentException) {
+            // expected — only the registered bytes pass
+        }
+    }
+
+    /**
+     * caller-substituted registration: the bytes are the real fixture
+     * (computed == pin) but the caller declares a different digest. The caller
+     * may not register its own value.
+     */
+    @Test
+    fun requireRegisteredDigest_rejectsCallerSubstitutedDeclaration() {
+        try {
+            APlus10AFixtureSeed.requireRegisteredDigest(
+                APlus10AFixtureSeed.REGISTERED_FIXTURE_DIGEST,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            fail("the caller may not substitute its own declared digest")
+        } catch (e: IllegalArgumentException) {
+            // expected — declared digest must also equal the registered pin
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // R9 P1 (Sol) — exact canonical transport envelope: mirror + comparator
+    //
+    // The old verifier read root `mode` and required "hook" (the writer puts
+    // "hook" under locationDeliveryMode; root mode is the spoof mode), read
+    // `fields.wifiSsid` (the canonical column is wifi_ssid), only checked that
+    // schemaVersion EXISTS, and accepted extra/missing legs. A freshly
+    // published valid payload therefore deterministically failed while the
+    // source-token guard stayed green. These cases drive the mirror with a
+    // fixture in the WRITER's exact shape and mutate one leg at a time.
+    // ------------------------------------------------------------------
+
+    private val seededRow: ProfileEntity =
+        APlus10AFixtureSeed.toProfileRows(APlus10AFixtureSeed.parsePayload(payload())).first()
+
+    private val snapshot = APlus10AFixtureSeed.TransportSettingsSnapshot(
+        refreshIntervalSec = 30,
+        locationDeliveryMode = "hook",
+        spoofMode = "always_on",
+        activeHourStart = 7,
+        activeHourEnd = 22,
+    )
+
+    /** `fields` in the writer's shape: DB column keys, org.json number rendering (3.0 → 3). */
+    private fun canonicalFields(ssidKey: String = "wifi_ssid", extra: String = "", drop: String? = null,
+                                longitude: Double = seededRow.longitude!!): String {
+        val legs = linkedMapOf(
+            "latitude" to JSONObject.numberToString(seededRow.latitude!!),
+            "longitude" to JSONObject.numberToString(longitude),
+            "altitude" to JSONObject.numberToString(seededRow.altitude!!),
+            "accuracy" to JSONObject.numberToString(seededRow.accuracy!!.toDouble()),
+            "addname" to JSONObject.quote(seededRow.addname),
+            "tac" to seededRow.tac!!.toString(),
+            ssidKey to JSONObject.quote(seededRow.wifiSsid),
+        )
+        drop?.let { legs.remove(it) }
+        return legs.entries.joinToString(",") { "\"${it.key}\":${it.value}" } + extra
+    }
+
+    /** The full canonical payload exactly as ConfigPrefsSync.buildFieldMapJson emits it. */
+    private fun canonicalPublished(
+        schemaVersion: Int = ConfigPrefsSync.SCHEMA_VERSION,
+        mode: String = "always_on",
+        delivery: String = "hook",
+        activeHours: String = """"activeHours":{"start":7,"end":22},""",
+        fields: String = canonicalFields(),
+        unavailable: String = "[]",
+    ): String =
+        """{"schemaVersion":$schemaVersion,"refreshIntervalSec":30,"locationDeliveryMode":"$delivery",""" +
+            """$activeHours"mode":"$mode","fields":{$fields},"unavailable":$unavailable}"""
+
+    private fun mismatch(published: String, row: ProfileEntity = seededRow): String? =
+        APlus10AFixtureSeed.transportEnvelopeMismatch(
+            published, APlus10AFixtureSeed.expectedTransportEnvelope(row, snapshot))
+
+    @Test
+    fun envelope_canonicalPublishedPayloadMatchesTheMirrorExactly() {
+        assertNull(mismatch(canonicalPublished()))
+    }
+
+    @Test
+    fun envelope_mirrorUsesTheWriterSchemaConstantAndSplitsDeliveryFromSpoofMode() {
+        val expected = APlus10AFixtureSeed.expectedTransportEnvelope(seededRow, snapshot)
+        assertEquals(ConfigPrefsSync.SCHEMA_VERSION, expected.getInt("schemaVersion"))
+        assertEquals("hook", expected.getString("locationDeliveryMode"))
+        assertEquals("always_on", expected.getString("mode"))
+        assertEquals(7, expected.getJSONObject("activeHours").getInt("start"))
+        assertEquals(22, expected.getJSONObject("activeHours").getInt("end"))
+        assertEquals(0, expected.getJSONArray("unavailable").length())
+        assertTrue(expected.getJSONObject("fields").has("wifi_ssid"))
+        assertEquals(false, expected.getJSONObject("fields").has("wifiSsid"))
+    }
+
+    @Test
+    fun envelope_numbersCompareNumericallyNotByRendering() {
+        // accuracy is REAL in SQLite; the writer emits getDouble → org.json renders 3.0 as 3.
+        val row = seededRow.copy(accuracy = 3f)
+        val expected = APlus10AFixtureSeed.expectedTransportEnvelope(row, snapshot)
+        val base = canonicalFields().replace(
+            "\"accuracy\":${JSONObject.numberToString(seededRow.accuracy!!.toDouble())}", "\"accuracy\":3")
+        assertNull(APlus10AFixtureSeed.transportEnvelopeMismatch(canonicalPublished(fields = base), expected))
+        val asDouble = base.replace("\"accuracy\":3", "\"accuracy\":3.0")
+        assertNull(APlus10AFixtureSeed.transportEnvelopeMismatch(canonicalPublished(fields = asDouble), expected))
+    }
+
+    @Test
+    fun envelope_rootModeIsTheSpoofMode_notTheDeliveryWireValue() {
+        // Sol R9: the old verifier required root mode == "hook"; a canonical payload has
+        // mode=always_on and locationDeliveryMode=hook. Root mode "hook" must now MISMATCH.
+        val reason = mismatch(canonicalPublished(mode = "hook"))
+        assertNotNull(reason); assertTrue(reason!!, reason.contains("$.mode"))
+        val delivery = mismatch(canonicalPublished(delivery = "system_mock"))
+        assertNotNull(delivery); assertTrue(delivery!!, delivery.contains("$.locationDeliveryMode"))
+    }
+
+    @Test
+    fun envelope_fieldKeyMustBeTheDbColumn_wifi_ssid() {
+        val reason = mismatch(canonicalPublished(fields = canonicalFields(ssidKey = "wifiSsid")))
+        assertNotNull(reason)
+        assertTrue(reason!!, reason.contains("wifi_ssid") && reason.contains("wifiSsid"))
+    }
+
+    @Test
+    fun envelope_extraOrMissingFieldIsAMismatch() {
+        val extra = mismatch(canonicalPublished(fields = canonicalFields(extra = ""","speed":0.5""")))
+        assertNotNull(extra); assertTrue(extra!!, extra.contains("$.fields") && extra.contains("speed"))
+        val missing = mismatch(canonicalPublished(fields = canonicalFields(drop = "longitude")))
+        assertNotNull(missing); assertTrue(missing!!, missing.contains("$.fields") && missing.contains("longitude"))
+    }
+
+    @Test
+    fun envelope_valueDriftIsAMismatch() {
+        // R8's counterexample at the exact-envelope level: a post-getAll longitude rewrite+republish.
+        val reason = mismatch(canonicalPublished(fields = canonicalFields(longitude = seededRow.longitude!! + 1.0)))
+        assertNotNull(reason); assertTrue(reason!!, reason.contains("$.fields.longitude"))
+    }
+
+    @Test
+    fun envelope_schemaVersionMustBeTheExactWriterValue() {
+        val reason = mismatch(canonicalPublished(schemaVersion = ConfigPrefsSync.PREVIOUS_SCHEMA_VERSION))
+        assertNotNull(reason); assertTrue(reason!!, reason.contains("$.schemaVersion"))
+    }
+
+    @Test
+    fun envelope_unavailableSetAndActiveHoursAreLoadBearing() {
+        val unavailable = mismatch(canonicalPublished(unavailable = """["tac"]"""))
+        assertNotNull(unavailable); assertTrue(unavailable!!, unavailable.contains("$.unavailable"))
+        val noHours = mismatch(canonicalPublished(activeHours = ""))
+        assertNotNull(noHours); assertTrue(noHours!!, noHours.contains("activeHours"))
+    }
+
+    @Test
+    fun envelope_nonJsonPublishedTransportIsAMismatch() {
+        assertNotNull(mismatch("not json at all"))
+        assertNotNull(mismatch("[]"))
+    }
+}

@@ -8,6 +8,7 @@ import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
 import com.example.cellrebelauto.db.AppDatabase
+import androidx.room.withTransaction
 import com.example.cellrebelauto.environment.ProviderTrustStore
 import java.io.File
 import kotlin.concurrent.thread
@@ -113,20 +114,57 @@ class ProviderRevokeCollectorActivity : Activity() {
     }
 
     private fun StringBuilder.state() {
-        val snap = snapshot()
-        val db = runBlocking { AppDatabase.getInstance(applicationContext).providerPairingDao().all() }
-        appendLine("[state] durable readback (Room):")
-        appendLine("running attempts: ${snap.runningAttemptCount} " +
-            "aplusStates=${snap.runningAplusStates.distinct().ifEmpty { listOf("—") }}")
-        appendLine("trusted quota entries (total): ${snap.trustedCountTotal}")
-        appendLine("provider pairing rows: ${db.size}")
-        db.forEach {
-            appendLine("  ${it.applicationId} signer=${it.currentSignerDigest.take(12)}… " +
-                "revokedAt=${it.revokedAt ?: "—"}")
+        // R7 P2: ONE transactional snapshot. The R6 shape built the aggregate
+        // and the per-row bindings from separate, non-transactional reads, so
+        // it could splice one attempt generation's phase with another
+        // generation's plan binding. Every read below — running attempts,
+        // their sessions, their tasks, trusted count, pairing rows — happens
+        // inside a single db.withTransaction so the whole readback is one
+        // consistent generation. Each running row also carries its OWN session
+        // status + attempt status + aplusState + both plan legs.
+        val db = AppDatabase.getInstance(applicationContext)
+        val snapshot = runBlocking {
+            db.withTransaction {
+                val allAttempts = db.testAttemptDao().getAllAttempts()
+                val running = allAttempts.filter { it.status == "starting" || it.status == "running" }
+                val rows = running.map { a ->
+                    val task = db.locationTaskDao().getTaskById(a.taskId)
+                    val session = db.runSessionDao().getById(a.runSessionId)
+                    val mismatch = APlus10APlanSeed.planBindingMismatch(task?.planId, session?.planId)
+                    "attempt=${a.id} attemptStatus=${a.status} aplusState=${a.aplusState ?: "—"} " +
+                        "taskId=${a.taskId} runSessionId=${a.runSessionId} " +
+                        "sessionStatus=${session?.status ?: "<no-session>"} " +
+                        "taskPlanId=${task?.planId ?: "?"} sessionPlanId=${session?.planId ?: "?"}" +
+                        (mismatch?.let { " PLAN_BINDING_MISMATCH: $it" } ?: "")
+                }
+                StateSnapshot(
+                    runningCount = running.size,
+                    runningAplusStates = running.mapNotNull { it.aplusState }.distinct().ifEmpty { listOf("—") },
+                    rows = rows,
+                    trustedCountTotal = db.trustedQuotaDao().countAll(),
+                    pairingRows = db.providerPairingDao().all().map {
+                        "${it.applicationId} signer=${it.currentSignerDigest.take(12)}… revokedAt=${it.revokedAt ?: "—"}"
+                    },
+                )
+            }
         }
+        appendLine("[state] durable readback (Room, single transaction):")
+        appendLine("running attempts: ${snapshot.runningCount} aplusStates=${snapshot.runningAplusStates}")
+        snapshot.rows.forEach { appendLine("  running $it") }
+        appendLine("trusted quota entries (total): ${snapshot.trustedCountTotal}")
+        appendLine("provider pairing rows: ${snapshot.pairingRows.size}")
+        snapshot.pairingRows.forEach { appendLine("  $it") }
         appendLine()
-        appendLine("readback path: Room queries over the app database — durable rows, not memory.")
+        appendLine("readback path: one transactional Room snapshot — durable rows, one generation, not memory.")
     }
+
+    private data class StateSnapshot(
+        val runningCount: Int,
+        val runningAplusStates: List<String>,
+        val rows: List<String>,
+        val trustedCountTotal: Int,
+        val pairingRows: List<String>,
+    )
 
     // ---- plain revoke -----------------------------------------------------
 

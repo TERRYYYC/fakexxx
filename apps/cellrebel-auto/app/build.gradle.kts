@@ -106,4 +106,8 @@ dependencies {
     testImplementation("androidx.room:room-testing:2.7.1")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
+    // G2 §5A plan seeder parses the frozen fixture JSON on-device via org.json;
+    // the real impl (not the android.jar stub) lets the parser be JVM-unit-tested
+    // without booting Robolectric. Test-only; production unchanged.
+    testImplementation("org.json:json:20240303")
 }

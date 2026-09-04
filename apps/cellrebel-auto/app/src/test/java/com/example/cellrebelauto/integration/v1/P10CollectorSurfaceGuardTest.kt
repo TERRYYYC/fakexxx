@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.integration.v1
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -106,6 +107,13 @@ class P10CollectorSurfaceGuardTest {
         assertTrue(
             "debug collector must implement the run_active gate token",
             debug.contains("run_active"),
+        )
+        // R5 P2: cmd=state must resolve running attempts to their durable plan
+        // so a start verdict is plan-bound (a global count can't tell plan X
+        // from a stale plan Y run).
+        assertTrue(
+            "cmd=state must bind each running attempt to its planId (getTaskById → planId)",
+            debug.contains("getTaskById(") && Regex("""planId=\$\{?""").containsMatchIn(debug),
         )
         assertTrue(
             "debug collector must implement the attempt_state:<STATE> gate prefix",
@@ -236,6 +244,298 @@ class P10CollectorSurfaceGuardTest {
     }
 
     // ------------------------------------------------------------------
+    // GAP① — Auto had no adb-reachable §5A seed/run (shared A/B/C root cause)
+    // ------------------------------------------------------------------
+
+    /**
+     * §5A needs Auto to seed a plan and start a run from a device shell, but a
+     * plan is created only by the file-picker importCsv and a run only by the
+     * `exported=false` accessibility service. The debug seed surface must exist
+     * and freeze the two command tokens the runbook drives.
+     */
+    @Test
+    fun gap1_seedRunSurfaceExistsAndVocabularyIsFrozen() {
+        val seed = File(debugSourceDir, "APlusSeedActivity.kt")
+        assertTrue("APlusSeedActivity.kt must exist in the debug source set", seed.isFile)
+        val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == seed }.second
+        assertTrue("seed surface must freeze the seed_plan command", code.contains("\"seed_plan\""))
+        assertTrue("seed surface must freeze the start_run command", code.contains("\"start_run\""))
+    }
+
+    /**
+     * start_run must drive the PRODUCT's own run entry
+     * ([AutomationService.startAutomation]) — not a debug reimplementation that
+     * could diverge from how a real run begins. A surface that starts a run some
+     * other way would prove nothing about the product path.
+     */
+    @Test
+    fun gap1_startRunDrivesTheProductRunEntry() {
+        val code = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "APlusSeedActivity.kt" }.second
+        assertTrue(
+            "start_run must call AutomationService.startAutomation — the same entry the UI uses",
+            code.contains("AutomationService.startAutomation("),
+        )
+    }
+
+    /**
+     * R6 P1-2 → R7 P1-2 (Sol): the start verdict must bind to a REQUEST-OWNED
+     * durable transition. The pure verdict logic is behaviorally tested in
+     * [APlus10APlanSeedTest]; this guard is WIRING-SENSITIVE — it pins the
+     * actual arguments the shipped activity feeds the verdict (Sol P2-3: the
+     * old guard only checked a token was present, so a mis-wired call could
+     * pass). It requires: MAX(id) fence (not getLatest, which orders by
+     * startedAt and clock skew can hide a newer id), an `id > ?` cardinality
+     * query, the durable first-attempt milestone leg, single-flight, the
+     * atomic START_RECEIPT, and the typed vocabulary — including the
+     * degenerate/awaiting failures that keep a zero-attempt session out of
+     * RUN_STARTED.
+     */
+    @Test
+    fun gap1_startRunVerdictIsRequestOwnedGeneration() {
+        val code = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "APlusSeedActivity.kt" }.second
+        // Pre-max fence via MAX(id), NOT getLatest (startedAt ordering).
+        assertTrue(
+            "start_run must fence pre-max via MAX(id), not startedAt-ordered getLatest",
+            Regex("""preMaxSessionId[\s\S]{0,160}MAX\(id\)[\s\S]{0,120}run_sessions""").containsMatchIn(code),
+        )
+        assertFalse(
+            "start_run must NOT use getLatest for the pre-max fence (clock skew hides a newer id)",
+            Regex("""preMaxSessionId[\s\S]{0,160}getLatest""").containsMatchIn(code),
+        )
+        // ALL new rows read via id > ? (cardinality), fed as newSessions.
+        assertTrue(
+            "start_run must read ALL sessions with id > pre-max (cardinality query)",
+            Regex("""id\s*>\s*\?[\s\S]{0,80}run_sessions|run_sessions[\s\S]{0,80}id\s*>\s*\?""").containsMatchIn(code),
+        )
+        assertTrue(
+            "the verdict must consume the newSessions list argument",
+            Regex("""startRunVerdict\([\s\S]{0,200}newSessions\s*=""").containsMatchIn(code),
+        )
+        // Durable first-attempt milestone leg, bound to the new session.
+        assertTrue(
+            "start_run must resolve the durable first-attempt milestone (test_attempts by runSessionId)",
+            Regex("""firstAttemptId[\s\S]{0,160}test_attempts[\s\S]{0,80}runSessionId""").containsMatchIn(code),
+        )
+        assertTrue(
+            "the verdict must be fed the firstAttemptId milestone argument",
+            Regex("""startRunVerdict\([\s\S]{0,240}firstAttemptId\s*=""").containsMatchIn(code),
+        )
+        // Single-flight owner token across the whole entry.
+        assertTrue(
+            "start_run must hold the single-flight lock across receipt+start+poll",
+            code.contains("synchronized(START_RUN_LOCK)"),
+        )
+        // R8 P1-2 (Option D): the prechecks are fast-path REFUSALS only; the
+        // receipt is OBSERVED after the product call (r8_* guards below).
+        for (precheck in listOf("START_PRECHECK not_connected", "START_PRECHECK already_running")) {
+            assertTrue("start_run must keep the fast-path refusal '$precheck'", code.contains(precheck))
+        }
+        for (receipt in listOf("START_RECEIPT accepted_observed", "START_RECEIPT rejected_already_running", "START_RECEIPT indeterminate")) {
+            assertTrue("start_run must emit the observed receipt '$receipt'", code.contains(receipt))
+        }
+        assertEquals(
+            "the pre-call predicted receipt 'START_RECEIPT accepted' must be gone — R8: printed before the " +
+                "call it was a prediction, not an observation",
+            false,
+            code.contains("\"START_RECEIPT accepted\""),
+        )
+        // Typed verdict vocabulary — including R7 degenerate/awaiting failures.
+        for (token in listOf("RUN_STARTED", "RUN_START_CONFLICT", "RUN_START_DEGENERATE", "RUN_NOT_STARTED")) {
+            assertTrue("start_run must emit the typed token $token", code.contains(token))
+        }
+        assertEquals(
+            "the pre-R6 untyped acceptance token must be gone",
+            false,
+            code.contains("REQUEST_ACCEPTED"),
+        )
+        val collector = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "ProviderRevokeCollectorActivity.kt" }.second
+        // R7 P2: state() must be ONE transactional snapshot with per-row status.
+        assertTrue(
+            "cmd=state must build its readback in a single withTransaction snapshot",
+            collector.contains("withTransaction"),
+        )
+        assertTrue(
+            "cmd=state must print per-row session status",
+            collector.contains("sessionStatus="),
+        )
+        assertTrue(
+            "cmd=state must print per-row attempt status",
+            collector.contains("attemptStatus="),
+        )
+        assertTrue(
+            "cmd=state must print runSessionId per running attempt (session leg of the binding)",
+            collector.contains("runSessionId=\${a.runSessionId}"),
+        )
+        assertTrue(
+            "cmd=state must flag task-plan vs session-plan divergence via planBindingMismatch",
+            collector.contains("APlus10APlanSeed.planBindingMismatch("),
+        )
+    }
+
+    /**
+     * KB-8 (PR #62 review P1-1) — canonical spec v1.62 freezes coordinate
+     * ownership with the provider: Auto does not import/hold/assert
+     * coordinates (§2.2; KB-8 permanent limit). The plan seeder must
+     * therefore consume ONLY {order, journeyCaseId, requiredSuccesses} and
+     * must never copy fixture coordinates into the legacy LocationTask
+     * columns — importing them recreates the second coordinate holder the
+     * operator's A adjudication eliminated. (An earlier revision of this
+     * guard asserted the OPPOSITE, reading the drifted product TrustPolicy
+     * as spec intent; the spec is the truth source, not the drift.)
+     */
+    @Test
+    fun kb8_planSeedDoesNotImportFixtureCoordinates() {
+        val seedLogic = File(debugSourceDir, "APlus10APlanSeed.kt")
+        assertTrue("APlus10APlanSeed.kt must exist in the debug source set", seedLogic.isFile)
+        val code = kotlinSourcesWithoutComments(debugSourceDir).first { it.first == seedLogic }.second
+        assertEquals(
+            "the plan seeder must NOT read fixture coordinates (KB-8: provider-owned)",
+            false,
+            Regex("""item\.(latitude|longitude)""").containsMatchIn(code),
+        )
+        assertEquals(
+            "the fixture parser must NOT extract coordinate fields (KB-8)",
+            false,
+            Regex("""getDouble\("(latitude|longitude)"\)""").containsMatchIn(code),
+        )
+        assertTrue(
+            "the legacy non-null task columns must carry the inert placeholder",
+            code.contains("COORDINATE_PLACEHOLDER"),
+        )
+    }
+
+    @Test
+    fun gap1_seedActivityIsDeclaredInDebugManifest() {
+        val manifest = File(moduleRoot, "src/debug/AndroidManifest.xml").readText()
+        val noComments = manifest.replace(Regex("<!--[\\s\\S]*?-->"), "")
+        assertTrue(
+            "src/debug/AndroidManifest.xml must declare APlusSeedActivity — otherwise §5A " +
+                "seed/run has no adb entry point",
+            Regex("""<activity\b[^>]*?APlusSeedActivity""").containsMatchIn(noComments),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // R8 P1-2 (Option D) — the start receipt is OBSERVED after the product
+    // call on the product's own PUBLISHED verdict. Wiring-sensitive pins:
+    // the pure classifier is behaviourally tested in APlus10APlanSeedTest;
+    // these guards pin what the shipped activity feeds it and when.
+    // ------------------------------------------------------------------
+
+    /**
+     * Ordering: snapshot the public logs BEFORE the call, call the product,
+     * read logs + isRunning AFTER, classify, and only then print the receipt;
+     * the request-owned poll is reachable ONLY through onlyIfAccepted(receipt).
+     * Moving `accepted_observed` (or the poll) in front of the call turns the
+     * observation back into the R7 prediction Sol's counterexample beat.
+     */
+    @Test
+    fun r8_startReceiptIsObservedAfterTheProductCallAndGatesThePoll() {
+        val code = kotlinSourcesWithoutComments(debugSourceDir)
+            .first { it.first.name == "APlusSeedActivity.kt" }.second
+        fun at(token: String): Int {
+            val i = code.indexOf(token)
+            assertTrue("start_run must contain '$token'", i >= 0)
+            return i
+        }
+        val before = at("val logsBefore = AutomationService.logs.value")
+        // The product call must be a bare statement (the runbook echo line also
+        // contains the text inside a string literal — that is not the call).
+        val startStatement = Regex("""(?m)^\s*AutomationService\.startAutomation\(planId\)\s*$""")
+        val callMatch = startStatement.find(code)
+        assertTrue("start_run must call AutomationService.startAutomation(planId) as a bare statement", callMatch != null)
+        val call = callMatch!!.range.first
+        val after = at("val logsAfter = AutomationService.logs.value")
+        val running = at("val runningAfter = AutomationService.isRunning.value")
+        val classify = at("APlus10APlanSeed.observeStartReceipt(")
+        val accepted = at("\"START_RECEIPT accepted_observed")
+        val gate = at("APlus10APlanSeed.onlyIfAccepted(receipt)")
+        assertTrue("logs must be snapshotted BEFORE the product call", before < call)
+        assertTrue("logs must be re-read AFTER the product call", call < after)
+        assertTrue("isRunning must be read AFTER the product call", call < running)
+        assertTrue("classification must follow both post-call reads", after < classify && running < classify)
+        assertTrue("the receipt line may be printed only after classification", classify < accepted)
+        assertTrue("the poll gate must follow the receipt", accepted < gate)
+        assertTrue(
+            "the request-owned poll must be invoked ONLY inside onlyIfAccepted(receipt) { ... }",
+            Regex("""onlyIfAccepted\(receipt\)\s*\{\s*pollStartVerdict\(""").containsMatchIn(code),
+        )
+        assertEquals(
+            "pollStartVerdict must have exactly one call site (inside the gate) besides its declaration",
+            2,
+            Regex("""pollStartVerdict\(""").findAll(code).count(),
+        )
+        assertEquals(
+            "exactly one product start call per request",
+            1,
+            startStatement.findAll(code).count(),
+        )
+        assertTrue(
+            "rejected and indeterminate receipts must both terminate in RUN_NOT_STARTED before the gate",
+            Regex("""rejected_already_running[\s\S]{0,700}RUN_NOT_STARTED[\s\S]{0,900}indeterminate[\s\S]{0,700}RUN_NOT_STARTED""")
+                .containsMatchIn(code.substring(0, gate)),
+        )
+    }
+
+    /**
+     * The receipt couples to an UNVERSIONED product behaviour: the reject
+     * branch of AutomationService.startWithPlan publishes one exact log line;
+     * the accept branch flips isRunning and publishes nothing before launch.
+     * Pin every fact the classifier relies on so drift in main goes loudly
+     * red here instead of quietly reading as "indeterminate" on the device.
+     */
+    @Test
+    fun r8_productRejectSentinelAndAcceptSilenceArePinnedInMain() {
+        val service = File(mainSourceDir, "automation/AutomationService.kt")
+        assertTrue("AutomationService.kt must exist", service.isFile)
+        val sources = kotlinSourcesWithoutComments(mainSourceDir)
+        val code = sources.first { it.first == service }.second
+        val sentinel = APlus10APlanSeed.PRODUCT_REJECT_SENTINEL
+        // 1. reject branch: check → exactly this log line → return
+        assertTrue(
+            "startWithPlan's reject branch must publish exactly '$sentinel' and return",
+            Regex("""if\s*\(_isRunning\.value\)\s*\{\s*addLog\("${Regex.escape(sentinel)}"\)\s*return\s*\}""")
+                .containsMatchIn(code),
+        )
+        // 2. the literal exists ONCE in all of main — no other main writer can forge it
+        val mainAll = sources.joinToString("\n") { it.second }
+        assertEquals(
+            "the reject sentinel must occur exactly once in src/main",
+            1,
+            Regex(Regex.escape(sentinel)).findAll(mainAll).count(),
+        )
+        // 3. accept branch: _isRunning := true BEFORE launch, NO synchronous addLog (lambda wiring only)
+        val rejectLog = code.indexOf("addLog(\"$sentinel\")")
+        val launch = code.indexOf("automationJob = serviceScope.launch")
+        assertTrue("the reject branch must precede the launch", rejectLog in 0 until launch)
+        val acceptRegion = code.substring(rejectLog + 1, launch)
+        assertTrue(
+            "the accept branch must set _isRunning.value = true before launching",
+            acceptRegion.contains("_isRunning.value = true"),
+        )
+        assertEquals(
+            "the accept branch must publish no log before launch (every addLog( there must be lambda wiring)",
+            Regex("""\{\s*addLog\(it\)\s*\}""").findAll(acceptRegion).count(),
+            Regex("""addLog\(""").findAll(acceptRegion).count(),
+        )
+        // 4. the entry point is a synchronous direct call, and logs are public
+        assertTrue(
+            "startAutomation must call startWithPlan synchronously (happens-before, not poll)",
+            Regex("""fun startAutomation\(planId: Long\)\s*\{\s*instance\?\.startWithPlan\(planId\)""").containsMatchIn(code),
+        )
+        assertTrue(
+            "logs must be published as a public StateFlow",
+            code.contains("val logs: StateFlow<List<String>> = _logs"),
+        )
+        // 5. the entry format the classifier matches: "[HH:mm:ss] $message"
+        assertTrue(code.contains("SimpleDateFormat(\"HH:mm:ss\""))
+        assertTrue(code.contains("\"[\$timestamp] \$message\""))
+    }
+
+    // ------------------------------------------------------------------
     // Production purity
     // ------------------------------------------------------------------
 
@@ -244,6 +544,8 @@ class P10CollectorSurfaceGuardTest {
         val main = kotlinSourcesWithoutComments(mainSourceDir).joinToString("\n") { it.second }
         listOf(
             "ProviderRevokeCollectorActivity",
+            "APlusSeedActivity",
+            "APlus10APlanSeed",
             collectorMarker,
             "run_active",
             "attempt_state:",
@@ -251,6 +553,8 @@ class P10CollectorSurfaceGuardTest {
             "hold_lease",
             "release_receipt_loss",
             "crash_after_apply",
+            "seed_plan",
+            "start_run",
         ).forEach { symbol ->
             assertEquals(
                 "production main source must not contain '$symbol' — the P10 collector " +
@@ -267,6 +571,53 @@ class P10CollectorSurfaceGuardTest {
             "debug collector sources must embed the marker string '$collectorMarker' — " +
                 "the release-APK scan keys on it",
             debugCode().contains(collectorMarker),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // PR #62 merge-gate P1 (codex inline 3898022696, re-verified by Sol @ faf561d):
+    // start_run must be bound to the EXACT latest seed_plan invocation, not to
+    // "any plan whose topology matches". seed_plan inserts a new plan every time
+    // and never deletes earlier FX-G2-10A plans, so a stale planId replayed from
+    // an older seed report would start old task/attempt/quota state while this
+    // surface still reports the run as plan-bound — a harness false green.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `start_run is bound to the exact latest seed_plan and stale plan ids fail closed`() {
+        val bindingFile = File(debugSourceDir, "APlusSeedBinding.kt")
+        assertTrue(
+            "APlusSeedBinding.kt must exist in the debug source set — the durable latest-seed carrier",
+            bindingFile.isFile,
+        )
+        val sources = kotlinSourcesWithoutComments(debugSourceDir)
+        val bindingSrc = sources.first { it.first.name == "APlusSeedBinding.kt" }.second
+        val activitySrc = sources.first { it.first.name == "APlusSeedActivity.kt" }.second
+
+        // seed_plan records THIS seed as the only startable one.
+        assertTrue(
+            "seed_plan must persist the latest seed via APlusSeedBinding.record(",
+            activitySrc.contains("APlusSeedBinding.record("),
+        )
+        // start_run verifies identity (latest planId + seed_token) INSIDE the single-flight lock,
+        // so the check is atomic with the seed record write.
+        val startRunAt = activitySrc.indexOf("fun StringBuilder.startRun(")
+        val lockAt = activitySrc.indexOf("synchronized(START_RUN_LOCK)", startRunAt)
+        val verifyAt = activitySrc.indexOf("APlusSeedBinding.verifyLatestSeed(", startRunAt)
+        assertTrue("startRun must exist", startRunAt >= 0)
+        assertTrue("startRun must take START_RUN_LOCK", lockAt > startRunAt)
+        assertTrue(
+            "start_run must call APlusSeedBinding.verifyLatestSeed( under START_RUN_LOCK",
+            verifyAt > lockAt,
+        )
+        // Three fail-closed refusal shapes are named in the carrier: no record / stale id / wrong token.
+        for (needle in listOf("no verified seed recorded", "is not the latest seed", "seed_token does not match")) {
+            assertTrue("APlusSeedBinding must refuse with '$needle'", bindingSrc.contains(needle))
+        }
+        // The documented spelling must teach the token so the runbook cannot drift back to plan_id-only.
+        assertTrue(
+            "usage must document --es seed_token",
+            activitySrc.contains("--es seed_token") || activitySrc.contains("--es \${APlusSeedBinding.EXTRA_SEED_TOKEN}"),
         )
     }
 }
