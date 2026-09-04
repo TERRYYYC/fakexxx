@@ -1,5 +1,6 @@
 package name.caiyao.fakegps.integration.v1
 
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
@@ -20,6 +21,7 @@ class EnvironmentObserver(
     private val tracker: ContinuityTracker,
     private val environment: QwyEnvironment,
     private val clock: MonotonicClock,
+    private val audit: IntegrationAuditStore,
 ) {
     /**
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
@@ -38,7 +40,7 @@ class EnvironmentObserver(
         val effective = environment.observeEffective()
         val schedule = environment.scheduleSnapshot()
 
-        return EnvironmentObservationV1(
+        val observation = EnvironmentObservationV1(
             leaseId = lease.leaseId,
             acceptedIntentHash = lease.acceptedIntentHash,
             observedAtEpochMs = clock.epochMs(),
@@ -59,9 +61,82 @@ class EnvironmentObserver(
             scheduleDecisionWire = environment.scheduleDecisionWire(
                 schedule?.scheduleId ?: "",
             ),
-            evidenceRefs = effective.evidenceRefs,
+            evidenceRefs = emptyList(),
             scheduleItemId = schedule?.currentItemId ?: "",
             scheduleVersion = schedule?.scheduleVersion ?: 0L,
         )
+
+        // The reference crosses Binder only after its backing row is durable.
+        // A write failure therefore fails the whole observe call closed; it can
+        // never return a structurally valid but unresolvable evidence ref.
+        val evidence = audit.append(
+            event = "observe",
+            callerApplicationId = lease.callerApplicationId,
+            leaseId = lease.leaseId,
+            operationId = request.operationId,
+            payloadDigest = QwyObservationEvidenceDigest.compute(observation),
+        )
+        return observation.copy(evidenceRefs = listOf("qwy:audit:${evidence.seq}"))
     }
+}
+
+/** Canonical binding for the observation payload backed by a QWY audit row. */
+internal object QwyObservationEvidenceDigest {
+    private const val DOMAIN = "fakexxx:qwy:v1:observation-evidence"
+    private const val ABSENT = "0"
+    private const val PRESENT = "1"
+
+    /**
+     * [EnvironmentObservationV1.evidenceRefs] is intentionally excluded: its
+     * sequence is assigned by the append this digest protects. Every nullable
+     * field has an explicit presence discriminator, so absence cannot collide
+     * with a legitimate value.
+     */
+    fun compute(observation: EnvironmentObservationV1): String =
+        CanonicalDigestV1.digest(
+            DOMAIN,
+            listOf(
+                CanonicalDigestV1.utf8(observation.leaseId),
+                CanonicalDigestV1.utf8(observation.acceptedIntentHash),
+                CanonicalDigestV1.decimal(observation.observedAtEpochMs),
+                CanonicalDigestV1.decimal(observation.observedAtElapsedRealtimeMs),
+                CanonicalDigestV1.decimal(observation.environmentRevision),
+                CanonicalDigestV1.utf8(observation.environmentFingerprint),
+                CanonicalDigestV1.decimal(observation.continuityCoverageWire),
+            ) + optionalLong(observation.continuitySinceEpochMs) +
+                optionalLong(observation.continuitySinceElapsedRealtimeMs) +
+                optionalInt(observation.deliveryModeWire) +
+                listOf(CanonicalDigestV1.decimal(observation.verificationLevelWire)) +
+                optionalDouble(observation.effectiveLatitude) +
+                optionalDouble(observation.effectiveLongitude) +
+                optionalBoolean(observation.isMock) +
+                listOf(
+                    CanonicalDigestV1.decimal(observation.scheduleDecisionWire),
+                    CanonicalDigestV1.utf8(observation.scheduleItemId),
+                    CanonicalDigestV1.decimal(observation.scheduleVersion),
+                ),
+        )
+
+    private fun optionalLong(value: Long?): List<ByteArray> = optional(
+        value?.let(CanonicalDigestV1::decimal),
+    )
+
+    private fun optionalInt(value: Int?): List<ByteArray> = optional(
+        value?.let(CanonicalDigestV1::decimal),
+    )
+
+    private fun optionalDouble(value: Double?): List<ByteArray> = optional(
+        value?.toRawBits()?.let(CanonicalDigestV1::decimal),
+    )
+
+    private fun optionalBoolean(value: Boolean?): List<ByteArray> = optional(
+        value?.let { CanonicalDigestV1.utf8(if (it) "1" else "0") },
+    )
+
+    private fun optional(value: ByteArray?): List<ByteArray> =
+        if (value == null) {
+            listOf(CanonicalDigestV1.utf8(ABSENT))
+        } else {
+            listOf(CanonicalDigestV1.utf8(PRESENT), value)
+        }
 }

@@ -81,7 +81,6 @@ data class EffectiveEnvironment(
     val deliveryModeWire: Int?,
     val verificationLevelWire: Int,
     val environmentFingerprint: String,
-    val evidenceRefs: List<String>,
 )
 
 /**
@@ -350,7 +349,6 @@ class QwyEnvironmentController(
             deliveryModeWire = if (isMock) 1 else null,
             verificationLevelWire = verificationLevel,
             environmentFingerprint = fingerprint,
-            evidenceRefs = emptyList(),
         )
     }
 

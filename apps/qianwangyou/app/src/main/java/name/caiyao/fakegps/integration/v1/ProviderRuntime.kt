@@ -215,7 +215,7 @@ object ProviderRuntime {
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
-        val observer = EnvironmentObserver(tracker, environment, clock)
+        val observer = EnvironmentObserver(tracker, environment, clock, audit)
 
         val handler = EnvironmentControlHandler(
             authorizer = authorizer,

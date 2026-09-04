@@ -154,7 +154,6 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var cleanupOutcome: CleanupOutcome = CleanupOutcome.Complete
     var isMock: Boolean? = true
     var fingerprint: String = "fp-1"
-    var evidenceRefs: List<String> = listOf("qwy:audit:1")
 
     // --- call-count instrumentation (memory by design; counts across restarts) ---
     var applyCount: Int = 0
@@ -323,7 +322,6 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
             deliveryModeWire = if (verified) DeliveryModeV1.SYSTEM_MOCK.wire else null,
             verificationLevelWire = level,
             environmentFingerprint = fingerprint,
-            evidenceRefs = evidenceRefs,
         )
     }
 

@@ -7,7 +7,7 @@ import name.caiyao.fakegps.integration.v1.support.ProviderHarness.Companion.AUTO
 import name.caiyao.fakegps.integration.v1.support.SimulatedWriteCrash
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.fail
 import org.junit.Test
 
@@ -18,8 +18,6 @@ class ObservationEvidenceRefTest {
     fun observe_returnsDurableReferenceToThisObservation() {
         val harness = ProviderHarness.create()
         harness.pair()
-        // Mirror the production adapter, which currently supplies no refs.
-        harness.env.evidenceRefs = emptyList()
         val receipt = harness.apply(key = "observe-evidence-apply")
         val request = ObserveRequestV1(
             leaseId = receipt.leaseId,
@@ -30,7 +28,7 @@ class ObservationEvidenceRefTest {
         val observation = harness.handler.observe(AUTO_UID, request)
 
         assertEquals("one audit row must back this observation", 1, observation.evidenceRefs.size)
-        val match = Regex("^qwy:audit:(\\d+)$").matchEntire(observation.evidenceRefs.single())
+        val match = Regex("^qwy:audit:([1-9]\\d*)$").matchEntire(observation.evidenceRefs.single())
         assertNotNull("evidence ref must use qwy:audit:<seq>", match)
         val referencedSeq = match!!.groupValues[1].toLong()
 
@@ -43,9 +41,17 @@ class ObservationEvidenceRefTest {
         assertEquals(AUTO_PKG, event.callerApplicationId)
         assertEquals(receipt.leaseId, event.leaseId)
         assertEquals(request.operationId, event.operationId)
-        assertTrue(
-            "audit row must bind the observation payload with a SHA-256 digest",
-            event.payloadDigest?.matches(Regex("^[0-9a-f]{64}$")) == true,
+        assertEquals(
+            "audit digest must bind this exact observation payload",
+            QwyObservationEvidenceDigest.compute(observation),
+            event.payloadDigest,
+        )
+        assertNotEquals(
+            "changing an observed field must change the backing digest",
+            event.payloadDigest,
+            QwyObservationEvidenceDigest.compute(
+                observation.copy(environmentFingerprint = "different-fingerprint"),
+            ),
         )
     }
 
