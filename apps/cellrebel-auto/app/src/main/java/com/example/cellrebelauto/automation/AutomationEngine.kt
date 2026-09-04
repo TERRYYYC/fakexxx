@@ -186,25 +186,44 @@ class AutomationEngine(
                     runSessionId = existingSession.id
                     planRepository.markSessionStatus(runSessionId, "recovering")
                     updateState(AutomationState.RECOVERING)
-                    // Issue #88: provider terminal truth is an admission stop, including resume.
-                    // Check it BEFORE iterating recoverable attempts: an exhausted provider retains
-                    // its final currentItemId by contract, so replaying an old local advance against
-                    // that item would attribute another quota/advance to the wrong owner. Preserve
-                    // the recoverable attempt and its append-only carriers for operator inspection.
+                    val recoverableAttempts = planRepository.findAPlusRecoverableAttempts(planId)
+                    // Issue #88: provider terminal truth stops NEW work, but it cannot strand the
+                    // durable owner of the terminal transition itself. Exactly one ADVANCE_PENDING
+                    // owner may still retrieve its same-key receipt; ADVANCE_STATE_READBACK may
+                    // finish the mandatory fresh four-leg readback; CLOSED may finish its local-only
+                    // status projection. Every other/multiple-owner shape remains fail-closed.
                     val recoveryCapabilities = aplusCoordinator.executorBackend().discover()
-                    if (recoveryCapabilities?.exhausted == true &&
-                        !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
-                    ) {
+                    val planCompleteBeforeRecovery =
+                        PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+                    val exhaustedWithoutOwner = recoveryCapabilities?.exhausted == true &&
+                        recoverableAttempts.isEmpty() && !planCompleteBeforeRecovery
+                    val exhaustedWithUnprovenOwner = recoveryCapabilities?.exhausted == true &&
+                        recoverableAttempts.isNotEmpty() &&
+                        !canConvergeSingleExhaustedOwner(
+                            recoverableAttempts,
+                            existingSession.id,
+                            recoveryCapabilities
+                        )
+                    if (exhaustedWithoutOwner || exhaustedWithUnprovenOwner) {
                         aplusPause(
                             "provider schedule is already EXHAUSTED during recovery admission — " +
                                 "recoverable attempts and remaining local tasks are preserved"
                         )
                         return@coroutineScope
                     }
-                    for (crashed in planRepository.findAPlusRecoverableAttempts(planId)) {
+                    for (crashed in recoverableAttempts) {
                         if (!recoverCrashedAttempt(crashed, aplusCoordinator)) {
                             return@coroutineScope
                         }
+                    }
+                    if (recoveryCapabilities?.exhausted == true &&
+                        !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+                    ) {
+                        aplusPause(
+                            "provider schedule is already EXHAUSTED after terminal owner convergence — " +
+                                "remaining local tasks stay pending"
+                        )
+                        return@coroutineScope
                     }
                     planRepository.markSessionStatus(runSessionId, "running")
                 }
@@ -289,10 +308,6 @@ class AutomationEngine(
 
                 // # 选中时是否为 pending（cooldown 卡的下一步去向据此投影）
                 val advancingToNewTask = task.status == "pending"
-                // # 新选中的 pending 任务 → active
-                if (advancingToNewTask) {
-                    planRepository.markTaskActive(task.id)
-                }
                 log("--- Location csvRow=${task.csvRow} (${task.latitude},${task.longitude}) " +
                     "success ${task.completedSuccesses}/${task.requiredSuccesses} ---")
 
@@ -333,6 +348,48 @@ class AutomationEngine(
                     else -> null
                 }
 
+                val aplusCoord = recoveryCoordinator
+                val aplusEvidenceSrc = completionEvidenceSource
+                // Issue #88: re-read the provider immediately before opening each attempt. The
+                // run-start handshake is not an enduring admission token: a cooldown or another
+                // actor can advance the schedule to EXHAUSTED after it. This exact snapshot is both
+                // the terminal-admission decision and the CAS anchor persisted below; never discover
+                // again between admission and attempt creation.
+                val aplusAnchorProjection = if (aplusCoord != null && aplusEvidenceSrc != null) {
+                    val discovered = aplusCoord.executorBackend().discover()
+                    if (discovered == null ||
+                        discovered.protocolVersion !=
+                        io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+                    ) {
+                        aplusPause("provider discover failed or protocol incompatible before attempt anchor (v1 required)")
+                        return@coroutineScope
+                    }
+                    if (discovered.exhausted == true) {
+                        aplusPause(
+                            "provider schedule is EXHAUSTED immediately before attempt — " +
+                                "no attempt was created"
+                        )
+                        return@coroutineScope
+                    }
+                    if (discovered.currentScheduleId == null ||
+                        discovered.currentItemId == null ||
+                        discovered.scheduleVersion == null
+                    ) {
+                        // v1.55 group invariant: a partial-null projection is illegal — fail-closed
+                        // before creating an attempt or dispatching any external execution.
+                        aplusPause("discover projection incomplete before attempt — cannot anchor the advance CAS triple")
+                        return@coroutineScope
+                    }
+                    discovered
+                } else {
+                    null
+                }
+
+                // # 新选中的 pending 任务只有越过所有 attempt admission gate 后才 → active。
+                if (advancingToNewTask) {
+                    planRepository.markTaskActive(task.id)
+                }
+
                 // # 创建尝试行（starting），ordinal = 任务内计数 + 1
                 val startedAt = nowMs()
                 val attemptOrdinal = planRepository.countAttemptsForTask(task.id) + 1
@@ -371,8 +428,6 @@ class AutomationEngine(
                 // # release 在 terminalize 之前、lease-bound + durable；trust-fail → unverified + legacy-zero；
                 // # PASS → 终态化 attempt（绝不动 legacy 计数）。apply/release 外部调用是 GREEN，pre-freeze
                 // # 只驱动 §8.1 迁移 + 持久化 owner 态，判定路径（recordTrustedCompletion）保持可达。
-                val aplusCoord = recoveryCoordinator
-                val aplusEvidenceSrc = completionEvidenceSource
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
                     var aplusState = AttemptState.CREATED
                     // R45 (Sol R45 P1-3 / spec §4.3 step 1): ANCHOR — the advance CAS triple
@@ -384,17 +439,7 @@ class AutomationEngine(
                     // would push a previous generation's completion onto a NEW schedule).
                     // F12: discover MUST precede intent construction — the provider's currentScheduleId
                     // feeds into scheduleRef (the intent digest preimage), not Auto's task PK.
-                    val anchorDiscover = aplusCoord.executorBackend()?.discover()
-                    val anchorProjection = anchorDiscover?.takeIf {
-                        it.currentScheduleId != null && it.currentItemId != null && it.scheduleVersion != null
-                    }
-                    if (anchorProjection == null) {
-                        // v1.55 group invariant: a partial-null projection is illegal — fail-closed
-                        // with NO external execution (§6.7.5 applies the same rule at readback).
-                        planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
-                        aplusPause("discover projection incomplete for attempt $attemptId — cannot anchor the advance CAS triple")
-                        return@coroutineScope
-                    }
+                    val anchorProjection = checkNotNull(aplusAnchorProjection)
                     planRepository.markAplusAdvanceAnchor(
                         attemptId, anchorProjection.currentScheduleId!!, anchorProjection.currentItemId!!, anchorProjection.scheduleVersion!!
                     )
@@ -425,11 +470,20 @@ class AutomationEngine(
                     val preflight = aplusCoord.executorBackend()?.preflight(
                         applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest
                     )
-                    if (preflight == null || preflight.scheduleDecisionWire !=
-                        io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire
+                    if (preflight == null ||
+                        preflight.scheduleDecisionWire !=
+                        io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1.ALLOWED_NOW.wire ||
+                        preflight.exhausted == true
                     ) {
-                        // §6.7: not allowed now (or unavailable) ⇒ typed failure, no apply, no quota.
-                        val why = if (preflight == null) "unavailable (fail-closed)" else "decision=${preflight.scheduleDecisionWire}"
+                        // §6.7 / #88: not allowed now, unavailable, or explicitly terminal ⇒ typed
+                        // failure with no apply and no quota. QWY's schedule identity decision can
+                        // remain ALLOWED_NOW after exhaustion, so the terminal bit is an independent
+                        // admission leg. Null retains the PR's compatibility boundary.
+                        val why = when {
+                            preflight == null -> "unavailable (fail-closed)"
+                            preflight.exhausted == true -> "provider schedule exhausted"
+                            else -> "decision=${preflight.scheduleDecisionWire}"
+                        }
                         planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
                         aplusPause("preflight denied schedule for attempt $attemptId ($why)")
                         return@coroutineScope
@@ -1077,13 +1131,6 @@ class AutomationEngine(
             // verification + receipt-digest binding. The provider's idempotency returns the
             // STORED receipt for the same key; a crash never pushes a second advance.
             "ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK" -> {
-                if (planRepository.getTrustedEntry(crashed.id) == null) {
-                    // The advance only ever runs quota-reached — a missing mint here is an
-                    // invariant break, fail-closed (never advance without the ledger authority).
-                    planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
-                    aplusPause("ADVANCE_* crash without a durable trusted mint for attempt ${crashed.id} — invariant break")
-                    return false
-                }
                 // INV-23: the intent digest recompute from the persisted attempt owner state —
                 // the same inputs the original apply digested.
                 // F12: scheduleRef comes from the persisted anchor, not taskId.
@@ -1334,6 +1381,34 @@ class AutomationEngine(
         return advanceAfterRelease(crashed, postReleaseState)
     }
 
+    private suspend fun canConvergeSingleExhaustedOwner(
+        recoverableAttempts: List<TestAttempt>,
+        activeSessionId: Long,
+        exhaustedCapabilities: io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1?
+    ): Boolean {
+        val owner = recoverableAttempts.singleOrNull() ?: return false
+        if (owner.runSessionId != activeSessionId) return false
+        val capabilities = exhaustedCapabilities ?: return false
+        if (capabilities.exhausted != true) return false
+        return when (owner.aplusState) {
+            AttemptState.CLOSED.name -> true
+            AttemptState.ADVANCE_PENDING.name,
+            AttemptState.ADVANCE_STATE_READBACK.name -> {
+                if (capabilities.protocolVersion !=
+                    io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+                ) {
+                    return false
+                }
+                val anchor = planRepository.getAplusAdvanceAnchor(owner.id) ?: return false
+                anchor.third != Long.MAX_VALUE &&
+                    capabilities.currentScheduleId == anchor.first &&
+                    capabilities.currentItemId == anchor.second &&
+                    capabilities.scheduleVersion == anchor.third + 1
+            }
+            else -> false
+        }
+    }
+
     /**
      * R43 GREEN (M-CR-06): re-decide a DECIDING crash from the DURABLE DB carriers. The §8.1
      * TRUST_POLICY_PASS transaction crashed before commit; the durable execution evidence (located
@@ -1347,10 +1422,6 @@ class AutomationEngine(
      *   FAIL wrote the unverified carrier); false when any durable carrier is missing (fail-closed:
      *   NO mint — the caller falls through to the release convergence + interrupted projection).
      */
-    /** The persisted lease for an attempt (never invented; null when absent). */
-    private suspend fun leaseIdForAttempt(attemptId: Long): String =
-        planRepository.getAplusLeaseId(attemptId) ?: ""
-
     private suspend fun PlanRepository.trustedCountForTaskPublic(taskId: Long): Int =
         trustedCountForTask(taskId)
 
@@ -1891,22 +1962,79 @@ class AutomationEngine(
         }
         val task = planRepository.getTask(taskId)
         if (task == null) {
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("task $taskId missing for attempt $attemptId — cannot build the advance proof")
-            return AdvanceVerificationResult.FAILED
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_TASK_MISSING",
+                "task $taskId missing — cannot build the advance proof"
+            )
+        }
+        if (task.planId != planId) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_TASK_PLAN_MISMATCH",
+                "task $taskId belongs to plan ${task.planId}, expected $planId"
+            )
+        }
+        val trusted = planRepository.getTrustedEntry(attemptId)
+        if (trusted == null) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_TRUST_MISSING",
+                "no durable trusted mint"
+            )
+        }
+        if (trusted.taskId != taskId) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_TRUST_TASK_MISMATCH",
+                "trusted carrier names task ${trusted.taskId}, expected $taskId"
+            )
+        }
+        if (planRepository.getUnverifiedRecord(attemptId) != null) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_CONFLICTING_TRUST_CARRIERS",
+                "trusted and unverified carriers both exist"
+            )
+        }
+        val trustedSuccessCount = planRepository.trustedCountForTaskPublic(taskId)
+        if (trustedSuccessCount < task.requiredSuccesses) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_QUOTA_NOT_REACHED",
+                "trusted count $trustedSuccessCount is below required ${task.requiredSuccesses}"
+            )
         }
         // R45 (Sol R45 P1-3): the CAS triple is REPLAYED byte-for-byte from the attempt-open
         // anchor — never re-discovered here — and requestDigest is the canonical ADVANCE framing
         // (CanonicalAdvanceDigestV1), NOT the apply intent digest.
         val anchor = planRepository.getAplusAdvanceAnchor(attemptId)
         if (anchor == null) {
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("advance anchor missing for attempt $attemptId — cannot build the CAS request (fail-closed)")
-            return AdvanceVerificationResult.FAILED
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_ANCHOR_MISSING",
+                "advance anchor missing — cannot build the CAS request"
+            )
         }
         // §6.7.4a: the lease field is the HISTORICAL reference to where the quota was earned
         // (the release already made it RELEASED before the advance was first dispatched).
-        val advanceLease = leaseIdForAttempt(attemptId)
+        val advanceLease = planRepository.getAplusLeaseId(attemptId)
+        if (advanceLease.isNullOrBlank()) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_LEASE_MISSING",
+                "durable lease is missing"
+            )
+        }
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+        val releaseDigest = APlusOperationIdentity.releaseDigest(advanceLease)
+        if (!coordinator.hasMatchingDurableReleaseReceipt(releaseKey, advanceLease, releaseDigest)) {
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_RELEASE_AUTHORITY_MISSING",
+                "matching durable RELEASED receipt is missing"
+            )
+        }
         val baseAdvanceRequest = io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
             leaseId = advanceLease,
             idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
@@ -1916,7 +2044,7 @@ class AutomationEngine(
             expectedCurrentItemId = anchor.second,
             completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
                 scheduleItemId = anchor.second,
-                trustedSuccessCount = planRepository.trustedCountForTaskPublic(taskId),
+                trustedSuccessCount = trustedSuccessCount,
                 quotaRequired = task.requiredSuccesses,
                 ledgerRef = "ledger-$attemptId",
                 verifiedAtElapsedRealtimeMs = commitClockMs()
@@ -2119,6 +2247,16 @@ class AutomationEngine(
         } else {
             AdvanceVerificationResult.ADVANCED
         }
+    }
+
+    private suspend fun rejectAdvanceReplayAuthority(
+        attemptId: Long,
+        reason: String,
+        detail: String
+    ): AdvanceVerificationResult {
+        planRepository.markRecoveryRequired(attemptId, reason)
+        aplusPause("advance authority rejected for attempt $attemptId: $detail")
+        return AdvanceVerificationResult.FAILED
     }
 
     /**

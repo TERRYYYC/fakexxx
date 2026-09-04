@@ -53,6 +53,25 @@ class RecoveryCoordinator(
     fun executorBackend(): ExternalApplyExecutor = executor
 
     /**
+     * Read-only proof that the release preceding an advance is durably bound to the expected
+     * operation key, lease, and digest. Both durable indexes must resolve to the same RELEASED row;
+     * a bare ADVANCE_* phase is not sufficient authority to call the provider.
+     */
+    fun hasMatchingDurableReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String
+    ): Boolean {
+        val byKey = log.releaseReceiptForKey(idempotencyKey)
+        val byLease = log.releaseReceiptFor(leaseId)
+        return byKey != null &&
+            byKey == byLease &&
+            byKey.leaseId == leaseId &&
+            byKey.releaseDigest == releaseDigest &&
+            byKey.resultOutcome == "RELEASED"
+    }
+
+    /**
      * Reconcile a non-terminal attempt after crash/restart (§8.1 RECOVERY_REQUIRED). Returns a TYPED
      * result carrying the durable apply receipt + provider lease the engine MUST persist — the lease is
      * NOT invented by the caller; it comes back from the (idempotent) apply (Sol round-9 P1-3: the

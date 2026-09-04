@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.recovery
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -414,6 +415,58 @@ class RecoveryIdempotencyRedTest {
     }
 
     // ---- release durability (Sol round-10 P1-3 / round-11 P1-3) ----
+
+    @Test
+    fun `advance release authority requires a dual-index exact RELEASED receipt`() {
+        fun coordinatorWithReceipt(
+            digest: String = "rd-1",
+            outcome: String = "RELEASED",
+            keyOnly: Boolean = false,
+            leaseOnly: Boolean = false
+        ): RecoveryCoordinator {
+            val log = FakeDurableRecoveryLog()
+            when {
+                keyOnly -> log.seedReleaseReceiptKeyOnly("r-1", "lease-1", digest, outcome, 1000L)
+                leaseOnly -> log.seedReleaseReceiptLeaseOnly("r-1", "lease-1", digest, outcome, 1000L)
+                else -> log.seedReleaseReceipt("r-1", "lease-1", digest, outcome, 1000L)
+            }
+            return RecoveryCoordinator(RecordingExternalApplyExecutor(), log)
+        }
+
+        assertTrue(
+            coordinatorWithReceipt().hasMatchingDurableReleaseReceipt("r-1", "lease-1", "rd-1")
+        )
+        assertFalse(
+            "a noncanonical digest cannot authorize advance",
+            coordinatorWithReceipt(digest = "wrong-digest")
+                .hasMatchingDurableReleaseReceipt("r-1", "lease-1", "rd-1")
+        )
+        assertFalse(
+            "a FAILED receipt cannot authorize advance",
+            coordinatorWithReceipt(outcome = "FAILED")
+                .hasMatchingDurableReleaseReceipt("r-1", "lease-1", "rd-1")
+        )
+        assertFalse(
+            "a key-only receipt cannot authorize advance",
+            coordinatorWithReceipt(keyOnly = true)
+                .hasMatchingDurableReleaseReceipt("r-1", "lease-1", "rd-1")
+        )
+        assertFalse(
+            "a lease-only receipt cannot authorize advance",
+            coordinatorWithReceipt(leaseOnly = true)
+                .hasMatchingDurableReleaseReceipt("r-1", "lease-1", "rd-1")
+        )
+
+        val divergentLog = FakeDurableRecoveryLog().apply {
+            seedReleaseReceiptKeyOnly("r-1", "lease-1", "rd-1", "RELEASED", 1000L)
+            seedReleaseReceiptLeaseOnly("other-key", "lease-1", "rd-1", "RELEASED", 1000L)
+        }
+        assertFalse(
+            "divergent durable indexes cannot authorize advance",
+            RecoveryCoordinator(RecordingExternalApplyExecutor(), divergentLog)
+                .hasMatchingDurableReleaseReceipt("r-1", "lease-1", "rd-1")
+        )
+    }
 
     @Test
     fun `release with a durable receipt replays WITHOUT re-calling the provider`() {

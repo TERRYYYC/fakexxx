@@ -227,6 +227,18 @@ class EngineAdvanceRecoveryOracleTest {
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
         )
+        db.releaseReceiptDao().insertIfAbsent(
+            com.example.cellrebelauto.recovery.ReleaseReceiptRow(
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                    .releaseIdempotencyKey(attemptId),
+                leaseId = "lease-$attemptId",
+                releaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                    .releaseDigest("lease-$attemptId"),
+                resultOutcome = "RELEASED",
+                createdAt = 8500L
+            )
+        )
+        repo.completeTaskIfQuotaReached(task.id)
         return planId to task.id
     }
 
@@ -263,7 +275,7 @@ class EngineAdvanceRecoveryOracleTest {
 
     @Test
     fun `an ADVANCE_PENDING crash replays the same durable request and closes trusted`() = runTest {
-        val (planId, taskId) = seedCrashedAt("ADVANCE_PENDING")
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
         val clock = VClock()
         buildEngine(planId, clock).run()
 
@@ -561,13 +573,18 @@ class EngineAdvanceRecoveryOracleTest {
                 )
             }
         }
-        val (planId, taskId) = seedCrashedAt("ADVANCE_PENDING")
-        repo.completeTaskIfQuotaReached(taskId)
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        val originalRequest = expectedAdvanceRequest()
+        seedAdvanceEffect(originalRequest)
         buildEngineWith(planId, VClock(), exhaustedExecutor).run()
 
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("honest exhausted receipt + matching readback ⇒ CLOSED", "CLOSED", attempt.aplusState)
         assertEquals("closed trusted", "succeeded", attempt.status)
+        assertEquals("one original terminal call plus one same-key recovery replay", 2, advanceInvocationCount)
+        assertEquals("same-key recovery must not apply a second terminal provider effect", 1, advanceEffectCount)
+        assertEquals(originalRequest.idempotencyKey, advanceReplays.single().idempotencyKey)
+        assertEquals(originalRequest.requestDigest, advanceReplays.single().requestDigest)
         assertEquals(
             "aligned local/provider terminal recovery completes the session",
             "completed",

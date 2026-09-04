@@ -2,6 +2,7 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
@@ -10,7 +11,9 @@ import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
@@ -64,11 +67,13 @@ class EngineJourneyConsumerOracleTest {
         profileRefs = listOf("auto-profile"), scheduleRefs = listOf("auto-schedule"),
         currentScheduleId = anchorScheduleId, currentItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
     )
+    private val sequencedDiscoverAnswers = java.util.ArrayDeque<CapabilitySnapshotV1>()
 
     /** Armed by a terminal (exhausted) advance — the healthy §6.7.5 four-leg readback. */
     private var discoverReadback: CapabilitySnapshotV1? = null
 
     private var preflightDecision: Int? = ScheduleDecisionV1.ALLOWED_NOW.wire // null = unavailable (fail-closed)
+    private var preflightExhausted: Boolean? = false
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = null,
         scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-hash-1",
@@ -80,8 +85,13 @@ class EngineJourneyConsumerOracleTest {
     private val advanceCalls = mutableListOf<CompleteAndAdvanceRequestV1>()
     private val observePostAdvanceCalls = mutableListOf<Triple<String, String, String>>()
     private val events = mutableListOf<String>() // ordered "apply"/"release"/"advance" journey events
+    private val providerTimeline = mutableListOf<String>()
     private var armedPostAdvanceObservation: EnvironmentObservationV1? = null
     private var cellRebelRunCalls = 0
+    private data class StoredAdvance(val requestDigest: String, val receipt: AdvanceReceiptV1)
+    private val storedAdvances = mutableMapOf<String, StoredAdvance>()
+    private var advanceInvocationCount = 0
+    private var advanceEffectCount = 0
 
     /** Test hook: mutate the armed post-advance observation (tamper one four-leg). */
     private var observationTamper: (EnvironmentObservationV1) -> EnvironmentObservationV1 = { it }
@@ -97,7 +107,8 @@ class EngineJourneyConsumerOracleTest {
         }
         override fun discover(): CapabilitySnapshotV1? {
             discoverCalls += Unit
-            return discoverAnswer
+            providerTimeline += "discover"
+            return if (sequencedDiscoverAnswers.isEmpty()) discoverAnswer else sequencedDiscoverAnswers.removeFirst()
         }
         override fun preflight(intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): PreflightReportV1? {
             preflightCalls += intent
@@ -109,7 +120,7 @@ class EngineJourneyConsumerOracleTest {
                 achievableVerificationLevelWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
                 continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
                 environmentRevision = 7L, blockingReasonWires = emptyList(),
-                scheduleItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
+                scheduleItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = preflightExhausted
             )
         }
         override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
@@ -122,8 +133,13 @@ class EngineJourneyConsumerOracleTest {
             return null
         }
         override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+            advanceInvocationCount += 1
             advanceCalls += request
             events += "advance"
+            providerTimeline += "advance"
+            storedAdvances[request.idempotencyKey]?.let { stored ->
+                return if (stored.requestDigest == request.requestDigest) stored.receipt else null
+            }
             val receipt = advanceAnswer ?: return null
             // R46 (Sol R46 P1-2): a HEALTHY provider signs canonically (the preimage excludes
             // receiptDigest itself, so sign-then-fill is the canonical construction).
@@ -133,6 +149,8 @@ class EngineJourneyConsumerOracleTest {
                 )
             )
             advanceAnswer = signed
+            storedAdvances[request.idempotencyKey] = StoredAdvance(request.requestDigest, signed)
+            advanceEffectCount += 1
             if (signed.advancedToItemId == null) {
                 // A HEALTHY provider: after the terminal advance the schedule IS exhausted at V+1.
                 discoverAnswer = discoverReadback ?: CapabilitySnapshotV1(
@@ -243,14 +261,14 @@ class EngineJourneyConsumerOracleTest {
         return planId to task.id
     }
 
-    private suspend fun seedTwoTaskPlan(): Triple<Long, Long, Long> {
+    private suspend fun seedTwoTaskPlan(firstRequiredSuccesses: Int = 1): Triple<Long, Long, Long> {
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(
                 sourceFileName = "two-items.csv",
                 importedAt = 1000L,
                 globalBufferSeconds = 0,
                 totalRows = 2,
-                totalRequiredSuccesses = 2
+                totalRequiredSuccesses = firstRequiredSuccesses + 1
             ),
             listOf(
                 LocationTask(
@@ -259,7 +277,7 @@ class EngineJourneyConsumerOracleTest {
                     longitude = 116.4,
                     latitude = 39.9,
                     priority = 1,
-                    requiredSuccesses = 1
+                    requiredSuccesses = firstRequiredSuccesses
                 ),
                 LocationTask(
                     planId = 0,
@@ -343,11 +361,564 @@ class EngineJourneyConsumerOracleTest {
     }
 
     @Test
-    fun `an already exhausted provider stops recovery before replaying an advance (issue 88)`() = runTest {
+    fun `provider becoming exhausted at attempt anchor stops before creating the attempt (issue 88)`() = runTest {
+        val (planId, taskId) = seedPlan()
+        val active = discoverAnswer!!
+        sequencedDiscoverAnswers.addLast(active.copy(exhausted = false))
+        sequencedDiscoverAnswers.addLast(active.copy(exhausted = true))
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals("the per-attempt terminal snapshot creates no attempt", 0, db.testAttemptDao().getAttemptsForTask(taskId).size)
+        assertEquals("the per-attempt terminal snapshot dispatches no preflight", 0, preflightCalls.size)
+        assertEquals("the per-attempt terminal snapshot dispatches no apply/release/advance", emptyList<String>(), events)
+        assertEquals("the per-attempt terminal snapshot dispatches no observation", 0, observePostAdvanceCalls.size)
+        assertEquals("the per-attempt terminal snapshot never launches CellRebel", 0, cellRebelRunCalls)
+        assertEquals("the per-attempt terminal snapshot mints no quota", 0, db.trustedQuotaDao().countAll())
+        assertEquals("pending", repo.getTask(taskId)!!.status)
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `provider becoming exhausted at preflight stops before apply (issue 88)`() = runTest {
+        val (planId, taskId) = seedPlan()
+        preflightExhausted = true
+
+        buildEngine(planId, VClock(), null).run()
+
+        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
+        assertEquals("preflight is attempt-bound", 1, attempts.size)
+        assertEquals("the rejected attempt is terminal", "failed", attempts.single().status)
+        assertEquals("the live preflight is consumed exactly once", 1, preflightCalls.size)
+        assertEquals("terminal preflight dispatches no apply/release/advance", emptyList<String>(), events)
+        assertEquals("terminal preflight dispatches no observation", 0, observePostAdvanceCalls.size)
+        assertEquals("terminal preflight never launches CellRebel", 0, cellRebelRunCalls)
+        assertEquals("terminal preflight mints no quota", 0, db.trustedQuotaDao().countAll())
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    private data class ExhaustedRecoveryFixture(
+        val planId: Long,
+        val firstTaskId: Long,
+        val secondTaskId: Long,
+        val sessionId: Long,
+        val attemptId: Long
+    )
+
+    private suspend fun seedExhaustedRecoveryFixture(
+        phase: String,
+        trustedTaskMatchesOwner: Boolean = true,
+        projectOwnerTask: Boolean = true,
+        persistReleaseReceipt: Boolean = true,
+        ownerRequiredSuccesses: Int = 1
+    ): ExhaustedRecoveryFixture {
+        val (planId, firstTaskId, secondTaskId) = seedTwoTaskPlan(ownerRequiredSuccesses)
+        val sessionId = repo.createSession(planId, 500L)
+        val attemptId = 61L
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = attemptId,
+                taskId = firstTaskId,
+                runSessionId = sessionId,
+                attemptOrdinal = 1,
+                successOrdinal = null,
+                startedAt = 600L,
+                runningObservedAt = 700L,
+                endedAt = null,
+                status = "running",
+                failureReason = null,
+                webBrowsingScore = null,
+                videoStreamingScore = null,
+                latitude = 39.9,
+                longitude = 116.4,
+                aplusState = phase,
+                aplusLeaseId = "lease-$attemptId",
+                currentExecutionId = "exec-$attemptId",
+                aplusAnchorScheduleId = anchorScheduleId,
+                aplusAnchorItemId = anchorItemId,
+                aplusAnchorVersion = anchorVersion
+            )
+        )
+        db.trustedQuotaDao().insert(
+            com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+                attemptId = attemptId,
+                taskId = if (trustedTaskMatchesOwner) firstTaskId else secondTaskId,
+                evidenceDigest = "durable-before-resume",
+                committedAt = 800L
+            )
+        )
+        db.operationReceiptDao().insertIfAbsent(
+            com.example.cellrebelauto.recovery.OperationReceiptRow(
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                requestDigest = "apply-digest-$attemptId",
+                resultOutcome = "APPLIED",
+                createdAt = 700L,
+                leaseId = "lease-$attemptId",
+                operationId = "op-$attemptId"
+            )
+        )
+        if (projectOwnerTask) {
+            check(trustedTaskMatchesOwner) { "only owner-bound trust may project the owner task" }
+            assertEquals(
+                "fixture follows production: trusted quota projects the owner task complete before advance",
+                1,
+                repo.completeTaskIfQuotaReached(firstTaskId)
+            )
+            assertEquals("completed", repo.getTask(firstTaskId)!!.status)
+        } else {
+            assertEquals("pending", repo.getTask(firstTaskId)!!.status)
+        }
+        assertEquals("pending", repo.getTask(secondTaskId)!!.status)
+
+        if (persistReleaseReceipt) {
+            val leaseId = "lease-$attemptId"
+            db.releaseReceiptDao().insertIfAbsent(
+                com.example.cellrebelauto.recovery.ReleaseReceiptRow(
+                    idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .releaseIdempotencyKey(attemptId),
+                    leaseId = leaseId,
+                    releaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                        .releaseDigest(leaseId),
+                    resultOutcome = "RELEASED",
+                    createdAt = 750L
+                )
+            )
+        }
+
+        advanceAnswer = AdvanceReceiptV1(
+            outcomeWire = AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId,
+            advancedToItemId = null,
+            scheduleVersionAfter = anchorVersion + 1,
+            effectiveIntentHash = "eff-hash-terminal-replay",
+            effectiveEnvironmentRevision = 7L,
+            receiptDigest = "filled-at-call"
+        )
+        discoverAnswer = discoverAnswer!!.copy(
+            currentScheduleId = anchorScheduleId,
+            currentItemId = anchorItemId,
+            scheduleVersion = anchorVersion + 1,
+            exhausted = true
+        )
+        seedTerminalAdvanceEffect(
+            expectedTerminalAdvanceRequest(
+                attemptId = attemptId,
+                trustedSuccessCount = repo.trustedCountForTask(firstTaskId),
+                quotaRequired = ownerRequiredSuccesses
+            )
+        )
+        return ExhaustedRecoveryFixture(planId, firstTaskId, secondTaskId, sessionId, attemptId)
+    }
+
+    private fun expectedTerminalAdvanceRequest(
+        attemptId: Long,
+        trustedSuccessCount: Int,
+        quotaRequired: Int
+    ): CompleteAndAdvanceRequestV1 {
+        val base = CompleteAndAdvanceRequestV1(
+            leaseId = "lease-$attemptId",
+            idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                .applyIdempotencyKey(attemptId),
+            requestDigest = "",
+            expectedScheduleId = anchorScheduleId,
+            expectedScheduleVersion = anchorVersion,
+            expectedCurrentItemId = anchorItemId,
+            completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
+                scheduleItemId = anchorItemId,
+                trustedSuccessCount = trustedSuccessCount,
+                quotaRequired = quotaRequired,
+                ledgerRef = "ledger-$attemptId",
+                verifiedAtElapsedRealtimeMs = 99999L
+            ),
+            callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        )
+        return base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base))
+    }
+
+    /** Models the terminal provider effect that happened before Auto persisted its receipt/readback. */
+    private fun seedTerminalAdvanceEffect(request: CompleteAndAdvanceRequestV1) {
+        val base = checkNotNull(advanceAnswer)
+        val receipt = base.copy(
+            receiptDigest = CanonicalAdvanceReceiptDigestV1.compute(
+                base,
+                request.requestDigest,
+                request.idempotencyKey
+            )
+        )
+        storedAdvances[request.idempotencyKey] = StoredAdvance(request.requestDigest, receipt)
+        advanceInvocationCount = 1
+        advanceEffectCount = 1
+    }
+
+    private suspend fun assertTerminalOwnerRecoveryClosesBeforeSecondTask(phase: String) {
+        val fixture = seedExhaustedRecoveryFixture(phase)
+        val planId = fixture.planId
+        val firstTaskId = fixture.firstTaskId
+        val secondTaskId = fixture.secondTaskId
+        val sessionId = fixture.sessionId
+        val attemptId = fixture.attemptId
+
+        buildEngine(
+            planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("the durable terminal owner gets exactly one same-key replay", 1, advanceCalls.size)
+        val replay = advanceCalls.single()
+        assertEquals("one original terminal call plus one recovery replay", 2, advanceInvocationCount)
+        assertEquals("same-key replay cannot apply a second provider effect", 1, advanceEffectCount)
+        assertEquals(
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+            replay.idempotencyKey
+        )
+        assertEquals(CanonicalAdvanceDigestV1.compute(replay), replay.requestDigest)
+        assertEquals("admission plus independent terminal readback", 2, discoverCalls.size)
+        assertEquals(
+            "terminal recovery orders admission before replay and fresh readback after it",
+            listOf("discover", "advance", "discover"),
+            providerTimeline
+        )
+        assertEquals("terminal recovery dispatches no new-item preflight", 0, preflightCalls.size)
+        assertEquals("same-key replay is the only external journey call", listOf("advance"), events)
+        assertEquals("terminal recovery dispatches no post-advance observation", 0, observePostAdvanceCalls.size)
+        assertEquals("terminal recovery never launches CellRebel", 0, cellRebelRunCalls)
+
+        val recovered = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals("the terminal owner closes", "CLOSED", recovered.aplusState)
+        assertEquals("the durable trusted owner projects succeeded", "succeeded", recovered.status)
+        assertEquals("the original quota is neither duplicated nor discarded", 1, db.trustedQuotaDao().countAll())
+        assertEquals("completed", repo.getTask(firstTaskId)!!.status)
+        assertEquals("pending", repo.getTask(secondTaskId)!!.status)
+        assertEquals("provider exhaustion cannot create an attempt for task 2", 0, db.testAttemptDao().getAttemptsForTask(secondTaskId).size)
+        assertEquals("the incomplete local plan pauses after owner convergence", "paused", db.runSessionDao().getById(sessionId)!!.status)
+
+        val audit = db.auditEventDao().forAttempt(attemptId)
+        if (phase == "ADVANCE_PENDING") {
+            assertEquals(
+                listOf(
+                    "ADVANCE_PENDING->ADVANCE_PENDING",
+                    "ADVANCE_PENDING->ADVANCE_STATE_READBACK",
+                    "ADVANCE_STATE_READBACK->CLOSED"
+                ),
+                audit.filter {
+                    it.eventType in setOf(
+                        AttemptEvent.CRASH_RECOVER.name,
+                        AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED.name,
+                        AttemptEvent.EXHAUSTED_STATE_CONFIRMED.name
+                    )
+                }.map { it.payloadDigest }
+            )
+        } else {
+            assertTrue("persisted readback must not rewind through CRASH_RECOVER", audit.none { it.eventType == AttemptEvent.CRASH_RECOVER.name })
+            assertTrue("persisted readback must not verify the receipt twice", audit.none { it.eventType == AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED.name })
+            assertEquals(
+                "ADVANCE_STATE_READBACK->CLOSED",
+                audit.single { it.eventType == AttemptEvent.EXHAUSTED_STATE_CONFIRMED.name }.payloadDigest
+            )
+        }
+    }
+
+    @Test
+    fun `exhausted recovery lets an ADVANCE_PENDING owner converge before stopping task 2 (issue 88)`() = runTest {
+        assertTerminalOwnerRecoveryClosesBeforeSecondTask("ADVANCE_PENDING")
+    }
+
+    @Test
+    fun `exhausted recovery lets an ADVANCE_STATE_READBACK owner converge before stopping task 2 (issue 88)`() = runTest {
+        assertTerminalOwnerRecoveryClosesBeforeSecondTask("ADVANCE_STATE_READBACK")
+    }
+
+    @Test
+    fun `exhausted recovery does not reinterpret ADVANCE_OBSERVING as a terminal owner (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_OBSERVING")
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val preserved = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("an observation-phase owner cannot represent terminal exhaustion", "ADVANCE_OBSERVING", preserved.aplusState)
+        assertEquals("the ambiguous owner remains recoverable", "running", preserved.status)
+        assertEquals("ambiguous exhausted recovery replays no advance", 0, advanceCalls.size)
+        assertEquals("admission is the only provider call", 1, discoverCalls.size)
+        assertEquals("no new-item preflight", 0, preflightCalls.size)
+        assertEquals("no apply, release, or advance", emptyList<String>(), events)
+        assertEquals("no observation", 0, observePostAdvanceCalls.size)
+        assertEquals("no CellRebel launch", 0, cellRebelRunCalls)
+        assertEquals("task 2 stays attempt-free", 0, db.testAttemptDao().getAttemptsForTask(fixture.secondTaskId).size)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery rejects multiple durable owner candidates (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_PENDING")
+        db.testAttemptDao().insert(
+            TestAttempt(
+                id = 63L,
+                taskId = fixture.secondTaskId,
+                runSessionId = fixture.sessionId,
+                attemptOrdinal = 1,
+                successOrdinal = null,
+                startedAt = 650L,
+                runningObservedAt = null,
+                endedAt = null,
+                status = "running",
+                failureReason = null,
+                webBrowsingScore = null,
+                videoStreamingScore = null,
+                latitude = 40.0,
+                longitude = 116.5,
+                aplusState = "CLOSED",
+                aplusLeaseId = "lease-63",
+                aplusAnchorScheduleId = anchorScheduleId,
+                aplusAnchorItemId = anchorItemId,
+                aplusAnchorVersion = anchorVersion
+            )
+        )
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("ambiguous owners cannot select a replay target", 0, advanceCalls.size)
+        assertEquals("ambiguous owners dispatch no external journey call", emptyList<String>(), events)
+        assertEquals("the original owner remains recoverable", "ADVANCE_PENDING", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("the second candidate is not projected speculatively", "running", db.testAttemptDao().getAttemptById(63L)!!.status)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery rejects a terminal candidate owned by a stale session (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_PENDING")
+        val currentSessionId = repo.createSession(fixture.planId, 900L)
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("a stale-session candidate gets no recovery replay", 0, advanceCalls.size)
+        assertEquals("the already committed provider effect remains singular", 1, advanceEffectCount)
+        assertEquals("no second provider invocation is attempted", 1, advanceInvocationCount)
+        assertEquals("ADVANCE_PENDING", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("running", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.status)
+        assertEquals("paused", db.runSessionDao().getById(currentSessionId)!!.status)
+        assertEquals("task 2 stays attempt-free", 0, db.testAttemptDao().getAttemptsForTask(fixture.secondTaskId).size)
+    }
+
+    @Test
+    fun `exhausted recovery rejects terminal phase whose trusted carrier names another task (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture(
+            phase = "ADVANCE_PENDING",
+            trustedTaskMatchesOwner = false,
+            projectOwnerTask = false
+        )
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("foreign trust cannot authorize an external replay", 0, advanceCalls.size)
+        assertEquals("the already committed provider effect remains singular", 1, advanceEffectCount)
+        val rejected = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("RECOVERY_REQUIRED", rejected.aplusState)
+        assertEquals("ADVANCE_TRUST_TASK_MISMATCH", rejected.failureReason)
+        assertEquals("running", rejected.status)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery rejects terminal phase without durable release authority (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture(
+            phase = "ADVANCE_PENDING",
+            persistReleaseReceipt = false
+        )
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("a bare phase string cannot authorize an external replay", 0, advanceCalls.size)
+        assertEquals("the already committed provider effect remains singular", 1, advanceEffectCount)
+        val rejected = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("RECOVERY_REQUIRED", rejected.aplusState)
+        assertEquals("ADVANCE_RELEASE_AUTHORITY_MISSING", rejected.failureReason)
+        assertEquals("running", rejected.status)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery rejects terminal phase with conflicting trust carriers (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_PENDING")
+        db.unverifiedAttemptRecordDao().insert(
+            com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord(
+                attemptId = fixture.attemptId,
+                reason = "UNTRUSTED",
+                evidenceDigest = "conflicting-carrier"
+            )
+        )
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("conflicting carriers cannot authorize an external replay", 0, advanceCalls.size)
+        val rejected = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("RECOVERY_REQUIRED", rejected.aplusState)
+        assertEquals("ADVANCE_CONFLICTING_TRUST_CARRIERS", rejected.failureReason)
+    }
+
+    @Test
+    fun `exhausted recovery rejects terminal phase below trusted quota (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture(
+            phase = "ADVANCE_PENDING",
+            projectOwnerTask = false,
+            ownerRequiredSuccesses = 2
+        )
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("under-quota trust cannot authorize an external replay", 0, advanceCalls.size)
+        val rejected = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("RECOVERY_REQUIRED", rejected.aplusState)
+        assertEquals("ADVANCE_QUOTA_NOT_REACHED", rejected.failureReason)
+    }
+
+    @Test
+    fun `exhausted recovery rejects terminal phase without a nonempty lease (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_STATE_READBACK")
+        repo.markAplusLease(fixture.attemptId, "")
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("a missing lease cannot authorize an external replay", 0, advanceCalls.size)
+        val rejected = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("RECOVERY_REQUIRED", rejected.aplusState)
+        assertEquals("ADVANCE_LEASE_MISSING", rejected.failureReason)
+    }
+
+    private suspend fun assertExhaustedRecoveryRejectsUnrelatedProviderState(
+        mutate: (CapabilitySnapshotV1) -> CapabilitySnapshotV1
+    ) {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_STATE_READBACK")
+        discoverAnswer = mutate(discoverAnswer!!)
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("an unrelated EXHAUSTED state cannot authorize a replay", 0, advanceCalls.size)
+        assertEquals("the already committed provider effect remains singular", 1, advanceEffectCount)
+        assertEquals("ADVANCE_STATE_READBACK", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("running", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.status)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery rejects provider version that is not the owner anchor successor (issue 88)`() = runTest {
+        assertExhaustedRecoveryRejectsUnrelatedProviderState { it.copy(scheduleVersion = anchorVersion) }
+    }
+
+    @Test
+    fun `exhausted recovery rejects provider schedule that is not the owner anchor successor (issue 88)`() = runTest {
+        assertExhaustedRecoveryRejectsUnrelatedProviderState { it.copy(currentScheduleId = "other-schedule") }
+    }
+
+    @Test
+    fun `exhausted recovery rejects provider item that is not the owner anchor successor (issue 88)`() = runTest {
+        assertExhaustedRecoveryRejectsUnrelatedProviderState { it.copy(currentItemId = "other-item") }
+    }
+
+    @Test
+    fun `exhausted recovery never treats an overflowing anchor version as a successor (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_PENDING")
+        repo.markAplusAdvanceAnchor(fixture.attemptId, anchorScheduleId, anchorItemId, Long.MAX_VALUE)
+        discoverAnswer = discoverAnswer!!.copy(scheduleVersion = Long.MIN_VALUE)
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("overflow cannot manufacture a matching successor", 0, advanceCalls.size)
+        assertEquals("the already committed provider effect remains singular", 1, advanceEffectCount)
+        assertEquals("ADVANCE_PENDING", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery rejects an incompatible provider protocol before replay (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("ADVANCE_PENDING")
+        discoverAnswer = discoverAnswer!!.copy(
+            protocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION + 1
+        )
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        assertEquals("incompatible protocol cannot authorize a replay", 0, advanceCalls.size)
+        assertEquals("the already committed provider effect remains singular", 1, advanceEffectCount)
+        assertEquals("ADVANCE_PENDING", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("running", db.testAttemptDao().getAttemptById(fixture.attemptId)!!.status)
+        assertEquals("paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery still projects a CLOSED owner before stopping task 2 (issue 88)`() = runTest {
+        val fixture = seedExhaustedRecoveryFixture("CLOSED")
+
+        buildEngine(
+            fixture.planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
+
+        val projected = db.testAttemptDao().getAttemptById(fixture.attemptId)!!
+        assertEquals("CLOSED remains the terminal sink", "CLOSED", projected.aplusState)
+        assertEquals("the trusted carrier finishes the local status projection", "succeeded", projected.status)
+        assertEquals("CLOSED projection makes no provider replay", 0, advanceCalls.size)
+        assertEquals("CLOSED projection makes no external journey call", emptyList<String>(), events)
+        assertEquals("CLOSED projection makes no preflight", 0, preflightCalls.size)
+        assertEquals("CLOSED projection makes no observation", 0, observePostAdvanceCalls.size)
+        assertEquals("CLOSED projection never launches CellRebel", 0, cellRebelRunCalls)
+        assertEquals("provider exhaustion keeps task 2 attempt-free", 0, db.testAttemptDao().getAttemptsForTask(fixture.secondTaskId).size)
+        assertEquals("the incomplete plan pauses after projection", "paused", db.runSessionDao().getById(fixture.sessionId)!!.status)
+    }
+
+    @Test
+    fun `exhausted recovery completes an aligned one-task plan after CLOSED projection (issue 88)`() = runTest {
         val (planId, taskId) = seedPlan()
         val sessionId = repo.createSession(planId, 500L)
-        val attemptId = db.testAttemptDao().insert(
+        val attemptId = 62L
+        db.testAttemptDao().insert(
             TestAttempt(
+                id = attemptId,
                 taskId = taskId,
                 runSessionId = sessionId,
                 attemptOrdinal = 1,
@@ -361,8 +932,8 @@ class EngineJourneyConsumerOracleTest {
                 videoStreamingScore = null,
                 latitude = 39.9,
                 longitude = 116.4,
-                aplusState = "ADVANCE_PENDING",
-                aplusLeaseId = "lease-recovery",
+                aplusState = "CLOSED",
+                aplusLeaseId = "lease-$attemptId",
                 aplusAnchorScheduleId = anchorScheduleId,
                 aplusAnchorItemId = anchorItemId,
                 aplusAnchorVersion = anchorVersion
@@ -372,26 +943,30 @@ class EngineJourneyConsumerOracleTest {
             com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
                 attemptId = attemptId,
                 taskId = taskId,
-                evidenceDigest = "durable-before-resume",
+                evidenceDigest = "closed-projection-trust",
                 committedAt = 800L
             )
         )
-        discoverAnswer = discoverAnswer!!.copy(exhausted = true)
-        val before = db.testAttemptDao().getAttemptById(attemptId)!!
+        discoverAnswer = discoverAnswer!!.copy(
+            currentScheduleId = anchorScheduleId,
+            currentItemId = anchorItemId,
+            scheduleVersion = anchorVersion + 1,
+            exhausted = true
+        )
 
-        buildEngine(planId, VClock(), null).run()
+        buildEngine(
+            planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).run()
 
-        assertEquals("recovery admission reads provider terminal truth", 1, discoverCalls.size)
-        assertEquals("EXHAUSTED recovery admission dispatches no preflight", 0, preflightCalls.size)
-        assertEquals("EXHAUSTED recovery admission dispatches no apply/release/advance", 0, events.size)
-        assertEquals("EXHAUSTED recovery admission dispatches no observation", 0, observePostAdvanceCalls.size)
-        assertEquals("EXHAUSTED recovery admission never launches CellRebel", 0, cellRebelRunCalls)
-        assertEquals("EXHAUSTED recovery admission replays no advance", 0, advanceCalls.size)
-        assertEquals("the recoverable phase is preserved", before.aplusState, db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
-        assertEquals("the recoverable status is preserved", before.status, db.testAttemptDao().getAttemptById(attemptId)!!.status)
-        assertEquals("the durable quota carrier is preserved exactly once", 1, db.trustedQuotaDao().countAll())
-        assertEquals("the local task is not fabricated as complete", "pending", repo.getTask(taskId)!!.status)
-        assertEquals("the existing owner session is durably paused", "paused", db.runSessionDao().getById(sessionId)!!.status)
+        val projected = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals("CLOSED", projected.aplusState)
+        assertEquals("succeeded", projected.status)
+        assertEquals("the trusted carrier completes the only task", "completed", repo.getTask(taskId)!!.status)
+        assertEquals("the now-complete aligned plan finishes normally", "completed", db.runSessionDao().getById(sessionId)!!.status)
+        assertEquals("CLOSED projection makes no external journey call", emptyList<String>(), events)
+        assertEquals("CLOSED projection never launches CellRebel", 0, cellRebelRunCalls)
     }
 
     @Test
