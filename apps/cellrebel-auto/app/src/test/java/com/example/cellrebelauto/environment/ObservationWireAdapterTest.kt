@@ -146,8 +146,6 @@ class ObservationWireAdapterTest {
             applyReceiptIntentHash = pre.acceptedIntentHash,
             locallyRecomputedIntentHash = pre.acceptedIntentHash,
             applyReceiptLease = pre.leaseId,
-            targetLat = 39.9, targetLng = 116.4,
-            locationToleranceMeters = 1.0,
             preObservation = pre,
             postObservation = pre.copy(observedAtElapsedRealtimeMs = 14000L)
         )

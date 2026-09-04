@@ -1,29 +1,27 @@
 package com.example.cellrebelauto.environment
 
-import kotlin.math.atan2
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.sqrt
-
 /**
  * Decides whether an observed CellRebel completion may mint a
  * [com.example.cellrebelauto.model.ledger.TrustedQuotaEntry] (§8.1 DECIDING → QUOTA_COMMITTED).
  *
  * Per §8.6 / §9 only VERIFIED_NEW_COMPLETION (wire 1), with pre + post observation bound to the
- * SAME lease (INV-07), three-way intent hash agreement (INV-23), coordinates within tolerance
- * (INV-23), and mode/isMock/coverage/timing cross-consistent with the verification level (INV-27),
- * may PASS. Every other combination FAILs — wires 2-5 never produce trusted quota (INV-11).
+ * SAME lease (INV-07), three-way intent hash agreement (INV-23), and mode/isMock/coverage/timing
+ * cross-consistent with the verification level (INV-27), may PASS. Every other combination FAILs —
+ * wires 2-5 never produce trusted quota (INV-11).
+ *
+ * KB-8: distance-to-intent validation is PROVIDER-EXCLUSIVE (Qianwangyou owns the target and the
+ * exact 1 m validation; §2.2, §6.4.1). Auto carries no local target copy and runs no haversine —
+ * it only checks the provider-verified effective coordinates are finite and in geographic range
+ * (fail-closed on NaN/±Infinity/out-of-range). 
  *
  * GREEN (contract v1 frozen, `feat/pr-2-contract-v1@635a73a8`): the full §6.4 predicate. Both
  * observations are validated INDEPENDENTLY and symmetrically — PRE-only or POST-only validation is
- * a false oracle (F1c). The location tolerance gates on the FROZEN [TRUSTED_LOCATION_TOLERANCE_METERS]
- * constant, NEVER on the caller-supplied [CompletionTrustContext.locationToleranceMeters] (R6-F1
- * caller-tolerance false-oracle; the context field is audit-only). The RUN-phase floor
+ * a false oracle (F1c). The RUN-phase floor
  * (completedAt − runningConfirmedAt ≥ [MIN_RUNNING_EVIDENCE_MS]) rejects sub-10s runs (Sol round-3
  * Finding 1). Continuity comparisons use ONLY `*ElapsedRealtimeMs` fields — the epoch fields are
  * human-readable audit and never enter a predicate (§6.4.2).
  *
- * # 信任策略 GREEN：完整 §6.4 谓词；pre/post 对称独立校验；坐标用冻结 1.0m 常量；仅 monotonic 时钟可比
+ * # 信任策略 GREEN：完整 §6.4 谓词；pre/post 对称独立校验；坐标仅做有限/范围检查（KB-8：距离验证归 provider 独占）；仅 monotonic 时钟可比
  */
 class TrustPolicy {
 
@@ -68,10 +66,6 @@ class TrustPolicy {
         // a sub-10s run is NOT a trusted completion (Sol round-3 Finding 1).
         if (exec.completedAtElapsed - exec.runningConfirmedAtElapsed < MIN_RUNNING_EVIDENCE_MS) return TrustDecision.FAIL
 
-        // R43 (Sol GREEN-review P1-3): the TARGET coordinates must also be finite/in-range — a NaN
-        // target makes the haversine distance NaN, and `NaN > tolerance` is false ⇒ a false PASS.
-        if (!isFiniteGeo(context.targetLat, context.targetLng)) return TrustDecision.FAIL
-
         return TrustDecision.PASS
     }
 
@@ -94,16 +88,10 @@ class TrustPolicy {
         if (obs.acceptedIntentHash != context.applyReceiptIntentHash) return false
 
         // R43 (Sol GREEN-review P1-3): non-finite coordinates are a fail-closed contradiction tuple.
-        // NaN haversine is NaN, and `NaN > tolerance` is false — a NaN lat/lng would otherwise PASS.
-        // ±Infinity and out-of-range values are equally untrustworthy (a coordinate that cannot
-        // exist on Earth cannot bracket an attempt). Validated BEFORE any distance math, for BOTH
-        // the observation's effective coords AND the caller's target coords.
+        // NaN/±Infinity/out-of-range provider coordinates are untrustworthy (a coordinate that cannot
+        // exist on Earth cannot bracket an attempt). This is the ONLY coordinate gate Auto runs —
+        // distance-to-intent validation is provider-exclusive (KB-8), so no Auto-local haversine.
         if (!isFiniteGeo(obs.effectiveLat!!, obs.effectiveLng!!)) return false
-
-        // INV-23: coordinates within the FROZEN tolerance — NEVER the caller-supplied field
-        // (R6-F1 caller-tolerance false-oracle; context.locationToleranceMeters is audit-only).
-        val distanceM = haversineMeters(obs.effectiveLat!!, obs.effectiveLng!!, context.targetLat, context.targetLng)
-        if (distanceM > TRUSTED_LOCATION_TOLERANCE_METERS) return false
 
         return true
     }
@@ -112,22 +100,9 @@ class TrustPolicy {
     private fun isFiniteGeo(lat: Double, lng: Double): Boolean =
         lat.isFinite() && lng.isFinite() && lat in -90.0..90.0 && lng in -180.0..180.0
 
-    /** Great-circle distance in meters (Haversine, R = 6371000 m). */
-    private fun haversineMeters(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
-        val r = 6371000.0
-        val dLat = Math.toRadians(lat2 - lat1)
-        val dLng = Math.toRadians(lng2 - lng1)
-        val a = sin(dLat / 2) * sin(dLat / 2) +
-            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLng / 2) * sin(dLng / 2)
-        return 2 * r * atan2(sqrt(a), sqrt(1 - a))
-    }
-
     companion object {
         /** §8.6.2 VERIFIED_NEW_COMPLETION wire code — the only wire that may mint. */
         const val WIRE_VERIFIED_NEW_COMPLETION = 1
-
-        /** §6.4.2 frozen location tolerance (INV-23) — the ONLY pass threshold; caller fields are audit-only. */
-        const val TRUSTED_LOCATION_TOLERANCE_METERS = 1.0
 
         /** §6.4.2 RUN-phase evidence floor: completedAt − runningConfirmedAt must be at least this. */
         const val MIN_RUNNING_EVIDENCE_MS = 10_000L

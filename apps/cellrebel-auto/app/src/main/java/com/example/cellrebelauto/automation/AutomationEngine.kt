@@ -512,7 +512,7 @@ class AutomationEngine(
                             // §8.1: POST_OBSERVATION_OK → DECIDING is persisted right after the observation succeeds
                             // (Sol round-23 P1-1).
                             planRepository.markAplusState(attemptId, "DECIDING")
-                            // # DECIDE：ctx 由持久 intent（目标坐标、本地重算 hash）+ 后端 artifact 组装（INV-23）
+                            // # DECIDE：ctx 由持久 intent（本地重算 hash，KB-8 后不含坐标）+ 后端 artifact 组装（INV-23）
                             val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId, runSessionId)
                             if (evidence == null) {
                                 aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.OBSERVATION_UNTRUSTED) ?: aplusState
@@ -536,9 +536,6 @@ class AutomationEngine(
                                 applyReceiptIntentHash = evidence.applyReceiptIntentHash,
                                 locallyRecomputedIntentHash = intentDigest,
                                 applyReceiptLease = evidence.applyReceiptLease,
-                                targetLat = task.latitude,
-                                targetLng = task.longitude,
-                                locationToleranceMeters = 1.0,
                                 preObservation = preObservation,
                                 postObservation = postObservation
                             )
@@ -1173,9 +1170,6 @@ class AutomationEngine(
             applyReceiptIntentHash = receipt.acceptedIntentHash,
             locallyRecomputedIntentHash = intentDigest,
             applyReceiptLease = receipt.leaseId,
-            targetLat = crashed.latitude,
-            targetLng = crashed.longitude,
-            locationToleranceMeters = 1.0,
             preObservation = pre,
             postObservation = post
         )

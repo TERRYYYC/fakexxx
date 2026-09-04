@@ -166,7 +166,6 @@ class TrustedLedgerRedTest {
     private val FINGERPRINT = "fp-1"
     private val TARGET_LAT = 40.0
     private val TARGET_LNG = -74.0
-    private val TOLERANCE_M = 1.0 // §6.4.2 TRUSTED_LOCATION_TOLERANCE_METERS (frozen)
     // §6.4.2 monotonic execution window (elapsedRealtime; epoch audit fields are NOT predicates).
     // The RUN phase (completedAt − runningConfirmedAt) must be ≥ §6.4's 10000 ms floor — a sub-10 s run
     // is NOT a trusted completion (Sol round-3 Finding 1). 13000 − 2100 = 10900 ms ≥ 10000.
@@ -222,9 +221,6 @@ class TrustedLedgerRedTest {
         applyReceiptIntentHash = INTENT_HASH,
         locallyRecomputedIntentHash = INTENT_HASH,
         applyReceiptLease = LEASE,
-        targetLat = TARGET_LAT,
-        targetLng = TARGET_LNG,
-        locationToleranceMeters = TOLERANCE_M,
         preObservation = validPre(),
         postObservation = validPost()
     )
@@ -404,17 +400,15 @@ class TrustedLedgerRedTest {
         fail(validContext().copy(preObservation = validPre().copy(effectiveLat = null, effectiveLng = null)))
 
     @Test
-    fun `a coordinate outside the 1_0 m tolerance fails`() =
-        // 0.001 deg latitude ≈ 111 m ≫ 1.0 m tolerance (§6.4.2).
-        fail(validContext().copy(preObservation = validPre().copy(effectiveLat = 40.001)))
-
-    @Test
     fun `KB8 provider-verified coordinates differing from the Auto-local target still pass`() {
         // KB-8: Auto no longer imports/owns address coordinates — Qianwangyou is the SOLE
         // distance-validation authority (§2.2, §6.4/§6.4.1). A canonical verified observation whose
         // effective coordinates are finite, in-range and provider-verified must PASS even when they
         // differ from Auto's retired LOCAL target copy (here PRE+POST both ≈111 m off TARGET_LAT) —
         // the Auto-local haversine/distance gate is authority drift and must not reject the tuple.
+        // Supersedes the retired `coordinate outside the 1_0 m tolerance` negatives: with the
+        // Auto-local distance oracle removed, displacement from the Auto-local copy is no longer a
+        // Auto-side trust predicate (the provider owns the 1 m check).
         assertEquals(
             TrustDecision.PASS,
             TrustPolicy().evaluate(
@@ -486,33 +480,16 @@ class TrustedLedgerRedTest {
     fun `post empty evidenceRefs fails`() =
         fail(validContext().copy(postObservation = validPost().copy(evidenceRefs = emptyList())))
 
-    @Test
-    fun `a post coordinate outside the 1_0 m tolerance fails`() =
-        // Same ~111 m displacement as the PRE coordinate negative, applied to post.
-        fail(validContext().copy(postObservation = validPost().copy(effectiveLat = 40.001)))
-
-    // === R6-F1（§11.7）: closes Sol's round-5 F1 residuals — caller-tolerance false-oracle + un-bound lease + POST intent ===
+    // === R6-F1（§11.7）: closes Sol's round-5 F1 residuals — un-bound lease + POST intent ===
     //
     // Sol's round-5 verdict: R5-F1 was still greenable via (a) the predicate using the CALLER-provided
-    // [CompletionTrustContext.locationToleranceMeters] as the pass threshold (grounding §11.7 line 528 — a
-    // caller injects its own loose bound); (b) observations bound to EACH OTHER but not to the receipt's
-    // lease (no applyReceiptLease field, so a `pre.leaseId == post.leaseId` oracle greened it); and
-    // (c) only the PRE observation's intent hash checked against the receipt. Each negative below defeats
-    // one residual. They all PASS under the FAIL skeleton (trivially) but stay RED under the F1 combined
-    // attack (full §6.4 predicate + caller-tolerance + wrong-lease-acceptance) — verified in the R6-C self-gate.
-
-    @Test
-    fun `R6-F1 a caller-injected loose tolerance does NOT override the frozen 1_0 m bound`() =
-        // §11.7 caller-tolerance false-oracle: caller passes locationToleranceMeters = 50.0 m and a PRE coord
-        // ~20 m off intent (≫ frozen 1.0 m, ≪ 50.0 m). GREEN MUST gate on the FROZEN
-        // TRUSTED_LOCATION_TOLERANCE_METERS (1.0 m), not the caller field ⇒ 20 m > 1.0 m ⇒ FAIL. A bad impl
-        // that does `haversine <= context.locationToleranceMeters` sees 20 m < 50.0 m ⇒ PASS ⇒ fails this.
-        fail(
-            validContext().copy(
-                locationToleranceMeters = 50.0,
-                preObservation = validPre().copy(effectiveLat = TARGET_LAT + 0.00018) // ≈ 20 m off
-            )
-        )
+    // [CompletionTrustContext.locationToleranceMeters] as the pass threshold — RESOLVED by KB-8, which
+    // removed the field and the whole Auto-local distance gate (the caller-tolerance negative is gone
+    // with it); (b) observations bound to EACH OTHER but not to the receipt's lease (no applyReceiptLease
+    // field, so a `pre.leaseId == post.leaseId` oracle greened it); and (c) only the PRE observation's
+    // intent hash checked against the receipt. Each remaining negative below defeats one residual. They
+    // all PASS under the FAIL skeleton (trivially) but stay RED under the F1 combined attack (full §6.4
+    // predicate + wrong-lease-acceptance) — verified in the R6-C self-gate.
 
     @Test
     fun `R6-F1 a POST observation intent hash disagreeing with the receipt fails`() =
@@ -536,8 +513,9 @@ class TrustedLedgerRedTest {
         fail(validContext().copy(preObservation = validPre().copy(leaseId = "L-pre-other")))
 
     // === Non-finite / out-of-range coordinates (Sol GREEN-review P1-3) ===
-    // NaN haversine is NaN and `NaN > 1.0` is false — without an isFinite gate a NaN coordinate
-    // silently PASSes. ±Infinity and out-of-range values are equally untrustworthy.
+    // Provider-reported non-finite or out-of-range coordinates are untrustworthy — a coordinate
+    // that cannot exist on Earth cannot bracket an attempt, so each must fail closed. With the
+    // Auto-local distance oracle gone (KB-8) this finite/range check is the ONLY coordinate gate.
 
     @Test
     fun `a NaN latitude fails closed`() =
@@ -566,11 +544,6 @@ class TrustedLedgerRedTest {
     @Test
     fun `a POST NaN coordinate fails closed (symmetric polarity)`() =
         fail(validContext().copy(postObservation = validPost().copy(effectiveLng = Double.NaN)))
-
-    @Test
-    fun `a NaN TARGET coordinate fails closed even with valid observations`() =
-        // The target itself being non-finite makes the distance NaN ⇒ must fail closed, not pass.
-        fail(validContext().copy(targetLat = Double.NaN))
 
     // ---- AREA 5: production persist+mint entrypoint via PlanRepository (RED — §11.2 F1 / §11.4) ----
     //
