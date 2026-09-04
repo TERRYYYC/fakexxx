@@ -181,10 +181,14 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
   --es fixture_digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852 \
   [--el global_buffer_seconds 60]
 #   判据：logcat ECAPlusSeed 出 fixtureIndex↔taskId↔journeyCaseId↔requiredSuccesses 映射
-#   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId。
+#   （LocationTask 无 journeyCaseId 字段——该映射是唯一归因来源）+ planId + `SEED_BOUND … seed_token=`（下一步 start_run 的唯一凭据）。
 
 # Auto：启动 run（产品自身入口 AutomationService.startAutomation；无障碍服务须已启用）
-adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity --es cmd start_run --el plan_id <planId>
+adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integration.v1.APlusSeedActivity --es cmd start_run --el plan_id <planId> --es seed_token <seed_token>
+#   plan_id + seed_token 都来自最近一次 seed_plan 报告的 `SEED_BOUND generation=N plan=<id> seed_token=<token>` 行。
+#   start_run 只接受「最新一次 seed」的 (plan_id, seed_token)（merge-gate P1 3898022696：seed_plan 每次 insert 新 plan、
+#   旧 plan 不删，拓扑相同的旧 planId 会启动旧 task/attempt/quota 状态却自称 plan-bound）——无记录 / 旧 id / 错 token
+#   一律 REFUSED（fail-closed；pm clear 会连记录一起清，需重新 seed）。
 #   planId 必须是 seed_plan 种出的 FX-G2-10A plan——start_run 会校验拓扑
 #   （sourceFileName=FX-G2-10A / 10 行 / quota 冻结向量 [2,1,3,1,2,1,1,3,1,2] / csvRow 1..10 /
 #   坐标列仍是 KB-8 占位），拓扑不符（外来 CSV import、错 id、同总额再分配）即 REFUSED（P2/P4）。

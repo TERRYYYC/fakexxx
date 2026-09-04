@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.util.Base64
+import android.os.SystemClock
 import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
@@ -136,9 +137,31 @@ class APlusSeedActivity : Activity() {
         }
         // seedReport throws if the inserted task count diverges — no green over a partial seed.
         // PR #62 P1-1: emit only the independently verified REGISTERED digest.
-        append(APlus10APlanSeed.seedReport(items, planId, taskIds, APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST))
+        val seedReport = APlus10APlanSeed.seedReport(items, planId, taskIds, APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST)
+        // PR #62 merge-gate P1 (codex inline 3898022696, Sol @ faf561d): every seed_plan inserts a
+        // NEW plan and the earlier FX-G2-10A plans stay in the DB with identical topology, so
+        // start_run must be bound to THIS seed's identity, not to "a plan that matches". Record the
+        // latest seed only after seedReport proved the seed complete, and under START_RUN_LOCK so a
+        // concurrent start_run reads either the previous record or this one — never a torn write.
+        val latest = synchronized(START_RUN_LOCK) {
+            APlusSeedBinding.record(
+                prefs = APlusSeedBinding.prefs(applicationContext),
+                planId = planId,
+                token = APlusSeedBinding.newToken(),
+                fixtureDigest = APlus10APlanSeed.REGISTERED_FIXTURE_DIGEST,
+                seededAtElapsedMs = SystemClock.elapsedRealtime(),
+            )
+        }
+        append(seedReport)
+        appendLine(
+            "SEED_BOUND generation=${latest.generation} plan=$planId " +
+                "${APlusSeedBinding.EXTRA_SEED_TOKEN}=${latest.token} (earlier seeds are no longer startable)",
+        )
         appendLine()
-        appendLine("NEXT: start the run with --es cmd start_run --el plan_id $planId (accessibility service must be enabled)")
+        appendLine(
+            "NEXT: start the run with --es cmd start_run --el plan_id $planId " +
+                "--es ${APlusSeedBinding.EXTRA_SEED_TOKEN} ${latest.token} (accessibility service must be enabled)",
+        )
     }
 
     private fun StringBuilder.startRun(intent: Intent?) {
@@ -147,6 +170,7 @@ class APlusSeedActivity : Activity() {
             appendLine("REFUSED: start_run needs --el plan_id <id> (from a prior seed_plan)")
             return
         }
+        val seedToken = intent?.getStringExtra(APlusSeedBinding.EXTRA_SEED_TOKEN)
         // PR #62 R3 P2: bind to the SEEDED FX-G2-10A plan/topology, not any
         // planId. A run started against a foreign plan (a leftover CSV import,
         // a wrong id) would execute the wrong journeys and mis-attribute.
@@ -192,6 +216,22 @@ class APlusSeedActivity : Activity() {
         //     rejected US. Hence accepted_observed + exactly one new session > M
         //     + plan-bound + first-attempt milestone ⇒ the session is ours.
         synchronized(START_RUN_LOCK) {
+            // PR #62 merge-gate P1 (3898022696): identity FIRST — the exact latest seed_plan
+            // (plan_id AND seed_token), read under the same lock seed_plan writes it. The topology
+            // check above proves structure; this proves it is THIS seed and not a stale one whose
+            // tasks may already carry statuses, attempts and trusted-quota rows.
+            val bindingMismatch = APlusSeedBinding.verifyLatestSeed(
+                APlusSeedBinding.prefs(applicationContext), planId, seedToken,
+            )
+            if (bindingMismatch != null) {
+                appendLine("REFUSED: $bindingMismatch")
+                appendLine(
+                    "RUN_NOT_STARTED: start_run is bound to the exact latest seed_plan — " +
+                        "re-run seed_plan and use the plan_id + seed_token it prints.",
+                )
+                return
+            }
+            appendLine("START_BINDING latest_seed plan=$planId ok")
             appendLine("[start_run] AutomationService.startAutomation(plan=$planId) — the product's own run entry.")
             val serviceInstance = AutomationService::class.java
                 .getDeclaredField(SERVICE_INSTANCE_FIELD)
@@ -327,7 +367,7 @@ class APlusSeedActivity : Activity() {
         // extra-type discipline; ExtraCoerce tolerates --ei/--es but the
         // documented spelling must not teach the silent-default typo.
         appendLine("seed_plan: --es cmd seed_plan --es $EXTRA_FIXTURE_PAYLOAD_B64 <base64> --es $EXTRA_FIXTURE_DIGEST <sha256> [--el global_buffer_seconds 60]")
-        appendLine("start_run: --es cmd start_run --el plan_id <id>")
+        appendLine("start_run: --es cmd start_run --el plan_id <id> --es ${APlusSeedBinding.EXTRA_SEED_TOKEN} <token from the latest seed_plan report>")
     }
 
     private companion object {

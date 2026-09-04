@@ -573,4 +573,51 @@ class P10CollectorSurfaceGuardTest {
             debugCode().contains(collectorMarker),
         )
     }
+
+    // ------------------------------------------------------------------
+    // PR #62 merge-gate P1 (codex inline 3898022696, re-verified by Sol @ faf561d):
+    // start_run must be bound to the EXACT latest seed_plan invocation, not to
+    // "any plan whose topology matches". seed_plan inserts a new plan every time
+    // and never deletes earlier FX-G2-10A plans, so a stale planId replayed from
+    // an older seed report would start old task/attempt/quota state while this
+    // surface still reports the run as plan-bound — a harness false green.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `start_run is bound to the exact latest seed_plan and stale plan ids fail closed`() {
+        val bindingFile = File(debugSourceDir, "APlusSeedBinding.kt")
+        assertTrue(
+            "APlusSeedBinding.kt must exist in the debug source set — the durable latest-seed carrier",
+            bindingFile.isFile,
+        )
+        val sources = kotlinSourcesWithoutComments(debugSourceDir)
+        val bindingSrc = sources.first { it.first.name == "APlusSeedBinding.kt" }.second
+        val activitySrc = sources.first { it.first.name == "APlusSeedActivity.kt" }.second
+
+        // seed_plan records THIS seed as the only startable one.
+        assertTrue(
+            "seed_plan must persist the latest seed via APlusSeedBinding.record(",
+            activitySrc.contains("APlusSeedBinding.record("),
+        )
+        // start_run verifies identity (latest planId + seed_token) INSIDE the single-flight lock,
+        // so the check is atomic with the seed record write.
+        val startRunAt = activitySrc.indexOf("fun StringBuilder.startRun(")
+        val lockAt = activitySrc.indexOf("synchronized(START_RUN_LOCK)", startRunAt)
+        val verifyAt = activitySrc.indexOf("APlusSeedBinding.verifyLatestSeed(", startRunAt)
+        assertTrue("startRun must exist", startRunAt >= 0)
+        assertTrue("startRun must take START_RUN_LOCK", lockAt > startRunAt)
+        assertTrue(
+            "start_run must call APlusSeedBinding.verifyLatestSeed( under START_RUN_LOCK",
+            verifyAt > lockAt,
+        )
+        // Three fail-closed refusal shapes are named in the carrier: no record / stale id / wrong token.
+        for (needle in listOf("no verified seed recorded", "is not the latest seed", "seed_token does not match")) {
+            assertTrue("APlusSeedBinding must refuse with '$needle'", bindingSrc.contains(needle))
+        }
+        // The documented spelling must teach the token so the runbook cannot drift back to plan_id-only.
+        assertTrue(
+            "usage must document --es seed_token",
+            activitySrc.contains("--es seed_token") || activitySrc.contains("--es \${APlusSeedBinding.EXTRA_SEED_TOKEN}"),
+        )
+    }
 }
