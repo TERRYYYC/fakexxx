@@ -234,6 +234,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun findAPlusRecoverableAttempts(planId: Long): List<TestAttempt> =
         db.testAttemptDao().findAplusRecoverableAttempts(planId)
 
+    /** Re-read the durable Attempt owner after a recovery step changes its phase. */
+    suspend fun getAttempt(attemptId: Long): TestAttempt? =
+        db.testAttemptDao().getAttemptById(attemptId)
+
     /** The active (running) session the recovery supersedes rather than duplicating (Sol round-8 P1-6). */
     suspend fun findActiveRunSession(planId: Long): RunSession? =
         db.runSessionDao().findActiveRunningSession(planId)

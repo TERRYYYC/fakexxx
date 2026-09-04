@@ -84,33 +84,35 @@ class APlusAttemptDriverRedTest {
     }
 
     @Test
-    fun `the full canonical happy path driven through the production driver reaches CLOSED and appends one audit row per transition`() = runTest {
-        val attemptId = 991L
-        // THE no-call-site kill at scale: drive the frozen §8.1 happy-path event sequence THROUGH the
-        // production driver (NOT AttemptTransitions.next directly), and assert it traverses end-to-end to
-        // CLOSED with a full durable audit trail. Under the skeleton the walk stays CREATED (the driver is
-        // a no-op) and zero rows are appended. A table-only attack (table complete, driver still no-op)
-        // fails identically — proving the table is unreachable from any persisting entry.
-        var state = AttemptState.CREATED
-        for (event in APlusRunTemplate.TRUSTED_SYSTEM_MOCK_BATCH_V1.canonicalEventSequence) {
-            state = driver.driveTransition(attemptId, state, event)
-        }
-        assertEquals(
-            "the frozen canonical happy path driven through the production driver must reach CLOSED " +
-                "(got $state — under the skeleton / a table-only attack the walk never leaves CREATED)",
-            AttemptState.CLOSED,
-            state
-        )
-        val events = db.auditEventDao().forAttempt(attemptId)
-        assertEquals(
-            "each of the ${APlusRunTemplate.CANONICAL_HAPPY_PATH.size} canonical transitions must append a " +
-                "durable audit event (the end-to-end audit trail)",
-            APlusRunTemplate.CANONICAL_HAPPY_PATH.size,
-            events.size
-        )
-        assertTrue(
-            "every audit row must bind to the real attempt identity",
-            events.all { it.attemptId == 991L }
-        )
+    fun `all conditional canonical paths driven through the production driver reach CLOSED with complete audit`() = runTest {
+        // THE no-call-site kill at scale: drive each route-aware §8.1 path THROUGH the production
+        // driver. A table-only implementation or a generic RELEASE_RECEIPT call cannot satisfy this.
+        APlusRunTemplate.TRUSTED_SYSTEM_MOCK_BATCH_V1.canonicalAttemptPaths
+            .forEachIndexed { index, path ->
+                val attemptId = 991L + index
+                var state = AttemptState.CREATED
+                for (event in path.eventSequence) {
+                    state = if (event == AttemptEvent.RELEASE_RECEIPT) {
+                        driver.driveReleaseReceipt(attemptId, state, path.releaseRoute)
+                    } else {
+                        driver.driveTransition(attemptId, state, event)
+                    }
+                }
+                assertEquals(
+                    "conditional path ${path.releaseRoute}/${path.eventSequence.last()} must reach CLOSED",
+                    AttemptState.CLOSED,
+                    state
+                )
+                val events = db.auditEventDao().forAttempt(attemptId)
+                assertEquals(
+                    "each declared transition must append one durable audit event",
+                    path.eventSequence.size,
+                    events.size
+                )
+                assertTrue(
+                    "every audit row must bind to the real attempt identity",
+                    events.all { it.attemptId == attemptId }
+                )
+            }
     }
 }

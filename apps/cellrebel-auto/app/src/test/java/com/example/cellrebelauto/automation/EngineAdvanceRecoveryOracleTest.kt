@@ -2,6 +2,7 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.plan.LocationPlan
@@ -53,6 +54,15 @@ class EngineAdvanceRecoveryOracleTest {
     private val anchorVersion = 12L
 
     private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
+    private data class StoredAdvance(
+        val requestDigest: String,
+        val receipt: AdvanceReceiptV1
+    )
+    private val storedAdvances = mutableMapOf<String, StoredAdvance>()
+    private var advanceInvocationCount = 0
+    private var advanceEffectCount = 0
+    private var observeCalls = 0
+    private var discoverCalls = 0
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = "item-recovery-3b", advancedToItemId = "item-after-9z",
         scheduleVersionAfter = 13L, effectiveIntentHash = "eff-recovery",
@@ -64,15 +74,18 @@ class EngineAdvanceRecoveryOracleTest {
             ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
         override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome =
             ApplyOutcome("RELEASED", false)
-        override fun discover(): CapabilitySnapshotV1? = CapabilitySnapshotV1(
-            serviceVersion = "fake-1.0",
-            supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
-            supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
-            continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
-            environmentRevision = 7L,
-            profileRefs = listOf("p"), scheduleRefs = listOf("s"),
-            currentScheduleId = anchorScheduleId, currentItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
-        )
+        override fun discover(): CapabilitySnapshotV1? {
+            discoverCalls++
+            return CapabilitySnapshotV1(
+                serviceVersion = "fake-1.0",
+                supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
+                supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
+                continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
+                environmentRevision = 7L,
+                profileRefs = listOf("p"), scheduleRefs = listOf("s"),
+                currentScheduleId = anchorScheduleId, currentItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
+            )
+        }
         override fun preflight(intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): PreflightReportV1? =
             PreflightReportV1(
                 acceptedIntentHash = requestDigest,
@@ -84,6 +97,7 @@ class EngineAdvanceRecoveryOracleTest {
                 scheduleItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
             )
         override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
+            observeCalls++
             val r = advanceAnswer ?: return null
             if (r.advancedToItemId == null) return null
             return EnvironmentObservationV1(
@@ -101,12 +115,54 @@ class EngineAdvanceRecoveryOracleTest {
             )
         }
         override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+            advanceInvocationCount++
             advanceReplays += request
+            storedAdvances[request.idempotencyKey]?.let { stored ->
+                return if (stored.requestDigest == request.requestDigest) stored.receipt else null
+            }
             val base = advanceAnswer ?: return null
-            return base.copy(
+            val receipt = base.copy(
                 receiptDigest = CanonicalAdvanceReceiptDigestV1.compute(base, request.requestDigest, request.idempotencyKey)
             )
+            storedAdvances[request.idempotencyKey] = StoredAdvance(request.requestDigest, receipt)
+            advanceEffectCount++
+            return receipt
         }
+    }
+
+    private fun expectedAdvanceRequest(): CompleteAndAdvanceRequestV1 {
+        val base = CompleteAndAdvanceRequestV1(
+            leaseId = "lease-31",
+            idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(31L),
+            requestDigest = "",
+            expectedScheduleId = anchorScheduleId,
+            expectedScheduleVersion = anchorVersion,
+            expectedCurrentItemId = anchorItemId,
+            completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
+                scheduleItemId = anchorItemId,
+                trustedSuccessCount = 1,
+                quotaRequired = 1,
+                ledgerRef = "ledger-31",
+                verifiedAtElapsedRealtimeMs = 99999L
+            ),
+            callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        )
+        return base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base))
+    }
+
+    /** Models the provider effect that happened before the process died at ADVANCE_OBSERVING. */
+    private fun seedAdvanceEffect(request: CompleteAndAdvanceRequestV1) {
+        val base = checkNotNull(advanceAnswer)
+        val receipt = base.copy(
+            receiptDigest = CanonicalAdvanceReceiptDigestV1.compute(
+                base,
+                request.requestDigest,
+                request.idempotencyKey
+            )
+        )
+        storedAdvances[request.idempotencyKey] = StoredAdvance(request.requestDigest, receipt)
+        advanceInvocationCount = 1
+        advanceEffectCount = 1
     }
 
     // Minimal non-null source: the ADVANCE_* recovery branch reads DURABLE state only (the mint
@@ -223,16 +279,101 @@ class EngineAdvanceRecoveryOracleTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("the crashed attempt closed TRUSTED (the mint was durable)", "succeeded", attempt.status)
         assertEquals("CLOSED", attempt.aplusState)
+        assertEquals(
+            listOf(
+                "ADVANCE_PENDING->ADVANCE_PENDING",
+                "ADVANCE_PENDING->ADVANCE_OBSERVING",
+                "ADVANCE_OBSERVING->CLOSED"
+            ),
+            db.auditEventDao().forAttempt(31L)
+                .filter { it.eventType in setOf(
+                    AttemptEvent.CRASH_RECOVER.name,
+                    AttemptEvent.ADVANCE_RECEIPT_VERIFIED.name,
+                    AttemptEvent.OBSERVED_TUPLE_MATCHES.name
+                ) }
+                .map { it.payloadDigest }
+        )
     }
 
     @Test
     fun `an ADVANCE_OBSERVING crash resumes through the same replay and verification`() = runTest {
         val (planId, taskId) = seedCrashedAt("ADVANCE_OBSERVING")
+        val originalRequest = expectedAdvanceRequest()
+        seedAdvanceEffect(originalRequest)
         val clock = VClock()
         buildEngine(planId, clock).run()
 
         assertEquals("the observation-phase crash also replays + verifies (idempotent provider returns the stored receipt)", 1, advanceReplays.size)
+        assertEquals(originalRequest.idempotencyKey, advanceReplays.single().idempotencyKey)
+        assertEquals(originalRequest.requestDigest, advanceReplays.single().requestDigest)
+        assertEquals("one original call plus one recovery replay", 2, advanceInvocationCount)
+        assertEquals("the replay must not apply a second provider advance effect", 1, advanceEffectCount)
         assertEquals("closed trusted", "succeeded", db.testAttemptDao().getAttemptById(31L)!!.status)
+        val audit = db.auditEventDao().forAttempt(31L)
+        assertEquals(
+            "recovery must not rewind an already verified receipt to ADVANCE_PENDING",
+            0,
+            audit.count { it.eventType == AttemptEvent.ADVANCE_RECEIPT_VERIFIED.name }
+        )
+        assertEquals(
+            "ADVANCE_OBSERVING->CLOSED",
+            audit.single { it.eventType == AttemptEvent.OBSERVED_TUPLE_MATCHES.name }.payloadDigest
+        )
+    }
+
+    @Test
+    fun `a non-terminal receipt contradicting ADVANCE_STATE_READBACK does not forge a readback mismatch audit`() = runTest {
+        val (planId, taskId) = seedCrashedAt("ADVANCE_STATE_READBACK")
+        val clock = VClock()
+
+        buildEngine(planId, clock).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals(
+            "ADVANCE_RECEIPT_PHASE_CONTRADICTION:ADVANCE_STATE_READBACK:ADVANCED",
+            attempt.failureReason
+        )
+        assertEquals("phase contradiction must not execute observe", 0, observeCalls)
+        assertEquals("phase contradiction must not execute discover readback", 0, discoverCalls)
+        assertTrue(
+            "without a readback there must be no EXHAUSTED_STATE_MISMATCH audit",
+            db.auditEventDao().forAttempt(31L).none {
+                it.eventType == AttemptEvent.EXHAUSTED_STATE_MISMATCH.name
+            }
+        )
+    }
+
+    @Test
+    fun `an exhausted receipt contradicting ADVANCE_OBSERVING does not forge an observe mismatch audit`() = runTest {
+        advanceAnswer = AdvanceReceiptV1(
+            outcomeWire = io.github.terryyyc.fakexxx.contract.v1.AdvanceOutcomeV1.EXHAUSTED.wire,
+            advancedFromItemId = anchorItemId,
+            advancedToItemId = null,
+            scheduleVersionAfter = anchorVersion + 1,
+            effectiveIntentHash = "eff-recovery",
+            effectiveEnvironmentRevision = 7L,
+            receiptDigest = "filled-at-call"
+        )
+        val (planId, taskId) = seedCrashedAt("ADVANCE_OBSERVING")
+        val clock = VClock()
+
+        buildEngine(planId, clock).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals(
+            "ADVANCE_RECEIPT_PHASE_CONTRADICTION:ADVANCE_OBSERVING:EXHAUSTED",
+            attempt.failureReason
+        )
+        assertEquals("phase contradiction must not execute observe", 0, observeCalls)
+        assertEquals("phase contradiction must not execute discover readback", 0, discoverCalls)
+        assertTrue(
+            "without an observation there must be no OBSERVED_TUPLE_MISMATCH audit",
+            db.auditEventDao().forAttempt(31L).none {
+                it.eventType == AttemptEvent.OBSERVED_TUPLE_MISMATCH.name
+            }
+        )
     }
 
     @Test
@@ -294,6 +435,12 @@ class EngineAdvanceRecoveryOracleTest {
         assertEquals(
             "a receipt that does not bind this request is not a receipt — fail-closed (killing mutation: digest check removed ⇒ succeeded)",
             "RECOVERY_REQUIRED", attempt.aplusState
+        )
+        assertEquals(
+            "ADVANCE_PENDING->RECOVERY_REQUIRED",
+            db.auditEventDao().forAttempt(31L)
+                .single { it.eventType == AttemptEvent.ADVANCE_DIGEST_MISMATCH.name }
+                .payloadDigest
         )
     }
 
@@ -412,6 +559,18 @@ class EngineAdvanceRecoveryOracleTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("honest exhausted receipt + matching readback ⇒ CLOSED", "CLOSED", attempt.aplusState)
         assertEquals("closed trusted", "succeeded", attempt.status)
+        assertEquals(
+            listOf(
+                "ADVANCE_PENDING->ADVANCE_STATE_READBACK",
+                "ADVANCE_STATE_READBACK->CLOSED"
+            ),
+            db.auditEventDao().forAttempt(31L)
+                .filter { it.eventType in setOf(
+                    AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED.name,
+                    AttemptEvent.EXHAUSTED_STATE_CONFIRMED.name
+                ) }
+                .map { it.payloadDigest }
+        )
     }
 
     // ---- M-AD-17: Non-terminal observe intentHash mismatch → RECOVERY_REQUIRED ----
@@ -441,6 +600,12 @@ class EngineAdvanceRecoveryOracleTest {
             "RECOVERY_REQUIRED", attempt.aplusState
         )
         assertEquals("running", attempt.status)
+        assertEquals(
+            "ADVANCE_OBSERVING->RECOVERY_REQUIRED",
+            db.auditEventDao().forAttempt(31L)
+                .single { it.eventType == AttemptEvent.OBSERVED_TUPLE_MISMATCH.name }
+                .payloadDigest
+        )
     }
 
     // ---- M-AD-18: Non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED ----

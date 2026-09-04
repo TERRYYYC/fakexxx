@@ -189,22 +189,29 @@ class APlusTemplateRedTest {
     }
 
     @Test
-    fun `the frozen canonical event sequence driven through the real state machine walks CREATED to CLOSED`() {
-        // THE integration oracle (Sol's standard). Drive the template's frozen §8.1 happy-path event
-        // sequence through the REAL [AttemptTransitions.next] — the walk is computed HERE, independently
-        // of any template-authored result — and assert it lands on CLOSED.
+    fun `every frozen conditional path driven through the real state machine walks CREATED to CLOSED`() {
+        // THE integration oracle (Sol's standard). Drive all three §8.1 receipt/advance paths through
+        // the REAL reducer. RELEASE_RECEIPT is route-aware: committed-under-quota closes, while
+        // quota-reached must cross the non-terminal observation or exhausted readback suffix.
         // RED under the skeleton: [AttemptTransitions.next] returns `current`, so the walk never leaves
         // CREATED ⇒ the final state is CREATED, not CLOSED. GREEN must implement the full §8.1 table for
         // the chain to traverse end-to-end. A bad impl that asserts a mapping or precomputes CLOSED
         // inside the template cannot fool this — it does not read any template-authored field.
-        val walked = APlusRunTemplate.TRUSTED_SYSTEM_MOCK_BATCH_V1.canonicalEventSequence
-            .fold(AttemptState.CREATED) { state, event -> AttemptTransitions.next(state, event) }
-        assertEquals(
-            "the frozen canonical event sequence driven through the real state machine must reach CLOSED " +
-                "(got $walked — the skeleton no-op leaves the walk at CREATED)",
-            AttemptState.CLOSED,
-            walked
-        )
+        for (path in APlusRunTemplate.TRUSTED_SYSTEM_MOCK_BATCH_V1.canonicalAttemptPaths) {
+            val walked = path.eventSequence.fold(AttemptState.CREATED) { state, event ->
+                if (event == AttemptEvent.RELEASE_RECEIPT) {
+                    AttemptTransitions.nextAfterReleaseReceipt(state, path.releaseRoute)
+                } else {
+                    AttemptTransitions.next(state, event)
+                }
+            }
+            assertEquals(
+                "the frozen conditional path ${path.releaseRoute}/${path.eventSequence.last()} must " +
+                    "reach CLOSED (got $walked)",
+                AttemptState.CLOSED,
+                walked
+            )
+        }
     }
 
     @Test
@@ -214,7 +221,7 @@ class APlusTemplateRedTest {
         // close (no silent terminalization; §8.1: only RELEASE_PENDING + RELEASE_RECEIPT ⇒ CLOSED). Under
         // the skeleton the walk stays CREATED (≠ CLOSED); under a correct GREEN table it ends at
         // RELEASE_PENDING (≠ CLOSED). Either way this holds; it binds GREEN to honor the release receipt.
-        val noRelease = APlusRunTemplate.CANONICAL_HAPPY_PATH.dropLast(1) // drop the terminal RELEASE_RECEIPT
+        val noRelease = APlusRunTemplate.CANONICAL_RELEASE_PREFIX
         val walked = noRelease.fold(AttemptState.CREATED) { s, e -> AttemptTransitions.next(s, e) }
         assertTrue(
             "a sequence with no RELEASE_RECEIPT must not reach CLOSED (no silent close); got $walked",

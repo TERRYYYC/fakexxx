@@ -47,7 +47,32 @@ class APlusAttemptDriver(
         current: AttemptState,
         event: AttemptEvent
     ): AttemptState {
+        require(event != AttemptEvent.RELEASE_RECEIPT) {
+            "RELEASE_RECEIPT requires an authoritative ReleaseReceiptRoute"
+        }
         val next = AttemptTransitions.next(current, event)
+        appendAudit(attemptId, current, event, next)
+        return next
+    }
+
+    /** Drive the conditional §8.1 release-receipt edge without losing its authoritative route. */
+    suspend fun driveReleaseReceipt(
+        attemptId: Long,
+        current: AttemptState,
+        route: ReleaseReceiptRoute
+    ): AttemptState {
+        val next = AttemptTransitions.nextAfterReleaseReceipt(current, route)
+        appendAudit(attemptId, current, AttemptEvent.RELEASE_RECEIPT, next, route)
+        return next
+    }
+
+    private suspend fun appendAudit(
+        attemptId: Long,
+        current: AttemptState,
+        event: AttemptEvent,
+        next: AttemptState,
+        releaseRoute: ReleaseReceiptRoute? = null
+    ) {
         val seq = auditDao.count().toLong() + 1
         auditDao.insert(
             AutoAuditEvent(
@@ -55,10 +80,12 @@ class APlusAttemptDriver(
                 attemptId = attemptId,
                 correlationRef = null,
                 eventType = event.name,
-                payloadDigest = "$current->$next",
+                payloadDigest = buildString {
+                    append("$current->$next")
+                    releaseRoute?.let { append("[$it]") }
+                },
                 recordedAt = nowMs()
             )
         )
-        return next
     }
 }

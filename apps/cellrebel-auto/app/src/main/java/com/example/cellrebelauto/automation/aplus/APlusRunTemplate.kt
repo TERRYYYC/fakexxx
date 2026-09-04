@@ -9,9 +9,10 @@ package com.example.cellrebelauto.automation.aplus
  * The template calls a FIXED sequence of typed steps (§3.1):
  *   discover → preflight → apply → observe(pre) → CellRebel → observe(post) → decide → count → release
  *
- * Each attempt driven by this template must walk the §8.1 state machine from CREATED to CLOSED along
- * the canonical happy path. [canonicalEventSequence] is that path's §8.1 events, in order, frozen
- * straight from the §8.1 transition table — the same table [AttemptTransitions.next] must implement.
+ * Each attempt driven by this template walks the §8.1 state machine from CREATED to CLOSED along one
+ * of the three conditional receipt/advance paths in [canonicalAttemptPaths]. The release receipt is
+ * not a bare event: [CanonicalAttemptPath.releaseRoute] carries the authoritative quota predicate
+ * that selects CLOSED vs ADVANCE_PENDING.
  *
  * PRE-FREEZE SKELETON: the template carries only frozen DATA (the step + event sequence), which is spec
  * ground truth (§2.2 "冻结" / §3.1 step list / §8.1 table) — it declares NO behavior. The RED lives in
@@ -26,8 +27,8 @@ sealed class APlusRunTemplate {
     /** The frozen §3.1 typed-step sequence (product-level boundaries; the order is not a plugin point). */
     abstract val typedSteps: List<APlusTypedStep>
 
-    /** The frozen §8.1 happy-path event sequence the state machine must honor for this template. */
-    abstract val canonicalEventSequence: List<AttemptEvent>
+    /** The frozen §8.1 conditional paths the state machine must honor for this template. */
+    abstract val canonicalAttemptPaths: List<CanonicalAttemptPath>
 
     /**
      * TRUSTED_SYSTEM_MOCK_BATCH_V1 — the single frozen A+ template (§2.2). It accepts only
@@ -35,22 +36,26 @@ sealed class APlusRunTemplate {
      */
     object TRUSTED_SYSTEM_MOCK_BATCH_V1 : APlusRunTemplate() {
         override val typedSteps: List<APlusTypedStep> = APlusTypedStep.entries
-        override val canonicalEventSequence: List<AttemptEvent> = CANONICAL_HAPPY_PATH
+        override val canonicalAttemptPaths: List<CanonicalAttemptPath> = listOf(
+            CANONICAL_UNDER_QUOTA_PATH,
+            CANONICAL_QUOTA_REACHED_NON_TERMINAL_PATH,
+            CANONICAL_QUOTA_REACHED_EXHAUSTED_PATH
+        )
     }
 
     companion object {
         /**
-         * §8.1 happy path, frozen from the transition table (CREATED → CLOSED):
+         * Shared §8.1 prefix, frozen from the transition table (CREATED → RELEASE_PENDING):
          *   CREATED –BEGIN_APPLY→ APPLY_PENDING –APPLY_RECEIPT→ ENV_APPLIED –PRE_OBSERVATION_OK→
          *   PRE_OBSERVED –START_CELLREBEL→ CELLREBEL_START_PENDING –NEW_RUN_OBSERVED→ CELLREBEL_RUNNING
          *   –COMPLETION_OBSERVED→ POST_OBSERVE_PENDING –POST_OBSERVATION_OK→ DECIDING –TRUST_POLICY_PASS→
-         *   QUOTA_COMMITTED –BEGIN_RELEASE→ RELEASE_PENDING –RELEASE_RECEIPT→ CLOSED.
+         *   QUOTA_COMMITTED –BEGIN_RELEASE→ RELEASE_PENDING.
          *
-         * This is spec ground truth (the same table [AttemptTransitions.next] must implement), not GREEN
-         * logic — encoding it here freezes the template's declared sequence so an integration oracle can
-         * drive it through the real state machine and prove the machine honors it.
+         * The conditional receipt route and any advance-verification suffix live in the named path
+         * objects below; collapsing them into one `RELEASE_RECEIPT → CLOSED` path would erase §8.1's
+         * quota-reached branch.
          */
-        val CANONICAL_HAPPY_PATH: List<AttemptEvent> = listOf(
+        val CANONICAL_RELEASE_PREFIX: List<AttemptEvent> = listOf(
             AttemptEvent.BEGIN_APPLY,
             AttemptEvent.APPLY_RECEIPT,
             AttemptEvent.PRE_OBSERVATION_OK,
@@ -59,8 +64,33 @@ sealed class APlusRunTemplate {
             AttemptEvent.COMPLETION_OBSERVED,
             AttemptEvent.POST_OBSERVATION_OK,
             AttemptEvent.TRUST_POLICY_PASS,
-            AttemptEvent.BEGIN_RELEASE,
-            AttemptEvent.RELEASE_RECEIPT
+            AttemptEvent.BEGIN_RELEASE
+        )
+
+        /** Committed but under-quota: the durable release receipt closes without advancing. */
+        val CANONICAL_UNDER_QUOTA_PATH = CanonicalAttemptPath(
+            releaseRoute = ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA,
+            eventSequence = CANONICAL_RELEASE_PREFIX + AttemptEvent.RELEASE_RECEIPT
+        )
+
+        /** Quota reached, non-terminal advance: verify receipt, then independently match four legs. */
+        val CANONICAL_QUOTA_REACHED_NON_TERMINAL_PATH = CanonicalAttemptPath(
+            releaseRoute = ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED,
+            eventSequence = CANONICAL_RELEASE_PREFIX + listOf(
+                AttemptEvent.RELEASE_RECEIPT,
+                AttemptEvent.ADVANCE_RECEIPT_VERIFIED,
+                AttemptEvent.OBSERVED_TUPLE_MATCHES
+            )
+        )
+
+        /** Quota reached, exhausted advance: verify receipt, then independently confirm readback. */
+        val CANONICAL_QUOTA_REACHED_EXHAUSTED_PATH = CanonicalAttemptPath(
+            releaseRoute = ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED,
+            eventSequence = CANONICAL_RELEASE_PREFIX + listOf(
+                AttemptEvent.RELEASE_RECEIPT,
+                AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED,
+                AttemptEvent.EXHAUSTED_STATE_CONFIRMED
+            )
         )
 
         /**
@@ -74,6 +104,12 @@ sealed class APlusRunTemplate {
         val ALL: List<APlusRunTemplate> get() = listOf(TRUSTED_SYSTEM_MOCK_BATCH_V1)
     }
 }
+
+/** Pure-data description of one conditional §8.1 CREATED→CLOSED path. */
+data class CanonicalAttemptPath(
+    val releaseRoute: ReleaseReceiptRoute,
+    val eventSequence: List<AttemptEvent>
+)
 
 /**
  * A named boundary in the frozen A+ typed-step sequence (§3.1). The declaration order of [entries]

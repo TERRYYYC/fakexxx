@@ -8,6 +8,8 @@ import com.example.cellrebelauto.automation.aplus.APlusCompletionEvidence
 import com.example.cellrebelauto.automation.aplus.APlusEvidenceSource
 import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.aplus.APlusRunTemplate
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
+import com.example.cellrebelauto.automation.aplus.AttemptState
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.environment.ObservationSnapshot
@@ -18,6 +20,7 @@ import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.recovery.DurableRecoveryLog
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
@@ -149,6 +152,9 @@ class EngineTrustedPathRedTest {
         private val wire: Int,
         private val deliveryMode: String,
         private val present: Boolean = true,
+        private val prePresent: Boolean = present,
+        private val postPresent: Boolean = present,
+        private val completionPresent: Boolean = present,
         // R44 (Sol GREEN-review-3 F2): the intent-hash preimage inputs must equal the engine's
         // recompute — plan/task refs + the attempt validity window. Defaults match this harness
         // (fresh-db plan 1, task 42, VirtualClock initial 1000, buildEngine timeout 90s).
@@ -169,8 +175,8 @@ class EngineTrustedPathRedTest {
         // P1-1: a fixed "L1" would be rejected by a correct lease binding, so it must be the provider lease.
         private fun providerLease(attemptId: Long) = "lease-$attemptId"
 
-        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
-            if (!present) null else ObservationSnapshot(
+        private fun observation(attemptId: Long, runSessionId: Long): ObservationSnapshot =
+            ObservationSnapshot(
                 leaseId = providerLease(attemptId),
                 acceptedIntentHash = intentHash(attemptId, runSessionId),
                 coverage = "FULL",
@@ -188,14 +194,17 @@ class EngineTrustedPathRedTest {
                 evidenceRefs = listOf("qwy:store:abc")
             )
 
+        override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
+            if (!prePresent) null else observation(attemptId, runSessionId)
+
         override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long): ObservationSnapshot? =
-            if (!present) null else acquirePreObservation(attemptId, runSessionId)!!.copy(
+            if (!postPresent) null else observation(attemptId, runSessionId).copy(
                 observedAtElapsedRealtimeMs = POST_OBSERVED_AT_ELAPSED,
                 observedAtEpochMs = 6500L
             )
 
         override suspend fun acquireCompletionEvidence(attemptId: Long, runSessionId: Long): APlusCompletionEvidence? =
-            if (!present) null else executionForAttempt(attemptId)?.let { execution ->
+            if (!completionPresent) null else executionForAttempt(attemptId)?.let { execution ->
                 APlusCompletionEvidence(
                     execution = execution,
                     completionEvidenceWire = wire,
@@ -206,7 +215,7 @@ class EngineTrustedPathRedTest {
     }
 
     private class FakeBackend(
-        private val exec: RecordingExternalApplyExecutor,
+        private val exec: ExternalApplyExecutor,
         private val log: FakeDurableRecoveryLog,
         private val observe: SeededObserve,
         private val revision: SeededRevision,
@@ -225,6 +234,23 @@ class EngineTrustedPathRedTest {
         webScore = 8.0, videoScore = 7.0, runningObservedAt = 0L, startedAt = 0L, endedAt = 0L
     )
 
+    private fun runningSuccessRunner(clock: VirtualClock): CellRebelRunner = object : CellRebelRunner {
+        override suspend fun runTest(
+            startedAt: Long,
+            testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
+            onRunningObserved: suspend (Long) -> Unit
+        ): AttemptOutcome {
+            onStartInteraction()
+            onRunningObserved(clock.now)
+            return successTemplate.copy(
+                runningObservedAt = clock.now,
+                startedAt = startedAt,
+                endedAt = clock.now
+            )
+        }
+    }
+
     private fun buildEngine(
         planId: Long,
         runner: CellRebelRunner,
@@ -232,7 +258,8 @@ class EngineTrustedPathRedTest {
         clock: VirtualClock,
         driver: APlusAttemptDriver? = null,
         backend: APlusBackend? = null,
-        elapsedClockMs: (() -> Long)? = null
+        elapsedClockMs: (() -> Long)? = null,
+        toggles: StageToggles = StageToggles()
     ): AutomationEngine {
         // Service-used composition oracle (Sol round-11 P1-1): the SAME engineAplusParams the Service
         // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
@@ -249,6 +276,7 @@ class EngineTrustedPathRedTest {
             nowMs = clock.nowMs,
             delayMs = clock.delayMs,
             elapsedClockMs = elapsedClockMs ?: clock.nowMs,
+            stageToggles = { toggles },
             attemptDriver = driver,
             recoveryCoordinator = params?.first,
             completionEvidenceSource = params?.second
@@ -372,13 +400,28 @@ class EngineTrustedPathRedTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         seedTerminalDummyAttempt(taskId = taskId, attemptId = 77L) // non-constant attempt identity (P1-6)
+        val auditDao = db.auditEventDao()
         val executor = RecordingExternalApplyExecutor()
+        var ownerStateAtAdvance: String? = null
+        val capturingExecutor = object : ExternalApplyExecutor by executor {
+            override fun completeAndAdvance(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+                expectedIntentHash: String
+            ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? {
+                ownerStateAtAdvance = kotlinx.coroutines.runBlocking {
+                    db.testAttemptDao().getAttemptsForTask(taskId)
+                        .first { it.id > 77L }
+                        .aplusState
+                }
+                return executor.completeAndAdvance(request, expectedIntentHash)
+            }
+        }
         val log = FakeDurableRecoveryLog()
-        val backend = FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
+        val backend = FakeBackend(capturingExecutor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
         val clock = VirtualClock()
-        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val runner = runningSuccessRunner(clock)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(planId, runner, gps, clock, backend = backend).run()
+        buildEngine(planId, runner, gps, clock, driver = APlusAttemptDriver(auditDao), backend = backend).run()
 
         val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
         // Provider effect + lease (P1-2): the normal chain drove the executor and persisted the lease.
@@ -389,6 +432,38 @@ class EngineTrustedPathRedTest {
         // impl would leave it null.
         assertNotNull("the normal apply must record a durable apply receipt", log.receiptFor(applyKey(realAttemptId)))
         assertEquals("the normal chain must drive the release executor exactly once", 1, executor.releaseInvocationCount(releaseKey(realAttemptId)))
+        assertEquals(
+            "the happy path must begin release from the reducer's actual committed state",
+            "QUOTA_COMMITTED->RELEASE_PENDING",
+            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.BEGIN_RELEASE.name }.payloadDigest
+        )
+        assertEquals(
+            "the committed release source must itself come from the trust reducer",
+            "DECIDING->QUOTA_COMMITTED",
+            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.TRUST_POLICY_PASS.name }.payloadDigest
+        )
+        assertEquals(
+            "quota reached must keep the attempt non-terminal until advance verification",
+            "RELEASE_PENDING->ADVANCE_PENDING[COMMITTED_QUOTA_REACHED]",
+            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.RELEASE_RECEIPT.name }.payloadDigest
+        )
+        assertEquals(
+            "the durable owner must be ADVANCE_PENDING before the first completeAndAdvance call",
+            "ADVANCE_PENDING",
+            ownerStateAtAdvance
+        )
+        assertEquals(
+            listOf(
+                "ADVANCE_PENDING->ADVANCE_OBSERVING",
+                "ADVANCE_OBSERVING->CLOSED"
+            ),
+            auditDao.forAttempt(realAttemptId)
+                .filter { it.eventType in setOf(
+                    AttemptEvent.ADVANCE_RECEIPT_VERIFIED.name,
+                    AttemptEvent.OBSERVED_TUPLE_MATCHES.name
+                ) }
+                .map { it.payloadDigest }
+        )
         // RED: the skeleton decision drops the §7.1 detail, never mints, never terminalizes succeeded.
         val rows = db.attemptExecutionDao().forAttempt(realAttemptId)
         assertEquals(1, rows.size)
@@ -509,15 +584,16 @@ class EngineTrustedPathRedTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
         seedTerminalDummyAttempt(taskId = taskId, attemptId = 77L)
+        val auditDao = db.auditEventDao()
         val backend = FakeBackend(
             RecordingExternalApplyExecutor(), FakeDurableRecoveryLog(),
             SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
             FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "HOOK", present = true)
         )
         val clock = VirtualClock()
-        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val runner = runningSuccessRunner(clock)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
-        buildEngine(planId, runner, gps, clock, backend = backend).run()
+        buildEngine(planId, runner, gps, clock, driver = APlusAttemptDriver(auditDao), backend = backend).run()
 
         val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
         // RED (P2): a rejected completion must leave a durable UnverifiedAttemptRecord (skeleton writes none).
@@ -530,6 +606,327 @@ class EngineTrustedPathRedTest {
         assertEquals("never mint on fail", 0, db.trustedQuotaDao().countAll())
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
         assertEquals("UNTRUSTED", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.failureReason)
+        assertEquals(
+            "the trust-fail path must begin release from the reducer's actual unverified state",
+            "UNVERIFIED_RECORDED->RELEASE_PENDING",
+            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.BEGIN_RELEASE.name }.payloadDigest
+        )
+        assertEquals(
+            "the unverified release source must itself come from the trust reducer",
+            "DECIDING->UNVERIFIED_RECORDED",
+            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.TRUST_POLICY_FAIL.name }.payloadDigest
+        )
+    }
+
+    @Test
+    fun `a pre-observation rejection already in RELEASE_PENDING does not forge a duplicate BEGIN_RELEASE`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val backend = FakeBackend(
+            RecordingExternalApplyExecutor(), FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false)
+        )
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId,
+            FakeCellRebelRunner(listOf(successTemplate), clock.nowMs),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            driver = APlusAttemptDriver(auditDao),
+            backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val trail = auditDao.forAttempt(attemptId)
+        assertEquals(
+            "OBSERVATION_UNTRUSTED already owns the release-pending edge",
+            "ENV_APPLIED->RELEASE_PENDING",
+            trail.single { it.eventType == AttemptEvent.OBSERVATION_UNTRUSTED.name }.payloadDigest
+        )
+        assertEquals(
+            "the release helper must not append another BEGIN_RELEASE after the reducer already reached RELEASE_PENDING",
+            0,
+            trail.count { it.eventType == AttemptEvent.BEGIN_RELEASE.name }
+        )
+    }
+
+    @Test
+    fun `a missing post observation reconciles without forging an OBSERVATION_UNTRUSTED audit`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val executor = RecordingExternalApplyExecutor()
+        val backend = FakeBackend(
+            executor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(
+                TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK",
+                prePresent = true, postPresent = false, completionPresent = true
+            )
+        )
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId, runningSuccessRunner(clock), FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = APlusAttemptDriver(auditDao), backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val trail = auditDao.forAttempt(attemptId)
+        assertEquals(0, trail.count { it.eventType == AttemptEvent.OBSERVATION_UNTRUSTED.name })
+        assertEquals(
+            "RECOVERY_REQUIRED->RELEASE_PENDING",
+            trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
+        )
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals("POST_OBSERVATION_UNAVAILABLE", attempt.failureReason)
+        assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
+        assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
+        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+    }
+
+    @Test
+    fun `missing completion evidence reconciles without forging an OBSERVATION_UNTRUSTED audit`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val executor = RecordingExternalApplyExecutor()
+        val backend = FakeBackend(
+            executor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(
+                TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK",
+                prePresent = true, postPresent = true, completionPresent = false
+            )
+        )
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId, runningSuccessRunner(clock), FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = APlusAttemptDriver(auditDao), backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val trail = auditDao.forAttempt(attemptId)
+        assertEquals(0, trail.count { it.eventType == AttemptEvent.OBSERVATION_UNTRUSTED.name })
+        assertEquals(
+            "RECOVERY_REQUIRED->RELEASE_PENDING",
+            trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
+        )
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals("COMPLETION_EVIDENCE_UNAVAILABLE", attempt.failureReason)
+        assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
+        assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
+        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+    }
+
+    @Test
+    fun `a CellRebel failure before RUNNING confirmation reconciles without forging a TIMEOUT audit`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val executor = RecordingExternalApplyExecutor()
+        val backend = FakeBackend(
+            executor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK")
+        )
+        val clock = VirtualClock()
+        val failureRunner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome = AttemptOutcome.Failure(
+                FailureReason.NO_RUNNING_EVIDENCE, "never reached a startable baseline", startedAt, clock.now
+            )
+        }
+
+        buildEngine(
+            planId, failureRunner, FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = APlusAttemptDriver(auditDao), backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val trail = auditDao.forAttempt(attemptId)
+        assertEquals(0, trail.count { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name })
+        assertEquals(
+            "RECOVERY_REQUIRED->RELEASE_PENDING",
+            trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
+        )
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals(FailureReason.NO_RUNNING_EVIDENCE.name, attempt.failureReason)
+        assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
+        assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
+        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+    }
+
+    @Test
+    fun `a pre-existing run records its frozen classification before timeout reconciliation`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val executor = RecordingExternalApplyExecutor()
+        val backend = FakeBackend(
+            executor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK")
+        )
+        val clock = VirtualClock()
+        val preExistingRunner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome = AttemptOutcome.Failure(
+                FailureReason.PRE_EXISTING_RUN, "RUNNING preceded Start", startedAt, clock.now
+            )
+        }
+
+        buildEngine(
+            planId, preExistingRunner, FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = APlusAttemptDriver(auditDao), backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val trail = auditDao.forAttempt(attemptId)
+        assertEquals(
+            "CELLREBEL_START_PENDING->CELLREBEL_RUNNING",
+            trail.single { it.eventType == AttemptEvent.PRE_EXISTING_RUN.name }.payloadDigest
+        )
+        assertEquals(
+            "CELLREBEL_RUNNING->RECOVERY_REQUIRED",
+            trail.single { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }.payloadDigest
+        )
+        assertEquals(
+            "RECOVERY_REQUIRED->RELEASE_PENDING",
+            trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
+        )
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals(FailureReason.PRE_EXISTING_RUN.name, attempt.failureReason)
+        assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
+        assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
+        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+    }
+
+    @Test
+    fun `release stops before the provider when BEGIN_RELEASE is an unexpected no-op`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val executor = RecordingExternalApplyExecutor()
+        val backend = FakeBackend(
+            executor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK")
+        )
+        val clock = VirtualClock()
+
+        // This deliberately violates the CellRebelRunner contract: Success without the RUNNING callback.
+        // The reducer remains at CELLREBEL_START_PENDING, so BEGIN_RELEASE is undefined and the engine
+        // must fail closed before touching the provider instead of releasing past a forged transition.
+        buildEngine(
+            planId, FakeCellRebelRunner(listOf(successTemplate), clock.nowMs),
+            FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = APlusAttemptDriver(auditDao), backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        assertEquals(0, executor.releaseInvocationCount(releaseKey(attemptId)))
+        assertEquals("RECOVERY_REQUIRED", db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
+    }
+
+    @Test
+    fun `null audit driver still reduces every normal-path transition before release`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 2)
+        val delegate = RecordingExternalApplyExecutor()
+        var ownerStateAtRelease: String? = null
+        val capturingExecutor = object : ExternalApplyExecutor by delegate {
+            override fun release(
+                attemptId: Long,
+                idempotencyKey: String,
+                leaseId: String,
+                releaseDigest: String,
+                now: Long
+            ): com.example.cellrebelauto.recovery.ApplyOutcome {
+                ownerStateAtRelease = kotlinx.coroutines.runBlocking {
+                    db.testAttemptDao().getAttemptById(attemptId)?.aplusState
+                }
+                return delegate.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
+            }
+        }
+        val backend = FakeBackend(
+            capturingExecutor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK")
+        )
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId, runningSuccessRunner(clock), FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = null, backend = backend
+        ).run()
+
+        assertEquals(
+            "the optional audit sink must not disable the reducer",
+            "RELEASE_PENDING",
+            ownerStateAtRelease
+        )
+        val attempts = db.testAttemptDao().getAttemptsForTask(taskId)
+        assertEquals("quota=2 exercises both under-quota and quota-reached routes", 2, attempts.size)
+        assertTrue(attempts.all { it.aplusState == AttemptState.CLOSED.name && it.status == "succeeded" })
+        assertEquals("the second receipt must take the quota-reached advance route", 1, delegate.advanceCalls.size)
+    }
+
+    @Test
+    fun `a committed under-quota release receipt closes without dispatching advance`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 2)
+        val auditDao = db.auditEventDao()
+        val executor = RecordingExternalApplyExecutor()
+        var preflightCalls = 0
+        val oneAttemptExecutor = object : ExternalApplyExecutor by executor {
+            override fun preflight(
+                intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
+                idempotencyKey: String,
+                requestDigest: String
+            ): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1? {
+                preflightCalls++
+                return if (preflightCalls == 1) {
+                    executor.preflight(intent, idempotencyKey, requestDigest)
+                } else {
+                    null
+                }
+            }
+        }
+        val backend = FakeBackend(
+            oneAttemptExecutor, FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK")
+        )
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId, runningSuccessRunner(clock), FakeGpsSetter(listOf(GpsOutcome.Active)), clock,
+            driver = APlusAttemptDriver(auditDao), backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId)
+            .single { it.aplusState == AttemptState.CLOSED.name }
+            .id
+        assertEquals(0, executor.advanceCalls.size)
+        assertEquals(
+            "RELEASE_PENDING->CLOSED[COMMITTED_UNDER_QUOTA]",
+            auditDao.forAttempt(attemptId)
+                .single { it.eventType == AttemptEvent.RELEASE_RECEIPT.name }
+                .payloadDigest
+        )
     }
 
     // ---- R10-F2 apply-in-flight (no pre-seeded lease, P1-3) ----
@@ -548,7 +945,7 @@ class EngineTrustedPathRedTest {
         val quota = SeededQuota(mapOf(77L to true))
         val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
         val clock = VirtualClock()
-        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val runner = runningSuccessRunner(clock)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
         buildEngine(planId, runner, gps, clock, backend = backend).run()
 
@@ -580,7 +977,7 @@ class EngineTrustedPathRedTest {
         // pause the resumed plan, contradicting the "resumes → completed" GREEN projection.
         val backend = FakeBackend(executor, log, observe, revision, quota, FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
         val clock = VirtualClock()
-        val runner = FakeCellRebelRunner(listOf(successTemplate), clock.nowMs)
+        val runner = runningSuccessRunner(clock)
         val gps = FakeGpsSetter(listOf(GpsOutcome.Active))
         buildEngine(planId, runner, gps, clock, backend = backend).run()
 
@@ -681,7 +1078,9 @@ class EngineTrustedPathRedTest {
         buildEngine(planId, runner, gps, clock, driver = APlusAttemptDriver(auditDao) { 1_000_000L }, backend = passingBackend()).run()
 
         assertTrue("the real attempt id must be past the dummy (≠ 1L)", realAttemptId > 77L)
-        val canonical = APlusRunTemplate.CANONICAL_HAPPY_PATH.map { it.name }
+        val canonical = APlusRunTemplate.CANONICAL_QUOTA_REACHED_NON_TERMINAL_PATH
+            .eventSequence
+            .map { it.name }
         assertEquals("at run-test entry the audit must hold the pre-run §8.1 prefix; got $atRunEntry (skeleton/empty ⇒ RED)", canonical.take(4), atRunEntry)
         assertEquals("after RUNNING the audit must hold prefix + NEW_RUN_OBSERVED; got $afterRunningObserved", canonical.take(5), afterRunningObserved)
         val trail = auditDao.forAttempt(realAttemptId)
@@ -728,6 +1127,85 @@ class EngineTrustedPathRedTest {
     }
 
     // ---- R17 crash-matrix: recover terminal truth from the append-only carrier (Sol round-16 P1-1) ----
+
+    @Test
+    fun `CLOSED crash window with a trusted carrier projects succeeded without reviving the attempt`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "CLOSED", aplusLeaseId = "lease-77")
+        db.trustedQuotaDao().insert(
+            TrustedQuotaEntry(attemptId = 77L, taskId = taskId, evidenceDigest = "trusted", committedAt = 1000L)
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId,
+            FakeCellRebelRunner(listOf(successTemplate), clock.nowMs),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = crashBackend(executor, log),
+            toggles = StageToggles(locationStageEnabled = false, testStageEnabled = false)
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("terminal state must remain the CLOSED sink", "CLOSED", recovered.aplusState)
+        assertEquals("the trusted carrier must project the unfinished row to succeeded", "succeeded", recovered.status)
+        assertTrue("terminal projection must not call release", executor.releaseCallsFor(77L).isEmpty())
+    }
+
+    @Test
+    fun `CLOSED crash window with an unverified carrier projects failed without reviving the attempt`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "CLOSED", aplusLeaseId = "lease-77")
+        db.unverifiedAttemptRecordDao().insert(
+            UnverifiedAttemptRecord(attemptId = 77L, reason = "UNTRUSTED", evidenceDigest = "unverified")
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId,
+            FakeCellRebelRunner(listOf(successTemplate), clock.nowMs),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = crashBackend(executor, log),
+            toggles = StageToggles(locationStageEnabled = false, testStageEnabled = false)
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("terminal state must remain the CLOSED sink", "CLOSED", recovered.aplusState)
+        assertEquals("the unverified carrier must project the unfinished row to failed", "failed", recovered.status)
+        assertEquals("UNTRUSTED", recovered.failureReason)
+        assertTrue("terminal projection must not call release", executor.releaseCallsFor(77L).isEmpty())
+    }
+
+    @Test
+    fun `CLOSED crash window without a decision carrier projects interrupted without reviving the attempt`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        seedAPlusCrashAttempt(planId, taskId, attemptId = 77L, aplusState = "CLOSED", aplusLeaseId = "lease-77")
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId,
+            FakeCellRebelRunner(listOf(successTemplate), clock.nowMs),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            backend = crashBackend(executor, log),
+            toggles = StageToggles(locationStageEnabled = false, testStageEnabled = false)
+        ).run()
+
+        val recovered = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals("terminal state must remain the CLOSED sink", "CLOSED", recovered.aplusState)
+        assertEquals("a CLOSED row without decision authority is interrupted, never trusted", "interrupted", recovered.status)
+        assertTrue("terminal projection must not call release", executor.releaseCallsFor(77L).isEmpty())
+    }
 
     private fun crashBackend(executor: RecordingExternalApplyExecutor, log: FakeDurableRecoveryLog): FakeBackend =
         FakeBackend(executor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false))
