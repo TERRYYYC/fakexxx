@@ -59,6 +59,8 @@ fun PlanScreen(
     planConfig: PlanConfig,
     isRunning: Boolean,
     isServiceConnected: Boolean,
+    // Issue #9: readable WHY for a grey Start — null when the device is ready (no line shown).
+    serviceStatusLine: String? = null,
     importErrors: List<RowError>,
     importNotice: String?,
     onImport: (Uri) -> Unit,
@@ -108,6 +110,17 @@ fun PlanScreen(
                         color = if (isServiceConnected) Color(0xFF4CAF50) else Color(0xFFFF5722)
                     )
                 }
+            }
+        }
+
+        // # Issue #9：Service OFF 不再无解释 — 展开为可读状态行（含本构建应用名的开启指引）
+        serviceStatusLine?.let { line ->
+            item {
+                Text(
+                    text = line,
+                    fontSize = 12.sp,
+                    color = Color(0xFFFF5722)
+                )
             }
         }
 

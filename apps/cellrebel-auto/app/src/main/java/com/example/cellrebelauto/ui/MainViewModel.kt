@@ -214,6 +214,28 @@ class MainViewModel @JvmOverloads constructor(
     private val _currentScreen = MutableStateFlow(Screen.PLAN)
     val currentScreen: StateFlow<Screen> = _currentScreen
 
+    // ---- Device readiness (issue #9) ----
+
+    // # OEM 无障碍开关脆弱（settings put 被无条件回滚；force-stop/install -r 会清掉启用），
+    // # Plan 页的 Start 变灰必须给出可读原因。启用态由 AccessibilityManager 实测，进入
+    // # Plan 页时刷新（refreshDeviceReadiness）；连接态来自 AutomationService 的实时流。
+    private val _accessibilityEnabled = MutableStateFlow<Boolean?>(null)
+
+    /** The readable service status line for the Plan surface; null = healthy. */
+    val serviceStatusLine: StateFlow<String?> =
+        combine(AutomationService.isServiceConnected, _accessibilityEnabled) { connected, enabled ->
+            DeviceReadinessProjection.statusLine(
+                serviceConnected = connected,
+                accessibilityEnabled = enabled,
+                appDisplayName = DeviceReadinessProbe.appDisplayName(getApplication()),
+            )
+        }.stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    /** Re-probe the system's enabled accessibility services (call on Plan page entry). */
+    fun refreshDeviceReadiness() {
+        _accessibilityEnabled.value = DeviceReadinessProbe.accessibilityEnabled(getApplication())
+    }
+
     // ---- Data from service (delegated flows) ----
 
     // # 来自 AutomationService 的状态流
