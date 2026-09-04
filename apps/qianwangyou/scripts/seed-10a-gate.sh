@@ -65,6 +65,14 @@ usage() {
 # Device seam — the ONLY edge the selftest fakes.
 dev() { adb "$@"; }
 
+# #90: Vector-aware evidence resolver (exact-package, live-zone, fail-closed).
+# When this gate is executed, $0 is the gate itself; when the selftest sources
+# it, $0 is the selftest — so an explicit VE_LIB_PATH override wins.
+VE_LIB="${VE_LIB_PATH:-$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/vector-evidence.sh}"
+[ -r "$VE_LIB" ] || { echo "SEED_GATE_FAIL vector-evidence.sh not found at $VE_LIB" >&2; exit 2; }
+# shellcheck source=vector-evidence.sh
+. "$VE_LIB"
+
 # [A-Za-z0-9-] only: echoed verbatim by the Activity and matched EXACTLY in logcat.
 new_seed_token() {
     printf '%s-%s-%s%s' "$(date -u +%Y%m%dT%H%M%SZ)" "${BASHPID:-$$}" "$RANDOM" "$RANDOM"
@@ -211,19 +219,28 @@ await_seed_verdict() {
     return 2
 }
 
-# Non-fatal evidence: the device's REAL published transport for the record.
+# Evidence for the record: the device's REAL published transport. #90: the
+# canonical source is the LIVE Vector zone (/data/misc/*/prefs/<exact-package>/)
+# read via root; the app-private shared_prefs copy is at best a stale
+# pre-Vector mirror and is NEVER emitted as canonical. Zero/multiple live
+# sources, read failure, or missing root FAIL CLOSED — an explicitly requested
+# evidence capture that cannot prove its source zone is a gate failure, not a
+# note, because a self-consistent stale mirror is exactly the lap-3 false-P1
+# shape this closes.
 dump_evidence() {
     [ -n "$EVIDENCE_DIR" ] || return 0
     mkdir -p "$EVIDENCE_DIR" 2>/dev/null || { echo "SEED_GATE_NOTE evidence dir $EVIDENCE_DIR not writable — skipping dump" >&2; return 0; }
-    if dev shell run-as "$BENCH_PACKAGE" cat shared_prefs/spoof_config.xml >"$EVIDENCE_DIR/seed-published-transport.xml" 2>/dev/null &&
-        [ -s "$EVIDENCE_DIR/seed-published-transport.xml" ]; then
-        tr -d '\r' <"$EVIDENCE_DIR/seed-published-transport.xml" |
-            sed -n 's/.*name="json">\(.*\)<\/string>.*/\1/p' |
-            sed 's/&quot;/"/g; s/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g' >"$EVIDENCE_DIR/seed-published-payload.json"
-        echo "SEED_GATE_EVIDENCE token=$SEED_TOKEN transport=$EVIDENCE_DIR/seed-published-transport.xml payload=$EVIDENCE_DIR/seed-published-payload.json"
-    else
-        echo "SEED_GATE_NOTE could not dump the published transport via run-as (evidence only; verdict unaffected)" >&2
+    if ! ve_capture_evidence "$BENCH_PACKAGE" spoof_config.xml "$EVIDENCE_DIR"; then
+        echo "SEED_GATE_FAIL --evidence-dir requested but canonical Vector-live capture failed (fail-closed; never falls back to the app-private mirror)" >&2
+        return 2
     fi
+    # Back-compat names for existing evidence consumers: the canonical capture
+    # is vector-prefs/spoof_config.xml (+ .provenance); these are byte copies.
+    cp "$EVIDENCE_DIR/vector-prefs/spoof_config.xml" "$EVIDENCE_DIR/seed-published-transport.xml"
+    tr -d '\r' <"$EVIDENCE_DIR/seed-published-transport.xml" |
+        sed -n 's/.*name="json">\(.*\)<\/string>.*/\1/p' |
+        sed 's/&quot;/"/g; s/&lt;/</g; s/&gt;/>/g; s/&amp;/\&/g' >"$EVIDENCE_DIR/seed-published-payload.json"
+    echo "SEED_GATE_EVIDENCE token=$SEED_TOKEN transport=$EVIDENCE_DIR/vector-prefs/spoof_config.xml payload=$EVIDENCE_DIR/seed-published-payload.json (zone=vector-live; provenance alongside)"
 }
 
 seed_gate_main() {
@@ -250,7 +267,7 @@ seed_gate_main() {
     force_stop_and_assert_quiescent pre-seed || return $?
     launch_seed || return $?
     await_seed_verdict || return $?
-    dump_evidence
+    dump_evidence || return $?
     force_stop_and_assert_quiescent handoff || {
         echo "SEED_GATE_FAIL seeded state could not be handed off quiescent (token $SEED_TOKEN)" >&2
         return 2
