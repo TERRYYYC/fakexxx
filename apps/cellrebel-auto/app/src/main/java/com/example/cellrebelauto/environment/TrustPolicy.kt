@@ -12,7 +12,7 @@ package com.example.cellrebelauto.environment
  * KB-8: distance-to-intent validation is PROVIDER-EXCLUSIVE (Qianwangyou owns the target and the
  * exact 1 m validation; §2.2, §6.4.1). Auto carries no local target copy and runs no haversine —
  * it only checks the provider-verified effective coordinates are finite and in geographic range
- * (fail-closed on NaN/±Infinity/out-of-range). 
+ * (fail-closed on NaN/±Infinity/out-of-range).
  *
  * GREEN (contract v1 frozen, `feat/pr-2-contract-v1@635a73a8`): the full §6.4 predicate. Both
  * observations are validated INDEPENDENTLY and symmetrically — PRE-only or POST-only validation is
