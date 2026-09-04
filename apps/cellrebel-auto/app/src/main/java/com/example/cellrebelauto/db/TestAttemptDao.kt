@@ -236,4 +236,26 @@ interface TestAttemptDao {
             "instr(e.payloadDigest, 'RELEASED->RECOVERY_REQUIRED[') = 1)))"
     )
     suspend fun findAplusRecoverableAttempts(planId: Long): List<TestAttempt>
+
+    // ---- #12 plan-reset: the RECOVERY_REQUIRED dead-lane projection ----
+
+    /**
+     * Attempts of a plan terminally stuck in §8.1 RECOVERY_REQUIRED (recovery
+     * could not reconcile them — e.g. a final advance verification failure).
+     * Their existence is the second half (besides plan completion) of the
+     * reset-entry visibility: such a lane has no forward path and no operator
+     * exit without a reset (#12).
+     */
+    @Query(
+        "SELECT COUNT(*) FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
+            "WHERE t.planId = :planId AND a.aplusState = 'RECOVERY_REQUIRED'"
+    )
+    suspend fun countRecoveryRequiredForPlan(planId: Long): Int
+
+    /** Observable twin of [countRecoveryRequiredForPlan] (the Plan page visibility projection). */
+    @Query(
+        "SELECT COUNT(*) FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
+            "WHERE t.planId = :planId AND a.aplusState = 'RECOVERY_REQUIRED'"
+    )
+    fun observeRecoveryRequiredForPlan(planId: Long): Flow<Int>
 }
