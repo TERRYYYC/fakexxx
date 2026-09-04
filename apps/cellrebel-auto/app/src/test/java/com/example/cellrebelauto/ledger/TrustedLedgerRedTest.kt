@@ -408,6 +408,24 @@ class TrustedLedgerRedTest {
         // 0.001 deg latitude ≈ 111 m ≫ 1.0 m tolerance (§6.4.2).
         fail(validContext().copy(preObservation = validPre().copy(effectiveLat = 40.001)))
 
+    @Test
+    fun `KB8 provider-verified coordinates differing from the Auto-local target still pass`() {
+        // KB-8: Auto no longer imports/owns address coordinates — Qianwangyou is the SOLE
+        // distance-validation authority (§2.2, §6.4/§6.4.1). A canonical verified observation whose
+        // effective coordinates are finite, in-range and provider-verified must PASS even when they
+        // differ from Auto's retired LOCAL target copy (here PRE+POST both ≈111 m off TARGET_LAT) —
+        // the Auto-local haversine/distance gate is authority drift and must not reject the tuple.
+        assertEquals(
+            TrustDecision.PASS,
+            TrustPolicy().evaluate(
+                validContext().copy(
+                    preObservation = validPre().copy(effectiveLat = 40.001),
+                    postObservation = validPost().copy(effectiveLat = 40.001)
+                )
+            )
+        )
+    }
+
     // === Per-observation field inversions (every remaining §6.4 predicate field) ===
 
     @Test
