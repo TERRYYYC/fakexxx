@@ -15,8 +15,9 @@ package com.example.cellrebelauto.recovery
  *       (at-most-once; the receipt already proves the apply);
  *    2. `receiptFor(key)` with a DIFFERENT digest ⇒ **IDEMPOTENCY_CONFLICT** — do NOT call the
  *       executor, prior receipt preserved (INV-13);
- *    3. no receipt ⇒ `executor.apply(...)` (the external call) → `recordReceipt(...)` →
- *       `recordCheckpoint(...)` ⇒ **ADVANCED_TO_RELEASE**.
+ *    3. no receipt + caller-owned external-effect authority ⇒ `executor.apply(...)` (the external
+ *       call) → `recordReceipt(...)` → `recordCheckpoint(...)` ⇒ **ADVANCED_TO_RELEASE**;
+ *       otherwise fail closed before the executor.
  *    Across a crash the executor MAY be called twice; the PROVIDER's idempotency keeps the EFFECT at
  *    one (M-CR-02 window (b) recovery). A coordinator that returns ADVANCED without calling the
  *    executor fails the tests' provider-effect / invocation-count assertions.
@@ -83,20 +84,24 @@ class RecoveryCoordinator(
      *     missing (R5-F2: bind it to the receipt key).
      *  2. `receiptFor(key)` with a DIFFERENT digest ⇒ **IDEMPOTENCY_CONFLICT** — do NOT call the
      *     executor, prior receipt preserved (INV-13).
-     *  3. no receipt ⇒ `executor.apply(...)` (the external call) → `recordReceipt(...)` →
-     *     `recordCheckpoint(...)` ⇒ **ADVANCED_TO_RELEASE** with the fresh receipt + lease.
+     *  3. no receipt + [allowExternalApply] ⇒ `executor.apply(...)` (the external call) →
+     *     `recordReceipt(...)` → `recordCheckpoint(...)` ⇒ **ADVANCED_TO_RELEASE** with the fresh
+     *     receipt + lease. When external apply authority is absent, fail closed without a call.
      *  Across a crash the executor MAY be called twice; the PROVIDER's idempotency keeps the EFFECT at
      *  one (M-CR-02 window (b) recovery).
      *
      * @param idempotencyKey the frozen idempotency key for this attempt's apply (INV-13).
      * @param requestDigest the §6.3.4 canonical digest of the apply request (NOT the result digest).
+     * @param allowExternalApply authority for the no-receipt branch only. An exact durable receipt
+     *   remains locally replayable when fresh provider discovery is unavailable or incompatible.
      */
     fun reconcile(
         attemptId: Long,
         intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1,
         idempotencyKey: String,
         requestDigest: String,
-        now: Long
+        now: Long,
+        allowExternalApply: Boolean
     ): ReconcileResult {
         reconcileInvocationCount++
         val prior = log.receiptFor(idempotencyKey)
@@ -109,6 +114,12 @@ class RecoveryCoordinator(
             // window-c checkpoint if the prior process crashed after the receipt but before it (R5-F2).
             log.recordCheckpoint(attemptId, "RECONCILED_REPLAY", prior.idempotencyKey, now)
             return ReconcileResult.ReplayedApply(prior, prior.leaseId)
+        }
+        if (!allowExternalApply) {
+            // The caller could not prove that a NEW provider apply is safe. This gate deliberately
+            // follows the durable-receipt branches above: crash-window-c replay is local-only, while
+            // crash-window-b re-dispatch is an external effect and needs current live authority.
+            return ReconcileResult.InsufficientEvidence
         }
         // No durable receipt ⇒ M-CR-02 window (b): re-invoke the executor (the provider idempotently
         // no-ops if it already applied), record the receipt + checkpoint, advance with the fresh lease.

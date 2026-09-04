@@ -47,7 +47,7 @@ class RecoveryIdempotencyRedTest {
         val log = FakeDurableRecoveryLog()
         val rc = RecoveryCoordinator(executor, log)
 
-        val outcome = rc.reconcile(attemptId = 42L, intent = testApplyIntent(), idempotencyKey = "k-42", requestDigest = "digest-v1", now = 1000L)
+        val outcome = rc.reconcile(attemptId = 42L, intent = testApplyIntent(), idempotencyKey = "k-42", requestDigest = "digest-v1", now = 1000L, allowExternalApply = true)
 
         // RED (INV-15): skeleton returns INSUFFICIENT_EVIDENCE and never calls the executor. GREEN must
         // drive the external apply exactly once, record a receipt, and return ADVANCED_TO_RELEASE.
@@ -73,7 +73,7 @@ class RecoveryIdempotencyRedTest {
         val rc = RecoveryCoordinator(executor, log)
 
         // Replay the SAME idempotency key + canonical digest (e.g. a post-crash re-reconcile).
-        val outcome = rc.reconcile(attemptId = 42L, intent = testApplyIntent(), idempotencyKey = "k-42", requestDigest = "digest-v1", now = 2000L)
+        val outcome = rc.reconcile(attemptId = 42L, intent = testApplyIntent(), idempotencyKey = "k-42", requestDigest = "digest-v1", now = 2000L, allowExternalApply = false)
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must short-circuit on the existing receipt
         // (REPLAYED_APPLY) WITHOUT calling the executor again — at-most-once.
@@ -95,7 +95,7 @@ class RecoveryIdempotencyRedTest {
         val rc = RecoveryCoordinator(executor, log)
 
         // Same idempotency key, DIFFERENT canonical request digest (INV-13).
-        val outcome = rc.reconcile(attemptId = 42L, intent = testApplyIntent(), idempotencyKey = "k-42", requestDigest = "digest-v2", now = 2000L)
+        val outcome = rc.reconcile(attemptId = 42L, intent = testApplyIntent(), idempotencyKey = "k-42", requestDigest = "digest-v2", now = 2000L, allowExternalApply = false)
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must surface the conflict.
         assertTrue("same-key/different-digest must be IDEMPOTENCY_CONFLICT (got $outcome)", outcome is ReconcileResult.IdempotencyConflict)
@@ -125,7 +125,7 @@ class RecoveryIdempotencyRedTest {
 
         // Brand-new coordinator over the SAME executor + log = post-crash restart.
         val outcome = RecoveryCoordinator(executor, log)
-            .reconcile(attemptId = 7L, intent = testApplyIntent(), idempotencyKey = "k-7", requestDigest = "digest-7", now = 3000L)
+            .reconcile(attemptId = 7L, intent = testApplyIntent(), idempotencyKey = "k-7", requestDigest = "digest-7", now = 3000L, allowExternalApply = true)
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must recover M-CR-02: re-invoke the
         // executor (the provider idempotently no-ops, effect stays 1), record the receipt, advance.
@@ -152,7 +152,7 @@ class RecoveryIdempotencyRedTest {
         log.seedReceipt(idempotencyKey = "k-8", requestDigest = "digest-8", outcome = "RELEASED", createdAt = 1000L)
 
         val outcome = RecoveryCoordinator(executor, log)
-            .reconcile(attemptId = 8L, intent = testApplyIntent(), idempotencyKey = "k-8", requestDigest = "digest-8", now = 3000L)
+            .reconcile(attemptId = 8L, intent = testApplyIntent(), idempotencyKey = "k-8", requestDigest = "digest-8", now = 3000L, allowExternalApply = false)
 
         // RED: skeleton returns INSUFFICIENT_EVIDENCE. GREEN must see the receipt and REPLAY (no re-apply).
         assertTrue("post-crash reconcile with a receipt present must be REPLAYED_APPLY (got $outcome)", outcome is ReconcileResult.ReplayedApply)
@@ -191,7 +191,7 @@ class RecoveryIdempotencyRedTest {
         log.seedReceipt(idempotencyKey = "k-9", requestDigest = "digest-9", outcome = "RELEASED", createdAt = 1000L, leaseId = "lease-9")
 
         val outcome = RecoveryCoordinator(executor, log)
-            .reconcile(attemptId = 9L, intent = testApplyIntent(), idempotencyKey = "k-9", requestDigest = "digest-9", now = 3000L)
+            .reconcile(attemptId = 9L, intent = testApplyIntent(), idempotencyKey = "k-9", requestDigest = "digest-9", now = 3000L, allowExternalApply = false)
 
         assertTrue("receipt-present replay must be REPLAYED_APPLY (got $outcome)", outcome is ReconcileResult.ReplayedApply)
         assertEquals(
@@ -204,6 +204,29 @@ class RecoveryIdempotencyRedTest {
             (outcome as ReconcileResult.ReplayedApply).leaseId
         )
         assertEquals("the recovered lease is the receipt's lease", "lease-9", outcome.leaseId)
+    }
+
+    @Test
+    fun `reconcile without a receipt and without external apply authority fails before the executor`() {
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+
+        val outcome = RecoveryCoordinator(executor, log).reconcile(
+            attemptId = 10L,
+            intent = testApplyIntent(),
+            idempotencyKey = "k-10",
+            requestDigest = "digest-10",
+            now = 3000L,
+            allowExternalApply = false
+        )
+
+        assertTrue("missing authority must produce typed insufficient evidence",
+            outcome is ReconcileResult.InsufficientEvidence)
+        assertEquals("the coordinator must stop before provider apply", 0,
+            executor.invocationCount("k-10"))
+        assertEquals("no provider effect is possible", 0, executor.effectCount(10L))
+        assertNull("an unauthorized apply cannot mint a receipt", log.receiptFor("k-10"))
+        assertNull("an unauthorized apply cannot mint a checkpoint", log.checkpointFor(10L))
     }
 
     @Test

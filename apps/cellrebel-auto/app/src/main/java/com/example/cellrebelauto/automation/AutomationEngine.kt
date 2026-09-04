@@ -190,59 +190,10 @@ class AutomationEngine(
             // # owner session 被 REUSE（RECOVERING → RUNNING/PAUSED），绝不 mint 第二个 active run。
             val aplusCoordinator = recoveryCoordinator
             val aplusEvidence = completionEvidenceSource
-            if (aplusCoordinator != null && aplusEvidence != null) {
-                // # P1-6：复用现有 running session（supersede），不新建第二个 active run。
-                val existingSession = planRepository.findActiveRunSession(planId)
-                if (existingSession != null) {
-                    runSessionId = existingSession.id
-                    planRepository.markSessionStatus(runSessionId, "recovering")
-                    updateState(AutomationState.RECOVERING)
-                    val recoverableAttempts = planRepository.findAPlusRecoverableAttempts(planId)
-                    // Issue #88: provider terminal truth stops NEW work, but it cannot strand the
-                    // durable owner of the terminal transition itself. Exactly one ADVANCE_PENDING
-                    // owner may still retrieve its same-key receipt; ADVANCE_STATE_READBACK may
-                    // finish the mandatory fresh four-leg readback; CLOSED may finish its local-only
-                    // status projection. Every other/multiple-owner shape remains fail-closed.
-                    val recoveryCapabilities = aplusCoordinator.executorBackend().discover()
-                    val planCompleteBeforeRecovery =
-                        PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
-                    val exhaustedWithoutOwner = recoveryCapabilities?.exhausted == true &&
-                        recoverableAttempts.isEmpty() && !planCompleteBeforeRecovery
-                    val exhaustedWithUnprovenOwner = recoveryCapabilities?.exhausted == true &&
-                        recoverableAttempts.isNotEmpty() &&
-                        !canConvergeSingleExhaustedOwner(
-                            recoverableAttempts,
-                            existingSession.id,
-                            recoveryCapabilities
-                        )
-                    if (exhaustedWithoutOwner || exhaustedWithUnprovenOwner) {
-                        aplusPause(
-                            "provider schedule is already EXHAUSTED during recovery admission — " +
-                                "recoverable attempts and remaining local tasks are preserved"
-                        )
-                        return@coroutineScope
-                    }
-                    for (crashed in recoverableAttempts) {
-                        if (!recoverCrashedAttempt(
-                                crashed,
-                                aplusCoordinator,
-                                recoveryCapabilities
-                            )
-                        ) {
-                            return@coroutineScope
-                        }
-                    }
-                    if (recoveryCapabilities?.exhausted == true &&
-                        !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
-                    ) {
-                        aplusPause(
-                            "provider schedule is already EXHAUSTED after terminal owner convergence — " +
-                                "remaining local tasks stay pending"
-                        )
-                        return@coroutineScope
-                    }
-                    planRepository.markSessionStatus(runSessionId, "running")
-                }
+            if (aplusCoordinator != null && aplusEvidence != null &&
+                !recoverAPlusBeforeSweep(aplusCoordinator)
+            ) {
+                return@coroutineScope
             }
 
             // ==================== Step 0: recovery sweep FIRST (INV-9, F3R1-3) ====================
@@ -1114,6 +1065,151 @@ class AutomationEngine(
     }
 
     /**
+     * Reconcile the existing A+ owner before the generic sweep and normal admission. Extracted from
+     * [run] so the coroutine state machine remains below the JVM method-size ceiling; all exits are
+     * represented as a durable pause plus `false`.
+     */
+    private suspend fun recoverAPlusBeforeSweep(
+        coordinator: RecoveryCoordinator
+    ): Boolean {
+        // Query plan-scoped owners before trusting the session projection. An older process may have
+        // terminalized the session while leaving its A+ owner starting/running; the generic sweep
+        // deliberately excludes such rows, so returning early here would admit a second owner.
+        val recoverableAttempts = planRepository.findAPlusRecoverableAttempts(planId)
+        val existingSession = planRepository.findActiveRunSession(planId)
+        if (existingSession == null) {
+            val orphanedEffectOwners =
+                projectClosedRecoveryOwners(recoverableAttempts) ?: return false
+            if (orphanedEffectOwners.isEmpty()) return true
+            quarantineRecoveryOwners(orphanedEffectOwners, activeSessionId = null)
+            return false
+        }
+
+        // Reuse the newest active session (supersede); never mint a second active run.
+        runSessionId = existingSession.id
+        planRepository.markSessionStatus(runSessionId, "recovering")
+        updateState(AutomationState.RECOVERING)
+
+        val effectOwners = projectClosedRecoveryOwners(recoverableAttempts) ?: return false
+        if (!admitRecoveryOwners(effectOwners, existingSession.id)) return false
+
+        // Provider terminal truth stops NEW work, but cannot strand the durable owner of the
+        // terminal transition itself. CLOSED rows were projected locally above and do not consume
+        // provider-effect cardinality.
+        val recoveryCapabilities = coordinator.executorBackend().discover()
+        val planCompleteBeforeRecovery =
+            PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+        val exhaustedWithoutOwner = recoveryCapabilities?.exhausted == true &&
+            effectOwners.isEmpty() && !planCompleteBeforeRecovery
+        val exhaustedWithUnprovenOwner = recoveryCapabilities?.exhausted == true &&
+            effectOwners.isNotEmpty() &&
+            !canConvergeSingleExhaustedOwner(
+                effectOwners,
+                existingSession.id,
+                recoveryCapabilities,
+                coordinator
+            )
+        if (exhaustedWithoutOwner || exhaustedWithUnprovenOwner) {
+            aplusPause(
+                "provider schedule is already EXHAUSTED during recovery admission — " +
+                    "recoverable attempts and remaining local tasks are preserved"
+            )
+            return false
+        }
+
+        for (crashed in effectOwners) {
+            if (!recoverCrashedAttempt(crashed, coordinator, recoveryCapabilities)) return false
+        }
+        if (!recoveryOwnersConverged()) return false
+        if (recoveryCapabilities?.exhausted == true &&
+            !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+        ) {
+            aplusPause(
+                "provider schedule is already EXHAUSTED after terminal owner convergence — " +
+                    "remaining local tasks stay pending"
+            )
+            return false
+        }
+        planRepository.markSessionStatus(runSessionId, "running")
+        return true
+    }
+
+    /**
+     * A provider-effect owner whose session is no longer active is an inconsistent durable shape,
+     * not permission to mint a replacement run. Re-arm every owning session as PAUSED so the stop is
+     * durable and a later explicit resume can re-enter the ordinary same-session recovery gate.
+     */
+    private suspend fun quarantineRecoveryOwners(
+        effectOwners: List<TestAttempt>,
+        activeSessionId: Long?
+    ) {
+        val newestOwner = effectOwners.maxWith(
+            compareBy<TestAttempt> { it.startedAt }.thenBy { it.id }
+        )
+        val ownerSessionIds = effectOwners.map { it.runSessionId }.distinct()
+        // A newer session with no durable provider-effect owner is the unauthorized replacement,
+        // not the session recovery should keep selecting forever. Terminalize it while preserving
+        // its cycle count, then re-arm the real owner session(s) below.
+        if (activeSessionId != null && activeSessionId !in ownerSessionIds) {
+            planRepository.interruptSessionForRecoveryConflict(activeSessionId, nowMs())
+        }
+        runSessionId = newestOwner.runSessionId
+        ownerSessionIds.forEach { ownerSessionId ->
+            planRepository.markSessionStatus(ownerSessionId, "paused")
+        }
+        updateState(AutomationState.PAUSED)
+        log(
+            "ERROR: A+ recovery ownership is inactive or ambiguous — " +
+                "replacement session stopped and owner sessions re-armed as PAUSED without provider access"
+        )
+    }
+
+    /**
+     * CLOSED already owns terminal A+ truth; only its generic attempt/task projection may lag.
+     * Finish every such local-only row before deciding provider-effect owner cardinality. A failed
+     * projection pauses through [projectClosedAttempt] and leaves the remaining rows untouched.
+     */
+    private suspend fun projectClosedRecoveryOwners(
+        recoverableAttempts: List<TestAttempt>
+    ): List<TestAttempt>? {
+        for (closed in recoverableAttempts.filter { it.aplusState == AttemptState.CLOSED.name }) {
+            if (!projectClosedAttempt(closed)) return null
+        }
+        return recoverableAttempts.filter { it.aplusState != AttemptState.CLOSED.name }
+    }
+
+    /**
+     * Admit the complete plan-scoped provider-effect owner set before any provider read or mutation.
+     * Filtering the DAO query by session would silently orphan a possible in-flight effect, so
+     * ambiguity and a foreign session are explicit durable pauses instead.
+     */
+    private suspend fun admitRecoveryOwners(
+        recoverableAttempts: List<TestAttempt>,
+        activeSessionId: Long
+    ): Boolean {
+        if (recoverableAttempts.size <= 1 &&
+            recoverableAttempts.all { it.runSessionId == activeSessionId }
+        ) {
+            return true
+        }
+        quarantineRecoveryOwners(recoverableAttempts, activeSessionId)
+        return false
+    }
+
+    /**
+     * Evidence reacquisition may advance only one durable phase. Re-read before opening normal
+     * admission: any owner that is still starting/running keeps exclusive lifecycle custody.
+     */
+    private suspend fun recoveryOwnersConverged(): Boolean {
+        if (planRepository.findAPlusRecoverableAttempts(planId).isEmpty()) return true
+        aplusPause(
+            "A+ recovery advanced but still has a nonterminal owner — " +
+                "normal attempt admission remains closed"
+        )
+        return false
+    }
+
+    /**
      * Re-admit a durable CREATED owner after a crash between the admission transaction and
      * BEGIN_APPLY. No provider mutation is allowed until both the fresh discovery and the fresh
      * preflight still name the exact persisted anchor. An explicit terminal bit, protocol skew,
@@ -1220,7 +1316,7 @@ class AutomationEngine(
         coordinator: RecoveryCoordinator,
         recoveryCapabilities: CapabilitySnapshotV1?
     ): Boolean {
-        val recoveryAdvanceProtocolCompatible =
+        val recoveryProtocolCompatible =
             recoveryCapabilities?.protocolVersion == ContractV1.PROTOCOL_VERSION
         var recoveryOwnerState = crashed.aplusState
         // CLOSED is the §8.1 terminal sink, but attempt status is projected in a following Room write.
@@ -1286,7 +1382,7 @@ class AutomationEngine(
             // verification + receipt-digest binding. The provider's idempotency returns the
             // STORED receipt for the same key; a crash never pushes a second advance.
             "ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK" -> {
-                if (!recoveryAdvanceProtocolCompatible) {
+                if (!recoveryProtocolCompatible) {
                     aplusPause(
                         "provider discovery unavailable or protocol incompatible during " +
                             "ADVANCE_* recovery — same-key replay deferred"
@@ -1474,7 +1570,28 @@ class AutomationEngine(
                 crashed.runSessionId, crashed.id, planId, anchorScheduleRef, crashed.startedAt, crashed.startedAt + testTimeoutMs
             )
             val intentDigest = APlusOperationIdentity.requestDigest(applyIntent)
-            val result = coordinator.reconcile(crashed.id, applyIntent, applyKey, intentDigest, nowMs())
+            // A durable exact receipt is a local crash-window-c replay and does not need fresh
+            // provider authority. The coordinator consumes that receipt before consulting this bit.
+            // Only the no-receipt branch may dispatch a new provider apply, so bind that effect to
+            // protocol v1 plus the complete live schedule anchor. Explicit exhausted=true blocks;
+            // exhausted=null preserves the contract's stated compatibility boundary.
+            val allowExternalApply = recoveryCapabilities?.let { capabilities ->
+                capabilities.protocolVersion == ContractV1.PROTOCOL_VERSION &&
+                    capabilities.exhausted != true &&
+                    crashed.aplusAnchorItemId != null &&
+                    crashed.aplusAnchorVersion != null &&
+                    capabilities.currentScheduleId == anchorScheduleRef &&
+                    capabilities.currentItemId == crashed.aplusAnchorItemId &&
+                    capabilities.scheduleVersion == crashed.aplusAnchorVersion
+            } == true
+            val result = coordinator.reconcile(
+                attemptId = crashed.id,
+                intent = applyIntent,
+                idempotencyKey = applyKey,
+                requestDigest = intentDigest,
+                now = nowMs(),
+                allowExternalApply = allowExternalApply
+            )
             val leaseId = when (result) {
                 is ReconcileResult.AdvancedToRelease -> result.leaseId
                 is ReconcileResult.ReplayedApply -> result.leaseId
@@ -1543,33 +1660,46 @@ class AutomationEngine(
         return advanceAfterRelease(
             crashed,
             postReleaseState,
-            recoveryAdvanceProtocolCompatible
+            recoveryProtocolCompatible
         )
     }
 
     private suspend fun canConvergeSingleExhaustedOwner(
         recoverableAttempts: List<TestAttempt>,
         activeSessionId: Long,
-        exhaustedCapabilities: io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1?
+        exhaustedCapabilities: io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1?,
+        coordinator: RecoveryCoordinator
     ): Boolean {
         val owner = recoverableAttempts.singleOrNull() ?: return false
         if (owner.runSessionId != activeSessionId) return false
         val capabilities = exhaustedCapabilities ?: return false
         if (capabilities.exhausted != true) return false
+        if (capabilities.protocolVersion !=
+            io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        ) {
+            return false
+        }
+        val anchor = planRepository.getAplusAdvanceAnchor(owner.id) ?: return false
+        val isExactTerminalSuccessor = anchor.third != Long.MAX_VALUE &&
+            capabilities.currentScheduleId == anchor.first &&
+            capabilities.currentItemId == anchor.second &&
+            capabilities.scheduleVersion == anchor.third + 1
         return when (owner.aplusState) {
-            AttemptState.CLOSED.name -> true
             AttemptState.ADVANCE_PENDING.name,
-            AttemptState.ADVANCE_STATE_READBACK.name -> {
-                if (capabilities.protocolVersion !=
-                    io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
-                ) {
-                    return false
-                }
-                val anchor = planRepository.getAplusAdvanceAnchor(owner.id) ?: return false
-                anchor.third != Long.MAX_VALUE &&
-                    capabilities.currentScheduleId == anchor.first &&
-                    capabilities.currentItemId == anchor.second &&
-                    capabilities.scheduleVersion == anchor.third + 1
+            AttemptState.ADVANCE_STATE_READBACK.name -> isExactTerminalSuccessor
+            // Older builds wrote RELEASED after the physical release but before deciding whether
+            // quota required an advance. Under terminal provider truth it is a legitimate same-key
+            // convergence owner only when its exact dual-index release receipt is already durable;
+            // admission must never turn this compatibility phase into a fresh release effect.
+            "RELEASED" -> {
+                val leaseId = owner.aplusLeaseId
+                !leaseId.isNullOrBlank() &&
+                    isExactTerminalSuccessor &&
+                    coordinator.hasMatchingDurableReleaseReceipt(
+                        APlusOperationIdentity.releaseIdempotencyKey(owner.id),
+                        leaseId,
+                        APlusOperationIdentity.releaseDigest(leaseId)
+                    )
             }
             else -> false
         }

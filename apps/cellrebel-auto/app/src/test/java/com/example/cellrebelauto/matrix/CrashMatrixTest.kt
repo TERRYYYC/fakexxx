@@ -229,7 +229,17 @@ class CrashMatrixTest {
         return planId
     }
 
-    private suspend fun seedAttempt(planId: Long, taskId: Long, attemptId: Long, aplusState: String?, aplusLeaseId: String? = null, currentExecutionId: String? = null, aplusAnchorScheduleId: String? = "qwy-default-schedule"): Long {
+    private suspend fun seedAttempt(
+        planId: Long,
+        taskId: Long,
+        attemptId: Long,
+        aplusState: String?,
+        aplusLeaseId: String? = null,
+        currentExecutionId: String? = null,
+        aplusAnchorScheduleId: String? = "qwy-default-schedule",
+        aplusAnchorItemId: String? = "item-1",
+        aplusAnchorVersion: Long? = 1L
+    ): Long {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
         db.testAttemptDao().insert(
             TestAttempt(
@@ -240,7 +250,9 @@ class CrashMatrixTest {
                 latitude = 39.9, longitude = 116.4,
                 aplusState = aplusState, aplusLeaseId = aplusLeaseId,
                 currentExecutionId = currentExecutionId,
-                aplusAnchorScheduleId = aplusAnchorScheduleId
+                aplusAnchorScheduleId = aplusAnchorScheduleId,
+                aplusAnchorItemId = aplusAnchorItemId,
+                aplusAnchorVersion = aplusAnchorVersion
             )
         )
         return sessionId
@@ -253,6 +265,19 @@ class CrashMatrixTest {
     // the seeded attempt's own validity window (startedAt=600 from seedAttempt, timeout=90s from buildEngine).
     private fun ownerIntentDigest(sessionId: Long, planId: Long, attemptId: Long = 77L) =
         APlusOperationIdentity.requestDigest(testApplyIntent(attemptId, sessionId, planId, "qwy-default-schedule", 600L, 90_000L))
+
+    private suspend fun seedRoomApplyReceipt(attemptId: Long, requestDigest: String) {
+        db.operationReceiptDao().insertIfAbsent(
+            com.example.cellrebelauto.recovery.OperationReceiptRow(
+                idempotencyKey = applyKey(attemptId),
+                requestDigest = requestDigest,
+                resultOutcome = "APPLIED",
+                createdAt = 1000L,
+                leaseId = "lease-$attemptId",
+                operationId = "op-$attemptId"
+            )
+        )
+    }
 
     /**
      * Seed the DURABLE execution evidence (§8.1 COMPLETION_OBSERVED already persisted it) so the M-CR-06
@@ -338,6 +363,7 @@ class CrashMatrixTest {
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        seedRoomApplyReceipt(77L, intentDigest)
     }
 
     // ---- M-CR-03..06: recovery projections ----
@@ -473,6 +499,7 @@ class CrashMatrixTest {
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        seedRoomApplyReceipt(77L, intentDigest)
 
         // Run 1 (successor process): re-classify → persist receipt + execution evidence → advance.
         val evidence1 = SeededEvidenceSource(
@@ -494,10 +521,26 @@ class CrashMatrixTest {
         val evidence2 = SeededEvidenceSource(post = validPost(intentDigest))
         buildEngine(planId, VirtualClock(), FakeBackend(executor, log, evidence2)).run()
 
+        // The post-observation reacquisition intentionally advances one durable phase per resume;
+        // a third invocation owns the QUOTA_COMMITTED release/advance convergence.
+        val terminalRecovery = buildEngine(planId, VirtualClock(), FakeBackend(executor, log))
+        terminalRecovery.run()
+
         assertNotNull(
             "the full recovery chain must mint (re-decide PASS over production-written carriers)",
             db.trustedQuotaDao().getByAttempt(77L)
         )
+        val recovered = checkNotNull(db.testAttemptDao().getAttemptById(77L))
+        assertEquals(
+            "the full chain must close the durable owner; " +
+                "failure=${recovered.failureReason}; logs=${terminalRecovery.logs.value}",
+            "CLOSED",
+            recovered.aplusState
+        )
+        assertEquals("the full chain must project the trusted owner succeeded", "succeeded", recovered.status)
+        assertEquals("quota-reached recovery advances exactly once", 1, executor.advanceCalls.size)
+        assertEquals("recovery releases the owner lease exactly once", 1,
+            executor.releaseInvocationCount(releaseKey(77L)))
     }
 
     @Test
@@ -539,6 +582,7 @@ class CrashMatrixTest {
         val log = FakeDurableRecoveryLog()
         executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
         log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        seedRoomApplyReceipt(77L, intentDigest)
         buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
 
         val entry = db.trustedQuotaDao().getByAttempt(77L)
@@ -547,6 +591,13 @@ class CrashMatrixTest {
         assertEquals("M-CR-06: the mint digest must derive from the CURRENT execution (owner lookup, not positional)", seededDigest, entry.evidenceDigest)
         assertEquals("M-CR-06: committedAt must be the exact recovery commit time (15000)", RECOVERY_NOW, entry.committedAt)
         assertEquals("M-CR-06: the re-decision must insert EXACTLY ONE ledger row", 1, db.trustedQuotaDao().countAll())
+        val recovered = checkNotNull(db.testAttemptDao().getAttemptById(77L))
+        assertEquals("M-CR-06: the owner must reach the terminal state", "CLOSED", recovered.aplusState)
+        assertEquals("M-CR-06: trusted recovery must project succeeded", "succeeded", recovered.status)
+        assertEquals("M-CR-06: quota-reached recovery advances exactly once", 1,
+            executor.advanceCalls.size)
+        assertEquals("M-CR-06: recovery releases the owner lease exactly once", 1,
+            executor.releaseInvocationCount(releaseKey(77L)))
     }
 
     @Test

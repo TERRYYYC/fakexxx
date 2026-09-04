@@ -246,6 +246,10 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markSessionStatus(sessionId: Long, status: String) =
         db.runSessionDao().updateStatus(sessionId, status)
 
+    /** Terminalize a replacement run that cannot own the plan's durable A+ effect. */
+    suspend fun interruptSessionForRecoveryConflict(sessionId: Long, endedAt: Long) =
+        db.runSessionDao().interruptForRecoveryConflict(sessionId, endedAt)
+
     // # 可信完成投影（§7.3）：任务完成 = 可信计数达成；GREEN 由 F3 可信 SQL 承载
     suspend fun completeTaskIfQuotaReached(taskId: Long): Int =
         db.locationTaskDao().completeTaskIfQuotaReached(taskId)

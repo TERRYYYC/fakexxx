@@ -121,7 +121,14 @@ class ReceiptVerbatimReadbackTest {
         )
         val log = roomLog()
         val coordinator = RecoveryCoordinator(executor, log)
-        val result = coordinator.reconcile(77L, testApplyIntent(), "auto-aplus-apply-77", "digest-1", 1000L)
+        val result = coordinator.reconcile(
+            77L,
+            testApplyIntent(),
+            "auto-aplus-apply-77",
+            "digest-1",
+            1000L,
+            allowExternalApply = true
+        )
         assertTrue("no prior receipt ⇒ ADVANCED_TO_RELEASE", result is ReconcileResult.AdvancedToRelease)
         val receipt = log.receiptFor("auto-aplus-apply-77")
         assertNotNull("the reconcile-path apply must persist a durable receipt", receipt)
