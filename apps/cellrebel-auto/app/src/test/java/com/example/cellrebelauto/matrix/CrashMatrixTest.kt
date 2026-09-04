@@ -700,10 +700,17 @@ class CrashMatrixTest {
             postOverride = { copy(continuitySinceElapsedRealtimeMs = 9000L) })
     }
 
+    // KB-8 migration of the M-CR-06 coordinate family: Auto's ONLY coordinate gate is the
+    // finite/range check — distance-to-target validation is provider-exclusive, so displacement
+    // from the retired Auto-local target copy is NOT a rejection reason. The discriminators below
+    // pin the surviving finite/range predicate (out-of-range values survive the Room round-trip,
+    // unlike NaN which SQLite stores as NULL); `M_CR_06_kb8_displacement_mints` kills the opposite
+    // mutant (a resurrected Auto-local distance oracle refusing provider-verified displacement).
+
     @Test fun `M_CR_06_discriminator_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 coordinates discriminator", "effectiveLat/Lng ~20m off target (>1m tolerance)",
-            preOverride = { copy(effectiveLat = 39.9002) },
-            postOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 coordinates discriminator", "effectiveLat out of geographic range (>90)",
+            preOverride = { copy(effectiveLat = 91.0) },
+            postOverride = { copy(effectiveLat = 91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_evidence_refs`() = runTest {
@@ -794,23 +801,47 @@ class CrashMatrixTest {
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE lat off-target, POST canonical",
-            preOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 PRE-only coordinates", "PRE effectiveLat out of range, POST canonical",
+            preOverride = { copy(effectiveLat = 91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_post_only_coords`() = runTest {
-        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST lat off-target, PRE canonical",
-            postOverride = { copy(effectiveLat = 39.9002) })
+        assertDiscriminatorReject("M-CR-06 POST-only coordinates", "POST effectiveLat out of range, PRE canonical",
+            postOverride = { copy(effectiveLat = 91.0) })
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_lng`() = runTest {
-        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE lng off-target, POST canonical",
-            preOverride = { copy(effectiveLng = 116.4002) })
+        assertDiscriminatorReject("M-CR-06 PRE-only longitude", "PRE effectiveLng out of range, POST canonical",
+            preOverride = { copy(effectiveLng = 200.0) })
     }
 
     @Test fun `M_CR_06_discriminator_post_only_lng`() = runTest {
-        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST lng off-target, PRE canonical",
-            postOverride = { copy(effectiveLng = 116.4002) })
+        assertDiscriminatorReject("M-CR-06 POST-only longitude", "POST effectiveLng out of range, PRE canonical",
+            postOverride = { copy(effectiveLng = 200.0) })
+    }
+
+    @Test fun `M_CR_06_kb8_displacement_mints`() = runTest {
+        // KB-8 positive polarity (anti-refuse-all for the retired oracle): PRE+POST coordinates that
+        // are finite, in-range and provider-verified but DISPLACED from the Auto-local target copy
+        // (~20 m) must mint exactly ONE trusted row. An impl that resurrects the Auto-local
+        // haversine/distance gate mints ZERO and fails this.
+        val seededDigest = "ev-" + java.util.UUID.randomUUID().toString()
+        val planId = seedPlan(taskId = 42L)
+        val sessionId = seedAttempt(planId, 42L, attemptId = 77L, aplusState = "DECIDING", aplusLeaseId = LEASE_ID)
+        val intentDigest = ownerIntentDigest(sessionId, planId)
+        seedMcr06Fixture(sessionId, intentDigest, seededDigest,
+            preOverride = { copy(effectiveLat = 39.9002) },
+            postOverride = { copy(effectiveLat = 39.9002) },
+            receiptIntentHash = intentDigest
+        )
+        val executor = RecordingExternalApplyExecutor()
+        val log = FakeDurableRecoveryLog()
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = applyKey(77L), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(applyKey(77L), intentDigest, "RELEASED", 1000L)
+        buildEngine(planId, VirtualClock(now = RECOVERY_NOW), FakeBackend(executor, log)).run()
+
+        assertEquals("KB-8: provider-verified displacement from the Auto-local target must mint ONE trusted row (provider owns distance validation)", 1, db.trustedQuotaDao().countAll())
+        assertNotNull("KB-8: minted row must bind attempt 77", db.trustedQuotaDao().getByAttempt(77L))
     }
 
     @Test fun `M_CR_06_discriminator_pre_only_evidence_refs`() = runTest {
