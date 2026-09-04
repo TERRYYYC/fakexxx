@@ -297,8 +297,15 @@ class AdvanceMatrixTest {
         return AutomationEngine(
             planId = planId, planRepository = repo,
             cellRebelRunner = object : CellRebelRunner {
-                override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome =
-                    AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
+                override suspend fun runTest(
+                    startedAt: Long,
+                    testTimeoutMs: Long,
+                    onStartInteraction: suspend () -> Unit,
+                    onRunningObserved: suspend (Long) -> Unit
+                ): AttemptOutcome {
+                    onStartInteraction()
+                    return AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
+                }
             },
             gpsSetter = object : GpsLocationSetter {
                 override suspend fun setLocation(lat: Double, lng: Double) = GpsOutcome.Active

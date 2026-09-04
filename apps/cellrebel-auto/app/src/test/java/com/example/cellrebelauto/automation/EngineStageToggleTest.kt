@@ -51,9 +51,11 @@ class EngineStageToggleTest {
         override suspend fun runTest(
             startedAt: Long,
             testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
             onRunningObserved: suspend (Long) -> Unit
         ): AttemptOutcome {
             calls++
+            onStartInteraction()
             return AttemptOutcome.Success(
                 webScore = 8.0, videoScore = 7.0,
                 runningObservedAt = nowMs(), startedAt = startedAt, endedAt = nowMs()

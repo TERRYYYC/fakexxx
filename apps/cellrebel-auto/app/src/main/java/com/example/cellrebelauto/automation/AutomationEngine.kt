@@ -303,9 +303,6 @@ class AutomationEngine(
 
                 // # 创建尝试行（starting），ordinal = 任务内计数 + 1
                 val startedAt = nowMs()
-                // R44 (Sol GREEN-review-3 F3): the §7.1 execution evidence binds the MONOTONIC elapsed
-                // domain — captured from the elapsed seam at the same lifecycle moment as the wall stamp.
-                val attemptStartedAtElapsed = elapsedClockMs()
                 val attemptOrdinal = planRepository.countAttemptsForTask(task.id) + 1
                 val attemptId = planRepository.insertAttempt(
                     TestAttempt(
@@ -442,14 +439,26 @@ class AutomationEngine(
                     val currentExecId = "exec-${attemptId}-${nowMs()}"
                     planRepository.markCurrentExecutionId(attemptId, currentExecId)
                     updateState(AutomationState.LAUNCHING_CELLREBEL)
+                    var startInteractionAtElapsed: Long? = null
                     var runningConfirmedAtElapsed = 0L
-                    val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
-                        // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
-                        runningConfirmedAtElapsed = elapsedClockMs()
-                        planRepository.markAttemptRunning(attemptId, runningAt)
-                        aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
-                        planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
-                    }
+                    val outcome = cellRebelRunner.runTest(
+                        startedAt = startedAt,
+                        testTimeoutMs = testTimeoutMs,
+                        onStartInteraction = {
+                            // §6.4.2: this is the actual Start interaction boundary, after PRE and
+                            // after launch/navigation. Attempt creation and runTest entry are too early.
+                            if (startInteractionAtElapsed == null) {
+                                startInteractionAtElapsed = elapsedClockMs()
+                            }
+                        },
+                        onRunningObserved = { runningAt ->
+                            // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
+                            runningConfirmedAtElapsed = elapsedClockMs()
+                            planRepository.markAttemptRunning(attemptId, runningAt)
+                            aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED) ?: aplusState
+                            planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
+                        }
+                    )
                     ensureActive()
                     when (outcome) {
                         is AttemptOutcome.Failure -> {
@@ -466,6 +475,38 @@ class AutomationEngine(
                             return@coroutineScope
                         }
                         is AttemptOutcome.Success -> {
+                            val actualStartInteractionAtElapsed = startInteractionAtElapsed
+                            if (actualStartInteractionAtElapsed == null) {
+                                // A successful result without a successfully dispatched Start interaction
+                                // cannot own §7.1 execution evidence. Fail closed before writing a wire-1
+                                // row instead of relying on a later trust predicate to reject a forged 0.
+                                aplusState = attemptDriver?.driveTransition(
+                                    attemptId,
+                                    aplusState,
+                                    AttemptEvent.TIMEOUT_INTERRUPTED
+                                ) ?: aplusState
+                                aplusState = attemptDriver?.driveTransition(
+                                    attemptId,
+                                    aplusState,
+                                    AttemptEvent.RECONCILE
+                                ) ?: aplusState
+                                if (!aplusReleaseAndFinalize(
+                                        attemptId,
+                                        task.id,
+                                        success = false,
+                                        reason = FailureReason.UNTRUSTED.name,
+                                        endedAt = outcome.endedAt,
+                                        webScore = null,
+                                        videoScore = null
+                                    )) {
+                                    return@coroutineScope
+                                }
+                                updateState(AutomationState.FAILED)
+                                _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
+                                log("A+ attempt $attemptOrdinal returned success without Start interaction evidence — no execution row, no quota")
+                                aplusPause("missing Start interaction evidence for attempt $attemptId")
+                                return@coroutineScope
+                            }
                             aplusState = attemptDriver?.driveTransition(attemptId, aplusState, AttemptEvent.COMPLETION_OBSERVED) ?: aplusState
                             // R43 (Sol GREEN-review-2 F3): the §7.1 execution evidence row is persisted AT
                             // the COMPLETION_OBSERVED phase boundary — BEFORE the post-observe call and long
@@ -483,7 +524,7 @@ class AutomationEngine(
                                 // seam — NEVER AttemptOutcome.startedAt/endedAt (wall/epoch; the spec
                                 // forbids reusing them, and only the elapsed domain is comparable to
                                 // the provider observations in §6.4.2 bracketing).
-                                startedAtElapsed = attemptStartedAtElapsed,
+                                startedAtElapsed = actualStartInteractionAtElapsed,
                                 runningConfirmedAtElapsed = runningConfirmedAtElapsed,
                                 completedAtElapsed = completedAtElapsed,
                                 baselineRunningState = "IDLE",
@@ -491,7 +532,7 @@ class AutomationEngine(
                                 runningDurationMs = completedAtElapsed - runningConfirmedAtElapsed,
                                 webBrowsingScore = outcome.webScore,
                                 videoStreamingScore = outcome.videoScore,
-                                roundTimestampsElapsed = "$attemptStartedAtElapsed;$completedAtElapsed"
+                                roundTimestampsElapsed = "$actualStartInteractionAtElapsed;$completedAtElapsed"
                             )
                             // §8.1: COMPLETION_OBSERVED → POST_OBSERVE_PENDING is persisted BEFORE the post-observe
                             // call (Sol round-23 P1-1): a crash in the post-observe call must recover as
@@ -659,10 +700,10 @@ class AutomationEngine(
                 // ==================== CellRebel verified attempt ====================
                 returnToSelf()
                 updateState(AutomationState.LAUNCHING_CELLREBEL)
-                val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs) { runningAt ->
+                val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs, onStartInteraction = {}, onRunningObserved = { runningAt ->
                     // # C2：观察到 RUNNING 的瞬间持久化 starting -> running 迁移（spec O3）
                     planRepository.markAttemptRunning(attemptId, runningAt)
-                }
+                })
                 ensureActive()
                 returnToSelf()
 

@@ -250,7 +250,13 @@ class EngineJourneyConsumerOracleTest {
         return AutomationEngine(
             planId = planId, planRepository = repo,
             cellRebelRunner = object : CellRebelRunner {
-                override suspend fun runTest(startedAt: Long, testTimeoutMs: Long, onRunningObserved: suspend (Long) -> Unit): AttemptOutcome {
+                override suspend fun runTest(
+                    startedAt: Long,
+                    testTimeoutMs: Long,
+                    onStartInteraction: suspend () -> Unit,
+                    onRunningObserved: suspend (Long) -> Unit
+                ): AttemptOutcome {
+                    onStartInteraction()
                     onRunningObserved(4242L)
                     return AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
                 }

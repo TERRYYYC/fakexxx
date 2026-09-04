@@ -20,7 +20,12 @@ class CellRebelAttemptFlowTest {
      * # 脚本化假驱动：snapshot() 逐帧消费，耗尽后重复最后一帧；
      * # 点击效果由帧序列预先编排，计数器记录点击/坐标点按次数
      */
-    private class FakeDriver(frames: List<ScreenNode?>) : CellRebelDriver {
+    private class FakeDriver(
+        frames: List<ScreenNode?>,
+        private val clickStartResult: Boolean = true,
+        private val dispatchTapResult: Boolean = true,
+        private val interactionEvents: MutableList<String>? = null
+    ) : CellRebelDriver {
         private val frames = frames.toMutableList()
         var clickStartCount = 0
             private set
@@ -35,12 +40,14 @@ class CellRebelAttemptFlowTest {
 
         override suspend fun clickStart(): Boolean {
             clickStartCount++
-            return true
+            interactionEvents?.add("ACTION_CLICK")
+            return clickStartResult
         }
 
         override suspend fun dispatchStartTap(): Boolean {
             dispatchTapCount++
-            return true
+            interactionEvents?.add("COORDINATE_TAP")
+            return dispatchTapResult
         }
     }
 
@@ -55,6 +62,88 @@ class CellRebelAttemptFlowTest {
         nowMs = clock.nowMs,
         delayMs = clock.delayMs
     )
+
+    @Test
+    fun `Start callback fires after the successful ACTION_CLICK boundary`() {
+        val clock = VirtualClock()
+        val events = mutableListOf<String>()
+        val driver = FakeDriver(
+            listOf(
+                CellRebelFixtures.ready(),
+                CellRebelFixtures.running(),
+                CellRebelFixtures.completed(),
+                CellRebelFixtures.completed()
+            ),
+            interactionEvents = events
+        )
+
+        kotlinx.coroutines.test.runTest {
+            newFlow(clock).run(
+                driver,
+                startedAt = 0L,
+                testTimeoutMs = 90_000L,
+                onStartInteraction = { events += "START_CALLBACK" }
+            )
+        }
+
+        assertEquals(listOf("ACTION_CLICK", "START_CALLBACK"), events)
+    }
+
+    @Test
+    fun `failed ACTION_CLICK reports Start only after the coordinate fallback is dispatched`() {
+        val clock = VirtualClock()
+        val events = mutableListOf<String>()
+        val driver = FakeDriver(
+            listOf(
+                CellRebelFixtures.ready(),
+                CellRebelFixtures.running(),
+                CellRebelFixtures.completed(),
+                CellRebelFixtures.completed()
+            ),
+            clickStartResult = false,
+            interactionEvents = events
+        )
+
+        kotlinx.coroutines.test.runTest {
+            newFlow(clock).run(
+                driver,
+                startedAt = 0L,
+                testTimeoutMs = 90_000L,
+                onStartInteraction = { events += "START_CALLBACK" }
+            )
+        }
+
+        assertEquals(listOf("ACTION_CLICK", "COORDINATE_TAP", "START_CALLBACK"), events)
+    }
+
+    @Test
+    fun `failed ACTION_CLICK and failed coordinate fallback never report a Start interaction`() {
+        val clock = VirtualClock()
+        var startCallbacks = 0
+        val driver = FakeDriver(
+            listOf(
+                CellRebelFixtures.ready(),
+                CellRebelFixtures.unknown()
+            ),
+            clickStartResult = false,
+            dispatchTapResult = false
+        )
+
+        lateinit var outcome: AttemptOutcome
+        kotlinx.coroutines.test.runTest {
+            outcome = newFlow(clock).run(
+                driver,
+                startedAt = 0L,
+                testTimeoutMs = 9_000L,
+                onStartInteraction = { startCallbacks++ }
+            )
+        }
+
+        assertTrue(outcome is AttemptOutcome.Failure)
+        assertEquals(0, startCallbacks)
+        assertEquals(1, driver.clickStartCount)
+        assertEquals(1, driver.dispatchTapCount)
+    }
 
     @Test
     fun `never transitions to running yields NO_RUNNING_EVIDENCE after fallback tap`() {
@@ -88,10 +177,16 @@ class CellRebelAttemptFlowTest {
             )
         )
         val flow = newFlow(clock)
+        var startCallbacks = 0
 
         lateinit var outcome: AttemptOutcome
         kotlinx.coroutines.test.runTest {
-            outcome = flow.run(driver, startedAt = 0L, testTimeoutMs = 90_000L)
+            outcome = flow.run(
+                driver,
+                startedAt = 0L,
+                testTimeoutMs = 90_000L,
+                onStartInteraction = { startCallbacks++ }
+            )
         }
 
         // # INV-7：与"上一次运行"完全相同的分数同样是合法成功，不做跨尝试比较
@@ -103,6 +198,7 @@ class CellRebelAttemptFlowTest {
         assertEquals(3000L, success.runningObservedAt)
         assertEquals(1, driver.clickStartCount)
         assertEquals(1, driver.dispatchTapCount)
+        assertEquals("the delayed fallback must not re-report Start", 1, startCallbacks)
     }
 
     @Test
