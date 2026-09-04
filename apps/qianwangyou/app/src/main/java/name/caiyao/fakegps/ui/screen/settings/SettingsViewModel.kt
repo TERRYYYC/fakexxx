@@ -9,6 +9,7 @@ import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.PublishPropagation
 import name.caiyao.fakegps.data.LocationDeliveryMode
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.mockprovider.MockLocationAppOps
 import name.caiyao.fakegps.mockprovider.MockProviderRuntime
 import name.caiyao.fakegps.mockprovider.MockProviderState
 import name.caiyao.fakegps.mockprovider.MockProviderStatusStore
@@ -86,11 +87,19 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                     readPublishedConfig = ::readPublishedConfig,
                     publishProviderState = MockProviderStatusStore::publish,
                     startService = { MockProviderRuntime.enableSystemMock(getApplication()) },
+                    // Issue #8: ask AppOpsManager before any mutation (fail-open inside).
+                    mockLocationAppOpAllowed = {
+                        MockLocationAppOps.isMockLocationAllowed(getApplication())
+                    },
                 )
             ) {
                 SystemMockEnableOutcome.PublicationFailed -> {
                     _publishFailure.value =
                         "无法发布生效中档案，System Mock 未启动；Hook 仍保持当前状态"
+                }
+                SystemMockEnableOutcome.AppOpDenied -> {
+                    // The typed Failed state (with the dev-options guidance) is already published
+                    // to MockProviderStatusStore — the System Mock card renders it; no banner.
                 }
                 is SystemMockEnableOutcome.Invalid -> {
                     _publishedConfig.value = outcome.published
