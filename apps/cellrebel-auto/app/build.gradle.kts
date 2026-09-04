@@ -15,6 +15,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        // Non-empty only on a lane build type that must pair with a same-suffix provider
+        // (e.g. glmbench -> name.caiyao.fakegps.glmbench). Empty = ProviderPrincipal
+        // resolves by build debug/release semantics as before.
+        buildConfigField("String", "PROVIDER_APPLICATION_ID_OVERRIDE", "\"\"")
     }
 
     signingConfigs {
@@ -40,12 +44,32 @@ android {
         debug {
             signingConfig = signingConfigs.getByName("bench")
         }
+        // glmbench lane: debuggable sibling of debug that installs as a SEPARATE app
+        // (com.example.cellrebelauto.glmbench) alongside production/bench installs, pairs
+        // ONLY with name.caiyao.fakegps.glmbench via the BuildConfig override, and reuses
+        // the whole debug tooling source set (probes, ProviderPrincipalBuild).
+        create("glmbench") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".glmbench"
+            matchingFallbacks.add("debug")
+            buildConfigField("String", "PROVIDER_APPLICATION_ID_OVERRIDE", "\"name.caiyao.fakegps.glmbench\"")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    sourceSets {
+        // The glmbench build type compiles the debug lane's sources (probe surfaces +
+        // debug ProviderPrincipalBuild); its own srcDir stays available for lane-only
+        // additions. Manifest merge pulls the debug-only exported probe activities.
+        getByName("glmbench") {
+            java.srcDir("src/debug/java")
+            manifest.srcFile("src/debug/AndroidManifest.xml")
         }
     }
 
@@ -60,6 +84,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
