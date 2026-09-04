@@ -224,7 +224,6 @@ class ProviderReachabilityGuardTest {
             deliveryModeWire = null,
             verificationLevelWire = 0,
             environmentFingerprint = "probe",
-            evidenceRefs = emptyList(),
         )
 
         override fun scheduleDecisionWire(scheduleRef: String): Int = 0

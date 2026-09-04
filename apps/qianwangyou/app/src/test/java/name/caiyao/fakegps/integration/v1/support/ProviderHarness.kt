@@ -113,7 +113,7 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
         leases = EnvironmentLeaseStore(kv, clock)
         idempotency = DurableIdempotencyStore(kv)
         audit = DurableIntegrationAuditStore(kv, clock)
-        observerComponent = EnvironmentObserver(tracker, env, clock)
+        observerComponent = EnvironmentObserver(tracker, env, clock, audit)
         handler = EnvironmentControlHandler(
             authorizer = authorizer,
             pairingStore = pairing,
