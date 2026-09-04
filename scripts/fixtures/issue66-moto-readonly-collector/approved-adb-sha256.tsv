@@ -1,0 +1,4 @@
+# Repo-approved ADB client SHA-256 allowlist.
+# Format: <lane><TAB><label><TAB><sha256>
+PRODUCTION	platform-tools-37.0.0-macos-google-eqhxz8m8av	9fdf861259dc807937b13afdd5f053c7fda9f3b7726933fe0e0f45130ecb8dc7
+SELFTEST	issue66-fake-adb-536cc861	536cc861ad1ee2aae01444de9330b7d45e362fb9eb2b02c5f2b1a0d48a9006ec

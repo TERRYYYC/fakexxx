@@ -1,0 +1,21 @@
+# Exact class/method associations required by the Android 15 issue #66 oracle hook plan.
+com.android.server.appop.AppOpsCheckingServiceTracingDecorator	setUidMode
+com.android.server.appop.AppOpsCheckingServiceTracingDecorator	setPackageMode
+com.android.server.appop.AppOpsCheckingServiceTracingDecorator	removePackage
+com.android.server.appop.AppOpsCheckingServiceTracingDecorator	removeUid
+com.android.server.appop.AppOpsCheckingServiceTracingDecorator	clearAllModes
+com.android.server.permission.access.appop.AppOpService	setUidMode
+com.android.server.permission.access.appop.AppOpService	setPackageMode
+com.android.server.permission.access.appop.AppOpService	removePackage
+com.android.server.permission.access.appop.AppOpService	removeUid
+com.android.server.permission.access.AccessCheckingService	onPackageRemoved
+com.android.server.permission.access.AccessCheckingService	onPackageUninstalled
+com.android.server.permission.access.AccessCheckingService	onUserRemoved
+com.android.server.location.provider.LocationProviderManager	onStateChanged
+com.android.server.location.provider.LocationProviderManager	onEnabledChanged
+com.android.server.location.provider.MockLocationProvider	setProviderLocation
+com.android.server.location.LocationManagerService	addTestProvider
+com.android.server.location.LocationManagerService	removeTestProvider
+com.android.server.location.LocationManagerService	setTestProviderEnabled
+com.android.server.location.LocationManagerService	setTestProviderLocation
+com.android.server.SystemServiceManager	startBootPhase

@@ -114,26 +114,27 @@ fi
 
 RUN=0; PASSED=0; FAILED=0; PENDING=0
 FAILED_NAMES=""; PENDING_NAMES=""
-HOST_RECEIPT="integration-tests/pr63-on-issue66/harness/build/reports/pr63-on-issue66/host-gate-receipt.json"
+readonly HOST_RECEIPT="integration-tests/pr63-on-issue66/harness/build/reports/pr63-on-issue66/host-gate-receipt.json"
+readonly HOST_RECEIPT_LOCK="${HOST_RECEIPT%/*}/host-gate.lock"
 HOST_RECEIPT_VALIDATED=0
 
 verify_host_receipt() {
   local receipt_path="$1"
+  local lock_path="$2"
 
-  if [ ! -f "$receipt_path" ]; then
-    printf 'verify-a-plus: host gate passed but receipt is missing: %s\n' "$receipt_path" >&2
-    return 1
-  fi
   if ! command -v python3 >/dev/null 2>&1; then
     printf 'verify-a-plus: python3 is required to validate the host-gate JSON receipt\n' >&2
     return 1
   fi
 
-  python3 - "$receipt_path" <<'PY'
+  python3 - "$receipt_path" "$lock_path" <<'PY'
 import json
+import os
+import stat
 import sys
 
 receipt_path = sys.argv[1]
+lock_path = sys.argv[2]
 expected = {
     "schemaVersion": 2,
     "hostIntegration": "PASS",
@@ -150,24 +151,108 @@ expected = {
 }
 
 try:
+    os.mkdir(lock_path, 0o700)
+except FileExistsError:
+    print(
+        "verify-a-plus: host-gate lock already exists; "
+        "the canonical receipt is not authoritative",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+except OSError as error:
+    print(
+        f"verify-a-plus: cannot acquire host-gate validation lock: {error}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+owner_path = os.path.join(lock_path, "owner")
+owner_token = (
+    f"validator-pid={os.getpid()};ppid={os.getppid()};"
+    f"nonce={os.urandom(16).hex()}\n"
+).encode("ascii")
+owner_fd = None
+try:
+    owner_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    owner_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    owner_fd = os.open(owner_path, owner_flags, 0o600)
+    remaining = memoryview(owner_token)
+    while remaining:
+        written = os.write(owner_fd, remaining)
+        if written <= 0:
+            raise OSError("short write while recording validation-lock ownership")
+        remaining = remaining[written:]
+    os.fsync(owner_fd)
+except OSError as error:
+    if owner_fd is not None:
+        os.close(owner_fd)
+    print(
+        f"verify-a-plus: cannot establish host-gate validation-lock ownership: {error}; "
+        "the lock is retained as a fail-closed fence",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+validation_error = None
+try:
     with open(receipt_path, encoding="utf-8") as receipt_file:
         receipt = json.load(receipt_file)
+except FileNotFoundError:
+    validation_error = f"host gate passed but receipt is missing: {receipt_path}"
 except (OSError, UnicodeError, json.JSONDecodeError) as error:
-    print(f"verify-a-plus: invalid host-gate JSON receipt: {error}", file=sys.stderr)
-    raise SystemExit(1)
+    validation_error = f"invalid host-gate JSON receipt: {error}"
 
-if not isinstance(receipt, dict):
-    print("verify-a-plus: host-gate JSON receipt must be an object", file=sys.stderr)
-    raise SystemExit(1)
+if validation_error is None and not isinstance(receipt, dict):
+    validation_error = "host-gate JSON receipt must be an object"
 
-mismatches = [
-    f"{field}={receipt.get(field)!r} (expected {expected_value!r})"
-    for field, expected_value in expected.items()
-    if receipt.get(field) != expected_value
-]
-if mismatches:
+if validation_error is None:
+    mismatches = [
+        f"{field}={receipt.get(field)!r} (expected {expected_value!r})"
+        for field, expected_value in expected.items()
+        if receipt.get(field) != expected_value
+    ]
+    if mismatches:
+        validation_error = "host-gate receipt contract mismatch: " + "; ".join(mismatches)
+
+cleanup_error = None
+try:
+    owner_fd_state = os.fstat(owner_fd)
+    owner_path_state = os.lstat(owner_path)
+    if (
+        not stat.S_ISREG(owner_fd_state.st_mode)
+        or owner_fd_state.st_nlink != 1
+        or (owner_fd_state.st_dev, owner_fd_state.st_ino)
+        != (owner_path_state.st_dev, owner_path_state.st_ino)
+    ):
+        raise OSError("validation-lock owner identity changed")
+    os.lseek(owner_fd, 0, os.SEEK_SET)
+    observed_owner = b""
+    while True:
+        chunk = os.read(owner_fd, 4096)
+        if not chunk:
+            break
+        observed_owner += chunk
+        if len(observed_owner) > len(owner_token):
+            break
+    if observed_owner != owner_token:
+        raise OSError("validation-lock owner token changed")
+    os.unlink(owner_path)
+    os.close(owner_fd)
+    owner_fd = None
+    os.rmdir(lock_path)
+except OSError as error:
+    cleanup_error = str(error)
+finally:
+    if owner_fd is not None:
+        os.close(owner_fd)
+
+if validation_error is not None:
+    print(f"verify-a-plus: {validation_error}", file=sys.stderr)
+    raise SystemExit(1)
+if cleanup_error is not None:
     print(
-        "verify-a-plus: host-gate receipt contract mismatch: " + "; ".join(mismatches),
+        f"verify-a-plus: could not release the owned host-gate validation lock: "
+        f"{cleanup_error}; the receipt is not authoritative",
         file=sys.stderr,
     )
     raise SystemExit(1)
@@ -201,18 +286,9 @@ while IFS='|' read -r rank name pr file cmd; do
 
   printf '\n---- %s\n     $ %s\n' "$name" "$cmd"
   RUN=$((RUN + 1))
-  if [ "$name" = "auto-qwy-host" ]; then
-    # Never let a previous successful run satisfy the current aggregate gate.
-    if ! rm -f "$HOST_RECEIPT"; then
-      FAILED=$((FAILED + 1))
-      FAILED_NAMES="$FAILED_NAMES $name(stale-receipt)"
-      printf '     -> FAIL (could not remove stale host evidence receipt)\n'
-      continue
-    fi
-  fi
   if ( eval "$cmd" ); then
     if [ "$name" = "auto-qwy-host" ]; then
-      if verify_host_receipt "$HOST_RECEIPT"; then
+      if verify_host_receipt "$HOST_RECEIPT" "$HOST_RECEIPT_LOCK"; then
         HOST_RECEIPT_VALIDATED=1
         PASSED=$((PASSED + 1))
         printf '     -> PASS (repository host integration only; product/device remains BLOCKED)\n'
