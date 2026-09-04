@@ -24,7 +24,21 @@ enum class AttemptEvent {
     RECONCILE,
     RELEASE_RECEIPT,
     /** Release did not fully clear the lease — recovery required, do NOT advance (§8.1). */
-    RELEASE_INCOMPLETE
+    RELEASE_INCOMPLETE,
+    ADVANCE_RECEIPT_VERIFIED,
+    ADVANCE_DIGEST_MISMATCH,
+    ADVANCE_EXHAUSTED_VERIFIED,
+    EXHAUSTED_STATE_CONFIRMED,
+    EXHAUSTED_STATE_MISMATCH,
+    OBSERVED_TUPLE_MATCHES,
+    OBSERVED_TUPLE_MISMATCH
+}
+
+/** The authoritative §8.1 predicate that chooses the state after a durable release receipt. */
+enum class ReleaseReceiptRoute {
+    NOT_COMMITTED,
+    COMMITTED_UNDER_QUOTA,
+    COMMITTED_QUOTA_REACHED
 }
 
 /**
@@ -44,6 +58,23 @@ enum class AttemptEvent {
  * # §8.1 状态迁移函数（GREEN）：完整 §8.1 表；未定义的 (state,event) 元组为 no-op
  */
 object AttemptTransitions {
+
+    /**
+     * The release receipt is the one §8.1 event whose target depends on authoritative ledger state.
+     * Keeping the route mandatory prevents a caller from silently treating quota-reached as CLOSED.
+     */
+    fun nextAfterReleaseReceipt(
+        current: AttemptState,
+        route: ReleaseReceiptRoute
+    ): AttemptState {
+        if (current == AttemptState.CLOSED) return AttemptState.CLOSED
+        if (current != AttemptState.RELEASE_PENDING) return current
+        return when (route) {
+            ReleaseReceiptRoute.NOT_COMMITTED,
+            ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA -> AttemptState.CLOSED
+            ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED -> AttemptState.ADVANCE_PENDING
+        }
+    }
 
     /** The full §8.1 transition table. Unlisted (state, event) tuples are no-ops (stay in current). */
     fun next(current: AttemptState, event: AttemptEvent): AttemptState {
@@ -100,8 +131,29 @@ object AttemptTransitions {
                 else -> current
             }
             AttemptState.RELEASE_PENDING -> when (event) {
-                AttemptEvent.RELEASE_RECEIPT -> AttemptState.CLOSED
+                // The route-aware overload owns this conditional §8.1 edge. A bare receipt event
+                // cannot prove whether the trusted quota has reached the task threshold.
+                AttemptEvent.RELEASE_RECEIPT -> current
                 AttemptEvent.RELEASE_INCOMPLETE -> AttemptState.RECOVERY_REQUIRED // pause, never advance
+                else -> current
+            }
+            AttemptState.ADVANCE_PENDING -> when (event) {
+                AttemptEvent.CRASH_RECOVER -> AttemptState.ADVANCE_PENDING
+                AttemptEvent.ADVANCE_RECEIPT_VERIFIED -> AttemptState.ADVANCE_OBSERVING
+                AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED -> AttemptState.ADVANCE_STATE_READBACK
+                AttemptEvent.ADVANCE_DIGEST_MISMATCH -> AttemptState.RECOVERY_REQUIRED
+                else -> current
+            }
+            AttemptState.ADVANCE_OBSERVING -> when (event) {
+                AttemptEvent.OBSERVED_TUPLE_MATCHES -> AttemptState.CLOSED
+                AttemptEvent.OBSERVED_TUPLE_MISMATCH,
+                AttemptEvent.ADVANCE_DIGEST_MISMATCH -> AttemptState.RECOVERY_REQUIRED
+                else -> current
+            }
+            AttemptState.ADVANCE_STATE_READBACK -> when (event) {
+                AttemptEvent.EXHAUSTED_STATE_CONFIRMED -> AttemptState.CLOSED
+                AttemptEvent.EXHAUSTED_STATE_MISMATCH,
+                AttemptEvent.ADVANCE_DIGEST_MISMATCH -> AttemptState.RECOVERY_REQUIRED
                 else -> current
             }
             AttemptState.CLOSED -> AttemptState.CLOSED // unreachable (handled above) — kept exhaustive

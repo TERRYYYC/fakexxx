@@ -2,6 +2,7 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.model.execution.CellRebelExecution
@@ -14,6 +15,7 @@ import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.OperationReceiptRow
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import org.json.JSONArray
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
@@ -58,6 +60,7 @@ class EngineQuotaRecoveryRedTest {
     private val anchorVersion = 12L
 
     private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
+    private val releaseAttempts = mutableListOf<Long>()
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = "item-after-9z",
         scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-quota-recovery",
@@ -67,8 +70,10 @@ class EngineQuotaRecoveryRedTest {
     private val journeyExecutor = object : ExternalApplyExecutor {
         override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome =
             ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
-        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome =
-            ApplyOutcome("RELEASED", false)
+        override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome {
+            releaseAttempts += attemptId
+            return ApplyOutcome("RELEASED", false)
+        }
         override fun discover(): CapabilitySnapshotV1? = CapabilitySnapshotV1(
             serviceVersion = "fake-1.0",
             supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
@@ -176,6 +181,20 @@ class EngineQuotaRecoveryRedTest {
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
         )
+        if (phase == "RELEASED") {
+            // A legal legacy RELEASED row was written only after the old engine had durably
+            // recorded the release receipt. Seed that carrier so compatibility recovery proves
+            // replay from Room instead of silently issuing a fresh provider release.
+            db.releaseReceiptDao().insertIfAbsent(
+                ReleaseReceiptRow(
+                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+                    leaseId = "lease-$attemptId",
+                    releaseDigest = APlusOperationIdentity.releaseDigest("lease-$attemptId"),
+                    resultOutcome = "RELEASED",
+                    createdAt = 1100L
+                )
+            )
+        }
         return planId to task.id
     }
 
@@ -229,6 +248,15 @@ class EngineQuotaRecoveryRedTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("the crashed attempt must close as succeeded (the trusted mint is durable)", "succeeded", attempt.status)
         assertEquals("CLOSED", attempt.aplusState)
+        val trail = db.auditEventDao().forAttempt(31L)
+        assertEquals(
+            "QUOTA_COMMITTED->RELEASE_PENDING",
+            trail.single { it.eventType == AttemptEvent.BEGIN_RELEASE.name }.payloadDigest
+        )
+        assertEquals(
+            "RELEASE_PENDING->ADVANCE_PENDING[COMMITTED_QUOTA_REACHED]",
+            trail.single { it.eventType == AttemptEvent.RELEASE_RECEIPT.name }.payloadDigest
+        )
     }
 
     // ---- RELEASED crash + quota REACHED → advance MUST be dispatched ----
@@ -246,6 +274,7 @@ class EngineQuotaRecoveryRedTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("the crashed attempt must close as succeeded", "succeeded", attempt.status)
         assertEquals("CLOSED", attempt.aplusState)
+        assertEquals("legacy RELEASED must replay its durable receipt without a provider call", 0, releaseAttempts.count { it == 31L })
     }
 
     // ====================================================================================
@@ -283,6 +312,12 @@ class EngineQuotaRecoveryRedTest {
             "succeeded", attempt.status
         )
         assertEquals("CLOSED", attempt.aplusState)
+        assertEquals(
+            "RELEASE_PENDING->CLOSED[COMMITTED_UNDER_QUOTA]",
+            db.auditEventDao().forAttempt(31L)
+                .single { it.eventType == AttemptEvent.RELEASE_RECEIPT.name }
+                .payloadDigest
+        )
     }
 
     @Test
@@ -297,6 +332,7 @@ class EngineQuotaRecoveryRedTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("succeeded", attempt.status)
         assertEquals("CLOSED", attempt.aplusState)
+        assertEquals("legacy RELEASED must replay its durable receipt without a provider call", 0, releaseAttempts.count { it == 31L })
     }
 
     // ---- Over-quota: more trusted entries than required → advance dispatched exactly once ----

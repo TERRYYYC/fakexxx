@@ -121,7 +121,32 @@ class AttemptTransitionsRedTest {
     fun `RELEASE_PENDING plus RELEASE_RECEIPT closes the attempt`() {
         assertEquals(
             AttemptState.CLOSED,
-            AttemptTransitions.next(AttemptState.RELEASE_PENDING, AttemptEvent.RELEASE_RECEIPT)
+            AttemptTransitions.nextAfterReleaseReceipt(
+                AttemptState.RELEASE_PENDING,
+                ReleaseReceiptRoute.NOT_COMMITTED
+            )
+        )
+    }
+
+    @Test
+    fun `a committed but under-quota release receipt closes without advancing`() {
+        assertEquals(
+            AttemptState.CLOSED,
+            AttemptTransitions.nextAfterReleaseReceipt(
+                AttemptState.RELEASE_PENDING,
+                ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA
+            )
+        )
+    }
+
+    @Test
+    fun `a quota-reached release receipt advances instead of closing prematurely`() {
+        assertEquals(
+            AttemptState.ADVANCE_PENDING,
+            AttemptTransitions.nextAfterReleaseReceipt(
+                AttemptState.RELEASE_PENDING,
+                ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED
+            )
         )
     }
 
@@ -165,6 +190,116 @@ class AttemptTransitionsRedTest {
             "TIMEOUT_INTERRUPTED must route to RECOVERY_REQUIRED (save outcome, never guess success)",
             AttemptState.RECOVERY_REQUIRED,
             AttemptTransitions.next(AttemptState.CELLREBEL_RUNNING, AttemptEvent.TIMEOUT_INTERRUPTED)
+        )
+    }
+
+    @Test
+    fun `TIMEOUT before RUNNING confirmation is undefined and cannot invent a frozen edge`() {
+        assertEquals(
+            AttemptState.CELLREBEL_START_PENDING,
+            AttemptTransitions.next(
+                AttemptState.CELLREBEL_START_PENDING,
+                AttemptEvent.TIMEOUT_INTERRUPTED
+            )
+        )
+    }
+
+    @Test
+    fun `OBSERVATION_UNTRUSTED at POST_OBSERVE_PENDING is undefined and cannot invent a frozen edge`() {
+        assertEquals(
+            AttemptState.POST_OBSERVE_PENDING,
+            AttemptTransitions.next(
+                AttemptState.POST_OBSERVE_PENDING,
+                AttemptEvent.OBSERVATION_UNTRUSTED
+            )
+        )
+    }
+
+    @Test
+    fun `OBSERVATION_UNTRUSTED at DECIDING is undefined and cannot invent a frozen edge`() {
+        assertEquals(
+            AttemptState.DECIDING,
+            AttemptTransitions.next(
+                AttemptState.DECIDING,
+                AttemptEvent.OBSERVATION_UNTRUSTED
+            )
+        )
+    }
+
+    @Test
+    fun `a verified non-terminal advance receipt enters independent observation`() {
+        assertEquals(
+            AttemptState.ADVANCE_OBSERVING,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_PENDING,
+                AttemptEvent.ADVANCE_RECEIPT_VERIFIED
+            )
+        )
+    }
+
+    @Test
+    fun `a mismatched advance receipt digest requires recovery`() {
+        assertEquals(
+            AttemptState.RECOVERY_REQUIRED,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_PENDING,
+                AttemptEvent.ADVANCE_DIGEST_MISMATCH
+            )
+        )
+    }
+
+    @Test
+    fun `a verified exhausted receipt enters schedule readback`() {
+        assertEquals(
+            AttemptState.ADVANCE_STATE_READBACK,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_PENDING,
+                AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED
+            )
+        )
+    }
+
+    @Test
+    fun `a matching post-advance tuple closes the attempt`() {
+        assertEquals(
+            AttemptState.CLOSED,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_OBSERVING,
+                AttemptEvent.OBSERVED_TUPLE_MATCHES
+            )
+        )
+    }
+
+    @Test
+    fun `a mismatching post-advance tuple requires recovery`() {
+        assertEquals(
+            AttemptState.RECOVERY_REQUIRED,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_OBSERVING,
+                AttemptEvent.OBSERVED_TUPLE_MISMATCH
+            )
+        )
+    }
+
+    @Test
+    fun `a confirmed exhausted schedule readback closes the attempt`() {
+        assertEquals(
+            AttemptState.CLOSED,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_STATE_READBACK,
+                AttemptEvent.EXHAUSTED_STATE_CONFIRMED
+            )
+        )
+    }
+
+    @Test
+    fun `a mismatching exhausted schedule readback requires recovery`() {
+        assertEquals(
+            AttemptState.RECOVERY_REQUIRED,
+            AttemptTransitions.next(
+                AttemptState.ADVANCE_STATE_READBACK,
+                AttemptEvent.EXHAUSTED_STATE_MISMATCH
+            )
         )
     }
 
