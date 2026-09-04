@@ -335,7 +335,11 @@ class EngineAdvanceRecoveryOracleTest {
             attempt.failureReason
         )
         assertEquals("phase contradiction must not execute observe", 0, observeCalls)
-        assertEquals("phase contradiction must not execute discover readback", 0, discoverCalls)
+        assertEquals(
+            "only the recovery-admission discover runs; phase contradiction must not execute a readback",
+            1,
+            discoverCalls
+        )
         assertTrue(
             "without a readback there must be no EXHAUSTED_STATE_MISMATCH audit",
             db.auditEventDao().forAttempt(31L).none {
@@ -367,7 +371,11 @@ class EngineAdvanceRecoveryOracleTest {
             attempt.failureReason
         )
         assertEquals("phase contradiction must not execute observe", 0, observeCalls)
-        assertEquals("phase contradiction must not execute discover readback", 0, discoverCalls)
+        assertEquals(
+            "only the recovery-admission discover runs; phase contradiction must not execute a readback",
+            1,
+            discoverCalls
+        )
         assertTrue(
             "without an observation there must be no OBSERVED_TUPLE_MISMATCH audit",
             db.auditEventDao().forAttempt(31L).none {
@@ -537,8 +545,8 @@ class EngineAdvanceRecoveryOracleTest {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 realExecutor.completeAndAdvance(request, expectedIntentHash)
             override fun discover(): CapabilitySnapshotV1? {
-                // In the ADVANCE_PENDING recovery path, the ONLY discover() call IS the readback
-                // (no prior capability check). Return the matching exhausted state directly.
+                // Aligned terminal-recovery control: provider and local plan are both complete, so
+                // Issue #88 must still permit the idempotent replay that closes the crashed attempt.
                 return CapabilitySnapshotV1(
                     serviceVersion = "fake-1.0",
                     supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
@@ -548,17 +556,23 @@ class EngineAdvanceRecoveryOracleTest {
                     profileRefs = listOf("p"), scheduleRefs = listOf("s"),
                     currentScheduleId = anchorScheduleId,
                     currentItemId = anchorItemId, // advanceReceipt.advancedFromItemId
-                    scheduleVersion = anchorVersion + 1, // advanceReceipt.scheduleVersionAfter
+                    scheduleVersion = anchorVersion + 1,
                     exhausted = true
                 )
             }
         }
-        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        val (planId, taskId) = seedCrashedAt("ADVANCE_PENDING")
+        repo.completeTaskIfQuotaReached(taskId)
         buildEngineWith(planId, VClock(), exhaustedExecutor).run()
 
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("honest exhausted receipt + matching readback ⇒ CLOSED", "CLOSED", attempt.aplusState)
         assertEquals("closed trusted", "succeeded", attempt.status)
+        assertEquals(
+            "aligned local/provider terminal recovery completes the session",
+            "completed",
+            db.runSessionDao().getLatest()!!.status
+        )
         assertEquals(
             listOf(
                 "ADVANCE_PENDING->ADVANCE_STATE_READBACK",

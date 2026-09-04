@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.recovery.ApplyOutcome
 import com.example.cellrebelauto.recovery.ExternalApplyExecutor
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
@@ -80,6 +81,7 @@ class EngineJourneyConsumerOracleTest {
     private val observePostAdvanceCalls = mutableListOf<Triple<String, String, String>>()
     private val events = mutableListOf<String>() // ordered "apply"/"release"/"advance" journey events
     private var armedPostAdvanceObservation: EnvironmentObservationV1? = null
+    private var cellRebelRunCalls = 0
 
     /** Test hook: mutate the armed post-advance observation (tamper one four-leg). */
     private var observationTamper: (EnvironmentObservationV1) -> EnvironmentObservationV1 = { it }
@@ -241,6 +243,38 @@ class EngineJourneyConsumerOracleTest {
         return planId to task.id
     }
 
+    private suspend fun seedTwoTaskPlan(): Triple<Long, Long, Long> {
+        val planId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "two-items.csv",
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 2,
+                totalRequiredSuccesses = 2
+            ),
+            listOf(
+                LocationTask(
+                    planId = 0,
+                    csvRow = 1,
+                    longitude = 116.4,
+                    latitude = 39.9,
+                    priority = 1,
+                    requiredSuccesses = 1
+                ),
+                LocationTask(
+                    planId = 0,
+                    csvRow = 2,
+                    longitude = 116.5,
+                    latitude = 40.0,
+                    priority = 2,
+                    requiredSuccesses = 1
+                )
+            )
+        )
+        val tasks = db.locationTaskDao().getTasksForPlan(planId)
+        return Triple(planId, tasks[0].id, tasks[1].id)
+    }
+
     private fun buildEngine(planId: Long, clock: VClock, driver: com.example.cellrebelauto.automation.aplus.APlusAttemptDriver?): AutomationEngine {
         // R45: the Room durable log — the apply receipt (with the verbatim operationId) must be
         // durable for the post-advance observe tuple, exactly as in production.
@@ -256,6 +290,7 @@ class EngineJourneyConsumerOracleTest {
                     onStartInteraction: suspend () -> Unit,
                     onRunningObserved: suspend (Long) -> Unit
                 ): AttemptOutcome {
+                    cellRebelRunCalls += 1
                     onStartInteraction()
                     onRunningObserved(4242L)
                     return AttemptOutcome.Success(8.0, 7.0, startedAt, 0L, 4300L)
@@ -287,6 +322,101 @@ class EngineJourneyConsumerOracleTest {
             0, db.testAttemptDao().getAttemptsForTask(taskId).size
         )
         assertEquals("no session activity beyond the pause", 0, db.trustedQuotaDao().countAll())
+    }
+
+    @Test
+    fun `an already exhausted provider pauses before any attempt or external effect (issue 88)`() = runTest {
+        val (planId, taskId) = seedPlan()
+        discoverAnswer = discoverAnswer!!.copy(exhausted = true)
+        val clock = VClock()
+
+        buildEngine(planId, clock, null).run()
+
+        assertEquals("run-start EXHAUSTED creates no attempt", 0, db.testAttemptDao().getAttemptsForTask(taskId).size)
+        assertEquals("run-start EXHAUSTED dispatches no preflight", 0, preflightCalls.size)
+        assertEquals("run-start EXHAUSTED dispatches no apply/release/advance", 0, events.size)
+        assertEquals("run-start EXHAUSTED dispatches no observation", 0, observePostAdvanceCalls.size)
+        assertEquals("run-start EXHAUSTED never launches CellRebel", 0, cellRebelRunCalls)
+        assertEquals("run-start EXHAUSTED mints no quota", 0, db.trustedQuotaDao().countAll())
+        assertEquals("the unconsumed local task remains pending", "pending", repo.getTask(taskId)!!.status)
+        assertEquals("the terminal provider disposition is durable and fail-closed", "paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `an already exhausted provider stops recovery before replaying an advance (issue 88)`() = runTest {
+        val (planId, taskId) = seedPlan()
+        val sessionId = repo.createSession(planId, 500L)
+        val attemptId = db.testAttemptDao().insert(
+            TestAttempt(
+                taskId = taskId,
+                runSessionId = sessionId,
+                attemptOrdinal = 1,
+                successOrdinal = null,
+                startedAt = 600L,
+                runningObservedAt = 700L,
+                endedAt = null,
+                status = "running",
+                failureReason = null,
+                webBrowsingScore = null,
+                videoStreamingScore = null,
+                latitude = 39.9,
+                longitude = 116.4,
+                aplusState = "ADVANCE_PENDING",
+                aplusLeaseId = "lease-recovery",
+                aplusAnchorScheduleId = anchorScheduleId,
+                aplusAnchorItemId = anchorItemId,
+                aplusAnchorVersion = anchorVersion
+            )
+        )
+        db.trustedQuotaDao().insert(
+            com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+                attemptId = attemptId,
+                taskId = taskId,
+                evidenceDigest = "durable-before-resume",
+                committedAt = 800L
+            )
+        )
+        discoverAnswer = discoverAnswer!!.copy(exhausted = true)
+        val before = db.testAttemptDao().getAttemptById(attemptId)!!
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals("recovery admission reads provider terminal truth", 1, discoverCalls.size)
+        assertEquals("EXHAUSTED recovery admission dispatches no preflight", 0, preflightCalls.size)
+        assertEquals("EXHAUSTED recovery admission dispatches no apply/release/advance", 0, events.size)
+        assertEquals("EXHAUSTED recovery admission dispatches no observation", 0, observePostAdvanceCalls.size)
+        assertEquals("EXHAUSTED recovery admission never launches CellRebel", 0, cellRebelRunCalls)
+        assertEquals("EXHAUSTED recovery admission replays no advance", 0, advanceCalls.size)
+        assertEquals("the recoverable phase is preserved", before.aplusState, db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
+        assertEquals("the recoverable status is preserved", before.status, db.testAttemptDao().getAttemptById(attemptId)!!.status)
+        assertEquals("the durable quota carrier is preserved exactly once", 1, db.trustedQuotaDao().countAll())
+        assertEquals("the local task is not fabricated as complete", "pending", repo.getTask(taskId)!!.status)
+        assertEquals("the existing owner session is durably paused", "paused", db.runSessionDao().getById(sessionId)!!.status)
+    }
+
+    @Test
+    fun `verified EXHAUSTED stops before a second local task (issue 88)`() = runTest {
+        val (planId, firstTaskId, secondTaskId) = seedTwoTaskPlan()
+        val clock = VClock()
+
+        buildEngine(planId, clock, null).run()
+
+        val firstAttempt = db.testAttemptDao().getAttemptsForTask(firstTaskId).single()
+        assertEquals("the verified terminal attempt remains CLOSED", "CLOSED", firstAttempt.aplusState)
+        assertEquals(
+            "provider EXHAUSTED prevents creation of a second local attempt",
+            0,
+            db.testAttemptDao().getAttemptsForTask(secondTaskId).size
+        )
+        assertEquals("only the terminal item's quota is minted", 1, db.trustedQuotaDao().countAll())
+        assertEquals("only one provider preflight is dispatched", 1, preflightCalls.size)
+        assertEquals("only one provider apply is dispatched", 1, events.count { it == "apply" })
+        assertEquals("only one CellRebel execution is launched", 1, cellRebelRunCalls)
+        assertEquals("only one provider release is dispatched", 1, events.count { it == "release" })
+        assertEquals("only one provider advance is dispatched", 1, events.count { it == "advance" })
+        assertEquals("the consumed local task is completed", "completed", repo.getTask(firstTaskId)!!.status)
+        assertEquals("the unconsumed local task remains pending", "pending", repo.getTask(secondTaskId)!!.status)
+        assertEquals("provider terminal truth pauses rather than fabricating plan completion", "paused", db.runSessionDao().getLatest()!!.status)
     }
 
     @Test
@@ -356,6 +486,7 @@ class EngineJourneyConsumerOracleTest {
         // §6.7.2: the provider RECORDS completion, never recomputes it): the mint may commit, but
         // the run PAUSES instead of continuing to the next task.
         advanceAnswer = null
+        discoverAnswer = discoverAnswer!!.copy(scheduleVersion = anchorVersion, exhausted = false)
         val (planId2, taskId2) = seedPlan()
         val clock2 = VClock()
         buildEngine(planId2, clock2, null).run()
@@ -443,6 +574,11 @@ class EngineJourneyConsumerOracleTest {
 
         val attempt = db.testAttemptDao().getAttemptsForTask(taskId).first()
         assertEquals("healthy exhausted readback ⇒ CLOSED", "CLOSED", db.testAttemptDao().getAttemptById(attempt.id)!!.aplusState)
+        assertEquals(
+            "an aligned one-task plan reaches normal completion after verified EXHAUSTED",
+            "completed",
+            db.runSessionDao().getLatest()!!.status
+        )
         assertTrue(
             "a fresh discover() readback happened after the terminal advance (run-start + anchor + readback)",
             discoverCalls.size >= 3
@@ -460,6 +596,7 @@ class EngineJourneyConsumerOracleTest {
             currentScheduleId = anchorScheduleId, currentItemId = anchorItemId,
             scheduleVersion = anchorVersion + 1, exhausted = false // the tampered leg
         )
+        discoverAnswer = discoverAnswer!!.copy(scheduleVersion = anchorVersion, exhausted = false)
         val (planId2, taskId2) = seedPlan()
         val clock2 = VClock()
         buildEngine(planId2, clock2, null).run()

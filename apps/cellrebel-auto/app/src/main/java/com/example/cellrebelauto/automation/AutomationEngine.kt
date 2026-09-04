@@ -125,6 +125,12 @@ class AutomationEngine(
     // # hash 不由它提供——ctx 由持久 attempt intent 组装（INV-23）。默认 null = legacy。
     private val completionEvidenceSource: APlusEvidenceSource? = null
 ) {
+    private enum class AdvanceVerificationResult {
+        FAILED,
+        ADVANCED,
+        EXHAUSTED
+    }
+
     companion object {
         private const val TAG = "AutoEngine"
         // # 单步操作失败后的最大重试次数
@@ -180,6 +186,21 @@ class AutomationEngine(
                     runSessionId = existingSession.id
                     planRepository.markSessionStatus(runSessionId, "recovering")
                     updateState(AutomationState.RECOVERING)
+                    // Issue #88: provider terminal truth is an admission stop, including resume.
+                    // Check it BEFORE iterating recoverable attempts: an exhausted provider retains
+                    // its final currentItemId by contract, so replaying an old local advance against
+                    // that item would attribute another quota/advance to the wrong owner. Preserve
+                    // the recoverable attempt and its append-only carriers for operator inspection.
+                    val recoveryCapabilities = aplusCoordinator.executorBackend().discover()
+                    if (recoveryCapabilities?.exhausted == true &&
+                        !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+                    ) {
+                        aplusPause(
+                            "provider schedule is already EXHAUSTED during recovery admission — " +
+                                "recoverable attempts and remaining local tasks are preserved"
+                        )
+                        return@coroutineScope
+                    }
                     for (crashed in planRepository.findAPlusRecoverableAttempts(planId)) {
                         if (!recoverCrashedAttempt(crashed, aplusCoordinator)) {
                             return@coroutineScope
@@ -241,6 +262,15 @@ class AutomationEngine(
                     capabilities.protocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
                 ) {
                     aplusPause("provider discover failed or protocol incompatible (v1 required)")
+                    return@coroutineScope
+                }
+                if (capabilities.exhausted == true &&
+                    !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+                ) {
+                    aplusPause(
+                        "provider schedule is already EXHAUSTED before the first attempt — " +
+                            "remaining local tasks stay pending"
+                    )
                     return@coroutineScope
                 }
             }
@@ -650,6 +680,7 @@ class AutomationEngine(
                                 ) ?: run {
                                     return@coroutineScope
                                 }
+                                var providerExhausted = false
                                 if (quotaReached) {
                                     // R46 (Sol R46 P1-1): the normal path and the ADVANCE_* crash
                                     // recovery share ONE replay+verify routine so a mid-advance crash
@@ -657,20 +688,32 @@ class AutomationEngine(
                                     // idempotency key + canonical digest) and the same four-leg
                                     // verification — the provider's idempotency returns the stored
                                     // receipt for the same key, never a second advance.
-                                    if (!replayAdvanceAndVerify(
+                                    when (replayAdvanceAndVerify(
                                             attemptId,
                                             task.id,
                                             applyOutcome.operationId,
                                             intentDigest,
                                             releasedState
                                         )) {
-                                        return@coroutineScope
+                                        AdvanceVerificationResult.FAILED -> return@coroutineScope
+                                        AdvanceVerificationResult.ADVANCED -> Unit
+                                        AdvanceVerificationResult.EXHAUSTED -> providerExhausted = true
                                     }
                                 }
                                 if (!aplusFinalize(attemptId, task.id, endedAt = outcome.endedAt, webScore = outcome.webScore, videoScore = outcome.videoScore)) {
                                     return@coroutineScope
                                 }
                                 updateState(AutomationState.SUCCEEDED)
+                                if (providerExhausted &&
+                                    !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+                                ) {
+                                    currentAttemptId = null
+                                    aplusPause(
+                                        "provider schedule reached verified EXHAUSTED after attempt $attemptId — " +
+                                            "remaining local tasks stay pending"
+                                    )
+                                    return@coroutineScope
+                                }
                             } else {
                                 aplusState = driveAplusTransition(attemptId, aplusState, AttemptEvent.TRUST_POLICY_FAIL)
                                 // # UNVERIFIED_RECORDED：未验证记录由 recordTrustedCompletion 的 GREEN 写（P2），
@@ -1068,17 +1111,26 @@ class AutomationEngine(
                 } else {
                     persistedAdvanceState
                 }
-                if (!replayAdvanceAndVerify(
+                val advanceResult = replayAdvanceAndVerify(
                         crashed.id,
                         crashed.taskId,
                         null,
                         intentDigest,
                         replayState
                     )
-                ) {
+                if (advanceResult == AdvanceVerificationResult.FAILED) {
                     return false
                 }
                 planRepository.finalizeAplusSuccess(crashed.id, crashed.taskId, nowMs(), null, null)
+                if (advanceResult == AdvanceVerificationResult.EXHAUSTED &&
+                    !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+                ) {
+                    aplusPause(
+                        "provider schedule reached verified EXHAUSTED while recovering attempt ${crashed.id} — " +
+                            "remaining local tasks stay pending"
+                    )
+                    return false
+                }
                 log("A+ recovery: ADVANCE_* attempt ${crashed.id} replayed + independently verified — closed trusted")
                 return true
             }
@@ -1574,6 +1626,7 @@ class AutomationEngine(
             aplusPause("conflicting trusted + unverified carriers for attempt ${crashed.id}")
             return false
         }
+        var providerExhausted = false
         when {
             trusted != null && trusted.taskId == crashed.taskId -> {
                 // Group 1 (Sol closure verdict Issue #19): re-compute quota from the durable
@@ -1622,15 +1675,16 @@ class AutomationEngine(
                             crashed.startedAt, crashed.startedAt + testTimeoutMs
                         )
                     )
-                    if (!replayAdvanceAndVerify(
+                    when (replayAdvanceAndVerify(
                             crashed.id,
                             crashed.taskId,
                             null,
                             intentDigest,
                             postReleaseState
-                        )
-                    ) {
-                        return false
+                        )) {
+                        AdvanceVerificationResult.FAILED -> return false
+                        AdvanceVerificationResult.ADVANCED -> Unit
+                        AdvanceVerificationResult.EXHAUSTED -> providerExhausted = true
                     }
                 } else if (trustedCount >= task.requiredSuccesses && anchor == null) {
                     // Sol R3 P1-1: anchor null + quota reached is ALWAYS an invariant break,
@@ -1677,6 +1731,15 @@ class AutomationEngine(
                 }
                 planRepository.markAttemptInterruptedIfNonTerminal(crashed.id, nowMs())
             }
+        }
+        if (providerExhausted &&
+            !PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
+        ) {
+            aplusPause(
+                "provider schedule reached verified EXHAUSTED while recovering attempt ${crashed.id} — " +
+                    "remaining local tasks stay pending"
+            )
+            return false
         }
         // Sol R2 P1-1: remove scheduleAdvanced gate from recovery. The gate was designed for
         // the NORMAL path ("should we take the next address?") — its TrustedQuotaAcquirer checks
@@ -1807,8 +1870,9 @@ class AutomationEngine(
      * DURABLE state only (the attempt-open anchor triple + the trusted projection + the persisted
      * lease) — the rebuild is byte-identical to the original request (the digest preimage excludes
      * verifiedAtElapsedRealtimeMs), so an idempotent provider returns the STORED receipt for the
-     * same (key, digest) and a crash never pushes a second advance. Returns false = fail-closed
-     * (RECOVERY_REQUIRED + pause); true = the advance is proven by independent verification.
+     * same (key, digest) and a crash never pushes a second advance. The result distinguishes a
+     * verified non-terminal advance from verified EXHAUSTED; failures are already fail-closed
+     * (RECOVERY_REQUIRED + pause) before returning [AdvanceVerificationResult.FAILED].
      *
      * R46 (Sol R46 P1-2): the receipt's receiptDigest is RECOMPUTED
      * (CanonicalAdvanceReceiptDigestV1) before anything in it is trusted — a receipt that does
@@ -1820,16 +1884,16 @@ class AutomationEngine(
         verbatimOperationId: String?,
         intentDigest: String,
         currentState: AttemptState
-    ): Boolean {
+    ): AdvanceVerificationResult {
         val coordinator = recoveryCoordinator ?: run {
             aplusPause("no coordinator to advance attempt $attemptId")
-            return false
+            return AdvanceVerificationResult.FAILED
         }
         val task = planRepository.getTask(taskId)
         if (task == null) {
             planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
             aplusPause("task $taskId missing for attempt $attemptId — cannot build the advance proof")
-            return false
+            return AdvanceVerificationResult.FAILED
         }
         // R45 (Sol R45 P1-3): the CAS triple is REPLAYED byte-for-byte from the attempt-open
         // anchor — never re-discovered here — and requestDigest is the canonical ADVANCE framing
@@ -1838,7 +1902,7 @@ class AutomationEngine(
         if (anchor == null) {
             planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
             aplusPause("advance anchor missing for attempt $attemptId — cannot build the CAS request (fail-closed)")
-            return false
+            return AdvanceVerificationResult.FAILED
         }
         // §6.7.4a: the lease field is the HISTORICAL reference to where the quota was earned
         // (the release already made it RELEASED before the advance was first dispatched).
@@ -1870,7 +1934,7 @@ class AutomationEngine(
         ) {
             planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
             aplusPause("attempt $attemptId cannot replay advance from $currentState")
-            return false
+            return AdvanceVerificationResult.FAILED
         }
         // The owner is already ADVANCE_PENDING (or a later verification phase) before this first
         // external call. Recovery replays from its persisted phase and never rewinds it to PENDING.
@@ -1880,7 +1944,7 @@ class AutomationEngine(
             // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
             planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
             aplusPause("completeAndAdvance not proven for attempt $attemptId — schedule did not advance")
-            return false
+            return AdvanceVerificationResult.FAILED
         }
         // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
         // (requestDigest, idempotencyKey) together with the outcome the provider claims.
@@ -1895,7 +1959,7 @@ class AutomationEngine(
             )
             planRepository.markAplusState(attemptId, mismatchState.name)
             aplusPause("advance receipt digest mismatch for attempt $attemptId — the receipt does not bind this request")
-            return false
+            return AdvanceVerificationResult.FAILED
         }
         // R45 (Sol R45 P1-5 / §6.7.5): the receipt is the provider's SELF-DESCRIPTION, not proof
         // the environment moved. Independent verification is mandatory — non-terminal: observe()
@@ -1912,7 +1976,7 @@ class AutomationEngine(
                     "non-terminal advance receipt contradicts persisted ADVANCE_STATE_READBACK " +
                         "for attempt $attemptId"
                 )
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             val observingState = when (currentState) {
                 AttemptState.ADVANCE_PENDING -> driveAplusTransition(
@@ -1930,7 +1994,7 @@ class AutomationEngine(
                     "non-terminal advance receipt conflicts with persisted phase $currentState " +
                         "for attempt $attemptId"
                 )
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             planRepository.markAplusState(attemptId, observingState.name)
             // The observe tuple's operationId: the VERBATIM apply receipt first (the engine owns
@@ -1940,7 +2004,7 @@ class AutomationEngine(
             if (operationId == null) {
                 planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
                 aplusPause("apply operationId missing for attempt $attemptId — cannot observe the new environment")
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             val observed = coordinator.executorBackend().observe(
                 advanceLease, operationId, advanceReceipt.effectiveIntentHash
@@ -1967,7 +2031,7 @@ class AutomationEngine(
                     planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
                 }
                 aplusPause("post-advance observe mismatch for attempt $attemptId — leg $mismatchLeg does not match receipt (OBSERVED_TUPLE_MISMATCH)")
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             val closedState = driveAplusTransition(
                 attemptId,
@@ -1977,7 +2041,7 @@ class AutomationEngine(
             if (closedState != AttemptState.CLOSED) {
                 planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
                 aplusPause("post-advance verification did not close attempt $attemptId (got $closedState)")
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             planRepository.markAplusState(attemptId, closedState.name)
         } else {
@@ -1990,7 +2054,7 @@ class AutomationEngine(
                     "exhausted advance receipt contradicts persisted ADVANCE_OBSERVING " +
                         "for attempt $attemptId"
                 )
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             val readbackState = when (currentState) {
                 AttemptState.ADVANCE_PENDING -> driveAplusTransition(
@@ -2008,7 +2072,7 @@ class AutomationEngine(
                     "exhausted advance receipt conflicts with persisted phase $currentState " +
                         "for attempt $attemptId"
                 )
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             planRepository.markAplusState(attemptId, readbackState.name)
             val readback = coordinator.executorBackend().discover()
@@ -2036,7 +2100,7 @@ class AutomationEngine(
                     planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
                 }
                 aplusPause("exhausted readback mismatch for attempt $attemptId — leg $readbackMismatchLeg (READBACK_TUPLE_MISMATCH)")
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             val closedState = driveAplusTransition(
                 attemptId,
@@ -2046,11 +2110,15 @@ class AutomationEngine(
             if (closedState != AttemptState.CLOSED) {
                 planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
                 aplusPause("exhausted readback did not close attempt $attemptId (got $closedState)")
-                return false
+                return AdvanceVerificationResult.FAILED
             }
             planRepository.markAplusState(attemptId, closedState.name)
         }
-        return true
+        return if (exhausted) {
+            AdvanceVerificationResult.EXHAUSTED
+        } else {
+            AdvanceVerificationResult.ADVANCED
+        }
     }
 
     /**
