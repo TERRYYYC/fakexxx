@@ -144,6 +144,13 @@ class AndroidSdkRuntimeValidationTest(unittest.TestCase):
                     self.assertEqual(head, git("rev-parse", "HEAD"))
                     self.assertEqual(b"", git("diff", "HEAD", "--"))
 
+    def test_home_acl_fixture_runs_under_private_host_umask(self):
+        previous_umask = os.umask(0o077)
+        try:
+            self.test_ci_removes_only_the_reviewed_home_default_acl()
+        finally:
+            os.umask(previous_umask)
+
     def test_ci_removes_only_the_reviewed_home_default_acl(self):
         workflow = (REPO_ROOT / ".github/workflows/android-a-plus.yml").read_text()
         marker = "      - name: normalize reviewed home default ACL\n"
@@ -181,6 +188,8 @@ class AndroidSdkRuntimeValidationTest(unittest.TestCase):
             with self.subTest(scenario=scenario), self._sdk_fixture() as fixture:
                 home = fixture / "home"
                 home.mkdir(mode=0o755)
+                # This fixture models fixed /home metadata, not the caller's umask.
+                home.chmod(0o755)
                 child = home / "untouched"
                 child.write_bytes(b"existing-child")
                 child_before = (child.read_bytes(), child.stat().st_mode)

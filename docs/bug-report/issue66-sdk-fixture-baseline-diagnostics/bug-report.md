@@ -7,7 +7,7 @@ topics:
   - fixture-diagnostics
 doc_kind: bug_report
 created: 2026-09-05
-status: home_acl_confirmed_bytecode_candidate_awaiting_linux_confirmation
+status: bytecode_confirmed_private_umask_fixture_fix_awaiting_linux
 github_issue: 66
 ---
 
@@ -19,9 +19,9 @@ github_issue: 66
 | --- | --- |
 | Symptom | Two positive SDK tests return 1 with empty CLI output on Linux, while the other nine tests pass. |
 | Evidence | [Run 33965387938](https://github.com/TERRYYYC/fakexxx/actions/runs/33965387938), host job `101304479473`, branch `6790aee7250ffd0bdd8cbe0657773555a0649145`; Java 21 and private-stager 9 tests pass before the SDK failure. |
-| Known root cause | Run `33967895755` confirms the guarded `/home` default-ACL removal and all 43 standalone tests pass. The combined gate then rejects untracked source state; the seven repository-module import entrypoints lack explicit bytecode suppression. |
-| Strategy | Preserve the proven ACL guard and source-cleanliness policy; prevent import cache creation with explicit `-B` at the seven importing Python entrypoints. |
-| Timeout strategy | The next real Linux job must advance through combined source validation without generated cache files; no ignore rule or post-hoc deletion may bypass the source gate. |
+| Known root cause | ACL normalization and bytecode suppression now pass on Linux. Run `33968503219` reaches the combined suite, where the private `077` umask exposes a new fixture's implicit `0755` assumption. |
+| Strategy | Preserve the proven host guards; explicitly establish the intended mode only on the private test fixture and replay its cases under the private umask. |
+| Timeout strategy | The next real Linux job must pass the fixture under the combined runner's unchanged private environment; no production policy or source-cleanliness bypass is allowed. |
 | Warning strategy | A local reproduction is not the Linux root cause unless its failure pattern and rejection stage match. Do not relax production SDK admission. |
 | User-visible impact | CI failure becomes actionable; this does not change the app, SDK trust policy, or device-validation result. |
 | Acceptance | An unsafe fixture ancestor causes a named baseline failure before negative mutation; existing mutation/budget tests retain their original checks; diagnostics contain no environment, SDK bytes, or ACL payloads. |
@@ -160,3 +160,26 @@ predicate. The inline probe stops before any `/home` access. Targeted GREEN comp
 3.371 seconds; the full SDK suite passes all 14 tests in 4.923 seconds. These are local
 regression results, not a claim that the next combined Linux gate has passed. Independent
 review and the next CI remain the next actions.
+
+## Confirmed bytecode result and private-umask fixture correction
+
+[Run 33968503219](https://github.com/TERRYYYC/fakexxx/actions/runs/33968503219), host job
+`101312747003`, reports run head `870acc6dab84a7d2b2ae18e658818bc60ac47167`.
+The guarded ACL step and all 44 standalone tests passed. The combined runner advanced past
+its initial clean-source check and repeated Java 21 and stager 9 successfully. Its SDK suite
+then failed five subcases of the new home-ACL fixture, not the production ACL normalization.
+
+The complete runner sets a private `077` umask. `home.mkdir(mode=0o755)` is filtered by that
+mask and creates a `0700` directory, whereas the simulated fixed `/home` must be `0755`.
+The two positive cases consequently stop at `HOST_HOME_ACL_TARGET_INVALID`; three
+post-command mutation cases also stop before their expected command. Replaying the complete
+SDK suite locally under `077` reproduces exactly these same five failures. This is distinct
+from the previously excluded `0002` hypothesis for the older SDK-baseline failure.
+
+The correction explicitly sets `0755` only on the newly created private fixture directory,
+before deliberate unsafe-mode mutations. It changes neither the CI host `/home` nor the
+runner umask, production validator, source-cleanliness policy, or command boundaries.
+A permanent regression replays all 12 existing fixture scenarios under `077` and restores
+the previous process mask in `finally`. Before the fixture correction it reproduces the five
+failures; the corrected suite is tested under both `022` and `077`. The complete SDK suite
+now contains 15 tests. Real Linux combined-host acceptance remains pending.
