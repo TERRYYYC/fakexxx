@@ -19,13 +19,42 @@ class ProviderTrustGate(
     private val currentSignerDigest: (applicationId: String) -> String?
 ) {
 
-    /** True iff the provider's CURRENT signer is an operator-approved active principal. */
+    /**
+     * True iff the provider's CURRENT signer is an operator-approved active principal.
+     *
+     * Issue #10: every rejection is RECORDED ([ProviderTrustRejections]) and Log.w'd under the
+     * "ProviderTrustGate" tag with the applicationId and the typed cause — a revoked principal's
+     * discover-null must be diagnosable from logcat, not inferred from a bare engine pause.
+     */
     suspend fun isCurrentSignerTrusted(applicationId: String): Boolean {
-        val signer = currentSignerDigest(applicationId) ?: return false
-        return trustStore.findActive(applicationId, signer) != null
+        val signer = currentSignerDigest(applicationId)
+        if (signer == null) {
+            val because = "current signer unresolvable (package not installed or multi-signer)"
+            ProviderTrustRejections.record(applicationId, null, because)
+            android.util.Log.w(
+                TAG,
+                "gate rejected provider applicationId=$applicationId signer=unresolvable " +
+                    "because $because",
+            )
+            return false
+        }
+        if (trustStore.findActive(applicationId, signer) == null) {
+            val because = "signer not an approved active principal"
+            ProviderTrustRejections.record(applicationId, signer, because)
+            android.util.Log.w(
+                TAG,
+                "gate rejected provider applicationId=$applicationId signer=$signer " +
+                    "because $because (revoke or signer rotation — re-approve in Provider 管理)",
+            )
+            return false
+        }
+        ProviderTrustRejections.clear(applicationId)
+        return true
     }
 
     companion object {
+        private const val TAG = "ProviderTrustGate"
+
         /**
          * THE production signer resolver: PackageManager current signing certificate →
          * "sha256:<hex>" (the same digest format [ProviderTrustStore.approve] stores). v1 rejects

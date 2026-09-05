@@ -189,7 +189,7 @@ jobs:
         working-directory: .
         run: |
           ./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app \
-            --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release-unsigned.apk
+            --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release.apk
 
       # Lint runs through the debt ratchet rather than as `lintDebug`, so a
       # green check never hides a growing error count. Budget for this app is 0.

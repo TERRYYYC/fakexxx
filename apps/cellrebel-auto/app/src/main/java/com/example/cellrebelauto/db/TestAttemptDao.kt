@@ -25,6 +25,20 @@ interface TestAttemptDao {
     @Insert
     suspend fun insert(attempt: TestAttempt): Long
 
+    /**
+     * Removes only the pristine row created inside an id-reservation transaction. AUTOINCREMENT's
+     * sqlite_sequence update remains committed, so the returned id cannot later be generated for
+     * another attempt. The full owner guard prevents this helper from deleting lifecycle data.
+     */
+    @Query(
+        "DELETE FROM test_attempts WHERE id = :attemptId AND taskId = :taskId AND " +
+            "runSessionId = :runSessionId AND status = 'starting' AND runningObservedAt IS NULL AND " +
+            "endedAt IS NULL AND aplusState IS NULL AND aplusLeaseId IS NULL AND " +
+            "currentExecutionId IS NULL AND aplusAnchorScheduleId IS NULL AND " +
+            "aplusAnchorItemId IS NULL AND aplusAnchorVersion IS NULL"
+    )
+    suspend fun deletePristineIdReservation(attemptId: Long, taskId: Long, runSessionId: Long): Int
+
     // # 全量尝试（导出用，按 id 升序 = 时间顺序）
     @Query("SELECT * FROM test_attempts ORDER BY id ASC")
     suspend fun getAllAttempts(): List<TestAttempt>

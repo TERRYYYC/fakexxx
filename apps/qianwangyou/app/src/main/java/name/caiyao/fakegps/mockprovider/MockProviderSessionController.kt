@@ -5,6 +5,17 @@ enum class MockProviderRecovery {
     ReselectThisAppAndRetryStop,
 }
 
+/**
+ * Typed causes a [MockProviderState.Failed] can carry (issue #8). The OS can silently reset the
+ * android:mock_location app-op back to deny (observed overnight on a Moto / Android 15): the
+ * framework surfaces that as a SecurityException whose message mentions MOCK_LOCATION. Mapping it
+ * to a typed reason lets the settings card render the re-selection guidance without string
+ * matching the raw message.
+ */
+enum class MockProviderFailureReason {
+    MOCK_LOCATION_APP_OP_DENIED,
+}
+
 sealed interface MockProviderState {
     data object Idle : MockProviderState
     data class Starting(val config: MockLocationConfig) : MockProviderState
@@ -17,6 +28,7 @@ sealed interface MockProviderState {
         val message: String,
         val recovery: MockProviderRecovery? = null,
         val providerCleanupRequired: Boolean = false,
+        val reason: MockProviderFailureReason? = null,
     ) : MockProviderState
 }
 
@@ -100,10 +112,24 @@ class MockProviderSessionController(
                     primary + cleanup,
                     recovery,
                     providerCleanupRequired = providerCleanupRequired,
+                    reason = mockLocationAppOpDeniedReason(failure, cleanupFailure),
                 ),
             )
         }
     }
+
+    /**
+     * Issue #8: the framework raises the reset app-op as a SecurityException whose message
+     * mentions MOCK_LOCATION ("... from uid N not allowed to perform MOCK_LOCATION"). The
+     * primary failure AND the cleanup leg can each carry it — either typing the state is enough
+     * for the settings card to render the re-selection guidance.
+     */
+    private fun mockLocationAppOpDeniedReason(
+        vararg failures: Throwable?,
+    ): MockProviderFailureReason? =
+        failures.filterIsInstance<SecurityException>()
+            .firstOrNull { it.message?.contains("MOCK_LOCATION") == true }
+            ?.let { MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED }
 
     private fun updateState(next: MockProviderState) {
         state = next

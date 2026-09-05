@@ -25,6 +25,7 @@ import com.example.cellrebelauto.recovery.ObserveIntentAcquirer
 import com.example.cellrebelauto.recovery.OperationReceiptRow
 import com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer
 import com.example.cellrebelauto.recovery.RecoveryCoordinator
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
 import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
@@ -212,6 +213,19 @@ class AdvanceMatrixTest {
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
         )
+        if (phase in setOf("ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK")) {
+            val leaseId = "lease-$attemptId"
+            db.releaseReceiptDao().insertIfAbsent(
+                ReleaseReceiptRow(
+                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+                    leaseId = leaseId,
+                    releaseDigest = APlusOperationIdentity.releaseDigest(leaseId),
+                    resultOutcome = "RELEASED",
+                    createdAt = 8500L
+                )
+            )
+            repo.completeTaskIfQuotaReached(task.id)
+        }
         return planId to task.id
     }
 

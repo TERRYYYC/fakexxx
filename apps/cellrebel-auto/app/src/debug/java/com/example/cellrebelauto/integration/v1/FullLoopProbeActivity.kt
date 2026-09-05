@@ -221,6 +221,13 @@ class FullLoopProbeActivity : Activity() {
             val snap = requireValid("[1] discover",
                 ContractResponseValidator.validateDiscover(svc.discover())
             ) ?: return@buildString
+            if (snap.protocolVersion != ContractV1.PROTOCOL_VERSION) {
+                appendLine(
+                    "STOP: provider protocol ${snap.protocolVersion} is incompatible; " +
+                        "v${ContractV1.PROTOCOL_VERSION} required"
+                )
+                return@buildString
+            }
             appendLine()
             appendLine("[1] discover → item=${snap.currentItemId} ver=${snap.scheduleVersion} rev=${snap.environmentRevision}")
             val itemId = snap.currentItemId
@@ -467,6 +474,8 @@ class FullLoopProbeActivity : Activity() {
 
                     // Non-null group precondition (AutomationEngine.kt:1410-1415)
                     val readbackMismatchLeg: String? = when {
+                        readback.protocolVersion != ContractV1.PROTOCOL_VERSION ->
+                            "protocolVersion (${readback.protocolVersion} vs ${ContractV1.PROTOCOL_VERSION})"
                         readback.currentScheduleId == null -> "currentScheduleId_null"
                         readback.currentItemId == null -> "currentItemId_null"
                         readback.scheduleVersion == null -> "scheduleVersion_null"

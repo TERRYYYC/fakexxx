@@ -111,6 +111,7 @@ class LocationDeliveryOrchestratorTest {
             MockProviderState.Failed(
                 "not allowed to perform MOCK_LOCATION",
                 MockProviderRecovery.SelectThisAppAndRetryStart,
+                reason = MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED,
             ),
             result,
         )
@@ -396,6 +397,7 @@ class LocationDeliveryOrchestratorTest {
                     "not allowed to perform MOCK_LOCATION",
                 MockProviderRecovery.ReselectThisAppAndRetryStop,
                 providerCleanupRequired = true,
+                reason = MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED,
             ),
             result,
         )

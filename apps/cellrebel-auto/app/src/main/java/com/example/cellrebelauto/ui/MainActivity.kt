@@ -43,6 +43,8 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     val attempts by vm.attempts.collectAsState()
     val legacyResults by vm.legacyResults.collectAsState()
     val isServiceConnected by vm.isServiceConnected.collectAsState()
+    // Issue #9: readable device-readiness line for the Plan surface (null = healthy).
+    val serviceStatusLine by vm.serviceStatusLine.collectAsState()
     val planState by vm.planUiState.collectAsState()
     val planConfig by vm.planConfig.collectAsState()
     val importErrors by vm.importErrors.collectAsState()
@@ -56,11 +58,14 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     Box(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
         when (currentScreen) {
         Screen.PLAN -> {
+            // # Issue #9：进入 Plan 页即重探无障碍启用态（从系统设置返回后也会重新进入本页）
+            androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshDeviceReadiness() }
             PlanScreen(
                 planState = planState,
                 planConfig = planConfig,
                 isRunning = isRunning,
                 isServiceConnected = isServiceConnected,
+                serviceStatusLine = serviceStatusLine,
                 importErrors = importErrors,
                 importNotice = importNotice,
                 onImport = { vm.importCsv(it) },
@@ -114,12 +119,22 @@ fun MainApp(vm: MainViewModel = viewModel()) {
             // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
             androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshProviders() }
             val entries by vm.providerEntries.collectAsState()
+            // # Issue #10：撤销走 暂存→确认对话框→执行；撤销后横幅说明引擎影响
+            val revokeCandidate by vm.revokeCandidate.collectAsState()
+            val revokeNotice by vm.revokeImpactNotice.collectAsState()
             ProviderApprovalScreen(
                 pending = entries.filter { !it.isApproved },
                 approved = entries.filter { it.isApproved },
                 onApprove = { vm.approveProvider(it) },
-                onRevoke = { vm.revokeProvider(it) },
+                onRevoke = { vm.requestRevoke(it) },
                 onBack = { vm.navigateTo(Screen.PLAN) },
+                revokeDialog = revokeCandidate?.let {
+                    ProviderRevokeDialogState(candidate = it)
+                },
+                onRevokeConfirmed = { vm.confirmRevoke() },
+                onRevokeDismissed = { vm.dismissRevokeDialog() },
+                revokeImpactNotice = revokeNotice,
+                onRevokeNoticeDismissed = { vm.dismissRevokeNotice() },
                 modifier = Modifier
             )
         }

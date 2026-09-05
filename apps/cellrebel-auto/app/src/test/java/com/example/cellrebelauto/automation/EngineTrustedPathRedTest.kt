@@ -327,7 +327,9 @@ class EngineTrustedPathRedTest {
         attemptId: Long,
         aplusState: String?,
         aplusLeaseId: String? = null,
-        aplusAnchorScheduleId: String? = "qwy-default-schedule"  // F12: provider's durable anchor
+        aplusAnchorScheduleId: String? = "qwy-default-schedule", // F12: provider's durable anchor
+        aplusAnchorItemId: String? = "item-1",
+        aplusAnchorVersion: Long? = 1L
     ): Long {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 500L, planId = planId, status = "running"))
         db.testAttemptDao().insert(
@@ -338,7 +340,9 @@ class EngineTrustedPathRedTest {
                 webBrowsingScore = null, videoStreamingScore = null,
                 latitude = 39.9, longitude = 116.4,
                 aplusState = aplusState, aplusLeaseId = aplusLeaseId,
-                aplusAnchorScheduleId = aplusAnchorScheduleId
+                aplusAnchorScheduleId = aplusAnchorScheduleId,
+                aplusAnchorItemId = aplusAnchorItemId,
+                aplusAnchorVersion = aplusAnchorVersion
             )
         )
         return sessionId

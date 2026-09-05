@@ -128,9 +128,11 @@ class RecordingExternalApplyExecutor(
         )
     var discoverCalls = 0
         private set
+    var onDiscover: () -> Unit = {}
 
     override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? {
         discoverCalls++
+        onDiscover()
         return discoverFixture
     }
 

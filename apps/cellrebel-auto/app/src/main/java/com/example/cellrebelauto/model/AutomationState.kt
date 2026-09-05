@@ -59,6 +59,10 @@ enum class AutomationState(val displayName: String) {
     DONE("Done"),
     // # 发生不可恢复的错误
     ERROR("Error"),
+    // # Issue #15：无障碍服务被系统/OEM 回收（onDestroy/onUnbind）——引擎宿主已死，
+    // # 协程被取消，任何 Running 类显示都是假象。类型化终态：UI 据此替换"继续跳秒"的
+    // # 运行假象为"服务已断开 — 引擎已停止，请重新开始"。
+    SERVICE_RECYCLED("Service recycled — engine stopped"),
 
     // --- A+ recovery (§8.2, R8) ---
     // # 正在 reconcile 崩溃残留 attempt（优先于取下一任务）

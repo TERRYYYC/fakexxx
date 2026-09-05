@@ -24,9 +24,14 @@ interface RunSessionDao {
     @Query("SELECT * FROM run_sessions ORDER BY startedAt DESC LIMIT 1")
     suspend fun getLatest(): RunSession?
 
-    // # A+ 恢复态投影（§8.2 RECOVERING/PAUSED）：仅改状态，不结束会话
-    @Query("UPDATE run_sessions SET status = :status WHERE id = :id")
+    // # A+ 恢复态投影（§8.2 RECOVERING/PAUSED）：重开先前被错误终态化的 owner 时，
+    // # active 状态与 endedAt 必须原子一致（endedAt=null 才表示仍可恢复）。
+    @Query("UPDATE run_sessions SET status = :status, endedAt = NULL WHERE id = :id")
     suspend fun updateStatus(id: Long, status: String)
+
+    /** Supersede a replacement session without overwriting its accumulated cycle count. */
+    @Query("UPDATE run_sessions SET status = 'interrupted', endedAt = :endedAt WHERE id = :id")
+    suspend fun interruptForRecoveryConflict(id: Long, endedAt: Long)
 
     @Query("SELECT * FROM run_sessions WHERE id = :id")
     suspend fun getById(id: Long): RunSession?

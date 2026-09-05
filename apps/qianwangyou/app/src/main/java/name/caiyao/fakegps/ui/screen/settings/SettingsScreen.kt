@@ -47,6 +47,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.BuildConfig
+import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
 import kotlin.math.roundToInt
 
 @SuppressLint("InlinedApi")
@@ -65,6 +67,8 @@ fun SettingsScreen(
     val locationDeliveryMode by vm.locationDeliveryMode.collectAsState()
     val mockProviderState by vm.mockProviderState.collectAsState()
     val publishedConfig by vm.publishedConfig.collectAsState()
+    val pendingCallers by vm.pendingCallers.collectAsState()
+    val environmentControlMessage by vm.environmentControlMessage.collectAsState()
     val locationModel = LocationDeliveryUiContract.model(
         locationDeliveryMode,
         mockProviderState,
@@ -126,6 +130,8 @@ fun SettingsScreen(
     var showRefreshDialog by remember { mutableStateOf(false) }
     var showHourStartDialog by remember { mutableStateOf(false) }
     var showHourEndDialog by remember { mutableStateOf(false) }
+    var callerToApprove by remember { mutableStateOf<PendingPairingCandidate?>(null) }
+    var showRestartConfirmation by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -262,6 +268,46 @@ fun SettingsScreen(
             )
             HorizontalDivider()
 
+            SectionHeader("Auto 协作")
+            environmentControlMessage?.let { message ->
+                ListItem(
+                    headlineContent = { Text(message) },
+                    trailingContent = {
+                        TextButton(onClick = vm::dismissEnvironmentControlMessage) { Text("关闭") }
+                    },
+                )
+            }
+            ListItem(
+                headlineContent = { Text("待批准的 Auto") },
+                supportingContent = {
+                    Text(
+                        if (pendingCallers.isEmpty())
+                            "先在 Auto 发起一次运行，再回来刷新并核对调用方身份"
+                        else "只批准你确认安装的 applicationId 与完整签名摘要",
+                    )
+                },
+                trailingContent = {
+                    TextButton(onClick = vm::refreshPendingCallers) { Text("刷新") }
+                },
+            )
+            pendingCallers.forEach { candidate ->
+                ListItem(
+                    headlineContent = { Text(candidate.callerApplicationId) },
+                    supportingContent = {
+                        Text("签名：${candidate.currentSignerDigest}\n版本：${candidate.observedVersionCode ?: "未知"}")
+                    },
+                    trailingContent = {
+                        TextButton(onClick = { callerToApprove = candidate }) { Text("批准") }
+                    },
+                )
+            }
+            ListItem(
+                headlineContent = { Text("重新运行已完成日程") },
+                supportingContent = { Text("仅在日程已完成且没有未释放环境时，创建 generation+1 并回到第一项") },
+                modifier = Modifier.clickable { showRestartConfirmation = true },
+            )
+            HorizontalDivider()
+
             // --- 外观 ---
             SectionHeader("外观")
             ListItem(
@@ -290,13 +336,47 @@ fun SettingsScreen(
             SectionHeader("关于")
             ListItem(
                 headlineContent = { Text("版本") },
-                supportingContent = { Text("3.0.0") },
+                supportingContent = { Text(BuildConfig.VERSION_NAME) },
             )
             ListItem(
                 headlineContent = { Text("GitHub") },
                 supportingContent = { Text("TERRYYYC/FakeGps-test") },
             )
         }
+    }
+
+    callerToApprove?.let { candidate ->
+        AlertDialog(
+            onDismissRequest = { callerToApprove = null },
+            title = { Text("批准这个 Auto？") },
+            text = { Text("${candidate.callerApplicationId}\n\n${candidate.currentSignerDigest}\n\n批准后该精确身份可请求环境控制。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.approveCaller(candidate)
+                    callerToApprove = null
+                }) { Text("确认批准") }
+            },
+            dismissButton = {
+                TextButton(onClick = { callerToApprove = null }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showRestartConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showRestartConfirmation = false },
+            title = { Text("重新运行日程？") },
+            text = { Text("只会重开已经完成的日程；有活动或待恢复环境时会拒绝，不会清空档案或历史。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.restartCompletedSchedule()
+                    showRestartConfirmation = false
+                }) { Text("确认重开") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRestartConfirmation = false }) { Text("取消") }
+            },
+        )
     }
 
     // Mode selection dialog
