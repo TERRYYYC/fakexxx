@@ -267,15 +267,42 @@ class AutomationService : AccessibilityService() {
         Log.w(TAG, "Service interrupted")
     }
 
+    /**
+     * Issue #15: the engine HOST is gone — publish a typed terminal + retract every run-page
+     * projection SYNCHRONOUSLY (no IO, no suspension — the system time-limits onDestroy) and
+     * STRICTLY BEFORE any coroutine cancellation. The forwarders die with serviceScope, so a
+     * terminal the engine's cancellation handler tries to publish would never reach the
+     * companion flows (the device's illusion: stale Running state + a StageProgress anchor the
+     * UI ticks locally forever); the ONLY reliable publisher is the lifecycle callback itself.
+     *
+     * # #15：宿主服务消亡——在取消任何协程之前，同步发布类型化终态并清空运行投影
+     */
+    private fun publishServiceRecycledTerminal() {
+        addLog("SERVICE_RECYCLED — accessibility service destroyed; engine stopped. Restart the plan to continue.")
+        _currentState.value = AutomationState.SERVICE_RECYCLED
+        _stageProgress.value = null
+        _currentTask.value = null
+        _cooldown.value = null
+        _isRunning.value = false
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        // # Issue #15：系统解绑路径（禁用开关）先于 recycle——同一类型化终态，防 Run 页残留运行假象。
+        publishServiceRecycledTerminal()
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        // # Issue #15：先同步发布类型化终态（见 publishServiceRecycledTerminal），再取消协程——
+        // 顺序反过来会留出"取消已发生、终态未发布"的窗口（转发器随作用域一起死亡）。
+        publishServiceRecycledTerminal()
         automationJob?.cancel()
         binderExecutor?.unbind()
         binderExecutor = null
         serviceScope.cancel()
         instance = null
         _isServiceConnected.value = false
-        _isRunning.value = false
         Log.w(TAG, "Service destroyed")
     }
 
