@@ -135,9 +135,5 @@ class EngineLegacyCancelFinalizeTest {
             "stopped",
             db.runSessionDao().getById(sessionId)!!.status
         )
-        assertNull(
-            "the stage-wait projection must be cleared on cancellation (no infinite local tick)",
-            engine.stageProgress.value
-        )
     }
 }

@@ -18,13 +18,12 @@ import org.robolectric.RobolectricTestRunner
  * Device truth: the OEM recycles the accessibility service mid-run (onDestroy). The engine
  * coroutine is cancelled inside serviceScope; the state forwarders die with the SAME scope, so
  * whatever the engine's cancellation handler publishes never reaches the companion StateFlows —
- * the Run page keeps a Running-like state, the StageProgress anchor stays set (the local ticker
- * spins forever: "已等待 4m47s（上限 45s）"), and History keeps the zombie attempt.
+ * the Run page keeps a Running-like state and History keeps the zombie attempt.
  *
  * The destroy path must therefore publish a TYPED terminal SYNCHRONOUSLY (no IO, no suspension)
  * BEFORE any coroutine cancellation:
  *   - currentState = SERVICE_RECYCLED (typed terminal, not a stale mid-run state);
- *   - stageProgress / currentTask / cooldown cleared (no local-tick anchors, no stale card);
+ *   - currentTask / cooldown cleared (no stale run cards);
  *   - isRunning = false.
  *
  * Drives the REAL AutomationService lifecycle (attach → onServiceConnected → simulated mid-run
@@ -77,10 +76,6 @@ class AutomationServiceRecycleStateTest {
         // inside the GPS settle stage — the device's silent-death shape).
         companionFlow("_isRunning").value = true
         companionFlow("_currentState").value = AutomationState.WAITING_INTERVAL
-        companionFlow("_stageProgress").value = StageProgress(
-            stageLabel = "GPS settling", detailLabel = "gps settle",
-            startedAtMs = 0L, budgetMs = 45_000L
-        )
         companionFlow("_currentTask").value = EngineTaskSnapshot(
             csvRow = 1, priority = 1, latitude = 39.9, longitude = 116.4,
             completedSuccesses = 0, requiredSuccesses = 1, attemptOrdinal = 1
@@ -97,8 +92,7 @@ class AutomationServiceRecycleStateTest {
             AutomationState.SERVICE_RECYCLED,
             SvcCompanion.currentState.value
         )
-        // The local-tick anchors and run-page cards must be retracted.
-        assertNull("stageProgress must be cleared on destroy (no infinite local tick)", SvcCompanion.stageProgress.value)
+        // Run-page cards must be retracted.
         assertNull("currentTask must be cleared on destroy", SvcCompanion.currentTask.value)
         assertNull("cooldown must be cleared on destroy", SvcCompanion.cooldown.value)
         assertFalse("isRunning must be false after destroy", SvcCompanion.isRunning.value)
