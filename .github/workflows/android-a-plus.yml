@@ -413,6 +413,7 @@ jobs:
         run: |
           readonly expected_jdk=/opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-101/x64
           readonly jdk_cache_parents=(
+            /opt
             /opt/hostedtoolcache
             /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
             /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-101

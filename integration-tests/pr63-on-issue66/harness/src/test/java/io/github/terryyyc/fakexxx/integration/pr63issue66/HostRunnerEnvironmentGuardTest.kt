@@ -1335,10 +1335,10 @@ class HostRunnerEnvironmentGuardTest {
             standaloneSecurityTests,
         )
         // Bind the whole independently reviewed step, including shell/metadata.
-        // Its actual command semantics are exercised by the five-layout Python regression.
+        // Its actual command semantics are exercised by the seven-layout Python regression.
         val jdkNormalizeStep = hostJob.substring(jdkNormalizeStart, jdkNormalizeEnd)
         val reviewedJdkNormalizeSha256 =
-            "a72cd3f697d0a33d0cc5aff1e0926b6b6d960526861a39bb1796b7534a9d65e9"
+            "8beb1c536150e94794fc5edfeadebc0073688bb510ce51592c904a9950e5ba71"
         fun stepSha256(step: String): String = java.security.MessageDigest.getInstance("SHA-256")
             .digest(step.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         assertEquals(

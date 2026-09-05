@@ -76,18 +76,47 @@ makes the tool cache writable. The pinned setup-java's tool-cache dependency cre
 root and copies the archive children, rather than copying the archive root's `0755` mode. The
 official archive and local reviewed source retain that `0755` root mode.
 
-### Repair and verification
+### First repair and local verification
 
-The workflow first checks the exact expected JDK path, every cache-container type and the resolved
+The first repair checks the exact expected JDK path, every cache-container type and the resolved
 physical path. Only then does it remove group/other write permission from the three fixed cache
 ancestors and set the selected `x64` root to `0755`. These operations are non-recursive; JDK
 descendants and unrelated cache entries are unchanged. The existing complete tree-digest and
 runtime checks still run immediately afterward. No validator policy or download source changes.
 
-The permanent Java-suite regression executes the workflow's actual shell step against five private
+Its Java-suite regression executes the workflow's actual shell step against five private
 fixtures: valid, wrong JAVA_HOME, root symlink, parent symlink and non-directory root. It checks
 that invalid inputs cause no writes and that valid normalization preserves every descendant and
 unrelated payload/mode. The old workflow is RED; the reviewed candidate plus the existing Java
 suite is 21/21 GREEN. The stager's 9 and Android validator's 11 checks are unchanged. The real Linux
 rerun, rather than this fixture result, decides whether the CI preparation is fixed. Final exact-run
 results and approval are recorded in [PR #81](https://github.com/TERRYYYC/fakexxx/pull/81).
+
+### Missing `/opt` ancestor: reproduced follow-up
+
+[Run 33964605023](https://github.com/TERRYYYC/fakexxx/actions/runs/33964605023), for branch commit
+`0e89fa910fe579f9732562a351722b8532f22aaa` through merge reference
+`a5f8f442ddce3d40305e831a6b0925e7a22d58b1`, passed the new normalization step and the complete
+Linux JDK-tree digest regression. Its sole failure among the 21 Java tests was the real runtime
+binding: the CLI returned 1 without diagnostic output before a binding was emitted. The first
+repair therefore fixed the cache-tree root but did not establish safe path authority above it.
+
+The same runner image's [configure-system.sh](https://github.com/actions/runner-images/blob/ubuntu24/20260831.293/images/ubuntu/scripts/build/configure-system.sh)
+makes `/opt` itself world-writable. `validate_runtime` checks every resolved ancestor before it
+hashes the tree or executes Java; `require_safe_path` rejects that mode at line 130. The first
+normalization array began at `/opt/hostedtoolcache`, so it left `/opt` unchanged. A private fixture
+using the actual workflow step reproduced this precise rejection; no JVM-output-filtering or
+validator-policy change was needed.
+
+The correction adds only the fixed `/opt` ancestor to the non-recursive normalization array. The
+existing regression now maps the entire `/opt` prefix into its private temporary tree and covers
+seven layouts: valid, wrong JAVA_HOME, JDK-root symlink, cache-parent symlink, non-directory JDK
+root, `/opt` symlink, and non-directory `/opt`. Its snapshots cover the entire private fixture,
+including renamed `.original` trees and unrelated siblings. Valid normalization must leave all
+five selected containers at `0755` and pass the production `require_safe_path` check for each;
+all other bytes and modes must remain unchanged. Invalid layouts must make no changes.
+
+The old four-container workflow is RED against the ancestor fixture; the five-container candidate
+is GREEN across the same seven layouts. This is local regression evidence, not a claim that the
+real Linux runtime binding or complete CI is already green. The follow-up CI run and independent
+review determine closure; the validator, pinned JDK source, and exact JVM challenge are unchanged.

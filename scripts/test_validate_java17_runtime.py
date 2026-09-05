@@ -626,17 +626,21 @@ int main(int argc, char **argv) {
         program = textwrap.dedent(step.split("        run: |\n", 1)[1])
         self.assertNotIn("--recursive", program)
         self.assertNotIn("chmod -R", program)
-        expected_prefix = "/opt/hostedtoolcache"
+        expected_prefix = "/opt"
         self.assertIn(
             "readonly expected_jdk=/opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-101/x64",
             program,
         )
-        for scenario in ("valid", "wrong_home", "root_symlink", "parent_symlink", "root_file"):
+        for scenario in (
+            "valid", "wrong_home", "root_symlink", "parent_symlink", "root_file",
+            "opt_symlink", "opt_file",
+        ):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(
                 prefix="issue66-ci-jdk-permissions-",
             ) as directory:
                 private = pathlib.Path(directory).resolve()
-                cache = private / "toolcache"
+                opt = private / "opt"
+                cache = opt / "hostedtoolcache"
                 version = cache / "Java_Temurin-Hotspot_jdk" / "17.0.20-101"
                 jdk = version / "x64"
                 (jdk / "bin").mkdir(parents=True)
@@ -644,21 +648,29 @@ int main(int argc, char **argv) {
                 (jdk / "bin/java").chmod(0o755)
                 (cache / "unrelated").write_bytes(b"unrelated cache payload")
                 (cache / "unrelated").chmod(0o777)
-                targets = (cache, version.parent, version, jdk)
+                (private / "unrelated-outside-opt").write_bytes(b"unrelated host payload")
+                (private / "unrelated-outside-opt").chmod(0o777)
+                targets = (opt, cache, version.parent, version, jdk)
                 for target in targets:
                     target.chmod(0o777)
-                if scenario in {"root_symlink", "parent_symlink", "root_file"}:
-                    target = version if scenario == "parent_symlink" else jdk
+                if scenario in {
+                    "root_symlink", "parent_symlink", "root_file", "opt_symlink", "opt_file",
+                }:
+                    target = opt if scenario.startswith("opt_") else (
+                        version if scenario == "parent_symlink" else jdk
+                    )
                     original = target.with_name(target.name + ".original")
                     target.rename(original)
-                    if scenario == "root_file":
+                    if scenario in {"root_file", "opt_file"}:
                         target.write_bytes(b"not a directory")
                     else:
                         target.symlink_to(original, target_is_directory=True)
 
                 def snapshot():
                     result = {}
-                    for path in (cache, *cache.rglob("*")):
+                    # Include renamed .original trees and unrelated siblings, not
+                    # only entries reachable through the candidate /opt pathname.
+                    for path in (private, *private.rglob("*")):
                         state = path.lstat()
                         if stat.S_ISLNK(state.st_mode):
                             payload = os.readlink(path)
@@ -671,8 +683,9 @@ int main(int argc, char **argv) {
 
                 before = snapshot()
                 # Private process-owned fixtures do not need sudo. The only other
-                # substitutions bind the fixed cache prefix and OS chmod location.
-                fixture_program = program.replace(expected_prefix, str(cache)).replace(
+                # substitutions bind the entire /opt prefix and OS chmod location.
+                # A newly added /opt ancestor must never reach the real host path.
+                fixture_program = program.replace(expected_prefix, str(opt)).replace(
                     "/usr/bin/sudo -- ", "",
                 )
                 if not os.path.exists("/usr/bin/chmod"):
@@ -688,7 +701,9 @@ int main(int argc, char **argv) {
                 after = snapshot()
                 if scenario == "valid":
                     self.assertEqual(0, completed.returncode, completed.stderr)
-                    self.assertEqual([0o755] * 4, [stat.S_IMODE(path.stat().st_mode) for path in targets])
+                    self.assertEqual([0o755] * 5, [stat.S_IMODE(path.stat().st_mode) for path in targets])
+                    for path in targets:
+                        VALIDATOR_MODULE.require_safe_path(path, directory=True)
                     self.assertEqual(
                         {path: value for path, value in before.items() if path not in targets},
                         {path: value for path, value in after.items() if path not in targets},
