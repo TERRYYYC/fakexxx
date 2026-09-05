@@ -129,8 +129,17 @@ payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.
 #      一组自洽的终态标记（SEED_LOCAL_VERIFIED + SEED_CONTRACT_INCOMPLETE，digest 回显须等于启动
 #      digest；同 token 同时出现 FAILED 与 VERIFIED、或重复标记 → FAIL；旧 launch 的陈旧成功/失败
 #      一律忽略），最后再次 force-stop 并断言静默完成交接，才打 SEED_GATE_PASS token=… digest=…。
-#      可选 --evidence-dir <dir>：PASS 后 run-as dump 设备上真实发布的 transport（spoof_config.xml
-#      + 提取出的 canonical JSON）留证。device-free 由 scripts/selftest-seed-10a-gate.sh 逐条 pin
+#      可选 --evidence-dir <dir>：PASS 后按 #90 Vector-aware 语义 dump 设备上真实发布的 transport 留证：
+#      canonical = 恰一条 live Vector 源（`su ls -d /data/misc/*/prefs/<exact-package>/spoof_config.xml`
+#      恰一命中；0/多命中、读取失败、su 不可用一律 fail-closed —— 显式要求的证据拿不到可信来源即
+#      SEED_GATE_FAIL，绝不回退 app-private shared_prefs 当 canonical —— 那是 Vector 重定向下格式完好
+#      但陈旧的 pre-Vector mirror，第三圈判定人曾据此产出错误 P1）。落盘结构：`vector-prefs/`
+#      （canonical + .provenance：package / sourceZone=vector-live / 精确 remote path / cardinality=1/1 /
+#      sha256）+ `app-private-mirror/`（仅 historical 标注副本；与 live 不同则打 VE_DIVERGENCE 双哈希）。
+#      `test-hook.sh` 的 snapshot_prefs() 同语义（exact-package 恰一条，多包不再 collapse）。**读任何
+#      app 私有状态前先确定该进程的存储重定向（Vector/沙箱/多用户）；同名多副本必须都取都比；下
+#      全称结论（不存在/唯一/从未）前说出样本面并证明其完整（#90，lessons F3'）。device-free 由
+#      scripts/selftest-seed-10a-gate.sh 逐条 pin
 #      （存活 PID / 持锁 / SEED_FAILED / 无判定 / 裸 local-verified / 陈旧成功+新超时 / 陈旧成功+
 #      新失败 / 陈旧失败+新成功 / pidof 错误 / adb 传输失败 / 不自洽终态 / digest 不符 / 近似 token /
 #      死 owner 回收 / 死 owner 但设备存活拒回收 / 无 owner 记录拒回收 / 交接未静默）。
