@@ -947,16 +947,22 @@ class AutomationEngine(
             // # 停止/取消：legacy 在途尝试标记 interrupted；A+ 模式绝不盲目标记 terminal——cancel 后可能
             // # 仍持有未收敛 lease，必须保持 recoverable 由下次恢复 reconcile（Sol round-9 addendum）。
             // # withContext(NonCancellable) 保证 paused 持久化在取消上下文中仍完成（Sol round-10 P1-5）。
+            // # Issue #17/#15：清理等待投影（Run 页本地跳秒的锚点）+ legacy 收尾同样包进 NonCancellable——
+            // # 取消后的挂起调用会在第一个挂起点重抛 CancellationException，不包裹就会吞掉
+            // # markAttemptInterrupted/finishSession（History 留下 running 僵尸 attempt/session）。
             _cooldown.value = null
+            _stageProgress.value = null
             if (recoveryCoordinator != null) {
                 withContext(NonCancellable) {
                     aplusPause("cancelled with an unresolved A+ lease — recoverable, not terminalized")
                 }
             } else {
-                currentAttemptId?.let { planRepository.markAttemptInterruptedIfNonTerminal(it, nowMs()) }
-                updateState(AutomationState.IDLE)
-                if (runSessionId != 0L) {
-                    planRepository.finishSession(runSessionId, "stopped", nowMs(), _cycleCount.value)
+                withContext(NonCancellable) {
+                    currentAttemptId?.let { planRepository.markAttemptInterruptedIfNonTerminal(it, nowMs()) }
+                    updateState(AutomationState.IDLE)
+                    if (runSessionId != 0L) {
+                        planRepository.finishSession(runSessionId, "stopped", nowMs(), _cycleCount.value)
+                    }
                 }
             }
             log("=== Automation stopped by user ===")
@@ -964,20 +970,26 @@ class AutomationEngine(
 
         } catch (e: Exception) {
             // # 不可恢复的错误：legacy 在飞 attempt 终态化（F7 不留孤儿）；A+ 模式保持 recoverable。
+            // # Issue #17/#15：同样清掉等待投影（引擎死亡后 UI 不得继续本地跳秒）。
+            _stageProgress.value = null
             if (recoveryCoordinator != null) {
                 withContext(NonCancellable) {
                     aplusPause("exception with an unresolved A+ lease: ${e.message}")
                 }
             } else {
-                currentAttemptId?.let { attemptId ->
-                    runCatching {
-                        planRepository.markAttemptInterruptedIfNonTerminal(attemptId, nowMs())
-                    }.onFailure { Log.w(TAG, "failed to terminalize in-flight attempt $attemptId", it) }
-                }
-                currentAttemptId = null
-                updateState(AutomationState.ERROR)
-                if (runSessionId != 0L) {
-                    planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)
+                // # Issue #17：同样的 NonCancellable 包裹——runCatching 拦得住业务异常，拦不住取消
+                // # 与取消竞态下的半截收尾。
+                withContext(NonCancellable) {
+                    currentAttemptId?.let { attemptId ->
+                        runCatching {
+                            planRepository.markAttemptInterruptedIfNonTerminal(attemptId, nowMs())
+                        }.onFailure { Log.w(TAG, "failed to terminalize in-flight attempt $attemptId", it) }
+                    }
+                    currentAttemptId = null
+                    updateState(AutomationState.ERROR)
+                    if (runSessionId != 0L) {
+                        planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)
+                    }
                 }
             }
             log("=== Automation ERROR: ${e.message} ===")
