@@ -2,14 +2,20 @@
 """Regression tests for the Issue 66 Android SDK trust boundary."""
 
 import importlib.util
+import contextlib
+import errno
+import io
 import json
 import os
 import pathlib
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
+import textwrap
 import traceback
+import types
 import unittest
 from unittest import mock
 
@@ -45,6 +51,134 @@ class _ObservableScandir:
 
 
 class AndroidSdkRuntimeValidationTest(unittest.TestCase):
+    def test_ci_removes_only_the_reviewed_home_default_acl(self):
+        workflow = (REPO_ROOT / ".github/workflows/android-a-plus.yml").read_text()
+        marker = "      - name: normalize reviewed home default ACL\n"
+        self.assertIn(marker, workflow, "CI does not establish safe /home default-ACL authority")
+        start = workflow.index(marker)
+        end = workflow.index("\n      - name:", start + len(marker))
+        step = workflow[start:end]
+        self.assertTrue(workflow[end:].startswith("\n      - name: standalone runtime security tests"))
+        self.assertIn("shell: /bin/bash --noprofile --norc -p -euo pipefail {0}", step)
+        self.assertIn('"/usr/bin/sudo", "--", "/usr/bin/setfacl", "--remove-default", "--", "/home"', step)
+        self.assertNotIn("--recursive", step)
+        self.assertNotIn("--remove-all", step)
+        self.assertNotIn("chmod", step)
+        self.assertNotIn("chown", step)
+        program = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        program = program.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        access = struct.pack("<I", 2) + b"".join(
+            struct.pack("<HHI", tag, permissions, qualifier)
+            for tag, permissions, qualifier in (
+                (1, 7, 0xFFFFFFFF), (2, 7, 65534), (4, 5, 0xFFFFFFFF),
+                (16, 5, 0xFFFFFFFF), (32, 5, 0xFFFFFFFF),
+            )
+        )
+        default = struct.pack("<I", 2) + b"".join(
+            struct.pack("<HHI", tag, permissions, 0xFFFFFFFF)
+            for tag, permissions in ((1, 7), (4, 7), (32, 5))
+        )
+        self.assertFalse(VALIDATOR_MODULE.posix_acl_grants_write(access))
+        self.assertTrue(VALIDATOR_MODULE.posix_acl_grants_write(default))
+        for scenario in (
+            "remove_default", "already_safe", "unsafe_access", "readonly_default",
+            "oversized_default", "wrong_owner", "wrong_mode", "symlink", "file",
+            "changed_access", "retained_default", "changed_inode",
+        ):
+            with self.subTest(scenario=scenario), self._sdk_fixture() as fixture:
+                home = fixture / "home"
+                home.mkdir(mode=0o755)
+                child = home / "untouched"
+                child.write_bytes(b"existing-child")
+                child_before = (child.read_bytes(), child.stat().st_mode)
+                target_inode = home.stat().st_ino
+                acl_state = {"system.posix_acl_access": access, "system.posix_acl_default": default}
+                if scenario == "already_safe":
+                    acl_state.pop("system.posix_acl_default")
+                if scenario == "unsafe_access":
+                    acl_state["system.posix_acl_access"] = default
+                if scenario == "readonly_default":
+                    acl_state["system.posix_acl_default"] = access
+                if scenario == "oversized_default":
+                    acl_state["system.posix_acl_default"] = b"x" * 65537
+                if scenario == "wrong_mode":
+                    home.chmod(0o775)
+                if scenario in {"symlink", "file"}:
+                    original = home.with_name("home.original")
+                    home.rename(original)
+                    if scenario == "symlink":
+                        home.symlink_to(original, target_is_directory=True)
+                    else:
+                        home.write_bytes(b"not a directory")
+                real_stat, real_fstat, real_lstat = os.stat, os.fstat, pathlib.Path.lstat
+                calls = []
+
+                def reviewed_state(value):
+                    if value.st_ino != target_inode:
+                        return value
+                    fields = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+                    fields["st_uid"] = 12345 if scenario == "wrong_owner" else 0
+                    if calls and scenario == "changed_inode":
+                        fields["st_ino"] += 1
+                    return types.SimpleNamespace(**fields)
+
+                def fixture_stat(*args, **kwargs):
+                    return reviewed_state(real_stat(*args, **kwargs))
+
+                def fixture_fstat(descriptor):
+                    return reviewed_state(real_fstat(descriptor))
+
+                def fixture_getxattr(descriptor, name):
+                    self.assertEqual(target_inode, real_fstat(descriptor).st_ino)
+                    if name not in acl_state:
+                        raise OSError(errno.ENODATA, "fixture ACL absent")
+                    return acl_state[name]
+
+                def remove_default(arguments, **kwargs):
+                    self.assertEqual(
+                        ["/usr/bin/sudo", "--", "/usr/bin/setfacl", "--remove-default", "--", str(home)],
+                        arguments,
+                    )
+                    self.assertTrue(kwargs["check"])
+                    self.assertEqual(10, kwargs["timeout"])
+                    calls.append(arguments)
+                    if scenario != "retained_default":
+                        acl_state.pop("system.posix_acl_default")
+                    if scenario == "changed_access":
+                        acl_state["system.posix_acl_access"] = default
+                    return subprocess.CompletedProcess(arguments, 0)
+
+                output = io.StringIO()
+                rejected = None
+                # All literal /home references are mapped to this private fixture.
+                # POSIX ACL bytes and the original parser run even on macOS; no
+                # real /home, privilege elevation, or ACL mutation command is used.
+                fixture_program = program.replace('"/home"', repr(str(home)))
+                with mock.patch("sys.platform", "linux"), mock.patch.object(os, "stat", fixture_stat), \
+                        mock.patch.object(os, "fstat", fixture_fstat), \
+                        mock.patch.object(pathlib.Path, "lstat", lambda path: reviewed_state(real_lstat(path))), \
+                        mock.patch.object(os, "getxattr", fixture_getxattr, create=True), \
+                        mock.patch.object(os, "listxattr", lambda _fd: list(acl_state), create=True), \
+                        mock.patch.object(subprocess, "run", remove_default), \
+                        contextlib.redirect_stdout(output):
+                    try:
+                        exec(compile(fixture_program, "<reviewed-home-acl-step>", "exec"), {})
+                    except (Exception, SystemExit) as error:
+                        if isinstance(error, AssertionError):
+                            raise
+                        rejected = error
+                if scenario in {"remove_default", "already_safe"}:
+                    self.assertIsNone(rejected, repr(rejected))
+                    self.assertEqual(access, acl_state["system.posix_acl_access"])
+                    self.assertNotIn("system.posix_acl_default", acl_state)
+                    self.assertEqual(child_before, (child.read_bytes(), child.stat().st_mode))
+                    self.assertEqual(1 if scenario == "remove_default" else 0, len(calls))
+                    expected = "HOST_HOME_DEFAULT_ACL_REMOVED" if calls else "HOST_HOME_ACL_ALREADY_SAFE"
+                    self.assertEqual(expected + "\n", output.getvalue())
+                else:
+                    self.assertIsNotNone(rejected, "unsafe or changed authority was accepted")
+                    self.assertEqual(1 if scenario in {"changed_access", "retained_default", "changed_inode"} else 0, len(calls))
+
     def test_fixture_baseline_reports_unsafe_ancestor_before_negative_mutation(self):
         with self._sdk_fixture() as fixture:
             fixture_path = fixture

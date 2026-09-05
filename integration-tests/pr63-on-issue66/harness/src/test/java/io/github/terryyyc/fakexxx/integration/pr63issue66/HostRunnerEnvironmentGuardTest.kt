@@ -1329,11 +1329,13 @@ class HostRunnerEnvironmentGuardTest {
             freezeEnd + 1,
             jdkNormalizeStart,
         )
-        assertEquals(
-            "an unreviewed step can run between JDK cache normalization and the first repository command",
-            jdkNormalizeEnd + 1,
-            standaloneSecurityTests,
-        )
+        val homeAclStart = hostJob.indexOf("      - name: normalize reviewed home default ACL")
+        val homeAclEnd = hostJob.indexOf("\n      - name:", homeAclStart + 1)
+        check(homeAclStart >= 0 && homeAclEnd > homeAclStart) {
+            "reviewed home default-ACL normalization step has no bounded extent"
+        }
+        assertEquals("an unreviewed step precedes home ACL normalization", jdkNormalizeEnd + 1, homeAclStart)
+        assertEquals("an unreviewed step follows home ACL normalization", homeAclEnd + 1, standaloneSecurityTests)
         // Bind the whole independently reviewed step, including shell/metadata.
         // Its actual command semantics are exercised by the seven-layout Python regression.
         val jdkNormalizeStep = hostJob.substring(jdkNormalizeStart, jdkNormalizeEnd)
@@ -1351,6 +1353,17 @@ class HostRunnerEnvironmentGuardTest {
             reviewedJdkNormalizeSha256,
             stepSha256(jdkNormalizeStep.replace("        shell:", "        if: false\n        shell:")),
         )
+        val homeAclStep = hostJob.substring(homeAclStart, homeAclEnd)
+        val reviewedHomeAclSha256 = "79311b827cf78698a65e4915f5d497f6b91e0d9efc5645be67f7ae50c644022a"
+        assertEquals("home ACL normalization gained an unreviewed command or metadata", reviewedHomeAclSha256, stepSha256(homeAclStep))
+        for (mutant in listOf(
+            homeAclStep.replace("        shell:", "        if: false\n        shell:"),
+            homeAclStep.replace("--remove-default", "--remove-all"),
+            homeAclStep.replace("--remove-default", "--recursive"),
+            homeAclStep + "\n      - name: injected\n        run: true\n",
+        )) {
+            assertNotEquals("home ACL normalization accepted a bypass or broader mutation", reviewedHomeAclSha256, stepSha256(mutant))
+        }
         val freezeStep = hostJob.substring(freezeStart, freezeEnd)
 
         val runMarker = "        run: |\n"

@@ -621,7 +621,7 @@ int main(int argc, char **argv) {
         next_step = host_job.index("\n      - name:", step_start + len(marker))
         step = host_job[step_start:next_step]
         self.assertLess(host_job.index("freeze preinstalled Android SDK permissions"), step_start)
-        self.assertTrue(host_job[next_step:].startswith("\n      - name: standalone runtime security tests"))
+        self.assertTrue(host_job[next_step:].startswith("\n      - name: normalize reviewed home default ACL"))
         self.assertIn("shell: /bin/bash --noprofile --norc -p -euo pipefail {0}", step)
         program = textwrap.dedent(step.split("        run: |\n", 1)[1])
         self.assertNotIn("--recursive", program)

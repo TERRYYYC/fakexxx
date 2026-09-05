@@ -439,6 +439,74 @@ jobs:
           /usr/bin/sudo -- /usr/bin/chmod -- go-w "${jdk_cache_parents[@]}"
           /usr/bin/sudo -- /usr/bin/chmod -- 0755 "$expected_jdk"
 
+      - name: normalize reviewed home default ACL
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: |
+          /usr/bin/env -i ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin /usr/bin/python3 -I - <<'PY'
+          import errno
+          import importlib.util
+          import os
+          import pathlib
+          import stat
+          import subprocess
+          import sys
+
+          if sys.platform != "linux":
+              raise SystemExit("HOST_HOME_ACL_PLATFORM_INVALID")
+          spec = importlib.util.spec_from_file_location("sdk_validator", "scripts/validate-android-sdk-runtime.py")
+          validator = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(validator)
+          root = pathlib.Path("/home")
+
+          def identity(value):
+              return value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode
+
+          def read_acl(descriptor, name):
+              try:
+                  payload = os.getxattr(descriptor, name)
+              except OSError as error:
+                  if error.errno == errno.ENODATA:
+                      return None
+                  raise
+              if len(payload) > 65536:
+                  raise SystemExit("HOST_HOME_ACL_TOO_LARGE")
+              return payload
+
+          named = root.lstat()
+          if not stat.S_ISDIR(named.st_mode) or named.st_uid != 0 or stat.S_IMODE(named.st_mode) != 0o755:
+              raise SystemExit("HOST_HOME_ACL_TARGET_INVALID")
+          descriptor = os.open(root, validator.directory_flags())
+          try:
+              before = identity(os.fstat(descriptor))
+              if before != identity(named):
+                  raise SystemExit("HOST_HOME_ACL_TARGET_CHANGED")
+              access = read_acl(descriptor, "system.posix_acl_access")
+              default = read_acl(descriptor, "system.posix_acl_default")
+              if access is not None and validator.posix_acl_grants_write(access):
+                  raise SystemExit("HOST_HOME_ACCESS_ACL_UNSAFE")
+              if default is not None and not validator.posix_acl_grants_write(default):
+                  raise SystemExit("HOST_HOME_DEFAULT_ACL_NOT_EXPECTED_WRITE")
+              if (before != identity(os.fstat(descriptor)) or before != identity(root.lstat())
+                      or access != read_acl(descriptor, "system.posix_acl_access")
+                      or default != read_acl(descriptor, "system.posix_acl_default")):
+                  raise SystemExit("HOST_HOME_ACL_PRECHECK_CHANGED")
+              if default is not None:
+                  # Only this fixed host command is privileged; repository Python is not.
+                  subprocess.run(
+                      ["/usr/bin/sudo", "--", "/usr/bin/setfacl", "--remove-default", "--", "/home"],
+                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      timeout=10, check=True,
+                  )
+              if (before != identity(os.fstat(descriptor)) or before != identity(root.lstat())
+                      or access != read_acl(descriptor, "system.posix_acl_access")
+                      or read_acl(descriptor, "system.posix_acl_default") is not None):
+                  raise SystemExit("HOST_HOME_ACL_POSTCHECK_CHANGED")
+              validator.ACL_INSPECTOR.snapshot(descriptor)
+              print("HOST_HOME_DEFAULT_ACL_REMOVED" if default is not None else "HOST_HOME_ACL_ALREADY_SAFE")
+          finally:
+              os.close(descriptor)
+          PY
+
       - name: standalone runtime security tests
         shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: |
