@@ -244,12 +244,20 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         }
     }
 
-    override fun restartExhaustedSchedule(): Boolean {
-        if (!exhausted || itemIds.isEmpty()) return false
-        scheduleVersion += 1
-        currentItemId = itemIds.first()
-        exhausted = false
-        advanceCount = 0
+    override fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean {
+        if (itemIds.isEmpty() || itemIds.first() != firstItemId) return false
+        val eligibleOldState = exhausted && scheduleVersion + 1L == targetVersion
+        val alreadyAppliedState =
+            !exhausted && scheduleVersion == targetVersion && currentItemId == firstItemId
+        check(eligibleOldState || alreadyAppliedState) {
+            "fake schedule restart target diverged"
+        }
+        kv.transaction {
+            scheduleVersion = targetVersion
+            currentItemId = firstItemId
+            exhausted = false
+            advanceCount = 0
+        }
         return true
     }
 

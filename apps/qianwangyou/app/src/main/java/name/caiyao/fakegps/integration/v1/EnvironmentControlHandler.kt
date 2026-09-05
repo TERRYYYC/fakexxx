@@ -78,9 +78,19 @@ class EnvironmentControlHandler(
         if (!schedule.exhausted) {
             return@withOwnerFence OperatorScheduleRestartResult.NOT_EXHAUSTED
         }
-        if (environment.restartExhaustedSchedule()) {
+        val firstItemId = schedule.itemIds.firstOrNull()
+            ?: return@withOwnerFence OperatorScheduleRestartResult.NO_SCHEDULE
+        val targetVersion = schedule.scheduleVersion + 1L
+        storage.transaction {
+            storage.write(
+                RESTART_PENDING_NAMESPACE,
+                RESTART_PENDING_KEY,
+                DurableFieldCodec.encode(listOf(targetVersion.toString(), firstItemId)),
+            )
             tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
             audit.append("schedule_restarted")
+        }
+        if (settlePendingScheduleRestart()) {
             OperatorScheduleRestartResult.RESTARTED
         } else {
             OperatorScheduleRestartResult.WRITE_FAILED
@@ -780,6 +790,31 @@ class EnvironmentControlHandler(
     }
 
     /**
+     * Roll forward a provider-committed operator restart into qwy's separate
+     * SharedPreferences store. The external apply receives an exact target and
+     * is idempotent, so failures before/after its commit converge on re-entry.
+     * A false return keeps the marker durable for a later retry.
+     */
+    private fun settlePendingScheduleRestart(): Boolean {
+        val marker = storage.read(RESTART_PENDING_NAMESPACE, RESTART_PENDING_KEY)
+        if (marker.isNullOrEmpty()) return true
+        val parts = DurableFieldCodec.decodeNonNull(marker)
+        val targetVersion = parts[0].toLong()
+        val firstItemId = parts[1]
+        if (!environment.applyScheduleRestart(targetVersion, firstItemId)) return false
+        val applied = checkNotNull(environment.scheduleSnapshot()) {
+            "pending schedule restart present but environment has no schedule"
+        }
+        check(
+            applied.scheduleVersion == targetVersion &&
+                applied.currentItemId == firstItemId &&
+                !applied.exhausted,
+        ) { "committed schedule restart diverged from environment" }
+        storage.write(RESTART_PENDING_NAMESPACE, RESTART_PENDING_KEY, "")
+        return true
+    }
+
+    /**
      * Owner-process startup reconciliation: fresh tracker generation, then
      * state-aware lease recovery (§8.4 recovery table). Invoked by the service
      * on create and by tests via harness restart.
@@ -791,6 +826,9 @@ class EnvironmentControlHandler(
         // forbidden middle (receipt durable, pointer stale). Startup is
         // single-threaded, so this runs without the owner fence here.
         settlePendingAdvance()
+        check(settlePendingScheduleRestart()) {
+            "committed schedule restart could not be durably applied"
+        }
 
         // Tracker already allocated a new generation in its init block.
         // Now do state-aware lease recovery.
@@ -918,6 +956,9 @@ class EnvironmentControlHandler(
      */
     private inline fun <T> withOwnerFence(block: () -> T): T = synchronized(ownerLock) {
         settlePendingAdvance()
+        check(settlePendingScheduleRestart()) {
+            "committed schedule restart could not be durably applied"
+        }
         block()
     }
 
@@ -929,6 +970,9 @@ class EnvironmentControlHandler(
          */
         const val ADVANCE_PENDING_NAMESPACE: String = "integration.v1.advance.pending"
         const val ADVANCE_PENDING_KEY: String = "slot"
+
+        const val RESTART_PENDING_NAMESPACE: String = "integration.v1.restart.pending"
+        const val RESTART_PENDING_KEY: String = "slot"
 
         /**
          * §6.3.3 wire-8 observe exception window (v1.75 GREEN): per-caller slot
