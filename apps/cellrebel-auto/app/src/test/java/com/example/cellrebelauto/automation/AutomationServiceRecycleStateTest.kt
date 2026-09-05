@@ -5,6 +5,14 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.automation.AutomationService.Companion as SvcCompanion
 import com.example.cellrebelauto.model.AutomationState
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -37,6 +45,29 @@ import org.robolectric.RobolectricTestRunner
  */
 @RunWith(RobolectricTestRunner::class)
 class AutomationServiceRecycleStateTest {
+
+    @Test
+    fun `a cancelled run cannot be replaced until its non-cancellable retirement completes`() = runBlocking {
+        val retirementRelease = CompletableDeferred<Unit>()
+        val enteredRetirement = CompletableDeferred<Unit>()
+        val job = CoroutineScope(Dispatchers.Default).launch {
+            try {
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) {
+                    enteredRetirement.complete(Unit)
+                    retirementRelease.await()
+                }
+            }
+        }
+
+        job.cancel()
+        enteredRetirement.await()
+        assertFalse("cancelled is not the same as durably retired", mayStartAutomation(job))
+        retirementRelease.complete(Unit)
+        job.join()
+        assertTrue(mayStartAutomation(job))
+    }
 
     @Test
     fun `closed lifecycle fence rejects a stale forwarder even after a new run begins`() {

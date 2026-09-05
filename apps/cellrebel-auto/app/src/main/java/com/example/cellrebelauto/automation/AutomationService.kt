@@ -291,7 +291,6 @@ class AutomationService : AccessibilityService() {
         // # Issue #15：系统解绑路径（禁用开关）先于 recycle——同一类型化终态，防 Run 页残留运行假象。
         publishServiceRecycledTerminal()
         automationJob?.cancel()
-        automationJob = null
         return super.onUnbind(intent)
     }
 
@@ -316,6 +315,10 @@ class AutomationService : AccessibilityService() {
      * # 创建引擎和处理器，启动计划驱动的自动化协程
      */
     private fun startWithPlan(planId: Long) {
+        if (!mayStartAutomation(automationJob)) {
+            addLog("Previous automation run is still retiring, ignoring start request")
+            return
+        }
         if (_isRunning.value) {
             addLog("Already running, ignoring start request")
             return
@@ -338,7 +341,7 @@ class AutomationService : AccessibilityService() {
             val planConfig = configStore.config.first()
             if (plan == null) {
                 addLog("ERROR: plan #$planId not found")
-                _isRunning.value = false
+                projectionFence.publish(runGeneration) { _isRunning.value = false }
                 return@launch
             }
 
@@ -428,6 +431,9 @@ class AutomationService : AccessibilityService() {
         Log.w(TAG, message)
     }
 }
+
+/** Cancellation requested is not retirement complete: NonCancellable cleanup may still write durable state. */
+internal fun mayStartAutomation(existingJob: Job?): Boolean = existingJob == null || existingJob.isCompleted
 
 /** Serializes lifecycle terminalization with engine projections and rejects stale run publishers. */
 internal class ServiceProjectionFence {
