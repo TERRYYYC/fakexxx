@@ -272,15 +272,13 @@ class AutomationService : AccessibilityService() {
      * projection SYNCHRONOUSLY (no IO, no suspension — the system time-limits onDestroy) and
      * STRICTLY BEFORE any coroutine cancellation. The forwarders die with serviceScope, so a
      * terminal the engine's cancellation handler tries to publish would never reach the
-     * companion flows (the device's illusion: stale Running state + a StageProgress anchor the
-     * UI ticks locally forever); the ONLY reliable publisher is the lifecycle callback itself.
+     * companion flows; the ONLY reliable publisher is the lifecycle callback itself.
      *
      * # #15：宿主服务消亡——在取消任何协程之前，同步发布类型化终态并清空运行投影
      */
     private fun publishServiceRecycledTerminal() {
         addLog("SERVICE_RECYCLED — accessibility service destroyed; engine stopped. Restart the plan to continue.")
         _currentState.value = AutomationState.SERVICE_RECYCLED
-        _stageProgress.value = null
         _currentTask.value = null
         _cooldown.value = null
         _isRunning.value = false
