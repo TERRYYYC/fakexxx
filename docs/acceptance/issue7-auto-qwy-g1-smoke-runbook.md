@@ -433,7 +433,12 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 
 ## 11. 记录基线（记录猫用）
 
-每轮冒烟**必须**记录，缺项即不可判定：
+每轮冒烟**必须**记录。记录项分两档：
+
+- **判定承重**（Tier A，#1–6 / #8–11）：**缺项即不可判定**——这些项要么被 §7 判据直接用作逐字匹配输入（#6 logcat / #8 apply-observe / #10 mock 状态 / #11 exit code / #9 失败原文），要么是证据准入前提（#1 设备身份 / #2 源码基线 / #3 构建身份 / #4 配对身份 / #5 种子基线），缺少任何一项该轮冒烟无法给出可验证的 PASS/FAIL。
+- **辅助附件**（Tier B，#7）：**缺项应补记但不阻塞判定**——仅供人工直觉参考与封存归档，不被 §7 任何判据引用，不影响 §12 退出标准。
+
+### Tier A — 判定承重（缺项即不可判定）
 
 | # | 记录项 | 来源 |
 |---|---|---|
@@ -443,14 +448,40 @@ CLEANUP UNSAFE: lease <id>… release validation failed → <outcome> — DEVICE
 | 4 | 批准所用的完整 signerDigest 与 approve 命令 | §6.2（基线="批准了谁"） |
 | 5 | 种子地址基线 | `prepare_kyiv` → Kyiv 50.4501 / 30.5234（§6.0） |
 | 6 | 每步探针的当次 logcat 全文 | `capture_step` 产出的 `run-<step>.log`（§6.0.0）：跟随写文件、终态或 deadline 后 `kill+wait`；**不得在 `am start` 后立即 `-d` 立取** |
-| 7 | 每步探针屏幕截图 | `adb exec-out screencap -p > <run>-<step>.png` |
 | 8 | `[3] apply` 的 rev/verif/fingerprint 与 `[4]` 的 hashMatch | 探针输出（记录猫不补写） |
 | 9 | 任何 `CLEANUP UNSAFE` / `FAILED` / `STOP` 原文 | §9 协议完成后照实记 |
 | 10 | 冒烟后 mock 状态直接验证（`dumpsys location` 与 `appops` 输出原文；地图目测只作辅助，不构成判据） | §6.5 / §7.5 |
 | 11 | 每步 `capture_step` 的 **exit code（0/1/130）** 与证据文件里的 `TIMEOUT after <s>` / `ABORTED by signal` 行原文 | 超时/中断行已**追加进同一 `run-<step>.log`**（非 stdout）；exit 1 = FAIL(TIMEOUT)、exit 130 = FAIL(ABORTED)，**部分日志必须随证据保留**，不得丢弃；130 发生在 §6.4 → §9 结果一并封存 |
 
+### Tier B — 辅助附件（缺项应补记但不阻塞判定）
+
+| # | 记录项 | 来源 | 有效性说明 |
+|---|---|---|---|
+| 7 | 每步探针屏幕截图 | `adb exec-out screencap -p > <run>-<step>.png` | 仅作人工直觉辅助与封存附件，**不参与 §7 判定、不影响 §12 退出标准**。截图存在时，记录猫应在证据报告中标注逐步有效性状态（见下），标注结果同样不改变判定 |
+
+> **§11-7 有效性标注**（仅当截图存在时，标注进证据报告）
+>
+> | 标注 | 含义 | 举例 |
+> |---|---|---|
+> | ✅ 有效 | 截图 UI 内容与该步自身日志对应 | 探针显示 `RESULT: CONNECTED`，日志同步出 `RESULT: CONNECTED` |
+> | ❌ 黑屏 | 设备 Dozing/屏幕关闭，截图全黑 | C5 run#2 v1：7 张同 hash、全黑（F-19） |
+> | ❌ 陈旧帧 | 截图显示前一步或更早的 UI 内容 | C5 run#2 v2：6.5 截图仍显示 6.2b 配对界面（F-19） |
+> | ❌ 转场半帧 | 动画中间帧，非稳态 UI | C5 run#2 v2：6.0 截图为上一轮握手界面的转场半帧（F-19） |
+> | ⚠️ 未核 | hash 唯一但未目视核对内容 | hash 唯一性**不**构成有效性证据 |
+> | ⚠️ 不适用 | 该步无对应探针 UI（如 force-stop） | 6.0.1 无探针 Activity |
+> | ❌ 其他无效 | 损坏/截断 PNG、错误前台 Activity、或上述类别未覆盖的无效状态 | PNG header 损坏；截图显示非目标 Activity |
+>
+> **三类朴素检查均不能替代逐步内容核对（F-19 实证）：**
+> ① 文件数量齐全 — 黑屏帧满足 ② hash 互不相同 — 转场半帧天然唯一 ③ 非黑屏计数 — 陈旧帧通过
+
 证据文件命名：`docs/acceptance/g1-smoke-<date>-<device-serial4>-<run#>.md`（含上面字段 +
-`reportDigest: sha256:<原始 logcat+截图 字节的 SHA-256>`）。**记录猫不得改原始字节。**
+`reportDigest: sha256:<设备证据报告文件的 SHA-256>`）。**记录猫不得改原始字节。**
+
+> `reportDigest` 语义定义见 feature-spec §10.1（冻结）；本节不复述。
+>
+> 原始证据的逐文件完整性由独立的 `evidence-manifest.sha256` 校验。
+> 已有证据报告（如 run#2）中 reportDigest 使用了旧定义（逐文件字节流连接），
+> 保留原始计算不追溯修改；后续轮次按 §10.1 执行。
 
 ## 12. 退出标准 → G2 前置
 
