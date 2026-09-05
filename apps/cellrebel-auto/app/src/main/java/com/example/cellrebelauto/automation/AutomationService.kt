@@ -149,7 +149,8 @@ class AutomationService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         _isServiceConnected.value = true
-        Log.d(TAG, "Service connected")
+        // Issue #16: background-uid DEBUG is dropped by logd — lifecycle markers must survive.
+        Log.w(TAG, "Service connected")
         addLog("Accessibility service connected")
         // F1: bind the frozen-contract provider service for the accessibility-service lifetime.
         val executor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(applicationContext)
@@ -275,7 +276,7 @@ class AutomationService : AccessibilityService() {
         instance = null
         _isServiceConnected.value = false
         _isRunning.value = false
-        Log.d(TAG, "Service destroyed")
+        Log.w(TAG, "Service destroyed")
     }
 
     // ---- Control ----
@@ -389,7 +390,11 @@ class AutomationService : AccessibilityService() {
             .format(java.util.Date())
         val entry = "[$timestamp] $message"
         _logs.value = (_logs.value + entry).takeLast(200)
-        Log.d(TAG, message)
+        // Issue #16: carries the provider bind request/result, run lifecycle markers, and the
+        // handler-forwarded navigation trail — all emitted while our uid is backgrounded, where
+        // logd drops DEBUG. WARN (the MIUI popup direct Log.d lines stay DEBUG: event-level
+        // detail out of the #16 scope, and their addLog twins already surface here at WARN).
+        Log.w(TAG, message)
     }
 }
 

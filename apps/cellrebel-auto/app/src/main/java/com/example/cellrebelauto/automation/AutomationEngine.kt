@@ -2667,7 +2667,10 @@ class AutomationEngine(
         val old = _state.value
         _state.value = newState
         if (old != newState) {
-            Log.d(TAG, "State: $old → $newState")
+            // Issue #16: device evidence (Moto/Android 15) — while the engine app is backgrounded
+            // (CellRebel foreground), logd drops DEBUG for the background uid; INFO/WARN survive.
+            // State transitions are the diagnostic backbone of every E2E timeline → WARN.
+            Log.w(TAG, "State: $old → $newState")
         }
     }
 
@@ -2676,6 +2679,10 @@ class AutomationEngine(
             .format(java.util.Date())
         val entry = "[$timestamp] $message"
         _logs.value = (_logs.value + entry).takeLast(200)
-        Log.d(TAG, message)
+        // Issue #16: engine log lines (plan start / Location / failures / aplusPause / ~10s
+        // stage heartbeats) are exactly what goes missing when the app is backgrounded —
+        // logd rate-limits DEBUG for background uids. WARN keeps them visible. No engine
+        // line is per-second noise (the fastest cadence here is the 10s heartbeat).
+        Log.w(TAG, message)
     }
 }
