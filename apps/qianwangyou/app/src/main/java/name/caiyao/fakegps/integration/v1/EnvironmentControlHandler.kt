@@ -69,6 +69,24 @@ class EnvironmentControlHandler(
     // keeps testing the rejection paths through a recorder.
     private val diagnostics: DiagnosticLog = DiagnosticLog.ANDROID,
 ) {
+    fun restartScheduleForOperator(): OperatorScheduleRestartResult = withOwnerFence {
+        if (leaseStore.blockingLease() != null) {
+            return@withOwnerFence OperatorScheduleRestartResult.BLOCKED_BY_LEASE
+        }
+        val schedule = environment.scheduleSnapshot()
+            ?: return@withOwnerFence OperatorScheduleRestartResult.NO_SCHEDULE
+        if (!schedule.exhausted) {
+            return@withOwnerFence OperatorScheduleRestartResult.NOT_EXHAUSTED
+        }
+        if (environment.restartExhaustedSchedule()) {
+            tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
+            audit.append("schedule_restarted")
+            OperatorScheduleRestartResult.RESTARTED
+        } else {
+            OperatorScheduleRestartResult.WRITE_FAILED
+        }
+    }
+
     fun discover(callingUid: Int): CapabilitySnapshotV1 = withOwnerFence {
         authorizer.authorize(callingUid)
         val snap = tracker.snapshot()
@@ -971,4 +989,12 @@ class EnvironmentControlHandler(
         return AdvanceReceiptV1(p[0]!!.toInt(), p[1]!!, p[2],
             p[3]!!.toLong(), p[4]!!, p[5]!!.toLong(), p[6]!!)
     }
+}
+
+enum class OperatorScheduleRestartResult {
+    RESTARTED,
+    BLOCKED_BY_LEASE,
+    NO_SCHEDULE,
+    NOT_EXHAUSTED,
+    WRITE_FAILED,
 }

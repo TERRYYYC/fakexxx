@@ -95,6 +95,18 @@ class QwyScheduleStore(context: Context) {
     fun getAdvanceCount(): Long =
         prefs.getLong(KEY_ADVANCE_COUNT, 0L)
 
+    /** Explicit operator restart: same topology, new generation, never a silent re-init. */
+    fun restartExhausted(): Boolean {
+        val items = getItemIds()
+        if (!isExhausted() || items.isEmpty()) return false
+        return prefs.edit()
+            .putLong(KEY_SCHEDULE_VERSION, getScheduleVersion() + 1L)
+            .putString(KEY_CURRENT_ITEM_ID, items.first())
+            .putBoolean(KEY_EXHAUSTED, false)
+            .putLong(KEY_ADVANCE_COUNT, 0L)
+            .commit()
+    }
+
     /**
      * Advance the pointer to the next item. Returns the outcome: either the
      * next itemId (Advanced) or null (Exhausted — last item retained).

@@ -244,6 +244,15 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         }
     }
 
+    override fun restartExhaustedSchedule(): Boolean {
+        if (!exhausted || itemIds.isEmpty()) return false
+        scheduleVersion += 1
+        currentItemId = itemIds.first()
+        exhausted = false
+        advanceCount = 0
+        return true
+    }
+
     /**
      * F14 (C5): the REAL controller computes this from the actual publish
      * outcome (ConfigPrefsSync success → VERIFIED, failure → NONE; P1-2 fix).

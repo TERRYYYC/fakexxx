@@ -265,7 +265,10 @@ object ProviderRuntime {
         // here shares the single writer rather than forking a second one — a
         // second FileDurableKv over the same directory is the split-brain §6.6 L3
         // forbids, and it would not be visible until the two disagreed.
-        return DurablePairingStore(kv).pendingCandidates()
+        val store = DurablePairingStore(kv)
+        return store.pendingCandidates().filter { candidate ->
+            store.findActive(candidate.callerApplicationId, candidate.currentSignerDigest) == null
+        }
     }
 
     /**
@@ -292,6 +295,10 @@ object ProviderRuntime {
         store.approve(candidate, SystemClock.elapsedRealtime())
         return true
     }
+
+    /** User-facing, owner-fenced restart of a completed schedule generation. */
+    fun restartScheduleForOperator(context: Context): OperatorScheduleRestartResult =
+        handler(context).restartScheduleForOperator()
 
     /**
      * Called on orderly teardown of the provider service. Without this, [consume]

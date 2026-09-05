@@ -14,7 +14,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.1.0"
         // Non-empty only on a lane build type that must pair with a same-suffix provider
         // (e.g. glmbench -> name.caiyao.fakegps.glmbench). Empty = ProviderPrincipal
         // resolves by build debug/release semantics as before.
@@ -55,6 +55,7 @@ android {
             buildConfigField("String", "PROVIDER_APPLICATION_ID_OVERRIDE", "\"name.caiyao.fakegps.glmbench\"")
         }
         release {
+            signingConfig = signingConfigs.getByName("bench")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
