@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "profileId": "darwin-aarch64-eclipse-temurin-17.0.20.1+1",
+      "os": "darwin",
+      "arch": "aarch64",
+      "javaMajor": 17,
+      "javaVendor": "Eclipse Adoptium",
+      "javaVmVendor": "Eclipse Adoptium",
+      "javaRuntimeVersion": "17.0.20.1+1",
+      "jdkTreeSha256": "f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8"
+    },
+    {
+      "profileId": "linux-x86_64-eclipse-temurin-17.0.20.1+1",
+      "os": "linux",
+      "arch": "x86_64",
+      "javaMajor": 17,
+      "javaVendor": "Eclipse Adoptium",
+      "javaVmVendor": "Eclipse Adoptium",
+      "javaRuntimeVersion": "17.0.20.1+1",
+      "jdkTreeSha256": "427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97"
+    }
+  ]
+}

@@ -1,0 +1,369 @@
+import org.gradle.api.GradleException
+import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.testing.TestDescriptor
+import org.gradle.api.tasks.testing.TestListener
+import org.gradle.api.tasks.testing.TestResult
+
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.nio.file.StandardOpenOption
+import java.util.concurrent.ConcurrentSkipListSet
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import java.util.regex.Pattern
+
+// Command-line init scripts are also visible to nested/included builds. Only the invocation's
+// root build owns the requested task path and the single attestation file.
+if (gradle.buildPath != ":") {
+    return
+}
+
+if (Runtime.version().feature() != 17) {
+    throw new GradleException(
+        "Issue 66 test attestation requires the Gradle VM to run on Java 17; " +
+            "found Java ${Runtime.version().feature()}.",
+    )
+}
+if (gradle.startParameter.dryRun) {
+    throw new GradleException("Issue 66 test attestation forbids Gradle dry-run execution.")
+}
+if (gradle.startParameter.taskGraph) {
+    throw new GradleException("Issue 66 test attestation forbids task-graph-only execution.")
+}
+
+def projectProperties = gradle.startParameter.projectProperties
+def requireProperty = { String name ->
+    if (!projectProperties.containsKey(name)) {
+        throw new GradleException("Missing required Gradle property -P${name}.")
+    }
+    String value = projectProperties.get(name)
+    if (value == null || value.isEmpty() || value != value.trim()) {
+        throw new GradleException("Gradle property -P${name} must be non-empty and unpadded.")
+    }
+    return value
+}
+def rejectRecordDelimiters = { String name, String value ->
+    if (
+        value.indexOf('\u0000') >= 0 ||
+            value.indexOf('\r') >= 0 ||
+            value.indexOf('\n') >= 0 ||
+            value.indexOf('=') >= 0 ||
+            value.indexOf(',') >= 0
+    ) {
+        throw new GradleException(
+            "Gradle property -P${name} contains a forbidden attestation delimiter.",
+        )
+    }
+    return value
+}
+
+String attestationPathValue = rejectRecordDelimiters(
+    "issue66AttestationPath",
+    requireProperty("issue66AttestationPath"),
+)
+String runId = rejectRecordDelimiters(
+    "issue66RunId",
+    requireProperty("issue66RunId"),
+)
+String stage = rejectRecordDelimiters(
+    "issue66Stage",
+    requireProperty("issue66Stage"),
+)
+String expectedTask = rejectRecordDelimiters(
+    "issue66ExpectedTask",
+    requireProperty("issue66ExpectedTask"),
+)
+String requiredClassesValue = requireProperty("issue66RequiredClasses")
+if (
+    requiredClassesValue.indexOf('\u0000') >= 0 ||
+        requiredClassesValue.indexOf('\r') >= 0 ||
+        requiredClassesValue.indexOf('\n') >= 0 ||
+        requiredClassesValue.indexOf('=') >= 0
+) {
+    throw new GradleException(
+        "Gradle property -Pissue66RequiredClasses contains a forbidden attestation delimiter.",
+    )
+}
+
+def taskPathSegments = expectedTask.split(':', -1)
+if (
+    !expectedTask.startsWith(':') ||
+        taskPathSegments.length < 2 ||
+        taskPathSegments[0] != "" ||
+        taskPathSegments.drop(1).any { it.isEmpty() }
+) {
+    throw new GradleException(
+        "Gradle property -Pissue66ExpectedTask must be one exact absolute task path.",
+    )
+}
+
+Pattern classNamePattern = Pattern.compile(
+    '[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)+',
+)
+List<String> requiredClasses = requiredClassesValue.split(',', -1).toList()
+requiredClasses.each { String className ->
+    if (
+        className.isEmpty() ||
+            className != className.trim() ||
+            !classNamePattern.matcher(className).matches()
+    ) {
+        throw new GradleException(
+            "Gradle property -Pissue66RequiredClasses contains an invalid class name.",
+        )
+    }
+}
+if (requiredClasses.toSet().size() != requiredClasses.size()) {
+    throw new GradleException(
+        "Gradle property -Pissue66RequiredClasses must not contain duplicate class names.",
+    )
+}
+
+String jdkProfileId = rejectRecordDelimiters(
+    "issue66JdkProfileId",
+    requireProperty("issue66JdkProfileId"),
+)
+String javaVendor = rejectRecordDelimiters(
+    "issue66JavaVendor",
+    requireProperty("issue66JavaVendor"),
+)
+String javaVmVendor = rejectRecordDelimiters(
+    "issue66JavaVmVendor",
+    requireProperty("issue66JavaVmVendor"),
+)
+String jdkRuntimeVersion = rejectRecordDelimiters(
+    "issue66JdkRuntimeVersion",
+    requireProperty("issue66JdkRuntimeVersion"),
+)
+String jdkTreeSha256 = rejectRecordDelimiters(
+    "issue66JdkTreeSha256",
+    requireProperty("issue66JdkTreeSha256"),
+)
+if (!Pattern.compile('[a-z0-9][a-z0-9._+-]{0,127}').matcher(jdkProfileId).matches()) {
+    throw new GradleException("Gradle property -Pissue66JdkProfileId is invalid.")
+}
+if (!Pattern.compile('17\\.[0-9][0-9A-Za-z.+_-]*').matcher(jdkRuntimeVersion).matches()) {
+    throw new GradleException("Gradle property -Pissue66JdkRuntimeVersion is invalid.")
+}
+if (!Pattern.compile('[0-9a-f]{64}').matcher(jdkTreeSha256).matches()) {
+    throw new GradleException("Gradle property -Pissue66JdkTreeSha256 is invalid.")
+}
+String expectedJavaHomeValue = requireProperty("issue66JdkHome")
+if (
+    expectedJavaHomeValue.indexOf('\u0000') >= 0 ||
+        expectedJavaHomeValue.indexOf('\r') >= 0 ||
+        expectedJavaHomeValue.indexOf('\n') >= 0
+) {
+    throw new GradleException("Gradle property -Pissue66JdkHome contains a forbidden delimiter.")
+}
+
+Path attestationPath
+Path expectedJavaHome
+try {
+    attestationPath = Paths.get(attestationPathValue).toAbsolutePath().normalize()
+    expectedJavaHome = Paths.get(expectedJavaHomeValue).toRealPath()
+} catch (RuntimeException exception) {
+    throw new GradleException(
+        "Gradle property -Pissue66AttestationPath is not a valid filesystem path.",
+        exception,
+    )
+} catch (IOException exception) {
+    throw new GradleException("Gradle property -Pissue66JdkHome is unavailable.", exception)
+}
+try {
+    Path actualJavaHome = Paths.get(System.getProperty("java.home")).toRealPath()
+    if (
+        actualJavaHome != expectedJavaHome ||
+            System.getProperty("java.vendor") != javaVendor ||
+            System.getProperty("java.vm.vendor") != javaVmVendor ||
+            System.getProperty("java.runtime.version") != jdkRuntimeVersion
+    ) {
+        throw new GradleException(
+            "Issue 66 Gradle VM does not equal the staged reviewed runtime profile.",
+        )
+    }
+} catch (IOException exception) {
+    throw new GradleException("Issue 66 Gradle VM Java home is unavailable.", exception)
+}
+
+def rootGradle = gradle
+rootGradle.projectsEvaluated {
+    def matchingTasks = []
+    rootGradle.rootProject.allprojects.each { project ->
+        project.tasks.each { task ->
+            if (task.path == expectedTask) {
+                matchingTasks.add(task)
+            }
+        }
+    }
+    if (matchingTasks.size() != 1) {
+        throw new GradleException(
+            "Expected exactly one task at ${expectedTask}; found ${matchingTasks.size()}.",
+        )
+    }
+
+    def targetTask = matchingTasks[0]
+    if (!(targetTask instanceof Test)) {
+        throw new GradleException("Expected task ${expectedTask} is not a Gradle Test task.")
+    }
+    Test testTask = (Test) targetTask
+
+    AtomicInteger testLauncherMajor = new AtomicInteger(-1)
+    AtomicLong testCount = new AtomicLong(0L)
+    AtomicLong failureCount = new AtomicLong(0L)
+    AtomicLong invalidClassNameCount = new AtomicLong(0L)
+    def observedClasses = new ConcurrentSkipListSet<String>()
+
+    testTask.doFirst {
+        if (testTask.dryRun.get()) {
+            throw new GradleException(
+                "Issue 66 test attestation forbids test dry-run for ${expectedTask}.",
+            )
+        }
+        int launcherMajor = testTask.javaLauncher.get().metadata.languageVersion.asInt()
+        if (launcherMajor != 17) {
+            throw new GradleException(
+                "Issue 66 test attestation requires ${expectedTask} to use a Java 17 " +
+                    "Test launcher; found Java ${launcherMajor}.",
+            )
+        }
+        Path launcherHome = testTask.javaLauncher.get().metadata.installationPath.asFile
+            .toPath().toRealPath()
+        if (launcherHome != expectedJavaHome) {
+            throw new GradleException(
+                "Issue 66 Test launcher does not use the staged reviewed runtime.",
+            )
+        }
+        testLauncherMajor.set(launcherMajor)
+    }
+
+    testTask.addTestListener([
+        beforeSuite: { TestDescriptor descriptor -> },
+        afterSuite: { TestDescriptor descriptor, TestResult result -> },
+        beforeTest: { TestDescriptor descriptor -> },
+        afterTest: { TestDescriptor descriptor, TestResult result ->
+            // A dry-run or assumption-only class can emit SKIPPED events without executing a
+            // test body. Such events cannot satisfy either the count or required-class proof.
+            if (result.resultType == TestResult.ResultType.SKIPPED) {
+                return
+            }
+
+            testCount.incrementAndGet()
+            if (result.resultType == TestResult.ResultType.FAILURE) {
+                failureCount.incrementAndGet()
+            }
+
+            String className = descriptor.className
+            if (className == null || !classNamePattern.matcher(className).matches()) {
+                invalidClassNameCount.incrementAndGet()
+            } else {
+                observedClasses.add(className)
+            }
+        },
+    ] as TestListener)
+
+    def verifierProvider = testTask.project.tasks.register(
+        "issue66WriteHostGateTestAttestation",
+    ) { verifierTask ->
+        verifierTask.group = "verification"
+        verifierTask.description =
+            "Verifies one real Issue 66 Test execution and writes its non-replayable attestation."
+        verifierTask.doLast {
+            def state = testTask.state
+            if (
+                !state.executed ||
+                    !state.didWork ||
+                    state.skipped ||
+                    state.upToDate ||
+                    state.noSource
+            ) {
+                throw new GradleException(
+                    "Expected ${expectedTask} to execute real test work; " +
+                        "executed=${state.executed}, didWork=${state.didWork}, " +
+                        "skipped=${state.skipped}, upToDate=${state.upToDate}, " +
+                        "noSource=${state.noSource}.",
+                )
+            }
+            if (state.failure != null) {
+                throw new GradleException("Expected ${expectedTask} to complete successfully.")
+            }
+            if (testLauncherMajor.get() != 17) {
+                throw new GradleException(
+                    "Java 17 Test launcher preflight did not execute for ${expectedTask}.",
+                )
+            }
+            if (testCount.get() <= 0L) {
+                throw new GradleException("Expected ${expectedTask} to emit at least one test event.")
+            }
+            if (failureCount.get() != 0L) {
+                throw new GradleException(
+                    "Expected ${expectedTask} to have no failed tests; " +
+                        "found ${failureCount.get()}.",
+                )
+            }
+            if (invalidClassNameCount.get() != 0L) {
+                throw new GradleException(
+                    "Expected every ${expectedTask} test event to have a safe class name.",
+                )
+            }
+
+            List<String> classes = new ArrayList<>(observedClasses)
+            List<String> missingClasses = requiredClasses.findAll { String requiredClass ->
+                return !observedClasses.contains(requiredClass)
+            }
+            if (!missingClasses.isEmpty()) {
+                throw new GradleException(
+                    "Expected ${expectedTask} to execute required test classes: ${missingClasses}.",
+                )
+            }
+
+            String attestation = [
+                "schemaVersion=2",
+                "runId=${runId}",
+                "stage=${stage}",
+                "taskPath=${testTask.path}",
+                "jdkHome=${expectedJavaHome}",
+                "jdkProfileId=${jdkProfileId}",
+                "javaVendor=${javaVendor}",
+                "javaVmVendor=${javaVmVendor}",
+                "jdkRuntimeVersion=${jdkRuntimeVersion}",
+                "jdkTreeSha256=${jdkTreeSha256}",
+                "jdkMajor=17",
+                "testLauncherMajor=${testLauncherMajor.get()}",
+                "testCount=${testCount.get()}",
+                "failureCount=${failureCount.get()}",
+                "classes=${classes.join(',')}",
+            ].join('\n') + '\n'
+
+            try {
+                Files.write(
+                    attestationPath,
+                    attestation.getBytes(StandardCharsets.UTF_8),
+                    StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.WRITE,
+                )
+            } catch (IOException exception) {
+                throw new GradleException(
+                    "Could not exclusively create Issue 66 test attestation at " +
+                        "${attestationPath}.",
+                    exception,
+                )
+            }
+        }
+    }
+
+    testTask.finalizedBy(verifierProvider)
+    rootGradle.taskGraph.whenReady { graph ->
+        if (!graph.hasTask(testTask)) {
+            throw new GradleException(
+                "Expected task ${expectedTask} is not present in the execution graph.",
+            )
+        }
+        if (!graph.hasTask(verifierProvider.get())) {
+            throw new GradleException(
+                "Issue 66 test attestation verifier is not present in the execution graph.",
+            )
+        }
+    }
+}

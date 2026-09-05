@@ -45,7 +45,7 @@ or business completion. This phase did not operate Moto, merge a PR, or close #6
 
 ## Final combined host verification at 6691bcb
 
-All commands used the repository wrappers, JDK
+The historical 6691bcb commands used the repository wrappers, JDK
 `/Applications/Android Studio.app/Contents/jbr/Contents/Home`, and SDK
 `/Users/terry/Library/Android/sdk`. Raw logs and command/HEAD/exit/timestamp metadata are
 in `/tmp/fakexxx-readback.yazTyt/`; these local temporary files are not permanent remote storage.
@@ -55,13 +55,50 @@ does not need access to these temporary directories to inspect the principal res
 
 | Check | Result | Raw receipt |
 | --- | --- | --- |
-| `bash scripts/verify-a-plus.sh --stage full` | 12/12 repository gates, exit 0 | `final-full-gate.log`, `.meta` |
+| 历史完整 repository gate（2026-09-03；原普通 Bash 调用现已废弃；安全复跑：`./scripts/verify-a-plus.sh --stage full`） | 12/12 repository gates, exit 0 | `final-full-gate.log`, `.meta` |
 | Full debug unit suite | 1,046 tests; 0 failures/errors/skips | `final-variants-apks.log`, `final-junit-counts.log` |
 | Full codexBench unit suite | 1,046 tests; 0 failures/errors/skips | same |
 | Full release unit suite | 1,010 tests; 0 failures/errors/skips | same |
 | Full Auto/QWY host integration | 25 tests; 0 failures/errors/skips | full-gate log and JUnit counts |
 | QWY debug/codexBench/release/androidTest builds | all successful, exit 0 | `final-variants-apks.log`, `.meta` |
 | Both codex-bench APK identities/signers | passed | `final-apk-isolation.log`, `.meta` |
+
+### Current working-tree host-gate note (not 6691bcb device evidence)
+
+The current host entry points no longer accept the historical Android Studio JBR merely because it
+reports Java 17. The registered runtimes are macOS arm64 Eclipse Temurin
+`darwin-aarch64-eclipse-temurin-17.0.20.1+1` / JDK-tree SHA-256
+`f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8`, and Linux x86_64 Eclipse
+Temurin `linux-x86_64-eclipse-temurin-17.0.20.1+1` / JDK-tree SHA-256
+`427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97`. The aggregate stages the
+chosen JDK privately, gives every one of its twelve gates its own isolated Gradle home and requires
+Gradle VM/Test launcher 17. The nested host runner uses a separate per-run staged JDK and shares one
+fresh Gradle home only across its Auto, QWY and harness phases.
+
+The current receipt is schema 4 with exactly 19 keys:
+`schemaVersion`, `sourceHead`, `sourceTree`, `sourceState`, `runnerSha256`, `runId`, `jdkProfileId`,
+`jdkRuntimeVersion`, `jdkTreeSha256`, `gradleAttestationAutoSha256`,
+`gradleAttestationQwySha256`, `gradleAttestationHarnessSha256`, `hostIntegration`, `issue66Ac7`,
+`emulator`, `physicalDevice`, `deviceFull`, `overall`, `reason`. It binds three
+`gradle-attestation-{auto,qwy,harness}-$runId.txt` siblings. Each proof is schema 2 with exactly 15
+ordered lines: `schemaVersion`, `runId`, `stage`, `taskPath`, `jdkHome`, `jdkProfileId`,
+`javaVendor`, `javaVmVendor`, `jdkRuntimeVersion`, `jdkTreeSha256`, `jdkMajor`,
+`testLauncherMajor`, `testCount`, `failureCount`, `classes`. The consumer opens each proof
+no-follow, verifies stable bytes and SHA-256, re-reads it and binds its run/JDK/task/classes back to
+the receipt.
+
+The Android validator binds only the AGP 9.1 TCB at `platforms/android-35`,
+`build-tools/36.0.0`, `platform-tools` and their safe ancestors. It is not whole-SDK content
+provenance; Ubuntu 24 CI separately freezes the whole preinstalled SDK before repository commands.
+Current author-side evidence is the complete device-free harness at 15 suites / 141 tests with zero
+failures, errors or skips; the three main boundary classes at 54 + 21 + 42 = 117, plus 2
+`HostEphemeralCleanupGuardTest` tests, for 119 related guard tests; the three standalone Python
+runtime-security suites at 40/40; and services compatibility at 131/131. The earlier collector
+result was 1718/1718; it predates the final process/environment and argv-budget repairs and is not
+evidence for them. Their complete rerun belongs to the clean exact-commit gate.
+Host tests fixed `ADB=/usr/bin/false`; no new ADB, emulator or physical-device operation
+was performed for this working-tree update. A clean exact-commit gate and independent review remain
+required.
 
 The aggregate host receipt explicitly retains `issue66Ac7=NOT_PASSED`,
 `deviceFull=BLOCKED`, and `overall=BLOCKED`. Those fields describe the product/device
@@ -150,7 +187,13 @@ These are the final 6691bcb local build bytes, not Moto-installed artifacts:
 Both codex-bench APKs retain signer
 `7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41`, isolated package IDs
 `name.caiyao.fakegps.codexbench` / `com.example.cellrebelauto.codexbench`, and labels
-`千网游 · codex-bench` / `CellRebel Auto · codex-bench`.
+`千网游 · codex-bench` / `CellRebel Auto · codex-bench`. Their launchers are respectively
+`.ui.ComposeActivity` and `.ui.MainActivity`, so package, label and launcher identities remain
+non-colliding.
+
+Both exact-build fingerprint lists remain empty and production remains `BUILD_UNATTESTED`.
+Restart/reboot, global Location/provider changes, adversarial mutations and app lifecycle changes
+remain separately unauthorized; the historical AVD activity below does not expand Moto authority.
 
 ## Discarded environment and evidence hygiene
 

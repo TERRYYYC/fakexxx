@@ -21,6 +21,12 @@ spending the maintenance window on an APK that can only return `BUILD_UNATTESTED
 both exact-build fingerprint lists are empty. The current QWY APK therefore returns before
 installing any system-server hook and cannot establish issue #66 `FULL`.
 
+The identities remain distinct at every launch surface: QWY
+`name.caiyao.fakegps.codexbench`, label `千网游 · codex-bench`, launcher
+`.ui.ComposeActivity`; Auto `com.example.cellrebelauto.codexbench`, label
+`CellRebel Auto · codex-bench`, launcher `.ui.MainActivity`. Empty `EVIDENCE_ONLY_FINGERPRINTS` and
+`ATTESTED_FINGERPRINTS` keep every real build at `BUILD_UNATTESTED`.
+
 **Implementation status (2026-09-04):** Task 2A now has a device-free collector selftest,
 operational-read-only shell-gated collector, typed stable-snapshot receipt verifier, redacted summary,
 whole-receipt-tree and binary SHA-256 binding, a private executed ADB snapshot, and separate static
@@ -30,6 +36,47 @@ and fail closed on stale, concurrent or cleanup-ambiguous PASS state. This is ho
 evidence only: no command from this branch has run against the Moto, late-bridge state is not
 observable in this slice, Task 2B is not implemented, and all device/#66/FULL claims remain
 blocked.
+
+**Current host evidence (2026-09-05):** the complete local harness passes 15 suites / 141 tests with
+zero failures, errors or skips. The three main boundary classes pass 54 + 21 + 42 = 117 tests; with
+2 `HostEphemeralCleanupGuardTest` tests, related guards total 119. The three standalone Python
+runtime-security suites pass 40/40 and services compatibility passes 131/131. The earlier collector
+result was 1718/1718; it predates the final process/environment and argv-budget repairs and is not
+evidence for them. Their complete rerun belongs to the clean exact-commit gate.
+Host test runs fixed `ADB=/usr/bin/false`; no ADB, emulator or physical-device command
+was executed. A clean exact-commit gate and independent review remain required.
+
+## Host runtime and receipt trust contract
+
+Only two reviewed Java 17 profiles are registered:
+
+- macOS arm64 Eclipse Temurin `darwin-aarch64-eclipse-temurin-17.0.20.1+1`, JDK-tree SHA-256
+  `f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8`;
+- Linux x86_64 Eclipse Temurin `linux-x86_64-eclipse-temurin-17.0.20.1+1`, JDK-tree SHA-256
+  `427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97`.
+
+Both aggregate and nested host entry points stage the matching JDK in a private per-run root and
+require Java 17 for the Gradle VM and test launcher. The nested host runner shares one new Gradle
+home only across its Auto, QWY and harness phases and removes it before PASS. The aggregate creates
+a distinct private Gradle home for each of the twelve exact manifest gates, so writable Gradle
+startup state cannot cross a gate boundary.
+
+The authoritative host receipt is schema 4 with exactly these 19 keys:
+`schemaVersion`, `sourceHead`, `sourceTree`, `sourceState`, `runnerSha256`, `runId`, `jdkProfileId`,
+`jdkRuntimeVersion`, `jdkTreeSha256`, `gradleAttestationAutoSha256`,
+`gradleAttestationQwySha256`, `gradleAttestationHarnessSha256`, `hostIntegration`, `issue66Ac7`,
+`emulator`, `physicalDevice`, `deviceFull`, `overall`, `reason`. PASS requires three same-directory
+`gradle-attestation-{auto,qwy,harness}-$runId.txt` siblings. Each is schema 2 with exactly 15
+ordered lines: `schemaVersion`, `runId`, `stage`, `taskPath`, `jdkHome`, `jdkProfileId`,
+`javaVendor`, `javaVmVendor`, `jdkRuntimeVersion`, `jdkTreeSha256`, `jdkMajor`,
+`testLauncherMajor`, `testCount`, `failureCount`, `classes`. The aggregate consumer opens every
+proof no-follow, checks its stable identity/content and SHA-256, re-reads it, and binds its run ID,
+staged JDK, stage/task/count and required classes back to the receipt.
+
+The Android validator binds only the inputs selected by the AGP 9.1 TCB:
+`platforms/android-35`, `build-tools/36.0.0`, `platform-tools` and their safety-checked ancestors.
+It does not claim provenance for all SDK content. Ubuntu 24 CI separately makes the complete
+preinstalled SDK root-owned and non-writable before executing any repository command.
 
 ## Safety contract
 
@@ -118,7 +165,9 @@ blocked.
    six-file command receipts. Output is a new mode-0700 directory outside every linked worktree and
    common Git directory. Walk its physical parent using no-follow directory descriptors and reject
    forbidden directory identities through case/path/firmlink aliases, unsafe owner/mode, inherited
-   extended ACLs and pathname/inode replacement. Pin the created directory inode for the run.
+   extended ACLs and pathname/inode replacement. ACL inspection errors fail closed; only explicit
+   `ENOTSUP`/`EOPNOTSUPP` results mean that the platform lacks that interface. Pin the created
+   directory inode for the run.
    Admit production ADB clients only through a repo-pinned `PRODUCTION` SHA-256 row; keep fake ADB
    clients in a disjoint `SELFTEST` lane whose receipts production verification refuses. Read,
    hash and copy the selected ADB from the same no-follow descriptor into the private tree. Source
@@ -133,11 +182,18 @@ blocked.
    LSPosed scope configuration, global Location/provider toggle, diagnostic registration,
    force-stop, crash, restart, or reboot, even when a different phase may later be authorized to
    perform some of them.
+   Each collector/selftest shell entry point must clear `BASH_ENV`, `ENV`, `DEVELOPER_DIR`,
+   `SDKROOT` and `TOOLCHAINS` as its first executable shell logic. This prevents macOS's fixed
+   `/usr/bin/python3` launcher from being redirected through a caller-selected xcrun tree; the
+   SELFTEST fake ADB clears the same selectors before invoking its fixed Python helper.
    Before creating output or invoking ADB, require the exact Git HEAD and collector SHA-256 pair
    published by the independent review as external arguments. Verify that the current repository
-   HEAD and a stable read of the collector entry-point bytes respectively match those two values,
-   and recheck that binding before each receipt and final publication. Values calculated locally
-   at execution time are not independent approval.
+   HEAD and a stable read of the collector entry-point bytes respectively match those two values.
+   Open the source chain no-follow from `/` through every absolute parent; require each directory
+   owner to be root or the effective user and reject group/world write authority. Reject Linux
+   POSIX ACL xattrs and any Darwin ALLOW ACL entry while permitting Darwin deny-only entries.
+   Recheck the binding before each receipt and final publication. Values calculated locally at
+   execution time are not independent approval.
 3. Keep bridge timing out of this public/static collector. A later oracle-observation stage must
    first add device-free timing tests for bridge-before-owner-start and bridge-after-owner-start;
    only that reviewed stage may emit `STOP_LATE_BRIDGE`. This collector records no bridge verdict,
@@ -151,13 +207,51 @@ blocked.
    Freeze the Android-15 missing-package rc/stdout/stderr contract and AOSP AppOps/TimeUtils forms,
    including UID overrides, field ordering, canonical units and integer bounds. Validate APK/JAR
    ZIP structure, unique safe NUL-unambiguous names, CRCs, APK manifest presence and
-   `services.jar` dex presence before accepting any captured archive bytes. Do not probe root
-   capability or private manager/framework storage in this substage.
+   `services.jar` dex presence before accepting any captured archive bytes. For each installed
+   package, require an initial exact-package `pm path`, metadata, then a contiguous pre-path / APK
+   read / post-path bracket whose three identical path-query argv resolve to one equal unique
+   `base.apk`. A changed or disappeared pre/post path stops as `STOP_PACKAGE_PATH_CHANGED` before
+   archive validation, hashing or later service observations; `NOT_INSTALLED` keeps only the
+   initial query. Bind the same stems, argv and equal paths in offline verification. This detects
+   the tested pathname changes but does not attest the remote inode or exclude change-and-restore
+   during the APK byte read. Do not probe root capability or private manager/framework storage in
+   this substage.
+   Run every exact ADB argv through a no-shell, new-process-group, dual-pipe supervisor with fixed
+   non-overridable budgets. Production text/APK/services profiles are respectively
+   `30s/4MiB/1MiB`, `180s/256MiB/1MiB` and `120s/128MiB/1MiB` for
+   timeout/stdout/stderr; SELFTEST uses fixed compact equivalents. Timeout or stdout/stderr overflow
+   must kill the process group with bounded waits, finish the six-file carrier, and emit a typed
+   evidence STOP without retrying or resetting the ADB server. Apply lane file caps before archive
+   reads and enforce, in both live and offline validators, 16,384 APK / 4,096 framework members,
+   stored-or-deflated methods, 256-MiB single-member and 512-MiB total expansion caps, and the
+   integer `uncompressed <= 100 * compressed + 1 MiB` rule independently for every member and for
+   aggregate member totals, with the same fixed 1-MiB slack in both calculations. Before any
+   `ZipFile` construction, bound EOCD/Zip64 and central-directory-header parsing and reject both
+   declared and observed member-count overflow. Keep the live receipt on one no-follow descriptor
+   from that preflight through metadata/CRC validation, with descriptor and pathname identity
+   checks before and after; keep offline reads bounded through their post-read state check. Archive
+   resource violations use typed APK/framework archive-limit STOPs rather than malformed-archive
+   reasons. Bound the host ADB executable at 64 MiB in source validation, nonblocking snapshot
+   copy, every runtime integrity check and offline verification. Before reading evidence content,
+   enumerate with fixed ceilings: four evidence-root entries, one tooling entry and 512 receipt
+   entries. Metadata carriers use the lane text ceiling, and every later directory recheck must use
+   the same streaming bounded enumeration rather than materializing an untrusted listing.
+   Treat each archive receipt as one state machine:
+   `CAPTURED -> FD_PINNED -> PREFLIGHTED -> VALIDATED_AND_HASHED -> TREE_REBOUND -> PUBLISHED`.
+   The validation digest and identity must come from the same no-follow descriptor, and receipt-tree
+   construction must re-open every name without following links, stream it within its lane cap, and
+   require archive bytes to match the saved validated identity and digest. No pathname-only archive
+   reopen or unbounded whole-file read is permitted between validation and publication.
 5. Record root capability plus LSPosed DB/WAL/SHM and Vector private state as
    `NOT_COLLECTED_PRIVILEGED`. Absence of those observations is an explicit boundary, never a
    negative finding and never permission to fall back to `su`.
 6. Compare required Android-15 oracle classes/methods against dexdump output only after the exact
    build-tools revision/SHA-256 is present in a repo-pinned, independently reviewed allowlist.
+   Read build-tools `source.properties` within a fixed 64-KiB cap through
+   `O_NOFOLLOW | O_NONBLOCK`, bind its descriptor and pathname identity before/after the read, then reopen and
+   require identical bytes and identity; symlink/FIFO replacement must stop without blocking.
+   Parse dexdump with a fixed line cap and retain only the required seven classes and twenty
+   class/method pairs, never all attacker-selected unique records.
    That allowlist is empty in this slice; a local SDK path or native executable shape is not a
    trust anchor and stops as `STOP_TOOL_NOT_ATTESTED`. The checked-in fake can emit only a SELFTEST
    status. A later approved-tool static presence result is only `COMPATIBILITY_CANDIDATE`, not
@@ -171,6 +265,8 @@ blocked.
    random ownership token through the full JSON/contract read, and return PASS only after
    inode/token-checked cleanup. Any ownership, inode or cleanup ambiguity leaves a fail-closed
    manual-inspection fence rather than trusting an otherwise valid PASS receipt.
+   The runner likewise emits terminal PASS text/JSON and returns zero only after its own final
+   lock release succeeds; a fenced PASS-shaped file is not a successful run.
    This local protocol covers cooperating runner/validator concurrency, accidental rewrites and
    the enumerated pathname/inode races. It is not a cryptographic seal against a malicious process
    running as the same host user, which can change user-owned files after any lock is released.
@@ -215,7 +311,7 @@ represented as the Moto fingerprint.
 | AC4 restart/boot/missing hook/read-or-ACK crash | Exact-build API-35 emulator for the complete matrix; authorized Moto only for separately approved cases | Oracle restart, reboot, missing-coverage and crash seams | Per-case fail-closed health, revision/ACK and replay receipts | Reboot, process restart and deliberate crash are not currently authorized on Moto. |
 | AC5 same-coordinate refresh | Exact-build API-35 emulator and authorized Moto | Ordinary same-bit coordinate refresh | Stable sequence plus successful observation without a false mutation bump | This proves only AC5 for the exact reviewed APK/build pair. |
 | AC6 authoritative-only FULL | Existing host/runtime tests, then both exact-build runtime environments | Public-source and complete-authoritative-source observations | Source classification, complete coverage/health and durable reconciliation receipts | Task 2A/static presence is not AC6 evidence; public callbacks remain PARTIAL/NONE. |
-| AC7 production proof | Exact-build API-35 emulator **and** authorized rooted Moto | Complete nominal path plus the authorized subset of AC1–AC6 | Exact HEAD/APK hashes, emulator bundle, Moto bundle, cleanup receipts and independent review | Both bundles are mandatory before device PASS, FULL, issue closure or merge. |
+| AC7 production proof | Exact-build API-35 emulator **and** authorized rooted Moto | Complete nominal path plus the authorized subset of AC1–AC6 | Exact HEAD/APK hashes, emulator bundle, Moto bundle, cleanup receipts and independent review | Both bundles are mandatory before device PASS, FULL, or closing issue #66. They are not evidence produced by, or a merge prerequisite for, the host-only collector slice. |
 
 ## Task 3 — deferred authorized device sequence
 
@@ -257,10 +353,12 @@ represented as the Moto fingerprint.
 
 ## Handoff boundary
 
-This plan does not merge PR #74, close #66, modify the phone, or claim Moto readiness. The first
-publishable slice is only the staged admission mechanism. The device-free selftested,
-operational-read-only shell-gated collector is a second slice after that mechanism is independently
-reviewed; device execution is a third slice and remains blocked until the independent review has
+This plan does not merge the current draft stack (#74 → #75 → #81), close #66, modify the
+phone, or claim Moto readiness. The first publishable slice is only the staged admission mechanism.
+The device-free selftested, operational-read-only shell-gated collector is a second slice after that
+mechanism is independently reviewed. Merging that host-only slice remains separately gated by its
+exact-HEAD host gate, CI, independent review, and stack order; it would not satisfy AC7 or authorize
+a Moto command. Device execution is a third slice and remains blocked until the independent review has
 published the approved exact Git HEAD and collector SHA-256, the current repository HEAD and a
 stable read of the collector entry-point bytes respectively match those external values, and
 `adb devices -l` contains the exact authorized Moto. Task 2A may then run.

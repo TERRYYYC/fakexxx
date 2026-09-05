@@ -1,8 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Device-free RED matrix for the static issue #66 services.jar compatibility
 # checker. It creates synthetic ZIP/JAR files whose classes*.dex entries are
 # consumed only by the checked-in fake dexdump fixture.
 
+unset BASH_ENV ENV
+unset DEVELOPER_DIR SDKROOT TOOLCHAINS
+PATH=/usr/bin:/bin
+export PATH
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,9 +18,19 @@ APPROVED_DEXDUMP_DIGESTS="$FIXTURE_DIR/approved-dexdump-sha256.tsv"
 FAKE_DEXDUMP="$FIXTURE_DIR/fake-dexdump.sh"
 HOOK_PLAN="$REPO_ROOT/apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/hook/oracle/Android15OracleHookPlan.java"
 INSTALLER="$REPO_ROOT/apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleInstaller.java"
+readonly SERVICES_JAR_SIZE_LIMIT=134217728
+readonly DEXDUMP_SIZE_LIMIT=67108864
+readonly SOURCE_PROPERTIES_SIZE_LIMIT=65536
+readonly ARCHIVE_ENTRY_LIMIT=4096
+readonly ARCHIVE_SINGLE_UNCOMPRESSED_LIMIT=268435456
+readonly ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT=536870912
+readonly SELFTEST_DEXDUMP_TIMEOUT_SECONDS=2
+readonly SELFTEST_DEXDUMP_STDOUT_LIMIT=262144
+readonly SELFTEST_DEXDUMP_STDERR_LIMIT=65536
 
 pass=0
 fail=0
+skip=0
 
 report() { # ok|fail name [detail]
   if [ "$1" = ok ]; then
@@ -26,6 +40,11 @@ report() { # ok|fail name [detail]
     printf 'FAIL %s :: %s\n' "$2" "${3:-unspecified failure}"
     fail=$((fail + 1))
   fi
+}
+
+report_skip() { # name
+  printf 'skip %s\n' "$1"
+  skip=$((skip + 1))
 }
 
 for fixture in \
@@ -47,7 +66,7 @@ fi
 # Keep the fixture bound to the production hook plan instead of letting a
 # duplicated class/method inventory silently drift.
 assert_fixture_source_binding() { # hook-plan installer members
-python3 - "$1" "$2" "$3" <<'PY'
+/usr/bin/python3 -I - "$1" "$2" "$3" <<'PY'
 import re
 import sys
 
@@ -169,7 +188,7 @@ DEXDUMP_LOG="$WORK/dexdump.log"
 # Prove that the source-binding guard follows the actual hookAllMethods call,
 # not the later NoSuchMethodException text which also names startBootPhase.
 MUTATED_INSTALLER="$WORK/installer-with-lookalike-error-only.java"
-if ! python3 - "$INSTALLER" "$MUTATED_INSTALLER" <<'PY'
+if ! /usr/bin/python3 -I - "$INSTALLER" "$MUTATED_INSTALLER" <<'PY'
 import re
 import sys
 
@@ -197,17 +216,9 @@ else
   report ok "source binding rejects error-message-only startBootPhase lookalike"
 fi
 
-# The wrapper participates only in TOCTOU tests. The fake dexdump arms a
-# replacement worker; the first digest read after that invocation releases it,
-# waits for the atomic replacement, and hashes the bytes now at the input path.
-HASH_GATE_DIR="$WORK/hash-gate"
-mkdir -p "$HASH_GATE_DIR"
-cp -- "$FAKE_DEXDUMP" "$HASH_GATE_DIR/shasum"
-chmod 700 "$HASH_GATE_DIR/shasum"
-
 make_jar() { # jar mode [class] [method]
   local jar="$1" mode="$2" class_name="${3:-}" method_name="${4:-}"
-  python3 - "$MEMBERS" "$jar" "$mode" "$class_name" "$method_name" <<'PY'
+  /usr/bin/python3 -I - "$MEMBERS" "$jar" "$mode" "$class_name" "$method_name" <<'PY'
 import collections
 import sys
 import zipfile
@@ -265,6 +276,141 @@ with zipfile.ZipFile(jar_path, "w", compression=zipfile.ZIP_STORED) as archive:
 PY
 }
 
+make_archive_boundary_jar() { # jar mode
+  local jar="$1" mode="$2"
+  make_jar "$jar" positive
+  /usr/bin/python3 -I - "$jar" "$mode" "$ARCHIVE_ENTRY_LIMIT" \
+    "$ARCHIVE_SINGLE_UNCOMPRESSED_LIMIT" "$ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT" <<'PY'
+import struct
+import sys
+import zipfile
+
+path, mode = sys.argv[1:3]
+entry_limit = int(sys.argv[3])
+single_limit = int(sys.argv[4])
+total_limit = int(sys.argv[5])
+
+
+def central_records(payload):
+    eocd = payload.rfind(b"PK\x05\x06")
+    if eocd < 0:
+        raise AssertionError("fixture EOCD missing")
+    directory_size, directory_offset = struct.unpack_from("<LL", payload, eocd + 12)
+    records = {}
+    cursor = directory_offset
+    boundary = directory_offset + directory_size
+    while cursor < boundary:
+        assert payload[cursor:cursor + 4] == b"PK\x01\x02"
+        name_length, extra_length, comment_length = struct.unpack_from(
+            "<HHH", payload, cursor + 28
+        )
+        name = bytes(payload[cursor + 46:cursor + 46 + name_length]).decode("utf-8")
+        records[name] = cursor
+        cursor += 46 + name_length + extra_length + comment_length
+    assert cursor == boundary
+    return eocd, records
+
+
+if mode in {"entries-exact", "entries-over"}:
+    target = entry_limit if mode == "entries-exact" else entry_limit + 1
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_STORED) as archive:
+        existing = len(archive.infolist())
+        for index in range(target - existing):
+            archive.writestr(f"padding/{index:05d}.txt", b"")
+elif mode == "member-over":
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("member-over.bin", b"x")
+    payload = bytearray(open(path, "rb").read())
+    _eocd, records = central_records(payload)
+    struct.pack_into("<L", payload, records["member-over.bin"] + 24, single_limit + 1)
+    open(path, "wb").write(payload)
+elif mode == "total-over":
+    names = ["total-a.bin", "total-b.bin", "total-c.bin"]
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_STORED) as archive:
+        for name in names:
+            archive.writestr(name, b"x")
+    payload = bytearray(open(path, "rb").read())
+    _eocd, records = central_records(payload)
+    declared = total_limit // len(names) + 1
+    for name in names:
+        struct.pack_into("<L", payload, records[name] + 24, declared)
+    open(path, "wb").write(payload)
+elif mode == "ratio-over":
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("ratio-bomb.bin", b"0" * (2 * 1024 * 1024))
+elif mode == "unsupported-method":
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_BZIP2) as archive:
+        archive.writestr("unsupported-method.bin", b"not-deflate")
+elif mode == "eocd-entry-over":
+    payload = bytearray(open(path, "rb").read())
+    eocd, _records = central_records(payload)
+    struct.pack_into("<H", payload, eocd + 8, entry_limit + 1)
+    struct.pack_into("<H", payload, eocd + 10, entry_limit + 1)
+    open(path, "wb").write(payload)
+elif mode == "eocd-trailing-byte":
+    with open(path, "ab") as stream:
+        stream.write(b"x")
+else:
+    raise AssertionError(f"unknown boundary mode: {mode}")
+PY
+}
+
+make_dexdump_resource_jar() { # jar mode [amount]
+  local jar="$1" mode="$2" amount="${3:-0}"
+  /usr/bin/python3 -I - "$GOOD_JAR" "$jar" "$mode" "$amount" <<'PY'
+import sys
+import zipfile
+
+source, target, mode, raw_amount = sys.argv[1:]
+amount = int(raw_amount)
+with zipfile.ZipFile(source) as archive:
+    payload = archive.read("classes.dex")
+if mode == "stdout-bytes":
+    if len(payload) > amount:
+        raise AssertionError("requested stdout fixture is smaller than valid payload")
+    padding = bytearray()
+    while len(payload) + len(padding) < amount:
+        remaining = amount - len(payload) - len(padding)
+        if remaining <= 1024:
+            padding.extend(b" " * remaining)
+        else:
+            padding.extend(b" " * 1023 + b"\n")
+    payload += bytes(padding)
+elif mode == "unique-records":
+    if len(payload) > amount:
+        raise AssertionError("requested unique-record fixture is smaller than valid payload")
+    prefix = bytearray()
+    index = 0
+    while len(prefix) + len(payload) < amount:
+        descriptor = f"Lselftest/irrelevant/Unique{index:06d};"
+        record = (
+            f"Class #{index}            -\n"
+            f"  Class descriptor  : '{descriptor}'\n"
+            "  Direct methods    -\n"
+            f"    #0              : (in {descriptor})\n"
+            f"      name          : 'irrelevantMethod{index:06d}'\n"
+        ).encode("ascii")
+        remaining = amount - len(payload) - len(prefix)
+        if len(record) > remaining:
+            prefix.extend(b" " * remaining)
+            break
+        prefix.extend(record)
+        index += 1
+    payload = bytes(prefix) + payload
+elif mode == "stderr-bytes":
+    payload = f"FAKE_DEXDUMP_STDERR_BYTES={amount}\n".encode("ascii") + payload
+elif mode == "hang":
+    payload = b"FAKE_DEXDUMP_HANG\n" + payload
+elif mode == "late-write":
+    payload = b"FAKE_DEXDUMP_LATE_WRITE\n" + payload
+else:
+    raise AssertionError(f"unknown dexdump mode: {mode}")
+with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
+    archive.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+    archive.writestr("classes.dex", payload)
+PY
+}
+
 OUT=""
 RC=0
 run_checker() { # services.jar dexdump output.json [checker]
@@ -273,6 +419,19 @@ run_checker() { # services.jar dexdump output.json [checker]
   OUT="$(
     FAKE_DEXDUMP_LOG="$DEXDUMP_LOG" \
       "$checker" --services-jar "$jar" --dexdump "$dexdump" --output "$output" \
+        --allow-pinned-selftest-fixture 2>&1
+  )"
+  RC=$?
+}
+
+run_checker_with_late_marker() { # services.jar output.json marker
+  local jar="$1" output="$2" marker="$3"
+  : >"$DEXDUMP_LOG"
+  rm -f -- "$marker"
+  OUT="$(
+    FAKE_DEXDUMP_LOG="$DEXDUMP_LOG" \
+    FAKE_DEXDUMP_LATE_WRITE_MARKER="$marker" \
+      "$CHECKER" --services-jar "$jar" --dexdump "$FAKE_DEXDUMP" --output "$output" \
         --allow-pinned-selftest-fixture 2>&1
   )"
   RC=$?
@@ -332,43 +491,126 @@ run_checker_with_after_analysis_swap() { # jar dexdump output target replacement
   local jar="$1" dexdump="$2" output="$3" target="$4" replacement="$5" state="$6"
   : >"$DEXDUMP_LOG"
   rm -f -- "$state"
+  (
+    attempts=0
+    while [ "$attempts" -lt 5000 ]; do
+      if [ -f "$state" ] && [ "$(sed -n '1p' "$state" 2>/dev/null || true)" = hash-ready ]; then
+        if mv -f -- "$replacement" "$target"; then
+          printf 'swapped\n' >"$state"
+        else
+          printf 'swap-failed\n' >"$state"
+        fi
+        exit
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.001
+    done
+    exit 98
+  ) &
+  local swap_pid=$!
   OUT="$(
-    PATH="$HASH_GATE_DIR:$PATH" \
     FAKE_DEXDUMP_LOG="$DEXDUMP_LOG" \
-    FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_TARGET="$target" \
-    FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_REPLACEMENT="$replacement" \
-    FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_STATE="$state" \
       "$CHECKER" --services-jar "$jar" --dexdump "$dexdump" --output "$output" \
-        --allow-pinned-selftest-fixture 2>&1
+        --allow-pinned-selftest-fixture \
+        --selftest-post-analysis-gate 2>&1
   )"
   RC=$?
+  wait "$swap_pid"
+  SWAP_RC=$?
+}
+
+run_checker_with_source_properties_swap() { # checker jar tool output properties mode victim
+  local checker=$1 jar=$2 tool=$3 output=$4 properties=$5 mode=$6 victim=$7
+  local state="${output}.selftest-source-properties.state"
+  local checker_log="${output}.checker.log"
+  local checker_pid swap_pid attempts writer_pid actual_rc
+  CHECKER_TIMED_OUT=0
+  SWAP_RC=0
+  : >"$DEXDUMP_LOG"
+  rm -f -- "$state" "$checker_log"
+  (
+    attempts=0
+    while [ "$attempts" -lt 5000 ]; do
+      if [ -f "$state" ] \
+          && [ "$(sed -n '1p' "$state" 2>/dev/null || true)" = lstat-ready ]; then
+        if ! mv -- "$properties" "${properties}.before-swap"; then
+          printf 'swap-failed\n' >"$state"
+          exit 97
+        fi
+        case "$mode" in
+          symlink)
+            ln -s -- "$victim" "$properties" || {
+              printf 'swap-failed\n' >"$state"
+              exit 97
+            }
+            ;;
+          fifo)
+            mkfifo -- "$properties" || {
+              printf 'swap-failed\n' >"$state"
+              exit 97
+            }
+            ;;
+          *)
+            printf 'swap-failed\n' >"$state"
+            exit 97
+            ;;
+        esac
+        printf 'swapped\n' >"$state"
+        exit
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.001
+    done
+    exit 98
+  ) &
+  swap_pid=$!
+  "$checker" --services-jar "$jar" --dexdump "$tool" --output "$output" \
+      --allow-pinned-selftest-fixture \
+      --selftest-source-properties-gate >"$checker_log" 2>&1 &
+  checker_pid=$!
+  wait "$swap_pid"
+  SWAP_RC=$?
+
+  attempts=0
+  while kill -0 "$checker_pid" 2>/dev/null && [ "$attempts" -lt 1000 ]; do
+    attempts=$((attempts + 1))
+    sleep 0.001
+  done
+  if kill -0 "$checker_pid" 2>/dev/null; then
+    CHECKER_TIMED_OUT=1
+    if [ "$mode" = fifo ]; then
+      printf 'Pkg.UserSrc=false\nPkg.Revision=35.0.2\n' >"$properties" &
+      writer_pid=$!
+      wait "$checker_pid"
+      actual_rc=$?
+      wait "$writer_pid" 2>/dev/null || true
+    else
+      kill "$checker_pid" 2>/dev/null || true
+      wait "$checker_pid" 2>/dev/null
+      actual_rc=$?
+    fi
+  else
+    wait "$checker_pid"
+    actual_rc=$?
+  fi
+  OUT="$(cat "$checker_log" 2>/dev/null || true)"
+  if (( CHECKER_TIMED_OUT )); then
+    RC=124
+  else
+    RC=$actual_rc
+  fi
 }
 
 sha256_path() { # path
-  python3 - "$1" <<'PY'
+  /usr/bin/python3 -I - "$1" <<'PY'
 import hashlib
 import sys
 print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
 PY
 }
 
-candidate_splices_digest() { # output-json digest-field replacement-digest
-  python3 - "$1" "$2" "$3" <<'PY' >/dev/null 2>&1
-import json
-import sys
-
-path, digest_field, replacement_digest = sys.argv[1:]
-payload = json.load(open(path, encoding="utf-8"))
-assert payload.get("status") in {
-    "COMPATIBILITY_CANDIDATE",
-    "SELFTEST_STATIC_MEMBERS_PRESENT",
-}, payload
-assert payload.get(digest_field) == replacement_digest, payload
-PY
-}
-
 assert_non_authoritative_json() { # path expected-status [expected-reason]
-  python3 - "$1" "$2" "${3:-}" <<'PY'
+  /usr/bin/python3 -I - "$1" "$2" "${3:-}" <<'PY'
 import json
 import re
 import sys
@@ -492,6 +734,48 @@ expect_dexdump_not_called() { # name
   fi
 }
 
+expect_selftest_success() { # name output-json
+  local name="$1" output="$2"
+  if [ "$RC" -ne 0 ]; then
+    report fail "$name" "rc=$RC output=$OUT"
+  elif [[ "$OUT" != *"SELFTEST_STATIC_MEMBERS_PRESENT"* ]]; then
+    report fail "$name" "selftest marker missing: $OUT"
+  elif ! assert_non_authoritative_json "$output" SELFTEST_STATIC_MEMBERS_PRESENT; then
+    report fail "$name" "invalid selftest success JSON"
+  else
+    report ok "$name"
+  fi
+}
+
+# The dexdump parser may retain only the fixed 7-class/20-method inventory.
+# A stdout byte cap alone is not a heap bound when attacker-controlled unique
+# strings are copied into Python sets.
+if /usr/bin/python3 -I - "$CHECKER" <<'PY' >/dev/null 2>&1
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+start = source.index("dump_path, members_path = sys.argv[1:]")
+end = source.index('print("STATIC_MEMBERS_PRESENT")', start)
+parser = source[start:end]
+assert not re.search(r"^\s*classes\.add\(current_class\)\s*$", parser, re.M)
+assert not re.search(
+    r"^\s*methods\.add\(\(current_class, match\.group\(1\)\)\)\s*$",
+    parser,
+    re.M,
+)
+assert "required_classes" in parser
+assert "required_methods" in parser
+assert "if current_class in required_classes:" in parser
+assert "if candidate in required_methods:" in parser
+PY
+then
+  report ok "dexdump parser retains only the fixed required-member inventory"
+else
+  report fail "dexdump parser retains only the fixed required-member inventory" \
+    "parser still accumulates attacker-selected unique classes or methods"
+fi
+
 # Positive parser control: all seven exact classes and all twenty class/method
 # associations are required. Because this invokes the pinned fake, its success
 # is explicitly selftest-only and cannot be a production compatibility verdict.
@@ -507,7 +791,7 @@ elif [[ "$OUT" != *"SELFTEST_STATIC_MEMBERS_PRESENT"* ]]; then
 elif ! assert_non_authoritative_json "$GOOD_JSON" SELFTEST_STATIC_MEMBERS_PRESENT; then
   report fail "complete synthetic services.jar exercises the pinned selftest parser" \
     "invalid or authoritative JSON"
-elif ! python3 - "$GOOD_JSON" <<'PY'
+elif ! /usr/bin/python3 -I - "$GOOD_JSON" <<'PY'
 import json
 import sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -522,6 +806,143 @@ elif [ "$(wc -l <"$DEXDUMP_LOG" | tr -d ' ')" != 1 ]; then
     "dexdump must run exactly once"
 else
   report ok "complete synthetic services.jar exercises the pinned selftest parser"
+fi
+
+# Inputs are bounded before hashing or copying. Sparse files make the regression
+# cheap to construct while still proving that declared size is checked first.
+OVERSIZED_SERVICES_JAR="$WORK/services-oversized-sparse.jar"
+OVERSIZED_SERVICES_JSON="$WORK/services-oversized-sparse.json"
+/usr/bin/python3 -I - "$OVERSIZED_SERVICES_JAR" "$SERVICES_JAR_SIZE_LIMIT" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "wb"):
+    pass
+os.truncate(sys.argv[1], int(sys.argv[2]) + 1)
+PY
+run_checker "$OVERSIZED_SERVICES_JAR" "$FAKE_DEXDUMP" "$OVERSIZED_SERVICES_JSON"
+expect_stop "oversized sparse services.jar is refused before snapshot" \
+  "$OVERSIZED_SERVICES_JSON" SERVICES_JAR_SIZE_LIMIT
+expect_dexdump_not_called "oversized sparse services.jar is refused before dexdump"
+
+OVERSIZED_DEXDUMP="$WORK/dexdump-oversized-sparse"
+OVERSIZED_DEXDUMP_JSON="$WORK/dexdump-oversized-sparse.json"
+cp -- "$FAKE_DEXDUMP" "$OVERSIZED_DEXDUMP"
+/usr/bin/python3 -I - "$OVERSIZED_DEXDUMP" "$DEXDUMP_SIZE_LIMIT" <<'PY'
+import os
+import sys
+
+os.truncate(sys.argv[1], int(sys.argv[2]) + 1)
+PY
+chmod 700 "$OVERSIZED_DEXDUMP"
+run_checker "$GOOD_JAR" "$OVERSIZED_DEXDUMP" "$OVERSIZED_DEXDUMP_JSON"
+expect_stop "oversized sparse dexdump is refused before snapshot" \
+  "$OVERSIZED_DEXDUMP_JSON" DEXDUMP_SIZE_LIMIT
+expect_dexdump_not_called "oversized sparse dexdump is refused before invocation"
+
+# ZIP metadata is validated before any member is expanded, and classes.dex is
+# streamed instead of materialized by archive.read(). The exact-count archive
+# is the positive boundary control.
+ARCHIVE_ENTRIES_EXACT_JAR="$WORK/archive-entries-exact.jar"
+ARCHIVE_ENTRIES_EXACT_JSON="$WORK/archive-entries-exact.json"
+make_archive_boundary_jar "$ARCHIVE_ENTRIES_EXACT_JAR" entries-exact
+run_checker "$ARCHIVE_ENTRIES_EXACT_JAR" "$FAKE_DEXDUMP" "$ARCHIVE_ENTRIES_EXACT_JSON"
+expect_selftest_success "archive accepts exactly the entry-count cap" \
+  "$ARCHIVE_ENTRIES_EXACT_JSON"
+
+for archive_case in \
+    entries-over \
+    member-over \
+    total-over \
+    ratio-over \
+    unsupported-method \
+    eocd-entry-over; do
+  archive_jar="$WORK/archive-$archive_case.jar"
+  archive_json="$WORK/archive-$archive_case.json"
+  make_archive_boundary_jar "$archive_jar" "$archive_case"
+  run_checker "$archive_jar" "$FAKE_DEXDUMP" "$archive_json"
+  expect_stop "archive preflight refuses $archive_case" \
+    "$archive_json" SERVICES_ARCHIVE_LIMIT
+  expect_dexdump_not_called "archive $archive_case is refused before dexdump"
+done
+
+ARCHIVE_EOCD_TRAILING_JAR="$WORK/archive-eocd-trailing-byte.jar"
+ARCHIVE_EOCD_TRAILING_JSON="$WORK/archive-eocd-trailing-byte.json"
+make_archive_boundary_jar "$ARCHIVE_EOCD_TRAILING_JAR" eocd-trailing-byte
+run_checker "$ARCHIVE_EOCD_TRAILING_JAR" "$FAKE_DEXDUMP" \
+  "$ARCHIVE_EOCD_TRAILING_JSON"
+expect_stop "archive preflight refuses bytes after EOCD" \
+  "$ARCHIVE_EOCD_TRAILING_JSON" INVALID_JAR
+expect_dexdump_not_called "archive EOCD boundary refusal occurs before dexdump"
+
+# The selftest identity uses deliberately small fixed process budgets so exact
+# cap and cap+1 behavior can be covered without producing large fixtures.
+DEXDUMP_STDOUT_EXACT_JAR="$WORK/dexdump-stdout-exact.jar"
+DEXDUMP_STDOUT_EXACT_JSON="$WORK/dexdump-stdout-exact.json"
+make_dexdump_resource_jar "$DEXDUMP_STDOUT_EXACT_JAR" stdout-bytes \
+  "$SELFTEST_DEXDUMP_STDOUT_LIMIT"
+run_checker "$DEXDUMP_STDOUT_EXACT_JAR" "$FAKE_DEXDUMP" \
+  "$DEXDUMP_STDOUT_EXACT_JSON"
+expect_selftest_success "dexdump accepts stdout at the exact cap" \
+  "$DEXDUMP_STDOUT_EXACT_JSON"
+
+DEXDUMP_UNIQUE_RECORDS_JAR="$WORK/dexdump-unique-records.jar"
+DEXDUMP_UNIQUE_RECORDS_JSON="$WORK/dexdump-unique-records.json"
+make_dexdump_resource_jar "$DEXDUMP_UNIQUE_RECORDS_JAR" unique-records \
+  "$SELFTEST_DEXDUMP_STDOUT_LIMIT"
+run_checker \
+  "$DEXDUMP_UNIQUE_RECORDS_JAR" "$FAKE_DEXDUMP" "$DEXDUMP_UNIQUE_RECORDS_JSON"
+expect_selftest_success \
+  "dexdump accepts cap-sized high-cardinality irrelevant records with bounded state" \
+  "$DEXDUMP_UNIQUE_RECORDS_JSON"
+
+DEXDUMP_STDOUT_OVER_JAR="$WORK/dexdump-stdout-over.jar"
+DEXDUMP_STDOUT_OVER_JSON="$WORK/dexdump-stdout-over.json"
+make_dexdump_resource_jar "$DEXDUMP_STDOUT_OVER_JAR" stdout-bytes \
+  "$((SELFTEST_DEXDUMP_STDOUT_LIMIT + 1))"
+run_checker "$DEXDUMP_STDOUT_OVER_JAR" "$FAKE_DEXDUMP" \
+  "$DEXDUMP_STDOUT_OVER_JSON"
+expect_stop "dexdump refuses stdout at cap plus one" \
+  "$DEXDUMP_STDOUT_OVER_JSON" DEXDUMP_STDOUT_LIMIT
+
+DEXDUMP_STDERR_EXACT_JAR="$WORK/dexdump-stderr-exact.jar"
+DEXDUMP_STDERR_EXACT_JSON="$WORK/dexdump-stderr-exact.json"
+make_dexdump_resource_jar "$DEXDUMP_STDERR_EXACT_JAR" stderr-bytes \
+  "$SELFTEST_DEXDUMP_STDERR_LIMIT"
+run_checker "$DEXDUMP_STDERR_EXACT_JAR" "$FAKE_DEXDUMP" \
+  "$DEXDUMP_STDERR_EXACT_JSON"
+expect_selftest_success "dexdump accepts stderr at the exact cap" \
+  "$DEXDUMP_STDERR_EXACT_JSON"
+
+DEXDUMP_STDERR_OVER_JAR="$WORK/dexdump-stderr-over.jar"
+DEXDUMP_STDERR_OVER_JSON="$WORK/dexdump-stderr-over.json"
+make_dexdump_resource_jar "$DEXDUMP_STDERR_OVER_JAR" stderr-bytes \
+  "$((SELFTEST_DEXDUMP_STDERR_LIMIT + 1))"
+run_checker "$DEXDUMP_STDERR_OVER_JAR" "$FAKE_DEXDUMP" \
+  "$DEXDUMP_STDERR_OVER_JSON"
+expect_stop "dexdump refuses stderr at cap plus one" \
+  "$DEXDUMP_STDERR_OVER_JSON" DEXDUMP_STDERR_LIMIT
+
+DEXDUMP_HANG_JAR="$WORK/dexdump-hang.jar"
+DEXDUMP_HANG_JSON="$WORK/dexdump-hang.json"
+make_dexdump_resource_jar "$DEXDUMP_HANG_JAR" hang
+run_checker "$DEXDUMP_HANG_JAR" "$FAKE_DEXDUMP" "$DEXDUMP_HANG_JSON"
+expect_stop "dexdump timeout is fail-closed" "$DEXDUMP_HANG_JSON" DEXDUMP_TIMEOUT
+
+DEXDUMP_LATE_JAR="$WORK/dexdump-late-write.jar"
+DEXDUMP_LATE_JSON="$WORK/dexdump-late-write.json"
+DEXDUMP_LATE_MARKER="$WORK/dexdump-late-write.marker"
+make_dexdump_resource_jar "$DEXDUMP_LATE_JAR" late-write
+run_checker_with_late_marker "$DEXDUMP_LATE_JAR" "$DEXDUMP_LATE_JSON" \
+  "$DEXDUMP_LATE_MARKER"
+expect_stop "dexdump surviving process group is fail-closed" \
+  "$DEXDUMP_LATE_JSON" DEXDUMP_PROCESS_GROUP
+/bin/sleep 1.25
+if [ -e "$DEXDUMP_LATE_MARKER" ]; then
+  report fail "dexdump process group cannot perform a late write" \
+    "late marker exists after checker return"
+else
+  report ok "dexdump process group cannot perform a late write"
 fi
 
 # A caller-selected executable is not an Android SDK identity. Even when it
@@ -565,6 +986,149 @@ expect_stop "caller-controlled Android SDK root cannot trust a fake dexdump" \
   "$FAKE_SDK_JSON" UNTRUSTED_DEXDUMP
 expect_dexdump_not_called "caller-controlled SDK fake is refused before invocation"
 
+# Exercise source.properties through the production SDK-layout branch without
+# trusting a caller-controlled SDK. The copied checker adds one canonical,
+# private selftest root, but its native stub remains absent from the pinned
+# approval list and therefore can never reach dexdump execution or success.
+SOURCE_PROPERTIES_CHECKER_DIR="$WORK/source-properties-checker"
+SOURCE_PROPERTIES_CHECKER="$SOURCE_PROPERTIES_CHECKER_DIR/check-issue66-services-compatibility.sh"
+SOURCE_PROPERTIES_FIXTURES="$SOURCE_PROPERTIES_CHECKER_DIR/fixtures/issue66-services-compatibility"
+SOURCE_PROPERTIES_SDK_ROOT="$WORK/source-properties-sdk"
+mkdir -p "$SOURCE_PROPERTIES_FIXTURES" "$SOURCE_PROPERTIES_SDK_ROOT/build-tools"
+SOURCE_PROPERTIES_SDK_ROOT="$(cd "$SOURCE_PROPERTIES_SDK_ROOT" && pwd -P)"
+cp -- "$CHECKER" "$SOURCE_PROPERTIES_CHECKER"
+cp -- "$MEMBERS" "$SOURCE_PROPERTIES_FIXTURES/required-members.tsv"
+cp -- "$APPROVED_DEXDUMP_DIGESTS" \
+  "$SOURCE_PROPERTIES_FIXTURES/approved-dexdump-sha256.tsv"
+if ! /usr/bin/python3 -I - \
+    "$SOURCE_PROPERTIES_CHECKER" "$SOURCE_PROPERTIES_SDK_ROOT" <<'PY'
+import pathlib
+import sys
+
+checker_path, root = sys.argv[1:]
+path = pathlib.Path(checker_path)
+source = path.read_text(encoding="utf-8")
+needle = '    pathlib.Path("/opt/android-sdk-linux"),\n'
+assert source.count(needle) == 1
+source = source.replace(needle, needle + f"    pathlib.Path({root!r}),\n")
+path.write_text(source, encoding="utf-8")
+PY
+then
+  printf 'could not prepare source.properties security checker fixture\n' >&2
+  exit 2
+fi
+chmod 700 "$SOURCE_PROPERTIES_CHECKER" "$SOURCE_PROPERTIES_SDK_ROOT" \
+  "$SOURCE_PROPERTIES_SDK_ROOT/build-tools"
+
+make_native_sdk_stub() { # revision
+  local revision=$1 directory="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/$1"
+  mkdir "$directory"
+  chmod 700 "$directory"
+  /usr/bin/python3 -I - "$directory/dexdump" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "wb") as stream:
+    stream.write(bytes.fromhex("7f454c46"))
+os.chmod(sys.argv[1], 0o500)
+PY
+}
+
+make_native_sdk_stub 35.0.0
+SOURCE_PROPERTIES_OVERSIZED_TOOL="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.0/dexdump"
+SOURCE_PROPERTIES_OVERSIZED="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.0/source.properties"
+SOURCE_PROPERTIES_OVERSIZED_JSON="$WORK/source-properties-oversized.json"
+/usr/bin/python3 -I - \
+  "$SOURCE_PROPERTIES_OVERSIZED" "$SOURCE_PROPERTIES_SIZE_LIMIT" <<'PY'
+import os
+import sys
+
+prefix = b"Pkg.UserSrc=false\nPkg.Revision=35.0.0\n"
+limit = int(sys.argv[2])
+with open(sys.argv[1], "wb") as stream:
+    stream.write(prefix)
+    stream.write(b"x" * (limit + 1 - len(prefix)))
+os.chmod(sys.argv[1], 0o600)
+PY
+run_checker "$GOOD_JAR" "$SOURCE_PROPERTIES_OVERSIZED_TOOL" \
+  "$SOURCE_PROPERTIES_OVERSIZED_JSON" "$SOURCE_PROPERTIES_CHECKER"
+expect_stop "source.properties above the fixed cap is refused" \
+  "$SOURCE_PROPERTIES_OVERSIZED_JSON" UNTRUSTED_DEXDUMP
+expect_dexdump_not_called "oversized source.properties is refused before dexdump"
+
+make_native_sdk_stub 35.0.3
+SOURCE_PROPERTIES_EXACT_TOOL="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.3/dexdump"
+SOURCE_PROPERTIES_EXACT="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.3/source.properties"
+SOURCE_PROPERTIES_EXACT_JSON="$WORK/source-properties-exact.json"
+/usr/bin/python3 -I - \
+  "$SOURCE_PROPERTIES_EXACT" "$SOURCE_PROPERTIES_SIZE_LIMIT" <<'PY'
+import os
+import sys
+
+prefix = b"Pkg.UserSrc=false\nPkg.Revision=35.0.3\n#"
+limit = int(sys.argv[2])
+with open(sys.argv[1], "wb") as stream:
+    stream.write(prefix)
+    stream.write(b"x" * (limit - len(prefix)))
+os.chmod(sys.argv[1], 0o600)
+PY
+run_checker "$GOOD_JAR" "$SOURCE_PROPERTIES_EXACT_TOOL" \
+  "$SOURCE_PROPERTIES_EXACT_JSON" "$SOURCE_PROPERTIES_CHECKER"
+expect_stop "source.properties accepts the exact fixed cap before digest approval" \
+  "$SOURCE_PROPERTIES_EXACT_JSON" TOOL_NOT_ATTESTED
+expect_dexdump_not_called "exact-cap source.properties cannot bypass dexdump approval"
+
+make_native_sdk_stub 35.0.1
+SOURCE_PROPERTIES_LINK_TOOL="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.1/dexdump"
+SOURCE_PROPERTIES_LINK="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.1/source.properties"
+SOURCE_PROPERTIES_LINK_VICTIM="$WORK/source-properties-link-victim"
+SOURCE_PROPERTIES_LINK_JSON="$WORK/source-properties-link.json"
+printf 'Pkg.UserSrc=false\nPkg.Revision=35.0.1\n' >"$SOURCE_PROPERTIES_LINK"
+printf 'Pkg.UserSrc=false\nPkg.Revision=35.0.1\n' >"$SOURCE_PROPERTIES_LINK_VICTIM"
+chmod 600 "$SOURCE_PROPERTIES_LINK" "$SOURCE_PROPERTIES_LINK_VICTIM"
+run_checker_with_source_properties_swap \
+  "$SOURCE_PROPERTIES_CHECKER" "$GOOD_JAR" "$SOURCE_PROPERTIES_LINK_TOOL" \
+  "$SOURCE_PROPERTIES_LINK_JSON" "$SOURCE_PROPERTIES_LINK" symlink \
+  "$SOURCE_PROPERTIES_LINK_VICTIM"
+if (( CHECKER_TIMED_OUT )); then
+  report fail "regular-to-symlink source.properties race is refused without blocking" \
+    "checker exceeded the one-second completion bound"
+else
+  expect_stop "regular-to-symlink source.properties race is refused without blocking" \
+    "$SOURCE_PROPERTIES_LINK_JSON" UNTRUSTED_DEXDUMP
+fi
+if (( SWAP_RC != 0 )); then
+  report fail "regular-to-symlink source.properties race is deterministic" \
+    "swap helper rc=$SWAP_RC"
+else
+  report ok "regular-to-symlink source.properties race is deterministic"
+fi
+expect_dexdump_not_called "symlink-raced source.properties is refused before dexdump"
+
+make_native_sdk_stub 35.0.2
+SOURCE_PROPERTIES_FIFO_TOOL="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.2/dexdump"
+SOURCE_PROPERTIES_FIFO="$SOURCE_PROPERTIES_SDK_ROOT/build-tools/35.0.2/source.properties"
+SOURCE_PROPERTIES_FIFO_JSON="$WORK/source-properties-fifo.json"
+printf 'Pkg.UserSrc=false\nPkg.Revision=35.0.2\n' >"$SOURCE_PROPERTIES_FIFO"
+chmod 600 "$SOURCE_PROPERTIES_FIFO"
+run_checker_with_source_properties_swap \
+  "$SOURCE_PROPERTIES_CHECKER" "$GOOD_JAR" "$SOURCE_PROPERTIES_FIFO_TOOL" \
+  "$SOURCE_PROPERTIES_FIFO_JSON" "$SOURCE_PROPERTIES_FIFO" fifo ""
+if (( CHECKER_TIMED_OUT )); then
+  report fail "regular-to-FIFO source.properties race is refused without blocking" \
+    "checker blocked until the selftest supplied a FIFO writer"
+else
+  expect_stop "regular-to-FIFO source.properties race is refused without blocking" \
+    "$SOURCE_PROPERTIES_FIFO_JSON" UNTRUSTED_DEXDUMP
+fi
+if (( SWAP_RC != 0 )); then
+  report fail "regular-to-FIFO source.properties race is deterministic" \
+    "swap helper rc=$SWAP_RC"
+else
+  report ok "regular-to-FIFO source.properties race is deterministic"
+fi
+expect_dexdump_not_called "FIFO-raced source.properties is refused before dexdump"
+
 # The explicit selftest lane is content-pinned. It cannot bless a modified
 # copy and, even for the exact fixture, its earlier positive result has the
 # distinct SELFTEST_STATIC_MEMBERS_PRESENT status.
@@ -582,7 +1146,7 @@ expect_dexdump_not_called "modified selftest dexdump is refused before invocatio
 # Without a repo-approved digest it must stop before invocation rather than
 # inheriting production authority from its pathname, metadata, or file magic.
 if [ -z "$TRUSTED_DEXDUMP" ]; then
-  report ok "unattested SDK dexdump probe skipped because no local SDK is installed"
+  report_skip "unattested SDK dexdump probe unavailable because no local SDK is installed"
 else
   TRUSTED_DEXDUMP_JSON="$WORK/trusted-dexdump.json"
   run_checker_without_fixture_mode \
@@ -690,7 +1254,7 @@ expect_dexdump_not_called "required-members mismatch is refused before dexdump"
 # be rejected even when every original field remains otherwise valid.
 DEVICE_PASS_JSON="$WORK/good-with-device-pass.json"
 AUTHORITY_JSON="$WORK/good-with-production-authority.json"
-if ! python3 - "$GOOD_JSON" "$DEVICE_PASS_JSON" "$AUTHORITY_JSON" <<'PY'
+if ! /usr/bin/python3 -I - "$GOOD_JSON" "$DEVICE_PASS_JSON" "$AUTHORITY_JSON" <<'PY'
 import json
 import sys
 
@@ -737,7 +1301,7 @@ while IFS= read -r class_name; do
   make_jar "$jar" missing-class "$class_name"
   run_checker "$jar" "$FAKE_DEXDUMP" "$output"
   expect_stop "missing required class $class_name is refused" "$output" MISSING_CLASS
-  if ! python3 - "$output" "$class_name" <<'PY' >/dev/null 2>&1
+  if ! /usr/bin/python3 -I - "$output" "$class_name" <<'PY' >/dev/null 2>&1
 import json
 import sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -762,7 +1326,7 @@ while IFS=$'\t' read -r class_name method_name; do
   make_jar "$jar" missing-method "$class_name" "$method_name"
   run_checker "$jar" "$FAKE_DEXDUMP" "$output"
   expect_stop "missing $class_name#$method_name is refused" "$output" MISSING_METHOD
-  if ! python3 - "$output" "$class_name" "$method_name" <<'PY' >/dev/null 2>&1
+  if ! /usr/bin/python3 -I - "$output" "$class_name" "$method_name" <<'PY' >/dev/null 2>&1
 import json
 import sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -810,47 +1374,43 @@ else
   report fail "dexdump failure exercised exactly one fake invocation" "log=$(tr '\n' ';' <"$DEXDUMP_LOG")"
 fi
 
-# Deterministic TOCTOU probes: fake dexdump arms a worker after it has emitted
-# the analysis bytes, and the test-only shasum gate releases that worker at the
-# checker's first post-analysis hash. A candidate must never bind that old
-# analysis to replacement bytes now present at either input path.
-IFS=$'\t' read -r FIRST_REQUIRED_CLASS FIRST_REQUIRED_METHOD \
-  < <(grep -v '^#' "$MEMBERS" | head -n 1)
-
+# Deterministic fail-closed binding probes. The checker first completes the
+# pinned fake analysis, then creates a fixed-token state file. This selftest
+# performs the replacement itself and acknowledges through that data-only gate;
+# the checker never resolves or dispatches a caller-provided executable.
 TOCTOU_SERVICES_JAR="$WORK/services-toctou.jar"
 TOCTOU_SERVICES_REPLACEMENT="$WORK/services-toctou-replacement.jar"
 TOCTOU_SERVICES_JSON="$WORK/services-toctou.json"
-TOCTOU_SERVICES_STATE="$WORK/services-toctou.state"
+TOCTOU_SERVICES_STATE="$TOCTOU_SERVICES_JSON.selftest-post-analysis.state"
 make_jar "$TOCTOU_SERVICES_JAR" positive
 make_jar "$TOCTOU_SERVICES_REPLACEMENT" missing-method \
-  "$FIRST_REQUIRED_CLASS" "$FIRST_REQUIRED_METHOD"
+  "$(grep -v '^#' "$MEMBERS" | head -n 1 | cut -f1)" \
+  "$(grep -v '^#' "$MEMBERS" | head -n 1 | cut -f2)"
 TOCTOU_SERVICES_REPLACEMENT_SHA="$(sha256_path "$TOCTOU_SERVICES_REPLACEMENT")"
 run_checker_with_after_analysis_swap \
   "$TOCTOU_SERVICES_JAR" "$FAKE_DEXDUMP" "$TOCTOU_SERVICES_JSON" \
   "$TOCTOU_SERVICES_JAR" "$TOCTOU_SERVICES_REPLACEMENT" "$TOCTOU_SERVICES_STATE"
 expect_stop "services.jar replacement after analysis is refused" \
   "$TOCTOU_SERVICES_JSON" INPUT_CHANGED
-if [ "$(sed -n '1p' "$TOCTOU_SERVICES_STATE" 2>/dev/null || true)" != swapped ]; then
+if [ "$SWAP_RC" -ne 0 ] \
+    || [ "$(sed -n '1p' "$TOCTOU_SERVICES_STATE" 2>/dev/null || true)" != swapped ] \
+    || [ "$(sha256_path "$TOCTOU_SERVICES_JAR")" != "$TOCTOU_SERVICES_REPLACEMENT_SHA" ]; then
   report fail "services.jar TOCTOU replacement is deterministic" \
-    "state=$(cat "$TOCTOU_SERVICES_STATE" 2>/dev/null || printf missing)"
-elif [ "$(sha256_path "$TOCTOU_SERVICES_JAR")" != "$TOCTOU_SERVICES_REPLACEMENT_SHA" ]; then
-  report fail "services.jar TOCTOU replacement is deterministic" \
-    "target bytes do not match replacement digest"
+    "swap_rc=$SWAP_RC state=$(sed -n '1p' "$TOCTOU_SERVICES_STATE" 2>/dev/null || printf missing)"
 else
   report ok "services.jar TOCTOU replacement is deterministic"
 fi
-if candidate_splices_digest "$TOCTOU_SERVICES_JSON" servicesJarSha256 \
-    "$TOCTOU_SERVICES_REPLACEMENT_SHA"; then
-  report fail "services.jar output never splices old analysis with replacement hash" \
-    "candidate JSON contains the replacement servicesJarSha256"
+if [ "$(wc -l <"$DEXDUMP_LOG" | tr -d ' ')" != 1 ]; then
+  report fail "services.jar binding refusal occurs after analysis" \
+    "fake invocation log=$(tr '\n' ';' <"$DEXDUMP_LOG")"
 else
-  report ok "services.jar output never splices old analysis with replacement hash"
+  report ok "services.jar binding refusal occurs after analysis"
 fi
 
 TOCTOU_DEXDUMP="$WORK/dexdump-toctou"
 TOCTOU_DEXDUMP_REPLACEMENT="$WORK/dexdump-toctou-replacement"
 TOCTOU_DEXDUMP_JSON="$WORK/dexdump-toctou.json"
-TOCTOU_DEXDUMP_STATE="$WORK/dexdump-toctou.state"
+TOCTOU_DEXDUMP_STATE="$TOCTOU_DEXDUMP_JSON.selftest-post-analysis.state"
 cp -- "$FAKE_DEXDUMP" "$TOCTOU_DEXDUMP"
 cp -- "$FAKE_DEXDUMP" "$TOCTOU_DEXDUMP_REPLACEMENT"
 printf '\n# replacement digest marker\n' >>"$TOCTOU_DEXDUMP_REPLACEMENT"
@@ -861,21 +1421,19 @@ run_checker_with_after_analysis_swap \
   "$TOCTOU_DEXDUMP" "$TOCTOU_DEXDUMP_REPLACEMENT" "$TOCTOU_DEXDUMP_STATE"
 expect_stop "dexdump replacement after analysis is refused" \
   "$TOCTOU_DEXDUMP_JSON" INPUT_CHANGED
-if [ "$(sed -n '1p' "$TOCTOU_DEXDUMP_STATE" 2>/dev/null || true)" != swapped ]; then
+if [ "$SWAP_RC" -ne 0 ] \
+    || [ "$(sed -n '1p' "$TOCTOU_DEXDUMP_STATE" 2>/dev/null || true)" != swapped ] \
+    || [ "$(sha256_path "$TOCTOU_DEXDUMP")" != "$TOCTOU_DEXDUMP_REPLACEMENT_SHA" ]; then
   report fail "dexdump TOCTOU replacement is deterministic" \
-    "state=$(cat "$TOCTOU_DEXDUMP_STATE" 2>/dev/null || printf missing)"
-elif [ "$(sha256_path "$TOCTOU_DEXDUMP")" != "$TOCTOU_DEXDUMP_REPLACEMENT_SHA" ]; then
-  report fail "dexdump TOCTOU replacement is deterministic" \
-    "target bytes do not match replacement digest"
+    "swap_rc=$SWAP_RC state=$(sed -n '1p' "$TOCTOU_DEXDUMP_STATE" 2>/dev/null || printf missing)"
 else
   report ok "dexdump TOCTOU replacement is deterministic"
 fi
-if candidate_splices_digest "$TOCTOU_DEXDUMP_JSON" dexdumpSha256 \
-    "$TOCTOU_DEXDUMP_REPLACEMENT_SHA"; then
-  report fail "dexdump output never splices old execution with replacement hash" \
-    "candidate JSON contains the replacement dexdumpSha256"
+if [ "$(wc -l <"$DEXDUMP_LOG" | tr -d ' ')" != 1 ]; then
+  report fail "dexdump binding refusal occurs after analysis" \
+    "fake invocation log=$(tr '\n' ';' <"$DEXDUMP_LOG")"
 else
-  report ok "dexdump output never splices old execution with replacement hash"
+  report ok "dexdump binding refusal occurs after analysis"
 fi
 
 # Existing output is immutable and rejected before inspecting the jar.
@@ -906,5 +1464,6 @@ run_checker "$GOOD_JAR" "$DEXDUMP_LINK" "$DEXDUMP_LINK_JSON"
 expect_stop "symlink dexdump input is refused" "$DEXDUMP_LINK_JSON" SYMLINK_INPUT
 expect_dexdump_not_called "dexdump symlink is rejected before invocation"
 
-printf 'issue66 services compatibility selftest: %d passed, %d failed\n' "$pass" "$fail"
+printf 'issue66 services compatibility selftest: %d passed, %d failed, %d skipped\n' \
+  "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

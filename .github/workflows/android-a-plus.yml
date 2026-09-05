@@ -360,14 +360,83 @@ jobs:
     # lookup, or emulator/physical-device behavior, and creates no release
     # dependency edge between the two app lanes above.
     name: auto + qwy host integration (in-process; no device)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '17.0.20+101'
+          architecture: x64
+          check-latest: false
+          verify-signature: true
+
+      - name: freeze preinstalled Android SDK permissions
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: |
+          readonly expected_sdk=/usr/local/lib/android/sdk
+          if [[ "${ANDROID_HOME-}" != "$expected_sdk" ||
+                "${ANDROID_SDK_ROOT-}" != "$expected_sdk" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_ANDROID_SDK_TARGET_MISMATCH' >&2
+            exit 1
+          fi
+          if [[ ! -d "$expected_sdk" || -L "$expected_sdk" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_ANDROID_SDK_TYPE_INVALID' >&2
+            exit 1
+          fi
+          physical_sdk=$(/usr/bin/realpath --canonicalize-existing -- "$expected_sdk")
+          readonly physical_sdk
+          if [[ "$physical_sdk" != "$expected_sdk" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_ANDROID_SDK_PHYSICAL_TARGET_MISMATCH' >&2
+            exit 1
+          fi
+          /usr/bin/sudo -- /usr/bin/chown --recursive --no-dereference root:root -- "$expected_sdk"
+          /usr/bin/sudo -- /usr/bin/chmod --recursive a-w -- "$expected_sdk"
+          unsafe_sdk_entry=$(
+            /usr/bin/find -P "$expected_sdk" \
+              \( \
+                \( -type l \( ! -user root -o ! -group root \) \) \
+                -o \
+                \( ! -type l \( ! -user root -o ! -group root -o -perm /0222 \) \) \
+              \) \
+              -print -quit
+          )
+          readonly unsafe_sdk_entry
+          if [[ -n "$unsafe_sdk_entry" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_ANDROID_SDK_PERMISSION_FREEZE_FAILED' >&2
+            exit 1
+          fi
+
+      - name: standalone runtime security tests
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: |
+          readonly setup_java_home="${JAVA_HOME-}"
+          if [[ -z "$setup_java_home" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_SETUP_JAVA_HOME_MISSING' >&2
+            exit 1
+          fi
+          for runtime_security_test in \
+            scripts/test_validate_java17_runtime.py \
+            scripts/test_stage_java17_runtime.py \
+            scripts/test_validate_android_sdk_runtime.py; do
+            if [[ ! -f "$runtime_security_test" || -L "$runtime_security_test" ]]; then
+              printf '%s\n' 'HOST_INTEGRATION_RUNTIME_SECURITY_TEST_MISSING' >&2
+              exit 1
+            fi
+          done
+          /usr/bin/env -i \
+            ADB=/usr/bin/false \
+            ISSUE66_ACTIVE_JDK17_HOME="$setup_java_home" \
+            ISSUE66_TEMURIN_JDK17_HOME="$setup_java_home" \
+            LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+            /usr/bin/python3 -I scripts/test_validate_java17_runtime.py
+          /usr/bin/env -i \
+            ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+            /usr/bin/python3 -I scripts/test_stage_java17_runtime.py
+          /usr/bin/env -i \
+            ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+            /usr/bin/python3 -I scripts/test_validate_android_sdk_runtime.py
 
       - name: repository wrappers and host runner are executable
         run: |
@@ -379,7 +448,7 @@ jobs:
       - name: combined host gate
         run: ./integration-tests/pr63-on-issue66/run-host-gate.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: auto-qwy-host-integration-evidence

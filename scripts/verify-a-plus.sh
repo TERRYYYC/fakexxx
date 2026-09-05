@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 #
 # verify-a-plus.sh — aggregate verification gate for the A+ baseline.
 #
@@ -21,9 +21,53 @@
 # Exit codes: 0 = every gate required at this stage passed; 1 = otherwise.
 
 set -uo pipefail
+unset BASH_ENV ENV
+unset DEVELOPER_DIR SDKROOT TOOLCHAINS
+PATH=/usr/bin:/bin
+export PATH
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+inspect_inherited_environment() {
+  [[ -f /usr/bin/python3 && -x /usr/bin/python3 ]] || return 70
+  /usr/bin/python3 -I - <<'PY'
+import os
+
+if hasattr(os, "environb"):
+    environment_names = os.environb.keys()
+else:
+    environment_names = (os.fsencode(name) for name in os.environ)
+if any(name.startswith(b"BASH_FUNC_") for name in environment_names):
+    raise SystemExit(78)
+PY
+}
+
+inherited_environment_status=0
+inspect_inherited_environment || inherited_environment_status=$?
+case "$inherited_environment_status" in
+  0) ;;
+  78)
+    printf '%s\n' 'VERIFY_A_PLUS_UNSAFE_INHERITED_BASH_FUNCTION_ENV' >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' 'VERIFY_A_PLUS_INHERITED_ENVIRONMENT_INSPECTION_UNAVAILABLE' >&2
+    exit 1
+    ;;
+esac
+unset inherited_environment_status
+
+# Repository discovery starts only after startup hooks are cleared and host lookup is fixed.
+REPO_ROOT="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$REPO_ROOT" || exit 1
+readonly requested_java_home="${JAVA_HOME:-}"
+unset JAVA_HOME
+readonly requested_android_home="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+readonly java_profile_validator="$REPO_ROOT/scripts/validate-java17-runtime.py"
+readonly java_runtime_stager="$REPO_ROOT/scripts/stage-java17-runtime.py"
+readonly android_sdk_validator="$REPO_ROOT/scripts/validate-android-sdk-runtime.py"
+readonly verify_temp_anchor="$REPO_ROOT/integration-tests/pr63-on-issue66/harness"
+readonly verify_temp_parent="$verify_temp_anchor/build"
+host_java_home=""
+host_java_binding=""
 
 STAGE="full"
 LIST_ONLY=0
@@ -74,18 +118,67 @@ esac
 # quietly passing.
 GATES="
 1|provenance|PR-1|scripts/check-provenance.sh|./scripts/check-provenance.sh --stage \$STAGE
-1|auto-unit-tests|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew testDebugUnitTest
-1|auto-assemble|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew assembleDebug
-1|qwy-unit-tests|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew testDebugUnitTest
-1|qwy-assemble|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew assembleDebug
+1|auto-unit-tests|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew testDebugUnitTest --no-daemon
+1|auto-assemble|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew assembleDebug --no-daemon
+1|qwy-unit-tests|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew testDebugUnitTest --no-daemon
+1|qwy-assemble|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew assembleDebug --no-daemon
 1|inherited-lint-debt|PR-1|scripts/check-inherited-lint-debt.sh|./scripts/check-inherited-lint-debt.sh
 2|contract-v1|PR-2|scripts/check-contract-v1.sh|./scripts/check-contract-v1.sh
-3|acceptance-scenarios|PR-5|acceptance/scenarios|cd acceptance && ./gradlew test
+3|acceptance-scenarios|PR-5|acceptance/scenarios|cd acceptance && ./gradlew test --no-daemon
 3|matrix-coverage|PR-5|scripts/check-matrix-coverage.sh|./scripts/check-matrix-coverage.sh
 3|forbidden-boundaries|PR-5|acceptance/scripts/check-forbidden-boundaries.sh|./acceptance/scripts/check-forbidden-boundaries.sh
-3|auto-qwy-host|PR-6|integration-tests/pr63-on-issue66/run-host-gate.sh|bash ./integration-tests/pr63-on-issue66/run-host-gate.sh
+3|auto-qwy-host|PR-6|integration-tests/pr63-on-issue66/run-host-gate.sh|/bin/bash -p ./integration-tests/pr63-on-issue66/run-host-gate.sh
 3|release-debt|PR-2|scripts/check-release-debt.sh|./scripts/check-release-debt.sh
 "
+readonly GATES
+
+readonly EXPECTED_GATE_COUNT=12
+readonly EXPECTED_GATE_NAMES="provenance,auto-unit-tests,auto-assemble,qwy-unit-tests,qwy-assemble,inherited-lint-debt,contract-v1,acceptance-scenarios,matrix-coverage,forbidden-boundaries,auto-qwy-host,release-debt"
+readonly EXPECTED_GATE_MANIFEST_SHA256="fcac0011972a263f61972d4810c3cc3388b4022b3cb1e44c6bcbfbe67ea3c358"
+if ! manifest_sha256="$(printf '%s' "$GATES" | /usr/bin/python3 -I -c \
+  'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')" ||
+  [ "$manifest_sha256" != "$EXPECTED_GATE_MANIFEST_SHA256" ]; then
+  printf '%s\n' 'VERIFY_A_PLUS_GATE_MANIFEST_INCOMPLETE' >&2
+  exit 1
+fi
+unset manifest_sha256
+manifest_count=0
+manifest_names=""
+expected_active=0
+expected_pending=0
+manifest_invalid=0
+while IFS='|' read -r rank name pr file cmd extra; do
+  [ -z "${rank:-}" ] && continue
+  case "$rank" in 1|2|3) ;; *) manifest_invalid=1 ;; esac
+  case "$name" in
+    ''|*[!a-z0-9-]*) manifest_invalid=1 ;;
+  esac
+  case "$pr" in PR-[1-9]|PR-[1-9][0-9]*) ;; *) manifest_invalid=1 ;; esac
+  if [ -z "$file" ] || [ -z "$cmd" ] || [ -n "${extra:-}" ]; then
+    manifest_invalid=1
+  fi
+  manifest_count=$((manifest_count + 1))
+  if [ -z "$manifest_names" ]; then
+    manifest_names="$name"
+  else
+    manifest_names="$manifest_names,$name"
+  fi
+  if [ "$rank" -gt "$STAGE_RANK" ]; then
+    expected_pending=$((expected_pending + 1))
+  else
+    expected_active=$((expected_active + 1))
+  fi
+done <<EOF
+$(printf '%s\n' "$GATES")
+EOF
+if [ "$manifest_invalid" -ne 0 ] ||
+  [ "$manifest_count" -ne "$EXPECTED_GATE_COUNT" ] ||
+  [ "$manifest_names" != "$EXPECTED_GATE_NAMES" ]; then
+  printf '%s\n' 'VERIFY_A_PLUS_GATE_MANIFEST_INCOMPLETE' >&2
+  exit 1
+fi
+readonly expected_active expected_pending
+unset manifest_invalid manifest_count manifest_names
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   printf 'Gate manifest (requested stage: %s)\n\n' "$STAGE"
@@ -101,19 +194,652 @@ EOF
   exit 0
 fi
 
+read_java_binding_field() {
+  local binding="$1" field="$2"
+  /usr/bin/python3 -I - "$binding" "$field" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+field = sys.argv[2]
+expected_keys = {
+    "schemaVersion",
+    "profileId",
+    "javaHome",
+    "os",
+    "arch",
+    "javaMajor",
+    "javaVendor",
+    "javaVmVendor",
+    "javaRuntimeVersion",
+    "jdkTreeSha256",
+}
+
+
+def reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+try:
+    if not raw or len(raw.encode("utf-8")) > 8192:
+        raise ValueError("binding size")
+    value = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    canonical = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+except (UnicodeEncodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if (
+    not isinstance(value, dict)
+    or set(value) != expected_keys
+    or canonical != raw
+    or type(value.get("schemaVersion")) is not int
+    or value["schemaVersion"] != 1
+    or type(value.get("javaMajor")) is not int
+    or value["javaMajor"] != 17
+    or field != "javaHome"
+):
+    raise SystemExit(1)
+result = value.get(field)
+if (
+    not isinstance(result, str)
+    or not result
+    or result != result.strip()
+    or any(delimiter in result for delimiter in ("\x00", "\r", "\n"))
+):
+    raise SystemExit(1)
+print(result)
+PY
+}
+
+stage_java_runtime() {
+  local candidate="$1" stage_root="$2"
+  [ -f /usr/bin/python3 ] && [ -x /usr/bin/python3 ] || return 1
+  [ -f "$java_runtime_stager" ] && [ ! -L "$java_runtime_stager" ] || return 1
+  /usr/bin/python3 -I "$java_runtime_stager" "$candidate" "$stage_root"
+}
+
+verify_java_runtime_binding() {
+  [ -n "$host_java_home" ] && [ -n "$host_java_binding" ] || return 1
+  [ -f "$java_profile_validator" ] && [ ! -L "$java_profile_validator" ] || return 1
+  /usr/bin/python3 -I "$java_profile_validator" \
+    --verify-binding "$host_java_home" "$host_java_binding" >/dev/null
+}
+
+create_verify_temp_root() {
+  local anchor="$1"
+  /usr/bin/python3 -I - "$anchor" <<'PY'
+import errno
+import os
+import pathlib
+import secrets
+import stat
+import subprocess
+import sys
+
+anchor = pathlib.Path(sys.argv[1])
+try:
+    if not anchor.is_absolute() or anchor.resolve(strict=True) != anchor:
+        raise OSError("anchor is not one physical absolute directory")
+except OSError:
+    raise SystemExit(1)
+if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+    raise SystemExit(1)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+
+
+def dev_inode(value):
+    return value.st_dev, value.st_ino
+
+
+def directory_is_empty(directory_fd):
+    with os.scandir(directory_fd) as entries:
+        return next(entries, None) is None
+
+
+def has_extended_acl(path):
+    try:
+        attributes = os.listxattr(path, follow_symlinks=False)
+    except AttributeError:
+        attributes = ()
+    except OSError as error:
+        unsupported = {
+            item
+            for item in (
+                getattr(errno, "ENOTSUP", None),
+                getattr(errno, "EOPNOTSUPP", None),
+            )
+            if item is not None
+        }
+        if error.errno not in unsupported:
+            raise
+        attributes = ()
+    if any(
+        attribute in {"system.posix_acl_access", "system.posix_acl_default"}
+        for attribute in attributes
+    ):
+        return True
+    if sys.platform == "darwin":
+        result = subprocess.run(
+            ["/bin/ls", "-lde", os.fspath(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.splitlines():
+            raise OSError("cannot inspect directory ACL")
+        lines = result.stdout.splitlines()
+        mode_token = lines[0].split(maxsplit=1)[0]
+        return "+" in mode_token or any(
+            line.lstrip().split(":", 1)[0].isdigit() for line in lines[1:]
+        )
+    return False
+
+
+def validate_directory(descriptor, path, expected_mode=None):
+    opened = os.fstat(descriptor)
+    named = os.stat(path, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or opened.st_uid != os.geteuid()
+        or named.st_uid != os.geteuid()
+        or stat.S_IMODE(opened.st_mode) & 0o022
+        or stat.S_IMODE(named.st_mode) & 0o022
+        or dev_inode(opened) != dev_inode(named)
+        or (expected_mode is not None and stat.S_IMODE(opened.st_mode) != expected_mode)
+        or (expected_mode is not None and stat.S_IMODE(named.st_mode) != expected_mode)
+        or has_extended_acl(path)
+    ):
+        raise OSError("directory identity, owner, mode, or ACL is unsafe")
+    opened_after = os.fstat(descriptor)
+    named_after = os.stat(path, follow_symlinks=False)
+    if dev_inode(opened_after) != dev_inode(opened) or dev_inode(named_after) != dev_inode(opened):
+        raise OSError("directory changed during ACL validation")
+    return opened
+
+
+anchor_fd = None
+build_fd = None
+root_fd = None
+created_root_identity = None
+root_name = None
+try:
+    anchor_fd = os.open(anchor, directory_flags)
+    validate_directory(anchor_fd, anchor)
+    try:
+        os.mkdir("build", 0o700, dir_fd=anchor_fd)
+    except FileExistsError:
+        pass
+    build_path = anchor / "build"
+    build_fd = os.open("build", directory_flags, dir_fd=anchor_fd)
+    validate_directory(build_fd, build_path)
+    for _ in range(128):
+        candidate = f"verify-a-plus.{secrets.token_hex(4)}"
+        try:
+            os.mkdir(candidate, 0o700, dir_fd=build_fd)
+        except FileExistsError:
+            continue
+        root_name = candidate
+        created = os.stat(root_name, dir_fd=build_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.geteuid():
+            raise OSError("new private root identity is unsafe")
+        created_root_identity = dev_inode(created)
+        break
+    if root_name is None:
+        raise OSError("private namespace exhausted")
+    root_path = build_path / root_name
+    root_fd = os.open(root_name, directory_flags, dir_fd=build_fd)
+    validate_directory(root_fd, root_path, expected_mode=0o700)
+    if not directory_is_empty(root_fd):
+        raise OSError("new private root is not empty")
+    print(root_path)
+except BaseException as error:
+    if root_name is not None and created_root_identity is not None and build_fd is not None:
+        try:
+            if root_fd is None:
+                root_fd = os.open(root_name, directory_flags, dir_fd=build_fd)
+            opened = os.fstat(root_fd)
+            named = os.stat(root_name, dir_fd=build_fd, follow_symlinks=False)
+            if (
+                stat.S_ISDIR(opened.st_mode)
+                and opened.st_uid == os.geteuid()
+                and dev_inode(opened) == created_root_identity
+                and dev_inode(named) == created_root_identity
+                and directory_is_empty(root_fd)
+            ):
+                os.close(root_fd)
+                root_fd = None
+                confirmed = os.stat(root_name, dir_fd=build_fd, follow_symlinks=False)
+                if dev_inode(confirmed) == created_root_identity:
+                    os.rmdir(root_name, dir_fd=build_fd)
+        except OSError:
+            pass
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        raise
+    raise SystemExit(1)
+finally:
+    if root_fd is not None:
+        os.close(root_fd)
+    if build_fd is not None:
+        os.close(build_fd)
+    if anchor_fd is not None:
+        os.close(anchor_fd)
+PY
+}
+
+create_private_java_runtime_root() {
+  local private_root="$1"
+  /usr/bin/python3 -I - "$private_root" <<'PY'
+import os
+import pathlib
+import re
+import secrets
+import stat
+import sys
+
+private_root = pathlib.Path(sys.argv[1])
+if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+    raise SystemExit(1)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+root_fd = None
+stage_fd = None
+
+
+def directory_is_empty(directory_fd):
+    with os.scandir(directory_fd) as entries:
+        return next(entries, None) is None
+
+
+try:
+    if (
+        not private_root.is_absolute()
+        or private_root.resolve(strict=True) != private_root
+        or re.fullmatch(r"verify-a-plus\.[0-9a-f]{8}", private_root.name) is None
+    ):
+        raise OSError("unsafe private root")
+    root_fd = os.open(private_root, directory_flags)
+    opened_root = os.fstat(root_fd)
+    named_root = os.stat(private_root, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened_root.st_mode)
+        or opened_root.st_uid != os.geteuid()
+        or stat.S_IMODE(opened_root.st_mode) != 0o700
+        or (opened_root.st_dev, opened_root.st_ino) != (named_root.st_dev, named_root.st_ino)
+    ):
+        raise OSError("unsafe private root identity")
+    stage_name = None
+    for _ in range(128):
+        candidate = f"jdk-runtime.{secrets.token_hex(16)}"
+        try:
+            os.mkdir(candidate, 0o700, dir_fd=root_fd)
+        except FileExistsError:
+            continue
+        stage_name = candidate
+        break
+    if stage_name is None:
+        raise OSError("private JDK namespace exhausted")
+    if re.fullmatch(r"jdk-runtime\.[0-9a-f]{32}", stage_name) is None:
+        raise OSError("private JDK stage name is unsafe")
+    stage_path = private_root / stage_name
+    stage_fd = os.open(stage_name, directory_flags, dir_fd=root_fd)
+    opened_stage = os.fstat(stage_fd)
+    named_stage = os.stat(stage_name, dir_fd=root_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened_stage.st_mode)
+        or opened_stage.st_uid != os.geteuid()
+        or stat.S_IMODE(opened_stage.st_mode) != 0o700
+        or (opened_stage.st_dev, opened_stage.st_ino)
+        != (named_stage.st_dev, named_stage.st_ino)
+        or not directory_is_empty(stage_fd)
+    ):
+        raise OSError("unsafe private JDK stage")
+    print(stage_path)
+except OSError:
+    raise SystemExit(1)
+finally:
+    if stage_fd is not None:
+        os.close(stage_fd)
+    if root_fd is not None:
+        os.close(root_fd)
+PY
+}
+
 # Toolchain preconditions — reported once, explicitly, instead of surfacing as
 # an opaque Gradle stack trace inside the first app gate.
-if ! command -v java >/dev/null 2>&1 && [ -z "${JAVA_HOME:-}" ]; then
-  printf 'verify-a-plus: no JVM on PATH and JAVA_HOME is unset (spec requires Java 17)\n' >&2
+if [ -z "$requested_java_home" ]; then
+  printf 'verify-a-plus: JAVA_HOME must name an explicit Java 17 runtime\n' >&2
   exit 1
 fi
-if [ -z "${ANDROID_HOME:-}${ANDROID_SDK_ROOT:-}" ] && [ ! -f apps/cellrebel-auto/local.properties ]; then
+if [ -z "$requested_android_home" ]; then
   printf 'verify-a-plus: Android SDK location unknown (set ANDROID_HOME or ANDROID_SDK_ROOT)\n' >&2
   exit 1
 fi
+emit_android_sdk_binding() {
+  local candidate="$1"
+  [ -f /usr/bin/python3 ] && [ -x /usr/bin/python3 ] || return 1
+  [ -f "$android_sdk_validator" ] && [ ! -L "$android_sdk_validator" ] || return 1
+  /usr/bin/python3 -I "$android_sdk_validator" --emit-binding "$candidate"
+}
+
+verify_android_sdk_binding() {
+  [ -n "$host_android_home" ] && [ -n "$host_android_binding" ] || return 1
+  /usr/bin/python3 -I "$android_sdk_validator" \
+    --verify-binding "$host_android_home" "$host_android_binding" >/dev/null
+}
+
+host_android_home="$requested_android_home"
+if ! host_android_binding="$(emit_android_sdk_binding "$requested_android_home")" ||
+  [ -z "$host_android_binding" ] ||
+  ! verify_android_sdk_binding; then
+  printf '%s\n' 'VERIFY_A_PLUS_ANDROID_SDK_INVALID' >&2
+  exit 1
+fi
+readonly host_android_home host_android_binding
+for local_sdk_override in \
+  "$REPO_ROOT/local.properties" \
+  "$REPO_ROOT/apps/cellrebel-auto/local.properties" \
+  "$REPO_ROOT/apps/qianwangyou/local.properties" \
+  "$REPO_ROOT/acceptance/local.properties" \
+  "$REPO_ROOT/integration-tests/pr63-on-issue66/local.properties"; do
+  if [ -e "$local_sdk_override" ] || [ -L "$local_sdk_override" ]; then
+    printf 'VERIFY_A_PLUS_LOCAL_SDK_OVERRIDE_PRESENT: %s\n' "$local_sdk_override" >&2
+    exit 1
+  fi
+done
+unset local_sdk_override
+
+verify_temp_root=""
+cleanup_verify_environment() {
+  local original_status=$?
+  trap '' HUP INT TERM
+  trap - EXIT
+  if [ -z "${verify_temp_root:-}" ]; then
+    exit "$original_status"
+  fi
+  if ! /usr/bin/python3 -I - "$verify_temp_parent" "$verify_temp_root" <<'PY'
+import errno
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import sys
+
+parent = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+if (
+    not parent.is_absolute()
+    or not target.is_absolute()
+    or target.parent != parent
+    or re.fullmatch(r"verify-a-plus\.[0-9a-f]{8}", target.name) is None
+    or not hasattr(os, "O_DIRECTORY")
+    or not hasattr(os, "O_NOFOLLOW")
+):
+    raise SystemExit(1)
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+
+
+def dev_inode(value):
+    return value.st_dev, value.st_ino
+
+
+def has_extended_acl(path):
+    try:
+        attributes = os.listxattr(path, follow_symlinks=False)
+    except AttributeError:
+        attributes = ()
+    except OSError as error:
+        unsupported = {
+            item
+            for item in (
+                getattr(errno, "ENOTSUP", None),
+                getattr(errno, "EOPNOTSUPP", None),
+            )
+            if item is not None
+        }
+        if error.errno not in unsupported:
+            raise
+        attributes = ()
+    if any(
+        attribute in {"system.posix_acl_access", "system.posix_acl_default"}
+        for attribute in attributes
+    ):
+        return True
+    if sys.platform == "darwin":
+        result = subprocess.run(
+            ["/bin/ls", "-lde", os.fspath(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.splitlines():
+            raise OSError("cannot inspect cleanup parent ACL")
+        lines = result.stdout.splitlines()
+        mode_token = lines[0].split(maxsplit=1)[0]
+        return "+" in mode_token or any(
+            line.lstrip().split(":", 1)[0].isdigit() for line in lines[1:]
+        )
+    return False
+
+
+try:
+    parent_fd = os.open(parent, directory_flags)
+except FileNotFoundError:
+    raise SystemExit(1)
+root_fd = None
+seen = 0
+
+
+def bounded_directory_names(directory_fd, remaining):
+    if remaining < 0:
+        raise OSError("cleanup entry count exceeded")
+    names = []
+    with os.scandir(directory_fd) as entries:
+        for entry in entries:
+            if len(names) >= remaining:
+                raise OSError("cleanup entry count exceeded")
+            names.append(entry.name)
+    names.sort(key=os.fsencode)
+    return names
+
+
+def clear(directory_fd, depth):
+    global seen
+    if depth > 128:
+        raise OSError("cleanup depth exceeded")
+    for name in bounded_directory_names(directory_fd, 200000 - seen):
+        seen += 1
+        value = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISDIR(value.st_mode):
+            if value.st_uid != os.geteuid():
+                raise OSError("cleanup directory owner changed")
+            if stat.S_IMODE(value.st_mode) != 0o700:
+                os.chmod(name, 0o700, dir_fd=directory_fd, follow_symlinks=False)
+                value = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            try:
+                if dev_inode(os.fstat(child_fd)) != dev_inode(value):
+                    raise OSError("cleanup directory identity changed")
+                clear(child_fd, depth + 1)
+                if dev_inode(os.fstat(child_fd)) != dev_inode(value):
+                    raise OSError("cleanup directory changed")
+            finally:
+                os.close(child_fd)
+            os.rmdir(name, dir_fd=directory_fd)
+        else:
+            os.unlink(name, dir_fd=directory_fd)
+
+
+try:
+    parent_state = os.fstat(parent_fd)
+    named_parent = os.stat(parent, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(parent_state.st_mode)
+        or parent_state.st_uid != os.geteuid()
+        or named_parent.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_state.st_mode) & 0o022
+        or stat.S_IMODE(named_parent.st_mode) & 0o022
+        or dev_inode(parent_state) != dev_inode(named_parent)
+        or has_extended_acl(parent)
+    ):
+        raise OSError("cleanup parent is unsafe")
+    parent_after_acl = os.fstat(parent_fd)
+    named_parent_after_acl = os.stat(parent, follow_symlinks=False)
+    if (
+        dev_inode(parent_after_acl) != dev_inode(parent_state)
+        or dev_inode(named_parent_after_acl) != dev_inode(parent_state)
+        or parent_after_acl.st_uid != os.geteuid()
+        or named_parent_after_acl.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_after_acl.st_mode) & 0o022
+        or stat.S_IMODE(named_parent_after_acl.st_mode) & 0o022
+    ):
+        raise OSError("cleanup parent changed during ACL validation")
+    try:
+        value = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    if not stat.S_ISDIR(value.st_mode) or value.st_uid != os.geteuid():
+        raise OSError("cleanup target is unsafe")
+    if stat.S_IMODE(value.st_mode) != 0o700:
+        os.chmod(target.name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+        value = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
+    root_fd = os.open(target.name, directory_flags, dir_fd=parent_fd)
+    if dev_inode(os.fstat(root_fd)) != dev_inode(value):
+        raise OSError("cleanup target identity changed")
+    clear(root_fd, 0)
+    if dev_inode(os.fstat(root_fd)) != dev_inode(value):
+        raise OSError("cleanup target changed")
+    os.close(root_fd)
+    root_fd = None
+    os.rmdir(target.name, dir_fd=parent_fd)
+    parent_confirmed = os.fstat(parent_fd)
+    named_parent_confirmed = os.stat(parent, follow_symlinks=False)
+    if (
+        dev_inode(parent_confirmed) != dev_inode(parent_state)
+        or dev_inode(named_parent_confirmed) != dev_inode(parent_state)
+        or parent_confirmed.st_uid != os.geteuid()
+        or named_parent_confirmed.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_confirmed.st_mode) & 0o022
+        or stat.S_IMODE(named_parent_confirmed.st_mode) & 0o022
+        or has_extended_acl(parent)
+    ):
+        raise OSError("cleanup parent changed")
+except OSError:
+    raise SystemExit(1)
+finally:
+    if root_fd is not None:
+        os.close(root_fd)
+    os.close(parent_fd)
+PY
+  then
+    printf 'VERIFY_A_PLUS_PRIVATE_ENVIRONMENT_CLEANUP_FAILED: %s\n' "$verify_temp_root" >&2
+    original_status=1
+  fi
+  exit "$original_status"
+}
+
+trap cleanup_verify_environment EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! verify_temp_root="$(create_verify_temp_root "$verify_temp_anchor")" ||
+  [ -z "$verify_temp_root" ]; then
+  printf '%s\n' 'VERIFY_A_PLUS_PRIVATE_ENVIRONMENT_UNAVAILABLE' >&2
+  exit 1
+fi
+readonly verify_temp_root
+if ! /bin/mkdir "$verify_temp_root/home" ||
+  ! /bin/chmod 0700 "$verify_temp_root/home"; then
+  printf '%s\n' 'VERIFY_A_PLUS_PRIVATE_ENVIRONMENT_UNAVAILABLE' >&2
+  exit 1
+fi
+readonly verify_child_home="$verify_temp_root/home"
+if ! host_java_stage_root="$(create_private_java_runtime_root "$verify_temp_root")" ||
+  [ -z "$host_java_stage_root" ]; then
+  printf '%s\n' 'VERIFY_A_PLUS_EPHEMERAL_JAVA_RUNTIME_PREPARATION_FAILED' >&2
+  exit 1
+fi
+readonly host_java_stage_root
+if ! host_java_binding="$(
+  stage_java_runtime "$requested_java_home" "$host_java_stage_root"
+)" || [ -z "$host_java_binding" ]; then
+  printf '%s\n' 'VERIFY_A_PLUS_JAVA_RUNTIME_INVALID' >&2
+  exit 1
+fi
+if ! host_java_home="$(read_java_binding_field "$host_java_binding" javaHome)" ||
+  [ -z "$host_java_home" ] ||
+  [[ "$host_java_home" != "$host_java_stage_root/home" ]] ||
+  ! verify_java_runtime_binding; then
+  printf '%s\n' 'VERIFY_A_PLUS_STAGED_JAVA_RUNTIME_INVALID' >&2
+  exit 1
+fi
+readonly host_java_home host_java_binding
+
+run_clean_gate_command() {
+  [ "$#" -eq 1 ] || return 1
+  local gate_gradle_user_home command_status=0
+  if ! gate_gradle_user_home="$(
+    /usr/bin/mktemp -d "$verify_temp_root/gradle-user-home.XXXXXXXX"
+  )" || [ -z "$gate_gradle_user_home" ] ||
+    ! /bin/chmod 0700 "$gate_gradle_user_home"; then
+    printf '%s\n' 'VERIFY_A_PLUS_GATE_PRIVATE_ENVIRONMENT_UNAVAILABLE' >&2
+    return 1
+  fi
+  if ! verify_java_runtime_binding; then
+    printf '%s\n' 'VERIFY_A_PLUS_JAVA_RUNTIME_CHANGED' >&2
+    return 1
+  fi
+  if ! verify_android_sdk_binding; then
+    printf '%s\n' 'VERIFY_A_PLUS_ANDROID_SDK_CHANGED' >&2
+    return 1
+  fi
+  /usr/bin/env -i \
+    ADB=/usr/bin/false \
+    ANDROID_HOME="$host_android_home" \
+    ANDROID_SDK_ROOT="$host_android_home" \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_SYSTEM=/dev/null \
+    GRADLE_USER_HOME="$gate_gradle_user_home" \
+    HOME="$verify_child_home" \
+    JAVA_HOME="$host_java_home" \
+    LANG=C \
+    LC_ALL=C \
+    PATH=/usr/bin:/bin \
+    STAGE="$STAGE" \
+    /bin/bash -p -c "$1" </dev/null || command_status=$?
+  if ! verify_java_runtime_binding; then
+    printf '%s\n' 'VERIFY_A_PLUS_JAVA_RUNTIME_CHANGED' >&2
+    return 1
+  fi
+  if ! verify_android_sdk_binding; then
+    printf '%s\n' 'VERIFY_A_PLUS_ANDROID_SDK_CHANGED' >&2
+    return 1
+  fi
+  return "$command_status"
+}
 
 RUN=0; PASSED=0; FAILED=0; PENDING=0
 FAILED_NAMES=""; PENDING_NAMES=""
+MANIFEST_SEEN=0; ACTIVE_SEEN=0
 readonly HOST_RECEIPT="integration-tests/pr63-on-issue66/harness/build/reports/pr63-on-issue66/host-gate-receipt.json"
 readonly HOST_RECEIPT_LOCK="${HOST_RECEIPT%/*}/host-gate.lock"
 readonly HOST_GATE_RUNNER="$REPO_ROOT/integration-tests/pr63-on-issue66/run-host-gate.sh"
@@ -154,7 +880,7 @@ if runner_path != canonical_runner_path:
     raise SystemExit(1)
 
 expected = {
-    "schemaVersion": 3,
+    "schemaVersion": 4,
     "hostIntegration": "PASS",
     "issue66Ac7": "NOT_PASSED",
     "emulator": "NOT_RUN",
@@ -168,13 +894,28 @@ expected = {
         "ADDITIONAL_AUTHORIZATION"
     ),
 }
-provenance_keys = {"sourceHead", "sourceTree", "runnerSha256", "runId"}
+binding_keys = {
+    "sourceHead",
+    "sourceTree",
+    "runnerSha256",
+    "runId",
+    "jdkProfileId",
+    "jdkRuntimeVersion",
+    "jdkTreeSha256",
+    "gradleAttestationAutoSha256",
+    "gradleAttestationQwySha256",
+    "gradleAttestationHarnessSha256",
+}
 
 class ReceiptSchemaError(ValueError):
     pass
 
 
 class SourceBindingError(ValueError):
+    pass
+
+
+class GradleAttestationError(ValueError):
     pass
 
 
@@ -227,9 +968,12 @@ def has_extended_acl(path):
         if error.errno not in unsupported:
             raise
         attributes = ()
-    if any(
-        attribute in {"system.posix_acl_access", "system.posix_acl_default"}
+    normalized_attributes = {
+        os.fsdecode(attribute) if isinstance(attribute, bytes) else attribute
         for attribute in attributes
+    }
+    if normalized_attributes.intersection(
+        {"system.posix_acl_access", "system.posix_acl_default"}
     ):
         return True
     if sys.platform == "darwin":
@@ -308,6 +1052,7 @@ def fixed_git(*arguments):
         "LC_ALL=C",
         "LANG=C",
         "PATH=/usr/bin:/bin",
+        "GIT_ATTR_NOSYSTEM=1",
         "GIT_CONFIG_NOSYSTEM=1",
         "GIT_CONFIG_SYSTEM=/dev/null",
         "GIT_CONFIG_GLOBAL=/dev/null",
@@ -321,6 +1066,18 @@ def fixed_git(*arguments):
         "core.fsmonitor=false",
         "-c",
         "core.untrackedCache=false",
+        "-c",
+        "core.trustctime=true",
+        "-c",
+        "core.checkStat=default",
+        "-c",
+        "core.fileMode=true",
+        "-c",
+        "core.excludesFile=/dev/null",
+        "-c",
+        "core.attributesFile=/dev/null",
+        "-c",
+        "core.ignoreCase=false",
         "-C",
         repo_root,
         *arguments,
@@ -436,16 +1193,418 @@ def stable_runner_sha256():
             os.close(runner_parent_fd)
 
 
-def require_plain_index():
-    raw = fixed_git("ls-files", "-v", "-z", "--cached")
-    if not raw or not raw.endswith(b"\x00"):
-        raise SourceBindingError("repository index listing is empty or malformed")
-    records = raw[:-1].split(b"\x00")
-    if any(len(record) < 3 or record[:2] != b"H " for record in records):
-        raise SourceBindingError(
-            "repository index contains hidden assume-unchanged, skip-worktree, "
-            "or other noncanonical flags"
+def nul_records(raw, label):
+    if not raw:
+        return []
+    if not raw.endswith(b"\x00"):
+        raise SourceBindingError(f"{label} is not NUL terminated")
+    return raw[:-1].split(b"\x00")
+
+
+def safe_source_path(path):
+    components = path.split(b"/")
+    return (
+        bool(path)
+        and not path.startswith(b"/")
+        and all(component not in {b"", b".", b".."} for component in components)
+        and components[0] != b".git"
+    )
+
+
+def parse_head_entries(raw):
+    entries = {}
+    for record in nul_records(raw, "HEAD tree listing"):
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ")
+        except ValueError as error:
+            raise SourceBindingError("HEAD tree contains a malformed entry") from error
+        if (
+            not safe_source_path(path)
+            or path in entries
+            or object_type != b"blob"
+            or mode not in {b"100644", b"100755", b"120000"}
+            or re.fullmatch(b"[0-9a-f]{40}", object_id) is None
+        ):
+            raise SourceBindingError(
+                "HEAD tree contains an unsupported, unsafe, or duplicate entry"
+            )
+        entries[path] = (mode, object_id)
+    if not entries:
+        raise SourceBindingError("HEAD tree is empty")
+    return entries
+
+
+def parse_index_entries(raw):
+    entries = {}
+    for record in nul_records(raw, "repository index listing"):
+        try:
+            metadata, path = record.split(b"\t", 1)
+            tag, mode, object_id, stage = metadata.split(b" ")
+        except ValueError as error:
+            raise SourceBindingError("repository index contains a malformed entry") from error
+        if (
+            tag != b"H"
+            or stage != b"0"
+            or not safe_source_path(path)
+            or path in entries
+            or mode not in {b"100644", b"100755", b"120000"}
+            or re.fullmatch(b"[0-9a-f]{40}", object_id) is None
+        ):
+            raise SourceBindingError(
+                "repository index flags, stage, mode, object, or path are not plain"
+            )
+        entries[path] = (mode, object_id)
+    return entries
+
+
+def raw_source_manifest(source_head):
+    head_tree = fixed_git("ls-tree", "-r", "-z", "--full-tree", source_head)
+    index = fixed_git("ls-files", "--stage", "-v", "-z", "--cached")
+    head_entries = parse_head_entries(head_tree)
+    index_entries = parse_index_entries(index)
+    if head_entries != index_entries:
+        raise SourceBindingError("repository index content or mode does not equal HEAD")
+    return head_tree, index, head_entries
+
+
+def source_directory_is_safe(value):
+    return (
+        stat.S_ISDIR(value.st_mode)
+        and value.st_uid == os.geteuid()
+        and not stat.S_IMODE(value.st_mode) & 0o022
+    )
+
+
+if sys.platform == "darwin":
+    import ctypes
+
+    darwin_libc = ctypes.CDLL(None, use_errno=True)
+    darwin_acl_get_fd = darwin_libc.acl_get_fd_np
+    darwin_acl_get_fd.argtypes = [ctypes.c_int, ctypes.c_int]
+    darwin_acl_get_fd.restype = ctypes.c_void_p
+    darwin_acl_free = darwin_libc.acl_free
+    darwin_acl_free.argtypes = [ctypes.c_void_p]
+    darwin_acl_free.restype = ctypes.c_int
+
+
+def fd_has_extended_acl(descriptor_fd):
+    """Inspect the pinned source inode without resolving its pathname again."""
+    if sys.platform == "darwin":
+        ctypes.set_errno(0)
+        acl = darwin_acl_get_fd(descriptor_fd, 0x00000100)
+        if not acl:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ENOENT:
+                return False
+            unsupported = {
+                value
+                for value in (
+                    getattr(errno, "ENOTSUP", None),
+                    getattr(errno, "EOPNOTSUPP", None),
+                )
+                if value is not None
+            }
+            if error_number in unsupported:
+                return False
+            raise OSError(error_number, "cannot inspect pinned Darwin ACL")
+        ctypes.set_errno(0)
+        if darwin_acl_free(acl) != 0:
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, "cannot release pinned Darwin ACL")
+        return True
+
+    try:
+        attributes = os.listxattr(descriptor_fd)
+    except AttributeError as error:
+        raise OSError("descriptor xattr inspection is unavailable") from error
+    except OSError as error:
+        unsupported = {
+            value
+            for value in (
+                getattr(errno, "ENOTSUP", None),
+                getattr(errno, "EOPNOTSUPP", None),
+            )
+            if value is not None
+        }
+        if error.errno in unsupported:
+            return False
+        raise
+    attribute_names = {os.fsdecode(attribute) for attribute in attributes}
+    return bool(
+        attribute_names
+        & {"system.posix_acl_access", "system.posix_acl_default"}
+    )
+
+
+def validate_source_directory_fd(directory_fd, label):
+    before = os.fstat(directory_fd)
+    if not source_directory_is_safe(before):
+        raise OSError(f"{label} identity, owner, or mode is unsafe")
+    if fd_has_extended_acl(directory_fd):
+        raise OSError(f"{label} has an extended ACL")
+    after = os.fstat(directory_fd)
+    if file_identity(after) != file_identity(before) or not source_directory_is_safe(after):
+        raise OSError(f"{label} changed during ACL inspection")
+    if fd_has_extended_acl(directory_fd):
+        raise OSError(f"{label} acquired an extended ACL")
+    confirmed = os.fstat(directory_fd)
+    if (
+        file_identity(confirmed) != file_identity(after)
+        or not source_directory_is_safe(confirmed)
+    ):
+        raise OSError(f"{label} changed after ACL inspection")
+    return confirmed
+
+
+def open_source_parent(repo_fd, path):
+    components = path.split(b"/")
+    parent_fd = os.dup(repo_fd)
+    try:
+        for component in components[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | os.O_DIRECTORY
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                opened_state = validate_source_directory_fd(
+                    next_fd,
+                    "tracked source directory",
+                )
+                named_state = os.stat(
+                    component,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not source_directory_is_safe(named_state)
+                    or file_identity(opened_state) != file_identity(named_state)
+                ):
+                    raise OSError(
+                        "tracked path traverses an unsafe or unstable directory"
+                    )
+                opened_state_confirmed = validate_source_directory_fd(
+                    next_fd,
+                    "tracked source directory",
+                )
+                named_state_confirmed = os.stat(
+                    component,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    file_identity(opened_state_confirmed) != file_identity(opened_state)
+                    or file_identity(named_state_confirmed) != file_identity(named_state)
+                    or file_identity(opened_state_confirmed)
+                    != file_identity(named_state_confirmed)
+                ):
+                    raise OSError("tracked source directory changed during validation")
+            except BaseException:
+                os.close(next_fd)
+                raise
+            os.close(parent_fd)
+            parent_fd = next_fd
+        validate_source_directory_fd(parent_fd, "tracked source parent")
+        return parent_fd, components[-1]
+    except BaseException:
+        os.close(parent_fd)
+        raise
+
+
+def git_blob_sha1(payload):
+    header = b"blob " + str(len(payload)).encode("ascii") + b"\x00"
+    try:
+        digest = hashlib.sha1(usedforsecurity=False)
+    except TypeError:
+        digest = hashlib.sha1()
+    digest.update(header)
+    digest.update(payload)
+    return digest.hexdigest().encode("ascii")
+
+
+def verify_raw_leaf(repo_fd, path, expected_mode, expected_object_id):
+    parent_fd, leaf_name = open_source_parent(repo_fd, path)
+    file_fd = None
+    confirmed_parent_fd = None
+    try:
+        parent_state = validate_source_directory_fd(parent_fd, "tracked source parent")
+        before = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+        if expected_mode == b"120000":
+            if not stat.S_ISLNK(before.st_mode) or before.st_uid != os.geteuid():
+                raise OSError("tracked symlink type or owner differs from HEAD")
+            # A symlink's replacement authority lives on its pinned, ACL-checked
+            # parent; Darwin does not expose an ACL on the symlink inode itself.
+            payload = os.readlink(leaf_name, dir_fd=parent_fd)
+            if isinstance(payload, str):
+                payload = os.fsencode(payload)
+            after = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+            if file_identity(after) != file_identity(before):
+                raise OSError("tracked symlink changed during raw read")
+        else:
+            file_fd = os.open(
+                leaf_name,
+                os.O_RDONLY
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent_fd,
+            )
+            opened_state = os.fstat(file_fd)
+            if (
+                not stat.S_ISREG(opened_state.st_mode)
+                or opened_state.st_uid != os.geteuid()
+                or before.st_uid != os.geteuid()
+                or stat.S_IMODE(opened_state.st_mode) & 0o022
+                or stat.S_IMODE(before.st_mode) & 0o022
+                or file_identity(opened_state) != file_identity(before)
+            ):
+                raise OSError("tracked regular file identity, owner, or mode is unsafe")
+            if fd_has_extended_acl(file_fd):
+                raise OSError("tracked regular file has an extended ACL")
+            opened_state_after_acl = os.fstat(file_fd)
+            named_state_after_acl = os.stat(
+                leaf_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                file_identity(opened_state_after_acl) != file_identity(opened_state)
+                or file_identity(named_state_after_acl) != file_identity(opened_state)
+            ):
+                raise OSError("tracked regular file changed during ACL inspection")
+            payload_buffer = bytearray()
+            while True:
+                chunk = os.read(file_fd, 65536)
+                if not chunk:
+                    break
+                payload_buffer.extend(chunk)
+                if len(payload_buffer) > 64 * 1024 * 1024:
+                    raise OSError("tracked file exceeds the 64 MiB provenance ceiling")
+            opened_state_after = os.fstat(file_fd)
+            after = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                file_identity(opened_state_after) != file_identity(opened_state)
+                or file_identity(after) != file_identity(opened_state)
+            ):
+                raise OSError("tracked regular file changed during raw read")
+            if fd_has_extended_acl(file_fd):
+                raise OSError("tracked regular file acquired an extended ACL")
+            opened_state_final = os.fstat(file_fd)
+            named_state_final = os.stat(
+                leaf_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                file_identity(opened_state_final) != file_identity(opened_state)
+                or file_identity(named_state_final) != file_identity(opened_state)
+            ):
+                raise OSError("tracked regular file changed during final ACL inspection")
+            actual_mode = (
+                b"100755"
+                if stat.S_IMODE(opened_state.st_mode) & 0o111
+                else b"100644"
+            )
+            if actual_mode != expected_mode:
+                raise OSError("tracked executable mode differs from HEAD")
+            payload = bytes(payload_buffer)
+        if git_blob_sha1(payload) != expected_object_id:
+            raise OSError("tracked raw bytes differ from HEAD")
+
+        parent_state_after = os.fstat(parent_fd)
+        confirmed_parent_fd, _ = open_source_parent(repo_fd, path)
+        confirmed_parent_state = validate_source_directory_fd(
+            confirmed_parent_fd,
+            "tracked source parent",
         )
+        if (
+            file_identity(parent_state_after) != file_identity(parent_state)
+            or file_identity(confirmed_parent_state) != file_identity(parent_state)
+            or not source_directory_is_safe(parent_state_after)
+            or not source_directory_is_safe(confirmed_parent_state)
+        ):
+            raise OSError("tracked source parent changed during raw read")
+        parent_state_final = validate_source_directory_fd(
+            parent_fd,
+            "tracked source parent",
+        )
+        confirmed_parent_state_final = os.fstat(confirmed_parent_fd)
+        if (
+            file_identity(parent_state_final) != file_identity(parent_state)
+            or file_identity(confirmed_parent_state_final) != file_identity(parent_state)
+        ):
+            raise OSError("tracked source parent changed during final ACL inspection")
+    finally:
+        if confirmed_parent_fd is not None:
+            os.close(confirmed_parent_fd)
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def verify_raw_worktree(repo_fd, entries):
+    try:
+        repo_state = validate_source_directory_fd(repo_fd, "repository root")
+        named_repo_state = os.stat(repo_root, follow_symlinks=False)
+        if (
+            not source_directory_is_safe(named_repo_state)
+            or file_identity(repo_state) != file_identity(named_repo_state)
+        ):
+            raise OSError("repository root identity, owner, or mode is unsafe")
+        repo_state_after_acl = validate_source_directory_fd(repo_fd, "repository root")
+        named_repo_state_after_acl = os.stat(repo_root, follow_symlinks=False)
+        if (
+            file_identity(repo_state_after_acl) != file_identity(repo_state)
+            or file_identity(named_repo_state_after_acl) != file_identity(repo_state)
+        ):
+            raise OSError("repository root changed during ACL inspection")
+
+        for path, (expected_mode, expected_object_id) in entries.items():
+            verify_raw_leaf(repo_fd, path, expected_mode, expected_object_id)
+        repo_state_after = validate_source_directory_fd(repo_fd, "repository root")
+        named_repo_state_after = os.stat(repo_root, follow_symlinks=False)
+        if (
+            file_identity(repo_state_after) != file_identity(repo_state)
+            or file_identity(named_repo_state_after) != file_identity(repo_state)
+            or not source_directory_is_safe(repo_state_after)
+            or not source_directory_is_safe(named_repo_state_after)
+        ):
+            raise OSError("repository root changed during raw source verification")
+        repo_state_final = validate_source_directory_fd(repo_fd, "repository root")
+        named_repo_state_final = os.stat(repo_root, follow_symlinks=False)
+        if (
+            file_identity(repo_state_final) != file_identity(repo_state)
+            or file_identity(named_repo_state_final) != file_identity(repo_state)
+        ):
+            raise OSError("repository root changed during final ACL inspection")
+    except OSError as error:
+        raise SourceBindingError(f"cannot verify raw tracked source: {error}") from error
+
+
+def verify_raw_untracked():
+    untracked_ignore_files = fixed_git(
+        "ls-files",
+        "--others",
+        "-z",
+        "--",
+        ".gitignore",
+        ":(glob)**/.gitignore",
+    )
+    if nul_records(untracked_ignore_files, "untracked .gitignore listing"):
+        raise SourceBindingError("untracked .gitignore could alter ignore semantics")
+    untracked = fixed_git(
+        "ls-files",
+        "--others",
+        "-z",
+        "--exclude-per-directory=.gitignore",
+    )
+    if nul_records(untracked, "untracked source listing"):
+        raise SourceBindingError("repository contains non-committed, non-ignored source")
 
 
 def head_runner_sha256(source_head):
@@ -480,22 +1639,27 @@ def read_source_binding():
             raise SourceBindingError("source HEAD is not one SHA-1 commit id")
         if not re.fullmatch(r"[0-9a-f]{40}", source_tree):
             raise SourceBindingError("source tree is not one SHA-1 tree id")
-        require_plain_index()
-        status = fixed_git(
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignore-submodules=none",
-        )
-        if status:
-            raise SourceBindingError("repository tracked/untracked source state is not clean")
+        manifest_before = raw_source_manifest(source_head)
+        verify_raw_worktree(repo_fd, manifest_before[2])
+        verify_raw_untracked()
         runner_sha256 = stable_runner_sha256()
         reviewed_runner_sha256 = head_runner_sha256(source_head)
         if runner_sha256 != reviewed_runner_sha256:
             raise SourceBindingError(
                 "canonical runner bytes do not match the runner blob at source HEAD"
             )
-        require_plain_index()
+
+        confirmed_head = git_scalar("rev-parse", "--verify", "HEAD^{commit}")
+        confirmed_tree = git_scalar("rev-parse", "--verify", "HEAD^{tree}")
+        manifest_after = raw_source_manifest(source_head)
+        if (
+            confirmed_head != source_head
+            or confirmed_tree != source_tree
+            or manifest_after[:2] != manifest_before[:2]
+        ):
+            raise SourceBindingError("HEAD or index changed during raw source binding")
+        verify_raw_worktree(repo_fd, manifest_after[2])
+        verify_raw_untracked()
 
         repo_state_after = os.fstat(repo_fd)
         confirmed_repo_state = confirm_directory_path(repo_root, repo_state)
@@ -514,6 +1678,199 @@ def read_source_binding():
     finally:
         if repo_fd is not None:
             os.close(repo_fd)
+
+
+gradle_attestation_specs = {
+    "auto": (
+        "gradleAttestationAutoSha256",
+        ":app:testDebugUnitTest",
+        ("com.example.cellrebelauto.automation.ProviderPrincipalRoutingRedTest",),
+    ),
+    "qwy": (
+        "gradleAttestationQwySha256",
+        ":app:testDebugUnitTest",
+        (
+            "name.caiyao.fakegps.hook.oracle.Android15OracleHookPlanTest",
+            "name.caiyao.fakegps.hook.oracle.SystemServerOracleWiringGuardTest",
+            "name.caiyao.fakegps.integration.v1.AuthoritativeOracleProductionGuardTest",
+            "name.caiyao.fakegps.integration.v1.BinderAuthoritativeContinuitySourceTest",
+            "name.caiyao.fakegps.oracle.OracleBundleCodecTest",
+            "name.caiyao.fakegps.integration.v1.AuthoritativeAdvanceProviderTest",
+        ),
+    ),
+    "harness": (
+        "gradleAttestationHarnessSha256",
+        ":harness:testDebugUnitTest",
+        (
+            "io.github.terryyyc.fakexxx.integration.pr63issue66.HarnessBoundaryGuardTest",
+            "io.github.terryyyc.fakexxx.integration.pr63issue66.HostRunnerEnvironmentGuardTest",
+            "io.github.terryyyc.fakexxx.integration.pr63issue66.HostReceiptModeGuardTest",
+            "io.github.terryyyc.fakexxx.integration.pr63issue66.HostEphemeralCleanupGuardTest",
+        ),
+    ),
+}
+gradle_attestation_keys = [
+    "schemaVersion",
+    "runId",
+    "stage",
+    "taskPath",
+    "jdkHome",
+    "jdkProfileId",
+    "javaVendor",
+    "javaVmVendor",
+    "jdkRuntimeVersion",
+    "jdkTreeSha256",
+    "jdkMajor",
+    "testLauncherMajor",
+    "testCount",
+    "failureCount",
+    "classes",
+]
+# This offline consumer cannot reexecute a removed staged JDK. Bind its proof
+# to the exact admitted identities; the standalone profile test checks this
+# table against the runtime registry on both supported host platforms.
+reviewed_java_profiles = {
+    "darwin-aarch64-eclipse-temurin-17.0.20.1+1": (
+        "Eclipse Adoptium", "Eclipse Adoptium", "17.0.20.1+1",
+        "f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8",
+    ),
+    "linux-x86_64-eclipse-temurin-17.0.20.1+1": (
+        "Eclipse Adoptium", "Eclipse Adoptium", "17.0.20.1+1",
+        "427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97",
+    ),
+}
+
+
+def read_gradle_attestation(stage, expected_sha256, receipt):
+    if stage not in gradle_attestation_specs:
+        raise GradleAttestationError(f"unsupported stage: {stage!r}")
+    receipt_run_id = receipt["runId"]
+    name = f"gradle-attestation-{stage}-{receipt_run_id}.txt"
+    if os.path.basename(name) != name:
+        raise GradleAttestationError("derived filename is unsafe")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        initial = os.fstat(descriptor)
+        named_initial = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_uid != os.geteuid()
+            or stat.S_IMODE(initial.st_mode) != 0o600
+            or initial.st_nlink != 1
+            or initial.st_size < 1
+            or initial.st_size > 16384
+            or file_identity(initial) != file_identity(named_initial)
+            or fd_has_extended_acl(descriptor)
+        ):
+            raise GradleAttestationError(
+                f"{stage} proof identity, owner, mode, link count, size, or ACL is unsafe"
+            )
+
+        raw = b""
+        while True:
+            chunk = os.read(descriptor, 16385 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+            if len(raw) > 16384:
+                raise GradleAttestationError(f"{stage} proof exceeds 16384 bytes")
+
+        after_read = os.fstat(descriptor)
+        named_after_read = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            file_identity(after_read) != file_identity(initial)
+            or file_identity(named_after_read) != file_identity(initial)
+            or fd_has_extended_acl(descriptor)
+        ):
+            raise GradleAttestationError(f"{stage} proof changed during its first read")
+
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise GradleAttestationError(f"{stage} proof is not UTF-8") from error
+        if not text.endswith("\n") or "\r" in text or "\x00" in text:
+            raise GradleAttestationError(f"{stage} proof has unsafe text framing")
+        lines = text[:-1].split("\n")
+        if len(lines) != len(gradle_attestation_keys):
+            raise GradleAttestationError(f"{stage} proof must contain exactly 15 lines")
+        values = {}
+        for expected_key, line in zip(gradle_attestation_keys, lines):
+            key, separator, value = line.partition("=")
+            if not separator or key != expected_key or key in values or not value:
+                raise GradleAttestationError(
+                    f"{stage} proof has a missing, duplicate, extra, or reordered field"
+                )
+            values[key] = value
+
+        hash_value = hashlib.sha256(raw).hexdigest()
+        if hash_value != expected_sha256:
+            raise GradleAttestationError(f"{stage} proof digest does not match the receipt")
+
+        _, expected_task, required_classes = gradle_attestation_specs[stage]
+        if (
+            values["schemaVersion"] != "2"
+            or values["runId"] != receipt_run_id
+            or values["stage"] != stage
+            or values["taskPath"] != expected_task
+            or values["jdkProfileId"] != receipt["jdkProfileId"]
+            or values["jdkRuntimeVersion"] != receipt["jdkRuntimeVersion"]
+            or values["jdkTreeSha256"] != receipt["jdkTreeSha256"]
+            or values["jdkMajor"] != "17"
+            or values["testLauncherMajor"] != "17"
+            or not re.fullmatch(r"[1-9][0-9]*", values["testCount"])
+            or values["failureCount"] != "0"
+        ):
+            raise GradleAttestationError(f"{stage} proof contract does not match the receipt")
+        expected_jdk_home = re.escape(parent_path) + r"/jdk-runtime\.[0-9a-f]{32}/home"
+        if re.fullmatch(expected_jdk_home, values["jdkHome"]) is None:
+            raise GradleAttestationError(f"{stage} proof JDK home is not a staged sibling")
+        observed_java_identity = tuple(values[field] for field in (
+            "javaVendor", "javaVmVendor", "jdkRuntimeVersion", "jdkTreeSha256",
+        ))
+        if observed_java_identity != reviewed_java_profiles.get(values["jdkProfileId"]):
+            raise GradleAttestationError(f"{stage} proof Java identity is not a registered profile")
+        classes = values["classes"].split(",")
+        if classes != sorted(set(classes)) or any(
+            re.fullmatch(
+                r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+",
+                name,
+            ) is None
+            for name in classes
+        ):
+            raise GradleAttestationError(f"{stage} proof classes are unsafe or not canonical")
+        for required_class in required_classes:
+            if required_class not in classes:
+                raise GradleAttestationError(
+                    f"{stage} proof did not execute required class {required_class}"
+                )
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        confirmed_raw = b""
+        while True:
+            chunk = os.read(descriptor, 16385 - len(confirmed_raw))
+            if not chunk:
+                break
+            confirmed_raw += chunk
+            if len(confirmed_raw) > 16384:
+                raise GradleAttestationError(f"{stage} proof changed beyond its size ceiling")
+        confirmed = os.fstat(descriptor)
+        named_confirmed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            confirmed_raw != raw
+            or file_identity(confirmed) != file_identity(initial)
+            or file_identity(named_confirmed) != file_identity(initial)
+            or fd_has_extended_acl(descriptor)
+        ):
+            raise GradleAttestationError(f"{stage} proof identity or content changed")
+        return values
+    except OSError as error:
+        raise GradleAttestationError(f"cannot safely read {stage} proof: {error}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 parent_path = os.path.abspath(os.path.dirname(receipt_path) or ".")
@@ -720,7 +2077,7 @@ except (OSError, UnicodeError, json.JSONDecodeError) as error:
 if validation_error is None and type(receipt) is not dict:
     validation_error = "host-gate receipt schema mismatch: root must be an object"
 
-expected_keys = set(expected) | provenance_keys
+expected_keys = set(expected) | binding_keys
 if validation_error is None and set(receipt) != expected_keys:
     missing = sorted(expected_keys - set(receipt))
     extra = sorted(set(receipt) - expected_keys)
@@ -736,19 +2093,36 @@ if validation_error is None:
         for field, expected_value in expected.items()
         if type(receipt[field]) is not type(expected_value)
     ]
-    if type(receipt["runId"]) is not str:
-        type_mismatches.append(
-            f"runId has type {type(receipt['runId']).__name__} (expected str)"
-        )
+    type_mismatches.extend(
+        f"{field} has type {type(receipt[field]).__name__} (expected str)"
+        for field in binding_keys
+        if field not in expected and type(receipt[field]) is not str
+    )
     if type_mismatches:
         validation_error = (
             "host-gate receipt schema mismatch: " + "; ".join(type_mismatches)
         )
 
 if validation_error is None:
+    receipt_format_errors = []
     if not re.fullmatch(r"[0-9a-f]{32}", receipt["runId"]):
-        validation_error = (
-            "host-gate receipt schema mismatch: runId must be 32 lowercase hex characters"
+        receipt_format_errors.append("runId must be 32 lowercase hex characters")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]{0,127}", receipt["jdkProfileId"]):
+        receipt_format_errors.append("jdkProfileId has an unsafe format")
+    if not re.fullmatch(r"17\.[0-9][0-9A-Za-z.+_-]*", receipt["jdkRuntimeVersion"]):
+        receipt_format_errors.append("jdkRuntimeVersion is not a Java 17 runtime")
+    if not re.fullmatch(r"[0-9a-f]{64}", receipt["jdkTreeSha256"]):
+        receipt_format_errors.append("jdkTreeSha256 must be one lowercase SHA-256")
+    for field in (
+        "gradleAttestationAutoSha256",
+        "gradleAttestationQwySha256",
+        "gradleAttestationHarnessSha256",
+    ):
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt[field]):
+            receipt_format_errors.append(f"{field} must be one lowercase SHA-256")
+    if receipt_format_errors:
+        validation_error = "host-gate receipt schema mismatch: " + "; ".join(
+            receipt_format_errors
         )
 
 if validation_error is None:
@@ -759,6 +2133,27 @@ if validation_error is None:
     ]
     if mismatches:
         validation_error = "host-gate receipt contract mismatch: " + "; ".join(mismatches)
+
+if validation_error is None:
+    gradle_attestations = {}
+    try:
+        for stage, (sha_field, _, _) in gradle_attestation_specs.items():
+            gradle_attestations[stage] = read_gradle_attestation(
+                stage,
+                receipt[sha_field],
+                receipt,
+            )
+        jdk_homes = {values["jdkHome"] for values in gradle_attestations.values()}
+        java_vendors = {values["javaVendor"] for values in gradle_attestations.values()}
+        java_vm_vendors = {
+            values["javaVmVendor"] for values in gradle_attestations.values()
+        }
+        if len(jdk_homes) != 1 or len(java_vendors) != 1 or len(java_vm_vendors) != 1:
+            raise GradleAttestationError(
+                "the three proofs do not bind one JDK home and vendor identity"
+            )
+    except GradleAttestationError as error:
+        validation_error = f"Gradle attestation invalid: {error}"
 
 receipt_recheck_error = None
 if receipt_fd is not None:
@@ -896,7 +2291,7 @@ if cleanup_error is not None:
     raise SystemExit(1)
 
 print(
-    "     receipt: VALID — schemaVersion=3; hostIntegration=PASS; "
+    "     receipt: VALID — schemaVersion=4; hostIntegration=PASS; "
     f"sourceState=CLEAN; sourceHead={receipt['sourceHead'][:12]}; "
     f"runId={receipt['runId']}; "
     "issue66Ac7=NOT_PASSED; physicalDevice=NOT_RUN; "
@@ -909,12 +2304,14 @@ printf 'verify-a-plus: stage=%s\n' "$STAGE"
 
 while IFS='|' read -r rank name pr file cmd; do
   [ -z "${rank:-}" ] && continue
+  MANIFEST_SEEN=$((MANIFEST_SEEN + 1))
 
   if [ "$rank" -gt "$STAGE_RANK" ]; then
     PENDING=$((PENDING + 1))
     PENDING_NAMES="$PENDING_NAMES $name(owner=$pr)"
     continue
   fi
+  ACTIVE_SEEN=$((ACTIVE_SEEN + 1))
 
   if [ ! -e "$file" ]; then
     # Required at this stage but absent: fail loudly. Never skip.
@@ -926,7 +2323,7 @@ while IFS='|' read -r rank name pr file cmd; do
 
   printf '\n---- %s\n     $ %s\n' "$name" "$cmd"
   RUN=$((RUN + 1))
-  if ( eval "$cmd" ); then
+  if run_clean_gate_command "$cmd" </dev/null; then
     if [ "$name" = "auto-qwy-host" ]; then
       if verify_host_receipt "$HOST_RECEIPT" "$HOST_RECEIPT_LOCK" "$REPO_ROOT" "$HOST_GATE_RUNNER"; then
         HOST_RECEIPT_VALIDATED=1
@@ -949,6 +2346,14 @@ while IFS='|' read -r rank name pr file cmd; do
 done <<EOF
 $(printf '%s\n' "$GATES")
 EOF
+
+if [ "$MANIFEST_SEEN" -ne "$EXPECTED_GATE_COUNT" ] ||
+  [ "$ACTIVE_SEEN" -ne "$expected_active" ] ||
+  [ "$PENDING" -ne "$expected_pending" ]; then
+  printf '%s\n' 'VERIFY_A_PLUS_GATE_MANIFEST_INCOMPLETE' >&2
+  FAILED=$((FAILED + 1))
+  FAILED_NAMES="$FAILED_NAMES manifest(incomplete)"
+fi
 
 printf '\n========================================\n'
 printf 'verify-a-plus summary (stage=%s)\n' "$STAGE"

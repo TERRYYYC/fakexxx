@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Device-free RED matrix for the issue #66 Moto read-only preflight collector.
 #
 # This selftest NEVER addresses a real adb binary:
@@ -24,7 +24,36 @@
 # The collector must route every executable adb command through the same exact
 # allowlist before execution.
 
+unset BASH_ENV ENV DEVELOPER_DIR SDKROOT TOOLCHAINS
+PATH=/usr/bin:/bin
+export PATH
 set -uo pipefail
+
+ACL_HELPER_CONTRACT_ONLY=0
+COLLECTOR_BINDING_CONTRACT_ONLY=0
+PACKAGE_PATH_CONTRACT_ONLY=0
+RESOURCE_BUDGET_CONTRACT_ONLY=0
+STARTUP_ENV_CONTRACT_ONLY=0
+if (( $# > 0 )); then
+  if (( $# == 1 )); then
+    case "$1" in
+      --acl-helper-contract-only) ACL_HELPER_CONTRACT_ONLY=1 ;;
+      --collector-binding-contract-only) COLLECTOR_BINDING_CONTRACT_ONLY=1 ;;
+      --package-path-contract-only) PACKAGE_PATH_CONTRACT_ONLY=1 ;;
+      --resource-budget-contract-only) RESOURCE_BUDGET_CONTRACT_ONLY=1 ;;
+      --startup-env-contract-only) STARTUP_ENV_CONTRACT_ONLY=1 ;;
+      *)
+        printf 'usage: %s [--acl-helper-contract-only|--collector-binding-contract-only|--package-path-contract-only|--resource-budget-contract-only|--startup-env-contract-only]\n' \
+          "${0##*/}" >&2
+        exit 2
+        ;;
+    esac
+  else
+    printf 'usage: %s [--acl-helper-contract-only|--collector-binding-contract-only|--package-path-contract-only|--resource-budget-contract-only|--startup-env-contract-only]\n' \
+      "${0##*/}" >&2
+    exit 2
+  fi
+fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -51,6 +80,7 @@ unset \
   FAKE_ADB_REPLACEMENT \
   FAKE_ADB_REPLACE_MARKER \
   FAKE_ADB_REPLACE_SOURCE \
+  FAKE_ADB_LATE_MARKER \
   FAKE_ADB_SCENARIO \
   FAKE_ADB_SNAPSHOT_REPLACE_MARKER \
   FAKE_ADB_SWAP_MARKER \
@@ -124,6 +154,648 @@ else
   report ok "production Git binding disables replacement objects, ambient configs, and fsmonitor"
 fi
 
+# Exercise the three embedded ACL helpers directly. This source-level seam is
+# intentionally device-free: it compiles each real helper, replaces only that
+# Python process's os.listxattr, and checks the errno contract without running
+# the collector or resolving any adb executable.
+ACL_HELPER_CONTRACT_DETAIL="$("$PYTHON_BIN" -I - "$COLLECTOR" <<'PY' 2>&1
+import errno
+import os
+import pathlib
+import stat
+import subprocess
+import sys
+
+source_path = pathlib.Path(sys.argv[1])
+lines = source_path.read_text(encoding="utf-8").splitlines()
+starts = [
+    index for index, line in enumerate(lines)
+    if line == "def has_extended_acl(path):"
+]
+if len(starts) != 3:
+    raise SystemExit(f"expected exactly 3 ACL helpers, found {len(starts)}")
+
+helpers = []
+for helper_number, start in enumerate(starts, 1):
+    end = start + 1
+    while end < len(lines) and (not lines[end] or lines[end][0].isspace()):
+        end += 1
+    snippet = "\n".join(lines[start:end]) + "\n"
+    namespace = {
+        "errno": errno,
+        "os": os,
+        "pathlib": pathlib,
+        "stat": stat,
+        "subprocess": subprocess,
+        "sys": sys,
+    }
+    exec(compile(snippet, f"{source_path}:acl-helper-{helper_number}", "exec"), namespace)
+    helpers.append(namespace["has_extended_acl"])
+
+had_listxattr = hasattr(os, "listxattr")
+original_listxattr = getattr(os, "listxattr", None)
+original_platform = sys.platform
+
+def raise_errno(error_number):
+    def injected_listxattr(*_args, **_kwargs):
+        raise OSError(error_number, os.strerror(error_number))
+    return injected_listxattr
+
+try:
+    # Force the xattr-only branch so the contract is independent of whether
+    # this selftest host is Darwin or Linux.
+    sys.platform = "linux"
+    for helper_number, helper in enumerate(helpers, 1):
+        for error_number in (errno.EACCES, errno.EIO):
+            os.listxattr = raise_errno(error_number)
+            try:
+                helper(pathlib.Path("."))
+            except OSError as error:
+                if error.errno != error_number:
+                    raise SystemExit(
+                        f"ACL helper {helper_number} changed errno "
+                        f"{error_number} to {error.errno}"
+                    ) from error
+            else:
+                raise SystemExit(
+                    f"ACL helper {helper_number} swallowed "
+                    f"{errno.errorcode[error_number]}"
+                )
+
+        unsupported_errnos = {
+            value for value in (
+                getattr(errno, "ENOTSUP", None),
+                getattr(errno, "EOPNOTSUPP", None),
+            )
+            if value is not None
+        }
+        if not unsupported_errnos:
+            raise SystemExit("host Python exposes no unsupported-xattr errno")
+        for error_number in unsupported_errnos:
+            os.listxattr = raise_errno(error_number)
+            if helper(pathlib.Path(".")) is not False:
+                raise SystemExit(
+                    f"ACL helper {helper_number} did not treat "
+                    f"{errno.errorcode.get(error_number, error_number)} as unsupported"
+                )
+
+        delattr(os, "listxattr")
+        try:
+            helper(pathlib.Path("."))
+        except (AttributeError, OSError):
+            pass
+        else:
+            raise SystemExit(
+                f"ACL helper {helper_number} accepted a non-Darwin host "
+                "without descriptor/path xattr inspection"
+            )
+        if had_listxattr:
+            os.listxattr = original_listxattr
+finally:
+    sys.platform = original_platform
+    if had_listxattr:
+        os.listxattr = original_listxattr
+    elif hasattr(os, "listxattr"):
+        delattr(os, "listxattr")
+PY
+)"
+ACL_HELPER_CONTRACT_RC=$?
+if (( ACL_HELPER_CONTRACT_RC == 0 )); then
+  report ok "all three ACL helpers propagate EACCES/EIO and ignore only unsupported-xattr errors"
+else
+  report fail \
+    "all three ACL helpers propagate EACCES/EIO and ignore only unsupported-xattr errors" \
+    "$ACL_HELPER_CONTRACT_DETAIL"
+fi
+
+# A status-only Python launcher can make the source-level helper probe above
+# report success without executing its body. Bind the contract-only lane to
+# output that only the real isolated interpreter can produce.
+ACL_PYTHON_RUNTIME_OUT="$("$PYTHON_BIN" -I -c \
+  'import sys; sys.stdout.write("ISSUE66_REAL_PYTHON\n")' 2>&1)"
+ACL_PYTHON_RUNTIME_RC=$?
+if (( ACL_PYTHON_RUNTIME_RC == 0 )) \
+    && [[ $ACL_PYTHON_RUNTIME_OUT == ISSUE66_REAL_PYTHON ]]; then
+  report ok "ACL-only selftest executes the real isolated Python runtime"
+else
+  report fail "ACL-only selftest executes the real isolated Python runtime" \
+    "rc=$ACL_PYTHON_RUNTIME_RC output=$ACL_PYTHON_RUNTIME_OUT"
+fi
+unset ACL_PYTHON_RUNTIME_OUT ACL_PYTHON_RUNTIME_RC
+
+if (( ACL_HELPER_CONTRACT_ONLY )); then
+  printf 'issue66 Moto read-only collector selftest: %d passed, %d failed\n' "$pass" "$fail"
+  [ "$fail" -eq 0 ]
+  exit
+fi
+
+# Exercise the real stable_collector_binding body without parsing arguments or
+# resolving an adb executable. The fixture keeps every byte private and proves
+# that the entrypoint file plus every absolute parent from the filesystem root
+# are one no-follow, owner/mode/ACL-checked binding.
+COLLECTOR_BINDING_CONTRACT_DETAIL="$("$PYTHON_BIN" -I - "$COLLECTOR" <<'PY' 2>&1
+import errno
+import os
+import pathlib
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+source_path = pathlib.Path(sys.argv[1])
+source = source_path.read_text(encoding="utf-8")
+function_marker = "stable_collector_binding() {"
+try:
+    function_tail = source.split(function_marker, 1)[1]
+    binding_source = function_tail.split("<<'PY'\n", 1)[1].split("\nPY\n}", 1)[0] + "\n"
+except (IndexError, ValueError) as error:
+    raise SystemExit(f"cannot extract stable_collector_binding body: {error}")
+
+failures = []
+
+
+def make_fixture():
+    # Keep the fixture beneath the already-reviewed source chain. A generic
+    # /tmp fixture would be rejected on hosts where /tmp is intentionally
+    # world-writable once the binding pins every ancestor from `/`.
+    temporary = tempfile.TemporaryDirectory(
+        prefix=".issue66-collector-binding-",
+        dir=source_path.parent,
+    )
+    repo = pathlib.Path(temporary.name) / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    collector = scripts / source_path.name
+    shutil.copyfile(source_path, collector)
+    os.chmod(repo, 0o700)
+    os.chmod(scripts, 0o700)
+    os.chmod(collector, 0o700)
+    return temporary, repo, scripts, collector
+
+
+def invoke(code, collector, repo, extra_environment=None):
+    environment = os.environ.copy()
+    if extra_environment:
+        environment.update(extra_environment)
+    return subprocess.run(
+        [
+            sys.executable, "-I", "-", os.fspath(collector),
+            os.fspath(repo), str(2 * 1024 * 1024),
+        ],
+        input=code.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=environment,
+        check=False,
+    )
+
+
+def expect_rejected(label, result):
+    if result.returncode == 0:
+        failures.append(f"{label} was accepted: {result.stdout.decode(errors='replace').strip()}")
+
+
+temporary, repo, scripts, collector = make_fixture()
+try:
+    baseline = invoke(binding_source, collector, repo)
+    if baseline.returncode != 0:
+        failures.append(
+            "safe collector binding was rejected: "
+            + baseline.stdout.decode(errors="replace").strip()
+        )
+
+    outer = repo.parent
+    os.chmod(outer, 0o777)
+    expect_rejected(
+        "world-writable ancestor outside repository root",
+        invoke(binding_source, collector, repo),
+    )
+    os.chmod(outer, 0o700)
+
+    os.chmod(repo, 0o720)
+    expect_rejected("group-writable repository root", invoke(binding_source, collector, repo))
+    os.chmod(repo, 0o700)
+
+    os.chmod(scripts, 0o720)
+    expect_rejected("group-writable collector parent", invoke(binding_source, collector, repo))
+    os.chmod(scripts, 0o700)
+
+    alias = repo / "scripts-alias"
+    alias.symlink_to(scripts, target_is_directory=True)
+    expect_rejected(
+        "symlinked collector parent",
+        invoke(binding_source, alias / collector.name, repo),
+    )
+
+    owner_marker = "path = pathlib.Path(sys.argv[1])\n"
+    owner_hook = r'''
+_selftest_real_fstat = os.fstat
+def _selftest_foreign_directory_owner(descriptor):
+    value = _selftest_real_fstat(descriptor)
+    if stat.S_ISDIR(value.st_mode):
+        fields = list(value)
+        fields[4] = value.st_uid + 1
+        return os.stat_result(fields)
+    return value
+os.fstat = _selftest_foreign_directory_owner
+'''
+    if binding_source.count(owner_marker) != 1:
+        failures.append("collector binding path marker changed")
+    else:
+        owner_instrumented = binding_source.replace(
+            owner_marker,
+            owner_marker + owner_hook,
+            1,
+        )
+        expect_rejected(
+            "foreign-owned collector directory",
+            invoke(owner_instrumented, collector, repo),
+        )
+finally:
+    temporary.cleanup()
+
+
+def extract_function(code, signature):
+    lines = code.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == signature]
+    if len(starts) != 1:
+        return None
+    start = starts[0]
+    end = start + 1
+    while end < len(lines) and (not lines[end] or lines[end][0].isspace()):
+        end += 1
+    return "\n".join(lines[start:end]) + "\n"
+
+
+fd_acl_source = extract_function(binding_source, "def fd_has_extended_acl(descriptor_fd):")
+if fd_acl_source is None:
+    failures.append("stable collector binding has no unique fd-pinned ACL helper")
+else:
+    namespace = {"errno": errno, "os": os, "sys": sys}
+    exec(compile(fd_acl_source, f"{source_path}:fd-acl-helper", "exec"), namespace)
+    fd_acl_helper = namespace["fd_has_extended_acl"]
+    temporary, repo, scripts, collector = make_fixture()
+    descriptor = os.open(collector, os.O_RDONLY)
+    had_listxattr = hasattr(os, "listxattr")
+    original_listxattr = getattr(os, "listxattr", None)
+    original_platform = sys.platform
+    try:
+        sys.platform = "linux"
+        os.listxattr = lambda candidate: (
+            ["system.posix_acl_access"] if candidate == descriptor else []
+        )
+        if fd_acl_helper(descriptor) is not True:
+            failures.append("Linux fd ACL helper missed system.posix_acl_access")
+        os.listxattr = lambda candidate: ["user.unrelated"]
+        if fd_acl_helper(descriptor) is not False:
+            failures.append("Linux fd ACL helper treated an unrelated xattr as an ACL")
+        if hasattr(os, "listxattr"):
+            delattr(os, "listxattr")
+        try:
+            fd_acl_helper(descriptor)
+        except (AttributeError, OSError):
+            pass
+        else:
+            failures.append("non-Darwin fd ACL helper accepted a missing listxattr API")
+    finally:
+        sys.platform = original_platform
+        if had_listxattr:
+            os.listxattr = original_listxattr
+        elif hasattr(os, "listxattr"):
+            delattr(os, "listxattr")
+        os.close(descriptor)
+        temporary.cleanup()
+
+
+if sys.platform == "darwin":
+    def add_acl(target, rule):
+        result = subprocess.run(
+            ["/bin/chmod", "+a", rule, os.fspath(target)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stdout.decode(errors="replace"))
+
+    def remove_acl(target):
+        subprocess.run(
+            ["/bin/chmod", "-N", os.fspath(target)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    acl_cases = (
+        ("outside-repository ancestor allowing ACL", lambda repo, scripts, collector: repo.parent,
+         "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr"),
+        ("repository-root ACL", lambda repo, scripts, collector: repo,
+         "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr"),
+        ("collector-parent ACL", lambda repo, scripts, collector: scripts,
+         "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr"),
+        ("collector-file ACL", lambda repo, scripts, collector: collector,
+         "everyone allow write,append,writeattr,writeextattr"),
+    )
+    for label, choose_target, rule in acl_cases:
+        temporary, repo, scripts, collector = make_fixture()
+        target = choose_target(repo, scripts, collector)
+        try:
+            mode_before = stat.S_IMODE(target.lstat().st_mode)
+            add_acl(target, rule)
+            if stat.S_IMODE(target.lstat().st_mode) != mode_before:
+                failures.append(f"{label} fixture changed POSIX mode")
+            expect_rejected(label, invoke(binding_source, collector, repo))
+        finally:
+            remove_acl(target)
+            temporary.cleanup()
+
+    temporary, repo, scripts, collector = make_fixture()
+    try:
+        add_acl(repo, "everyone deny delete")
+        deny_only = invoke(binding_source, collector, repo)
+        if deny_only.returncode != 0:
+            failures.append(
+                "deny-only repository ACL was rejected: "
+                + deny_only.stdout.decode(errors="replace").strip()
+            )
+    finally:
+        remove_acl(repo)
+        temporary.cleanup()
+
+    live_repo = source_path.parent.parent
+    live_binding = invoke(binding_source, source_path, live_repo)
+    if live_binding.returncode != 0:
+        failures.append(
+            "live collector chain (including the deny-only user-home ACL) was rejected: "
+            + live_binding.stdout.decode(errors="replace").strip()
+        )
+
+    read_marker = "path = pathlib.Path(sys.argv[1])\n"
+    read_hook = r'''
+_selftest_real_read = os.read
+_selftest_acl_added = False
+def _selftest_read_then_add_acl(descriptor, amount):
+    global _selftest_acl_added
+    chunk = _selftest_real_read(descriptor, amount)
+    if chunk and not _selftest_acl_added:
+        _selftest_acl_added = True
+        completed = __import__("subprocess").run(
+            ["/bin/chmod", "+a", os.environ["SELFTEST_ACL_AFTER_READ_RULE"],
+             os.environ["SELFTEST_ACL_AFTER_READ_TARGET"]],
+            stdin=__import__("subprocess").DEVNULL,
+            stdout=__import__("subprocess").DEVNULL,
+            stderr=__import__("subprocess").DEVNULL,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise OSError("could not install after-read ACL fixture")
+    return chunk
+os.read = _selftest_read_then_add_acl
+'''
+    if binding_source.count(read_marker) != 1:
+        failures.append("collector binding read-rendezvous marker changed")
+    else:
+        read_instrumented = binding_source.replace(read_marker, read_marker + read_hook, 1)
+        after_read_cases = (
+            ("collector file acquired an ACL during read", lambda repo, scripts, collector: collector,
+             "everyone allow write,append,writeattr,writeextattr"),
+            ("collector parent acquired an ACL during read", lambda repo, scripts, collector: scripts,
+             "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr"),
+        )
+        for label, choose_target, rule in after_read_cases:
+            temporary, repo, scripts, collector = make_fixture()
+            target = choose_target(repo, scripts, collector)
+            try:
+                expect_rejected(
+                    label,
+                    invoke(
+                        read_instrumented,
+                        collector,
+                        repo,
+                        {
+                            "SELFTEST_ACL_AFTER_READ_TARGET": os.fspath(target),
+                            "SELFTEST_ACL_AFTER_READ_RULE": rule,
+                        },
+                    ),
+                )
+            finally:
+                remove_acl(target)
+                temporary.cleanup()
+
+if failures:
+    raise SystemExit("; ".join(failures))
+PY
+)"
+COLLECTOR_BINDING_CONTRACT_RC=$?
+if (( COLLECTOR_BINDING_CONTRACT_RC == 0 )); then
+  report ok "collector binding pins file and absolute parent chain owner mode and ACL"
+else
+  report fail \
+    "collector binding pins file and absolute parent chain owner mode and ACL" \
+    "$COLLECTOR_BINDING_CONTRACT_DETAIL"
+fi
+if (( COLLECTOR_BINDING_CONTRACT_ONLY )); then
+  printf 'issue66 Moto read-only collector selftest: %d passed, %d failed\n' "$pass" "$fail"
+  [ "$fail" -eq 0 ]
+  exit
+fi
+
+privileged_shell_header_intact() { # script-path
+  "$PYTHON_BIN" -I - "$1" <<'PY'
+import pathlib
+import json
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+if not lines or lines[0] != "#!/bin/bash -p":
+    raise SystemExit("missing fixed privileged-mode Bash shebang")
+for line in lines[1:]:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if stripped != "unset BASH_ENV ENV DEVELOPER_DIR SDKROOT TOOLCHAINS":
+        raise SystemExit(f"first executable line is not environment cleanup: {stripped!r}")
+    break
+else:
+    raise SystemExit("script has no executable environment cleanup")
+PY
+}
+
+if SHELL_HEADER_DETAIL="$(privileged_shell_header_intact "$COLLECTOR" 2>&1)"; then
+  report ok "collector enters fixed privileged Bash and clears startup-file variables first"
+else
+  report fail \
+    "collector enters fixed privileged Bash and clears startup-file variables first" \
+    "$SHELL_HEADER_DETAIL"
+fi
+if SHELL_HEADER_DETAIL="$(privileged_shell_header_intact "$0" 2>&1)"; then
+  report ok "selftest enters fixed privileged Bash and clears startup-file variables first"
+else
+  report fail \
+    "selftest enters fixed privileged Bash and clears startup-file variables first" \
+    "$SHELL_HEADER_DETAIL"
+fi
+if SHELL_HEADER_DETAIL="$(privileged_shell_header_intact "$FAKE_ADB" 2>&1)"; then
+  report ok "fake adb enters fixed privileged Bash and clears startup selectors first"
+else
+  report fail \
+    "fake adb enters fixed privileged Bash and clears startup selectors first" \
+    "$SHELL_HEADER_DETAIL"
+fi
+
+# Prove the kernel-selected shebang ignores a hostile Bash startup file and,
+# on Darwin, clears every xcrun developer-tool selector before the first fixed
+# /usr/bin/python3 call.  The nested selftest uses the ACL-only lane to avoid
+# recursion and adb, and that lane emits a real-interpreter sentinel so a
+# selector-routed /usr/bin/true cannot create a false green.
+STARTUP_ENV_WORK="$(/usr/bin/mktemp -d \
+  "${TMPDIR:-/tmp}/issue66-startup-env-selftest.XXXXXX")" \
+  || { printf 'selftest cannot create startup-environment fixture\n' >&2; exit 2; }
+/bin/chmod 700 "$STARTUP_ENV_WORK"
+STARTUP_ENV_POISON="$STARTUP_ENV_WORK/poison.sh"
+STARTUP_ENV_MARKER="$STARTUP_ENV_WORK/sourced"
+printf '%s\n' ': >"${SELFTEST_STARTUP_POISON_MARKER:?}"' >"$STARTUP_ENV_POISON"
+/bin/chmod 600 "$STARTUP_ENV_POISON"
+
+STARTUP_ENV_OUT="$(
+  BASH_ENV="$STARTUP_ENV_POISON" \
+  ENV="$STARTUP_ENV_POISON" \
+  SELFTEST_STARTUP_POISON_MARKER="$STARTUP_ENV_MARKER" \
+    "$COLLECTOR" </dev/null 2>&1
+)"
+STARTUP_ENV_RC=$?
+if (( STARTUP_ENV_RC == 2 )) \
+    && [[ $STARTUP_ENV_OUT == *"usage:"* ]] \
+    && [[ ! -e $STARTUP_ENV_MARKER ]]; then
+  report ok "collector usage path ignores poison BASH_ENV/ENV"
+else
+  report fail "collector usage path ignores poison BASH_ENV/ENV" \
+    "rc=$STARTUP_ENV_RC marker=$([[ -e $STARTUP_ENV_MARKER ]] && printf present || printf absent) output=$STARTUP_ENV_OUT"
+fi
+
+/bin/rm -f "$STARTUP_ENV_MARKER"
+STARTUP_ENV_OUT="$(
+  BASH_ENV="$STARTUP_ENV_POISON" \
+  ENV="$STARTUP_ENV_POISON" \
+  SELFTEST_STARTUP_POISON_MARKER="$STARTUP_ENV_MARKER" \
+    "$0" --acl-helper-contract-only </dev/null 2>&1
+)"
+STARTUP_ENV_RC=$?
+if (( STARTUP_ENV_RC == 0 )) \
+    && [[ $STARTUP_ENV_OUT == *"4 passed, 0 failed"* ]] \
+    && [[ ! -e $STARTUP_ENV_MARKER ]]; then
+  report ok "ACL-only selftest ignores poison BASH_ENV/ENV"
+else
+  report fail "ACL-only selftest ignores poison BASH_ENV/ENV" \
+    "rc=$STARTUP_ENV_RC marker=$([[ -e $STARTUP_ENV_MARKER ]] && printf present || printf absent) output=$STARTUP_ENV_OUT"
+fi
+
+if [[ $(/usr/bin/uname -s) == Darwin ]]; then
+  STARTUP_SELECTOR_ROOT="$STARTUP_ENV_WORK/fake-command-line-tools"
+  /bin/mkdir -p "$STARTUP_SELECTOR_ROOT/usr/bin" \
+    || { printf 'selftest cannot create xcrun selector fixture\n' >&2; exit 2; }
+  /bin/ln -s /usr/bin/true "$STARTUP_SELECTOR_ROOT/usr/bin/xcrun" \
+    || { printf 'selftest cannot arm xcrun selector fixture\n' >&2; exit 2; }
+
+  DEVELOPER_DIR="$STARTUP_SELECTOR_ROOT" \
+    /usr/bin/python3 -I -c 'raise SystemExit(91)' >/dev/null 2>&1
+  STARTUP_SELECTOR_ARM_RC=$?
+  if (( STARTUP_SELECTOR_ARM_RC == 0 )); then
+    report ok "macOS fake CommandLineTools reroutes unguarded system Python"
+  else
+    report fail "macOS fake CommandLineTools reroutes unguarded system Python" \
+      "expected armed rc=0, got rc=$STARTUP_SELECTOR_ARM_RC"
+  fi
+
+  STARTUP_SELECTOR_OUT="$(
+    BASH_ENV="$STARTUP_ENV_POISON" \
+    ENV="$STARTUP_ENV_POISON" \
+    DEVELOPER_DIR="$STARTUP_SELECTOR_ROOT" \
+    SDKROOT="$STARTUP_SELECTOR_ROOT/SDKs/Poison.sdk" \
+    TOOLCHAINS=issue66-poison-toolchain \
+    SELFTEST_STARTUP_POISON_MARKER="$STARTUP_ENV_MARKER" \
+      "$COLLECTOR" --selftest-fixture --adb "$FAKE_ADB" \
+        --classify-adb -- devices -l </dev/null 2>&1
+  )"
+  STARTUP_SELECTOR_RC=$?
+  if (( STARTUP_SELECTOR_RC == 0 )) \
+      && [[ $STARTUP_SELECTOR_OUT == ALLOW_READ_ONLY ]] \
+      && [[ ! -e $STARTUP_ENV_MARKER ]]; then
+    report ok "collector clears combined Bash and xcrun selector poison"
+  else
+    report fail "collector clears combined Bash and xcrun selector poison" \
+      "rc=$STARTUP_SELECTOR_RC marker=$([[ -e $STARTUP_ENV_MARKER ]] && printf present || printf absent) output=$STARTUP_SELECTOR_OUT"
+  fi
+
+  /bin/rm -f "$STARTUP_ENV_MARKER"
+  STARTUP_SELECTOR_OUT="$(
+    BASH_ENV="$STARTUP_ENV_POISON" \
+    ENV="$STARTUP_ENV_POISON" \
+    DEVELOPER_DIR="$STARTUP_SELECTOR_ROOT" \
+    SDKROOT="$STARTUP_SELECTOR_ROOT/SDKs/Poison.sdk" \
+    TOOLCHAINS=issue66-poison-toolchain \
+    SELFTEST_STARTUP_POISON_MARKER="$STARTUP_ENV_MARKER" \
+      "$0" --acl-helper-contract-only </dev/null 2>&1
+  )"
+  STARTUP_SELECTOR_RC=$?
+  if (( STARTUP_SELECTOR_RC == 0 )) \
+      && [[ $STARTUP_SELECTOR_OUT == *"4 passed, 0 failed"* ]] \
+      && [[ $STARTUP_SELECTOR_OUT == *"ACL-only selftest executes the real isolated Python runtime"* ]] \
+      && [[ ! -e $STARTUP_ENV_MARKER ]]; then
+    report ok "selftest clears combined Bash and xcrun selector poison"
+  else
+    report fail "selftest clears combined Bash and xcrun selector poison" \
+      "rc=$STARTUP_SELECTOR_RC marker=$([[ -e $STARTUP_ENV_MARKER ]] && printf present || printf absent) output=$STARTUP_SELECTOR_OUT"
+  fi
+
+  /bin/rm -f "$STARTUP_ENV_MARKER"
+  STARTUP_FAKE_LOG="$STARTUP_ENV_WORK/fake-adb.log"
+  STARTUP_FAKE_OUT="$(
+    BASH_ENV="$STARTUP_ENV_POISON" \
+    ENV="$STARTUP_ENV_POISON" \
+    DEVELOPER_DIR="$STARTUP_SELECTOR_ROOT" \
+    SDKROOT="$STARTUP_SELECTOR_ROOT/SDKs/Poison.sdk" \
+    TOOLCHAINS=issue66-poison-toolchain \
+    SELFTEST_STARTUP_POISON_MARKER="$STARTUP_ENV_MARKER" \
+    FAKE_ADB_SCENARIO=budget-text-stdout-over \
+    FAKE_ADB_LOG="$STARTUP_FAKE_LOG" \
+    SELFTEST_WORK_ROOT="$STARTUP_ENV_WORK" \
+    SELFTEST_REAL_PYTHON=/usr/bin/python3 \
+      "$FAKE_ADB" devices -l 2>/dev/null
+  )"
+  STARTUP_FAKE_RC=$?
+  if (( STARTUP_FAKE_RC == 0 )) \
+      && (( ${#STARTUP_FAKE_OUT} == 65537 )) \
+      && [[ ! -e $STARTUP_ENV_MARKER ]]; then
+    report ok "fake adb clears combined Bash and xcrun poison before Python"
+  else
+    report fail "fake adb clears combined Bash and xcrun poison before Python" \
+      "rc=$STARTUP_FAKE_RC marker=$([[ -e $STARTUP_ENV_MARKER ]] && printf present || printf absent) stdout-bytes=${#STARTUP_FAKE_OUT}"
+  fi
+
+  /bin/rm -f "$STARTUP_SELECTOR_ROOT/usr/bin/xcrun" "$STARTUP_FAKE_LOG"
+  /bin/rmdir "$STARTUP_SELECTOR_ROOT/usr/bin" "$STARTUP_SELECTOR_ROOT/usr" \
+    "$STARTUP_SELECTOR_ROOT" \
+    || { printf 'selftest cannot remove xcrun selector fixture\n' >&2; exit 2; }
+  unset STARTUP_FAKE_LOG STARTUP_FAKE_OUT STARTUP_FAKE_RC \
+    STARTUP_SELECTOR_ARM_RC STARTUP_SELECTOR_OUT STARTUP_SELECTOR_RC \
+    STARTUP_SELECTOR_ROOT
+fi
+/bin/rm -f "$STARTUP_ENV_POISON" "$STARTUP_ENV_MARKER"
+/bin/rmdir "$STARTUP_ENV_WORK" \
+  || { printf 'selftest cannot remove startup-environment fixture\n' >&2; exit 2; }
+unset STARTUP_ENV_MARKER STARTUP_ENV_OUT STARTUP_ENV_POISON STARTUP_ENV_RC STARTUP_ENV_WORK
+
+if (( STARTUP_ENV_CONTRACT_ONLY )); then
+  printf 'issue66 Moto read-only collector selftest: %d passed, %d failed\n' "$pass" "$fail"
+  [ "$fail" -eq 0 ]
+  exit
+fi
+
 SELFTEST_REVIEWED_HEAD="$(/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
   /usr/bin/git -C "$REPO_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
   || { printf 'selftest cannot resolve the repository HEAD\n' >&2; exit 2; }
@@ -145,6 +817,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/issue66-moto-collector-selftest.XXXXXX")"
 UNSAFE_OUT="$REPO_ROOT/scripts/fixtures/issue66-moto-readonly-collector/.unsafe-output-$$"
 UNSAFE_COMMON_OUT=""
 SHELL_ID_FIXTURE_ROOT=""
+ATTESTATION_COPY=""
 prepare_cleanup_root() { # root created exclusively by this selftest
   local root=$1
   [ -e "$root" ] || return 0
@@ -167,6 +840,10 @@ cleanup() {
       && $SHELL_ID_FIXTURE_ROOT == "$REPO_ROOT"/.issue66-shell-id-fixture-* ]]; then
     prepare_cleanup_root "$SHELL_ID_FIXTURE_ROOT"
     rm -rf "$SHELL_ID_FIXTURE_ROOT"
+  fi
+  if [[ -n $ATTESTATION_COPY \
+      && $ATTESTATION_COPY == "$REPO_ROOT"/.issue66-allowlist-fixture.* ]]; then
+    rm -rf "$ATTESTATION_COPY"
   fi
 }
 trap cleanup EXIT
@@ -856,8 +1533,8 @@ expected_exact = {
     "adbServerTrust": "DEFAULT_LOCAL_ENDPOINT_NOT_ATTESTED__INHERITED_ROUTING_REJECTED",
     "adbClientTrust": "SELFTEST_FIXTURE_ONLY__NOT_DEVICE_EVIDENCE",
     "adbApprovalLane": "SELFTEST",
-    "adbApprovalLabel": "issue66-fake-adb-536cc861",
-    "adbAllowlistSha256": "a52061a3a5410b7fea4703ae51c20e3525f1c4d467c36155f0d556100a63930e",
+    "adbApprovalLabel": "issue66-fake-adb-317c1607",
+    "adbAllowlistSha256": "92fe765782212bbd51536110a4023e4eb75472d0ce9ea1446c54a013653cea49",
     "adbSnapshotPath": "tooling/adb",
     "status": "COLLECTED",
     "collectionStatus": "COLLECTED",
@@ -928,8 +1605,8 @@ assert manifest.get("durableAck") == "NOT_CREATED", manifest
 assert manifest.get("fullClaim") == "NOT_CREATED", manifest
 assert manifest.get("adbClientTrust") == "SELFTEST_FIXTURE_ONLY__NOT_DEVICE_EVIDENCE", manifest
 assert manifest.get("adbApprovalLane") == "SELFTEST", manifest
-assert manifest.get("adbApprovalLabel") == "issue66-fake-adb-536cc861", manifest
-assert manifest.get("adbAllowlistSha256") == "a52061a3a5410b7fea4703ae51c20e3525f1c4d467c36155f0d556100a63930e", manifest
+assert manifest.get("adbApprovalLabel") == "issue66-fake-adb-317c1607", manifest
+assert manifest.get("adbAllowlistSha256") == "92fe765782212bbd51536110a4023e4eb75472d0ce9ea1446c54a013653cea49", manifest
 PY
   )"
   check_rc=$?
@@ -1090,6 +1767,9 @@ for package in known:
         )
 
 expected_counts = {expected: 1 for expected in required_once}
+for package in known:
+    if package not in missing:
+        expected_counts[f"-s {serial} shell pm path {package}"] = 3
 expected_counts[f"-s {serial} shell cat /proc/sys/kernel/random/boot_id"] = 2
 expected_counts[f"-s {serial} shell cat /proc/uptime"] = 2
 wrong_counts = [
@@ -1239,6 +1919,1989 @@ PY
   fi
 }
 
+assert_package_path_bracket() { # manifest receipts adb-log missing-package-or-- label packages...
+  local manifest_path="$1" receipts_dir="$2" adb_log="$3" missing_pkg="$4" label="$5"
+  shift 5
+  local check_out check_rc
+  check_out="$("$PYTHON_BIN" -I - \
+    "$manifest_path" "$receipts_dir" "$adb_log" "$missing_pkg" "$@" <<'PY' 2>&1
+import json
+import pathlib
+import re
+import shlex
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+receipts = pathlib.Path(sys.argv[2])
+adb_log = pathlib.Path(sys.argv[3])
+missing = set() if sys.argv[4] == "-" else {sys.argv[4]}
+known = tuple(sys.argv[5:])
+serial = "ZY22JHW9M4"
+
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+stems = manifest.get("receiptStems")
+statuses = manifest.get("knownPackages")
+if not isinstance(stems, list) or len(stems) != len(set(stems)):
+    raise SystemExit("receiptStems is not one unique ordered list")
+if not isinstance(statuses, dict) or set(statuses) != set(known):
+    raise SystemExit("knownPackages does not match the fixed package set")
+positions = {stem: index for index, stem in enumerate(stems)}
+adb_lines = adb_log.read_text(encoding="utf-8").splitlines()
+
+path_re = re.compile(
+    r"^/data/app/([A-Za-z0-9._+=~-]+)/([A-Za-z0-9._+=~-]+)/"
+    r"(base|split_[A-Za-z0-9._+=~-]+)\.apk$"
+)
+
+
+def command(stem):
+    raw = (receipts / f"{stem}.command.txt").read_text(encoding="utf-8")
+    return tuple(shlex.split(raw))
+
+
+def base_path(stem, package):
+    raw = (receipts / f"{stem}.stdout.txt").read_bytes()
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SystemExit(f"{stem}: path stdout is not UTF-8: {error}")
+    if "\x00" in value or not value.endswith("\n"):
+        raise SystemExit(f"{stem}: path framing mismatch")
+    value = value.replace("\r\n", "\n")
+    if "\r" in value:
+        raise SystemExit(f"{stem}: path contains bare CR")
+    paths = []
+    for line in value[:-1].split("\n"):
+        if not line.startswith("package:"):
+            raise SystemExit(f"{stem}: path line lacks package prefix")
+        candidate = line[len("package:"):]
+        match = path_re.fullmatch(candidate)
+        if (
+            match is None
+            or match.group(1) in {".", ".."}
+            or match.group(2) in {".", ".."}
+            or not match.group(2).startswith(package + "-")
+        ):
+            raise SystemExit(f"{stem}: unsafe package path")
+        paths.append((candidate, match.group(3)))
+    if not paths or len({path for path, _ in paths}) != len(paths):
+        raise SystemExit(f"{stem}: empty or duplicate package path")
+    bases = [path for path, leaf in paths if leaf == "base"]
+    if len(bases) != 1:
+        raise SystemExit(f"{stem}: expected exactly one base APK")
+    return bases[0]
+
+
+for package in known:
+    package_stem = package.replace(".", "-")
+    initial = f"package-{package_stem}-path"
+    pre = f"package-{package_stem}-path-pre-apk"
+    apk = f"package-{package_stem}-apk"
+    post = f"package-{package_stem}-path-post-apk"
+    pm_argv = ("./tooling/adb", "-s", serial, "shell", "pm", "path", package)
+    adb_pm = f"-s {serial} shell pm path {package}"
+
+    if package in missing:
+        if statuses.get(package) != "NOT_INSTALLED":
+            raise SystemExit(f"{package}: missing package status changed")
+        if initial not in positions or any(stem in positions for stem in (pre, apk, post)):
+            raise SystemExit(f"{package}: NOT_INSTALLED receipt graph is not initial-path only")
+        if command(initial) != pm_argv or adb_lines.count(adb_pm) != 1:
+            raise SystemExit(f"{package}: NOT_INSTALLED pm path is not exactly once")
+        continue
+
+    if statuses.get(package) != "INSTALLED":
+        raise SystemExit(f"{package}: installed package status changed")
+    metadata = (
+        initial,
+        f"package-{package_stem}-dumpsys",
+        f"package-{package_stem}-pidof",
+        f"package-{package_stem}-appops",
+    )
+    if any(stem not in positions for stem in metadata + (pre, apk, post)):
+        raise SystemExit(f"{package}: path bracket stem missing")
+    metadata_positions = [positions[stem] for stem in metadata]
+    if metadata_positions != list(range(metadata_positions[0], metadata_positions[0] + 4)):
+        raise SystemExit(f"{package}: initial path and metadata are not ordered")
+    if [positions[pre], positions[apk], positions[post]] != list(
+        range(positions[pre], positions[pre] + 3)
+    ):
+        raise SystemExit(f"{package}: pre/APK/post bracket is not contiguous")
+    if positions[initial] >= positions[pre] or positions[post] >= positions["services-jar"]:
+        raise SystemExit(f"{package}: path bracket crosses its collection boundary")
+    if any(command(stem) != pm_argv for stem in (initial, pre, post)):
+        raise SystemExit(f"{package}: three pm path receipts do not bind identical argv")
+    paths = [base_path(stem, package) for stem in (initial, pre, post)]
+    if len(set(paths)) != 1:
+        raise SystemExit(f"{package}: base APK path changed across bracket: {paths!r}")
+    expected_apk = ("./tooling/adb", "-s", serial, "exec-out", "cat", paths[0])
+    if command(apk) != expected_apk:
+        raise SystemExit(f"{package}: APK receipt does not use the bracketed base path")
+    if adb_lines.count(adb_pm) != 3:
+        raise SystemExit(f"{package}: live pm path count is {adb_lines.count(adb_pm)}, expected 3")
+PY
+  )"
+  check_rc=$?
+  if (( check_rc == 0 )); then
+    report ok "$label"
+  else
+    report fail "$label" "$check_out"
+  fi
+}
+
+assert_package_path_stop_boundary() { # adb-log before|after label
+  local check_out check_rc
+  check_out="$("$PYTHON_BIN" -I - "$1" "$2" "$AUTHORIZED_SERIAL" <<'PY' 2>&1
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+phase = sys.argv[2]
+serial = sys.argv[3]
+package = "name.caiyao.fakegps"
+pm_path = f"-s {serial} shell pm path {package}"
+apk = f"-s {serial} exec-out cat /data/app/~~issue66/{package}-fixture/base.apk"
+services = f"-s {serial} exec-out cat /system/framework/services.jar"
+expected_path_reads = 2 if phase == "before" else 3
+if lines.count(pm_path) != expected_path_reads:
+    raise SystemExit(
+        f"{phase}: pm path count={lines.count(pm_path)}, expected={expected_path_reads}"
+    )
+if not lines or lines[-1] != pm_path:
+    raise SystemExit(f"{phase}: path-change receipt is not the final adb observation")
+apk_reads = [line for line in lines if " exec-out cat /data/app/" in line]
+if phase == "before" and apk_reads:
+    raise SystemExit(f"before: APK bytes were read before rejection: {apk_reads!r}")
+if phase == "after" and apk_reads != [apk]:
+    raise SystemExit(f"after: APK read set is not the single bracketed path: {apk_reads!r}")
+if services in lines:
+    raise SystemExit(f"{phase}: services.jar ran after package-path change")
+PY
+  )"
+  check_rc=$?
+  if (( check_rc == 0 )); then
+    report ok "$3"
+  else
+    report fail "$3" "$check_out"
+  fi
+}
+
+run_fc5_verifier_mutation() { # evidence-root label
+  run_verify "$1"
+  expect_stop "$2" STOP_INCOMPLETE_RECEIPT
+  expect_exit_code "$2 uses evidence rc=21" 21
+  expect_no_adb_call "$2 performs no adb call"
+}
+
+assert_package_hash_absent() { # manifest package label
+  local check_out check_rc
+  check_out="$("$PYTHON_BIN" -I - "$1" "$2" <<'PY' 2>&1
+import json
+import pathlib
+import sys
+
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+digests = manifest.get("packageApkSha256")
+if not isinstance(digests, dict) or sys.argv[2] in digests:
+    raise SystemExit(f"unexpected package digest state: {digests!r}")
+PY
+  )"
+  check_rc=$?
+  if (( check_rc == 0 )); then
+    report ok "$3"
+  else
+    report fail "$3" "$check_out"
+  fi
+}
+
+assert_budget_receipt() { # evidence-root stem stdout-suffix size exit label
+  local check_out check_rc
+  check_out="$("$PYTHON_BIN" -I - "$1" "$2" "$3" "$4" "$5" <<'PY' 2>&1
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+stem = sys.argv[2]
+stdout_suffix = sys.argv[3]
+expected_size = int(sys.argv[4])
+expected_exit = sys.argv[5]
+receipts = root / "receipts"
+payload = receipts / f"{stem}.{stdout_suffix}"
+if payload.stat().st_size != expected_size:
+    raise SystemExit(
+        f"{payload.name} size={payload.stat().st_size}, expected={expected_size}"
+    )
+exit_text = (receipts / f"{stem}.exit.txt").read_text(encoding="ascii").strip()
+if exit_text != expected_exit:
+    raise SystemExit(f"{stem} exit={exit_text!r}, expected={expected_exit!r}")
+PY
+  )"
+  check_rc=$?
+  if (( check_rc == 0 )); then
+    report ok "$6"
+  else
+    report fail "$6" "$check_out"
+  fi
+}
+
+assert_budget_stop_stem_last() { # evidence-root stem label
+  local check_out check_rc
+  check_out="$("$PYTHON_BIN" -I - "$1" "$2" <<'PY' 2>&1
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+stem = sys.argv[2]
+manifest_stems = json.loads(
+    (root / "manifest.json").read_text(encoding="utf-8")
+)["receiptStems"]
+file_stems = (root / "receipts" / "stems.txt").read_text(
+    encoding="ascii"
+).splitlines()
+if not manifest_stems or manifest_stems[-1] != stem:
+    raise SystemExit(f"manifest failing stem is not last: {manifest_stems[-1:]!r}")
+if not file_stems or file_stems[-1] != stem:
+    raise SystemExit(f"stems.txt failing stem is not last: {file_stems[-1:]!r}")
+expected = {
+    f"{stem}.command.txt", f"{stem}.start-utc.txt", f"{stem}.stdout.txt",
+    f"{stem}.stdout.bin", f"{stem}.stderr.bin", f"{stem}.exit.txt",
+    f"{stem}.end-utc.txt",
+}
+actual = {path.name for path in (root / "receipts").glob(f"{stem}.*")}
+expected = {name for name in expected if (root / "receipts" / name).exists()}
+if len(actual) != 6 or actual != expected:
+    raise SystemExit(f"failing carrier sidecars={sorted(actual)!r}")
+PY
+  )"
+  check_rc=$?
+  if (( check_rc == 0 )); then
+    report ok "$3"
+  else
+    report fail "$3" "$check_out"
+  fi
+}
+
+expect_fc6_live_stop() { # case-name exact-marker
+  if (( RC != 0 )) && [[ $OUT == "$2" ]]; then
+    report ok "$1"
+  else
+    report fail "$1" "rc=$RC expected exact output=$2 actual output=$OUT"
+  fi
+}
+
+run_fc6_typed_live_case() { # scenario marker stem suffix cap exit anchor label
+  local scenario=$1 marker=$2 stem=$3 suffix=$4 cap=$5 receipt_exit=$6 anchor=$7 label=$8
+  local output_dir="$WORK/out-$scenario"
+  run_collect "$scenario" "$AUTHORIZED_SERIAL" "$output_dir"
+  expect_fc6_live_stop "$label is refused with one exact typed marker" "$marker"
+  expect_exit_code "$label uses evidence rc=21" 21
+  if [[ -f $output_dir/manifest.json ]]; then
+    assert_stop_manifest "$output_dir/manifest.json" "$marker" \
+      "$label manifest preserves the typed reason"
+    assert_six_file_receipts "$output_dir/manifest.json" "$output_dir/receipts" \
+      "$label completes the six-file carrier before stopping"
+    assert_budget_receipt "$output_dir" "$stem" "$suffix" "$cap" "$receipt_exit" \
+      "$label stores the exact capped bytes and canonical exit"
+    assert_budget_stop_stem_last "$output_dir" "$stem" \
+      "$label records the failing carrier last and complete"
+  else
+    report fail "$label manifest exists" "missing manifest.json"
+  fi
+  assert_no_adb_after "$ADB_LOG" "$anchor" "$label has no retry or later adb command"
+  assert_no_privileged_fallback "$ADB_LOG" "$label has no privileged fallback"
+}
+
+run_fc6_child_exit_case() { # child-exit
+  local child_exit=$1 scenario="budget-child-exit-$1"
+  local label="ordinary adb child exit $1" output_dir="$WORK/out-$scenario"
+  run_collect "$scenario" "$AUTHORIZED_SERIAL" "$output_dir"
+  expect_fc6_live_stop "$label is exactly a transport read failure" \
+    STOP_ADB_READ_FAILED
+  expect_exit_code "$label uses evidence rc=21" 21
+  if [[ -f $output_dir/manifest.json ]]; then
+    assert_stop_manifest "$output_dir/manifest.json" STOP_ADB_READ_FAILED \
+      "$label is not confused with a supervisor outcome"
+    assert_six_file_receipts "$output_dir/manifest.json" "$output_dir/receipts" \
+      "$label completes the six-file carrier before stopping"
+    assert_budget_receipt "$output_dir" devices stdout.txt 0 "$child_exit" \
+      "$label preserves the child exit code"
+    assert_budget_stop_stem_last "$output_dir" devices \
+      "$label records devices as the failing carrier"
+  else
+    report fail "$label manifest exists" "missing manifest.json"
+  fi
+  assert_no_adb_after "$ADB_LOG" "devices -l" \
+    "$label has no retry or later adb command"
+  assert_no_privileged_fallback "$ADB_LOG" "$label has no privileged fallback"
+}
+
+run_fc6_success_live_case() { # scenario stem suffix size label
+  local scenario=$1 stem=$2 suffix=$3 size=$4 label=$5
+  local output_dir="$WORK/out-$scenario"
+  run_collect "$scenario" "$AUTHORIZED_SERIAL" "$output_dir"
+  if (( RC == 0 )) && [[ $OUT == *"COLLECTED evidence="* ]]; then
+    report ok "$label completes collection"
+  else
+    report fail "$label completes collection" "rc=$RC output=$OUT"
+  fi
+  if [[ -f $output_dir/manifest.json ]]; then
+    assert_budget_receipt "$output_dir" "$stem" "$suffix" "$size" 0 \
+      "$label accepts the exact transport cap"
+  else
+    report fail "$label manifest exists" "missing manifest.json"
+  fi
+  run_verify "$output_dir"
+  if (( RC == 0 )) && [[ $OUT == *RECEIPTS_COMPLETE* ]]; then
+    report ok "$label passes offline receipt verification"
+  else
+    report fail "$label passes offline receipt verification" "rc=$RC output=$OUT"
+  fi
+  expect_no_adb_call "$label offline verification performs no adb call"
+}
+
+run_fc6_archive_live_case() { # scenario marker label
+  local scenario=$1 marker=$2 label=$3
+  local output_dir="$WORK/out-$scenario" stem
+  run_collect "$scenario" "$AUTHORIZED_SERIAL" "$output_dir"
+  expect_fc6_live_stop "$label is refused with one exact typed marker" "$marker"
+  expect_exit_code "$label uses evidence rc=21" 21
+  if [[ -f $output_dir/manifest.json ]]; then
+    assert_stop_manifest "$output_dir/manifest.json" "$marker" \
+      "$label manifest preserves the archive-limit reason"
+    assert_six_file_receipts "$output_dir/manifest.json" "$output_dir/receipts" \
+      "$label preserves strict receipts"
+    if [[ $scenario == archive-apk-* ]]; then
+      stem=package-name-caiyao-fakegps-path-post-apk
+    else
+      stem=services-jar
+    fi
+    assert_budget_stop_stem_last "$output_dir" "$stem" \
+      "$label records the failing archive carrier last and complete"
+  else
+    report fail "$label manifest exists" "missing manifest.json"
+  fi
+  assert_no_privileged_fallback "$ADB_LOG" "$label has no privileged fallback"
+}
+
+run_fc6_tree_rebind_case() { # scenario marker exit label
+  local scenario=$1 marker=$2 expected_exit=$3 label=$4
+  local output_dir="$WORK/out-$scenario"
+  run_collect "$scenario" "$AUTHORIZED_SERIAL" "$output_dir"
+  expect_fc6_live_stop "$label stops before publication" "$marker"
+  expect_exit_code "$label uses its typed exit" "$expected_exit"
+  if [[ -f $output_dir/manifest.json ]]; then
+    assert_stop_manifest "$output_dir/manifest.json" "$marker" \
+      "$label manifest remains STOP"
+    assert_six_file_receipts "$output_dir/manifest.json" "$output_dir/receipts" \
+      "$label leaves only complete receipt carriers"
+  else
+    report fail "$label manifest exists" "missing manifest.json"
+  fi
+  assert_no_privileged_fallback "$ADB_LOG" "$label has no privileged fallback"
+}
+
+run_fc6_verifier_case() { # evidence-root marker label
+  run_verify "$1"
+  if (( RC == 21 )) \
+      && [[ $OUT == "$2: "* ]] \
+      && [[ $OUT != *STOP_INCOMPLETE_RECEIPT* ]]; then
+    report ok "$3 preserves the typed verifier marker without wrapping"
+  else
+    report fail "$3 preserves the typed verifier marker without wrapping" \
+      "rc=$RC output=$OUT"
+  fi
+  expect_exit_code "$3 uses evidence rc=21" 21
+  expect_no_adb_call "$3 performs no adb call"
+}
+
+write_fc6_archive_mutation() { # output-path apk|services mutation
+  "$PYTHON_BIN" -I - "$1" "$2" "$3" <<'PY'
+import io
+import pathlib
+import struct
+import sys
+import zipfile
+
+path = pathlib.Path(sys.argv[1])
+kind = sys.argv[2]
+mutation = sys.argv[3]
+
+file_caps = {"apk": 3 * 1024 * 1024, "services": 2 * 1024 * 1024}
+member_caps = {"apk": 16384, "services": 4096}
+if mutation == "file-over":
+    path.write_bytes(b"F" * (file_caps[kind] + 1))
+    raise SystemExit(0)
+
+compression = zipfile.ZIP_BZIP2 if mutation == "method-over" else (
+    zipfile.ZIP_DEFLATED
+    if mutation in {"ratio-over", "aggregate-ratio-over"}
+    else zipfile.ZIP_STORED
+)
+buffer = io.BytesIO()
+with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
+    def add(name, data=b""):
+        member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        member.external_attr = 0o100600 << 16
+        member.compress_type = compression
+        archive.writestr(member, data)
+
+    if kind == "apk":
+        add("AndroidManifest.xml", b"manifest")
+        add("classes.dex", b"dex\n035\0")
+    elif kind == "services":
+        add("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n")
+        add("classes.dex", b"dex\n035\0")
+    else:
+        raise SystemExit("unknown archive kind")
+
+    if mutation in {"member-over", "member-boundary"}:
+        total = member_caps[kind] + (1 if mutation == "member-over" else 0)
+        for index in range(total - 2):
+            add(f"budget/{index:05d}")
+    elif mutation == "ratio-over":
+        add("budget/ratio.bin", b"R" * (2 * 1024 * 1024))
+    elif mutation == "aggregate-ratio-over":
+        add("budget/ratio-one.bin", b"R" * (768 * 1024))
+        add("budget/ratio-two.bin", b"S" * (768 * 1024))
+    elif mutation in {"single-over", "total-over"}:
+        add("budget/one.bin", b"1")
+        if mutation == "total-over":
+            add("budget/two.bin", b"2")
+            add("budget/three.bin", b"3")
+    elif mutation == "method-over":
+        add("budget/method.bin", b"method")
+    else:
+        raise SystemExit(f"unknown archive mutation: {mutation}")
+
+data = bytearray(buffer.getvalue())
+if mutation in {"single-over", "total-over"}:
+    central_signature = b"PK\x01\x02"
+    positions = []
+    cursor = 0
+    while True:
+        cursor = data.find(central_signature, cursor)
+        if cursor < 0:
+            break
+        positions.append(cursor)
+        cursor += 4
+    target_positions = positions[-1:] if mutation == "single-over" else positions[-3:]
+    sizes = (
+        [256 * 1024 * 1024 + 1]
+        if mutation == "single-over"
+        else [200 * 1024 * 1024, 200 * 1024 * 1024, 112 * 1024 * 1024 + 1]
+    )
+    for position, size in zip(target_positions, sizes):
+        struct.pack_into("<I", data, position + 24, size)
+path.write_bytes(data)
+PY
+}
+
+# FC-6: one immutable lane-selected budget supervises every exact adb argv.
+# The source contract supplements live deadlock/limit cases with integer-only
+# ZIP metadata boundary checks against both independent validator copies.
+FC6_STATIC_DETAIL="$("$PYTHON_BIN" -I - "$COLLECTOR" <<'PY' 2>&1
+import ast
+import datetime
+import errno
+import hashlib
+import os
+import pathlib
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+required = (
+    "readonly PROD_TEXT_TIMEOUT_SECONDS=30",
+    "readonly PROD_TEXT_STDOUT_LIMIT=4194304",
+    "readonly PROD_BINARY_APK_TIMEOUT_SECONDS=180",
+    "readonly PROD_BINARY_APK_STDOUT_LIMIT=268435456",
+    "readonly PROD_BINARY_SERVICES_TIMEOUT_SECONDS=120",
+    "readonly PROD_BINARY_SERVICES_STDOUT_LIMIT=134217728",
+    "readonly PROD_STDERR_LIMIT=1048576",
+    "readonly SELFTEST_TIMEOUT_SECONDS=2",
+    "readonly SELFTEST_TEXT_STDOUT_LIMIT=65536",
+    "readonly SELFTEST_APK_STDOUT_LIMIT=3145728",
+    "readonly SELFTEST_SERVICES_STDOUT_LIMIT=2097152",
+    "readonly SELFTEST_STDERR_LIMIT=32768",
+    "readonly ADB_SNAPSHOT_SIZE_LIMIT=67108864",
+    "readonly ADB_ALLOWLIST_SIZE_LIMIT=65536",
+    "readonly COLLECTOR_SOURCE_SIZE_LIMIT=2097152",
+    "readonly OFFLINE_RETAINED_CONTROL_LIMIT=67108864",
+    "subprocess.Popen(",
+    "shell=False",
+    "start_new_session=True",
+    "selectors.DefaultSelector()",
+    "os.killpg(",
+    "process.wait(timeout=",
+    "def sanitized_child_environment(lane):",
+    "def bounded_retained_control_total(current, values, byte_limit):",
+    "def receipt_profile(name):",
+    'bounded_directory_names(root, 4, "evidence root")',
+    'bounded_directory_names(tooling, 1, "tooling directory")',
+    "file_read_limits[str(adb_path)] = (adb_snapshot_size_limit, None)",
+    "file_digest.hexdigest() != expected_digest",
+    "print(f\"{digest.hexdigest()}\\t{identity_text(opened_after)}\")",
+)
+missing = [fragment for fragment in required if fragment not in source]
+if missing:
+    raise SystemExit(f"resource supervisor contract missing: {missing!r}")
+for forbidden in ("--adb-timeout", "--stdout-limit", "--stderr-limit", "ADB_TIMEOUT_SECONDS"):
+    if forbidden in source:
+        raise SystemExit(f"resource budget exposes an override surface: {forbidden}")
+
+tree_start = source.index("sha256_receipt_tree() {")
+tree_end = source.index("\nrender_manifest()", tree_start)
+tree_source = source[tree_start:tree_end]
+verify_start = source.index("verify_receipts() {")
+verify_end = source.index("\nread_scalar_receipt()", verify_start)
+verify_source = source[verify_start:verify_end]
+main_source = source[source.index("main() {"):]
+if "read_bytes(" in tree_source or "path.open(" in tree_source:
+    raise SystemExit("receipt-tree hashing contains an unbounded pathname read")
+if "os.listdir(" in tree_source:
+    raise SystemExit("receipt-tree hashing materializes an unbounded directory listing")
+if "receipts.glob(" in verify_source or ".iterdir()" in verify_source:
+    raise SystemExit("offline verification materializes an unbounded directory listing")
+if "sha256_file() {" in source:
+    raise SystemExit("collector retains a dead unbounded pathname hash helper")
+
+def embedded_python(function_name):
+    tail = source.split(f"{function_name}() {{", 1)[1]
+    heredoc_tail = tail.split("<<'PY'", 1)[1].split("\n", 1)[1]
+    return heredoc_tail.split("\nPY\n", 1)[0] + "\n"
+
+validate_adb_python = embedded_python("validate_adb_binary")
+snapshot_adb_python = embedded_python("snapshot_adb_binary")
+intact_adb_python = embedded_python("adb_snapshot_intact")
+verify_python = embedded_python("verify_receipts")
+if "O_NONBLOCK" not in validate_adb_python or "O_NONBLOCK" not in snapshot_adb_python:
+    raise SystemExit("ADB source opens are not uniformly nonblocking before type checks")
+validate_allowlist_python = embedded_python("validate_adb_approval")
+if "O_NONBLOCK" not in validate_allowlist_python:
+    raise SystemExit("live ADB allowlist open is not nonblocking")
+if "def stable_trust_bytes(path, byte_limit):" not in validate_allowlist_python:
+    raise SystemExit("live ADB allowlist lacks the bounded trust-file reader")
+if "def stable_trust_bytes(path, byte_limit):" not in verify_python:
+    raise SystemExit("offline repo trust inputs lack the bounded trust-file reader")
+if "receipt_snapshot" in verify_python or "valid_archive_bytes" in verify_python:
+    raise SystemExit("offline verification still retains complete archive receipt bytes")
+if "def stable_archive_file(path, kind):" not in verify_python:
+    raise SystemExit("offline verification lacks descriptor-streamed archive validation")
+
+parsed_verifier = ast.parse(verify_python)
+retained_nodes = [
+    node for node in parsed_verifier.body
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    and node.name == "bounded_retained_control_total"
+]
+if len(retained_nodes) != 1:
+    raise SystemExit("cannot extract the offline retained-control accounting seam")
+retained_namespace = {}
+exec(
+    compile(
+        ast.Module(body=retained_nodes, type_ignores=[]),
+        sys.argv[1],
+        "exec",
+    ),
+    retained_namespace,
+)
+bounded_retained_control_total = retained_namespace[
+    "bounded_retained_control_total"
+]
+retained_limit = 4096
+if bounded_retained_control_total(
+    1024, (b"A" * 1024, b"B" * 2048), retained_limit
+) != retained_limit:
+    raise SystemExit("offline retained-control accounting rejected its exact byte cap")
+try:
+    bounded_retained_control_total(
+        1024, (b"A" * 1024, b"B" * 2049), retained_limit
+    )
+except SystemExit as error:
+    if "exceed the fixed memory limit" not in str(error):
+        raise
+else:
+    raise SystemExit("offline retained-control accounting accepted byte cap+1")
+
+# Execute the unchanged production carrier loop, not only its accounting helper.
+
+carrier_nodes = [
+    node for node in parsed_verifier.body
+    if isinstance(node, ast.For)
+    and isinstance(node.target, ast.Name) and node.target.id == "stem"
+    and isinstance(node.iter, ast.Name) and node.iter.id == "expected_stems"
+    and any(
+        isinstance(child, ast.Assign)
+        and any(isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "carriers" for target in child.targets)
+        for child in ast.walk(node)
+    )
+]
+retained_nodes = [
+    node for node in parsed_verifier.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "bounded_retained_control_total"
+]
+if len(carrier_nodes) != 1 or len(retained_nodes) != 1:
+    raise SystemExit("cannot extract the offline carrier-loop accounting seam")
+carrier_program = compile(
+    ast.Module(body=retained_nodes + carrier_nodes, type_ignores=[]),
+    sys.argv[1], "exec",
+)
+
+def run_carrier_accounting(command, count, budget):
+    with tempfile.TemporaryDirectory(prefix="issue66-command-accounting-") as temp:
+        receipts = pathlib.Path(temp)
+        stems = [f"test-{index}" for index in range(count)]
+        for stem in stems:
+            values = {
+                "command.txt": command,
+                "start-utc.txt": b"2026-09-05T00:00:00Z\n",
+                "stdout.txt": b"",
+                "stderr.bin": b"",
+                "exit.txt": b"0\n",
+                "end-utc.txt": b"2026-09-05T00:00:00Z\n",
+            }
+            for suffix, value in values.items():
+                (receipts / f"{stem}.{suffix}").write_bytes(value)
+        limits = {}
+        def bounded_fixture_read(path):
+            value = path.read_bytes()
+            if len(value) > limits[str(path)][0]:
+                raise SystemExit("fixture input exceeds assigned file limit")
+            return value
+        namespace = {
+            "receipts": receipts, "expected_stems": stems, "binary_stems": set(),
+            "file_read_limits": limits, "metadata_limit": 4 * 1024 * 1024,
+            "text_stdout_limit": 4 * 1024 * 1024, "stderr_limit": 1024 * 1024,
+            "retained_control_bytes": 0, "retained_control_limit": budget,
+            "carriers": {}, "accounted": set(), "previous_end": None,
+            "receipt_names": {path.name for path in receipts.iterdir()},
+            "stable_bytes": bounded_fixture_read, "shlex": shlex,
+            "datetime": datetime, "re": re,
+            "rfc3339": re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"),
+        }
+        failure = None
+        try:
+            exec(carrier_program, namespace)
+        except SystemExit as error:
+            failure = str(error)
+        return namespace, failure
+
+failures = []
+exact_command = b"adb -s " + b"A" * 4089
+exact_payload = sum(len(arg.encode("utf-8")) for arg in shlex.split(exact_command.decode()))
+state, error = run_carrier_accounting(exact_command, 1, exact_payload)
+if error is not None or state["retained_control_bytes"] != exact_payload or len(state["carriers"]) != 1:
+    failures.append("exact-cap command argv is not retained and counted exactly")
+state, error = run_carrier_accounting(exact_command + b"A", 1, 65536)
+if error != "fixture input exceeds assigned file limit" or state["carriers"]:
+    failures.append("command carrier byte cap+1 is accepted")
+state, error = run_carrier_accounting(exact_command, 1, exact_payload - 1)
+if error != "offline retained control bytes exceed the fixed memory limit" or state["carriers"]:
+    failures.append("argv is stored before rejecting aggregate byte cap+1")
+state, error = run_carrier_accounting(exact_command, 17, 65536)
+if error != "offline retained control bytes exceed the fixed memory limit" or len(state["carriers"]) != 16:
+    failures.append("multiple command carriers bypass the aggregate byte cap")
+unicode_command = "adb -s " + "é" * 2044 + "a"
+state, error = run_carrier_accounting(unicode_command.encode("utf-8"), 1, exact_payload)
+if error is not None or state["retained_control_bytes"] != exact_payload:
+    failures.append("argv accounting counts characters instead of retained UTF-8 bytes")
+if failures:
+    raise SystemExit("; ".join(failures))
+print("offline carrier-loop command caps and aggregate argv accounting passed")
+
+root_scan = verify_source.index('bounded_directory_names(root, 4, "evidence root")')
+tooling_scan = verify_source.index(
+    'bounded_directory_names(tooling, 1, "tooling directory")'
+)
+first_untrusted_read = min(
+    verify_source.index("manifest_bytes = stable_bytes(manifest_path)"),
+    verify_source.index("summary_bytes = stable_bytes(summary_path)"),
+    verify_source.index("adb_snapshot_digest = stable_file_digest(adb_path"),
+)
+if root_scan > first_untrusted_read or tooling_scan > first_untrusted_read:
+    raise SystemExit("offline directory cardinality gates run after an untrusted read")
+
+def run_embedded(program, *arguments, timeout=5):
+    return subprocess.run(
+        ["/usr/bin/python3", "-I", "-", *(str(value) for value in arguments)],
+        input=program.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+def adb_identity(path):
+    value = path.stat()
+    return ":".join(str(item) for item in (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns, stat.S_IMODE(value.st_mode),
+    ))
+
+def snapshot_identity(path):
+    value = path.stat()
+    return f"{value.st_dev}:{value.st_ino}:{value.st_size}"
+
+with tempfile.TemporaryDirectory(prefix="issue66-fc6-adb-cap-") as directory:
+    boundary_root = pathlib.Path(directory)
+    size_limit = 64 * 1024 * 1024
+    exact_source = boundary_root / "adb-exact"
+    over_source = boundary_root / "adb-over"
+    exact_source.touch(mode=0o600)
+    over_source.touch(mode=0o600)
+    os.truncate(exact_source, size_limit)
+    os.truncate(over_source, size_limit + 1)
+    exact_source.chmod(0o500)
+    over_source.chmod(0o500)
+
+    exact_validation = run_embedded(
+        validate_adb_python, exact_source, size_limit, timeout=10
+    )
+    over_validation = run_embedded(validate_adb_python, over_source, size_limit)
+    if exact_validation.returncode != 0 or over_validation.returncode == 0:
+        raise SystemExit(
+            "ADB validation size boundary drifted: "
+            f"exact={exact_validation.returncode} over={over_validation.returncode}"
+        )
+
+    fifo_source = boundary_root / "adb-fifo"
+    os.mkfifo(fifo_source, 0o500)
+    fifo_validation = run_embedded(validate_adb_python, fifo_source, size_limit)
+    fifo_snapshot = run_embedded(
+        snapshot_adb_python,
+        fifo_source,
+        adb_identity(fifo_source),
+        boundary_root / "fifo-copy",
+        size_limit,
+    )
+    if fifo_validation.returncode == 0 or fifo_snapshot.returncode == 0:
+        raise SystemExit("ADB FIFO source was not refused after a nonblocking open")
+
+    tooling = boundary_root / "tooling"
+    tooling.mkdir(mode=0o700)
+    exact_snapshot = tooling / "adb"
+    copied = run_embedded(
+        snapshot_adb_python,
+        exact_source,
+        adb_identity(exact_source),
+        exact_snapshot,
+        size_limit,
+        timeout=10,
+    )
+    over_copy = run_embedded(
+        snapshot_adb_python,
+        over_source,
+        adb_identity(over_source),
+        boundary_root / "over-copy",
+        size_limit,
+    )
+    if (
+        copied.returncode != 0
+        or over_copy.returncode == 0
+        or exact_snapshot.stat().st_size != size_limit
+    ):
+        raise SystemExit(
+            "ADB snapshot size boundary drifted: "
+            f"exact={copied.returncode} over={over_copy.returncode}"
+        )
+    copied_digest = copied.stdout.decode("ascii").strip()
+    tooling.chmod(0o500)
+    intact = run_embedded(
+        intact_adb_python,
+        tooling,
+        exact_snapshot,
+        snapshot_identity(exact_snapshot),
+        copied_digest,
+        size_limit,
+        timeout=10,
+    )
+    tooling.chmod(0o700)
+    over_snapshot = tooling / "adb-over"
+    over_snapshot.touch(mode=0o600)
+    os.truncate(over_snapshot, size_limit + 1)
+    over_snapshot.chmod(0o500)
+    tooling.chmod(0o500)
+    over_intact = run_embedded(
+        intact_adb_python,
+        tooling,
+        over_snapshot,
+        snapshot_identity(over_snapshot),
+        "0" * 64,
+        size_limit,
+    )
+    tooling.chmod(0o700)
+    if intact.returncode != 0 or over_intact.returncode == 0:
+        raise SystemExit(
+            "ADB snapshot integrity size boundary drifted: "
+            f"exact={intact.returncode} over={over_intact.returncode}"
+        )
+
+    wanted_functions = {"inode_state", "has_extended_acl", "typed_stop", "stable_bytes"}
+    parsed_verifier = ast.parse(verify_python)
+    selected = [
+        node for node in parsed_verifier.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in wanted_functions
+    ]
+    if {node.name for node in selected} != wanted_functions:
+        raise SystemExit("cannot extract the offline bounded-reader seam")
+    offline_namespace = {
+        "errno": errno,
+        "hashlib": hashlib,
+        "os": os,
+        "pathlib": pathlib,
+        "stat": stat,
+        "subprocess": subprocess,
+        "sys": sys,
+        "file_states": {},
+        "file_digests": {},
+        "file_read_limits": {str(exact_source): (size_limit, None)},
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), sys.argv[1], "exec"), offline_namespace)
+    exact_bytes = offline_namespace["stable_bytes"](exact_source, expected_mode=0o500)
+    if len(exact_bytes) != size_limit:
+        raise SystemExit("offline ADB reader rejected or truncated the exact size cap")
+    del exact_bytes
+    offline_namespace["file_read_limits"][str(over_source)] = (size_limit, None)
+    try:
+        offline_namespace["stable_bytes"](over_source, expected_mode=0o500)
+    except SystemExit as error:
+        if "exceeds its lane read limit" not in str(error):
+            raise
+    else:
+        raise SystemExit("offline ADB reader accepted size cap+1")
+
+trust_signature = "def stable_trust_bytes(path, byte_limit):"
+trust_starts = [
+    index for index, line in enumerate(source.splitlines())
+    if line == trust_signature
+]
+if len(trust_starts) != 2:
+    raise SystemExit(f"expected two bounded trust readers, found {len(trust_starts)}")
+trust_sources = []
+source_lines = source.splitlines()
+for start in trust_starts:
+    end = start + 1
+    while end < len(source_lines) and (
+        not source_lines[end] or source_lines[end][0].isspace()
+    ):
+        end += 1
+    trust_sources.append("\n".join(source_lines[start:end]) + "\n")
+if trust_sources[0] != trust_sources[1]:
+    raise SystemExit("live and offline repo trust readers have drifted")
+
+trust_namespace = {"os": os, "stat": stat}
+exec(compile(trust_sources[0], sys.argv[1], "exec"), trust_namespace)
+stable_trust_bytes = trust_namespace["stable_trust_bytes"]
+trust_limit = 4096
+trust_temporary = tempfile.TemporaryDirectory(prefix="issue66-fc6-trust-inputs-")
+trust_root = pathlib.Path(trust_temporary.name)
+trust_exact = trust_root / "exact"
+trust_over = trust_root / "over"
+trust_fifo = trust_root / "fifo"
+trust_exact.write_bytes(b"A" * trust_limit)
+trust_over.write_bytes(b"B" * (trust_limit + 1))
+os.mkfifo(trust_fifo, 0o600)
+if stable_trust_bytes(trust_exact, trust_limit) != b"A" * trust_limit:
+    raise SystemExit("bounded trust reader rejected its exact byte cap")
+for label, candidate in (("cap+1", trust_over), ("FIFO", trust_fifo)):
+    started = time.monotonic()
+    try:
+        stable_trust_bytes(candidate, trust_limit)
+    except OSError:
+        pass
+    else:
+        raise SystemExit(f"bounded trust reader accepted {label}")
+    if time.monotonic() - started > 0.5:
+        raise SystemExit(f"bounded trust reader blocked on {label}")
+
+trust_swap = trust_root / "swap"
+trust_replacement = trust_root / "replacement"
+trust_detached = trust_root / "detached"
+trust_swap.write_bytes(b"S" * trust_limit)
+trust_replacement.write_bytes(b"R" * trust_limit)
+
+class TrustSwapOs:
+    def __init__(self):
+        self.swapped = False
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def read(self, descriptor, amount):
+        value = os.read(descriptor, amount)
+        if value and not self.swapped:
+            self.swapped = True
+            os.replace(trust_swap, trust_detached)
+            os.replace(trust_replacement, trust_swap)
+        return value
+
+swap_namespace = {"os": TrustSwapOs(), "stat": stat}
+exec(compile(trust_sources[0], sys.argv[1], "exec"), swap_namespace)
+try:
+    swap_namespace["stable_trust_bytes"](trust_swap, trust_limit)
+except OSError:
+    pass
+else:
+    raise SystemExit("bounded trust reader accepted a pathname swap during read")
+trust_temporary.cleanup()
+
+try:
+    supervisor_tail = source.split("supervise_adb_receipt() {", 1)[1]
+    supervisor_python = (
+        supervisor_tail.split("<<'PY'\n", 1)[1].split("\nPY\n}", 1)[0] + "\n"
+    )
+    complete_start = source.index("complete_supervised_receipt() {")
+    complete_end = source.index("\nrun_text_receipt()", complete_start)
+    complete_function = source[complete_start:complete_end]
+except (IndexError, ValueError) as error:
+    raise SystemExit(f"cannot extract FC-6 supervisor seams: {error}") from error
+
+supervisor_lines = supervisor_python.splitlines()
+write_signature = "def write_all(output, value):"
+write_starts = [
+    index for index, line in enumerate(supervisor_lines) if line == write_signature
+]
+if len(write_starts) != 1:
+    raise SystemExit(
+        f"expected one supervisor write-all helper, found {len(write_starts)}"
+    )
+write_start = write_starts[0]
+write_end = write_start + 1
+while write_end < len(supervisor_lines) and (
+    not supervisor_lines[write_end] or supervisor_lines[write_end][0].isspace()
+):
+    write_end += 1
+write_namespace = {}
+exec(
+    compile(
+        "\n".join(supervisor_lines[write_start:write_end]) + "\n",
+        str(pathlib.Path(sys.argv[1])),
+        "exec",
+    ),
+    write_namespace,
+)
+
+class ShortWriter:
+    def __init__(self, maximum):
+        self.maximum = maximum
+        self.data = bytearray()
+
+    def write(self, value):
+        amount = min(self.maximum, len(value))
+        self.data.extend(value[:amount])
+        return amount
+
+payload = b"0123456789abcdef"
+short_writer = ShortWriter(3)
+write_namespace["write_all"](short_writer, payload)
+if bytes(short_writer.data) != payload:
+    raise SystemExit(f"short file writes lost bytes: {bytes(short_writer.data)!r}")
+try:
+    write_namespace["write_all"](ShortWriter(0), payload)
+except OSError:
+    pass
+else:
+    raise SystemExit("zero-progress receipt write was not an internal failure")
+
+class InvalidWriter:
+    def __init__(self, result):
+        self.result = result
+
+    def write(self, _value):
+        return self.result
+
+for label, result in (("None", None), ("oversized", len(payload) + 1)):
+    try:
+        write_namespace["write_all"](InvalidWriter(result), payload)
+    except OSError:
+        pass
+    else:
+        raise SystemExit(f"{label} receipt write progress was not an internal failure")
+
+with tempfile.TemporaryDirectory(prefix="issue66-fc6-internal-") as directory:
+    root = pathlib.Path(directory)
+    missing = root / "missing"
+    supervised = subprocess.run(
+        [
+            "/usr/bin/python3", "-I", "-", "2", "65536", "32768", "SELFTEST",
+            str(missing / "stdout"), str(missing / "stderr"), "/usr/bin/false",
+        ],
+        input=supervisor_python.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if supervised.returncode != 0 or supervised.stdout != b"INTERNAL\t70\n":
+        raise SystemExit(
+            "supervisor internal failure protocol drifted: "
+            f"rc={supervised.returncode} stdout={supervised.stdout!r} "
+            f"stderr={supervised.stderr!r}"
+        )
+
+    # A successful leader may fork a same-process-group descendant that closes
+    # both inherited pipes before continuing. Pipe EOF plus leader exit=0 is
+    # not command completion: the supervisor must stop that group and report a
+    # typed fail-closed outcome instead of accepting OK.
+    orphan_marker = root / "orphan-late-marker"
+    orphan_stdout = root / "orphan.stdout"
+    orphan_stderr = root / "orphan.stderr"
+    orphan_stdout.touch()
+    orphan_stderr.touch()
+    orphan_program = (
+        "import os,sys,time\n"
+        "if os.fork() != 0: os._exit(0)\n"
+        "os.close(1); os.close(2)\n"
+        "time.sleep(1.0)\n"
+        "open(sys.argv[1], 'wb').write(b'orphan\\n')\n"
+        "os._exit(0)\n"
+    )
+    orphaned = subprocess.run(
+        [
+            "/usr/bin/python3", "-I", "-", "2", "65536", "32768", "SELFTEST",
+            str(orphan_stdout), str(orphan_stderr),
+            "/usr/bin/python3", "-I", "-c", orphan_program,
+            str(orphan_marker),
+        ],
+        input=supervisor_python.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    if orphaned.returncode != 0 or orphaned.stdout != b"ORPHANED_GROUP\t70\n":
+        raise SystemExit(
+            "successful leader with a live same-group descendant was accepted: "
+            f"rc={orphaned.returncode} stdout={orphaned.stdout!r} "
+            f"stderr={orphaned.stderr!r}"
+        )
+    marker_deadline = time.monotonic() + 1.25
+    while time.monotonic() < marker_deadline and not orphan_marker.exists():
+        time.sleep(0.025)
+    if orphan_marker.exists():
+        raise SystemExit("orphaned adb descendant survived the bounded group stop")
+
+    environment_stdout = root / "environment.stdout"
+    environment_stderr = root / "environment.stderr"
+    environment_stdout.touch()
+    environment_stderr.touch()
+    poison_names = (
+        "BASH_ENV", "ENV", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP",
+        "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+    )
+    environment_program = (
+        "import os\n"
+        f"names={poison_names!r}\n"
+        "print('poison=' + ','.join(name for name in names if name in os.environ))\n"
+        "print('home=' + ('present' if os.environ.get('HOME') else 'missing'))\n"
+    )
+    poisoned_environment = os.environ.copy()
+    # The test may itself run under env -i; provide the optional identity input
+    # explicitly so this checks preservation independently of the login shell.
+    poisoned_environment["HOME"] = str(root / "fixture-home")
+    poisoned_environment.update({name: "/definitely/not/allowed" for name in poison_names})
+    sanitized = subprocess.run(
+        [
+            "/usr/bin/python3", "-I", "-", "2", "65536", "32768", "PRODUCTION",
+            str(environment_stdout), str(environment_stderr),
+            "/usr/bin/python3", "-I", "-c", environment_program,
+        ],
+        input=supervisor_python.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=poisoned_environment,
+        timeout=5,
+        check=False,
+    )
+    if (
+        sanitized.returncode != 0
+        or sanitized.stdout != b"OK\t0\n"
+        or environment_stdout.read_bytes() != b"poison=\nhome=present\n"
+    ):
+        raise SystemExit(
+            "production adb child environment retained loader/startup injection: "
+            f"rc={sanitized.returncode} result={sanitized.stdout!r} "
+            f"child={environment_stdout.read_bytes()!r} "
+            f"stderr={sanitized.stderr!r}"
+        )
+
+    receipts = root / "receipts"
+    receipts.mkdir()
+    prefix = receipts / "devices"
+    for suffix in ("command.txt", "start-utc.txt", "stdout.txt", "stderr.bin"):
+        pathlib.Path(f"{prefix}.{suffix}").write_bytes(b"")
+    shell_harness = (
+        "set -uo pipefail\n"
+        + complete_function
+        + "\n"
+        + r'''
+timestamp_utc() { printf '%s\n' '2000-01-01T00:00:00Z'; }
+adb_snapshot_intact() { return 0; }
+stop_now() {
+  printf '%s\n' "$1"
+  case "$1" in STOP_INTERNAL_*) exit 70 ;; *) exit 99 ;; esac
+}
+OUTPUT_DIR=$1
+complete_supervised_receipt devices "$OUTPUT_DIR/receipts/devices" "$2"
+'''
+    )
+    completed = subprocess.run(
+        [
+            "/bin/bash", "-p", "-s", "--", str(root),
+            supervised.stdout.decode("ascii").strip(),
+        ],
+        input=shell_harness.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    expected_files = {
+        "devices.command.txt", "devices.start-utc.txt", "devices.stdout.txt",
+        "devices.stderr.bin", "devices.exit.txt", "devices.end-utc.txt",
+    }
+    actual_files = {
+        path.name for path in receipts.iterdir() if path.name != "stems.txt"
+    }
+    if (
+        completed.returncode != 70
+        or completed.stdout != b"STOP_INTERNAL_ADB_SUPERVISOR\n"
+        or actual_files != expected_files
+        or (receipts / "devices.exit.txt").read_text(encoding="ascii") != "70\n"
+        or (receipts / "stems.txt").read_text(encoding="ascii") != "devices\n"
+    ):
+        raise SystemExit(
+            "internal supervisor completion contract drifted: "
+            f"rc={completed.returncode} stdout={completed.stdout!r} "
+            f"stderr={completed.stderr!r} files={sorted(actual_files)!r}"
+        )
+PY
+)"
+FC6_STATIC_RC=$?
+if (( FC6_STATIC_RC == 0 )); then
+  report ok "FC-6 supervisor has fixed budgets, group termination and typed internal completion"
+else
+  report fail "FC-6 supervisor has fixed budgets, group termination and typed internal completion" \
+    "$FC6_STATIC_DETAIL"
+fi
+
+FC6_ARCHIVE_BOUNDARY_DETAIL="$("$PYTHON_BIN" -I - "$COLLECTOR" <<'PY' 2>&1
+import io
+import pathlib
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+source_path = pathlib.Path(sys.argv[1])
+source = source_path.read_text(encoding="utf-8")
+lines = source.splitlines()
+archive_limits = {
+    "apk_members": 16384,
+    "services_members": 4096,
+    "single_size": 256 * 1024 * 1024,
+    "total_size": 512 * 1024 * 1024,
+    "ratio": 100,
+    "ratio_slack": 1024 * 1024,
+}
+
+def extracted_helpers(signature):
+    starts = [index for index, line in enumerate(lines) if line == signature]
+    if len(starts) != 2:
+        raise SystemExit(f"expected two {signature!r} helpers, found {len(starts)}")
+    helpers = []
+    helper_sources = []
+    for start in starts:
+        end = start + 1
+        while end < len(lines) and (not lines[end] or lines[end][0].isspace()):
+            end += 1
+        helper_source = "\n".join(lines[start:end]) + "\n"
+        helper_sources.append(helper_source)
+        namespace = {
+            "archive_limits": archive_limits,
+            "struct": struct,
+            "zipfile": zipfile,
+        }
+        exec(compile(helper_source, str(source_path), "exec"), namespace)
+        helpers.append(namespace[signature.split("(", 1)[0].split()[1]])
+    if helper_sources[0] != helper_sources[1]:
+        raise SystemExit(f"live and offline {signature!r} implementations drifted")
+    return helpers
+
+metadata_helpers = extracted_helpers(
+    "def archive_metadata_within_limits(members, kind):"
+)
+preflight_helpers = extracted_helpers(
+    "def archive_directory_preflight(read_at, archive_size, kind):"
+)
+
+offline_start = source.index("def stable_archive_file(path, kind):")
+offline_end = source.index("\ndef installed_base_path(", offline_start)
+offline = source[offline_start:offline_end]
+if offline.index("preflight = archive_directory_preflight(") > offline.index(
+    "with zipfile.ZipFile("
+):
+    raise SystemExit("offline ZipFile constructor precedes bounded directory preflight")
+
+live_start = source.index("valid_archive_file() { # path apk|services")
+live_end = source.index("\nclassify_devices_inventory_file()", live_start)
+live = source[live_start:live_end]
+live_order = (
+    'getattr(os, "O_NOFOLLOW", 0)',
+    'stream = os.fdopen(descriptor, "rb", buffering=0)',
+    "preflight = archive_directory_preflight(",
+    "preflight_after = os.fstat(stream.fileno())",
+    "if preflight_after.st_size > file_limit:",
+    "with zipfile.ZipFile(bounded)",
+    "opened_after = os.fstat(stream.fileno())",
+    "named_after = path.lstat()",
+    "if opened_after.st_size > file_limit:",
+)
+positions = [live.index(fragment) for fragment in live_order]
+if positions != sorted(positions) or "zipfile.ZipFile(path" in live:
+    raise SystemExit("live archive validation is not pinned to one nofollow descriptor")
+
+class Member:
+    def __init__(self, file_size=0, compress_size=0, compress_type=zipfile.ZIP_STORED):
+        self.file_size = file_size
+        self.compress_size = compress_size
+        self.compress_type = compress_type
+
+MIB = 1024 * 1024
+SLACK = MIB
+
+def compressed_for(size):
+    return max(0, (max(0, size - SLACK) + 99) // 100)
+
+for number, helper in enumerate(metadata_helpers, 1):
+    checks = (
+        ("APK member cap", [Member()] * 16384, "apk", True),
+        ("APK member cap+1", [Member()] * 16385, "apk", False),
+        ("services member cap", [Member()] * 4096, "services", True),
+        ("services member cap+1", [Member()] * 4097, "services", False),
+        ("single cap", [Member(256*MIB, compressed_for(256*MIB))], "apk", True),
+        ("single cap+1", [Member(256*MIB+1, compressed_for(256*MIB+1))], "apk", False),
+        ("total cap", [Member(256*MIB, 256*MIB)] * 2, "apk", True),
+        ("total cap+1", [
+            Member(256*MIB, 256*MIB),
+            Member(256*MIB, 256*MIB),
+            Member(1, 1),
+        ], "apk", False),
+        ("ratio cap", [Member(100 + SLACK, 1)], "apk", True),
+        ("ratio cap+1", [Member(101 + SLACK, 1)], "apk", False),
+        ("aggregate ratio cap", [
+            Member(SLACK//2, 0), Member(SLACK//2, 0),
+        ], "apk", True),
+        ("aggregate ratio cap+1", [
+            Member(SLACK//2 + 1, 0), Member(SLACK//2, 0),
+        ], "apk", False),
+        ("stored method", [Member()], "apk", True),
+        ("deflated method", [Member(compress_type=zipfile.ZIP_DEFLATED)], "apk", True),
+        ("unsupported method", [Member(compress_type=zipfile.ZIP_BZIP2)], "apk", False),
+    )
+    for label, members, kind, expected in checks:
+        actual = helper(members, kind)
+        if actual is not expected:
+            raise SystemExit(
+                f"helper {number} {label}: actual={actual!r} expected={expected!r}"
+            )
+
+CENTRAL_HEADER = b"PK\x01\x02" + b"\0" * 42
+
+def legacy_eocd(entries, directory_size, directory_offset=0):
+    return struct.pack(
+        "<4s4H2LH", b"PK\x05\x06", 0, 0, entries, entries,
+        directory_size, directory_offset, 0,
+    )
+
+def regular_directory(actual_entries, declared_entries=None):
+    if declared_entries is None:
+        declared_entries = actual_entries
+    directory = CENTRAL_HEADER * actual_entries
+    return directory + legacy_eocd(declared_entries, len(directory))
+
+def zip64_declared_directory(entries):
+    zip64 = struct.pack(
+        "<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0,
+        entries, entries, 0, 0,
+    )
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, 0, 1)
+    legacy = struct.pack(
+        "<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF,
+        0xFFFFFFFF, 0xFFFFFFFF, 0,
+    )
+    return zip64 + locator + legacy
+
+malformed = bytearray(CENTRAL_HEADER)
+struct.pack_into("<H", malformed, 28, 1)
+malformed = bytes(malformed) + legacy_eocd(1, len(malformed))
+preflight_checks = (
+    ("empty directory", regular_directory(0), "apk", "OK"),
+    ("APK exact declared/actual member cap", regular_directory(16384), "apk", "OK"),
+    ("services exact declared/actual member cap", regular_directory(4096), "services", "OK"),
+    ("APK legacy declared member cap+1", legacy_eocd(16385, 0), "apk", "LIMIT"),
+    ("services legacy declared member cap+1", legacy_eocd(4097, 0), "services", "LIMIT"),
+    ("APK Zip64 declared member cap+1", zip64_declared_directory(16385), "apk", "LIMIT"),
+    (
+        "forged-low declaration with actual APK cap+1",
+        regular_directory(16385, declared_entries=1),
+        "apk",
+        "LIMIT",
+    ),
+    ("truncated central-directory variable field", malformed, "apk", "INVALID"),
+)
+for number, helper in enumerate(preflight_helpers, 1):
+    for label, data, kind, expected in preflight_checks:
+        actual = helper(
+            lambda offset, length, value=data: value[offset:offset + length],
+            len(data),
+            kind,
+        )
+        if actual != expected:
+            raise SystemExit(
+                f"preflight {number} {label}: actual={actual!r} expected={expected!r}"
+            )
+
+live_python_start = live.index("import io\n")
+live_python_end = live.rindex("\nPY\n")
+live_python = live[live_python_start:live_python_end] + "\n"
+
+class TypedArchiveStop(Exception):
+    pass
+
+class ZipFileSentinel:
+    ZIP_STORED = zipfile.ZIP_STORED
+    ZIP_DEFLATED = zipfile.ZIP_DEFLATED
+    BadZipFile = zipfile.BadZipFile
+    LargeZipFile = zipfile.LargeZipFile
+
+    def __init__(self):
+        self.calls = 0
+
+    def ZipFile(self, *_args, **_kwargs):
+        self.calls += 1
+        raise AssertionError("ZipFile constructor ran before archive-count preflight")
+
+def typed_stop(marker, _detail):
+    raise TypedArchiveStop(marker)
+
+constructor_limit_cases = (
+    ("legacy declared count", legacy_eocd(16385, 0)),
+    ("Zip64 declared count", zip64_declared_directory(16385)),
+    ("forged-low actual count", regular_directory(16385, declared_entries=1)),
+)
+live_without_zip_import = live_python.replace("import zipfile\n", "", 1)
+if live_without_zip_import == live_python:
+    raise SystemExit("cannot install live ZipFile constructor sentinel")
+with tempfile.TemporaryDirectory(prefix="issue66-fc6-live-cap-") as directory:
+    for index, (label, data) in enumerate(constructor_limit_cases):
+        archive_path = pathlib.Path(directory) / f"preflight-{index}.apk"
+        archive_path.write_bytes(data)
+        archive_path.chmod(0o600)
+        sentinel = ZipFileSentinel()
+        saved_argv = sys.argv
+        sys.argv = [
+            "-", str(archive_path), "apk", str(1024 * 1024),
+            "16384", "4096", str(256 * 1024 * 1024),
+            str(512 * 1024 * 1024), "100", str(1024 * 1024),
+        ]
+        try:
+            try:
+                exec(
+                    compile(live_without_zip_import, str(source_path), "exec"),
+                    {"__name__": "__main__", "zipfile": sentinel},
+                )
+            except SystemExit as error:
+                if error.code != 2:
+                    raise SystemExit(
+                        f"live {label} produced wrong preflight exit: {error.code!r}"
+                    ) from error
+            else:
+                raise SystemExit(f"live {label} did not stop at the preflight limit")
+        finally:
+            sys.argv = saved_argv
+        if sentinel.calls:
+            raise SystemExit(f"live {label} constructed ZipFile before stopping")
+
+    over_cap = pathlib.Path(directory) / "archive.apk"
+    over_cap.write_bytes(b"A" * 17)
+    over_cap.chmod(0o600)
+    completed = subprocess.run(
+        [
+            "/usr/bin/python3", "-I", "-", str(over_cap), "apk", "16",
+            "16384", "4096", str(256 * 1024 * 1024),
+            str(512 * 1024 * 1024), "100", str(1024 * 1024),
+        ],
+        input=live_python.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 2:
+        raise SystemExit(
+            "live initial file-cap violation lost typed rc=2: "
+            f"rc={completed.returncode} stderr={completed.stderr.decode(errors='replace')!r}"
+        )
+PY
+)"
+FC6_ARCHIVE_BOUNDARY_RC=$?
+if (( FC6_ARCHIVE_BOUNDARY_RC == 0 )); then
+  report ok "live/offline ZIP preflight and metadata gates share exact bounded contracts"
+else
+  report fail "live/offline ZIP preflight and metadata gates share exact bounded contracts" \
+    "$FC6_ARCHIVE_BOUNDARY_DETAIL"
+fi
+
+FC6_GROWTH_LIMIT_DETAIL="$("$PYTHON_BIN" -I - "$COLLECTOR" <<'PY' 2>&1
+import hashlib
+import os as real_os
+import pathlib
+import stat
+import sys
+import tempfile
+
+source_path = pathlib.Path(sys.argv[1])
+lines = source_path.read_text(encoding="utf-8").splitlines()
+signature = "def stable_bytes(path, expected_mode=0o600):"
+try:
+    start = lines.index(signature)
+except ValueError as error:
+    raise SystemExit("offline stable reader missing") from error
+end = start + 1
+while end < len(lines) and (not lines[end] or lines[end][0].isspace()):
+    end += 1
+
+def inode_state(value):
+    return (
+        value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+        value.st_uid, stat.S_IMODE(value.st_mode), value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+def typed_stop(marker, detail):
+    raise SystemExit(f"{marker}: {detail}")
+
+with tempfile.TemporaryDirectory(prefix="issue66-fc6-growth-") as directory:
+    path = pathlib.Path(directory) / "archive.bin"
+    path.write_bytes(b"A" * 16)
+    path.chmod(0o600)
+
+    class OsProxy:
+        def __init__(self):
+            self.grew = False
+            self.read_sizes = []
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def read(self, descriptor, amount):
+            self.read_sizes.append(amount)
+            if not self.grew:
+                self.grew = True
+                with path.open("ab") as stream:
+                    stream.write(b"B" * 1024)
+            return real_os.read(descriptor, amount)
+
+    proxy = OsProxy()
+    namespace = {
+        "hashlib": hashlib,
+        "os": proxy,
+        "pathlib": pathlib,
+        "stat": stat,
+        "inode_state": inode_state,
+        "has_extended_acl": lambda _path: False,
+        "file_states": {},
+        "file_digests": {},
+        "file_read_limits": {
+            str(path): (16, "STOP_APK_ARCHIVE_LIMIT"),
+        },
+        "typed_stop": typed_stop,
+    }
+    exec(
+        compile("\n".join(lines[start:end]) + "\n", str(source_path), "exec"),
+        namespace,
+    )
+    try:
+        namespace["stable_bytes"](path)
+    except SystemExit as error:
+        if not str(error).startswith("STOP_APK_ARCHIVE_LIMIT:"):
+            raise SystemExit(f"growth produced wrong failure: {error}") from error
+    else:
+        raise SystemExit("same-inode post-fstat growth escaped the lane cap")
+    if not proxy.read_sizes or max(proxy.read_sizes) > 17:
+        raise SystemExit(f"reader requested beyond remaining+1: {proxy.read_sizes!r}")
+
+    path.write_bytes(b"A" * 16)
+
+    class EofGrowthProxy:
+        def __init__(self):
+            self.fstat_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def fstat(self, descriptor):
+            self.fstat_calls += 1
+            if self.fstat_calls == 2:
+                with path.open("ab") as stream:
+                    stream.write(b"B")
+            return real_os.fstat(descriptor)
+
+    eof_proxy = EofGrowthProxy()
+    namespace = {
+        "hashlib": hashlib,
+        "os": eof_proxy,
+        "pathlib": pathlib,
+        "stat": stat,
+        "inode_state": inode_state,
+        "has_extended_acl": lambda _path: False,
+        "file_states": {},
+        "file_digests": {},
+        "file_read_limits": {
+            str(path): (16, "STOP_APK_ARCHIVE_LIMIT"),
+        },
+        "typed_stop": typed_stop,
+    }
+    exec(
+        compile("\n".join(lines[start:end]) + "\n", str(source_path), "exec"),
+        namespace,
+    )
+    try:
+        namespace["stable_bytes"](path)
+    except SystemExit as error:
+        if not str(error).startswith("STOP_APK_ARCHIVE_LIMIT:"):
+            raise SystemExit(f"EOF growth produced wrong failure: {error}") from error
+    else:
+        raise SystemExit("EOF-to-fstat growth escaped the typed lane cap")
+PY
+)"
+FC6_GROWTH_LIMIT_RC=$?
+if (( FC6_GROWTH_LIMIT_RC == 0 )); then
+  report ok "offline descriptor reads remain bounded across same-inode growth"
+else
+  report fail "offline descriptor reads remain bounded across same-inode growth" \
+    "$FC6_GROWTH_LIMIT_DETAIL"
+fi
+
+FC6_LATE_MARKER="$WORK/fc6-timeout-late-marker"
+export FAKE_ADB_LATE_MARKER="$FC6_LATE_MARKER"
+export ISSUE66_ADB_TIMEOUT_SECONDS=60
+export ISSUE66_ADB_STDOUT_LIMIT=999999999
+run_fc6_typed_live_case budget-timeout STOP_ADB_TIMEOUT devices stdout.txt 0 124 \
+  "devices -l" "timed-out adb process group"
+/bin/sleep 2
+if [[ ! -e $FC6_LATE_MARKER ]]; then
+  report ok "timeout kills the complete process group before its late marker"
+else
+  report fail "timeout kills the complete process group before its late marker" \
+    "late marker exists: $FC6_LATE_MARKER"
+fi
+unset FAKE_ADB_LATE_MARKER ISSUE66_ADB_TIMEOUT_SECONDS ISSUE66_ADB_STDOUT_LIMIT
+
+run_fc6_typed_live_case budget-text-stdout-over STOP_ADB_STDOUT_LIMIT devices \
+  stdout.txt 65536 125 "devices -l" "text stdout cap+1"
+run_fc6_typed_live_case budget-stderr-over STOP_ADB_STDERR_LIMIT devices \
+  stderr.bin 32768 126 "devices -l" "stderr cap+1"
+for fc6_child_exit in 124 125 126 70; do
+  run_fc6_child_exit_case "$fc6_child_exit"
+done
+run_fc6_success_live_case budget-dual-boundary process-list stdout.txt 65536 \
+  "simultaneous exact-cap stdout/stderr"
+assert_budget_receipt "$WORK/out-budget-dual-boundary" process-list stderr.bin 32768 0 \
+  "simultaneous exact-cap stderr is fully drained"
+
+apk_anchor="-s $AUTHORIZED_SERIAL exec-out cat /data/app/~~issue66/name.caiyao.fakegps-fixture/base.apk"
+services_anchor="-s $AUTHORIZED_SERIAL exec-out cat /system/framework/services.jar"
+run_fc6_typed_live_case budget-apk-stdout-over STOP_ADB_STDOUT_LIMIT \
+  package-name-caiyao-fakegps-apk stdout.bin 3145728 125 "$apk_anchor" \
+  "APK stdout cap+1"
+run_fc6_success_live_case budget-apk-stdout-boundary \
+  package-name-caiyao-fakegps-apk stdout.bin 3145728 \
+  "APK stdout exact cap"
+run_fc6_typed_live_case budget-services-stdout-over STOP_ADB_STDOUT_LIMIT \
+  services-jar stdout.bin 2097152 125 "$services_anchor" \
+  "services stdout cap+1"
+run_fc6_success_live_case budget-services-stdout-boundary \
+  services-jar stdout.bin 2097152 \
+  "services stdout exact cap"
+
+run_fc6_tree_rebind_case archive-tree-services-grow \
+  STOP_FRAMEWORK_ARCHIVE_LIMIT 21 \
+  "same-inode services growth after validation"
+run_fc6_tree_rebind_case archive-tree-services-swap \
+  STOP_INTERNAL_HASH_FAILED 70 \
+  "services pathname replacement after validation"
+
+run_fc6_archive_live_case archive-apk-member-over STOP_APK_ARCHIVE_LIMIT \
+  "live APK member-count cap+1"
+run_fc6_archive_live_case archive-apk-ratio-over STOP_APK_ARCHIVE_LIMIT \
+  "live APK compression-ratio cap+1"
+run_fc6_archive_live_case archive-apk-aggregate-ratio-over STOP_APK_ARCHIVE_LIMIT \
+  "live APK aggregate compression-ratio cap+1"
+run_fc6_archive_live_case archive-apk-method-over STOP_APK_ARCHIVE_LIMIT \
+  "live APK unsupported compression method"
+run_fc6_archive_live_case archive-services-member-over STOP_FRAMEWORK_ARCHIVE_LIMIT \
+  "live services member-count cap+1"
+
+FC6_BASE_OUT="$WORK/out-fc6-member-boundary"
+run_collect archive-apk-member-boundary "$AUTHORIZED_SERIAL" "$FC6_BASE_OUT"
+if (( RC == 0 )); then
+  report ok "live APK exact member-count boundary completes"
+else
+  report fail "live APK exact member-count boundary completes" "rc=$RC output=$OUT"
+fi
+run_verify "$FC6_BASE_OUT"
+if (( RC == 0 )); then
+  report ok "offline verifier accepts the exact APK member-count boundary"
+else
+  report fail "offline verifier accepts the exact APK member-count boundary" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "exact archive boundary verification performs no adb call"
+
+FC6_METADATA_OVER="$WORK/verify-fc6-command-metadata-over"
+cp -R "$FC6_BASE_OUT" "$FC6_METADATA_OVER"
+"$PYTHON_BIN" -I - \
+  "$FC6_METADATA_OVER/receipts/devices.command.txt" <<'PY'
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_bytes(b"X" * 65537)
+PY
+run_verify "$FC6_METADATA_OVER"
+if (( RC == 21 )) \
+    && [[ $OUT == *STOP_INCOMPLETE_RECEIPT* ]] \
+    && [[ $OUT == *"exceeds its lane read limit"* ]]; then
+  report ok "offline verifier rejects command metadata cap+1 before reading it"
+else
+  report fail "offline verifier rejects command metadata cap+1 before reading it" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "command metadata cap verification performs no adb call"
+
+FC6_RECEIPT_CARDINALITY="$WORK/verify-fc6-receipt-cardinality-over"
+cp -R "$FC6_BASE_OUT" "$FC6_RECEIPT_CARDINALITY"
+for ((fc6_extra_index = 0; fc6_extra_index < 513; fc6_extra_index++)); do
+  : >"$FC6_RECEIPT_CARDINALITY/receipts/extra-$fc6_extra_index.txt"
+done
+run_verify "$FC6_RECEIPT_CARDINALITY"
+if (( RC == 21 )) \
+    && [[ $OUT == *STOP_INCOMPLETE_RECEIPT* ]] \
+    && [[ $OUT == *"receipt directory cardinality exceeds 512"* ]]; then
+  report ok "offline verifier bounds receipt enumeration before carrier reads"
+else
+  report fail "offline verifier bounds receipt enumeration before carrier reads" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "receipt cardinality verification performs no adb call"
+
+FC6_ROOT_CARDINALITY="$WORK/verify-fc6-root-cardinality-over"
+cp -R "$FC6_BASE_OUT" "$FC6_ROOT_CARDINALITY"
+: >"$FC6_ROOT_CARDINALITY/extra-root-entry"
+run_verify "$FC6_ROOT_CARDINALITY"
+if (( RC == 21 )) \
+    && [[ $OUT == *STOP_INCOMPLETE_RECEIPT* ]] \
+    && [[ $OUT == *"evidence root cardinality exceeds 4"* ]]; then
+  report ok "offline verifier bounds evidence-root enumeration before reads"
+else
+  report fail "offline verifier bounds evidence-root enumeration before reads" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "evidence-root cardinality verification performs no adb call"
+
+FC6_TOOLING_CARDINALITY="$WORK/verify-fc6-tooling-cardinality-over"
+cp -R "$FC6_BASE_OUT" "$FC6_TOOLING_CARDINALITY"
+/bin/chmod 700 "$FC6_TOOLING_CARDINALITY/tooling"
+: >"$FC6_TOOLING_CARDINALITY/tooling/extra-tool"
+/bin/chmod 500 "$FC6_TOOLING_CARDINALITY/tooling"
+run_verify "$FC6_TOOLING_CARDINALITY"
+if (( RC == 21 )) \
+    && [[ $OUT == *STOP_INCOMPLETE_RECEIPT* ]] \
+    && [[ $OUT == *"tooling directory cardinality exceeds 1"* ]]; then
+  report ok "offline verifier bounds tooling enumeration before reads"
+else
+  report fail "offline verifier bounds tooling enumeration before reads" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "tooling cardinality verification performs no adb call"
+
+FC6_ADB_SNAPSHOT_OVER="$WORK/verify-fc6-adb-snapshot-over"
+cp -R "$FC6_BASE_OUT" "$FC6_ADB_SNAPSHOT_OVER"
+/bin/chmod 700 "$FC6_ADB_SNAPSHOT_OVER/tooling"
+"$PYTHON_BIN" -I - "$FC6_ADB_SNAPSHOT_OVER/tooling/adb" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.chmod(0o700)
+with path.open("r+b", buffering=0) as stream:
+    stream.truncate(64 * 1024 * 1024 + 1)
+path.chmod(0o500)
+PY
+/bin/chmod 500 "$FC6_ADB_SNAPSHOT_OVER/tooling"
+run_verify "$FC6_ADB_SNAPSHOT_OVER"
+if (( RC == 21 )) \
+    && [[ $OUT == *STOP_INCOMPLETE_RECEIPT* ]] \
+    && [[ $OUT == *"exceeds its lane read limit"* ]]; then
+  report ok "offline verifier rejects adb snapshot cap+1 before reading it"
+else
+  report fail "offline verifier rejects adb snapshot cap+1 before reading it" \
+    "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "adb snapshot cap verification performs no adb call"
+
+unset FC6_ADB_SNAPSHOT_OVER FC6_METADATA_OVER FC6_RECEIPT_CARDINALITY \
+  FC6_ROOT_CARDINALITY FC6_TOOLING_CARDINALITY fc6_extra_index
+
+fc6_archive_mutations=(
+  "apk|file-over|STOP_APK_ARCHIVE_LIMIT"
+  "services|file-over|STOP_FRAMEWORK_ARCHIVE_LIMIT"
+  "apk|member-over|STOP_APK_ARCHIVE_LIMIT"
+  "services|member-over|STOP_FRAMEWORK_ARCHIVE_LIMIT"
+  "apk|single-over|STOP_APK_ARCHIVE_LIMIT"
+  "apk|total-over|STOP_APK_ARCHIVE_LIMIT"
+  "apk|ratio-over|STOP_APK_ARCHIVE_LIMIT"
+  "apk|aggregate-ratio-over|STOP_APK_ARCHIVE_LIMIT"
+  "apk|method-over|STOP_APK_ARCHIVE_LIMIT"
+)
+for fc6_case in "${fc6_archive_mutations[@]}"; do
+  IFS='|' read -r fc6_kind fc6_mutation fc6_marker <<EOF
+$fc6_case
+EOF
+  fc6_broken="$WORK/verify-fc6-$fc6_kind-$fc6_mutation"
+  cp -R "$FC6_BASE_OUT" "$fc6_broken"
+  if [[ $fc6_kind == apk ]]; then
+    fc6_receipt=package-name-caiyao-fakegps-apk.stdout.bin
+    fc6_package=name.caiyao.fakegps
+  else
+    fc6_receipt=services-jar.stdout.bin
+    fc6_package=""
+  fi
+  write_fc6_archive_mutation "$fc6_broken/receipts/$fc6_receipt" \
+    "$fc6_kind" "$fc6_mutation"
+  rebind_binary_claim "$fc6_broken" "$fc6_receipt" "$fc6_package"
+  rebind_receipt_tree "$fc6_broken"
+  run_fc6_verifier_case "$fc6_broken" "$fc6_marker" \
+    "offline verifier rejects $fc6_kind $fc6_mutation budget violation"
+done
+
+if (( RESOURCE_BUDGET_CONTRACT_ONLY )); then
+  printf 'issue66 Moto read-only collector selftest: %d passed, %d failed\n' "$pass" "$fail"
+  [[ $fail -eq 0 ]]
+  exit
+fi
+
+# FC-5: every installed package path is observed initially, immediately before
+# its APK read, and immediately afterwards. The three exact pm-path argv and
+# unique base path must agree. These cases are intentionally early so the
+# focused mode can prove the contract without traversing the full mutation set.
+path_change_cases=(
+  "package-path-change-before-apk|before|before-APK package path change"
+  "package-path-change-after-apk|after|after-APK package path change"
+  "package-path-disappear-before-apk|before|before-APK package disappearance"
+  "package-path-disappear-after-apk|after|after-APK package disappearance"
+)
+for path_change_case in "${path_change_cases[@]}"; do
+  IFS='|' read -r path_change_scenario path_change_phase path_change_label <<EOF
+$path_change_case
+EOF
+  path_change_out="$WORK/out-$path_change_scenario"
+  run_collect "$path_change_scenario" "$AUTHORIZED_SERIAL" "$path_change_out"
+  expect_stop "$path_change_label is refused" \
+    STOP_PACKAGE_PATH_CHANGED
+  expect_exit_code "$path_change_label uses evidence rc=21" 21
+  expect_only_authorized_target "$path_change_label stays scoped"
+  assert_no_privileged_fallback "$ADB_LOG" \
+    "$path_change_label has no privileged fallback"
+  if [[ -f $path_change_out/manifest.json ]]; then
+    assert_stop_manifest "$path_change_out/manifest.json" STOP_PACKAGE_PATH_CHANGED \
+      "$path_change_label manifest preserves the exact reason"
+    assert_six_file_receipts "$path_change_out/manifest.json" \
+      "$path_change_out/receipts" \
+      "$path_change_label preserves strict six-file receipts"
+    assert_package_hash_absent "$path_change_out/manifest.json" name.caiyao.fakegps \
+      "$path_change_label cannot publish an APK digest"
+  else
+    report fail "$path_change_label manifest exists" "missing manifest.json"
+  fi
+  assert_package_path_stop_boundary "$ADB_LOG" "$path_change_phase" \
+    "$path_change_label stops at the bracket boundary"
+done
+
+FC5_BASE_OUT="$WORK/out-fc5-path-bracket"
+run_collect target "$AUTHORIZED_SERIAL" "$FC5_BASE_OUT"
+if (( RC == 0 )); then
+  report ok "FC-5 positive collection completes"
+else
+  report fail "FC-5 positive collection completes" "rc=$RC output=$OUT"
+fi
+if [[ -f $FC5_BASE_OUT/manifest.json ]]; then
+  assert_package_path_bracket "$FC5_BASE_OUT/manifest.json" \
+    "$FC5_BASE_OUT/receipts" "$ADB_LOG" - \
+    "FC-5 positive collection binds three identical package paths" \
+    "${KNOWN_PACKAGES[@]}"
+else
+  report fail "FC-5 positive package-path graph exists" "missing manifest.json"
+fi
+run_verify "$FC5_BASE_OUT"
+if (( RC == 0 )); then
+  report ok "offline verifier accepts the intact FC-5 path bracket"
+else
+  report fail "offline verifier accepts the intact FC-5 path bracket" "rc=$RC output=$OUT"
+fi
+expect_no_adb_call "intact FC-5 offline verification performs no adb call"
+
+FC5_MISSING_OUT="$WORK/out-fc5-missing-package"
+run_collect missing-package "$AUTHORIZED_SERIAL" "$FC5_MISSING_OUT"
+if (( RC == 0 )) && [[ -f $FC5_MISSING_OUT/manifest.json ]]; then
+  assert_package_path_bracket "$FC5_MISSING_OUT/manifest.json" \
+    "$FC5_MISSING_OUT/receipts" "$ADB_LOG" "$MISSING_FIXTURE_PACKAGE" \
+    "NOT_INSTALLED remains a single initial pm-path receipt" \
+    "${KNOWN_PACKAGES[@]}"
+else
+  report fail "FC-5 missing-package collection completes" "rc=$RC output=$OUT"
+fi
+
+fc5_required=(
+  package-name-caiyao-fakegps-path-pre-apk
+  package-name-caiyao-fakegps-apk
+  package-name-caiyao-fakegps-path-post-apk
+)
+fc5_fixture_ready=1
+for fc5_stem in "${fc5_required[@]}"; do
+  [[ -e $FC5_BASE_OUT/receipts/$fc5_stem.command.txt ]] || fc5_fixture_ready=0
+done
+
+fc5_mutations=(
+  pre-path post-path pre-missing post-missing pre-command post-command
+  delete-pre extra-pre swap-bracket
+)
+if (( fc5_fixture_ready )); then
+  for fc5_mutation in "${fc5_mutations[@]}"; do
+    fc5_broken="$WORK/verify-fc5-$fc5_mutation"
+    cp -R "$FC5_BASE_OUT" "$fc5_broken"
+    "$PYTHON_BIN" -I - "$fc5_broken" "$fc5_mutation" <<'PY'
+import json
+import pathlib
+import shutil
+import sys
+
+root = pathlib.Path(sys.argv[1])
+mutation = sys.argv[2]
+receipts = root / "receipts"
+prefix = "package-name-caiyao-fakegps"
+pre = f"{prefix}-path-pre-apk"
+apk = f"{prefix}-apk"
+post = f"{prefix}-path-post-apk"
+
+if mutation in {"pre-path", "post-path"}:
+    stem = pre if mutation == "pre-path" else post
+    (receipts / f"{stem}.stdout.txt").write_text(
+        "package:/data/app/~~verifieddrift/name.caiyao.fakegps-fixture/base.apk\n",
+        encoding="utf-8",
+    )
+elif mutation in {"pre-missing", "post-missing"}:
+    stem = pre if mutation == "pre-missing" else post
+    (receipts / f"{stem}.stdout.txt").write_bytes(b"")
+    (receipts / f"{stem}.stderr.bin").write_bytes(b"")
+    (receipts / f"{stem}.exit.txt").write_text("1\n", encoding="ascii")
+elif mutation in {"pre-command", "post-command"}:
+    stem = pre if mutation == "pre-command" else post
+    (receipts / f"{stem}.command.txt").write_text(
+        "./tooling/adb -s ZY22JHW9M4 shell pm path name.caiyao.fakegps.bench\n",
+        encoding="utf-8",
+    )
+elif mutation == "delete-pre":
+    for path in receipts.glob(f"{pre}.*"):
+        path.unlink()
+    for document_name in ("manifest.json", "summary.json"):
+        document_path = root / document_name
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        if document_name == "manifest.json":
+            document["receiptStems"].remove(pre)
+        else:
+            document["receiptCount"] -= 1
+        document_path.write_text(
+            json.dumps(document, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+    stems_path = receipts / "stems.txt"
+    stems = stems_path.read_text(encoding="utf-8").splitlines()
+    stems.remove(pre)
+    stems_path.write_text("\n".join(stems) + "\n", encoding="utf-8")
+elif mutation == "extra-pre":
+    extra = f"{pre}-extra"
+    for path in receipts.glob(f"{pre}.*"):
+        suffix = path.name[len(pre):]
+        shutil.copyfile(path, receipts / f"{extra}{suffix}")
+    for document_name in ("manifest.json", "summary.json"):
+        document_path = root / document_name
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        if document_name == "manifest.json":
+            index = document["receiptStems"].index(pre) + 1
+            document["receiptStems"].insert(index, extra)
+        else:
+            document["receiptCount"] += 1
+        document_path.write_text(
+            json.dumps(document, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+    stems_path = receipts / "stems.txt"
+    stems = stems_path.read_text(encoding="utf-8").splitlines()
+    stems.insert(stems.index(pre) + 1, extra)
+    stems_path.write_text("\n".join(stems) + "\n", encoding="utf-8")
+elif mutation == "swap-bracket":
+    for document_name in ("manifest.json",):
+        document_path = root / document_name
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        first = document["receiptStems"].index(pre)
+        second = document["receiptStems"].index(apk)
+        document["receiptStems"][first], document["receiptStems"][second] = (
+            document["receiptStems"][second],
+            document["receiptStems"][first],
+        )
+        document_path.write_text(
+            json.dumps(document, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+    stems_path = receipts / "stems.txt"
+    stems = stems_path.read_text(encoding="utf-8").splitlines()
+    first = stems.index(pre)
+    second = stems.index(apk)
+    stems[first], stems[second] = stems[second], stems[first]
+    stems_path.write_text("\n".join(stems) + "\n", encoding="utf-8")
+else:
+    raise SystemExit(f"unknown FC-5 mutation: {mutation}")
+PY
+    rebind_receipt_tree "$fc5_broken"
+    run_fc5_verifier_mutation "$fc5_broken" \
+      "offline verifier rejects FC-5 $fc5_mutation mutation"
+  done
+else
+  for fc5_mutation in "${fc5_mutations[@]}"; do
+    report fail "offline verifier rejects FC-5 $fc5_mutation mutation" \
+      "positive bundle lacks pre/APK/post path bracket"
+  done
+fi
+
+if (( PACKAGE_PATH_CONTRACT_ONLY )); then
+  printf 'issue66 Moto read-only collector selftest: %d passed, %d failed\n' "$pass" "$fail"
+  [[ $fail -eq 0 ]]
+  exit
+fi
+
 # Device collection and offline verification are both authorized against an
 # independently reviewed Git commit plus the exact collector bytes. Missing,
 # malformed, or stale bindings fail before an output directory or adb process
@@ -1344,7 +4007,11 @@ expect_stop "modified fake adb is rejected from the SELFTEST lane" \
 expect_exit_code "modified fake adb rejection uses local-safety rc=22" 22
 expect_no_adb_call "modified fake adb is rejected before execution"
 
-ATTESTATION_COPY="$WORK/attestation-copy"
+# Keep this source-copy fixture under the trusted repository parent chain so
+# the intentional allowlist tamper reaches its own gate rather than failing
+# earlier on a world-writable system temporary ancestor.
+ATTESTATION_COPY="$(mktemp -d "$REPO_ROOT/.issue66-allowlist-fixture.XXXXXX")" \
+  || { printf 'selftest cannot create the allowlist fixture\n' >&2; exit 2; }
 ATTESTATION_COLLECTOR="$ATTESTATION_COPY/collect-issue66-moto-readonly-preflight.sh"
 mkdir -p "$ATTESTATION_COPY/fixtures/issue66-moto-readonly-collector"
 cp "$COLLECTOR" "$ATTESTATION_COLLECTOR"

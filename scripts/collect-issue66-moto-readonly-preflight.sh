@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # Operational-read-only, exact-device preflight for issue #66.
 #
 # This first gate binds all device reads to the sole authorized Moto serial,
@@ -7,6 +7,7 @@
 # allowlist. It never installs, clears, stops, configures, registers, restarts,
 # reboots, or toggles device state.
 
+unset BASH_ENV ENV DEVELOPER_DIR SDKROOT TOOLCHAINS
 set -uo pipefail
 umask 077
 
@@ -54,7 +55,7 @@ COLLECTOR_PATH="$SELF_DIR/collect-issue66-moto-readonly-preflight.sh"
 PYTHON_BIN="/usr/bin/python3"
 GIT_BIN="/usr/bin/git"
 ADB_ALLOWLIST_PATH="$SELF_DIR/fixtures/issue66-moto-readonly-collector/approved-adb-sha256.tsv"
-ADB_ALLOWLIST_EXPECTED_SHA256="a52061a3a5410b7fea4703ae51c20e3525f1c4d467c36155f0d556100a63930e"
+ADB_ALLOWLIST_EXPECTED_SHA256="92fe765782212bbd51536110a4023e4eb75472d0ce9ea1446c54a013653cea49"
 
 ADB_BIN=""
 ADB_SOURCE_PATH=""
@@ -82,6 +83,34 @@ ADB_SNAPSHOT_IDENTITY=""
 COLLECTOR_SHA256=""
 COLLECTOR_SOURCE_IDENTITY=""
 RECEIPT_TREE_SHA256=""
+
+# Resource ceilings are part of the reviewed collector, not caller policy.
+# The compact SELFTEST lane keeps the same behavior while making boundary and
+# timeout regressions practical to exercise on a host with no device access.
+readonly PROD_TEXT_TIMEOUT_SECONDS=30
+readonly PROD_TEXT_STDOUT_LIMIT=4194304
+readonly PROD_BINARY_APK_TIMEOUT_SECONDS=180
+readonly PROD_BINARY_APK_STDOUT_LIMIT=268435456
+readonly PROD_BINARY_SERVICES_TIMEOUT_SECONDS=120
+readonly PROD_BINARY_SERVICES_STDOUT_LIMIT=134217728
+readonly PROD_STDERR_LIMIT=1048576
+readonly SELFTEST_TIMEOUT_SECONDS=2
+readonly SELFTEST_TEXT_STDOUT_LIMIT=65536
+readonly SELFTEST_APK_STDOUT_LIMIT=3145728
+readonly SELFTEST_SERVICES_STDOUT_LIMIT=2097152
+readonly SELFTEST_STDERR_LIMIT=32768
+readonly APK_ARCHIVE_MEMBER_LIMIT=16384
+readonly FRAMEWORK_ARCHIVE_MEMBER_LIMIT=4096
+readonly ARCHIVE_SINGLE_UNCOMPRESSED_LIMIT=268435456
+readonly ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT=536870912
+readonly ARCHIVE_RATIO_LIMIT=100
+readonly ARCHIVE_RATIO_SLACK=1048576
+readonly ADB_SNAPSHOT_SIZE_LIMIT=67108864
+readonly ADB_ALLOWLIST_SIZE_LIMIT=65536
+readonly COLLECTOR_SOURCE_SIZE_LIMIT=2097152
+# Offline verification retains only bounded control-plane bytes. APK and
+# services.jar payloads are validated and hashed one descriptor at a time.
+readonly OFFLINE_RETAINED_CONTROL_LIMIT=67108864
 
 usage() {
   cat >&2 <<'EOF'
@@ -112,23 +141,11 @@ json_escape() {
   printf '%s' "$value"
 }
 
-sha256_file() { # regular file
-  "$PYTHON_BIN" -I - "$1" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-digest = hashlib.sha256()
-with path.open("rb") as stream:
-    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-        digest.update(chunk)
-print(digest.hexdigest())
-PY
-}
-
 stable_collector_binding() { # stable SHA-256 + inode state for the exact entrypoint
-  "$PYTHON_BIN" -I - "$COLLECTOR_PATH" <<'PY'
+  "$PYTHON_BIN" -I - "$COLLECTOR_PATH" "$REPO_ROOT" \
+    "$COLLECTOR_SOURCE_SIZE_LIMIT" <<'PY'
+import ctypes
+import errno
 import hashlib
 import os
 import pathlib
@@ -136,6 +153,107 @@ import stat
 import sys
 
 path = pathlib.Path(sys.argv[1])
+repo_root = pathlib.Path(sys.argv[2])
+
+MAX_COLLECTOR_SIZE = int(sys.argv[3])
+
+
+def unsupported_acl_errnos():
+    return {
+        getattr(errno, name)
+        for name in ("ENOTSUP", "EOPNOTSUPP")
+        if hasattr(errno, name)
+    }
+
+
+def fd_has_extended_acl(descriptor_fd):
+    """Return whether the descriptor ACL can grant write/rebind authority."""
+    if sys.platform == "darwin":
+        library = ctypes.CDLL(None, use_errno=True)
+        library.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        library.acl_get_fd_np.restype = ctypes.c_void_p
+        library.acl_get_entry.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        library.acl_get_entry.restype = ctypes.c_int
+        library.acl_get_tag_type.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        library.acl_get_tag_type.restype = ctypes.c_int
+        library.acl_free.argtypes = [ctypes.c_void_p]
+        library.acl_free.restype = ctypes.c_int
+
+        ctypes.set_errno(0)
+        acl = library.acl_get_fd_np(descriptor_fd, 0x100)  # ACL_TYPE_EXTENDED
+        if not acl:
+            error_number = ctypes.get_errno()
+            if error_number == errno.ENOENT or error_number in unsupported_acl_errnos():
+                return False
+            raise OSError(error_number, os.strerror(error_number))
+
+        # Darwin's normal user-home chain can carry system-installed deny-only
+        # ACLs (for example, `everyone deny delete`). Those entries cannot grant
+        # replacement authority. Any ALLOW entry is unsafe, and unknown tags or
+        # iteration failures fail closed.
+        ACL_FIRST_ENTRY = 0
+        ACL_NEXT_ENTRY = -1
+        ACL_EXTENDED_ALLOW = 1
+        ACL_EXTENDED_DENY = 2
+        has_allow_entry = False
+        try:
+            entry_id = ACL_FIRST_ENTRY
+            while True:
+                entry = ctypes.c_void_p()
+                ctypes.set_errno(0)
+                entry_result = library.acl_get_entry(
+                    acl,
+                    entry_id,
+                    ctypes.byref(entry),
+                )
+                if entry_result != 0:
+                    error_number = ctypes.get_errno()
+                    if entry_id == ACL_NEXT_ENTRY and error_number == errno.EINVAL:
+                        break
+                    error_number = error_number or errno.EIO
+                    raise OSError(error_number, os.strerror(error_number))
+
+                tag_type = ctypes.c_int()
+                ctypes.set_errno(0)
+                if library.acl_get_tag_type(entry, ctypes.byref(tag_type)) != 0:
+                    error_number = ctypes.get_errno() or errno.EIO
+                    raise OSError(error_number, os.strerror(error_number))
+                if tag_type.value == ACL_EXTENDED_ALLOW:
+                    has_allow_entry = True
+                    break
+                if tag_type.value != ACL_EXTENDED_DENY:
+                    raise OSError(errno.EINVAL, "unknown Darwin ACL entry type")
+                entry_id = ACL_NEXT_ENTRY
+        finally:
+            ctypes.set_errno(0)
+            if library.acl_free(acl) != 0:
+                error_number = ctypes.get_errno() or errno.EIO
+                raise OSError(error_number, os.strerror(error_number))
+        return has_allow_entry
+
+    if not hasattr(os, "listxattr"):
+        raise OSError(
+            getattr(errno, "ENOSYS", errno.EIO),
+            "descriptor ACL inspection unavailable",
+        )
+    try:
+        attributes = os.listxattr(descriptor_fd)
+    except OSError as error:
+        if error.errno in unsupported_acl_errnos():
+            return False
+        raise
+    names = {os.fsdecode(attribute) for attribute in attributes}
+    return bool(
+        names.intersection({"system.posix_acl_access", "system.posix_acl_default"})
+    )
+
 
 def identity(value):
     return (
@@ -143,6 +261,7 @@ def identity(value):
         value.st_ino,
         stat.S_IFMT(value.st_mode),
         value.st_uid,
+        value.st_gid,
         stat.S_IMODE(value.st_mode),
         value.st_nlink,
         value.st_size,
@@ -150,31 +269,148 @@ def identity(value):
         value.st_ctime_ns,
     )
 
+
+def validate_directory_fd(descriptor_fd):
+    before = os.fstat(descriptor_fd)
+    if (
+        not stat.S_ISDIR(before.st_mode)
+        or before.st_uid not in {0, os.geteuid()}
+        or stat.S_IMODE(before.st_mode) & 0o022
+    ):
+        raise OSError("unsafe collector directory identity")
+    if fd_has_extended_acl(descriptor_fd):
+        raise OSError("collector directory has an allowing ACL")
+    after = os.fstat(descriptor_fd)
+    if identity(before) != identity(after):
+        raise OSError("collector directory changed during ACL inspection")
+    return identity(before)
+
+
+def close_chain(chain):
+    for record in reversed(chain):
+        os.close(record["descriptor"])
+
+
+if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+    raise OSError("required no-follow directory operations unavailable")
+if not path.is_absolute() or not repo_root.is_absolute():
+    raise OSError("collector and repository paths must be absolute")
+if os.path.normpath(os.fspath(path)) != os.fspath(path):
+    raise OSError("collector path is not normalized")
+if os.path.normpath(os.fspath(repo_root)) != os.fspath(repo_root):
+    raise OSError("repository path is not normalized")
+try:
+    relative_path = path.relative_to(repo_root)
+except ValueError as error:
+    raise OSError("collector is outside repository root") from error
+relative_parts = relative_path.parts
+if not relative_parts or any(part in ("", ".", "..") for part in relative_parts):
+    raise OSError("unsafe repository-relative collector path")
+repo_parts = repo_root.parts
+if not repo_parts or repo_parts[0] != os.path.sep:
+    raise OSError("repository root has no absolute root component")
+directory_components = repo_parts[1:] + relative_parts[:-1]
+if any(part in ("", ".", "..") for part in directory_components):
+    raise OSError("unsafe absolute collector directory component")
+
+directory_flags = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | os.O_NOFOLLOW
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+file_flags = (
+    os.O_RDONLY
+    | os.O_NOFOLLOW
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+)
+
+
+def open_directory_chain():
+    chain = []
+    try:
+        root_named = os.lstat(os.path.sep)
+        root_fd = os.open(os.path.sep, directory_flags)
+        chain.append(
+            {
+                "descriptor": root_fd,
+                "component": None,
+                "identity": None,
+            }
+        )
+        root_identity = validate_directory_fd(root_fd)
+        if identity(root_named) != root_identity:
+            raise OSError("filesystem root changed before open")
+        chain[-1]["identity"] = root_identity
+
+        for component in directory_components:
+            parent_fd = chain[-1]["descriptor"]
+            named = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            chain.append(
+                {
+                    "descriptor": child_fd,
+                    "component": component,
+                    "identity": None,
+                }
+            )
+            child_identity = validate_directory_fd(child_fd)
+            if identity(named) != child_identity:
+                raise OSError("collector ancestor changed before open")
+            chain[-1]["identity"] = child_identity
+        return chain
+    except BaseException:
+        close_chain(chain)
+        raise
+
+
+def validate_retained_chain(chain):
+    for index, record in enumerate(chain):
+        current_identity = validate_directory_fd(record["descriptor"])
+        if current_identity != record["identity"]:
+            raise OSError("collector directory changed after file read")
+        if index == 0:
+            named = os.lstat(os.path.sep)
+        else:
+            named = os.stat(
+                record["component"],
+                dir_fd=chain[index - 1]["descriptor"],
+                follow_symlinks=False,
+            )
+        if identity(named) != record["identity"]:
+            raise OSError("collector directory name changed after file read")
+
+
+chain = []
+reopened_chain = []
 descriptor = -1
 try:
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise OSError("O_NOFOLLOW unavailable")
-    before = path.lstat()
+    chain = open_directory_chain()
+    parent_fd = chain[-1]["descriptor"]
+    leaf_name = relative_parts[-1]
+    named_before = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
     if (
-        not stat.S_ISREG(before.st_mode)
-        or stat.S_ISLNK(before.st_mode)
-        or before.st_uid != os.geteuid()
-        or stat.S_IMODE(before.st_mode) & 0o022
-        or before.st_nlink != 1
-        or before.st_size <= 0
-        or before.st_size > 2 * 1024 * 1024
+        not stat.S_ISREG(named_before.st_mode)
+        or named_before.st_uid != os.geteuid()
+        or stat.S_IMODE(named_before.st_mode) & 0o022
+        or named_before.st_nlink != 1
+        or named_before.st_size <= 0
+        or named_before.st_size > MAX_COLLECTOR_SIZE
     ):
         raise OSError("unsafe collector identity")
-    flags = (
-        os.O_RDONLY
-        | os.O_NOFOLLOW
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    descriptor = os.open(path, flags)
+
+    descriptor = os.open(leaf_name, file_flags, dir_fd=parent_fd)
     opened_before = os.fstat(descriptor)
-    if identity(before) != identity(opened_before):
+    if identity(named_before) != identity(opened_before):
         raise OSError("collector changed before open")
+    if fd_has_extended_acl(descriptor):
+        raise OSError("collector has an extended ACL")
+    opened_after_acl = os.fstat(descriptor)
+    if identity(opened_before) != identity(opened_after_acl):
+        raise OSError("collector changed during initial ACL inspection")
+
     digest = hashlib.sha256()
     byte_count = 0
     while True:
@@ -182,23 +418,41 @@ try:
         if not chunk:
             break
         byte_count += len(chunk)
-        if byte_count > 2 * 1024 * 1024:
+        if byte_count > MAX_COLLECTOR_SIZE:
             raise OSError("collector exceeds size limit")
         digest.update(chunk)
+
     opened_after = os.fstat(descriptor)
-    after = path.lstat()
+    named_after = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+    if fd_has_extended_acl(descriptor):
+        raise OSError("collector acquired an extended ACL")
+    opened_final = os.fstat(descriptor)
+    named_final = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        identity(named_before) != identity(opened_after)
+        or identity(named_before) != identity(named_after)
+        or identity(named_before) != identity(opened_final)
+        or identity(named_before) != identity(named_final)
+        or byte_count != opened_final.st_size
+    ):
+        raise OSError("collector changed during read")
+
+    validate_retained_chain(chain)
+    reopened_chain = open_directory_chain()
+    if [record["identity"] for record in reopened_chain] != [
+        record["identity"] for record in chain
+    ]:
+        raise OSError("collector parent path changed during read")
+    print(
+        digest.hexdigest()
+        + "\t"
+        + ":".join(str(item) for item in identity(named_before))
+    )
 finally:
     if descriptor >= 0:
         os.close(descriptor)
-
-if (
-    identity(before) != identity(opened_before)
-    or identity(before) != identity(opened_after)
-    or identity(before) != identity(after)
-    or byte_count != opened_after.st_size
-):
-    raise SystemExit(1)
-print(digest.hexdigest() + "\t" + ":".join(str(item) for item in identity(before)))
+    close_chain(reopened_chain)
+    close_chain(chain)
 PY
 }
 
@@ -271,29 +525,198 @@ review_binding_intact() {
       && $actual_head == "$SOURCE_HEAD" ]]
 }
 
-sha256_receipt_tree() { # flat receipts directory, deterministic name+byte binding
-  "$PYTHON_BIN" -I - "$1" <<'PY'
+sha256_receipt_tree() { # directory [archive-name digest identity]...
+  local root=$1 text_budget apk_budget services_budget
+  local text_timeout text_limit text_stderr
+  local apk_timeout apk_limit apk_stderr
+  local services_timeout services_limit services_stderr
+  shift
+  text_budget="$(receipt_budget text)" || return 1
+  apk_budget="$(receipt_budget apk)" || return 1
+  services_budget="$(receipt_budget services)" || return 1
+  IFS=$'\t' read -r text_timeout text_limit text_stderr <<<"$text_budget"
+  IFS=$'\t' read -r apk_timeout apk_limit apk_stderr <<<"$apk_budget"
+  IFS=$'\t' read -r services_timeout services_limit services_stderr \
+    <<<"$services_budget"
+  [[ $text_stderr == "$apk_stderr" && $text_stderr == "$services_stderr" ]] \
+    || return 1
+  "$PYTHON_BIN" -I - "$root" "$text_limit" "$apk_limit" \
+    "$services_limit" "$text_stderr" "$@" <<'PY'
 import hashlib
-import pathlib
+import os
+import re
 import stat
 import struct
 import sys
 
-root = pathlib.Path(sys.argv[1])
-digest = hashlib.sha256(b"issue66-receipt-tree-v1\0")
-entries = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
-if not entries:
+root = sys.argv[1]
+text_limit = int(sys.argv[2])
+apk_limit = int(sys.argv[3])
+services_limit = int(sys.argv[4])
+stderr_limit = int(sys.argv[5])
+binding_args = sys.argv[6:]
+
+class ReceiptLimitError(Exception):
+    def __init__(self, exit_code, detail):
+        super().__init__(detail)
+        self.exit_code = exit_code
+
+def inode_state(value):
+    return (
+        value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+        value.st_uid, value.st_gid, stat.S_IMODE(value.st_mode),
+        value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+def identity_text(value):
+    return ":".join(str(item) for item in inode_state(value))
+
+def receipt_profile(name):
+    if name == "services-jar.stdout.bin":
+        return services_limit, 3
+    if re.fullmatch(r"package-[a-z0-9-]+-apk\.stdout\.bin", name):
+        return apk_limit, 2
+    if name.endswith(".stdout.bin"):
+        raise OSError("unknown binary receipt lane")
+    if name.endswith(".stderr.bin"):
+        return stderr_limit, 1
+    if name.endswith(".stdout.txt") or name == "stems.txt" or re.fullmatch(
+        r"[a-z0-9][a-z0-9-]*\.(?:command|start-utc|exit|end-utc)\.txt",
+        name,
+    ):
+        return text_limit, 1
+    raise OSError("unknown receipt carrier name")
+
+def bounded_names(descriptor, maximum):
+    names = []
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            if len(names) >= maximum:
+                raise OSError("invalid receipt directory cardinality")
+            names.append(entry.name)
+    if not names or len(names) != len(set(names)):
+        raise OSError("invalid receipt directory cardinality")
+    names.sort(key=lambda value: value.encode("utf-8"))
+    return names
+
+if len(binding_args) % 3:
     raise SystemExit(1)
-for path in entries:
-    value = path.lstat()
-    if not stat.S_ISREG(value.st_mode) or path.is_symlink():
+expected_bindings = {}
+for index in range(0, len(binding_args), 3):
+    name, expected_digest, expected_identity = binding_args[index:index + 3]
+    if (
+        name in expected_bindings
+        or not re.fullmatch(
+            r"(?:services-jar|package-[a-z0-9-]+-apk)\.stdout\.bin", name
+        )
+        or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
+        or re.fullmatch(r"[0-9]+(?::[0-9]+){9}", expected_identity) is None
+    ):
         raise SystemExit(1)
-    name = path.name.encode("utf-8")
-    data = path.read_bytes()
-    digest.update(struct.pack(">Q", len(name)))
-    digest.update(name)
-    digest.update(struct.pack(">Q", len(data)))
-    digest.update(data)
+    expected_bindings[name] = (expected_digest, expected_identity)
+
+directory_fd = -1
+try:
+    named_directory_before = os.lstat(root)
+    directory_fd = os.open(
+        root,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
+    )
+    opened_directory_before = os.fstat(directory_fd)
+    if (
+        inode_state(named_directory_before) != inode_state(opened_directory_before)
+        or not stat.S_ISDIR(opened_directory_before.st_mode)
+        or opened_directory_before.st_uid != os.geteuid()
+        or stat.S_IMODE(opened_directory_before.st_mode) != 0o700
+    ):
+        raise OSError("unsafe receipt directory")
+    names = bounded_names(directory_fd, 512)
+
+    digest = hashlib.sha256(b"issue66-receipt-tree-v1\0")
+    seen_bindings = set()
+    for raw_name in names:
+        if not raw_name or raw_name in {".", ".."} or "/" in raw_name or "\x00" in raw_name:
+            raise OSError("unsafe receipt carrier name")
+        name = raw_name.encode("utf-8")
+        file_limit, limit_exit = receipt_profile(raw_name)
+        named_before = os.stat(raw_name, dir_fd=directory_fd, follow_symlinks=False)
+        if named_before.st_size > file_limit:
+            raise ReceiptLimitError(limit_exit, "receipt exceeds its lane cap")
+        if (
+            not stat.S_ISREG(named_before.st_mode)
+            or named_before.st_uid != os.geteuid()
+            or stat.S_IMODE(named_before.st_mode) != 0o600
+            or named_before.st_nlink != 1
+        ):
+            raise OSError("unsafe receipt carrier")
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                raw_name,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory_fd,
+            )
+            opened_before = os.fstat(descriptor)
+            if inode_state(named_before) != inode_state(opened_before):
+                raise OSError("receipt carrier changed before open")
+
+            digest.update(struct.pack(">Q", len(name)))
+            digest.update(name)
+            digest.update(struct.pack(">Q", opened_before.st_size))
+            file_digest = hashlib.sha256()
+            bytes_read = 0
+            while True:
+                remaining = file_limit - bytes_read
+                chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
+                if not chunk:
+                    break
+                if len(chunk) > remaining:
+                    raise ReceiptLimitError(limit_exit, "receipt grew beyond its lane cap")
+                digest.update(chunk)
+                file_digest.update(chunk)
+                bytes_read += len(chunk)
+            opened_after = os.fstat(descriptor)
+            if opened_after.st_size > file_limit:
+                raise ReceiptLimitError(limit_exit, "receipt grew beyond its lane cap")
+            named_after = os.stat(
+                raw_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if not (
+                inode_state(opened_before) == inode_state(opened_after)
+                == inode_state(named_after)
+            ) or bytes_read != opened_after.st_size:
+                raise OSError("receipt carrier changed while hashing")
+            if raw_name in expected_bindings:
+                expected_digest, expected_identity = expected_bindings[raw_name]
+                if (
+                    file_digest.hexdigest() != expected_digest
+                    or identity_text(opened_after) != expected_identity
+                ):
+                    raise OSError("archive receipt no longer matches validated bytes")
+                seen_bindings.add(raw_name)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    names_after = bounded_names(directory_fd, 512)
+    opened_directory_after = os.fstat(directory_fd)
+    named_directory_after = os.lstat(root)
+    if (
+        inode_state(opened_directory_before) != inode_state(opened_directory_after)
+        or inode_state(opened_directory_after) != inode_state(named_directory_after)
+        or names != names_after
+        or seen_bindings != set(expected_bindings)
+    ):
+        raise OSError("receipt directory changed while hashing")
+except ReceiptLimitError as error:
+    raise SystemExit(error.exit_code)
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(1)
+finally:
+    if directory_fd >= 0:
+        os.close(directory_fd)
 print(digest.hexdigest())
 PY
 }
@@ -442,8 +865,11 @@ stop_now() { # exact marker
     STOP_WRONG_MANUFACTURER|STOP_WRONG_API|\
     STOP_UNPRIVILEGED_SHELL_REQUIRED|STOP_UNSUPPORTED_USER_0_REQUIRED) exit 20 ;;
     STOP_INCOMPLETE_CORE_RECEIPT|STOP_INCOMPLETE_RECEIPT|\
-    STOP_ADB_READ_FAILED|STOP_FRAMEWORK_READ_FAILED|STOP_APK_READ_FAILED|\
-    STOP_PACKAGE_OBSERVATION_MALFORMED|STOP_BOOT_CHANGED) exit 21 ;;
+    STOP_ADB_READ_FAILED|STOP_ADB_TIMEOUT|STOP_ADB_STDOUT_LIMIT|\
+    STOP_ADB_STDERR_LIMIT|STOP_FRAMEWORK_READ_FAILED|STOP_APK_READ_FAILED|\
+    STOP_FRAMEWORK_ARCHIVE_LIMIT|STOP_APK_ARCHIVE_LIMIT|\
+    STOP_PACKAGE_OBSERVATION_MALFORMED|STOP_PACKAGE_PATH_CHANGED|\
+    STOP_BOOT_CHANGED) exit 21 ;;
     STOP_INTERNAL_*) exit 70 ;;
     *) exit 22 ;;
   esac
@@ -563,6 +989,24 @@ sys.stdout.write(bases[0])
 PY
 }
 
+matching_package_path_receipt() { # receipt stem, package, expected base path
+  local stem=$1 package=$2 expected_path=$3 observed_path
+  run_text_receipt "$stem" \
+    -s "$AUTHORIZED_SERIAL" shell pm path "$package"
+  if (( LAST_RC == 1 )); then
+    [[ ! -s $OUTPUT_DIR/receipts/$stem.stdout.txt \
+        && ! -s $OUTPUT_DIR/receipts/$stem.stderr.bin ]] || return 1
+    return 1
+  elif (( LAST_RC != 0 )); then
+    return 2
+  fi
+  [[ -s $OUTPUT_DIR/receipts/$stem.stdout.txt \
+      && ! -s $OUTPUT_DIR/receipts/$stem.stderr.bin ]] || return 1
+  observed_path="$(select_base_apk_path \
+    "$OUTPUT_DIR/receipts/$stem.stdout.txt" "$package")" || return 1
+  [[ $observed_path == "$expected_path" ]]
+}
+
 valid_pidof_file() { # exact one-line decimal PID list
   local value
   value="$(read_scalar_receipt "$1")" || return 1
@@ -646,7 +1090,7 @@ validate_adb_binary() {
   [[ -f $ADB_BIN && -x $ADB_BIN && ! -L $ADB_BIN ]] \
     || stop_now STOP_INVALID_ADB_BINARY
   local validated
-  validated="$("$PYTHON_BIN" -I - "$ADB_BIN" <<'PY'
+  validated="$("$PYTHON_BIN" -I - "$ADB_BIN" "$ADB_SNAPSHOT_SIZE_LIMIT" <<'PY'
 import os
 import pathlib
 import stat
@@ -655,20 +1099,35 @@ import hashlib
 
 try:
     source = pathlib.Path(sys.argv[1]).resolve(strict=True)
+    size_limit = int(sys.argv[2])
     if any(separator in str(source) for separator in ("\n", "\r", "\t")):
         raise OSError("unsafe source pathname")
     before = source.lstat()
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if before.st_size > size_limit:
+        raise OSError("adb source exceeds size limit")
+    flags = (
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = os.open(source, flags)
     try:
         opened = os.fstat(descriptor)
+        if opened.st_size > size_limit:
+            raise OSError("adb source exceeds size limit")
         digest = hashlib.sha256()
+        byte_count = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            remaining = size_limit - byte_count
+            chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
             if not chunk:
                 break
+            if len(chunk) > remaining:
+                raise OSError("adb source grew beyond size limit")
             digest.update(chunk)
+            byte_count += len(chunk)
         opened_after = os.fstat(descriptor)
+        if opened_after.st_size > size_limit or byte_count != opened_after.st_size:
+            raise OSError("adb source changed size while reading")
     finally:
         os.close(descriptor)
     after = source.lstat()
@@ -720,7 +1179,8 @@ validate_adb_approval() {
     "$ADB_ALLOWLIST_PATH" \
     "$ADB_ALLOWLIST_EXPECTED_SHA256" \
     "$ADB_SOURCE_SHA256" \
-    "$ADB_APPROVAL_LANE" <<'PY'
+    "$ADB_APPROVAL_LANE" \
+    "$ADB_ALLOWLIST_SIZE_LIMIT" <<'PY'
 import hashlib
 import os
 import pathlib
@@ -732,47 +1192,67 @@ path = pathlib.Path(sys.argv[1])
 expected_allowlist_digest = sys.argv[2]
 source_digest = sys.argv[3]
 expected_lane = sys.argv[4]
+allowlist_size_limit = int(sys.argv[5])
 
 def internal_failure():
     raise SystemExit(70)
 
-def identity(value):
-    return (
-        value.st_dev, value.st_ino, value.st_size,
-        value.st_mtime_ns, value.st_ctime_ns, stat.S_IMODE(value.st_mode),
-    )
+def stable_trust_bytes(path, byte_limit):
+    def identity(value):
+        return (
+            value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+            value.st_uid, stat.S_IMODE(value.st_mode), value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+        )
 
-try:
-    named_before = path.lstat()
-    if stat.S_ISLNK(named_before.st_mode) or not stat.S_ISREG(named_before.st_mode):
-        raise OSError("allowlist is not a regular file")
-    if named_before.st_uid != os.geteuid() or stat.S_IMODE(named_before.st_mode) & 0o022:
-        raise OSError("allowlist ownership/mode is unsafe")
-    descriptor = os.open(
-        path,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
+    descriptor = -1
     try:
+        named_before = path.lstat()
+        if (
+            not stat.S_ISREG(named_before.st_mode)
+            or stat.S_ISLNK(named_before.st_mode)
+            or named_before.st_uid != os.geteuid()
+            or stat.S_IMODE(named_before.st_mode) & 0o022
+            or named_before.st_nlink != 1
+            or named_before.st_size <= 0
+            or named_before.st_size > byte_limit
+        ):
+            raise OSError("unsafe repo trust file ownership, type or size")
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
         opened_before = os.fstat(descriptor)
-        chunks = []
+        if identity(named_before) != identity(opened_before):
+            raise OSError("repo trust file changed before open")
+        data = bytearray()
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            remaining = byte_limit - len(data)
+            chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
             if not chunk:
                 break
-            chunks.append(chunk)
+            if len(chunk) > remaining:
+                raise OSError("repo trust file grew beyond its fixed byte limit")
+            data.extend(chunk)
         opened_after = os.fstat(descriptor)
+        named_after = path.lstat()
+        if (
+            opened_after.st_size > byte_limit
+            or len(data) != opened_after.st_size
+            or identity(named_before) != identity(opened_after)
+            or identity(opened_after) != identity(named_after)
+        ):
+            raise OSError("repo trust file changed while reading")
     finally:
-        os.close(descriptor)
-    named_after = path.lstat()
+        if descriptor >= 0:
+            os.close(descriptor)
+    return bytes(data)
+
+try:
+    data = stable_trust_bytes(path, allowlist_size_limit)
 except OSError:
     internal_failure()
-
-if not (
-    identity(named_before) == identity(opened_before)
-    == identity(opened_after) == identity(named_after)
-):
-    internal_failure()
-data = b"".join(chunks)
 if hashlib.sha256(data).hexdigest() != expected_allowlist_digest:
     internal_failure()
 try:
@@ -824,6 +1304,7 @@ PY
 
 create_output_dir() { # securely create and print canonical path + inode identity
   "$PYTHON_BIN" -I - "$OUTPUT_DIR" "$REPO_ROOT" <<'PY'
+import errno
 import os
 import pathlib
 import stat
@@ -880,7 +1361,18 @@ def has_extended_acl(path):
     """Reject access grants that POSIX mode bits do not disclose."""
     try:
         attributes = os.listxattr(path, follow_symlinks=False)
-    except (AttributeError, OSError):
+    except AttributeError as error:
+        if sys.platform != "darwin":
+            raise OSError("ACL inspection unavailable") from error
+        attributes = ()
+    except OSError as error:
+        unsupported_errnos = {
+            getattr(errno, name)
+            for name in ("ENOTSUP", "EOPNOTSUPP")
+            if hasattr(errno, name)
+        }
+        if error.errno not in unsupported_errnos:
+            raise
         attributes = ()
     if any(
         attribute in {"system.posix_acl_access", "system.posix_acl_default"}
@@ -1054,6 +1546,7 @@ PY
 output_binding_intact() {
   [[ -n $OUTPUT_DISPLAY_PATH && -n $OUTPUT_IDENTITY ]] || return 1
   "$PYTHON_BIN" -I - "$OUTPUT_DISPLAY_PATH" "$OUTPUT_IDENTITY" <<'PY' >/dev/null 2>&1
+import errno
 import os
 import pathlib
 import stat
@@ -1065,7 +1558,18 @@ expected = sys.argv[2]
 def has_extended_acl(path):
     try:
         attributes = os.listxattr(path, follow_symlinks=False)
-    except (AttributeError, OSError):
+    except AttributeError as error:
+        if sys.platform != "darwin":
+            raise OSError("ACL inspection unavailable") from error
+        attributes = ()
+    except OSError as error:
+        unsupported_errnos = {
+            getattr(errno, name)
+            for name in ("ENOTSUP", "EOPNOTSUPP")
+            if hasattr(errno, name)
+        }
+        if error.errno not in unsupported_errnos:
+            raise
         attributes = ()
     if any(
         attribute in {"system.posix_acl_access", "system.posix_acl_default"}
@@ -1111,13 +1615,15 @@ PY
 
 snapshot_adb_binary() {
   mkdir -m 700 tooling || return 1
-  ADB_SHA256="$("$PYTHON_BIN" -I - "$ADB_SOURCE_PATH" "$ADB_SOURCE_IDENTITY" tooling/.adb.tmp <<'PY'
+  ADB_SHA256="$("$PYTHON_BIN" -I - "$ADB_SOURCE_PATH" "$ADB_SOURCE_IDENTITY" \
+    tooling/.adb.tmp "$ADB_SNAPSHOT_SIZE_LIMIT" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-source_path, expected_identity, destination_path = sys.argv[1:]
+source_path, expected_identity, destination_path = sys.argv[1:4]
+size_limit = int(sys.argv[4])
 
 def identity(value):
     return ":".join(str(item) for item in (
@@ -1125,7 +1631,10 @@ def identity(value):
         value.st_mtime_ns, value.st_ctime_ns, stat.S_IMODE(value.st_mode),
     ))
 
-source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+source_flags = (
+    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+)
 destination_flags = (
     os.O_WRONLY | os.O_CREAT | os.O_EXCL
     | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1135,15 +1644,24 @@ try:
     destination = -1
     try:
         before = os.fstat(source)
-        if not stat.S_ISREG(before.st_mode) or identity(before) != expected_identity:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or identity(before) != expected_identity
+            or before.st_size > size_limit
+        ):
             raise OSError("adb source identity changed before snapshot")
         destination = os.open(destination_path, destination_flags, 0o500)
         digest = hashlib.sha256()
+        byte_count = 0
         while True:
-            chunk = os.read(source, 1024 * 1024)
+            remaining = size_limit - byte_count
+            chunk = os.read(source, min(1024 * 1024, remaining + 1))
             if not chunk:
                 break
+            if len(chunk) > remaining:
+                raise OSError("adb source grew beyond size limit")
             digest.update(chunk)
+            byte_count += len(chunk)
             view = memoryview(chunk)
             while view:
                 written = os.write(destination, view)
@@ -1153,7 +1671,13 @@ try:
         os.fchmod(destination, 0o500)
         os.fsync(destination)
         after = os.fstat(source)
-        if identity(after) != expected_identity:
+        destination_after = os.fstat(destination)
+        if (
+            identity(after) != expected_identity
+            or after.st_size > size_limit
+            or byte_count != after.st_size
+            or destination_after.st_size != byte_count
+        ):
             raise OSError("adb source changed while snapshotting")
     finally:
         if destination >= 0:
@@ -1169,7 +1693,6 @@ PY
   [[ -f tooling/.adb.tmp && -x tooling/.adb.tmp && ! -L tooling/.adb.tmp ]] || return 1
   mv -f tooling/.adb.tmp tooling/adb || return 1
   [[ -f tooling/adb && -x tooling/adb && ! -L tooling/adb ]] || return 1
-  [[ $(sha256_file tooling/adb) == "$ADB_SHA256" ]] || return 1
   ADB_SNAPSHOT_IDENTITY="$("$PYTHON_BIN" -I - tooling/adb <<'PY'
 import os
 import pathlib
@@ -1184,11 +1707,13 @@ PY
   )" || return 1
   chmod 500 tooling || return 1
   ADB_BIN=./tooling/adb
+  adb_snapshot_intact || return 1
 }
 
 adb_snapshot_intact() {
   [[ -n $ADB_SHA256 && -n $ADB_SNAPSHOT_IDENTITY ]] || return 1
-  "$PYTHON_BIN" -I - tooling tooling/adb "$ADB_SNAPSHOT_IDENTITY" "$ADB_SHA256" <<'PY' >/dev/null 2>&1
+  "$PYTHON_BIN" -I - tooling tooling/adb "$ADB_SNAPSHOT_IDENTITY" \
+    "$ADB_SHA256" "$ADB_SNAPSHOT_SIZE_LIMIT" <<'PY' >/dev/null 2>&1
 import hashlib
 import os
 import pathlib
@@ -1196,27 +1721,358 @@ import stat
 import sys
 
 directory = os.lstat(pathlib.Path(sys.argv[1]))
-binary = os.lstat(pathlib.Path(sys.argv[2]))
-if (
-    not stat.S_ISDIR(directory.st_mode)
-    or stat.S_ISLNK(directory.st_mode)
-    or stat.S_IMODE(directory.st_mode) != 0o500
-    or directory.st_uid != os.geteuid()
-    or not stat.S_ISREG(binary.st_mode)
-    or stat.S_ISLNK(binary.st_mode)
-    or stat.S_IMODE(binary.st_mode) != 0o500
-    or binary.st_uid != os.geteuid()
-    or f"{binary.st_dev}:{binary.st_ino}:{binary.st_size}" != sys.argv[3]
-):
+binary_path = pathlib.Path(sys.argv[2])
+expected_identity = sys.argv[3]
+expected_digest = sys.argv[4]
+size_limit = int(sys.argv[5])
+
+def identity(value):
+    return (
+        value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_uid,
+        stat.S_IMODE(value.st_mode), value.st_nlink, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+descriptor = -1
+try:
+    binary_before = binary_path.lstat()
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or stat.S_ISLNK(directory.st_mode)
+        or stat.S_IMODE(directory.st_mode) != 0o500
+        or directory.st_uid != os.geteuid()
+        or not stat.S_ISREG(binary_before.st_mode)
+        or stat.S_ISLNK(binary_before.st_mode)
+        or stat.S_IMODE(binary_before.st_mode) != 0o500
+        or binary_before.st_uid != os.geteuid()
+        or binary_before.st_nlink != 1
+        or binary_before.st_size > size_limit
+        or f"{binary_before.st_dev}:{binary_before.st_ino}:{binary_before.st_size}"
+        != expected_identity
+    ):
+        raise OSError("unsafe adb snapshot")
+    descriptor = os.open(
+        binary_path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+    )
+    opened_before = os.fstat(descriptor)
+    if identity(binary_before) != identity(opened_before):
+        raise OSError("adb snapshot changed before open")
+    digest = hashlib.sha256()
+    byte_count = 0
+    while True:
+        remaining = size_limit - byte_count
+        chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
+        if not chunk:
+            break
+        if len(chunk) > remaining:
+            raise OSError("adb snapshot grew beyond size limit")
+        digest.update(chunk)
+        byte_count += len(chunk)
+    opened_after = os.fstat(descriptor)
+    binary_after = binary_path.lstat()
+    if (
+        identity(opened_before) != identity(opened_after)
+        or identity(opened_after) != identity(binary_after)
+        or byte_count != opened_after.st_size
+        or opened_after.st_size > size_limit
+    ):
+        raise OSError("adb snapshot changed while reading")
+except (OSError, ValueError):
     raise SystemExit(1)
-digest = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
-if digest != sys.argv[4]:
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+if digest.hexdigest() != expected_digest:
     raise SystemExit(1)
 PY
 }
 
 timestamp_utc() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+receipt_budget() { # text|apk|services; prints timeout stdout-limit stderr-limit
+  local kind=$1
+  if (( SELFTEST_FIXTURE )); then
+    case "$kind" in
+      text) printf '%d\t%d\t%d\n' \
+        "$SELFTEST_TIMEOUT_SECONDS" "$SELFTEST_TEXT_STDOUT_LIMIT" \
+        "$SELFTEST_STDERR_LIMIT" ;;
+      apk) printf '%d\t%d\t%d\n' \
+        "$SELFTEST_TIMEOUT_SECONDS" "$SELFTEST_APK_STDOUT_LIMIT" \
+        "$SELFTEST_STDERR_LIMIT" ;;
+      services) printf '%d\t%d\t%d\n' \
+        "$SELFTEST_TIMEOUT_SECONDS" "$SELFTEST_SERVICES_STDOUT_LIMIT" \
+        "$SELFTEST_STDERR_LIMIT" ;;
+      *) return 1 ;;
+    esac
+  else
+    case "$kind" in
+      text) printf '%d\t%d\t%d\n' \
+        "$PROD_TEXT_TIMEOUT_SECONDS" "$PROD_TEXT_STDOUT_LIMIT" \
+        "$PROD_STDERR_LIMIT" ;;
+      apk) printf '%d\t%d\t%d\n' \
+        "$PROD_BINARY_APK_TIMEOUT_SECONDS" "$PROD_BINARY_APK_STDOUT_LIMIT" \
+        "$PROD_STDERR_LIMIT" ;;
+      services) printf '%d\t%d\t%d\n' \
+        "$PROD_BINARY_SERVICES_TIMEOUT_SECONDS" \
+        "$PROD_BINARY_SERVICES_STDOUT_LIMIT" "$PROD_STDERR_LIMIT" ;;
+      *) return 1 ;;
+    esac
+  fi
+}
+
+supervise_adb_receipt() { # kind stdout-path stderr-path exact-adb-argv...
+  local kind=$1 stdout_path=$2 stderr_path=$3 budget
+  shift 3
+  budget="$(receipt_budget "$kind")" || return 70
+  local timeout_seconds stdout_limit stderr_limit
+  IFS=$'\t' read -r timeout_seconds stdout_limit stderr_limit <<<"$budget"
+  "$PYTHON_BIN" -I - "$timeout_seconds" "$stdout_limit" "$stderr_limit" \
+    "$ADB_APPROVAL_LANE" "$stdout_path" "$stderr_path" "$@" <<'PY'
+import errno
+import os
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+timeout_seconds = int(sys.argv[1])
+limits = {"stdout": int(sys.argv[2]), "stderr": int(sys.argv[3])}
+approval_lane = sys.argv[4]
+paths = {"stdout": sys.argv[5], "stderr": sys.argv[6]}
+argv = sys.argv[7:]
+process = None
+selector = None
+streams = {}
+files = {}
+
+def group_exists():
+    if process is None:
+        return False
+    try:
+        os.killpg(process.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin may report EPERM for a just-reaped, empty process group.
+        # A live descendant of this mode-0500 snapshot retains our euid and
+        # therefore remains signalable; the timeout fixture exercises that.
+        return False
+
+def signal_group(value):
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, value)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+def bounded_group_stop():
+    if process is None:
+        return
+    signal_group(signal.SIGTERM)
+    grace_deadline = time.monotonic() + 0.25
+    while time.monotonic() < grace_deadline:
+        process.poll()
+        if not group_exists():
+            break
+        time.sleep(0.01)
+    if group_exists():
+        signal_group(signal.SIGKILL)
+        kill_deadline = time.monotonic() + 0.50
+        while time.monotonic() < kill_deadline:
+            process.poll()
+            if not group_exists():
+                break
+            time.sleep(0.01)
+    if group_exists():
+        raise RuntimeError("adb process group survived SIGKILL")
+    try:
+        process.wait(timeout=0.75)
+    except subprocess.TimeoutExpired:
+        signal_group(signal.SIGKILL)
+        try:
+            process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("adb process leader was not reaped") from error
+
+def safe_output(path):
+    flags = (
+        os.O_WRONLY | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    value = os.fstat(descriptor)
+    if not stat.S_ISREG(value.st_mode):
+        os.close(descriptor)
+        raise OSError("receipt output is not regular")
+    return os.fdopen(descriptor, "wb", buffering=0)
+
+def write_all(output, value):
+    remaining = memoryview(value)
+    while remaining:
+        written = output.write(remaining)
+        if (
+            not isinstance(written, int)
+            or written <= 0
+            or written > len(remaining)
+        ):
+            raise OSError("receipt output made invalid write progress")
+        remaining = remaining[written:]
+
+def sanitized_child_environment(lane):
+    if lane not in {"PRODUCTION", "SELFTEST"}:
+        raise ValueError("invalid ADB approval lane")
+    result = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+    # Preserve only the documented host identity/key-discovery inputs needed by
+    # adb. Loader, shell-startup and language-startup injection is absent by
+    # construction rather than maintained as a fragile denylist.
+    for name in (
+        "HOME", "USER", "LOGNAME", "TMPDIR", "ADB_VENDOR_KEYS",
+        "ANDROID_USER_HOME", "ANDROID_SDK_HOME",
+    ):
+        if name in os.environ:
+            result[name] = os.environ[name]
+    if lane == "SELFTEST":
+        # The fake transport has no device/network surface. Its explicit fault
+        # controls are kept only in the disjoint SELFTEST trust lane.
+        for name, value in os.environ.items():
+            if name.startswith(("FAKE_ADB_", "SELFTEST_", "POISON_")):
+                result[name] = value
+    return result
+
+outcome = "INTERNAL"
+receipt_exit = 70
+try:
+    if not argv or timeout_seconds <= 0 or any(limit < 0 for limit in limits.values()):
+        raise ValueError("invalid supervisor arguments")
+    files = {name: safe_output(path) for name, path in paths.items()}
+    child_env = sanitized_child_environment(approval_lane)
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        start_new_session=True,
+        env=child_env,
+    )
+    selector = selectors.DefaultSelector()
+    for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+        if stream is None:
+            raise OSError(f"missing {name} pipe")
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+        streams[name] = stream
+    totals = {"stdout": 0, "stderr": 0}
+    deadline = time.monotonic() + timeout_seconds
+    outcome = None
+    while selector.get_map() or process.poll() is None:
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            outcome = "TIMEOUT"
+            receipt_exit = 124
+            break
+        if selector.get_map():
+            events = selector.select(min(remaining_time, 0.10))
+        else:
+            time.sleep(min(remaining_time, 0.01))
+            events = ()
+        for key, _mask in events:
+            name = key.data
+            try:
+                chunk = os.read(key.fileobj.fileno(), 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+                continue
+            available = limits[name] - totals[name]
+            if available > 0:
+                accepted = chunk[:available]
+                write_all(files[name], accepted)
+                totals[name] += len(accepted)
+            if len(chunk) > available:
+                outcome = "STDOUT_LIMIT" if name == "stdout" else "STDERR_LIMIT"
+                receipt_exit = 125 if name == "stdout" else 126
+                break
+        if outcome is not None:
+            break
+    if outcome is None:
+        try:
+            child_exit = process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("child remained alive after both pipes closed") from error
+        if group_exists():
+            bounded_group_stop()
+            outcome = "ORPHANED_GROUP"
+            receipt_exit = 70
+        else:
+            outcome = "OK"
+            receipt_exit = child_exit if child_exit >= 0 else 128 - child_exit
+    else:
+        bounded_group_stop()
+except Exception:
+    outcome = "INTERNAL"
+    receipt_exit = 70
+    bounded_group_stop()
+finally:
+    if selector is not None:
+        try:
+            selector.close()
+        except Exception:
+            pass
+    for stream in streams.values():
+        try:
+            stream.close()
+        except Exception:
+            pass
+    for output in files.values():
+        try:
+            output.close()
+        except Exception:
+            outcome = "INTERNAL"
+            receipt_exit = 70
+print(f"{outcome}\t{receipt_exit}")
+PY
+}
+
+complete_supervised_receipt() { # stem prefix supervisor-result
+  local stem=$1 prefix=$2 result=$3 status receipt_exit
+  if [[ $result == *$'\n'* ]]; then
+    status=INTERNAL
+    receipt_exit=70
+  else
+    IFS=$'\t' read -r status receipt_exit <<<"$result"
+  fi
+  case "$status:$receipt_exit" in
+    OK:[0-9]*|TIMEOUT:124|STDOUT_LIMIT:125|STDERR_LIMIT:126|\
+    ORPHANED_GROUP:70|INTERNAL:70) ;;
+    *) status=INTERNAL; receipt_exit=70 ;;
+  esac
+  LAST_RC=$receipt_exit
+  printf '%d\n' "$LAST_RC" >"$prefix.exit.txt" \
+    || stop_now STOP_INTERNAL_RECEIPT_WRITE
+  timestamp_utc >"$prefix.end-utc.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
+  if [[ $status != OK ]]; then
+    printf '%s\n' "$stem" >>"$OUTPUT_DIR/receipts/stems.txt" \
+      || stop_now STOP_INTERNAL_RECEIPT_WRITE
+    adb_snapshot_intact || stop_now STOP_ADB_SNAPSHOT_CHANGED
+    case "$status" in
+      TIMEOUT) stop_now STOP_ADB_TIMEOUT ;;
+      STDOUT_LIMIT) stop_now STOP_ADB_STDOUT_LIMIT ;;
+      STDERR_LIMIT) stop_now STOP_ADB_STDERR_LIMIT ;;
+      ORPHANED_GROUP) stop_now STOP_INTERNAL_ADB_PROCESS_GROUP ;;
+      *) stop_now STOP_INTERNAL_ADB_SUPERVISOR ;;
+    esac
+  fi
 }
 
 run_text_receipt() { # stem adb-argv...
@@ -1243,13 +2099,12 @@ run_text_receipt() { # stem adb-argv...
   timestamp_utc >"$prefix.start-utc.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
   : >"$prefix.stdout.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
   : >"$prefix.stderr.bin" || stop_now STOP_INTERNAL_RECEIPT_WRITE
-  (
-    unset ADB_SERVER_SOCKET ANDROID_ADB_SERVER_ADDRESS ANDROID_ADB_SERVER_PORT
-    "$ADB_BIN" "$@"
-  ) </dev/null >"$prefix.stdout.txt" 2>"$prefix.stderr.bin"
-  LAST_RC=$?
-  printf '%d\n' "$LAST_RC" >"$prefix.exit.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
-  timestamp_utc >"$prefix.end-utc.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
+  local supervisor_result supervisor_rc
+  supervisor_result="$(supervise_adb_receipt text \
+    "$prefix.stdout.txt" "$prefix.stderr.bin" "$ADB_BIN" "$@")"
+  supervisor_rc=$?
+  (( supervisor_rc == 0 )) || supervisor_result=$'INTERNAL\t70'
+  complete_supervised_receipt "$stem" "$prefix" "$supervisor_result"
   "$PYTHON_BIN" -I - "$prefix.stdout.txt" <<'PY' >/dev/null 2>&1 \
     || stop_now STOP_INCOMPLETE_RECEIPT
 import pathlib
@@ -1290,13 +2145,13 @@ run_binary_receipt() { # stem adb-argv...
   timestamp_utc >"$prefix.start-utc.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
   : >"$prefix.stdout.bin" || stop_now STOP_INTERNAL_RECEIPT_WRITE
   : >"$prefix.stderr.bin" || stop_now STOP_INTERNAL_RECEIPT_WRITE
-  (
-    unset ADB_SERVER_SOCKET ANDROID_ADB_SERVER_ADDRESS ANDROID_ADB_SERVER_PORT
-    "$ADB_BIN" "$@"
-  ) </dev/null >"$prefix.stdout.bin" 2>"$prefix.stderr.bin"
-  LAST_RC=$?
-  printf '%d\n' "$LAST_RC" >"$prefix.exit.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
-  timestamp_utc >"$prefix.end-utc.txt" || stop_now STOP_INTERNAL_RECEIPT_WRITE
+  local receipt_kind=apk supervisor_result supervisor_rc
+  [[ $stem == services-jar ]] && receipt_kind=services
+  supervisor_result="$(supervise_adb_receipt "$receipt_kind" \
+    "$prefix.stdout.bin" "$prefix.stderr.bin" "$ADB_BIN" "$@")"
+  supervisor_rc=$?
+  (( supervisor_rc == 0 )) || supervisor_result=$'INTERNAL\t70'
+  complete_supervised_receipt "$stem" "$prefix" "$supervisor_result"
   LAST_STDOUT=""
   printf '%s\n' "$stem" >>"$OUTPUT_DIR/receipts/stems.txt" \
     || stop_now STOP_INTERNAL_RECEIPT_WRITE
@@ -1324,9 +2179,16 @@ verify_receipts() { # existing evidence root; host-only, no adb
   detail="$("$PYTHON_BIN" -I - . "$COLLECTOR_PATH" "$root" "$verify_identity" \
     "$ADB_ALLOWLIST_PATH" "$ADB_ALLOWLIST_EXPECTED_SHA256" \
     "$ADB_APPROVAL_LANE" "$ADB_CLIENT_TRUST" \
-    "$REVIEWED_HEAD" "$REVIEWED_COLLECTOR_SHA256" <<'PY' 2>&1
+    "$REVIEWED_HEAD" "$REVIEWED_COLLECTOR_SHA256" \
+    "$APK_ARCHIVE_MEMBER_LIMIT" "$FRAMEWORK_ARCHIVE_MEMBER_LIMIT" \
+    "$ARCHIVE_SINGLE_UNCOMPRESSED_LIMIT" \
+    "$ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT" "$ARCHIVE_RATIO_LIMIT" \
+    "$ARCHIVE_RATIO_SLACK" "$ADB_SNAPSHOT_SIZE_LIMIT" \
+    "$ADB_ALLOWLIST_SIZE_LIMIT" "$COLLECTOR_SOURCE_SIZE_LIMIT" \
+    "$OFFLINE_RETAINED_CONTROL_LIMIT" <<'PY' 2>&1
 import datetime
 import decimal
+import errno
 import hashlib
 import io
 import json
@@ -1351,10 +2213,35 @@ expected_approval_lane = sys.argv[7]
 expected_client_trust = sys.argv[8]
 expected_source_head = sys.argv[9]
 expected_collector_digest = sys.argv[10]
+archive_limits = {
+    "apk_members": int(sys.argv[11]),
+    "services_members": int(sys.argv[12]),
+    "single_size": int(sys.argv[13]),
+    "total_size": int(sys.argv[14]),
+    "ratio": int(sys.argv[15]),
+    "ratio_slack": int(sys.argv[16]),
+}
+adb_snapshot_size_limit = int(sys.argv[17])
+allowlist_size_limit = int(sys.argv[18])
+collector_size_limit = int(sys.argv[19])
+retained_control_limit = int(sys.argv[20])
 manifest_path = root / "manifest.json"
 summary_path = root / "summary.json"
 receipts = root / "receipts"
 tooling = root / "tooling"
+adb_path = tooling / "adb"
+
+if expected_approval_lane == "SELFTEST":
+    text_stdout_limit = 64 * 1024
+    apk_stdout_limit = 3 * 1024 * 1024
+    services_stdout_limit = 2 * 1024 * 1024
+    stderr_limit = 32 * 1024
+else:
+    text_stdout_limit = 4 * 1024 * 1024
+    apk_stdout_limit = 256 * 1024 * 1024
+    services_stdout_limit = 128 * 1024 * 1024
+    stderr_limit = 1024 * 1024
+metadata_limit = text_stdout_limit
 
 def inode_state(value):
     return (
@@ -1366,7 +2253,18 @@ def inode_state(value):
 def has_extended_acl(path):
     try:
         attributes = os.listxattr(path, follow_symlinks=False)
-    except (AttributeError, OSError):
+    except AttributeError as error:
+        if sys.platform != "darwin":
+            raise OSError("ACL inspection unavailable") from error
+        attributes = ()
+    except OSError as error:
+        unsupported_errnos = {
+            getattr(errno, name)
+            for name in ("ENOTSUP", "EOPNOTSUPP")
+            if hasattr(errno, name)
+        }
+        if error.errno not in unsupported_errnos:
+            raise
         attributes = ()
     if any(
         attribute in {"system.posix_acl_access", "system.posix_acl_default"}
@@ -1407,12 +2305,63 @@ def directory_state(path, expected_mode=0o700):
         raise SystemExit(f"evidence directory changed while checking ACL: {path}")
     return inode_state(after)
 
+def bounded_directory_names(path, maximum, label):
+    descriptor = -1
+    try:
+        named_before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0),
+        )
+        opened_before = os.fstat(descriptor)
+        if (
+            inode_state(named_before) != inode_state(opened_before)
+            or not stat.S_ISDIR(opened_before.st_mode)
+        ):
+            raise OSError("directory identity changed before enumeration")
+        names = set()
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if len(names) >= maximum:
+                    raise SystemExit(f"{label} cardinality exceeds {maximum}")
+                if entry.name in names:
+                    raise OSError("duplicate directory entry")
+                names.add(entry.name)
+        opened_after = os.fstat(descriptor)
+        named_after = path.lstat()
+    except OSError as error:
+        raise SystemExit(f"unsafe or unstable {label}: {error}")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not (
+        inode_state(named_before) == inode_state(opened_before)
+        == inode_state(opened_after) == inode_state(named_after)
+    ):
+        raise SystemExit(f"{label} changed while enumerating")
+    return names
+
 file_states = {}
+file_digests = {}
+file_read_limits = {}
+file_read_limits[str(manifest_path)] = (metadata_limit, None)
+file_read_limits[str(summary_path)] = (metadata_limit, None)
+file_read_limits[str(receipts / "stems.txt")] = (metadata_limit, None)
+file_read_limits[str(adb_path)] = (adb_snapshot_size_limit, None)
+
+def typed_stop(marker, detail):
+    raise SystemExit(f"{marker}: {detail}")
 
 def stable_bytes(path, expected_mode=0o600):
     descriptor = -1
     try:
         before = path.lstat()
+        read_limit = file_read_limits.get(str(path))
+        if read_limit is not None and before.st_size > read_limit[0]:
+            if read_limit[1] is not None:
+                typed_stop(read_limit[1], f"{path.name} exceeds its lane file limit")
+            raise OSError("evidence file exceeds its lane read limit")
         if (
             not stat.S_ISREG(before.st_mode)
             or stat.S_ISLNK(before.st_mode)
@@ -1441,40 +2390,73 @@ def stable_bytes(path, expected_mode=0o600):
         current_state = inode_state(opened_before)
         if key in file_states and file_states[key] != current_state:
             raise OSError("evidence file identity changed")
-        chunks = []
+        data = bytearray()
+        digest = hashlib.sha256()
+        bytes_read = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            if read_limit is None:
+                read_size = 1024 * 1024
+            else:
+                remaining = read_limit[0] - bytes_read
+                read_size = min(1024 * 1024, remaining + 1)
+            chunk = os.read(descriptor, read_size)
             if not chunk:
                 break
-            chunks.append(chunk)
+            if read_limit is not None and len(chunk) > remaining:
+                if read_limit[1] is not None:
+                    typed_stop(
+                        read_limit[1],
+                        f"{path.name} grew beyond its lane file limit",
+                    )
+                raise OSError("evidence file grew beyond its lane read limit")
+            data.extend(chunk)
+            digest.update(chunk)
+            bytes_read += len(chunk)
         opened_after = os.fstat(descriptor)
+        if read_limit is not None and opened_after.st_size > read_limit[0]:
+            if read_limit[1] is not None:
+                typed_stop(
+                    read_limit[1],
+                    f"{path.name} grew beyond its lane file limit",
+                )
+            raise OSError("evidence file grew beyond its lane read limit")
         after = path.lstat()
     except OSError as error:
         raise SystemExit(f"unsafe or unstable evidence file: {path}: {error}")
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    data = b"".join(chunks)
     if not (
         inode_state(before) == inode_state(opened_before)
         == inode_state(opened_after) == inode_state(after)
     ) or opened_after.st_size != len(data):
         raise SystemExit(f"evidence file changed while reading: {path}")
     file_states.setdefault(key, current_state)
-    return data
+    digest_hex = digest.hexdigest()
+    if key in file_digests and file_digests[key] != digest_hex:
+        raise SystemExit(f"evidence file digest changed while reading: {path}")
+    file_digests.setdefault(key, digest_hex)
+    return bytes(data)
 
-def stable_repo_bytes(path):
+def stable_file_digest(path, expected_mode=0o600, tree_digest=None, tree_name=None):
     descriptor = -1
     try:
         before = path.lstat()
+        read_limit = file_read_limits.get(str(path))
+        if read_limit is None:
+            raise OSError("evidence file has no fixed lane read limit")
+        if before.st_size > read_limit[0]:
+            if read_limit[1] is not None:
+                typed_stop(read_limit[1], f"{path.name} exceeds its lane file limit")
+            raise OSError("evidence file exceeds its lane read limit")
         if (
             not stat.S_ISREG(before.st_mode)
             or stat.S_ISLNK(before.st_mode)
             or before.st_uid != os.geteuid()
-            or stat.S_IMODE(before.st_mode) & 0o022
+            or (expected_mode is not None and stat.S_IMODE(before.st_mode) != expected_mode)
             or has_extended_acl(path)
         ):
-            raise OSError("unsafe repo trust file ownership/mode")
+            raise OSError("unsafe evidence file ownership/mode")
         descriptor = os.open(
             path,
             os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -1485,39 +2467,162 @@ def stable_repo_bytes(path):
             inode_state(before) != inode_state(opened_before)
             or not stat.S_ISREG(opened_before.st_mode)
             or opened_before.st_uid != os.geteuid()
-            or stat.S_IMODE(opened_before.st_mode) & 0o022
+            or (
+                expected_mode is not None
+                and stat.S_IMODE(opened_before.st_mode) != expected_mode
+            )
         ):
-            raise OSError("unsafe repo trust file ownership/mode")
+            raise OSError("unsafe evidence file ownership/mode")
         key = str(path)
         current_state = inode_state(opened_before)
         if key in file_states and file_states[key] != current_state:
-            raise OSError("repo trust file identity changed")
-        chunks = []
+            raise OSError("evidence file identity changed")
+        if tree_digest is not None:
+            if tree_name is None:
+                raise OSError("tree digest name is missing")
+            tree_digest.update(struct.pack(">Q", len(tree_name)))
+            tree_digest.update(tree_name)
+            tree_digest.update(struct.pack(">Q", opened_before.st_size))
+        digest = hashlib.sha256()
+        bytes_read = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            remaining = read_limit[0] - bytes_read
+            chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
             if not chunk:
                 break
-            chunks.append(chunk)
+            if len(chunk) > remaining:
+                if read_limit[1] is not None:
+                    typed_stop(
+                        read_limit[1],
+                        f"{path.name} grew beyond its lane file limit",
+                    )
+                raise OSError("evidence file grew beyond its lane read limit")
+            digest.update(chunk)
+            if tree_digest is not None:
+                tree_digest.update(chunk)
+            bytes_read += len(chunk)
         opened_after = os.fstat(descriptor)
+        if opened_after.st_size > read_limit[0]:
+            if read_limit[1] is not None:
+                typed_stop(
+                    read_limit[1],
+                    f"{path.name} grew beyond its lane file limit",
+                )
+            raise OSError("evidence file grew beyond its lane read limit")
         after = path.lstat()
     except OSError as error:
-        raise SystemExit(f"unsafe or unstable repo trust file: {path}: {error}")
+        raise SystemExit(f"unsafe or unstable evidence file: {path}: {error}")
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    data = b"".join(chunks)
     if not (
         inode_state(before) == inode_state(opened_before)
         == inode_state(opened_after) == inode_state(after)
-    ) or opened_after.st_size != len(data):
-        raise SystemExit(f"repo trust file changed while reading: {path}")
+    ) or opened_after.st_size != bytes_read:
+        raise SystemExit(f"evidence file changed while streaming: {path}")
+    digest_hex = digest.hexdigest()
+    if key in file_digests and file_digests[key] != digest_hex:
+        raise SystemExit(f"evidence file digest changed while streaming: {path}")
     file_states.setdefault(key, current_state)
+    file_digests.setdefault(key, digest_hex)
+    return digest_hex
+
+def stable_trust_bytes(path, byte_limit):
+    def identity(value):
+        return (
+            value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+            value.st_uid, stat.S_IMODE(value.st_mode), value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+        )
+
+    descriptor = -1
+    try:
+        named_before = path.lstat()
+        if (
+            not stat.S_ISREG(named_before.st_mode)
+            or stat.S_ISLNK(named_before.st_mode)
+            or named_before.st_uid != os.geteuid()
+            or stat.S_IMODE(named_before.st_mode) & 0o022
+            or named_before.st_nlink != 1
+            or named_before.st_size <= 0
+            or named_before.st_size > byte_limit
+        ):
+            raise OSError("unsafe repo trust file ownership, type or size")
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened_before = os.fstat(descriptor)
+        if identity(named_before) != identity(opened_before):
+            raise OSError("repo trust file changed before open")
+        data = bytearray()
+        while True:
+            remaining = byte_limit - len(data)
+            chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
+            if not chunk:
+                break
+            if len(chunk) > remaining:
+                raise OSError("repo trust file grew beyond its fixed byte limit")
+            data.extend(chunk)
+        opened_after = os.fstat(descriptor)
+        named_after = path.lstat()
+        if (
+            opened_after.st_size > byte_limit
+            or len(data) != opened_after.st_size
+            or identity(named_before) != identity(opened_after)
+            or identity(opened_after) != identity(named_after)
+        ):
+            raise OSError("repo trust file changed while reading")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return bytes(data)
+
+def stable_repo_bytes(path, byte_limit):
+    try:
+        before = path.lstat()
+        if has_extended_acl(path):
+            raise OSError("repo trust file has an extended ACL")
+        data = stable_trust_bytes(path, byte_limit)
+        after = path.lstat()
+    except OSError as error:
+        raise SystemExit(f"unsafe or unstable repo trust file: {path}: {error}")
+    key = str(path)
+    current_state = inode_state(after)
+    if inode_state(before) != current_state:
+        raise SystemExit(f"repo trust file changed while reading: {path}")
+    digest_hex = hashlib.sha256(data).hexdigest()
+    if key in file_states and file_states[key] != current_state:
+        raise SystemExit(f"repo trust file identity changed: {path}")
+    if key in file_digests and file_digests[key] != digest_hex:
+        raise SystemExit(f"repo trust file digest changed: {path}")
+    file_states.setdefault(key, current_state)
+    file_digests.setdefault(key, digest_hex)
     return data
+
+def bounded_retained_control_total(current, values, byte_limit):
+    if type(current) is not int or current < 0 or current > byte_limit:
+        raise SystemExit("offline retained control byte accounting is invalid")
+    remaining = byte_limit - current
+    for value in values:
+        value_size = len(value)
+        if value_size > remaining:
+            raise SystemExit("offline retained control bytes exceed the fixed memory limit")
+        remaining -= value_size
+    return byte_limit - remaining
 
 root_state = directory_state(root)
 receipts_state = directory_state(receipts)
 tooling_state = directory_state(tooling, expected_mode=0o500)
-allowlist_bytes = stable_repo_bytes(allowlist_path)
+root_names = bounded_directory_names(root, 4, "evidence root")
+tooling_names = bounded_directory_names(tooling, 1, "tooling directory")
+receipt_names = bounded_directory_names(receipts, 512, "receipt directory")
+if root_names != {"manifest.json", "summary.json", "receipts", "tooling"}:
+    raise SystemExit("evidence root contains an unexpected entry")
+if tooling_names != {"adb"}:
+    raise SystemExit("tooling directory contains an unexpected entry")
+allowlist_bytes = stable_repo_bytes(allowlist_path, allowlist_size_limit)
 if hashlib.sha256(allowlist_bytes).hexdigest() != expected_allowlist_digest:
     raise SystemExit("ADB allowlist digest mismatch")
 try:
@@ -1534,7 +2639,7 @@ if (
 
 manifest_bytes = stable_bytes(manifest_path)
 summary_bytes = stable_bytes(summary_path)
-collector_bytes = stable_repo_bytes(collector_path)
+collector_bytes = stable_repo_bytes(collector_path, collector_size_limit)
 
 def exact_json_object(pairs):
     result = {}
@@ -1721,7 +2826,14 @@ for package in known_packages:
         )
 for package in known_packages:
     if package in installed:
-        expected_stems.append(f"package-{package.replace('.', '-')}-apk")
+        package_stem = package.replace(".", "-")
+        expected_stems.extend(
+            (
+                f"package-{package_stem}-path-pre-apk",
+                f"package-{package_stem}-apk",
+                f"package-{package_stem}-path-post-apk",
+            )
+        )
 expected_stems.extend(("services-jar", "uptime-end", "boot-id-end"))
 
 stems = manifest.get("receiptStems")
@@ -1744,7 +2856,13 @@ binary_stems = {"services-jar"} | {
 }
 accounted = {"stems.txt"}
 carriers = {}
-receipt_snapshot = {"stems.txt": stems_bytes}
+retained_control_bytes = bounded_retained_control_total(
+    0,
+    (
+        allowlist_bytes, collector_bytes, manifest_bytes, summary_bytes, stems_bytes,
+    ),
+    retained_control_limit,
+)
 previous_end = None
 for stem in expected_stems:
     candidates = [receipts / f"{stem}.stdout.txt", receipts / f"{stem}.stdout.bin"]
@@ -1763,11 +2881,33 @@ for stem in expected_stems:
         receipts / f"{stem}.exit.txt",
         receipts / f"{stem}.end-utc.txt",
     ]
-    actual = list(receipts.glob(f"{stem}.*"))
-    if len(actual) != 6 or {path.name for path in actual} != {path.name for path in required}:
+    # Command carriers contain only fixed collector argv, never general output.
+    # Bound them separately before parsing or retaining any command strings.
+    file_read_limits[str(required[0])] = (4096, None)
+    for metadata_path in (required[1], required[4], required[5]):
+        file_read_limits[str(metadata_path)] = (metadata_limit, None)
+    if expects_binary:
+        if stem == "services-jar":
+            file_read_limits[str(stdout[0])] = (
+                services_stdout_limit, "STOP_FRAMEWORK_ARCHIVE_LIMIT"
+            )
+        else:
+            file_read_limits[str(stdout[0])] = (
+                apk_stdout_limit, "STOP_APK_ARCHIVE_LIMIT"
+            )
+    else:
+        file_read_limits[str(stdout[0])] = (text_stdout_limit, None)
+    file_read_limits[str(receipts / f"{stem}.stderr.bin")] = (stderr_limit, None)
+    actual_names = {
+        name for name in receipt_names if name.startswith(f"{stem}.")
+    }
+    if actual_names != {path.name for path in required}:
         raise SystemExit(f"{stem}: not an exact six-file carrier")
-    raw = {path.name: stable_bytes(path) for path in required}
-    receipt_snapshot.update(raw)
+    control_paths = [
+        path for path in required
+        if not (expects_binary and path == stdout[0])
+    ]
+    raw = {path.name: stable_bytes(path) for path in control_paths}
     try:
         command_argv = shlex.split(raw[required[0].name].decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as error:
@@ -1794,9 +2934,20 @@ for stem in expected_stems:
     if previous_end is not None and times[0] < previous_end:
         raise SystemExit(f"{stem}: receipt order moves backwards in time")
     previous_end = times[1]
+    retained_values = [argument.encode("utf-8") for argument in command_argv]
+    retained_values.append(raw[f"{stem}.stderr.bin"])
+    if not expects_binary:
+        retained_values.append(raw[stdout[0].name])
+    retained_control_bytes = bounded_retained_control_total(
+        retained_control_bytes,
+        retained_values,
+        retained_control_limit,
+    )
     carriers[stem] = {
         "argv": tuple(command_argv),
-        "stdout": raw[stdout[0].name],
+        "stdout": None if expects_binary else raw[stdout[0].name],
+        "stdout_path": stdout[0],
+        "stdout_digest": None,
         "stderr": raw[f"{stem}.stderr.bin"],
         "rc": int(exit_text),
     }
@@ -2048,30 +3199,356 @@ def valid_appops_text(value):
         and lines[1] == "Default mode: deny"
     )
 
-def valid_archive_bytes(data, kind):
+def archive_directory_preflight(read_at, archive_size, kind):
+    member_limit = (
+        archive_limits["apk_members"]
+        if kind == "apk"
+        else archive_limits["services_members"]
+        if kind == "services"
+        else -1
+    )
+    if member_limit < 0 or archive_size < 22:
+        return "INVALID"
+
+    def exact(offset, length):
+        if offset < 0 or length < 0 or offset + length > archive_size:
+            return None
+        try:
+            value = read_at(offset, length)
+        except (OSError, ValueError):
+            return None
+        return value if value is not None and len(value) == length else None
+
+    tail_size = min(archive_size, 22 + 65535)
+    tail_offset = archive_size - tail_size
+    tail = exact(tail_offset, tail_size)
+    if tail is None:
+        return "INVALID"
+    eocd = None
+    search_from = 0
+    while True:
+        position = tail.find(b"PK\x05\x06", search_from)
+        if position < 0:
+            break
+        if position + 22 <= len(tail):
+            fields = struct.unpack_from("<4s4H2LH", tail, position)
+            if tail_offset + position + 22 + fields[7] == archive_size:
+                if eocd is not None:
+                    return "INVALID"
+                eocd = (tail_offset + position, fields)
+        search_from = position + 1
+    if eocd is None:
+        return "INVALID"
+
+    eocd_offset, fields = eocd
+    _signature, disk, directory_disk, disk_entries, entries, directory_size, directory_offset, _comment = fields
+    needs_zip64 = (
+        disk == 0xFFFF
+        or directory_disk == 0xFFFF
+        or disk_entries == 0xFFFF
+        or entries == 0xFFFF
+        or directory_size == 0xFFFFFFFF
+        or directory_offset == 0xFFFFFFFF
+    )
+    directory_boundary = eocd_offset
+    if needs_zip64:
+        locator_offset = eocd_offset - 20
+        locator = exact(locator_offset, 20)
+        if locator is None:
+            return "INVALID"
+        locator_signature, zip64_disk, zip64_offset, total_disks = struct.unpack(
+            "<4sLQL", locator
+        )
+        if locator_signature != b"PK\x06\x07" or zip64_disk != 0 or total_disks != 1:
+            return "INVALID"
+        zip64_header = exact(zip64_offset, 56)
+        if zip64_header is None:
+            return "INVALID"
+        zip64_fields = struct.unpack("<4sQ2H2L4Q", zip64_header)
+        (
+            zip64_signature, zip64_record_size, _made_by, _needed,
+            actual_disk, actual_directory_disk, actual_disk_entries,
+            actual_entries, actual_directory_size, actual_directory_offset,
+        ) = zip64_fields
+        if (
+            zip64_signature != b"PK\x06\x06"
+            or zip64_record_size < 44
+            or zip64_offset + 12 + zip64_record_size != locator_offset
+            or actual_disk != 0
+            or actual_directory_disk != 0
+            or actual_disk_entries != actual_entries
+        ):
+            return "INVALID"
+        legacy_pairs = (
+            (disk, 0xFFFF, actual_disk),
+            (directory_disk, 0xFFFF, actual_directory_disk),
+            (disk_entries, 0xFFFF, actual_disk_entries),
+            (entries, 0xFFFF, actual_entries),
+            (directory_size, 0xFFFFFFFF, actual_directory_size),
+            (directory_offset, 0xFFFFFFFF, actual_directory_offset),
+        )
+        if any(legacy not in {sentinel, actual} for legacy, sentinel, actual in legacy_pairs):
+            return "INVALID"
+        entries = actual_entries
+        directory_size = actual_directory_size
+        directory_offset = actual_directory_offset
+        directory_boundary = zip64_offset
+    elif disk != 0 or directory_disk != 0 or disk_entries != entries:
+        return "INVALID"
+
+    if entries > member_limit:
+        return "LIMIT"
+    directory_end = directory_offset + directory_size
+    if (
+        directory_offset < 0
+        or directory_size < 0
+        or directory_end != directory_boundary
+        or directory_end > archive_size
+    ):
+        return "INVALID"
+    cursor = directory_offset
+    actual_entries = 0
+    while cursor < directory_end:
+        header = exact(cursor, 46)
+        if header is None or header[:4] != b"PK\x01\x02":
+            return "INVALID"
+        central = struct.unpack("<4s6H3L5H2L", header)
+        record_size = 46 + central[10] + central[11] + central[12]
+        if record_size < 46 or cursor + record_size > directory_end:
+            return "INVALID"
+        actual_entries += 1
+        if actual_entries > member_limit:
+            return "LIMIT"
+        cursor += record_size
+    if cursor != directory_end or actual_entries != entries:
+        return "INVALID"
+    return "OK"
+
+def archive_metadata_within_limits(members, kind):
+    member_limit = (
+        archive_limits["apk_members"]
+        if kind == "apk"
+        else archive_limits["services_members"]
+        if kind == "services"
+        else -1
+    )
+    if member_limit < 0 or len(members) > member_limit:
+        return False
+    total_size = 0
+    total_compressed_size = 0
+    for member in members:
+        if member.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            return False
+        if member.file_size < 0 or member.compress_size < 0:
+            return False
+        if member.file_size > archive_limits["single_size"]:
+            return False
+        total_size += member.file_size
+        total_compressed_size += member.compress_size
+        if total_size > archive_limits["total_size"]:
+            return False
+        if member.file_size > (
+            member.compress_size * archive_limits["ratio"]
+            + archive_limits["ratio_slack"]
+        ):
+            return False
+    if total_size > (
+        total_compressed_size * archive_limits["ratio"]
+        + archive_limits["ratio_slack"]
+    ):
+        return False
+    return True
+
+class BoundedArchiveStream:
+    def __init__(self, stream, size):
+        self.stream = stream
+        self.size = size
+        self.position = 0
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self.position + offset
+        elif whence == io.SEEK_END:
+            target = self.size + offset
+        else:
+            raise ValueError("invalid seek origin")
+        if target < 0 or target > self.size:
+            raise OSError("archive seek escaped the frozen size")
+        self.stream.seek(target, io.SEEK_SET)
+        self.position = target
+        return target
+
+    def read(self, amount=-1):
+        remaining = self.size - self.position
+        if amount is None or amount < 0 or amount > remaining:
+            amount = remaining
+        value = self.stream.read(amount)
+        self.position += len(value)
+        return value
+
+def stable_archive_file(path, kind):
+    read_limit = file_read_limits.get(str(path))
+    if read_limit is None or read_limit[1] is None:
+        raise SystemExit(f"archive has no typed lane read limit: {path}")
+    marker = read_limit[1]
+    descriptor = -1
+    stream = None
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        named_before = path.lstat()
+        if named_before.st_size > read_limit[0]:
+            typed_stop(marker, f"{path.name} exceeds its lane file limit")
+        if (
+            not stat.S_ISREG(named_before.st_mode)
+            or stat.S_ISLNK(named_before.st_mode)
+            or named_before.st_uid != os.geteuid()
+            or stat.S_IMODE(named_before.st_mode) != 0o600
+            or named_before.st_nlink != 1
+            or has_extended_acl(path)
+        ):
+            raise OSError("unsafe archive receipt ownership/mode")
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        opened_before = os.fstat(descriptor)
+        if (
+            inode_state(named_before) != inode_state(opened_before)
+            or not stat.S_ISREG(opened_before.st_mode)
+            or opened_before.st_uid != os.geteuid()
+            or stat.S_IMODE(opened_before.st_mode) != 0o600
+            or opened_before.st_nlink != 1
+        ):
+            raise OSError("archive receipt changed before open")
+        key = str(path)
+        current_state = inode_state(opened_before)
+        if key in file_states and file_states[key] != current_state:
+            raise OSError("archive receipt identity changed")
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+        descriptor = -1
+        bounded = BoundedArchiveStream(stream, opened_before.st_size)
+
+        def read_at(offset, length):
+            bounded.seek(offset)
+            return bounded.read(length)
+
+        preflight = archive_directory_preflight(
+            read_at,
+            opened_before.st_size,
+            kind,
+        )
+        if preflight == "LIMIT":
+            typed_stop(marker, f"{kind} archive member count exceeds its fixed limit")
+        if preflight != "OK":
+            return None
+        preflight_after = os.fstat(stream.fileno())
+        if preflight_after.st_size > read_limit[0]:
+            typed_stop(marker, f"{path.name} grew beyond its lane file limit")
+        if inode_state(preflight_after) != current_state:
+            raise OSError("archive changed during central-directory preflight")
+        bounded.seek(0)
+        with zipfile.ZipFile(bounded) as archive:
             members = archive.infolist()
+            if not archive_metadata_within_limits(members, kind):
+                typed_stop(marker, f"{kind} archive metadata exceeds a fixed limit")
             if any(member.filename != member.orig_filename for member in members):
-                return False
+                return None
             names = [member.orig_filename for member in members]
             if not members or len(names) != len(set(names)):
-                return False
+                return None
             for name in names:
                 parts = pathlib.PurePosixPath(name).parts
                 if not name or name.startswith("/") or ".." in parts or "\x00" in name:
-                    return False
+                    return None
             if kind == "apk" and names.count("AndroidManifest.xml") != 1:
-                return False
+                return None
             if kind == "services" and not any(
                 re.fullmatch(r"classes(?:[2-9][0-9]*)?\.dex", name) for name in names
             ):
-                return False
+                return None
             if kind not in {"apk", "services"} or archive.testzip() is not None:
-                return False
+                return None
+        bounded.seek(0)
+        digest = hashlib.sha256()
+        remaining = opened_before.st_size
+        while remaining:
+            chunk = bounded.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise OSError("archive truncated while hashing validated bytes")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        opened_after = os.fstat(stream.fileno())
+        named_after = path.lstat()
+        if opened_after.st_size > read_limit[0]:
+            typed_stop(marker, f"{path.name} grew beyond its lane file limit")
+        if (
+            inode_state(opened_before) != inode_state(opened_after)
+            or inode_state(opened_after) != inode_state(named_after)
+            or opened_after.st_nlink != 1
+        ):
+            raise OSError("archive changed while validating")
+        digest_hex = digest.hexdigest()
+        if key in file_digests and file_digests[key] != digest_hex:
+            raise OSError("archive receipt digest changed")
+        file_states.setdefault(key, current_state)
+        file_digests.setdefault(key, digest_hex)
+        return digest_hex
     except (RuntimeError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile):
-        return False
-    return True
+        return None
+    except OSError as error:
+        raise SystemExit(f"unsafe or unstable archive receipt: {path}: {error}")
+    finally:
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+        if descriptor >= 0:
+            os.close(descriptor)
+
+def installed_base_path(stem, package):
+    expected_argv[stem] = ("-s", serial, "shell", "pm", "path", package)
+    path_stdout_raw = carriers[stem]["stdout"]
+    if carriers[stem]["stderr"]:
+        raise SystemExit(f"{stem}: installed path emitted stderr")
+    require_rc(stem)
+    try:
+        path_stdout = path_stdout_raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SystemExit(f"{stem}: path stdout is not UTF-8: {error}")
+    if "\x00" in path_stdout or not path_stdout.endswith("\n"):
+        raise SystemExit(f"{stem}: installed path framing mismatch")
+    path_stdout = path_stdout.replace("\r\n", "\n")
+    if "\r" in path_stdout:
+        raise SystemExit(f"{stem}: installed path contains bare CR")
+    package_paths = []
+    for line in path_stdout[:-1].split("\n"):
+        if not line.startswith("package:"):
+            raise SystemExit(f"{stem}: installed path malformed")
+        candidate = line[len("package:"):]
+        match = safe_path_re.fullmatch(candidate)
+        if (
+            not match
+            or match.group(1) in {".", ".."}
+            or match.group(2) in {".", ".."}
+            or not match.group(2).startswith(package + "-")
+        ):
+            raise SystemExit(f"{stem}: unsafe installed path")
+        package_paths.append((candidate, match.group(3)))
+    if not package_paths or len({path for path, _ in package_paths}) != len(package_paths):
+        raise SystemExit(f"{stem}: empty or duplicate installed path")
+    base_paths = [path for path, leaf in package_paths if leaf == "base"]
+    if len(base_paths) != 1:
+        raise SystemExit(f"{stem}: expected exactly one base APK")
+    return base_paths[0]
 
 for package in known_packages:
     package_stem = package.replace(".", "-")
@@ -2084,50 +3561,24 @@ for package in known_packages:
         if path_stdout_raw or path_stderr_raw:
             raise SystemExit(f"{path_stem}: NOT_INSTALLED truth mismatch")
         continue
-    if path_stderr_raw:
-        raise SystemExit(f"{path_stem}: installed path emitted stderr")
-    require_rc(path_stem)
-    try:
-        path_stdout = path_stdout_raw.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise SystemExit(f"{path_stem}: path stdout is not UTF-8: {error}")
-    if "\x00" in path_stdout or not path_stdout.endswith("\n"):
-        raise SystemExit(f"{path_stem}: installed path framing mismatch")
-    path_stdout = path_stdout.replace("\r\n", "\n")
-    if "\r" in path_stdout:
-        raise SystemExit(f"{path_stem}: installed path contains bare CR")
-    path_lines = path_stdout[:-1].split("\n")
-    package_paths = []
-    for line in path_lines:
-        if not line.startswith("package:"):
-            raise SystemExit(f"{path_stem}: installed path malformed")
-        candidate = line[len("package:"):]
-        match = safe_path_re.fullmatch(candidate)
-        if (
-            not match
-            or match.group(1) in {".", ".."}
-            or match.group(2) in {".", ".."}
-            or not match.group(2).startswith(package + "-")
-        ):
-            raise SystemExit(f"{path_stem}: unsafe installed path")
-        package_paths.append((candidate, match.group(3)))
-    if len({path for path, _ in package_paths}) != len(package_paths):
-        raise SystemExit(f"{path_stem}: duplicate installed path")
-    base_paths = [path for path, leaf in package_paths if leaf == "base"]
-    if len(base_paths) != 1:
-        raise SystemExit(f"{path_stem}: expected exactly one base APK")
-    package_path = base_paths[0]
+    package_path = installed_base_path(path_stem, package)
 
     dumpsys_stem = f"package-{package_stem}-dumpsys"
     pidof_stem = f"package-{package_stem}-pidof"
     appops_stem = f"package-{package_stem}-appops"
+    pre_path_stem = f"package-{package_stem}-path-pre-apk"
     apk_stem = f"package-{package_stem}-apk"
+    post_path_stem = f"package-{package_stem}-path-post-apk"
     expected_argv[dumpsys_stem] = ("-s", serial, "shell", "dumpsys", "package", package)
     expected_argv[pidof_stem] = ("-s", serial, "shell", "pidof", package)
     expected_argv[appops_stem] = (
         "-s", serial, "shell", "appops", "get", "--user", "0", package,
         "android:mock_location",
     )
+    pre_package_path = installed_base_path(pre_path_stem, package)
+    post_package_path = installed_base_path(post_path_stem, package)
+    if package_path != pre_package_path or package_path != post_package_path:
+        raise SystemExit(f"{package}: base APK path changed across collection")
     expected_argv[apk_stem] = ("-s", serial, "exec-out", "cat", package_path)
 
     require_rc(dumpsys_stem)
@@ -2160,12 +3611,18 @@ for package in known_packages:
         raise SystemExit(f"{appops_stem}: mock-location AppOp malformed or ambiguous")
 
     require_rc(apk_stem)
-    if not valid_archive_bytes(carriers[apk_stem]["stdout"], "apk"):
+    archive_digest = stable_archive_file(carriers[apk_stem]["stdout_path"], "apk")
+    if archive_digest is None:
         raise SystemExit(f"{apk_stem}: invalid APK archive")
+    carriers[apk_stem]["stdout_digest"] = archive_digest
 
 require_rc("services-jar")
-if not valid_archive_bytes(carriers["services-jar"]["stdout"], "services"):
+services_archive_digest = stable_archive_file(
+    carriers["services-jar"]["stdout_path"], "services"
+)
+if services_archive_digest is None:
     raise SystemExit("services.jar archive invalid")
+carriers["services-jar"]["stdout_digest"] = services_archive_digest
 
 adb_paths = {carrier["argv"][0] for carrier in carriers.values()}
 if len(adb_paths) != 1:
@@ -2179,54 +3636,53 @@ def sha256_bytes(data):
 
 if adb_paths != {"./tooling/adb"}:
     raise SystemExit("receipt commands do not name the private adb snapshot")
-adb_path = tooling / "adb"
-adb_bytes = stable_bytes(adb_path, expected_mode=0o500)
-if sha256_bytes(adb_bytes) != adb_digest:
+adb_snapshot_digest = stable_file_digest(adb_path, expected_mode=0o500)
+if adb_snapshot_digest != adb_digest:
     raise SystemExit("adb executable digest mismatch")
 if sha256_bytes(collector_bytes) != collector_digest:
     raise SystemExit("collector executable digest mismatch")
 if sha256_bytes(collector_bytes) != expected_collector_digest:
     raise SystemExit("current collector does not match the reviewed digest")
-if sha256_bytes(carriers["services-jar"]["stdout"]) != services_digest:
+if services_archive_digest != services_digest:
     raise SystemExit("services.jar digest mismatch")
 for package in installed:
     stem = f"package-{package.replace('.', '-')}-apk"
-    if sha256_bytes(carriers[stem]["stdout"]) != apk_digests[package]:
+    if carriers[stem]["stdout_digest"] != apk_digests[package]:
         raise SystemExit(f"APK digest mismatch: {package}")
 
-actual_entries = {path.name for path in receipts.iterdir()}
+actual_entries = bounded_directory_names(receipts, 512, "receipt directory")
 if actual_entries != accounted:
     raise SystemExit("unmanifested or missing receipt entry")
 
 tree_digest = hashlib.sha256(b"issue66-receipt-tree-v1\0")
-for name_text in sorted(receipt_snapshot, key=lambda value: value.encode("utf-8")):
+for name_text in sorted(accounted, key=lambda value: value.encode("utf-8")):
     name = name_text.encode("utf-8")
-    data = receipt_snapshot[name_text]
-    tree_digest.update(struct.pack(">Q", len(name)))
-    tree_digest.update(name)
-    tree_digest.update(struct.pack(">Q", len(data)))
-    tree_digest.update(data)
+    stable_file_digest(
+        receipts / name_text,
+        tree_digest=tree_digest,
+        tree_name=name,
+    )
 if tree_digest.hexdigest() != receipt_tree_digest:
     raise SystemExit("receipt tree digest mismatch")
 
-if {path.name for path in tooling.iterdir()} != {"adb"}:
+if bounded_directory_names(tooling, 1, "tooling directory") != tooling_names:
     raise SystemExit("tooling directory contains an unexpected entry")
-if {path.name for path in root.iterdir()} != {"manifest.json", "summary.json", "receipts", "tooling"}:
+if bounded_directory_names(root, 4, "evidence root") != root_names:
     raise SystemExit("evidence root contains an unexpected entry")
 
 # Re-open every authenticated byte source and re-check directory identities.
 # This rejects a verifier result assembled from multiple pathname snapshots.
-if stable_bytes(manifest_path) != manifest_bytes or stable_bytes(summary_path) != summary_bytes:
+if (
+    stable_file_digest(manifest_path) != sha256_bytes(manifest_bytes)
+    or stable_file_digest(summary_path) != sha256_bytes(summary_bytes)
+):
     raise SystemExit("manifest or summary changed during verification")
-if stable_bytes(adb_path, expected_mode=0o500) != adb_bytes:
+if stable_file_digest(adb_path, expected_mode=0o500) != adb_snapshot_digest:
     raise SystemExit("adb snapshot changed during verification")
-if stable_repo_bytes(collector_path) != collector_bytes:
+if stable_repo_bytes(collector_path, collector_size_limit) != collector_bytes:
     raise SystemExit("collector changed during verification")
-if stable_repo_bytes(allowlist_path) != allowlist_bytes:
+if stable_repo_bytes(allowlist_path, allowlist_size_limit) != allowlist_bytes:
     raise SystemExit("ADB allowlist changed during verification")
-for name, data in receipt_snapshot.items():
-    if stable_bytes(receipts / name) != data:
-        raise SystemExit(f"receipt changed during verification: {name}")
 if (
     directory_state(root) != root_state
     or directory_state(receipts) != receipts_state
@@ -2244,7 +3700,12 @@ PY
 )"
   rc=$?
   if (( rc != 0 )); then
-    printf 'STOP_INCOMPLETE_RECEIPT: %s\n' "$detail" >&2
+    case "$detail" in
+      STOP_APK_ARCHIVE_LIMIT:*|STOP_FRAMEWORK_ARCHIVE_LIMIT:*)
+        printf '%s\n' "$detail" >&2
+        ;;
+      *) printf 'STOP_INCOMPLETE_RECEIPT: %s\n' "$detail" >&2 ;;
+    esac
     return 21
   fi
   return 0
@@ -2494,18 +3955,298 @@ raise SystemExit(1)
 PY
 }
 
-valid_archive_file() { # path apk|services
-  "$PYTHON_BIN" -I - "$1" "$2" <<'PY' >/dev/null 2>&1
+archive_stdout_limit() { # apk|services
+  local budget timeout_seconds stdout_limit stderr_limit
+  budget="$(receipt_budget "$1")" || return 1
+  IFS=$'\t' read -r timeout_seconds stdout_limit stderr_limit <<<"$budget"
+  printf '%d\n' "$stdout_limit"
+}
+
+valid_archive_file() { # path apk|services; stdout=digest<TAB>identity, rc2=limit
+  local file_limit
+  file_limit="$(archive_stdout_limit "$2")" || return 1
+  "$PYTHON_BIN" -I - "$1" "$2" "$file_limit" \
+    "$APK_ARCHIVE_MEMBER_LIMIT" "$FRAMEWORK_ARCHIVE_MEMBER_LIMIT" \
+    "$ARCHIVE_SINGLE_UNCOMPRESSED_LIMIT" \
+    "$ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT" "$ARCHIVE_RATIO_LIMIT" \
+    "$ARCHIVE_RATIO_SLACK" <<'PY' 2>/dev/null
+import hashlib
+import io
+import os
 import pathlib
 import re
+import stat
+import struct
 import sys
 import zipfile
 
 path = pathlib.Path(sys.argv[1])
 kind = sys.argv[2]
+file_limit = int(sys.argv[3])
+archive_limits = {
+    "apk_members": int(sys.argv[4]),
+    "services_members": int(sys.argv[5]),
+    "single_size": int(sys.argv[6]),
+    "total_size": int(sys.argv[7]),
+    "ratio": int(sys.argv[8]),
+    "ratio_slack": int(sys.argv[9]),
+}
+
+class ArchiveLimitError(Exception):
+    pass
+
+def archive_directory_preflight(read_at, archive_size, kind):
+    member_limit = (
+        archive_limits["apk_members"]
+        if kind == "apk"
+        else archive_limits["services_members"]
+        if kind == "services"
+        else -1
+    )
+    if member_limit < 0 or archive_size < 22:
+        return "INVALID"
+
+    def exact(offset, length):
+        if offset < 0 or length < 0 or offset + length > archive_size:
+            return None
+        try:
+            value = read_at(offset, length)
+        except (OSError, ValueError):
+            return None
+        return value if value is not None and len(value) == length else None
+
+    tail_size = min(archive_size, 22 + 65535)
+    tail_offset = archive_size - tail_size
+    tail = exact(tail_offset, tail_size)
+    if tail is None:
+        return "INVALID"
+    eocd = None
+    search_from = 0
+    while True:
+        position = tail.find(b"PK\x05\x06", search_from)
+        if position < 0:
+            break
+        if position + 22 <= len(tail):
+            fields = struct.unpack_from("<4s4H2LH", tail, position)
+            if tail_offset + position + 22 + fields[7] == archive_size:
+                if eocd is not None:
+                    return "INVALID"
+                eocd = (tail_offset + position, fields)
+        search_from = position + 1
+    if eocd is None:
+        return "INVALID"
+
+    eocd_offset, fields = eocd
+    _signature, disk, directory_disk, disk_entries, entries, directory_size, directory_offset, _comment = fields
+    needs_zip64 = (
+        disk == 0xFFFF
+        or directory_disk == 0xFFFF
+        or disk_entries == 0xFFFF
+        or entries == 0xFFFF
+        or directory_size == 0xFFFFFFFF
+        or directory_offset == 0xFFFFFFFF
+    )
+    directory_boundary = eocd_offset
+    if needs_zip64:
+        locator_offset = eocd_offset - 20
+        locator = exact(locator_offset, 20)
+        if locator is None:
+            return "INVALID"
+        locator_signature, zip64_disk, zip64_offset, total_disks = struct.unpack(
+            "<4sLQL", locator
+        )
+        if locator_signature != b"PK\x06\x07" or zip64_disk != 0 or total_disks != 1:
+            return "INVALID"
+        zip64_header = exact(zip64_offset, 56)
+        if zip64_header is None:
+            return "INVALID"
+        zip64_fields = struct.unpack("<4sQ2H2L4Q", zip64_header)
+        (
+            zip64_signature, zip64_record_size, _made_by, _needed,
+            actual_disk, actual_directory_disk, actual_disk_entries,
+            actual_entries, actual_directory_size, actual_directory_offset,
+        ) = zip64_fields
+        if (
+            zip64_signature != b"PK\x06\x06"
+            or zip64_record_size < 44
+            or zip64_offset + 12 + zip64_record_size != locator_offset
+            or actual_disk != 0
+            or actual_directory_disk != 0
+            or actual_disk_entries != actual_entries
+        ):
+            return "INVALID"
+        legacy_pairs = (
+            (disk, 0xFFFF, actual_disk),
+            (directory_disk, 0xFFFF, actual_directory_disk),
+            (disk_entries, 0xFFFF, actual_disk_entries),
+            (entries, 0xFFFF, actual_entries),
+            (directory_size, 0xFFFFFFFF, actual_directory_size),
+            (directory_offset, 0xFFFFFFFF, actual_directory_offset),
+        )
+        if any(legacy not in {sentinel, actual} for legacy, sentinel, actual in legacy_pairs):
+            return "INVALID"
+        entries = actual_entries
+        directory_size = actual_directory_size
+        directory_offset = actual_directory_offset
+        directory_boundary = zip64_offset
+    elif disk != 0 or directory_disk != 0 or disk_entries != entries:
+        return "INVALID"
+
+    if entries > member_limit:
+        return "LIMIT"
+    directory_end = directory_offset + directory_size
+    if (
+        directory_offset < 0
+        or directory_size < 0
+        or directory_end != directory_boundary
+        or directory_end > archive_size
+    ):
+        return "INVALID"
+    cursor = directory_offset
+    actual_entries = 0
+    while cursor < directory_end:
+        header = exact(cursor, 46)
+        if header is None or header[:4] != b"PK\x01\x02":
+            return "INVALID"
+        central = struct.unpack("<4s6H3L5H2L", header)
+        record_size = 46 + central[10] + central[11] + central[12]
+        if record_size < 46 or cursor + record_size > directory_end:
+            return "INVALID"
+        actual_entries += 1
+        if actual_entries > member_limit:
+            return "LIMIT"
+        cursor += record_size
+    if cursor != directory_end or actual_entries != entries:
+        return "INVALID"
+    return "OK"
+
+def archive_metadata_within_limits(members, kind):
+    member_limit = (
+        archive_limits["apk_members"]
+        if kind == "apk"
+        else archive_limits["services_members"]
+        if kind == "services"
+        else -1
+    )
+    if member_limit < 0 or len(members) > member_limit:
+        return False
+    total_size = 0
+    total_compressed_size = 0
+    for member in members:
+        if member.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            return False
+        if member.file_size < 0 or member.compress_size < 0:
+            return False
+        if member.file_size > archive_limits["single_size"]:
+            return False
+        total_size += member.file_size
+        total_compressed_size += member.compress_size
+        if total_size > archive_limits["total_size"]:
+            return False
+        if member.file_size > (
+            member.compress_size * archive_limits["ratio"]
+            + archive_limits["ratio_slack"]
+        ):
+            return False
+    if total_size > (
+        total_compressed_size * archive_limits["ratio"]
+        + archive_limits["ratio_slack"]
+    ):
+        return False
+    return True
+
+def inode_state(value):
+    return (
+        value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode),
+        value.st_uid, value.st_gid, stat.S_IMODE(value.st_mode),
+        value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+def identity_text(value):
+    return ":".join(str(item) for item in inode_state(value))
+
+class BoundedArchiveStream:
+    def __init__(self, stream, size):
+        self.stream = stream
+        self.size = size
+        self.position = 0
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        if whence == io.SEEK_SET:
+            target = offset
+        elif whence == io.SEEK_CUR:
+            target = self.position + offset
+        elif whence == io.SEEK_END:
+            target = self.size + offset
+        else:
+            raise ValueError("invalid seek origin")
+        if target < 0 or target > self.size:
+            raise OSError("archive seek escaped the frozen size")
+        self.stream.seek(target, io.SEEK_SET)
+        self.position = target
+        return target
+
+    def read(self, amount=-1):
+        remaining = self.size - self.position
+        if amount is None or amount < 0 or amount > remaining:
+            amount = remaining
+        value = self.stream.read(amount)
+        self.position += len(value)
+        return value
+
+descriptor = -1
+stream = None
 try:
-    with zipfile.ZipFile(path) as archive:
+    named_before = path.lstat()
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+    )
+    opened_before = os.fstat(descriptor)
+    if (
+        inode_state(named_before) != inode_state(opened_before)
+        or not stat.S_ISREG(opened_before.st_mode)
+        or opened_before.st_uid != os.geteuid()
+        or stat.S_IMODE(opened_before.st_mode) != 0o600
+        or opened_before.st_nlink != 1
+    ):
+        raise OSError("archive identity or mode is unsafe")
+    if opened_before.st_size > file_limit:
+        raise ArchiveLimitError("archive file exceeds its lane profile")
+    stream = os.fdopen(descriptor, "rb", buffering=0)
+    descriptor = -1
+    bounded = BoundedArchiveStream(stream, opened_before.st_size)
+
+    def read_at(offset, length):
+        bounded.seek(offset)
+        return bounded.read(length)
+
+    preflight = archive_directory_preflight(
+        read_at,
+        opened_before.st_size,
+        kind,
+    )
+    if preflight == "LIMIT":
+        raise ArchiveLimitError("archive member count exceeds its fixed limit")
+    if preflight != "OK":
+        raise ValueError("archive central directory is invalid")
+    preflight_after = os.fstat(stream.fileno())
+    if preflight_after.st_size > file_limit:
+        raise ArchiveLimitError("archive grew beyond its lane profile")
+    if inode_state(preflight_after) != inode_state(opened_before):
+        raise OSError("archive changed during central-directory preflight")
+    bounded.seek(0)
+    with zipfile.ZipFile(bounded) as archive:
         members = archive.infolist()
+        if not archive_metadata_within_limits(members, kind):
+            raise ArchiveLimitError("archive metadata exceeds a fixed limit")
         if any(member.filename != member.orig_filename for member in members):
             raise ValueError("archive member name contains a NUL suffix")
         names = [member.orig_filename for member in members]
@@ -2525,8 +4266,37 @@ try:
             raise ValueError("unknown archive kind")
         if archive.testzip() is not None:
             raise ValueError("archive CRC failure")
+    bounded.seek(0)
+    digest = hashlib.sha256()
+    remaining = opened_before.st_size
+    while remaining:
+        chunk = bounded.read(min(1024 * 1024, remaining))
+        if not chunk:
+            raise OSError("archive truncated while hashing validated bytes")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    opened_after = os.fstat(stream.fileno())
+    named_after = path.lstat()
+    if opened_after.st_size > file_limit:
+        raise ArchiveLimitError("archive grew beyond its lane profile")
+    if (
+        inode_state(opened_before) != inode_state(opened_after)
+        or inode_state(opened_after) != inode_state(named_after)
+    ):
+        raise OSError("archive changed while validating")
+    print(f"{digest.hexdigest()}\t{identity_text(opened_after)}")
+except ArchiveLimitError:
+    raise SystemExit(2)
 except (OSError, RuntimeError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile):
     raise SystemExit(1)
+finally:
+    if stream is not None:
+        try:
+            stream.close()
+        except OSError:
+            pass
+    if descriptor >= 0:
+        os.close(descriptor)
 PY
 }
 
@@ -2646,6 +4416,13 @@ main() {
   # Refresh the authoritative STOP only after the exact executable snapshot is
   # available, still before the first device command.
   write_manifest "STOP" "STOP_RUNNING" || fatal_manifest_write
+
+  local -a archive_binding_names archive_binding_digests archive_binding_identities
+  local -a tree_archive_args
+  archive_binding_names=()
+  archive_binding_digests=()
+  archive_binding_identities=()
+  tree_archive_args=()
 
   run_text_receipt devices devices -l
   (( LAST_RC == 0 )) || stop_now STOP_ADB_READ_FAILED
@@ -2778,7 +4555,7 @@ main() {
   # First collect and validate every fixed package path before reading any APK
   # bytes. This prevents an unsafe later path from leaving a partially trusted
   # set of APK binaries in the same evidence run.
-  local package package_stem package_path package_i query_rc
+  local package package_stem package_path package_i query_rc path_check_rc
   local package_apk_paths=("" "" "" "" "" "")
   for ((package_i = 0; package_i < ${#KNOWN_PACKAGES[@]}; package_i++)); do
     package=${KNOWN_PACKAGES[package_i]}
@@ -2849,19 +4626,50 @@ main() {
     package=${KNOWN_PACKAGES[package_i]}
     package_stem=${package//./-}
     package_path=${package_apk_paths[package_i]}
+
+    matching_package_path_receipt "package-$package_stem-path-pre-apk" \
+      "$package" "$package_path"
+    path_check_rc=$?
+    case "$path_check_rc" in
+      0) ;;
+      2) stop_now STOP_ADB_READ_FAILED ;;
+      *) stop_now STOP_PACKAGE_PATH_CHANGED ;;
+    esac
+
     run_binary_receipt "package-$package_stem-apk" \
       -s "$AUTHORIZED_SERIAL" exec-out cat "$package_path"
     (( LAST_RC == 0 )) || stop_now STOP_APK_READ_FAILED
+
+    matching_package_path_receipt "package-$package_stem-path-post-apk" \
+      "$package" "$package_path"
+    path_check_rc=$?
+    case "$path_check_rc" in
+      0) ;;
+      2) stop_now STOP_ADB_READ_FAILED ;;
+      *) stop_now STOP_PACKAGE_PATH_CHANGED ;;
+    esac
+
     [[ -s $OUTPUT_DIR/receipts/package-$package_stem-apk.stdout.bin ]] \
       || stop_now STOP_APK_READ_FAILED
-    valid_archive_file \
-      "$OUTPUT_DIR/receipts/package-$package_stem-apk.stdout.bin" apk \
-      || stop_now STOP_APK_READ_FAILED
-    PACKAGE_APK_SHA256[package_i]="$(sha256_file \
-      "$OUTPUT_DIR/receipts/package-$package_stem-apk.stdout.bin")" \
+    local archive_record archive_digest archive_identity archive_extra
+    archive_record="$(valid_archive_file \
+      "$OUTPUT_DIR/receipts/package-$package_stem-apk.stdout.bin" apk)"
+    path_check_rc=$?
+    case "$path_check_rc" in
+      0) ;;
+      2) stop_now STOP_APK_ARCHIVE_LIMIT ;;
+      *) stop_now STOP_APK_READ_FAILED ;;
+    esac
+    IFS=$'\t' read -r archive_digest archive_identity archive_extra \
+      <<<"$archive_record"
+    [[ $archive_record != *$'\n'* && -z $archive_extra \
+        && $archive_digest =~ ^[0-9a-f]{64}$ \
+        && $archive_identity =~ ^[0-9]+(:[0-9]+){9}$ ]] \
       || stop_now STOP_INTERNAL_HASH_FAILED
-    [[ ${PACKAGE_APK_SHA256[package_i]} =~ ^[0-9a-f]{64}$ ]] \
-      || stop_now STOP_INTERNAL_HASH_FAILED
+    PACKAGE_APK_SHA256[package_i]=$archive_digest
+    archive_binding_names+=("package-$package_stem-apk.stdout.bin")
+    archive_binding_digests+=("$archive_digest")
+    archive_binding_identities+=("$archive_identity")
   done
 
   run_binary_receipt services-jar \
@@ -2869,12 +4677,25 @@ main() {
   (( LAST_RC == 0 )) || stop_now STOP_FRAMEWORK_READ_FAILED
   [[ -s $OUTPUT_DIR/receipts/services-jar.stdout.bin ]] \
     || stop_now STOP_FRAMEWORK_READ_FAILED
-  valid_archive_file "$OUTPUT_DIR/receipts/services-jar.stdout.bin" services \
-    || stop_now STOP_FRAMEWORK_READ_FAILED
-  SERVICES_JAR_SHA256="$(sha256_file "$OUTPUT_DIR/receipts/services-jar.stdout.bin")" \
+  local archive_record archive_digest archive_identity archive_extra
+  archive_record="$(valid_archive_file \
+    "$OUTPUT_DIR/receipts/services-jar.stdout.bin" services)"
+  path_check_rc=$?
+  case "$path_check_rc" in
+    0) ;;
+    2) stop_now STOP_FRAMEWORK_ARCHIVE_LIMIT ;;
+    *) stop_now STOP_FRAMEWORK_READ_FAILED ;;
+  esac
+  IFS=$'\t' read -r archive_digest archive_identity archive_extra \
+    <<<"$archive_record"
+  [[ $archive_record != *$'\n'* && -z $archive_extra \
+      && $archive_digest =~ ^[0-9a-f]{64}$ \
+      && $archive_identity =~ ^[0-9]+(:[0-9]+){9}$ ]] \
     || stop_now STOP_INTERNAL_HASH_FAILED
-  [[ $SERVICES_JAR_SHA256 =~ ^[0-9a-f]{64}$ ]] \
-    || stop_now STOP_INTERNAL_HASH_FAILED
+  SERVICES_JAR_SHA256=$archive_digest
+  archive_binding_names+=(services-jar.stdout.bin)
+  archive_binding_digests+=("$archive_digest")
+  archive_binding_identities+=("$archive_identity")
 
   local boot_id_end uptime_end
   run_text_receipt uptime-end -s "$AUTHORIZED_SERIAL" shell cat /proc/uptime
@@ -2893,8 +4714,24 @@ main() {
   [[ $boot_id_start == "$boot_id_end" ]] || stop_now STOP_BOOT_CHANGED
   uptime_not_decreased "$uptime_start" "$uptime_end" || stop_now STOP_BOOT_CHANGED
 
-  RECEIPT_TREE_SHA256="$(sha256_receipt_tree "$OUTPUT_DIR/receipts")" \
-    || stop_now STOP_INTERNAL_HASH_FAILED
+  local archive_i tree_record tree_rc
+  for ((archive_i = 0; archive_i < ${#archive_binding_names[@]}; archive_i++)); do
+    tree_archive_args+=(
+      "${archive_binding_names[archive_i]}"
+      "${archive_binding_digests[archive_i]}"
+      "${archive_binding_identities[archive_i]}"
+    )
+  done
+  tree_record="$(sha256_receipt_tree \
+    "$OUTPUT_DIR/receipts" "${tree_archive_args[@]}")"
+  tree_rc=$?
+  case "$tree_rc" in
+    0) ;;
+    2) stop_now STOP_APK_ARCHIVE_LIMIT ;;
+    3) stop_now STOP_FRAMEWORK_ARCHIVE_LIMIT ;;
+    *) stop_now STOP_INTERNAL_HASH_FAILED ;;
+  esac
+  RECEIPT_TREE_SHA256=$tree_record
   [[ $RECEIPT_TREE_SHA256 =~ ^[0-9a-f]{64}$ ]] || stop_now STOP_INTERNAL_HASH_FAILED
   publish_collected_bundle
   printf 'COLLECTED evidence=%s compatibility=STATIC_ANALYSIS_PENDING adbApprovalLane=%s\n' \

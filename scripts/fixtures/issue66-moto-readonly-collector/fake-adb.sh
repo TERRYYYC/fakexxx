@@ -1,8 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Deterministic fake adb for selftest-issue66-moto-readonly-collector.sh.
 # It has no transport and cannot contact a device. Any mutating command is
 # rejected here as a second safety boundary in addition to collector policy.
 
+unset BASH_ENV ENV DEVELOPER_DIR SDKROOT TOOLCHAINS
 set -uo pipefail
 
 scenario="${FAKE_ADB_SCENARIO:-target}"
@@ -24,8 +25,14 @@ missing_fixture_package="com.cellrebel.mobile"
 # caller-controlled fixture path unless its resolved location remains beneath
 # the selftest's freshly-created private root.
 controlled_paths=("$log")
+case "$scenario" in
+  archive-tree-services-grow|archive-tree-services-swap)
+    controlled_paths+=("$PWD/receipts/services-jar.stdout.bin")
+    ;;
+esac
 for variable_name in \
   FAKE_ADB_REPLACEMENT \
+  FAKE_ADB_LATE_MARKER \
   FAKE_ADB_REPLACE_MARKER \
   FAKE_ADB_REPLACE_SOURCE \
   FAKE_ADB_SNAPSHOT_REPLACE_MARKER \
@@ -59,6 +66,97 @@ is_known_package() {
   return 1
 }
 
+emit_bytes() { # decimal byte count, one-byte ASCII payload
+  "$real_python" -I - "$1" "$2" <<'PY'
+import sys
+
+count = int(sys.argv[1])
+payload = sys.argv[2].encode("ascii")
+if len(payload) != 1 or count < 0:
+    raise SystemExit(2)
+chunk = payload * min(count, 65536)
+remaining = count
+while remaining:
+    amount = min(remaining, len(chunk))
+    sys.stdout.buffer.write(chunk[:amount])
+    remaining -= amount
+PY
+}
+
+emit_dual_streams() { # stdout bytes, stderr bytes
+  "$real_python" -I - "$1" "$2" <<'PY'
+import os
+import sys
+
+remaining = [int(sys.argv[1]), int(sys.argv[2])]
+while remaining[0] or remaining[1]:
+    for index, descriptor in enumerate((1, 2)):
+        amount = min(4096, remaining[index])
+        if amount:
+            os.write(descriptor, (b"O" if index == 0 else b"E") * amount)
+            remaining[index] -= amount
+PY
+}
+
+emit_process_list_at_limits() {
+  "$real_python" -I - <<'PY'
+import os
+
+stdout_limit = 64 * 1024
+stderr_limit = 32 * 1024
+header = b"USER PID NAME\n"
+prefix = b"u 1 "
+payload = header + prefix + b"p" * (stdout_limit - len(header) - len(prefix) - 1) + b"\n"
+assert len(payload) == stdout_limit
+remaining = [memoryview(payload), memoryview(b"E" * stderr_limit)]
+while remaining[0] or remaining[1]:
+    for index, descriptor in enumerate((1, 2)):
+        if remaining[index]:
+            written = os.write(descriptor, remaining[index][:4096])
+            remaining[index] = remaining[index][written:]
+PY
+}
+
+emit_sized_fixture_archive() { # apk|services package-or-empty exact-byte-count
+  "$real_python" -I - "$1" "${2-}" "$3" <<'PY'
+import io
+import sys
+import zipfile
+
+kind, package, target_text = sys.argv[1:]
+target = int(target_text)
+
+def build(padding_size):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        def add(name, data):
+            member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            member.external_attr = 0o100600 << 16
+            member.compress_type = zipfile.ZIP_STORED
+            archive.writestr(member, data)
+
+        if kind == "apk":
+            add("AndroidManifest.xml", f"ISSUE66_MANIFEST:{package}".encode("ascii"))
+            add("classes.dex", b"dex\n035\0ISSUE66_APK_FIXTURE")
+        elif kind == "services":
+            add("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n")
+            add("classes.dex", b"dex\n035\0ISSUE66_SERVICES_FIXTURE")
+        else:
+            raise SystemExit(2)
+        add("budget/padding.bin", b"P" * padding_size)
+    return buffer.getvalue()
+
+base = build(0)
+padding = target - len(base)
+if padding < 0:
+    raise SystemExit(3)
+data = build(padding)
+if len(data) != target:
+    raise SystemExit(f"sized archive mismatch: {len(data)} != {target}")
+sys.stdout.buffer.write(data)
+PY
+}
+
 emit_fixture_archive() { # apk|services [package]
   "$real_python" -I - "$1" "${2-}" "$scenario" <<'PY'
 import io
@@ -71,10 +169,20 @@ kind, package, scenario = sys.argv[1:]
 targeted_apk = kind == "apk" and package == "name.caiyao.fakegps"
 buffer = io.BytesIO()
 warnings.simplefilter("ignore", UserWarning)
-with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+compression = (
+    zipfile.ZIP_DEFLATED
+    if targeted_apk and scenario in {
+        "archive-apk-ratio-over", "archive-apk-aggregate-ratio-over"
+    }
+    else zipfile.ZIP_BZIP2
+    if targeted_apk and scenario == "archive-apk-method-over"
+    else zipfile.ZIP_STORED
+)
+with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
     def add(name, data):
         member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
         member.external_attr = 0o100600 << 16
+        member.compress_type = compression
         archive.writestr(member, data)
     if kind == "apk":
         if not (targeted_apk and scenario == "apk-empty-archive"):
@@ -92,11 +200,30 @@ with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
                 add("../escape", b"ISSUE66_UNSAFE_PARENT")
             elif targeted_apk and scenario == "apk-absolute-member":
                 add("/escape", b"ISSUE66_UNSAFE_ABSOLUTE")
+            if targeted_apk and scenario in {
+                "archive-apk-member-over",
+                "archive-apk-member-boundary",
+            }:
+                target_count = 16385 if scenario.endswith("-over") else 16384
+                for index in range(target_count - 2):
+                    add(f"budget/{index:05d}", b"")
+            if targeted_apk and scenario == "archive-apk-ratio-over":
+                add("assets/ratio.bin", b"R" * (2 * 1024 * 1024))
+            if targeted_apk and scenario == "archive-apk-aggregate-ratio-over":
+                add("assets/ratio-one.bin", b"R" * (768 * 1024))
+                add("assets/ratio-two.bin", b"S" * (768 * 1024))
     elif kind == "services":
         add("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n")
         if scenario != "services-missing-dex":
             dex_name = "classes.dexX" if scenario == "services-nul-member" else "classes.dex"
             add(dex_name, b"dex\n035\0ISSUE66_SERVICES_FIXTURE")
+        if scenario in {
+            "archive-services-member-over",
+            "archive-services-member-boundary",
+        }:
+            target_count = 4097 if scenario.endswith("-over") else 4096
+            for index in range(target_count - 2):
+                add(f"budget/{index:05d}", b"")
     else:
         raise SystemExit(2)
 data = bytearray(buffer.getvalue())
@@ -168,6 +295,36 @@ if [ "$mutating" -ne 0 ]; then
 fi
 
 if [ "$#" -eq 2 ] && [ "$1" = devices ] && [ "$2" = -l ]; then
+  case "$scenario" in
+    budget-timeout)
+      "$real_python" -I - \
+        "${FAKE_ADB_LATE_MARKER:?FAKE_ADB_LATE_MARKER is required}" <<'PY'
+import os
+import pathlib
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if os.fork() != 0:
+    os._exit(0)
+time.sleep(3)
+pathlib.Path(sys.argv[1]).write_text("late\n", encoding="ascii")
+os._exit(0)
+PY
+      exit 0
+      ;;
+    budget-text-stdout-over) emit_bytes 65537 T; exit 0 ;;
+    budget-text-stdout-boundary) emit_bytes 65536 T; exit 0 ;;
+    budget-stderr-over) emit_bytes 32769 E >&2; exit 0 ;;
+    budget-stderr-boundary) emit_bytes 32768 E >&2; exit 0 ;;
+    budget-dual-stream) emit_dual_streams 61440 30720; exit 0 ;;
+    budget-child-exit-124) exit 124 ;;
+    budget-child-exit-125) exit 125 ;;
+    budget-child-exit-126) exit 126 ;;
+    budget-child-exit-70) exit 70 ;;
+  esac
   if [ "$scenario" = devices-exit7 ]; then
     printf 'fixture devices inventory transport failure\n' >&2
     exit 7
@@ -212,6 +369,31 @@ shift 2
 if [ "$#" -eq 4 ] && [ "$1" = shell ] && [ "$2" = pm ] && [ "$3" = path ]; then
   package="$4"
   is_known_package "$package" || { printf 'unknown fixture package: %s\n' "$package" >&2; exit 98; }
+  case "$scenario" in
+    budget-apk-*|budget-services-*|archive-apk-*|archive-services-*|archive-tree-services-*)
+      [ "$package" = name.caiyao.fakegps ] || exit 1
+      ;;
+  esac
+  path_read_count="$(/usr/bin/grep -Fxc -- \
+    "-s $authorized shell pm path $package" "$log" || true)"
+  if [ "$package" = name.caiyao.fakegps ]; then
+    case "$scenario:$path_read_count" in
+      package-path-change-before-apk:2|package-path-change-before-apk:3)
+        printf 'package:/data/app/~~issue66changed/%s-fixture/base.apk\n' "$package"
+        exit 0
+        ;;
+      package-path-change-after-apk:3)
+        printf 'package:/data/app/~~issue66changed/%s-fixture/base.apk\n' "$package"
+        exit 0
+        ;;
+      package-path-disappear-before-apk:2|package-path-disappear-before-apk:3)
+        exit 1
+        ;;
+      package-path-disappear-after-apk:3)
+        exit 1
+        ;;
+    esac
+  fi
   if [ "$scenario" = missing-package-stderr ] && [ "$package" = "$missing_fixture_package" ]; then
     printf 'Unknown package: %s\n' "$package" >&2
     exit 1
@@ -732,14 +914,35 @@ if [ "$#" -eq 3 ] && [ "$1" = exec-out ] && [ "$2" = cat ]; then
       printf 'P'
       exit 0
     fi
+    case "$scenario" in
+      budget-services-stdout-over) emit_bytes 2097153 S; exit 0 ;;
+      budget-services-stdout-boundary)
+        emit_sized_fixture_archive services "" 2097152
+        exit 0
+        ;;
+    esac
     emit_fixture_archive services
     exit 0
   fi
   for package in "${known_packages[@]}"; do
     if [ "$path" = "/data/app/~~issue66/$package-fixture/base.apk" ]; then
+      if [ "$scenario" = package-path-change-after-apk ] \
+          && [ "$package" = name.caiyao.fakegps ]; then
+        printf 'P'
+        exit 0
+      fi
       if [ "$scenario" = apk-truncated ] && [ "$package" = name.caiyao.fakegps ]; then
         printf 'P'
         exit 0
+      fi
+      if [ "$package" = name.caiyao.fakegps ]; then
+        case "$scenario" in
+          budget-apk-stdout-over) emit_bytes 3145729 A; exit 0 ;;
+          budget-apk-stdout-boundary)
+            emit_sized_fixture_archive apk "$package" 3145728
+            exit 0
+            ;;
+        esac
       fi
       emit_fixture_archive apk "$package"
       exit 0
@@ -808,6 +1011,10 @@ case "$*" in
     ;;
   "shell ps -A"|"shell ps -A -o USER,PID,NAME")
     case "$scenario" in
+      budget-dual-boundary)
+        emit_process_list_at_limits
+        exit 0
+        ;;
       process-header-malformed)
         printf 'USER PPID NAME\n'
         printf 'root 1 init\n'
@@ -844,6 +1051,34 @@ case "$*" in
     ;;
   "shell cat /proc/uptime")
     uptime_reads="$(grep -F -c -- "shell cat /proc/uptime" "$log" || true)"
+    if [ "$uptime_reads" -ge 2 ]; then
+      case "$scenario" in
+        archive-tree-services-grow|archive-tree-services-swap)
+          "$real_python" -I - \
+            "$PWD/receipts/services-jar.stdout.bin" "$scenario" <<'PY' \
+            || exit 95
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+scenario = sys.argv[2]
+if scenario == "archive-tree-services-grow":
+    target = 2 * 1024 * 1024 + 1
+    with path.open("ab") as stream:
+        stream.write(b"G" * (target - path.stat().st_size))
+elif scenario == "archive-tree-services-swap":
+    data = path.read_bytes()
+    replacement = path.with_name(".services-jar.stdout.bin.swap")
+    replacement.write_bytes(data)
+    replacement.chmod(0o600)
+    os.replace(replacement, path)
+else:
+    raise SystemExit(2)
+PY
+          ;;
+      esac
+    fi
     case "$scenario" in
       uptime-negative)
         if [ "$uptime_reads" -ge 2 ]; then printf '1.00 999.00\n'; else printf '%s\n' '-1.00 998.00'; fi

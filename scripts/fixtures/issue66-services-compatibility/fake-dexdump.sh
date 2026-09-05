@@ -1,34 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # Device-free dexdump fixture. Synthetic classes*.dex entries contain a
 # dexdump-shaped text payload; this fixture emits that payload verbatim.
 
+unset BASH_ENV ENV
+unset DEVELOPER_DIR SDKROOT TOOLCHAINS
+PATH=/usr/bin:/bin
+export PATH
 set -uo pipefail
-
-if [ "${0##*/}" = shasum ]; then
-  state="${FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_STATE:-}"
-  if [ -n "$state" ] && [ -f "$state" ] && [ "$(sed -n '1p' "$state")" = armed ]; then
-    printf 'hash-ready\n' >"$state" || exit 98
-    attempts=0
-    while [ "$attempts" -lt 5000 ]; do
-      case "$(sed -n '1p' "$state" 2>/dev/null || true)" in
-        swapped) break ;;
-        swap-failed|swap-timeout) exit 98 ;;
-      esac
-      attempts=$((attempts + 1))
-      sleep 0.001
-    done
-    [ "$(sed -n '1p' "$state" 2>/dev/null || true)" = swapped ] || exit 98
-  fi
-  python3 - "${@: -1}" <<'PY'
-import hashlib
-import sys
-
-path = sys.argv[1]
-digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
-print(f"{digest}  {path}")
-PY
-  exit $?
-fi
 
 if [ -n "${FAKE_DEXDUMP_LOG:-}" ]; then
   {
@@ -94,37 +72,6 @@ if [ -z "$dex" ]; then
   exit 96
 fi
 
-# Optional deterministic TOCTOU hook used only by the device-free selftest.
-# The fake arms a background swap after it has been invoked. A test-only hash
-# gate signals immediately before the checker's post-analysis digest read, so
-# the replacement cannot race ahead of analysis or lose to the final hash.
-swap_target="${FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_TARGET:-}"
-swap_replacement="${FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_REPLACEMENT:-}"
-swap_state="${FAKE_DEXDUMP_AFTER_ANALYSIS_SWAP_STATE:-}"
-if [ -n "$swap_target$swap_replacement$swap_state" ]; then
-  if [ -z "$swap_target" ] || [ -z "$swap_replacement" ] || [ -z "$swap_state" ]; then
-    printf 'fake dexdump: incomplete after-analysis swap configuration\n' >&2
-    exit 95
-  fi
-  printf 'armed\n' >"$swap_state" || exit 95
-  (
-    attempts=0
-    while [ "$attempts" -lt 5000 ]; do
-      if [ -f "$swap_state" ] && [ "$(sed -n '1p' "$swap_state")" = hash-ready ]; then
-        if mv -f -- "$swap_replacement" "$swap_target"; then
-          printf 'swapped\n' >"$swap_state"
-        else
-          printf 'swap-failed\n' >"$swap_state"
-        fi
-        exit
-      fi
-      attempts=$((attempts + 1))
-      sleep 0.001
-    done
-    printf 'swap-timeout\n' >"$swap_state"
-  ) &
-fi
-
 first_line=""
 IFS= read -r first_line <"$dex" || true
 case "$first_line" in
@@ -135,6 +82,40 @@ case "$first_line" in
     esac
     printf 'fake dexdump: requested failure rc=%s\n' "$rc" >&2
     exit "$rc"
+    ;;
+  FAKE_DEXDUMP_HANG)
+    /bin/sleep 5
+    exit 98
+    ;;
+  FAKE_DEXDUMP_STDERR_BYTES=*)
+    stderr_bytes="${first_line#FAKE_DEXDUMP_STDERR_BYTES=}"
+    case "$stderr_bytes" in
+      ''|*[!0-9]*) exit 97 ;;
+    esac
+    /usr/bin/python3 -I - "$stderr_bytes" <<'PY'
+import os
+import sys
+
+remaining = int(sys.argv[1])
+chunk = b"e" * 65536
+while remaining:
+    written = os.write(2, chunk[:remaining])
+    if written <= 0:
+        raise SystemExit(97)
+    remaining -= written
+PY
+    /usr/bin/tail -n +2 -- "$dex"
+    exit
+    ;;
+  FAKE_DEXDUMP_LATE_WRITE)
+    late_marker="${FAKE_DEXDUMP_LATE_WRITE_MARKER:-}"
+    [ -n "$late_marker" ] || exit 97
+    (
+      /bin/sleep 1
+      printf 'late-write\n' >"$late_marker"
+    ) </dev/null >/dev/null 2>&1 9>&- &
+    /usr/bin/tail -n +2 -- "$dex"
+    exit
     ;;
 esac
 

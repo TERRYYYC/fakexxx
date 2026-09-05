@@ -32,6 +32,14 @@ config transport, independent readback diagnosis and then reviewed Moto revalida
 This implementation phase changes code/tests and records evidence; it does not operate Moto,
 merge PRs or close #66. Missing production-frame evidence remains an explicit remaining gate.
 
+The future install targets remain non-colliding: QWY
+`name.caiyao.fakegps.codexbench`, label `千网游 · codex-bench`, launcher
+`.ui.ComposeActivity`; Auto `com.example.cellrebelauto.codexbench`, label
+`CellRebel Auto · codex-bench`, launcher `.ui.MainActivity`. Both exact-build fingerprint lists
+remain empty, so the production result remains `BUILD_UNATTESTED`. Restart/reboot, global
+Location/provider changes, adversarial mutations and app lifecycle changes remain separately
+unauthorized.
+
 We are not building another mock-location provider, another Binder identity implementation,
 a new transport protocol, a generic diagnostic framework, or a substitute continuity oracle.
 
@@ -169,15 +177,39 @@ Do not claim this solves actual configuration publication without that positive 
 
 ## Validation commands (repository-derived)
 
-Use JDK `/Applications/Android Studio.app/Contents/jbr/Contents/Home` and
-`ANDROID_HOME=/Users/terry/Library/Android/sdk`, explicitly per command. Gradle wrapper and
-test tasks come from the existing workflows and previous acceptance recipe, not pnpm.
+The commands originally used Android Studio JBR and
+`ANDROID_HOME=/Users/terry/Library/Android/sdk`; that JBR invocation is historical evidence, not
+the current safe host-gate recipe. Current host validation accepts only the two registered JDK 17
+profiles: macOS arm64 Eclipse Temurin `darwin-aarch64-eclipse-temurin-17.0.20.1+1`, JDK-tree SHA-256
+`f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8`, and Linux x86_64 Eclipse
+Temurin `linux-x86_64-eclipse-temurin-17.0.20.1+1`, JDK-tree SHA-256
+`427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97`. Gradle wrapper and test
+tasks come from the existing workflows and previous acceptance recipe, not pnpm.
+
+The aggregate stages the reviewed JDK privately, requires Gradle VM/Test launcher 17, and creates
+one isolated Gradle home per manifest gate. Its nested host runner uses another private staged JDK
+and one per-run Gradle home shared only across Auto/QWY/harness. The current schema-4 receipt has an
+exact 19-key contract and SHA-binds three schema-2, exact-15-line Auto/QWY/harness attestations; the
+consumer opens and re-reads each proof no-follow and binds its SHA, run ID, staged JDK, task and
+classes. The Android validator covers only the AGP 9.1 TCB under `platforms/android-35`,
+`build-tools/36.0.0`, `platform-tools` and safe ancestors, not whole-SDK provenance. Ubuntu 24 CI
+separately freezes the whole preinstalled SDK before repository commands.
+
+Current author-side evidence is the complete device-free harness at 15 suites / 141 tests with zero
+failures, errors or skips; the three main boundary classes at 54 + 21 + 42 = 117, plus 2
+`HostEphemeralCleanupGuardTest` tests, for 119 related guard tests; the three standalone Python
+runtime-security suites at 40/40; and services compatibility at 131/131. The earlier collector
+result was 1718/1718; it predates the final process/environment and argv-budget repairs and is not
+evidence for them. Their complete rerun belongs to the clean exact-commit gate.
+Host tests fixed `ADB=/usr/bin/false`; no ADB, emulator or physical-device operation was
+performed for the current working-tree update. A clean exact-commit gate and independent review
+remain required.
 
 - In apps/qianwangyou: `./gradlew :app:testDebugUnitTest --tests '*SystemMockTrustPolicyTest' --tests '*QwyActualReadbackWiringTest'`.
 - Targeted new tests: `./gradlew :app:testDebugUnitTest --tests '*SystemMock*DiagnosticsTest'`.
 - Actual variants: run `:app:testCodexBenchUnitTest` and `:app:testReleaseUnitTest` with `--tests '*RuntimeSelfHook*' --tests '*ObservationScope*'` after enabling the tasks if required.
 - Android adapter: `./integration-tests/pr63-on-issue66/run-host-gate.sh :harness:testDebugUnitTest --tests '*AndroidSystemMockLocationReaderDiagnosticsTest'`.
-- Full affected-app and repository gate: `bash scripts/verify-a-plus.sh` using its documented environment; retain inherited lint debt rather than claim raw lint is clean.
+- Full affected-app and repository gate: `./scripts/verify-a-plus.sh` using its documented environment; retain inherited lint debt rather than claim raw lint is clean.
 - APK build: `./gradlew :app:assembleDebug :app:assembleCodexBench :app:assembleDebugAndroidTest`.
 - Terminal whitespace check: `git diff --check`; no formatter is configured in docs/SOP.md.
 
