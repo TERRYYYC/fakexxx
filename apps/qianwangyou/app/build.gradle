@@ -15,7 +15,7 @@ android {
         minSdk 24
         targetSdk 35
         versionCode 8
-        versionName "3.0.0"
+        versionName "0.1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
     }
@@ -59,11 +59,31 @@ android {
             // saved profiles. The Xposed framework sees them as two distinct modules.
             applicationIdSuffix ".bench"
         }
+        // glmbench lane: debuggable sibling of debug that installs as ANOTHER separate app
+        // (name.caiyao.fakegps.glmbench) for isolated operator-driven device testing —
+        // production/bench/codexbench packages and their state stay untouched. Carries the
+        // E2E-lane fixes branch. LSPosed sees it as its own module (scope it separately if
+        // HOOK delivery is wanted; SYSTEM_MOCK needs no scope).
+        glmbench {
+            initWith debug
+            applicationIdSuffix ".glmbench"
+            matchingFallbacks = ['debug']
+        }
         release {
             signingConfig signingConfigs.bench
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    sourceSets {
+        // The glmbench build type compiles the debug lane's sources (pairing approval,
+        // fault collector, acceptance probes); src/glmbench stays available for lane-only
+        // additions. The aliased manifest brings the exported debug seam activities.
+        glmbench {
+            java.srcDirs += ['src/debug/java']
+            manifest.srcFile 'src/debug/AndroidManifest.xml'
         }
     }
 

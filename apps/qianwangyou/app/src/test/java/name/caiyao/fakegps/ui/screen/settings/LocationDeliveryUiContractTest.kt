@@ -3,6 +3,7 @@ package name.caiyao.fakegps.ui.screen.settings
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.data.LocationDeliveryMode
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
+import name.caiyao.fakegps.mockprovider.MockProviderFailureReason
 import name.caiyao.fakegps.mockprovider.MockProviderRecovery
 import name.caiyao.fakegps.mockprovider.MockProviderState
 import org.junit.Assert.assertEquals
@@ -93,6 +94,52 @@ class LocationDeliveryUiContractTest {
         assertTrue(model.detail.contains("重新打开开关"))
         assertFalse(model.detail.contains("残留位置"))
         assertFalse(model.detail.contains("重试停止"))
+    }
+
+    /**
+     * Issue #8 RED: the OS silently resets the mock_location app-op (overnight death). When the
+     * typed reason is present the System Mock card must say WHAT happened (system reset, location
+     * back to real GPS) and HOW to recover (dev options → reselect the mock location app), instead
+     * of leaving the operator to infer it from "the location didn't change".
+     */
+    @Test
+    fun `app-op denied failure explains the system reset and the dev-options recovery path`() {
+        val model = LocationDeliveryUiContract.model(
+            LocationDeliveryMode.SYSTEM_MOCK,
+            MockProviderState.Failed(
+                "not allowed to perform MOCK_LOCATION",
+                MockProviderRecovery.SelectThisAppAndRetryStart,
+                reason = MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED,
+            ),
+            published(),
+        )
+
+        assertTrue(model.mockLocationAppOpDenied)
+        assertTrue(model.mockAppSelectionRequired)
+        assertTrue(model.status.contains("失败"))
+        assertTrue(model.detail.contains("重置"))
+        assertTrue(model.detail.contains("开发者选项"))
+        assertTrue(model.detail.contains("重新选择"))
+        assertTrue(model.detail.contains("重新打开 System Mock 开关"))
+        // The switch must stay touchable: the recovery is reselect + toggle back on.
+        assertTrue(model.switchEnabled)
+        assertFalse(model.retryStopVisible)
+    }
+
+    /** Issue #8: without the typed reason the legacy recovery guidance is unchanged. */
+    @Test
+    fun `legacy permission failure without typed reason keeps the generic guidance`() {
+        val model = LocationDeliveryUiContract.model(
+            LocationDeliveryMode.HOOK,
+            MockProviderState.Failed(
+                "not allowed to perform MOCK_LOCATION",
+                MockProviderRecovery.SelectThisAppAndRetryStart,
+            ),
+            published(),
+        )
+
+        assertFalse(model.mockLocationAppOpDenied)
+        assertFalse(model.detail.contains("重置"))
     }
 
     @Test

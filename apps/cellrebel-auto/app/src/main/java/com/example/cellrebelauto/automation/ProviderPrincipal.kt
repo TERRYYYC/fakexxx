@@ -1,5 +1,6 @@
 package com.example.cellrebelauto.automation
 
+import com.example.cellrebelauto.BuildConfig
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 
 /**
@@ -8,6 +9,9 @@ import io.github.terryyyc.fakexxx.contract.v1.ContractV1
  * G2 is an isolated debug/acceptance build and therefore talks only to the bench provider. G3
  * release builds retain the production provider. Every runtime leg consumes [selected] so trust,
  * binding, status, and probes cannot choose provider identities independently.
+ *
+ * A lane build type (e.g. glmbench) sets BuildConfig.PROVIDER_APPLICATION_ID_OVERRIDE to pair
+ * with a same-suffix provider package; empty string keeps the debug/release resolution.
  */
 internal object ProviderPrincipal {
 
@@ -18,7 +22,8 @@ internal object ProviderPrincipal {
             ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
         }
 
-    val selected: String = resolve(ProviderPrincipalBuild.isDebugBuild)
+    val selected: String =
+        BuildConfig.PROVIDER_APPLICATION_ID_OVERRIDE.ifEmpty { resolve(ProviderPrincipalBuild.isDebugBuild) }
 
     /** All pairable identities, with this build's selected principal first for the approval UI. */
     val knownApplicationIds: List<String> =

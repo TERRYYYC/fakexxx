@@ -28,6 +28,7 @@ interface QwyEnvironment {
 
     fun scheduleSnapshot(): ScheduleSnapshot?
     fun advancePointer(fromItemId: String): AdvancePointerOutcome
+    fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean = false
     fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome
     fun cleanup(leaseId: String): CleanupOutcome
     fun observeEffective(): EffectiveEnvironment
@@ -136,6 +137,9 @@ class QwyEnvironmentController(
             scheduleStore.initFromProfileIds(profileIds)
         }
     }
+
+    override fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean =
+        scheduleStore.applyRestart(targetVersion, firstItemId)
 
     // P1-2 fix: mockGateway construction failure is tracked; apply/cleanup
     // must report honestly when it is null.

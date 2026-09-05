@@ -96,6 +96,31 @@ class QwyScheduleStore(context: Context) {
         prefs.getLong(KEY_ADVANCE_COUNT, 0L)
 
     /**
+     * Idempotently applies a provider-committed operator restart instruction.
+     * The exact target is accepted both from the old exhausted state and from
+     * an already-applied state, so a crash after commit can safely replay the
+     * same durable SharedPreferences write before clearing the provider marker.
+     */
+    fun applyRestart(targetVersion: Long, firstItemId: String): Boolean {
+        val items = getItemIds()
+        if (items.isEmpty() || items.first() != firstItemId) return false
+        val currentVersion = getScheduleVersion()
+        val eligibleOldState = isExhausted() && currentVersion + 1L == targetVersion
+        val alreadyAppliedState =
+            !isExhausted() && currentVersion == targetVersion && getCurrentItemId() == firstItemId
+        check(eligibleOldState || alreadyAppliedState) {
+            "schedule restart target diverged: currentVersion=$currentVersion " +
+                "targetVersion=$targetVersion exhausted=${isExhausted()}"
+        }
+        return prefs.edit()
+            .putLong(KEY_SCHEDULE_VERSION, targetVersion)
+            .putString(KEY_CURRENT_ITEM_ID, firstItemId)
+            .putBoolean(KEY_EXHAUSTED, false)
+            .putLong(KEY_ADVANCE_COUNT, 0L)
+            .commit()
+    }
+
+    /**
      * Advance the pointer to the next item. Returns the outcome: either the
      * next itemId (Advanced) or null (Exhausted — last item retained).
      *

@@ -2,20 +2,83 @@ package name.caiyao.fakegps.ui.screen.settings
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.PublishPropagation
 import name.caiyao.fakegps.data.LocationDeliveryMode
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.mockprovider.MockLocationAppOps
 import name.caiyao.fakegps.mockprovider.MockProviderRuntime
 import name.caiyao.fakegps.mockprovider.MockProviderState
 import name.caiyao.fakegps.mockprovider.MockProviderStatusStore
+import name.caiyao.fakegps.integration.v1.OperatorScheduleRestartResult
+import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
+import name.caiyao.fakegps.integration.v1.ProviderRuntime
 
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settings = SpoofSettings.getInstance(app)
+
+    private val _pendingCallers = MutableStateFlow<List<PendingPairingCandidate>>(emptyList())
+    val pendingCallers: StateFlow<List<PendingPairingCandidate>> = _pendingCallers
+
+    private val _environmentControlMessage = MutableStateFlow<String?>(null)
+    val environmentControlMessage: StateFlow<String?> = _environmentControlMessage
+
+    init {
+        refreshPendingCallers()
+    }
+
+    fun refreshPendingCallers() {
+        viewModelScope.launch {
+            _pendingCallers.value = withContext(Dispatchers.IO) {
+                ProviderRuntime.pendingCallers(getApplication())
+            }
+        }
+    }
+
+    fun approveCaller(candidate: PendingPairingCandidate) {
+        viewModelScope.launch {
+            val approved = withContext(Dispatchers.IO) {
+                ProviderRuntime.approveCaller(
+                    getApplication(),
+                    candidate.callerApplicationId,
+                    candidate.currentSignerDigest,
+                )
+            }
+            _environmentControlMessage.value = if (approved) {
+                "已批准 ${candidate.callerApplicationId}；请返回 Auto 重新运行"
+            } else {
+                "批准失败：候选已变化，请刷新后核对完整身份"
+            }
+            refreshPendingCallers()
+        }
+    }
+
+    fun restartCompletedSchedule() {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                ProviderRuntime.restartScheduleForOperator(getApplication())
+            }
+            _environmentControlMessage.value = when (result) {
+                OperatorScheduleRestartResult.RESTARTED -> "日程已开启新一轮；可返回 Auto 重新运行"
+                OperatorScheduleRestartResult.BLOCKED_BY_LEASE -> "无法重开：仍有未释放的运行环境，请先让当前运行完成或恢复"
+                OperatorScheduleRestartResult.NO_SCHEDULE -> "无法重开：当前没有可用日程"
+                OperatorScheduleRestartResult.NOT_EXHAUSTED -> "无需重开：当前日程尚未完成"
+                OperatorScheduleRestartResult.WRITE_FAILED -> "重开失败：状态未写入，请重试"
+            }
+        }
+    }
+
+    fun dismissEnvironmentControlMessage() {
+        _environmentControlMessage.value = null
+    }
 
     val spoofMode: StateFlow<String> = settings.spoofMode
     val activeHourStart: StateFlow<Int> = settings.activeHourStart
@@ -86,11 +149,19 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
                     readPublishedConfig = ::readPublishedConfig,
                     publishProviderState = MockProviderStatusStore::publish,
                     startService = { MockProviderRuntime.enableSystemMock(getApplication()) },
+                    // Issue #8: ask AppOpsManager before any mutation (fail-open inside).
+                    mockLocationAppOpAllowed = {
+                        MockLocationAppOps.isMockLocationAllowed(getApplication())
+                    },
                 )
             ) {
                 SystemMockEnableOutcome.PublicationFailed -> {
                     _publishFailure.value =
                         "无法发布生效中档案，System Mock 未启动；Hook 仍保持当前状态"
+                }
+                SystemMockEnableOutcome.AppOpDenied -> {
+                    // The typed Failed state (with the dev-options guidance) is already published
+                    // to MockProviderStatusStore — the System Mock card renders it; no banner.
                 }
                 is SystemMockEnableOutcome.Invalid -> {
                     _publishedConfig.value = outcome.published

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- glmbench lane: a THIRD distinct name (production "千网游", bench "千网游·测试",
+         this one) so the launcher / settings / Xposed list never ambiguity-match during
+         operator-driven device testing. -->
+    <string name="app_name">千网游·GLM测试</string>
+</resources>

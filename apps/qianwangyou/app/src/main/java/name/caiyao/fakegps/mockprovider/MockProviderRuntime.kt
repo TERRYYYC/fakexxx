@@ -7,6 +7,13 @@ import name.caiyao.fakegps.data.SpoofSettings
 
 object MockProviderRuntime {
     fun enableSystemMock(context: Context) {
+        // Issue #8 preflight: the OS may have reset the mock_location app-op since the last run
+        // (this is the startup-reconciliation path after an overnight death). Fail fast with the
+        // typed state instead of letting the service die inside addTestProvider.
+        if (!MockLocationAppOps.isMockLocationAllowed(context)) {
+            MockProviderStatusStore.publish(MockLocationAppOps.appOpDeniedState())
+            return
+        }
         val intent = serviceIntent(context, MockProviderServiceContract.ACTION_START_FROM_EFFECTIVE_PROFILE)
         runCatching { ContextCompat.startForegroundService(context, intent) }
             .onFailure { MockProviderStatusStore.publish(MockProviderState.Failed(describe(it))) }

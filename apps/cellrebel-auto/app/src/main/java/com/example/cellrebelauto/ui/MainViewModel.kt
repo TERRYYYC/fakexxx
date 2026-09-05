@@ -48,10 +48,12 @@ data class PlanUiState(
     // # 已按执行顺序（priority ASC, csvRow ASC）排序
     val tasks: List<LocationTask> = emptyList(),
     // # taskId -> 尝试总数
-    val attemptCounts: Map<Long, Int> = emptyMap()
+    val attemptCounts: Map<Long, Int> = emptyMap(),
+    // # taskId -> 可信成功数（§7.3 进度唯一投影；legacy completedSuccesses 列在可信路径下冻结不写）
+    val trustedCounts: Map<Long, Int> = emptyMap()
 ) {
-    // # 已验证成功总数（计划级进度）
-    val completedSuccesses: Int get() = tasks.sumOf { it.completedSuccesses }
+    // # 已验证成功总数（计划级进度）——可信计数求和，不读 legacy 列
+    val completedSuccesses: Int get() = trustedCounts.values.sum()
 
     // # 计划未完成：存在未 completed 的任务
     val isUnfinished: Boolean
@@ -206,11 +208,71 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    // ---- Issue #10: revoke is irreversible and bricks every provider call — confirm first. ----
+
+    /** The staged revoke awaiting operator confirmation; null = no dialog shown. */
+    private val _revokeCandidate = MutableStateFlow<ProviderEntry?>(null)
+    val revokeCandidate: StateFlow<ProviderEntry?> = _revokeCandidate
+
+    /** Post-revoke impact banner (the engine will refuse ALL calls from this provider). */
+    private val _revokeImpactNotice = MutableStateFlow<String?>(null)
+    val revokeImpactNotice: StateFlow<String?> = _revokeImpactNotice
+
+    /** Stage ONLY: the principal stays active until confirmRevoke (no silent one-touch revoke). */
+    fun requestRevoke(entry: ProviderEntry) {
+        _revokeCandidate.value = entry
+    }
+
+    /** Perform the staged revoke and post the impact notice. */
+    fun confirmRevoke() {
+        val entry = _revokeCandidate.value ?: return
+        _revokeCandidate.value = null
+        viewModelScope.launch {
+            trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
+            refreshProviders()
+            _revokeImpactNotice.value =
+                "已撤销 ${entry.applicationId}（signer ${entry.signerDigest}）：" +
+                    "引擎的信任门将拒绝该 provider 的一切契约调用（discover/preflight/apply/observe/" +
+                    "completeAndAdvance），进行中的 attempt 只走 release/恢复。如需恢复请重新批准。"
+        }
+    }
+
+    /** Dismiss the dialog WITHOUT revoking. */
+    fun dismissRevokeDialog() {
+        _revokeCandidate.value = null
+    }
+
+    fun dismissRevokeNotice() {
+        _revokeImpactNotice.value = null
+    }
+
     // ---- Navigation ----
 
     // # F001：Plan 页为首页（设计稿 v2.1 §1.1）
     private val _currentScreen = MutableStateFlow(Screen.PLAN)
     val currentScreen: StateFlow<Screen> = _currentScreen
+
+    // ---- Device readiness (issue #9) ----
+
+    // # OEM 无障碍开关脆弱（settings put 被无条件回滚；force-stop/install -r 会清掉启用），
+    // # Plan 页的 Start 变灰必须给出可读原因。启用态由 AccessibilityManager 实测，进入
+    // # Plan 页时刷新（refreshDeviceReadiness）；连接态来自 AutomationService 的实时流。
+    private val _accessibilityEnabled = MutableStateFlow<Boolean?>(null)
+
+    /** The readable service status line for the Plan surface; null = healthy. */
+    val serviceStatusLine: StateFlow<String?> =
+        combine(AutomationService.isServiceConnected, _accessibilityEnabled) { connected, enabled ->
+            DeviceReadinessProjection.statusLine(
+                serviceConnected = connected,
+                accessibilityEnabled = enabled,
+                appDisplayName = DeviceReadinessProbe.appDisplayName(getApplication()),
+            )
+        }.stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    /** Re-probe the system's enabled accessibility services (call on Plan page entry). */
+    fun refreshDeviceReadiness() {
+        _accessibilityEnabled.value = DeviceReadinessProbe.accessibilityEnabled(getApplication())
+    }
 
     // ---- Data from service (delegated flows) ----
 
@@ -242,13 +304,14 @@ class MainViewModel @JvmOverloads constructor(
                 flowOf(PlanUiState())
             } else {
                 combine(
-                    planRepository.observeTasks(plan.id),
+                    planRepository.observeTasksWithTrustedCounts(plan.id),
                     planRepository.observeAttemptCounts(plan.id)
-                ) { tasks, counts ->
+                ) { tasksWithTrusted, counts ->
                     PlanUiState(
                         plan = plan,
-                        tasks = PlanScheduler.executionOrder(tasks),
-                        attemptCounts = counts.associate { it.taskId to it.count }
+                        tasks = PlanScheduler.executionOrder(tasksWithTrusted.map { it.task }),
+                        attemptCounts = counts.associate { it.taskId to it.count },
+                        trustedCounts = tasksWithTrusted.associate { it.task.id to it.trustedSuccesses }
                     )
                 }
             }

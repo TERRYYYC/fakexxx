@@ -261,7 +261,11 @@ class CellRebelHandler(
     }
 
     private fun log(msg: String) {
-        Log.d(TAG, msg)
+        // Issue #16: every line here (launch/navigation/ACTION_CLICK/Already/Found...) is emitted
+        // while CellRebel is foreground — i.e. exactly while OUR uid is backgrounded and logd drops
+        // DEBUG. WARN keeps the automation trail visible on device. Cadence is bounded by the 1.5s
+        // poll with 20s launch/navigation timeouts; no unbounded per-second noise passes through.
+        Log.w(TAG, msg)
         onLog(msg)
     }
 }

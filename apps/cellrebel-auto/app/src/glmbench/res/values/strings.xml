@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- glmbench lane: distinct launcher name so the operator can tell this isolated
+         test build from the plain debug/prod installs at a glance. -->
+    <string name="app_name">CellRebel Auto·GLM测试</string>
+</resources>

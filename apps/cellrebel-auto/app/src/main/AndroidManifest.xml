@@ -14,15 +14,18 @@
         <package android:name="com.cellrebel.mobile" />
         <package android:name="com.hopefactory2021.fakegpslocation" />
         <!-- R43 (Sol GREEN-review-2 F1): the frozen-contract provider (production + bench), required
-             for package visibility before binding IEnvironmentControlV1 (Android 11+ filtering). -->
+             for package visibility before binding IEnvironmentControlV1 (Android 11+ filtering).
+             The glmbench lane provider must be listed too — without it the lane build cannot even
+             SEE its own provider (discovery NameNotFound, bindService fails) on Android 11+. -->
         <package android:name="name.caiyao.fakegps" />
         <package android:name="name.caiyao.fakegps.bench" />
+        <package android:name="name.caiyao.fakegps.glmbench" />
     </queries>
 
     <application
         android:name=".CellRebelAutoApp"
         android:allowBackup="true"
-        android:label="CellRebel Auto"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.CellRebelAuto">
 

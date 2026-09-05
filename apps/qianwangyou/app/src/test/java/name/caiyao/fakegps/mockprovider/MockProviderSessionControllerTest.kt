@@ -113,6 +113,8 @@ class MockProviderSessionControllerTest {
                     "not allowed to perform MOCK_LOCATION",
                 recovery = MockProviderRecovery.ReselectThisAppAndRetryStop,
                 providerCleanupRequired = true,
+                // Issue #8: the denial is TYPED so the settings card renders re-selection guidance.
+                reason = MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED,
             ),
             controller.state,
         )
@@ -134,9 +136,64 @@ class MockProviderSessionControllerTest {
                 message = "not allowed to perform MOCK_LOCATION",
                 recovery = MockProviderRecovery.SelectThisAppAndRetryStart,
                 providerCleanupRequired = false,
+                // Issue #8: the denial is TYPED so the settings card renders re-selection guidance.
+                reason = MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED,
             ),
             controller.state,
         )
+    }
+
+    /**
+     * Issue #8 RED: the OS resets the android:mock_location app-op at will (observed as
+     * "name.caiyao.fakegps.glmbench from uid 10396 not allowed to perform MOCK_LOCATION" on a
+     * Moto / Android 15). The failed state must carry the TYPED reason — the settings card keys
+     * its guidance off the reason, not off the raw framework message.
+     */
+    @Test
+    fun `mock location app-op denial is typed in the failed state`() {
+        val gateway = RecordingMockProviderGateway(
+            failure = SecurityException(
+                "name.caiyao.fakegps.glmbench from uid 10396 not allowed to perform MOCK_LOCATION",
+            ),
+            failAt = "remove",
+        )
+        val controller = MockProviderSessionController(gateway)
+
+        controller.start(MockLocationConfig(50.4501, 30.5234))
+
+        val failed = controller.state as MockProviderState.Failed
+        assertEquals(MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED, failed.reason)
+    }
+
+    /** Issue #8: an unrelated SecurityException must NOT be typed as an app-op denial. */
+    @Test
+    fun `unrelated security failure is not typed as app-op denial`() {
+        val gateway = RecordingMockProviderGateway(
+            failure = SecurityException("provider already has a test provider"),
+            failAt = "replace",
+        )
+        val controller = MockProviderSessionController(gateway)
+
+        controller.start(MockLocationConfig(50.4501, 30.5234))
+
+        val failed = controller.state as MockProviderState.Failed
+        assertEquals(null, failed.reason)
+    }
+
+    /** Issue #8: the typed reason survives even when only the CLEANUP leg hit the app-op denial. */
+    @Test
+    fun `app-op denial during cleanup is typed in the failed state`() {
+        val gateway = RecordingMockProviderGateway(
+            failure = SecurityException("not allowed to perform MOCK_LOCATION"),
+            failAt = "publish",
+        )
+        val controller = MockProviderSessionController(gateway)
+
+        controller.start(MockLocationConfig(50.4501, 30.5234))
+
+        val failed = controller.state as MockProviderState.Failed
+        assertEquals(MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED, failed.reason)
+        assertEquals(MockProviderRecovery.ReselectThisAppAndRetryStop, failed.recovery)
     }
 
     @Test

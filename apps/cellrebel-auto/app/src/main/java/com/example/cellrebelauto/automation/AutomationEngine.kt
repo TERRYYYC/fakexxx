@@ -243,11 +243,28 @@ class AutomationEngine(
             // provider must advertise the frozen protocol version before any A+ attempt runs; an
             // unavailable/discover-failed provider fail-closes the plan BEFORE the first apply.
             recoveryCoordinator?.let { coord ->
+                val providerApplicationId = ProviderPrincipal.selected
+                val trustAttempt =
+                    com.example.cellrebelauto.environment.ProviderTrustRejections.beginAttempt(providerApplicationId)
                 val capabilities = coord.executorBackend().discover()
                 if (capabilities == null ||
                     capabilities.protocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
                 ) {
-                    aplusPause("provider discover failed or protocol incompatible (v1 required)")
+                    // # Issue #10：discover=null 的一个高频真因是信任门拒绝（撤销/签名轮转）。
+                    // # gate 每次拒绝都会记录 typed 原因（ProviderTrustRejections）；此处把最近
+                    // # 一次拒绝并入暂停文案，让现场日志直接指向“重新批准”而不是裸的 discover 失败。
+                    val gateRejection =
+                        com.example.cellrebelauto.environment.ProviderTrustRejections.consume(
+                            trustAttempt,
+                            providerApplicationId,
+                        )
+                    aplusPause(
+                        "provider discover failed or protocol incompatible (v1 required)" +
+                            (gateRejection?.let {
+                                " — trust gate rejected ${it.applicationId} " +
+                                    "signer=${it.signerDigest ?: "unresolvable"} (${it.because})"
+                            } ?: ""),
+                    )
                     return@coroutineScope
                 }
                 if (capabilities.exhausted == true &&
@@ -309,8 +326,14 @@ class AutomationEngine(
                     return@coroutineScope
                 }
                 // # INV-F3-1：跳过必记录（双关已在启动时拒绝，至多一个标记）
+                // # Issue #17：A+ 契约 lane 由 provider 负责位置注入——legacy Fake GPS 阶段与开关无关地
+                // # 跳过，attempt 行沿用 F003 的 gps_skipped 标记，History 里可解释为何没有 GPS 阶段。
+                // # A+ lane 本身也从不落入 legacy 分支（下方 if 以 continue/return 收尾），这里的标注
+                // # 让"跳过"这一事实落在持久数据上，而不只依赖控制流。
+                val aplusContractLane = recoveryCoordinator != null && completionEvidenceSource != null
                 val stageNotes = when {
                     !toggles.locationStageEnabled -> "gps_skipped"
+                    aplusContractLane -> "gps_skipped" // #17：provider owns location
                     !toggles.testStageEnabled -> "test_skipped"
                     else -> null
                 }
@@ -425,7 +448,10 @@ class AutomationEngine(
                     priority = task.priority,
                     latitude = task.latitude,
                     longitude = task.longitude,
-                    completedSuccesses = task.completedSuccesses,
+                    // §7.3: the Run-page "Verified successes" chip reads the TRUSTED projection —
+                    // the legacy completedSuccesses column is frozen on the trusted path and would
+                    // render a permanent 0 (the "UI never refreshes progress" bug).
+                    completedSuccesses = planRepository.trustedCountForTask(task.id),
                     requiredSuccesses = task.requiredSuccesses,
                     attemptOrdinal = attemptOrdinal
                 )
@@ -436,6 +462,11 @@ class AutomationEngine(
                 // # PASS → 终态化 attempt（绝不动 legacy 计数）。apply/release 外部调用是 GREEN，pre-freeze
                 // # 只驱动 §8.1 迁移 + 持久化 owner 态，判定路径（recordTrustedCompletion）保持可达。
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
+                    // # Issue #17：A+ 契约 lane —— 位置由 provider 侧注入，legacy Fake GPS（gpsSetter 驱动
+                    // # 第三方 App）+ settle 阶段与开关无关地自动跳过。真机（Moto/Android 15）两次复现：
+                    // # Location stage ON（默认）+ 正常路径时引擎在 legacy GPS settle 阶段静默死亡，History
+                    // # 留下 running 僵尸 attempt。每个 attempt 记录一行明确原因（跳过必留痕，INV-F3-1 语义）。
+                    log("A+ contract lane — legacy Fake GPS stage skipped (provider owns location)")
                     var aplusState = AttemptState.CREATED
                     val anchorProjection = checkNotNull(aplusAnchorProjection)
                     val admitted = checkNotNull(aplusAdmission)
@@ -788,7 +819,9 @@ class AutomationEngine(
                 }
 
                 // ==================== Location stage（AC-F3-2：OFF 则整段跳过） ====================
-                if (toggles.locationStageEnabled) {
+                // # Issue #17 双保险：A+ lane 下本分支结构上不可达（上方 A+ 分支恒以 continue/return
+                // # 收尾）；即便未来重构破坏了该不变式，legacy gpsSetter 也绝不与 provider 的位置注入叠加。
+                if (toggles.locationStageEnabled && !aplusContractLane) {
                     // # Fake GPS（失败即停，INV-10）
                     updateState(AutomationState.LAUNCHING_FAKE_GPS)
                     val gpsOutcome = gpsSetter.setLocation(task.latitude, task.longitude)
@@ -813,7 +846,12 @@ class AutomationEngine(
                         ensureActive()
                     }
                 } else {
-                    log("Location stage OFF — skipping Fake GPS entirely (gps_skipped)")
+                    if (aplusContractLane) {
+                        // # Issue #17 防御性兜底（结构性不可达：A+ 分支恒 continue/return）
+                        log("A+ contract lane — legacy Fake GPS stage skipped (provider owns location)")
+                    } else {
+                        log("Location stage OFF — skipping Fake GPS entirely (gps_skipped)")
+                    }
                 }
 
                 // ==================== Test stage OFF：GPS 验证即终态（AC-F3-3） ====================
@@ -833,7 +871,7 @@ class AutomationEngine(
                     val updated = planRepository.getTask(task.id)
                     if (updated != null) {
                         _currentTask.value = _currentTask.value
-                            ?.copy(completedSuccesses = updated.completedSuccesses)
+                            ?.copy(completedSuccesses = planRepository.trustedCountForTask(task.id))
                         if (updated.status == "completed") {
                             log("Location csvRow=${task.csvRow} quota complete ✔")
                         }
@@ -875,9 +913,9 @@ class AutomationEngine(
                         }
                         val updated = planRepository.getTask(task.id)
                         if (updated != null) {
-                            // # 刷新 Run 页状态卡上的成功计数
+                            // # 刷新 Run 页状态卡上的成功计数（§7.3 可信投影）
                             _currentTask.value = _currentTask.value
-                                ?.copy(completedSuccesses = updated.completedSuccesses)
+                                ?.copy(completedSuccesses = planRepository.trustedCountForTask(task.id))
                             // # F5：配额达成 → completed 已在 finalize 事务内完成
                             if (updated.status == "completed") {
                                 log("Location csvRow=${task.csvRow} quota complete ✔")
@@ -912,31 +950,40 @@ class AutomationEngine(
             }
 
         } catch (e: CancellationException) {
-            // # 停止/取消：legacy 在途尝试标记 interrupted；A+ 模式绝不盲目标记 terminal——cancel 后可能
-            // # 仍持有未收敛 lease，必须保持 recoverable 由下次恢复 reconcile（Sol round-9 addendum）。
-            // # withContext(NonCancellable) 保证 paused 持久化在取消上下文中仍完成（Sol round-10 P1-5）。
-            _cooldown.value = null
-            if (recoveryCoordinator != null) {
-                withContext(NonCancellable) {
-                    aplusPause("cancelled with an unresolved A+ lease — recoverable, not terminalized")
-                }
-            } else {
+            handleCancellation()
+            throw e // # 重新抛出以正确传播取消
+
+        } catch (e: Exception) {
+            handleUnexpectedFailure(e)
+            Log.e(TAG, "Automation failed", e)
+        }
+    }
+
+    private suspend fun handleCancellation() {
+        _cooldown.value = null
+        if (recoveryCoordinator != null) {
+            withContext(NonCancellable) {
+                aplusPause("cancelled with an unresolved A+ lease — recoverable, not terminalized")
+            }
+        } else {
+            withContext(NonCancellable) {
                 currentAttemptId?.let { planRepository.markAttemptInterruptedIfNonTerminal(it, nowMs()) }
                 updateState(AutomationState.IDLE)
                 if (runSessionId != 0L) {
                     planRepository.finishSession(runSessionId, "stopped", nowMs(), _cycleCount.value)
                 }
             }
-            log("=== Automation stopped by user ===")
-            throw e // # 重新抛出以正确传播取消
+        }
+        log("=== Automation stopped by user ===")
+    }
 
-        } catch (e: Exception) {
-            // # 不可恢复的错误：legacy 在飞 attempt 终态化（F7 不留孤儿）；A+ 模式保持 recoverable。
-            if (recoveryCoordinator != null) {
-                withContext(NonCancellable) {
-                    aplusPause("exception with an unresolved A+ lease: ${e.message}")
-                }
-            } else {
+    private suspend fun handleUnexpectedFailure(error: Exception) {
+        if (recoveryCoordinator != null) {
+            withContext(NonCancellable) {
+                aplusPause("exception with an unresolved A+ lease: ${error.message}")
+            }
+        } else {
+            withContext(NonCancellable) {
                 currentAttemptId?.let { attemptId ->
                     runCatching {
                         planRepository.markAttemptInterruptedIfNonTerminal(attemptId, nowMs())
@@ -948,9 +995,8 @@ class AutomationEngine(
                     planRepository.finishSession(runSessionId, "error", nowMs(), _cycleCount.value)
                 }
             }
-            log("=== Automation ERROR: ${e.message} ===")
-            Log.e(TAG, "Automation failed", e)
         }
+        log("=== Automation ERROR: ${error.message} ===")
     }
 
     /**
@@ -2653,7 +2699,10 @@ class AutomationEngine(
         val old = _state.value
         _state.value = newState
         if (old != newState) {
-            Log.d(TAG, "State: $old → $newState")
+            // Issue #16: device evidence (Moto/Android 15) — while the engine app is backgrounded
+            // (CellRebel foreground), logd drops DEBUG for the background uid; INFO/WARN survive.
+            // State transitions are the diagnostic backbone of every E2E timeline → WARN.
+            Log.w(TAG, "State: $old → $newState")
         }
     }
 
@@ -2662,6 +2711,10 @@ class AutomationEngine(
             .format(java.util.Date())
         val entry = "[$timestamp] $message"
         _logs.value = (_logs.value + entry).takeLast(200)
-        Log.d(TAG, message)
+        // Issue #16: engine log lines (plan start / Location / failures / aplusPause / ~10s
+        // stage heartbeats) are exactly what goes missing when the app is backgrounded —
+        // logd rate-limits DEBUG for background uids. WARN keeps them visible. No engine
+        // line is per-second noise (the fastest cadence here is the 10s heartbeat).
+        Log.w(TAG, message)
     }
 }
