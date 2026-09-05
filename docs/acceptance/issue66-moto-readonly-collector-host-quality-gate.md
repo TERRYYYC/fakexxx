@@ -1,0 +1,368 @@
+---
+feature_ids: [G2-66]
+topics: [android, moto, device-preflight, quality-gate, evidence]
+doc_kind: acceptance-evidence
+created: 2026-09-04
+---
+
+# Issue #66 Moto collector host quality gate
+
+## Verdict
+
+The Task 2A **host-only slice** is in a review-fix cycle and is not yet ready for device use. The
+first independent exact-HEAD review returned `REQUEST_CHANGES`; its repaired successor must have a
+complete exact-commit host-gate artifact and a new approval that publishes both the exact HEAD and
+collector SHA-256. This is not a feature-completion or device-pass claim:
+
+- issue #66 remains open and AC7 remains `NOT_PASSED`;
+- no emulator or physical-device command was run by the PR #81 commit range or its Task 2A
+  collector slice; earlier base-stack evidence is historical and does not satisfy AC7 for this
+  candidate;
+- Task 2B privileged inspection is not implemented;
+- both exact-build admission lists remain empty, so device `FULL` remains blocked;
+- the live Task 2A collection may run only after an independent review publishes the exact HEAD,
+  collector SHA-256 and approved command surface.
+
+The present working-tree verification did not invoke ADB, an emulator or a device. It fixed
+`ADB=/usr/bin/false`; the current complete local harness is 15 suites / 141 tests with zero
+failures, errors or skips. The three main boundary classes pass 54 + 21 + 42 = 117 tests; with 2
+`HostEphemeralCleanupGuardTest` tests, the related guards total 119. The three standalone Python
+runtime-security suites pass 40/40 and services compatibility passes 131/131. The earlier collector
+result was 1718/1718; it predates the final process/environment and argv-budget repairs and is not
+evidence for them. Their complete rerun belongs to the clean exact-commit gate. These remain
+author-side working-tree evidence until a clean exact-commit gate and
+independent review pass.
+
+The original requirement is [issue #66](https://github.com/TERRYYYC/fakexxx/issues/66): an
+authoritative continuity oracle must fail closed and receive exact-build emulator plus authorized
+rooted-device evidence before the blocker can close. The operator's exact device scope, allowed
+mutations and explicit exclusions are durably recorded in the
+[2026-09-04 authorization checkpoint](https://github.com/TERRYYYC/fakexxx/issues/66#issuecomment-5535947347).
+Only Moto `ZY22JHW9M4` is in scope. This slice consumes none of the authorized mutations and does
+not infer authority for the excluded reboot, provider, lifecycle, adversarial or unrelated-private-
+state operations.
+
+## Vision and delivery coverage
+
+| Requirement | Slice status | Evidence |
+| --- | --- | --- |
+| Preserve issue #66 AC6 runtime classification | OUTSIDE THIS SLICE; CLAIM CEILING ONLY | Task 2A never executes the runtime callback/oracle path. The base runtime contract and `AuthoritativeOracleProductionGuardTest`/`ProductionFullBoundaryTest` remain the earlier evidence; this slice only freezes its own device/FULL/AC7 claims as blocked and does not revalidate AC6. |
+| Bind future evidence to the exact authorized Moto/build | AUTHOR PASS; EXACT-COMMIT GATE/REVIEW REQUIRED | Collector rejects another serial/device/manufacturer/API and binds a transcript's fingerprint, boot, framework/APK bytes and tool hashes. Commit `1bdd265` completed its device-free exact-commit gate, but a later fresh-context scan found additional fail-closed gaps and superseded that candidate. The current 15-suite/141-test harness and 131/131 services repairs are green. The earlier 1718/1718 collector result predates the final process/environment and argv-budget repairs; their complete rerun belongs to the clean exact-commit gate. A new clean exact-commit gate artifact and independent approval are still required, and the live transport/source is not yet proven. |
+| Detect PRE-to-POST continuity mutations authoritatively | OUTSIDE THIS SLICE | Runtime oracle work is inherited from earlier slices; no Task 2A result claims to exercise it. |
+| Exact-build emulator plus authorized rooted-device proof | BLOCKED | Neither environment was run. This remains required for issue #66 AC7. |
+| Do not collide with existing app identities | PRESERVED | This slice installs no APK and names only the already-separated `.codexbench` identities as future mutable targets. |
+| Keep unauthorized device changes out of the preflight | PASS | The allowlist excludes install/uninstall, AppOps writes, provider toggles, `su`, private paths, lifecycle changes and reboot. |
+
+Delivery completeness: this is an explicitly staged Task 2A host slice, not the complete feature.
+It leaves durable expansion points (live collection, Task 2B, evidence-only admission and runtime
+proof) rather than placeholders that require rewriting this collector.
+
+## Independent review history
+
+The first exact-HEAD review of `6d06be5f68c1fce3e6fd5f88d1ab889898d5aa68` returned
+[`REQUEST_CHANGES`](https://github.com/TERRYYYC/fakexxx/pull/81#issuecomment-5536023752).
+It prohibited a Moto run until the reviewed HEAD/collector bytes are bound at execution, aggregate
+receipt publication and validation are race-safe and source-bound, and the declared Ubuntu gate is
+green. It also required honest AC6/AC7 mapping, durable authorization provenance and complete shell
+UID/GID parsing. That verdict is retained as history; only a new exact-HEAD review after all fixes
+and fresh gates may supersede it. No device action is justified by an author selftest alone.
+
+## Functional acceptance
+
+| Task 2A requirement | Status | Verification |
+| --- | --- | --- |
+| Device-free fake-ADB RED/green matrix | FINAL RERUN/EXACT-COMMIT REVIEW REQUIRED | The earlier complete author-side matrix completed 1718 assertions with zero failures, before the final process/environment and argv-budget repairs. It covers positive-control fixture use, poisoned bare `adb`, mandatory reviewed-HEAD/digest binding, first-targeted-command shell identity, source/snapshot replacement detection, exact Android 15 output grammars, package-path bracketing, bounded process supervision, archive/resource validation, bounded offline reads and cleanup of frozen test evidence. The independently consumable result must still come from the next clean exact commit. |
+| Exact serial-qualified operational-read-only allowlist | PASS | Mutating, generic-shell, wrong-serial and broad-query variants are refused before execution. |
+| New mode-0700 evidence root and atomic STOP/final manifest | PASS | The parent walk uses no-follow directory descriptors; repository/worktree aliases, macOS firmlinks, inherited ACLs and inode/path replacement are refused. Initial-write, summary-write and final-replacement failures are covered. |
+| One typed six-file receipt per ADB command | PASS | Exact stem graph, carrier type, argv, time, exit and undeclared-file checks are covered. |
+| Shell identity, boot and monotonic-uptime binding | TARGETED PASS | `shell id` is the first serial-targeted query and must have primary `uid=2000(shell) gid=2000(shell)` plus only accepted supplementary/context fields before other device observations. The repaired fake-ADB matrix rejects primary root GID, supplementary root groups and malformed context; inventory and the identity preflight are explicitly outside the later evidence bracket. |
+| Fixed package/process/AppOps and framework byte capture | PASS | API-35 missing-package semantics, every process row, exact AOSP AppOps/TimeUtils grammar (including UID overrides), safe split-APK paths, binary carriers and a whole-receipt-tree SHA-256 binding are covered. |
+| Offline receipt verification | TARGETED PASS; CLAIM CEILING | It opens each authenticated file no-follow and reads it from one inode-checked descriptor, validates exact internal structure without ADB and rechecks the reviewed source binding before returning. All content reads are capped, including metadata carriers, the 64-MiB ADB source/snapshot and archive lanes; root, tooling and receipt enumeration is streamed behind fixed 4/1/512-entry ceilings. It cannot authenticate that copied receipts came from a genuine Moto transport; the independently consumable result must come from the clean exact-commit gate. |
+| Static Android 15 services compatibility checker | PASS, PRODUCTION STOP | On this host, 131 assertions and 0 skips bind required members, bounded descriptor snapshots, descriptor-pinned SDK metadata, EOCD/ZIP metadata and streamed-dex limits, bounded process-group supervision, bounded required-only parser state, real post-analysis replacement detection and the output FD. Exact archive, output and 64-KiB `source.properties` caps pass while cap+1, regular-to-symlink/FIFO metadata races, zip-bomb, timeout and surviving-child cases stop before authority. A host without SDK `dexdump` reports the optional production-tool probe as skipped, never passed. Checker, selftest and pinned fake use privileged Bash startup; checker/selftest pin system PATH before source resolution and run every embedded parser through fixed `/usr/bin/python3 -I`. The independently approved dexdump digest list is intentionally empty, so a host SDK tool returns `STOP_TOOL_NOT_ATTESTED`; the pinned fake can emit only `SELFTEST_STATIC_MEMBERS_PRESENT`, never a production candidate. |
+| Repository-pinned production ADB client | PASS, SERVER UNATTESTED | The production lane accepts only the reviewed platform-tools 37.0.0 universal Mach-O client SHA-256 `9fdf861259dc807937b13afdd5f053c7fda9f3b7726933fe0e0f45130ecb8dc7`; the local ADB server/transport remains explicitly `NOT_ATTESTED`. |
+| Cooperating runner/validator stale and concurrent receipt protection | TARGETED PASS; EXACT-COMMIT GATE REQUIRED | The repair keeps one owner-token lock while publishing `RUNNING/BLOCKED` and later PASS through a private no-follow same-directory transaction; it binds source HEAD/tree, runner digest, run ID, reviewed JDK identity and three Gradle attestations. A success result is emitted only after the final verified lock release. The aggregate validator owns the same sibling lock while strictly parsing and rechecking the receipt and the three attestation siblings. The current boundary classes pass 117/117 on macOS (`HarnessBoundaryGuardTest` 54, `HostRunnerEnvironmentGuardTest` 21, `HostReceiptModeGuardTest` 42); with `HostEphemeralCleanupGuardTest` 2/2, related guards total 119/117. Coverage includes Ubuntu mode reads, fixed host lookup, raw HEAD/index/worktree-byte binding, local-filter nonexecution, index-hidden changes, Bash/Python/JVM startup poisoning, clean child environments, exact aggregate-gate membership, ephemeral cleanup and fd-pinned Darwin ACL checks. This protects the enumerated accidental/cooperating races, not malicious same-host-UID mutation after lock release; authority remains the exact-commit CI run/artifact plus independent review. |
+| Coordinate/private-state minimization | PASS | Summary whitelist excludes coordinates; root and private LSPosed/Vector observations remain `NOT_COLLECTED_PRIVILEGED`. |
+
+## Close and follow-up audit
+
+No CloseGateReport exists because this change does not close issue #66 or Task 2. The only
+follow-up-tail keyword in the changed plan is the heading “deferred authorized device sequence.”
+It explicitly marks unmet AC7 work as blocked and staged; it does not package that work as done.
+Every remaining device, privileged, reboot/provider/lifecycle and attestation step is enumerated
+with its owner/trigger boundary in the plan and runbook.
+
+This slice was developed on `codex/issue66-moto-readonly-collector`, based on
+`02574d210cc0`. The report deliberately does not predict the hash of the commit that contains it;
+the review packet must bind the exact resulting HEAD, collector SHA-256 and pull request. GitHub
+issue #66 was still OPEN with P0/release-blocking labels at gate time.
+
+The external repository does not contain `scripts/check-hotfix-pattern.mjs`,
+`scripts/check-fallback-layers.mjs`, a root `package.json`, or a pnpm lockfile, so the Cat Cafe
+mechanical hotfix/fallback/architecture/tips commands are unavailable here. Manual review found
+no fallback stack: the new branches are typed fail-closed stops. The implementation plan records
+an explicit internal-harness tips exemption.
+
+## Architecture, design and artifact checks
+
+- Architecture cell: `fakexxx::android-dual-app-contract`
+- Map delta: none
+- Why: the slice strengthens the external evidence gate without moving runtime ownership or
+  changing the frozen Binder contract.
+- Diff mismatch scan: no new Store, Queue, Router, Adapter, Dispatcher or Binding owner.
+- `designs/**/*.pen`: no matches; there is no UI or frontend change.
+- Root-level media/design artifacts in the worktree and committed diff: none.
+- Governance/skill/MCP surface: unchanged.
+
+## Dogfood-Your-Slice
+
+Scope verdict: exempt from real-device author dogfood before review because this is an internal,
+high-risk device-evidence harness whose live command surface is itself the object that must first
+receive independent approval. The available end-to-end path was nevertheless exercised with an
+explicit fake ADB: collect a complete bundle, verify it offline, mutate receipts and prove each
+case fails closed. The persistent post-review trigger is: a published exact-HEAD plus collector-
+SHA-256 approval, the local entry point matching both values, and the sole visible device being
+`ZY22JHW9M4`; then run Task 2A once and review its evidence. Locally calculating substitute values
+is not approval. This exception does not unblock feature close or AC7.
+
+## Five-axis risk and fresh verification
+
+Risk: behavior=high (new evidence state machine and verifier); data=medium (new private evidence
+tree and atomic receipts); security=high (real-device command/path boundary); contract=high
+(machine schemas and claim ceiling); irreversible=low for this slice (no mutation command exists).
+The high security/contract risk selected the full host gate in addition to targeted tests.
+
+Iterative fresh-context scans found and the author fixed boundary issues across the collector,
+checker and host runner: the ADB source identity/hash is checked through creation of a private
+snapshot from one no-follow file descriptor, and only that snapshot is rechecked around every
+later call; the evidence root and verifier inputs are inode-pinned; all receipt bytes are
+tree-hashed; duplicate JSON keys, Unicode/control scalar
+joins and noncanonical process/package/AppOps output are rejected; APK/JAR ZIP members and CRCs are
+validated; the final summary precedes the final manifest; checker output stays bound to an
+exclusive open FD; production dexdump approval is empty; and the host gate owns an exclusive lock
+while invalidating stale PASS state. A later documentation-consistency scan then found overly broad
+transport, framing and authorization claims plus three behavioral gaps: pathname-reopened verifier
+reads, a mode-`0400` stale-PASS failure, and late shell-identity gating. Each received a reproducing
+RED test and a fail-closed fix. A subsequent scan found that the aggregate receipt consumer could
+accept stale PASS while a concurrent runner lock existed; RED tests reproduced pre-existing-lock,
+handoff, owner-token, inode-replacement and cleanup races. The validator now owns the runner's same
+lock for its full read/validation lifetime, and structural guards freeze the canonical sibling
+receipt/lock assignments. A pre-review finding-generator rescan reported no remaining P1/P2, but
+the subsequent exact-HEAD formal review found the binding, publication, portability and
+traceability gaps recorded above. The current repair has not yet earned a replacement verdict.
+Finding-generator scans are never formal review approval.
+
+The post-review finding-generator then caught four additional host-boundary defects. GNU `stat -f`
+could contaminate the Ubuntu mode result before its GNU fallback; production PATH and two embedded
+Git calls were caller-controlled before the first ADB receipt; Git `assume-unchanged` or
+`skip-worktree` could conceal a modified runner behind a clean status; and Darwin extended ACLs
+could grant access not represented by mode `0700`/`0600`. Each was reproduced by a RED regression.
+The repair now uses one Python mode reader, fixed production Bash/PATH/Git, rejects noncanonical
+index flags and compares the no-follow runner digest with its HEAD blob, and checks ACLs throughout
+receipt creation, publication, validation and release. The combined focused suites are green.
+
+The resulting clean `1bdd265` host gate passed locally, with `physicalDevice=NOT_RUN`, and was
+published to draft PR #81. A new three-way fresh-context scan then found one success-path P1 and
+related P2 gaps before formal review: an `EXIT` trap could preserve status 0 when final lock release
+failed; terminal PASS text was printed before publication/release completed; split-token or dynamic
+ADB execution could bypass the lexical runner guard; Darwin-only ACL tests returned as passes on
+Linux; external guard scripts were missing from Gradle test inputs; collector ACL helpers swallowed
+all `listxattr` errors; and the aggregate verifier's outer dispatch still inherited PATH. It also
+found the adjacent schema-v2 README and PR body stale. The obsolete remote CI run was cancelled.
+RED tests reproduced each behavioral gap. The current repair performs and checks final release
+synchronously before terminal output, expands the runner mutation guard, marks platform tests with
+JUnit assumptions, binds external test inputs, propagates ACL inspection errors other than explicit
+unsupported-filesystem results, pins the collector, selftest and aggregate entry points to
+privileged-mode Bash, clears inherited Bash startup-file variables, pins aggregate
+PATH/dirname/host dispatch, and corrects the handoff documentation. This repair still requires the
+complete clean gate and a new exact-HEAD review.
+
+Two later fresh-context passes found additional source and command-boundary defects before that
+gate was allowed to run. The runner guard did not recognize ANSI-C-quoted `adb`, `else`, a lone
+background `&`, unquoted heredoc substitutions or indirect wrapper rebinding; the active runbook
+also demonstrated ordinary non-privileged Bash invocation. Separately, a clean-looking Git status
+could be forged through stat-cache settings or repo-local attributes/filters, the aggregate
+validator redundantly executed such a filter, and the Gradle guard omitted its own build script
+from its declared inputs. Finally, raw source binding checked POSIX owner/mode but not extended ACLs
+on the repository root, tracked directories or regular files. RED fixtures reproduced each gap,
+including filter side effects and real Darwin ACL grants. The repair now rejects the additional
+shell grammar and wrapper aliases, quotes heredocs, makes the wrappers readonly, documents only
+direct or `/bin/bash -p` entry, compares HEAD and index metadata with raw no-follow worktree bytes,
+does not use status or local filters, declares the build script and active docs as test inputs, and
+probes ACLs on pinned file descriptors before and after reads. A clean exact-commit gate and formal
+review are still outstanding; these fresh-context passes are finding generators only.
+
+A final direct-entry pass then found that the services checker and its selftest still selected Bash
+through `/usr/bin/env`, so a direct run could execute `BASH_ENV` before the scripts' own logic and
+could resolve `dirname`, hashing tools or parsers from an ambient PATH. The services TOCTOU test
+also depended on replacing `shasum` through that PATH. RED probes executed both attacks. The repair
+uses `/bin/bash -p`, clears `BASH_ENV`/`ENV` first, fixes PATH before source resolution, and replaces
+the executable hash shim with a fixed-token state-file handshake: the checker finishes analysis,
+the selftest performs the real input replacement, and no injected executable is dispatched. The
+pinned fake was hardened too, because privileged Bash does not remove exported-function bytes from
+the environment before a later non-privileged child. The Moto selftest now pins its own bootstrap
+PATH before `dirname`, then deliberately prepends only its private fixture directory. All three
+services executables are Gradle inputs, and an unavailable SDK `dexdump` probe is counted as skipped
+rather than passed.
+
+A subsequent execution-environment pass found that privileged Bash deliberately does not import an
+exported function but leaves its `BASH_FUNC_*` environment entry available to a later ordinary Bash
+child. The host runner could therefore appear clean and then let a Gradle wrapper re-import and
+execute the function. A real marker probe reproduced that path. The runner now uses fixed isolated
+Python before its first host command lookup to reject any inherited `BASH_FUNC_*` entry with a typed
+error. Its zero-argument selftests and Gradle wrappers run under `/usr/bin/env -i` with only the
+fixed host PATH, `JAVA_HOME`, `ANDROID_HOME`, private HOME/Gradle-home paths and non-device ADB stub
+needed by the host gate. JVM/Gradle option variables and all other inherited hooks are absent.
+Gradle uses `--no-daemon`; each zero-argument invocation creates a fresh mode-`0700` user home
+inside the private receipt directory, rejects root and nested distribution startup scripts before
+and after every build, and removes the complete temporary home before PASS publication. The three
+Gradle 9.3.1 wrappers pin the same official distribution SHA-256. The runner also rejects local
+`sdk.dir` overrides and challenges the explicitly supplied Java runtime before wrapper dispatch;
+the aggregate gate applies the same Java/SDK validation and gives all twelve exact manifest gates
+a private HOME/Gradle home, fixed stdin and a fixed clean environment.
+
+A later execution-attestation review then found four same-level fail-open surfaces: an executable
+named by caller-controlled `JAVA_HOME` could return fake Gradle success, a reused Gradle home could
+load startup code, services embedded Python could import caller code, and the aggregate gate read
+its manifest from stdin that a child could drain. RED tests reproduced all four. The repair adds a
+bounded Java-17 runtime/source challenge, fresh Gradle homes and wrapper checksums, fixed isolated
+Python, exact twelve-name/count manifest validation and `/dev/null` child stdin. Every zero-argument
+Gradle test is now rerun without build/configuration cache under a reviewed init script; the script
+requires Gradle VM and Test launcher Java 17, real non-skipped test events, zero failures and the
+named required test classes, then exclusively creates a 15-line schema-v2 per-stage attestation that the
+runner reads no-follow and binds to the current run. A real smoke test exposed the Groovy-only
+`ArrayList.single()` incompatibility before release; its RED was fixed to an index read after the
+exact-one guard, and a second real Auto run recorded 13 events with zero failures. A task-graph-only
+negative probe also returned nonzero and produced no attestation.
+
+The final resource-boundary pass then found that otherwise authenticated inputs could still consume
+unbounded memory or directory entries, that archive count/expansion checks needed a pre-`ZipFile`
+ceiling, and that split package-path observations could be mixed across an APK read. RED probes
+exercised oversized text, binary, metadata, ADB, directory, ZIP/Zip64 and package-path cases. The
+collector now supervises every no-shell ADB process with fixed timeout/stdout/stderr budgets, caps
+and streams all offline inputs, parses bounded central-directory headers before archive creation,
+applies symmetric member and aggregate expansion rules, and requires one initial plus contiguous
+pre/read/post exact-package path bracket. Receipt-tree enumeration is streaming and capped rather
+than materialized. The collector, its selftest and the SELFTEST fake also clear every inherited
+developer-tool selector in one first executable shell line.
+
+A companion entry-boundary pass applied the inherited exported-function check to
+`verify-a-plus.sh` before any external command and froze the exact privileged shebang/startup shape
+in the host guards. Author-side full serial reruns then completed the collector, services and the
+entire integration harness without a real ADB. These results remain working-tree evidence until a
+clean commit is exercised by the zero-argument gate.
+
+### Current host execution and receipt contract
+
+The Java registry contains two and only two reviewed Java 17 profiles:
+
+- macOS arm64 Eclipse Temurin `darwin-aarch64-eclipse-temurin-17.0.20.1+1`, JDK-tree SHA-256
+  `f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8`;
+- Linux x86_64 Eclipse Temurin `linux-x86_64-eclipse-temurin-17.0.20.1+1`, JDK-tree SHA-256
+  `427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97`.
+
+The macOS profile is the official Adoptium aarch64 archive with asset SHA-256
+`196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8`. The validator parses the
+bounded Mach-O load-command tables before executing Java: absolute dependencies outside
+`/usr/lib` and `/System/Library` are rejected, and `@loader_path`/`@rpath` dependencies must close
+inside the reviewed tree. This specifically excludes the superseded Homebrew tree, whose native
+libraries load mutable `/opt/homebrew/opt` dependencies outside its tree digest.
+
+Both host entry points stage the selected runtime inside a private per-run root and attest Java 17
+for both the Gradle VM and test launcher. `run-host-gate.sh` shares one new per-run Gradle home only
+across its Auto, QWY and harness Gradle phases, checks it around each phase and removes it before
+PASS. `verify-a-plus.sh` creates a distinct private Gradle home for each of the twelve aggregate
+manifest gates; writable Gradle startup state is never reused across gates.
+
+The PASS receipt is schema 4 with exactly these 19 keys:
+`schemaVersion`, `sourceHead`, `sourceTree`, `sourceState`, `runnerSha256`, `runId`, `jdkProfileId`,
+`jdkRuntimeVersion`, `jdkTreeSha256`, `gradleAttestationAutoSha256`,
+`gradleAttestationQwySha256`, `gradleAttestationHarnessSha256`, `hostIntegration`, `issue66Ac7`,
+`emulator`, `physicalDevice`, `deviceFull`, `overall`, `reason`. Its three SHA fields bind sibling
+`gradle-attestation-{auto,qwy,harness}-$runId.txt` proofs. Each proof is schema 2 and exactly 15
+ordered lines: `schemaVersion`, `runId`, `stage`, `taskPath`, `jdkHome`, `jdkProfileId`,
+`javaVendor`, `javaVmVendor`, `jdkRuntimeVersion`, `jdkTreeSha256`, `jdkMajor`,
+`testLauncherMajor`, `testCount`, `failureCount`, `classes`. The consumer opens each regular
+mode-`0600` sibling no-follow, checks ownership/link/ACL/size, hashes and re-reads stable bytes, then
+binds run ID, staged JDK, stage/task and required classes back to the receipt. A placeholder,
+RUNNING proof, missing sibling or digest/binding mismatch cannot validate as PASS.
+
+The Android validator has a narrower purpose: it binds the AGP 9.1 TCB subtrees
+`platforms/android-35`, `build-tools/36.0.0` and `platform-tools`, together with their safe
+ancestors. It is not a provenance statement for the rest of the Android SDK. The Ubuntu 24 CI job
+adds a separate machine boundary by recursively making the entire preinstalled SDK root-owned and
+non-writable before any repository command.
+
+The future install targets remain distinct end to end: QWY
+`name.caiyao.fakegps.codexbench`, label `千网游 · codex-bench`, launcher
+`.ui.ComposeActivity`; Auto `com.example.cellrebelauto.codexbench`, label
+`CellRebel Auto · codex-bench`, launcher `.ui.MainActivity`. Neither was installed here. Both the
+evidence-only and attested fingerprint lists remain empty, so every real build is unlisted and the
+production health ceiling remains `BUILD_UNATTESTED`. Restart/reboot, global Location/provider
+changes, adversarial mutations and app lifecycle changes remain separately unauthorized.
+
+This is a pre-commit author-side evidence snapshot (2026-09-05). Later exact-commit results and
+independent approval must be resolved from [PR #81](https://github.com/TERRYYYC/fakexxx/pull/81)
+and its commit-bound host receipt / CI artifacts; the older counts here never authorize device work.
+
+The final local review found one additional P2: parsed offline command argv was retained but not
+included in the 64-MiB retained-payload budget. The original production carrier loop reproduced
+the gap. The repair caps command files at 4 KiB before parsing and charges every parsed argument's
+UTF-8 bytes before saving a carrier. The permanent FC-6 regression exercises that unchanged loop
+for exact cap, cap+1, aggregate cap+1, 17-carrier accumulation and non-ASCII byte accounting.
+It was RED before the repair and GREEN afterward; complete exact-commit execution remains required.
+The non-author local reviewer `final_host_review` independently repeated the production-loop probe and closed
+this P2 with no new P1/P2. Its reviewed collector SHA-256 is
+`72f2cf47f1963da5e739fb268fdc01a3a15b7c50c0f40113bc560888a3781e20`.
+That delta verdict is not final approval; complete gate results and commit continuity remain required.
+
+Pre-commit author-side evidence is:
+
+| Verification | Result | Claim covered |
+| --- | --- | --- |
+| Superseded clean `1bdd265` full host gate | exit 0; collector 1473/1473; checker 93/93; Auto 13/13; QWY 69/69; harness 70/70 | exact source/tree/runner/run-ID binding worked, but later fresh findings invalidate this as the final candidate |
+| Pre-startup-hardening collector full rerun | 1474 tests, 0 failures | complete fake-ADB matrix after the ACL fix; subsequent Bash-entry byte changes make this candidate-only rather than current exact-source evidence |
+| Earlier complete collector selftest | 1718 passed, 0 failed; final repairs require rerun | superseded author evidence for the fake-ADB, source, process-supervision, bounded-input, archive, package-path, receipt and cleanup matrix; exact-commit execution and independent review remain required |
+| Final collector resource subset | 184 passed, 0 failed | includes the permanent original-loop argv budget regression and the final process/environment, archive, bounded-input and streaming checks; invoked in an empty environment with `ADB=/usr/bin/false`; this subset is not the complete collector matrix |
+| Current collector ACL helper contract | 3 helpers, 0 failures | `EACCES`/`EIO` propagate; only `ENOTSUP`/`EOPNOTSUPP` are accepted as unsupported |
+| Current collector startup contract | 13 tests, 0 failures | collector/selftest/fake use fixed privileged Bash, clear the complete startup/developer-selector set in one first executable line, and do not source poisoned startup files on device-free probes; the aggregate boundary suite additionally executes the selftest behind a poisoned PATH |
+| Current collector resource-boundary suite | 184 passed, 0 failed | fixed ADB process budgets, input/file/directory caps, bounded EOCD/Zip64 parsing, member/aggregate archive ceilings and streamed receipt traversal |
+| Current package-path bracket suite | 73 passed, 0 failed | exact-package initial and contiguous pre/read/post path queries, argv/path equality and offline stem binding |
+| Current services compatibility selftest | 131 passed, 0 failed, 0 skipped | fixed startup and isolated Python, bounded no-follow input snapshots and SDK metadata reads, ZIP EOCD/metadata/streaming limits, bounded dexdump process groups and required-only parser state, exact fake digest, output-FD binding and real post-analysis input replacement remain fail-closed without a PATH executable shim |
+| Current standalone Python runtime-security suites | 29 passed, 0 failed | Java-profile validation, private JDK staging and Android SDK runtime validation passed without ADB |
+| Earlier real Gradle attestation smoke | Auto 13 tests, 0 failures; attestation created | real Gradle 9.3.1/Groovy execution produced the then-current proof; the current contract is schema 2 with exactly 15 ordered lines and is covered by the current harness |
+| Current `HarnessBoundaryGuardTest` | 54 tests, 0 failures/errors/skips | services/Moto direct-startup and PATH poisoning, deferred/indirect command rejection, complete bounded Java subprocess AST, external-input cache binding, final-release ordering, raw source bytes/modes and fd-pinned ACLs |
+| Current `HostRunnerEnvironmentGuardTest` | 21 tests, 0 failures/errors/skips | real exported-function and fake-Java rejection at both host entry points, exact child-environment allowlist, Java/SDK propagation, shared per-run host Gradle-home isolation, wrapper checksum, standalone runtime-security integration and in-VM Java-17 test attestation |
+| Current `HostReceiptModeGuardTest` | 42 tests, 0 failures/errors/skips | outer PATH poisoning, full twelve-entry aggregate manifest/stdin isolation, per-gate private Gradle homes, declared-input cache invalidation, raw source binding, schema-v4 receipt and three schema-v2 proof verification |
+| Combined boundary classes | 117 tests, 0 failures/errors/skips | all three boundary classes passed with all declared external inputs and `ADB=/usr/bin/false` |
+| Current `HostEphemeralCleanupGuardTest` | 2 tests, 0 failures/errors/skips | host and aggregate private staging roots are removed on the covered success/failure paths |
+| Related guard total | 119 tests, 0 failures/errors/skips | the three boundary classes plus the ephemeral-cleanup guard passed with `ADB=/usr/bin/false` |
+| Complete integration harness | 15 suites, 141 tests, 0 failures/errors/skips | all host integration tests passed together for the current working tree with `ADB=/usr/bin/false` |
+| Scoped shell syntax and patch whitespace | 8 changed entry scripts parse; syntax exit 0 | host runner, aggregate verifier, collector, Moto selftest/fake, checker, services selftest/fake all pass system-Bash syntax parsing; final patch-whitespace status is checked again before commit |
+
+These are author-side repair checks, not current exact-commit gate evidence and not independent
+approval. The current harness, standalone Python and services matrices are green; the complete
+collector rerun is still required. The next clean exact-commit host gate must rerun and bind the
+complete suite, after which an independent
+review is still required; those results are recorded only after they complete.
+
+The following commands were recorded for the rejected `6d06be5` packet. They are historical and do
+not validate the current repair. The next review packet must supersede them with the machine receipt
+and CI/artifact association from the clean exact commit. Commands ran from
+`/Users/terry/Desktop/coding/fakexxx-moto-readonly-collector` on 2026-09-04:
+
+| Verification | Result | Claim covered |
+| --- | --- | --- |
+| Collector selftest | `1423 passed, 0 failed`, exit 0 | allowlist, receipts, stable verifier, first-targeted-command shell identity, topology, exact API-35 parsers, archive structure, per-call ADB snapshot integrity, hashes, cleanup and fail-closed states |
+| Services compatibility selftest | `93 passed, 0 failed`, exit 0 | source binding, exact JSON authority, member matrix, exclusive output FD, empty production tool allowlist and input/output TOCTOU |
+| Relevant shell syntax checks | 8/8, exit 0 | executable scripts parse, including the aggregate receipt validator |
+| `git diff --check` | exit 0, no output | patch hygiene |
+| Targeted `HarnessBoundaryGuardTest` | 15 tests, 0 failures/errors | quoted/indirect ADB boundary, descriptor-pinned verifier reads, exclusive runner/validator locking, stale receipt invalidation and deterministic receipt-lifetime race seams |
+| Zero-argument full host gate | exit 0 | collector 1423/1423; checker 93/93; Auto 13/13; QWY 69/69; integration harness 37/37; `hostIntegration=PASS`; `physicalDevice=NOT_RUN`; `overall=BLOCKED` |
+
+The resulting receipt is intentionally not a completion receipt:
+
+```json
+{"schemaVersion":2,"hostIntegration":"PASS","issue66Ac7":"NOT_PASSED","emulator":"NOT_RUN","physicalDevice":"NOT_RUN","deviceFull":"BLOCKED","overall":"BLOCKED","reason":"HOST_GATE_HAS_NO_DEVICE_EVIDENCE__BOTH_ADMISSION_LISTS_EMPTY__ACTIVATION_CLEANUP_REBOOTS_AND_ADVERSARIAL_MUTATIONS_REQUIRE_ADDITIONAL_AUTHORIZATION"}
+```
+
+No command in these verification runs addressed a real ADB binary or physical device.

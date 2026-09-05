@@ -1,0 +1,6 @@
+# Repo-approved Android SDK dexdump SHA-256 allowlist.
+#
+# Format: <build-tools-revision><TAB><sha256>
+# Empty by design: a digest must be independently reviewed before it can mint
+# COMPATIBILITY_CANDIDATE. Local SDK ownership or native file magic is not an
+# authenticity anchor.

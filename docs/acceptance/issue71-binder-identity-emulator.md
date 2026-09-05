@@ -223,16 +223,59 @@ logcat 需按本轮时间窗归因。整个 Android 测试集应另从干净 app
 
 完整 gate 的命令（从仓库根目录；不执行 adb）：
 
-```sh
+<!-- issue71-historical-verification-invocation:start -->
+历史实际调用记录（deprecated；不可复跑）：
+
+```text
 env JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' \
   ANDROID_HOME=/Users/terry/Library/Android/sdk \
   PATH='/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin':"$PATH" \
   bash scripts/verify-a-plus.sh --stage full
 ```
+<!-- issue71-historical-verification-invocation:end -->
+
+当前 host gate 不再把 Android Studio JBR 视为“Java 17 即可”的安全输入。macOS arm64 的
+已登记 profile 是 `darwin-aarch64-eclipse-temurin-17.0.20.1+1`，JDK-tree SHA-256
+`f89313615112db89abbaf64f7c5769432f3450e2c2d6059144e14b11104413d8`；Linux x86_64 CI 的
+已登记 profile 是 `linux-x86_64-eclipse-temurin-17.0.20.1+1`，JDK-tree SHA-256
+`427182064043c17bb698c7f9c5949f755f6dd80dddaf760b6fa7413178189a97`。先把
+`ISSUE66_DARWIN_TEMURIN_JDK17_HOME` 指向 SHA-256
+`196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8` 的官方 macOS aarch64
+Adoptium archive 安全解包后的 `Contents/Home`。当前安全复跑方式：
+
+```sh
+env JAVA_HOME="$ISSUE66_DARWIN_TEMURIN_JDK17_HOME" \
+  ANDROID_HOME=/Users/terry/Library/Android/sdk \
+  ./scripts/verify-a-plus.sh --stage full
+```
+
+The aggregate stages that reviewed JDK inside its private root, requires both Gradle VM and test
+launcher 17, and gives every one of the twelve gates a separate private Gradle home. The nested
+host runner shares a different per-run isolated Gradle home only across its Auto/QWY/harness
+phases. Current author-side evidence is the complete device-free harness at 15 suites / 141 tests
+with zero failures, errors or skips; the three main boundary classes at 54 + 21 + 42 = 117, plus 2
+`HostEphemeralCleanupGuardTest` tests, for 119 related guard tests; the three standalone Python
+runtime-security suites at 40/40; and services compatibility at 131/131. The earlier collector
+result was 1718/1718; it predates the final process/environment and argv-budget repairs and is not
+evidence for them. Their complete rerun belongs to the clean exact-commit gate.
+These checks used `ADB=/usr/bin/false` and did not rerun the historical emulator scenario
+on this page. A clean exact-commit gate and independent review remain required.
+
+The current Android validator binds only the AGP 9.1 TCB under `platforms/android-35`,
+`build-tools/36.0.0`, `platform-tools` and their safe ancestors. That is not whole-SDK content
+provenance. Ubuntu 24 CI separately freezes the complete preinstalled SDK as root-owned and
+non-writable before any repository command.
 
 该 gate 明确保留 `issue66Ac7=NOT_PASSED; deviceFull=BLOCKED; overall=BLOCKED`。
 其中 host receipt 的 `emulator=NOT_RUN` 描述 host lane 自身；本页的 API 35 身份回归是另一个
 独立 lane，不能用它覆盖产品 FULL 结论。系统服务指纹允许列表仍为空。
+
+The current host receipt contract is schema 4 with exactly 19 keys and three SHA-bound sibling
+attestations, not the historical receipt shape used when this emulator evidence was produced. Each
+Auto/QWY/harness attestation is schema 2 with exactly 15 ordered lines and binds the run ID, staged
+JDK profile/runtime/tree, Gradle VM/test-launcher Java 17, task/stage, nonzero test count, zero
+failures and required classes. The aggregate consumer opens and re-reads each proof no-follow,
+checks its SHA-256 and rejects missing, placeholder or cross-run content.
 
 本机产物 SHA-256（只证明这些本地产物，不是 Moto 安装证据）：
 
@@ -240,6 +283,13 @@ env JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' \
 - debug androidTest：`f1f9ab3aa329b9f2be87edb298f442e2cda9fc9f8f47261f080e92aff80fc840`
 - codexBench：`5d9e827a58a38cdd65d8f3068bd635355947bf986ad9b792029407278f3ce6ca`
 - codexBench signer：`7a598cbe6fb816ba74f01b58e3f43b8ff0f463989157e590ebd86c89b53f7e41`
+
+The two future Moto install targets remain non-colliding: QWY
+`name.caiyao.fakegps.codexbench` / `千网游 · codex-bench` launches `.ui.ComposeActivity`; Auto
+`com.example.cellrebelauto.codexbench` / `CellRebel Auto · codex-bench` launches `.ui.MainActivity`.
+Both exact-build fingerprint lists are empty, so production remains `BUILD_UNATTESTED`. Restart or
+reboot, global Location/provider mutation, adversarial mutation and app lifecycle operations remain
+separately unauthorized.
 
 ### Quality Gate 范围对账
 

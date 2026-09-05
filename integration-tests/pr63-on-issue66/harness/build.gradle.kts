@@ -37,6 +37,42 @@ val expectedQwyCanonicalSupport = setOf(
     rootProject.file("../../apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/support/Fakes.kt").canonicalFile,
     rootProject.file("../../apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/integration/v1/support/ProviderHarness.kt").canonicalFile,
 )
+val hostGuardExternalScripts = files(
+    rootProject.file("run-host-gate.sh"),
+    rootProject.file("host-gate-test-attestation.init.gradle"),
+    rootProject.file("../../scripts/verify-a-plus.sh"),
+    rootProject.file("../../scripts/validate-java17-runtime.py"),
+    rootProject.file("../../scripts/stage-java17-runtime.py"),
+    rootProject.file("../../scripts/fixtures/issue66-java17-runtime-profiles.json"),
+    rootProject.file("../../scripts/test_validate_java17_runtime.py"),
+    rootProject.file("../../scripts/test_stage_java17_runtime.py"),
+    rootProject.file("../../scripts/validate-android-sdk-runtime.py"),
+    rootProject.file("../../scripts/test_validate_android_sdk_runtime.py"),
+    rootProject.file("../../scripts/collect-issue66-moto-readonly-preflight.sh"),
+    rootProject.file("../../scripts/selftest-issue66-moto-readonly-collector.sh"),
+    rootProject.file("../../scripts/fixtures/issue66-moto-readonly-collector/fake-adb.sh"),
+    rootProject.file("../../scripts/fixtures/issue66-moto-readonly-collector/approved-adb-sha256.tsv"),
+    rootProject.file("../../scripts/check-issue66-services-compatibility.sh"),
+    rootProject.file("../../scripts/selftest-issue66-services-compatibility.sh"),
+    rootProject.file("../../scripts/fixtures/issue66-services-compatibility/fake-dexdump.sh"),
+    rootProject.file("../../apps/cellrebel-auto/gradle/wrapper/gradle-wrapper.properties"),
+    rootProject.file("../../apps/qianwangyou/gradle/wrapper/gradle-wrapper.properties"),
+    rootProject.file("../../acceptance/gradle/wrapper/gradle-wrapper.properties"),
+)
+val hostGuardExternalAppSources = files(
+    rootProject.file("../../apps/cellrebel-auto/app/src/main"),
+    rootProject.file("../../apps/qianwangyou/app/src/main"),
+)
+// HostReceiptModeGuardTest reads this script, so its own bytes are part of the test contract.
+val hostGuardBuildScript = files(
+    rootProject.file("harness/build.gradle.kts"),
+)
+val hostGuardExternalDocs = files(
+    rootProject.file("../../feature-specs/2026-09-03-readback-and-config-isolation-plan.md"),
+    rootProject.file("../../docs/acceptance/issue71-binder-identity-emulator.md"),
+    rootProject.file("../../docs/acceptance/readback-isolation-combined-2026-09-03.md"),
+    rootProject.file("../../docs/acceptance/issue66-moto-readonly-preflight-runbook.md"),
+)
 
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     if (name == "compileDebugUnitTestKotlin") {
@@ -111,4 +147,15 @@ val verifyResolvedIntegrationBoundary = tasks.register("verifyResolvedIntegratio
 
 tasks.matching { it.name == "testDebugUnitTest" }.configureEach {
     dependsOn(verifyResolvedIntegrationBoundary)
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    inputs.files(
+        hostGuardExternalScripts,
+        hostGuardExternalAppSources,
+        hostGuardBuildScript,
+        hostGuardExternalDocs,
+    )
+        .withPropertyName("hostGuardExternalInputs")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
 }
