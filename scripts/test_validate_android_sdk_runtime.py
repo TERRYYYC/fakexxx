@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import traceback
 import unittest
 from unittest import mock
 
@@ -44,6 +45,36 @@ class _ObservableScandir:
 
 
 class AndroidSdkRuntimeValidationTest(unittest.TestCase):
+    def test_fixture_baseline_reports_unsafe_ancestor_before_negative_mutation(self):
+        with self._sdk_fixture() as fixture:
+            fixture_path = fixture
+            unsafe_parent = fixture / "unsafe-parent"
+            unsafe_parent.mkdir(mode=0o755)
+            unsafe_parent.chmod(0o775)
+            sdk = unsafe_parent / "sdk"
+            secret = "issue66-diagnostic-must-not-print-environment"
+            with mock.patch.dict(os.environ, {"ISSUE66_DIAGNOSTIC_SECRET": secret}):
+                with self.assertRaises(AssertionError) as raised:
+                    self._write_sdk(sdk)
+            message = str(raised.exception)
+            diagnostic = json.loads(message)
+            self.assertEqual("SDK_FIXTURE_BASELINE_REJECTED", diagnostic["error"])
+            self.assertEqual("SdkValidationError", diagnostic["productionException"])
+            self.assertIn("require_safe_state", diagnostic["productionTrace"])
+            ancestor = next(
+                entry for entry in diagnostic["ancestorAuthority"]
+                if entry["path"] == str(unsafe_parent)
+            )
+            self.assertEqual(os.geteuid(), ancestor["uid"])
+            self.assertEqual("0775", ancestor["mode"])
+            self.assertIn("acl", ancestor)
+            self.assertNotIn(secret, message)
+            self.assertNotIn("platform-package", message)
+            self.assertNotIn("android-jar", message)
+            self.assertLessEqual(len(diagnostic["ancestorAuthority"]), 32)
+            self.assertLessEqual(len(diagnostic["productionTrace"]), 4096)
+        self.assertFalse(fixture_path.exists(), "rejected private fixture was not cleaned")
+
     def test_selected_tcb_walk_stops_after_the_remaining_entry_budget_plus_one(self):
         with self._sdk_fixture() as fixture:
             sdk = fixture / "sdk"
@@ -380,6 +411,45 @@ class AndroidSdkRuntimeValidationTest(unittest.TestCase):
             path = root / relative_path
             path.write_bytes(payload)
             path.chmod(0o755 if path.name in {"aapt2", "adb"} else 0o644)
+        # Check the unmodified fixture before a test poisons it or installs mocks.
+        # Otherwise an unsafe host ancestor can make negative tests falsely green.
+        self._assert_sdk_fixture_baseline(root)
+
+    def _assert_sdk_fixture_baseline(self, root):
+        failure_types = (
+            VALIDATOR_MODULE.SdkValidationError, OSError, ValueError, OverflowError, UnicodeError,
+        )
+        try:
+            VALIDATOR_MODULE.validate_sdk(os.fspath(root))
+        except failure_types as error:
+            # Report only bounded authority metadata. Never include environment,
+            # SDK bytes, ACL payloads, subprocess output, or exception messages.
+            production_trace = "".join(traceback.format_tb(error.__traceback__, limit=12))[:4096]
+            ancestors = list(reversed((root, *root.parents)))
+            authority = []
+            for ancestor in ancestors[:32]:
+                entry = {"path": str(ancestor)[:512], "acl": "not_inspected"}
+                descriptor = None
+                try:
+                    state = ancestor.lstat()
+                    entry.update(uid=state.st_uid, mode=format(stat.S_IMODE(state.st_mode), "04o"))
+                    descriptor = os.open(ancestor, VALIDATOR_MODULE.directory_flags())
+                    VALIDATOR_MODULE.ACL_INSPECTOR.snapshot(descriptor)
+                    entry["acl"] = "accepted"
+                except failure_types as inspection_error:
+                    entry["acl"] = "rejected:" + type(inspection_error).__name__
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                authority.append(entry)
+            self.fail(json.dumps({
+                "error": "SDK_FIXTURE_BASELINE_REJECTED",
+                "effectiveUid": os.geteuid(),
+                "ancestorAuthority": authority,
+                "ancestorsTruncated": len(ancestors) > 32,
+                "productionException": type(error).__name__,
+                "productionTrace": production_trace,
+            }, ensure_ascii=True, sort_keys=True))
 
     def _encode_binding(self, binding):
         return json.dumps(binding, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
