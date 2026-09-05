@@ -78,6 +78,61 @@ private fun stageIndexOf(state: AutomationState): Int = when (state) {
 }
 
 /**
+ * Issue #15: states that mean "the engine believes it is mid-run" — the Run surface must not
+ * keep rendering these as LIVE progress once the accessibility service is disconnected (the
+ * engine host is gone; anything mid-run is a stale illusion).
+ * # 呈"运行中"语义的状态集合：断开后这些状态一律视为过期假象
+ */
+val RUN_LIKE_STATES: Set<AutomationState> = setOf(
+    AutomationState.LAUNCHING_FAKE_GPS,
+    AutomationState.STOPPING_OLD_GPS,
+    AutomationState.SETTING_LOCATION,
+    AutomationState.CONFIRMING_LOCATION,
+    AutomationState.STARTING_FAKE_GPS,
+    AutomationState.WAITING_INTERVAL,
+    AutomationState.LAUNCHING_CELLREBEL,
+    AutomationState.NAVIGATING_TO_TEST,
+    AutomationState.STARTING_TEST,
+    AutomationState.WAITING_FOR_RESULT,
+    AutomationState.COLLECTING_RESULT,
+    AutomationState.PROCESSING,
+    AutomationState.COOLDOWN,
+    AutomationState.RECOVERING,
+)
+
+/** The Run-surface disconnect warning line (issue #15b). */
+const val SERVICE_DISCONNECTED_WARNING: String = "服务已断开 — 引擎已停止，请重新开始"
+
+/**
+ * Issue #15b: the Run-surface projection over (service connection, engine state, stage wait) —
+ * PURE, the UI renders it, never decides it (same pattern as DeviceReadinessProjection).
+ *
+ * Semantics:
+ *  - connected → no warning; the stage wait line ticks live from the anchor;
+ *  - disconnected && (Run-like state || a stale stage anchor) → the prominent warning line and
+ *    NO wait line (the local tick is frozen — the anchor belongs to a dead engine);
+ *  - disconnected && terminal state && no anchor → nothing (a quiet terminal is honest).
+ */
+data class RunSurfaceProjection(
+    /** Non-null = render the prominent "service disconnected" warning row. */
+    val serviceWarning: String?,
+    /** The "已等待 Xs（上限 Ys）" line; null = nothing to render / frozen. */
+    val stageWaitLine: String?,
+)
+
+fun runSurfaceProjection(
+    isServiceConnected: Boolean,
+    currentState: AutomationState,
+    stageProgress: StageProgress?,
+    nowMs: Long,
+): RunSurfaceProjection = RunSurfaceProjection(
+    // Scaffold of TODAY's behavior (issue #15b RED): no disconnect awareness — the wait line
+    // always ticks and no warning exists. The RED test pins the DESIRED projection.
+    serviceWarning = null,
+    stageWaitLine = StageProgress.waitLine(stageProgress, nowMs),
+)
+
+/**
  * Run dashboard (evolved from the old control panel, wireframe v2.1 §1.2):
  * status card (location / verified successes / attempts / plan total),
  * attempt stepper ending in a binary terminal, a SEPARATE scheduler cooldown
