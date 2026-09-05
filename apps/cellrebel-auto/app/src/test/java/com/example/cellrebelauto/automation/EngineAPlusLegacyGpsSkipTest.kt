@@ -186,9 +186,10 @@ class EngineAPlusLegacyGpsSkipTest {
                 override suspend fun runTest(
                     startedAt: Long,
                     testTimeoutMs: Long,
+                    onStartInteraction: suspend () -> Unit,
                     onRunningObserved: suspend (Long) -> Unit,
-                    onStageHeartbeat: suspend (phase: String, elapsedMs: Long, budgetMs: Long) -> Unit
                 ): AttemptOutcome {
+                    onStartInteraction()
                     onRunningObserved(clock.nowMs())
                     return AttemptOutcome.Success(
                         webScore = 8.0, videoScore = 7.0,

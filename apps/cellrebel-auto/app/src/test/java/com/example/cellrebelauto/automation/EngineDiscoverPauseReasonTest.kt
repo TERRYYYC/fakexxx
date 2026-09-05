@@ -67,6 +67,7 @@ class EngineDiscoverPauseReasonTest {
         override suspend fun runTest(
             startedAt: Long,
             testTimeoutMs: Long,
+            onStartInteraction: suspend () -> Unit,
             onRunningObserved: suspend (Long) -> Unit,
         ): AttemptOutcome = AttemptOutcome.Success(
             webScore = 8.0, videoScore = 7.0,
