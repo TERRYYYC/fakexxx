@@ -408,6 +408,36 @@ jobs:
             exit 1
           fi
 
+      - name: normalize reviewed JDK cache containers
+        shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
+        run: |
+          readonly expected_jdk=/opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-101/x64
+          readonly jdk_cache_parents=(
+            /opt/hostedtoolcache
+            /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk
+            /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-101
+          )
+          if [[ "${JAVA_HOME-}" != "$expected_jdk" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_JDK_CACHE_TARGET_MISMATCH' >&2
+            exit 1
+          fi
+          for jdk_path in "${jdk_cache_parents[@]}" "$expected_jdk"; do
+            if [[ ! -d "$jdk_path" || -L "$jdk_path" ]]; then
+              printf '%s\n' 'HOST_INTEGRATION_JDK_CACHE_TYPE_INVALID' >&2
+              exit 1
+            fi
+          done
+          physical_jdk=$(builtin cd -- "$expected_jdk" && /bin/pwd -P)
+          readonly physical_jdk
+          if [[ "$physical_jdk" != "$expected_jdk" ]]; then
+            printf '%s\n' 'HOST_INTEGRATION_JDK_CACHE_PHYSICAL_TARGET_MISMATCH' >&2
+            exit 1
+          fi
+          # setup-java copies archive children but creates its cache root with the host
+          # umask. Normalize only these container directories, never the JDK subtree.
+          /usr/bin/sudo -- /usr/bin/chmod -- go-w "${jdk_cache_parents[@]}"
+          /usr/bin/sudo -- /usr/bin/chmod -- 0755 "$expected_jdk"
+
       - name: standalone runtime security tests
         shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: |

@@ -60,3 +60,34 @@ security tests. Both the safely extracted source and descriptor-copied private t
 same macOS tree digest, and the staged runtime emits the expected Eclipse Adoptium binding. No ADB,
 emulator or physical-device operation was performed. These are working-tree results until the
 clean exact-HEAD host gate and independent review complete.
+
+## Linux CI cache-container permissions (2026-09-05 follow-up)
+
+### Reproduction and diagnosis
+
+[Run 33961496689](https://github.com/TERRYYYC/fakexxx/actions/runs/33961496689) completed 9 of 10
+jobs successfully, including both apps and codex-bench. Its host job downloaded and verified the
+correct `17.0.20.1+1` archive, then the standalone validator rejected the cache root at
+`visit_directory(root_fd, (), 0) -> require_safe_tree_entry`: group/other write permissions are
+forbidden. This is a CI preparation defect, not a reason to admit a writable runtime tree.
+
+The [exact runner-image setup](https://github.com/actions/runner-images/blob/ubuntu24/20260831.293/images/ubuntu/scripts/build/configure-environment.sh)
+makes the tool cache writable. The pinned setup-java's tool-cache dependency creates its target
+root and copies the archive children, rather than copying the archive root's `0755` mode. The
+official archive and local reviewed source retain that `0755` root mode.
+
+### Repair and verification
+
+The workflow first checks the exact expected JDK path, every cache-container type and the resolved
+physical path. Only then does it remove group/other write permission from the three fixed cache
+ancestors and set the selected `x64` root to `0755`. These operations are non-recursive; JDK
+descendants and unrelated cache entries are unchanged. The existing complete tree-digest and
+runtime checks still run immediately afterward. No validator policy or download source changes.
+
+The permanent Java-suite regression executes the workflow's actual shell step against five private
+fixtures: valid, wrong JAVA_HOME, root symlink, parent symlink and non-directory root. It checks
+that invalid inputs cause no writes and that valid normalization preserves every descendant and
+unrelated payload/mode. The old workflow is RED; the reviewed candidate plus the existing Java
+suite is 21/21 GREEN. The stager's 9 and Android validator's 11 checks are unchanged. The real Linux
+rerun, rather than this fixture result, decides whether the CI preparation is fixed. Final exact-run
+results and approval are recorded in [PR #81](https://github.com/TERRYYYC/fakexxx/pull/81).

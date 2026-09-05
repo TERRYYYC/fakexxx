@@ -608,6 +608,96 @@ int main(int argc, char **argv) {
             "offline receipt admission must bind the complete registered Java identities",
         )
 
+    def test_ci_normalizes_only_the_exact_jdk_cache_containers(self):
+        import textwrap
+
+        workflow = (REPO_ROOT / ".github/workflows/android-a-plus.yml").read_text()
+        host_job = workflow.split("  auto-qwy-host-integration:\n", 1)[1].split(
+            "\n  install-guards:", 1,
+        )[0]
+        marker = "      - name: normalize reviewed JDK cache containers\n"
+        self.assertIn(marker, host_job, "CI passes an unsafe cache root directly to validation")
+        step_start = host_job.index(marker)
+        next_step = host_job.index("\n      - name:", step_start + len(marker))
+        step = host_job[step_start:next_step]
+        self.assertLess(host_job.index("freeze preinstalled Android SDK permissions"), step_start)
+        self.assertTrue(host_job[next_step:].startswith("\n      - name: standalone runtime security tests"))
+        self.assertIn("shell: /bin/bash --noprofile --norc -p -euo pipefail {0}", step)
+        program = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        self.assertNotIn("--recursive", program)
+        self.assertNotIn("chmod -R", program)
+        expected_prefix = "/opt/hostedtoolcache"
+        self.assertIn(
+            "readonly expected_jdk=/opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.20-101/x64",
+            program,
+        )
+        for scenario in ("valid", "wrong_home", "root_symlink", "parent_symlink", "root_file"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(
+                prefix="issue66-ci-jdk-permissions-",
+            ) as directory:
+                private = pathlib.Path(directory).resolve()
+                cache = private / "toolcache"
+                version = cache / "Java_Temurin-Hotspot_jdk" / "17.0.20-101"
+                jdk = version / "x64"
+                (jdk / "bin").mkdir(parents=True)
+                (jdk / "bin/java").write_bytes(b"fixture Java payload; never executed")
+                (jdk / "bin/java").chmod(0o755)
+                (cache / "unrelated").write_bytes(b"unrelated cache payload")
+                (cache / "unrelated").chmod(0o777)
+                targets = (cache, version.parent, version, jdk)
+                for target in targets:
+                    target.chmod(0o777)
+                if scenario in {"root_symlink", "parent_symlink", "root_file"}:
+                    target = version if scenario == "parent_symlink" else jdk
+                    original = target.with_name(target.name + ".original")
+                    target.rename(original)
+                    if scenario == "root_file":
+                        target.write_bytes(b"not a directory")
+                    else:
+                        target.symlink_to(original, target_is_directory=True)
+
+                def snapshot():
+                    result = {}
+                    for path in (cache, *cache.rglob("*")):
+                        state = path.lstat()
+                        if stat.S_ISLNK(state.st_mode):
+                            payload = os.readlink(path)
+                        elif stat.S_ISREG(state.st_mode):
+                            payload = path.read_bytes()
+                        else:
+                            payload = None
+                        result[path] = (state.st_mode, payload)
+                    return result
+
+                before = snapshot()
+                # Private process-owned fixtures do not need sudo. The only other
+                # substitutions bind the fixed cache prefix and OS chmod location.
+                fixture_program = program.replace(expected_prefix, str(cache)).replace(
+                    "/usr/bin/sudo -- ", "",
+                )
+                if not os.path.exists("/usr/bin/chmod"):
+                    fixture_program = fixture_program.replace("/usr/bin/chmod", "/bin/chmod")
+                completed = subprocess.run(
+                    ["/bin/bash", "-p", "-euo", "pipefail", "-c", fixture_program],
+                    env={
+                        "PATH": "/usr/bin:/bin", "ADB": "/usr/bin/false",
+                        "JAVA_HOME": str(jdk) + (".wrong" if scenario == "wrong_home" else ""),
+                    },
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                )
+                after = snapshot()
+                if scenario == "valid":
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertEqual([0o755] * 4, [stat.S_IMODE(path.stat().st_mode) for path in targets])
+                    self.assertEqual(
+                        {path: value for path, value in before.items() if path not in targets},
+                        {path: value for path, value in after.items() if path not in targets},
+                        "normalization altered JDK descendants or unrelated cache entries",
+                    )
+                else:
+                    self.assertNotEqual(0, completed.returncode)
+                    self.assertEqual(before, after, "invalid layout was modified before rejection")
+
     def test_checked_profile_trees_reproduce_the_committed_digests(self):
         configured = {
             "ISSUE66_DARWIN_TEMURIN_JDK17_HOME": os.environ.get(

@@ -1317,10 +1317,39 @@ class HostRunnerEnvironmentGuardTest {
         )
         val freezeEnd = hostJob.indexOf("\n      - name:", freezeStart + 1)
         check(freezeEnd > freezeStart) { "Android SDK permission freeze step has no bounded end" }
+        val jdkNormalizeStart = hostJob.indexOf(
+            "      - name: normalize reviewed JDK cache containers",
+        )
+        val jdkNormalizeEnd = hostJob.indexOf("\n      - name:", jdkNormalizeStart + 1)
+        check(jdkNormalizeStart >= 0 && jdkNormalizeEnd > jdkNormalizeStart) {
+            "reviewed JDK cache normalization step has no bounded extent"
+        }
         assertEquals(
-            "an unreviewed step can run between the SDK freeze and the first repository command",
+            "an unreviewed step can run between the SDK freeze and JDK cache normalization",
             freezeEnd + 1,
+            jdkNormalizeStart,
+        )
+        assertEquals(
+            "an unreviewed step can run between JDK cache normalization and the first repository command",
+            jdkNormalizeEnd + 1,
             standaloneSecurityTests,
+        )
+        // Bind the whole independently reviewed step, including shell/metadata.
+        // Its actual command semantics are exercised by the five-layout Python regression.
+        val jdkNormalizeStep = hostJob.substring(jdkNormalizeStart, jdkNormalizeEnd)
+        val reviewedJdkNormalizeSha256 =
+            "a72cd3f697d0a33d0cc5aff1e0926b6b6d960526861a39bb1796b7534a9d65e9"
+        fun stepSha256(step: String): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(step.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        assertEquals(
+            "JDK cache normalization gained an unreviewed command or bypass metadata",
+            reviewedJdkNormalizeSha256,
+            stepSha256(jdkNormalizeStep),
+        )
+        assertNotEquals(
+            "JDK cache normalization accepted a conditional bypass",
+            reviewedJdkNormalizeSha256,
+            stepSha256(jdkNormalizeStep.replace("        shell:", "        if: false\n        shell:")),
         )
         val freezeStep = hostJob.substring(freezeStart, freezeEnd)
 

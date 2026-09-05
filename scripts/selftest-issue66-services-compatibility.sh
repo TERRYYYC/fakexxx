@@ -957,10 +957,14 @@ expect_stop "arbitrary caller-provided dexdump is refused" \
   "$ARBITRARY_DEXDUMP_JSON" UNTRUSTED_DEXDUMP
 expect_dexdump_not_called "untrusted dexdump is refused before invocation"
 
+# Match production discovery even when the host gate gives this selftest a
+# private HOME. Caller-controlled SDK environment variables are not trust roots.
+ACCOUNT_HOME="$(/usr/bin/python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" || exit 2
+readonly ACCOUNT_HOME
 TRUSTED_DEXDUMP=""
 for sdk_root in \
-    "$HOME/Library/Android/sdk" \
-    "$HOME/Android/Sdk" \
+    "$ACCOUNT_HOME/Library/Android/sdk" \
+    "$ACCOUNT_HOME/Android/Sdk" \
     /usr/local/lib/android/sdk \
     /opt/android-sdk \
     /opt/android-sdk-linux; do
