@@ -46,6 +46,7 @@ class AutomationService : AccessibilityService() {
     private var automationJob: Job? = null
     // # 当前引擎实例
     private var engine: AutomationEngine? = null
+    private val projectionFence = ServiceProjectionFence()
     // # MIUI 弹窗去抖：上次自动点击"允许"的时间戳
     private var lastMiuiDismissTime = 0L
 
@@ -277,21 +278,24 @@ class AutomationService : AccessibilityService() {
      * # #15：宿主服务消亡——在取消任何协程之前，同步发布类型化终态并清空运行投影
      */
     private fun publishServiceRecycledTerminal() {
-        addLog("SERVICE_RECYCLED — accessibility service destroyed; engine stopped. Restart the plan to continue.")
-        _currentState.value = AutomationState.SERVICE_RECYCLED
-        _currentTask.value = null
-        _cooldown.value = null
-        _isRunning.value = false
+        projectionFence.close {
+            addLog("SERVICE_RECYCLED — accessibility service destroyed; engine stopped. Restart the plan to continue.")
+            _currentState.value = AutomationState.SERVICE_RECYCLED
+            _currentTask.value = null
+            _cooldown.value = null
+            _isRunning.value = false
+        }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         // # Issue #15：系统解绑路径（禁用开关）先于 recycle——同一类型化终态，防 Run 页残留运行假象。
         publishServiceRecycledTerminal()
+        automationJob?.cancel()
+        automationJob = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         // # Issue #15：先同步发布类型化终态（见 publishServiceRecycledTerminal），再取消协程——
         // 顺序反过来会留出"取消已发生、终态未发布"的窗口（转发器随作用域一起死亡）。
         publishServiceRecycledTerminal()
@@ -302,6 +306,7 @@ class AutomationService : AccessibilityService() {
         instance = null
         _isServiceConnected.value = false
         Log.w(TAG, "Service destroyed")
+        super.onDestroy()
     }
 
     // ---- Control ----
@@ -324,7 +329,8 @@ class AutomationService : AccessibilityService() {
         val cellRebelHandler = CellRebelHandler(bridge, onLog = { addLog(it) })
         val fakeGpsHandler = FakeGpsHandler(bridge) { addLog(it) }
 
-        _isRunning.value = true
+        val runGeneration = projectionFence.beginRun()
+        projectionFence.publish(runGeneration) { _isRunning.value = true }
 
         automationJob = serviceScope.launch {
             // # 读取计划与高级配置（超时/GPS 稳定）
@@ -377,22 +383,22 @@ class AutomationService : AccessibilityService() {
             withForwarders(
                 forwarders = listOf(
                     // # 监听引擎状态并转发到 companion 的 StateFlow
-                    { newEngine.state.collect { _currentState.value = it } },
+                    { newEngine.state.collect { state -> projectionFence.publish(runGeneration) { _currentState.value = state } } },
                     // # 收集循环计数
-                    { newEngine.cycleCount.collect { _cycleCount.value = it } },
+                    { newEngine.cycleCount.collect { count -> projectionFence.publish(runGeneration) { _cycleCount.value = count } } },
                     // # 收集日志
-                    { newEngine.logs.collect { _logs.value = it } },
+                    { newEngine.logs.collect { logs -> projectionFence.publish(runGeneration) { _logs.value = logs } } },
                     // # 转发 Run 页所需的引擎投影流
-                    { newEngine.currentTask.collect { _currentTask.value = it } },
-                    { newEngine.cooldown.collect { _cooldown.value = it } },
-                    { newEngine.lastFailure.collect { _lastFailure.value = it } }
+                    { newEngine.currentTask.collect { task -> projectionFence.publish(runGeneration) { _currentTask.value = task } } },
+                    { newEngine.cooldown.collect { cooldown -> projectionFence.publish(runGeneration) { _cooldown.value = cooldown } } },
+                    { newEngine.lastFailure.collect { failure -> projectionFence.publish(runGeneration) { _lastFailure.value = failure } } }
                 )
             ) {
                 // # 运行引擎（阻塞直到完成/取消/出错）
                 try {
                     newEngine.run()
                 } finally {
-                    _isRunning.value = false
+                    projectionFence.publish(runGeneration) { _isRunning.value = false }
                     engine = null
                 }
             }
@@ -420,6 +426,29 @@ class AutomationService : AccessibilityService() {
         // logd drops DEBUG. WARN (the MIUI popup direct Log.d lines stay DEBUG: event-level
         // detail out of the #16 scope, and their addLog twins already surface here at WARN).
         Log.w(TAG, message)
+    }
+}
+
+/** Serializes lifecycle terminalization with engine projections and rejects stale run publishers. */
+internal class ServiceProjectionFence {
+    private val lock = Any()
+    private var generation = 0L
+    private var open = false
+
+    fun beginRun(): Long = synchronized(lock) {
+        generation += 1
+        open = true
+        generation
+    }
+
+    fun publish(runGeneration: Long, block: () -> Unit) = synchronized(lock) {
+        if (open && runGeneration == generation) block()
+    }
+
+    fun close(block: () -> Unit) = synchronized(lock) {
+        open = false
+        generation += 1
+        block()
     }
 }
 

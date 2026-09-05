@@ -5,9 +5,12 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.automation.AutomationService.Companion as SvcCompanion
 import com.example.cellrebelauto.model.AutomationState
 import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -34,6 +37,30 @@ import org.robolectric.RobolectricTestRunner
  */
 @RunWith(RobolectricTestRunner::class)
 class AutomationServiceRecycleStateTest {
+
+    @Test
+    fun `closed lifecycle fence rejects a stale forwarder even after a new run begins`() {
+        val fence = ServiceProjectionFence()
+        val staleRun = fence.beginRun()
+        var projection = AutomationState.WAITING_INTERVAL
+        val publisherEntered = CountDownLatch(1)
+        val releasePublisher = CountDownLatch(1)
+
+        val publisher = Thread {
+            publisherEntered.countDown()
+            releasePublisher.await(2, TimeUnit.SECONDS)
+            fence.publish(staleRun) { projection = AutomationState.IDLE }
+        }
+        publisher.start()
+        assertTrue(publisherEntered.await(2, TimeUnit.SECONDS))
+
+        fence.close { projection = AutomationState.SERVICE_RECYCLED }
+        fence.beginRun()
+        releasePublisher.countDown()
+        publisher.join(2_000)
+
+        assertEquals(AutomationState.SERVICE_RECYCLED, projection)
+    }
 
     private fun newConnectedService(): AutomationService {
         val service = AutomationService()

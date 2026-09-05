@@ -48,6 +48,7 @@ class ProviderTrustGate(
             )
             return false
         }
+        ProviderTrustRejections.clear(applicationId)
         return true
     }
 

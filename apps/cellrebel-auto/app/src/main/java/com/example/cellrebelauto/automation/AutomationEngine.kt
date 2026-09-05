@@ -243,6 +243,9 @@ class AutomationEngine(
             // provider must advertise the frozen protocol version before any A+ attempt runs; an
             // unavailable/discover-failed provider fail-closes the plan BEFORE the first apply.
             recoveryCoordinator?.let { coord ->
+                val providerApplicationId = ProviderPrincipal.selected
+                val trustAttempt =
+                    com.example.cellrebelauto.environment.ProviderTrustRejections.beginAttempt(providerApplicationId)
                 val capabilities = coord.executorBackend().discover()
                 if (capabilities == null ||
                     capabilities.protocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
@@ -251,7 +254,10 @@ class AutomationEngine(
                     // # gate 每次拒绝都会记录 typed 原因（ProviderTrustRejections）；此处把最近
                     // # 一次拒绝并入暂停文案，让现场日志直接指向“重新批准”而不是裸的 discover 失败。
                     val gateRejection =
-                        com.example.cellrebelauto.environment.ProviderTrustRejections.latestRejection()
+                        com.example.cellrebelauto.environment.ProviderTrustRejections.consume(
+                            trustAttempt,
+                            providerApplicationId,
+                        )
                     aplusPause(
                         "provider discover failed or protocol incompatible (v1 required)" +
                             (gateRejection?.let {

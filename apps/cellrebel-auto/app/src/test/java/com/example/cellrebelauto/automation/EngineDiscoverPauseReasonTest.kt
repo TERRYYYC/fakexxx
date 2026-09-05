@@ -112,8 +112,9 @@ class EngineDiscoverPauseReasonTest {
         return planId
     }
 
-    private suspend fun engineWithDiscoverFailure(planId: Long): AutomationEngine {
+    private suspend fun engineWithDiscoverFailure(planId: Long, onDiscover: () -> Unit = {}): AutomationEngine {
         val executor = RecordingExternalApplyExecutor().apply { discoverFixture = null }
+        executor.onDiscover = onDiscover
         val (coordinator, evidence) = APlusComposition.engineAplusParams(backend(executor))
         return AutomationEngine(
             planId = planId,
@@ -133,20 +134,20 @@ class EngineDiscoverPauseReasonTest {
     @Test
     fun `discover failure folds the gate's recorded rejection into the pause message`() = runTest {
         val planId = seedPlan()
-        ProviderTrustRejections.record(
-            applicationId = "name.caiyao.fakegps.bench",
-            signerDigest = "sha256:rotated",
-            because = "signer not an approved active principal",
-        )
-
-        val engine = engineWithDiscoverFailure(planId)
+        val engine = engineWithDiscoverFailure(planId) {
+            ProviderTrustRejections.record(
+                applicationId = ProviderPrincipal.selected,
+                signerDigest = "sha256:rotated",
+                because = "signer not an approved active principal",
+            )
+        }
         engine.run()
 
         assertEquals(AutomationState.PAUSED, engine.state.value)
         val pauseLine = engine.logs.value.last { it.contains("ERROR: provider discover failed") }
         assertTrue("still names the discover failure: $pauseLine", pauseLine.contains("provider discover failed"))
         assertTrue("names the gate: $pauseLine", pauseLine.contains("trust gate"))
-        assertTrue("names the provider: $pauseLine", pauseLine.contains("name.caiyao.fakegps.bench"))
+        assertTrue("names the provider: $pauseLine", pauseLine.contains(ProviderPrincipal.selected))
         assertTrue(
             "names the typed cause: $pauseLine",
             pauseLine.contains("signer not an approved active principal"),
@@ -164,5 +165,21 @@ class EngineDiscoverPauseReasonTest {
         val pauseLine = engine.logs.value.last { it.contains("ERROR: provider discover failed") }
         assertTrue(pauseLine.contains("provider discover failed"))
         assertFalse("no gate cause is invented: $pauseLine", pauseLine.contains("trust gate"))
+    }
+
+    @Test
+    fun `discover failure does not attribute a rejection from an earlier attempt`() = runTest {
+        val planId = seedPlan()
+        ProviderTrustRejections.record(
+            applicationId = "name.caiyao.fakegps.bench",
+            signerDigest = "sha256:stale",
+            because = "old revoked principal",
+        )
+
+        val engine = engineWithDiscoverFailure(planId)
+        engine.run()
+
+        val pauseLine = engine.logs.value.last { it.contains("ERROR: provider discover failed") }
+        assertFalse("stale rejection must not be attributed: $pauseLine", pauseLine.contains("old revoked principal"))
     }
 }
