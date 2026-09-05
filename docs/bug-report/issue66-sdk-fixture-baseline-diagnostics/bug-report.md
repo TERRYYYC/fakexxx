@@ -7,7 +7,7 @@ topics:
   - fixture-diagnostics
 doc_kind: bug_report
 created: 2026-09-05
-status: home_acl_candidate_awaiting_linux_confirmation
+status: home_acl_confirmed_bytecode_candidate_awaiting_linux_confirmation
 github_issue: 66
 ---
 
@@ -19,9 +19,9 @@ github_issue: 66
 | --- | --- |
 | Symptom | Two positive SDK tests return 1 with empty CLI output on Linux, while the other nine tests pass. |
 | Evidence | [Run 33965387938](https://github.com/TERRYYYC/fakexxx/actions/runs/33965387938), host job `101304479473`, branch `6790aee7250ffd0bdd8cbe0657773555a0649145`; Java 21 and private-stager 9 tests pass before the SDK failure. |
-| Known root cause | Diagnostic run `33966365173` establishes rejection of the `/home` ancestor's POSIX ACL despite root ownership and mode `0755`. The exact ACL payload was intentionally not logged; a write-granting default ACL remains a hypothesis until the new step verifies it on Linux. |
-| Strategy | Keep positive baselines and the production validator unchanged; add a narrowly guarded, default-only `/home` ACL normalization to the temporary host job. |
-| Timeout strategy | The next real Linux job must satisfy the new access/default preconditions and pass the SDK suite; an unexpected ACL state stops without broadening the repair. |
+| Known root cause | Run `33967895755` confirms the guarded `/home` default-ACL removal and all 43 standalone tests pass. The combined gate then rejects untracked source state; the seven repository-module import entrypoints lack explicit bytecode suppression. |
+| Strategy | Preserve the proven ACL guard and source-cleanliness policy; prevent import cache creation with explicit `-B` at the seven importing Python entrypoints. |
+| Timeout strategy | The next real Linux job must advance through combined source validation without generated cache files; no ignore rule or post-hoc deletion may bypass the source gate. |
 | Warning strategy | A local reproduction is not the Linux root cause unless its failure pattern and rejection stage match. Do not relax production SDK admission. |
 | User-visible impact | CI failure becomes actionable; this does not change the app, SDK trust policy, or device-validation result. |
 | Acceptance | An unsafe fixture ancestor causes a named baseline failure before negative mutation; existing mutation/budget tests retain their original checks; diagnostics contain no environment, SDK bytes, or ACL payloads. |
@@ -126,3 +126,37 @@ immediate-next-step expectation changes to the new reviewed ACL step. Local mock
 does not claim a real Linux `setfacl` execution or resolved Linux CI. The next action is an
 independent exact-patch review followed by CI: require the step's guarded site confirmation
 and SDK success. If the preconditions fail, investigate that evidence without widening scope.
+
+## Confirmed ACL result and bytecode follow-up
+
+[Run 33967895755](https://github.com/TERRYYYC/fakexxx/actions/runs/33967895755), host job
+`101311129224`, run head `3dd79daaa3469bb0b31728e08ee01cba2ff15566`, emitted
+`HOST_HOME_DEFAULT_ACL_REMOVED`. This confirms the guarded default-write/access-safe preconditions
+and post-removal production-inspector acceptance on the actual Linux runner. Java 21,
+private-stager 9, and SDK 13 tests all passed. The next combined gate failed at
+`validate_untracked`: `repository contains a non-committed, non-ignored path`.
+
+The ACL step and all three standalone suites load repository source modules through
+`importlib` loaders. The combined runner also invokes those three suites, yielding seven
+importing entrypoints. They used `-I` without explicit `-B`; isolated imports still generate
+`scripts/__pycache__/*.pyc`. Our tested macOS `/usr/bin/python3` starts with
+`sys.dont_write_bytecode=True` and flag value `1`, masking that default-dependent side effect.
+Explicitly enabling bytecode in a private fixture reproduces it with the original modules.
+The CI rejection itself does not print the rejected path; the exact cache-producing call chain
+is independently reproduced, rather than inferred from the error message alone.
+
+The minimal repair adds `-B` to those seven entrypoints only. Python documents
+[`-B` as preventing imported-source cache writes](https://docs.python.org/3/using/cmdline.html#cmdoption-B);
+`-I` does not imply it and ignores `PYTHON*` environment settings, so an environment-only
+fix would not establish this contract. No validator, source provenance rule, ignore file,
+or cache-deletion workaround changes.
+
+The permanent regression uses the actual command flags and original module import paths in
+private committed Git fixtures, explicitly modeling Linux's bytecode-enabled default on the
+tested macOS interpreter. The original seven commands give seven RED cache-creation failures.
+With `-B`, all seven leave no `.pyc` or untracked paths and preserve HEAD/tracked bytes;
+removing `-B` separately from each command reproduces the cache and untracked-path rejection
+predicate. The inline probe stops before any `/home` access. Targeted GREEN completes in
+3.371 seconds; the full SDK suite passes all 14 tests in 4.923 seconds. These are local
+regression results, not a claim that the next combined Linux gate has passed. Independent
+review and the next CI remain the next actions.

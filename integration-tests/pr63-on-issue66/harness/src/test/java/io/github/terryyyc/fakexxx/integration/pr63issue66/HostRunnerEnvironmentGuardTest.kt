@@ -1067,12 +1067,12 @@ class HostRunnerEnvironmentGuardTest {
         )
         assertTrue(
             "the active JDK test is not executed through the clean launcher and fixed Python",
-            "run_clean_host_command /usr/bin/python3 -I \"\$java_profile_validator_test\"" in
+            "run_clean_host_command /usr/bin/python3 -I -B \"\$java_profile_validator_test\"" in
                 securityFunction,
         )
         listOf(
-            "run_clean_host_command /usr/bin/python3 -I \"\$java_runtime_stager_test\"",
-            "run_clean_host_command /usr/bin/python3 -I \"\$android_sdk_validator_test\"",
+            "run_clean_host_command /usr/bin/python3 -I -B \"\$java_runtime_stager_test\"",
+            "run_clean_host_command /usr/bin/python3 -I -B \"\$android_sdk_validator_test\"",
         ).forEach { command ->
             assertTrue("standalone security test is not executed by fixed isolated Python: $command", command in securityFunction)
         }
@@ -1226,13 +1226,13 @@ class HostRunnerEnvironmentGuardTest {
             assertEquals(
                 "CI does not execute $test exactly once",
                 1,
-                securityStep.lineSequence().count { "/usr/bin/python3 -I $test" in it },
+                securityStep.lineSequence().count { "/usr/bin/python3 -I -B $test" in it },
             )
         }
         assertEquals(
             "CI standalone suites gained a non-isolated Python entrypoint",
             3,
-            securityStep.lineSequence().count { "/usr/bin/python3 -I scripts/" in it },
+            securityStep.lineSequence().count { "/usr/bin/python3 -I -B scripts/" in it },
         )
         val deletionMutant = hostJob.replace(securityStep, "      # deleted standalone security suites")
         assertFalse(
@@ -1354,10 +1354,11 @@ class HostRunnerEnvironmentGuardTest {
             stepSha256(jdkNormalizeStep.replace("        shell:", "        if: false\n        shell:")),
         )
         val homeAclStep = hostJob.substring(homeAclStart, homeAclEnd)
-        val reviewedHomeAclSha256 = "79311b827cf78698a65e4915f5d497f6b91e0d9efc5645be67f7ae50c644022a"
+        val reviewedHomeAclSha256 = "b4d865105ee8c162127d1408b71bcf48907966c7f6fafdd4e08cef599747af86"
         assertEquals("home ACL normalization gained an unreviewed command or metadata", reviewedHomeAclSha256, stepSha256(homeAclStep))
         for (mutant in listOf(
             homeAclStep.replace("        shell:", "        if: false\n        shell:"),
+            homeAclStep.replace("/usr/bin/python3 -I -B", "/usr/bin/python3 -I"),
             homeAclStep.replace("--remove-default", "--remove-all"),
             homeAclStep.replace("--remove-default", "--recursive"),
             homeAclStep + "\n      - name: injected\n        run: true\n",

@@ -51,6 +51,99 @@ class _ObservableScandir:
 
 
 class AndroidSdkRuntimeValidationTest(unittest.TestCase):
+    def test_runtime_security_imports_preserve_a_clean_repository_with_linux_bytecode_defaults(self):
+        workflow = (REPO_ROOT / ".github/workflows/android-a-plus.yml").read_text()
+        home_step = workflow.split("      - name: normalize reviewed home default ACL\n", 1)[1]
+        home_step = home_step.split("\n      - name:", 1)[0]
+        home_program = textwrap.dedent(home_step.split("        run: |\n", 1)[1])
+        home_program = home_program.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        # Execute the original import path only, before any real /home access.
+        home_import = home_program.split('root = pathlib.Path("/home")', 1)[0]
+        self.assertNotEqual(home_import, home_program)
+        home_command = next(line for line in home_step.splitlines() if "/usr/bin/python3 " in line)
+        security_step = workflow.split("      - name: standalone runtime security tests\n", 1)[1]
+        security_step = security_step.split("\n      - name:", 1)[0]
+        runner = RUNNER.read_text()
+        runner_step = runner.split("run_standalone_runtime_security_tests() {\n", 1)[1].split("\n}\n", 1)[0]
+        test_paths = (
+            ("scripts/test_validate_java17_runtime.py", "java_profile_validator_test"),
+            ("scripts/test_stage_java17_runtime.py", "java_runtime_stager_test"),
+            ("scripts/test_validate_android_sdk_runtime.py", "android_sdk_validator_test"),
+        )
+        entries = [("ci-home", home_command, "inline", home_import)]
+        for relative, variable in test_paths:
+            entries.append((
+                "ci-" + variable,
+                next(line for line in security_step.splitlines() if "/usr/bin/python3 " in line and relative in line),
+                "script", relative,
+            ))
+            entries.append((
+                "runner-" + variable,
+                next(line for line in runner_step.splitlines() if "/usr/bin/python3 " in line and variable in line),
+                "script", relative,
+            ))
+        sources = [relative for relative, _variable in test_paths] + [
+            "scripts/validate-java17-runtime.py", "scripts/stage-java17-runtime.py",
+            "scripts/validate-android-sdk-runtime.py",
+        ]
+        environment = dict(CLEAN_ENVIRONMENT, ADB="/usr/bin/false", GIT_CONFIG_NOSYSTEM="1",
+                           GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0")
+        for label, command, kind, payload in entries:
+            flags = []
+            for argument in command.split("/usr/bin/python3 ", 1)[1].split():
+                if not argument.startswith("-") or argument == "-":
+                    break
+                flags.append(argument)
+            self.assertIn("-I", flags)
+            for mutant in (False, True):
+                with self.subTest(entry=label, remove_explicit_B=mutant), self._sdk_fixture() as fixture:
+                    for relative in sources:
+                        target = fixture / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(REPO_ROOT / relative, target)
+
+                    def git(*arguments):
+                        return subprocess.run(
+                            ["/usr/bin/git", "-c", "core.hooksPath=/dev/null", *arguments],
+                            cwd=fixture, env=environment, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, check=True, timeout=20,
+                        ).stdout
+
+                    git("init", "--quiet")
+                    git("add", "--", "scripts")
+                    git("-c", "user.name=Issue66 Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "--quiet", "-m", "runtime import fixture")
+                    head = git("rev-parse", "HEAD")
+                    self.assertEqual(b"", git("status", "--porcelain"))
+                    selected_flags = [flag for flag in flags if not (mutant and flag == "-B")]
+                    bootstrap = (
+                        "import runpy, sys\n"
+                        # Apple system Python has implicit -B; model Linux's default explicitly.
+                        "sys.dont_write_bytecode = sys.argv[1] == 'explicit-B'\n"
+                        "if sys.argv[2] == 'inline':\n"
+                        "    sys.platform = 'linux'\n"
+                        "    exec(compile(sys.argv[3], '<ci-home-acl-import>', 'exec'))\n"
+                        "else:\n"
+                        "    runpy.run_path(sys.argv[3], run_name='issue66_import_fixture')\n"
+                    )
+                    result = subprocess.run(
+                        ["/usr/bin/python3", *selected_flags, "-c", bootstrap,
+                         "explicit-B" if "-B" in selected_flags else "linux-default", kind, payload],
+                        cwd=fixture, env=environment, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=20,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr.decode("utf-8", errors="replace"))
+                    untracked = git("ls-files", "--others", "-z", "--exclude-per-directory=.gitignore")
+                    caches = list((fixture / "scripts").rglob("*.pyc"))
+                    if mutant:
+                        self.assertTrue(caches, "removing -B no longer reproduces Linux cache creation")
+                        self.assertIn(b"scripts/__pycache__/", untracked)
+                    else:
+                        self.assertEqual([], caches, "runtime-security imports wrote repository bytecode")
+                        self.assertEqual(b"", untracked)
+                    self.assertEqual(head, git("rev-parse", "HEAD"))
+                    self.assertEqual(b"", git("diff", "HEAD", "--"))
+
     def test_ci_removes_only_the_reviewed_home_default_acl(self):
         workflow = (REPO_ROOT / ".github/workflows/android-a-plus.yml").read_text()
         marker = "      - name: normalize reviewed home default ACL\n"

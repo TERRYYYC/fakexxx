@@ -136,9 +136,9 @@ run_standalone_runtime_security_tests() {
   if ! verify_java_runtime_binding || ! verify_android_sdk_binding; then
     return 1
   fi
-  run_clean_host_command /usr/bin/python3 -I "$java_profile_validator_test" || return 1
-  run_clean_host_command /usr/bin/python3 -I "$java_runtime_stager_test" || return 1
-  run_clean_host_command /usr/bin/python3 -I "$android_sdk_validator_test" || return 1
+  run_clean_host_command /usr/bin/python3 -I -B "$java_profile_validator_test" || return 1
+  run_clean_host_command /usr/bin/python3 -I -B "$java_runtime_stager_test" || return 1
+  run_clean_host_command /usr/bin/python3 -I -B "$android_sdk_validator_test" || return 1
   if ! verify_java_runtime_binding || ! verify_android_sdk_binding; then
     return 1
   fi

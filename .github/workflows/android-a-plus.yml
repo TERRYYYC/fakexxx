@@ -442,7 +442,7 @@ jobs:
       - name: normalize reviewed home default ACL
         shell: /bin/bash --noprofile --norc -p -euo pipefail {0}
         run: |
-          /usr/bin/env -i ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin /usr/bin/python3 -I - <<'PY'
+          /usr/bin/env -i ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin /usr/bin/python3 -I -B - <<'PY'
           import errno
           import importlib.util
           import os
@@ -529,13 +529,13 @@ jobs:
             ISSUE66_ACTIVE_JDK17_HOME="$setup_java_home" \
             ISSUE66_TEMURIN_JDK17_HOME="$setup_java_home" \
             LANG=C LC_ALL=C PATH=/usr/bin:/bin \
-            /usr/bin/python3 -I scripts/test_validate_java17_runtime.py
+            /usr/bin/python3 -I -B scripts/test_validate_java17_runtime.py
           /usr/bin/env -i \
             ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin \
-            /usr/bin/python3 -I scripts/test_stage_java17_runtime.py
+            /usr/bin/python3 -I -B scripts/test_stage_java17_runtime.py
           /usr/bin/env -i \
             ADB=/usr/bin/false LANG=C LC_ALL=C PATH=/usr/bin:/bin \
-            /usr/bin/python3 -I scripts/test_validate_android_sdk_runtime.py
+            /usr/bin/python3 -I -B scripts/test_validate_android_sdk_runtime.py
 
       - name: repository wrappers and host runner are executable
         run: |
