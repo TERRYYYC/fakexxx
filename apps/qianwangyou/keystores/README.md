@@ -10,18 +10,19 @@ across machines.
 **Exact permitted scope (R3, matches the build config):**
 
 - `debug` builds of both apps (the `.bench` instrumentation variants).
-- `apps/qianwangyou`'s **release lane**: it has signed with this same key
-  since PR-1 — deliberately, so debug and release can replace each other via
-  `adb install -r` and an uninstall never wipes the user's saved profiles
-  (that data loss happened once). qianwangyou is a personal instrumentation
-  module, never distributed through a store.
-- `apps/cellrebel-auto`'s release lane is NOT covered; it stays unsigned.
+- Both apps' **v0.1.x release lanes** sign with this same key deliberately, so
+  controlled builds can replace each other via `adb install -r` without first
+  uninstalling the app. A prior uninstall deleted the user's saved profiles;
+  replacement install avoids that uninstall but does not guarantee that an
+  app-level database migration is non-destructive. These are personal,
+  controlled non-store builds; the permission does not extend to public distribution.
 
 **Forbidden (do not weaken):**
 
 - Any store, distribution, or security-trust purpose — this key is never a
   release/trust root in the store sense.
 - Reuse in any other project.
+- Uploading this keystore/private key as a release asset.
 
 The key is public by construction (default debug credentials are public
 knowledge); that is accepted for this repo's scope and is not a precedent for
