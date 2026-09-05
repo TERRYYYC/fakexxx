@@ -320,8 +320,14 @@ class AutomationEngine(
                     return@coroutineScope
                 }
                 // # INV-F3-1：跳过必记录（双关已在启动时拒绝，至多一个标记）
+                // # Issue #17：A+ 契约 lane 由 provider 负责位置注入——legacy Fake GPS 阶段与开关无关地
+                // # 跳过，attempt 行沿用 F003 的 gps_skipped 标记，History 里可解释为何没有 GPS 阶段。
+                // # A+ lane 本身也从不落入 legacy 分支（下方 if 以 continue/return 收尾），这里的标注
+                // # 让"跳过"这一事实落在持久数据上，而不只依赖控制流。
+                val aplusContractLane = recoveryCoordinator != null && completionEvidenceSource != null
                 val stageNotes = when {
                     !toggles.locationStageEnabled -> "gps_skipped"
+                    aplusContractLane -> "gps_skipped" // #17：provider owns location
                     !toggles.testStageEnabled -> "test_skipped"
                     else -> null
                 }
@@ -450,6 +456,11 @@ class AutomationEngine(
                 // # PASS → 终态化 attempt（绝不动 legacy 计数）。apply/release 外部调用是 GREEN，pre-freeze
                 // # 只驱动 §8.1 迁移 + 持久化 owner 态，判定路径（recordTrustedCompletion）保持可达。
                 if (aplusCoord != null && aplusEvidenceSrc != null) {
+                    // # Issue #17：A+ 契约 lane —— 位置由 provider 侧注入，legacy Fake GPS（gpsSetter 驱动
+                    // # 第三方 App）+ settle 阶段与开关无关地自动跳过。真机（Moto/Android 15）两次复现：
+                    // # Location stage ON（默认）+ 正常路径时引擎在 legacy GPS settle 阶段静默死亡，History
+                    // # 留下 running 僵尸 attempt。每个 attempt 记录一行明确原因（跳过必留痕，INV-F3-1 语义）。
+                    log("A+ contract lane — legacy Fake GPS stage skipped (provider owns location)")
                     var aplusState = AttemptState.CREATED
                     val anchorProjection = checkNotNull(aplusAnchorProjection)
                     val admitted = checkNotNull(aplusAdmission)
@@ -802,7 +813,9 @@ class AutomationEngine(
                 }
 
                 // ==================== Location stage（AC-F3-2：OFF 则整段跳过） ====================
-                if (toggles.locationStageEnabled) {
+                // # Issue #17 双保险：A+ lane 下本分支结构上不可达（上方 A+ 分支恒以 continue/return
+                // # 收尾）；即便未来重构破坏了该不变式，legacy gpsSetter 也绝不与 provider 的位置注入叠加。
+                if (toggles.locationStageEnabled && !aplusContractLane) {
                     // # Fake GPS（失败即停，INV-10）
                     updateState(AutomationState.LAUNCHING_FAKE_GPS)
                     val gpsOutcome = gpsSetter.setLocation(task.latitude, task.longitude)
@@ -827,7 +840,12 @@ class AutomationEngine(
                         ensureActive()
                     }
                 } else {
-                    log("Location stage OFF — skipping Fake GPS entirely (gps_skipped)")
+                    if (aplusContractLane) {
+                        // # Issue #17 防御性兜底（结构性不可达：A+ 分支恒 continue/return）
+                        log("A+ contract lane — legacy Fake GPS stage skipped (provider owns location)")
+                    } else {
+                        log("Location stage OFF — skipping Fake GPS entirely (gps_skipped)")
+                    }
                 }
 
                 // ==================== Test stage OFF：GPS 验证即终态（AC-F3-3） ====================
