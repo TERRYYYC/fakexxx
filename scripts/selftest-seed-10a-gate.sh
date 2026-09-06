@@ -1232,6 +1232,18 @@ latin = '<?xml version="1.0" encoding="ISO-8859-1"?><map><string name="json">{"l
 conflict = plain.replace('UTF-8', 'UTF-16')
 (root / 'xml-conflict.xml').write_bytes(conflict.encode('utf-8'))
 (root / 'xml-utf8-dtd.xml').write_bytes(entity.encode('utf-8'))
+(root / 'json-finite-exponent.xml').write_text(
+    '<map><string name="json">{"finite":1e308}</string></map>',
+    encoding='utf-8',
+)
+(root / 'json-overflow-exponent.xml').write_text(
+    '<map><string name="json">{"overflow":1e999}</string></map>',
+    encoding='utf-8',
+)
+(root / 'json-nested-negative-overflow.xml').write_text(
+    '<map><string name="json">{"outer":[{"overflow":-1e999}]}</string></map>',
+    encoding='utf-8',
+)
 PY
 
 run_extractor_case() { # input -> EXTRACT_RC / EXTRACT_OUT / EXTRACT_FILE
@@ -1273,6 +1285,24 @@ for reject_case in utf8-bom utf16-dtd utf32-dtd utf16-plain utf32-plain iso-asci
     { [ "$EXTRACT_RC" -ne 0 ] && [ ! -e "$EXTRACT_FILE" ]; } &&
         report ok "g${case_no} rejects XML byte/encoding case '$reject_case'" ||
         report fail "g${case_no} XML byte envelope must fail closed" "case=$reject_case rc=$EXTRACT_RC out=$EXTRACT_OUT payload=$(cat "$EXTRACT_FILE" 2>/dev/null)"
+done
+
+# ---- g80c-g80e: JSON exponent overflow must not bypass non-finite rejection
+run_extractor_case "$WORK/json-finite-exponent.xml"
+{ [ "$EXTRACT_RC" -eq 0 ] && grep -Fqx '{"finite":1e308}' "$EXTRACT_FILE"; } &&
+    report ok "g80c a large finite JSON exponent remains accepted" ||
+    report fail "g80c finite parse_float values must not be over-rejected" "rc=$EXTRACT_RC out=$EXTRACT_OUT"
+
+for overflow_case in overflow-exponent nested-negative-overflow; do
+    case "$overflow_case" in
+        overflow-exponent) case_no=80d ;;
+        nested-negative-overflow) case_no=80e ;;
+    esac
+    run_extractor_case "$WORK/json-${overflow_case}.xml"
+    { [ "$EXTRACT_RC" -ne 0 ] && [ ! -e "$EXTRACT_FILE" ]; } &&
+        report ok "g${case_no} rejects non-finite JSON exponent '$overflow_case'" ||
+        report fail "g${case_no} parse_float overflow must fail closed" \
+            "case=$overflow_case rc=$EXTRACT_RC out=$EXTRACT_OUT payload=$(cat "$EXTRACT_FILE" 2>/dev/null)"
 done
 
 # ---- g81-g83 (same-family sweep): coordinate producers cannot launder rc

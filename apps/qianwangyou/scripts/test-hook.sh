@@ -120,6 +120,7 @@ parse_vector_prefs_xml() { # mode=(json|pending) input-file
     "$PY" - "$mode" "$input_file" <<'PY'
 import html
 import json
+import math
 import re
 import sys
 import xml.etree.ElementTree as ElementTree
@@ -143,6 +144,13 @@ def reject_duplicate_json_keys(pairs):
 
 def reject_nonfinite_json(value):
     raise ValueError(f"non-finite JSON number: {value}")
+
+
+def parse_finite_json_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"JSON float overflows finite range: {value}")
+    return parsed
 
 
 try:
@@ -220,6 +228,7 @@ try:
             payload,
             object_pairs_hook=reject_duplicate_json_keys,
             parse_constant=reject_nonfinite_json,
+            parse_float=parse_finite_json_float,
         )
         if not isinstance(decoded, dict):
             reject("string[name=json] must contain a JSON object")

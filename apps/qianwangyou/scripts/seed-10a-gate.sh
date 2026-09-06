@@ -868,6 +868,7 @@ extract_single_json_payload() {
     fi
     "$json_python" - "$1" "$2" <<'PY'
 import json
+import math
 import re
 import sys
 import xml.etree.ElementTree as ElementTree
@@ -886,6 +887,13 @@ def reject_duplicate_object_keys(pairs):
 
 def reject_nonfinite(value):
     raise ValueError(f"non-finite JSON number: {value}")
+
+
+def parse_finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"JSON float overflows to a non-finite value: {value}")
+    return parsed
 
 
 try:
@@ -937,6 +945,7 @@ try:
         payload,
         object_pairs_hook=reject_duplicate_object_keys,
         parse_constant=reject_nonfinite,
+        parse_float=parse_finite_float,
     )
     if not isinstance(decoded, dict):
         raise ValueError("canonical payload must be a JSON object")

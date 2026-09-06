@@ -215,6 +215,13 @@ run_snapshot "$BENCH_PATH" "$DECLARED_JSON_XML" ''
     report fail "G1b strict envelope must accept its valid UTF-8 form" "rc=$RC out=$OUT"
 rm -f "$CALLS"
 
+FINITE_EXPONENT_XML='<map><string name="json">{"largeFinite":1e308}</string></map>'
+run_snapshot "$BENCH_PATH" "$FINITE_EXPONENT_XML" ''
+{ [ "$RC" -eq 0 ] && grep -q '"largeFinite":1e308' <<<"$OUT"; } &&
+    report ok "G1c large but finite JSON exponent remains accepted without rewriting" ||
+    report fail "G1c finite exponent must not be over-rejected" "rc=$RC out=$OUT"
+rm -f "$CALLS"
+
 # Different bytes prove the selected value is from bench rather than whichever
 # copy happens to be enumerated first.
 run_snapshot "$BENCH_PATH" "$BENCH_XML" '<map><string name="json">{"source":"production"}</string></map>'
@@ -271,7 +278,10 @@ for json_case in \
     'wrong-type|<map><boolean name="json" value="true" /></map>' \
     'duplicate-pref-key|<map><string name="json">{"a":1}</string><string name="json">{"a":2}</string></map>' \
     'duplicate-json-key|<map><string name="json">{"a":1,"a":2}</string></map>' \
-    'nonfinite-json|<map><string name="json">{"a":NaN}</string></map>'
+    'nonfinite-json|<map><string name="json">{"a":NaN}</string></map>' \
+    'positive-float-overflow|<map><string name="json">{"x":1e999}</string></map>' \
+    'negative-float-overflow|<map><string name="json">{"x":-1e999}</string></map>' \
+    'nested-float-overflow|<map><string name="json">{"x":{"values":[1,1e999]}}</string></map>'
 do
     json_name=${json_case%%|*}
     json_bytes=${json_case#*|}
