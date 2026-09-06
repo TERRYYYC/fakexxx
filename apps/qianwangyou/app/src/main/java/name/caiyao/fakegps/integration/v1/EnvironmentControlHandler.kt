@@ -666,6 +666,15 @@ class EnvironmentControlHandler(
             val outcomeWire =
                 if (toItemId == null) AdvanceOutcomeV1.EXHAUSTED.wire else AdvanceOutcomeV1.ADVANCED.wire
 
+            // Bump revision for schedule boundary BEFORE the receipt snapshot — same
+            // bump-then-receipt convention as release(). The receipt must describe the
+            // POST-boundary environment the §6.7.5 independent observe() reads; bumping
+            // after the snapshot left the live revision one ahead of
+            // effectiveEnvironmentRevision, so every real post-advance observe failed the
+            // engine's four-leg equality on the environmentRevision leg (device evidence
+            // 2026-09-06 ZY22JHW9M4: receipt 38 vs observed 39, deterministic).
+            tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
+
             val snap = tracker.snapshot()
             // Step 3b proved the reference exists and is the caller's own —
             // reuse that read; a fallback here would silently mask a broken gate.
@@ -728,9 +737,6 @@ class EnvironmentControlHandler(
                 leaseId = request.leaseId,
                 operationId = request.idempotencyKey,
             )
-
-            // Bump revision for schedule boundary
-            tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
 
             finalReceipt
         }
