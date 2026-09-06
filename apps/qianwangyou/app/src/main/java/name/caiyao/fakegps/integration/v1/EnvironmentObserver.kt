@@ -1,6 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
@@ -22,6 +23,9 @@ class EnvironmentObserver(
     private val environment: QwyEnvironment,
     private val clock: MonotonicClock,
     private val audit: IntegrationAuditStore,
+    private val authoritativeSource: AuthoritativeContinuitySource? = null,
+    private val expectedOracleOwnerPackage: String? = null,
+    private val expectedOracleOwnerUid: Int? = null,
 ) {
     /**
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
@@ -36,9 +40,43 @@ class EnvironmentObserver(
             )
         }
 
+        // The only production FULL path reads an external source immediately
+        // before and after the complete local projection. A source is optional
+        // only for legacy JVM harnesses; ProviderRuntime always supplies it.
+        val pre = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
+        val windowStartElapsedRealtimeMs = clock.elapsedRealtimeMs()
         val snap = tracker.snapshot()
         val effective = environment.observeEffective()
         val schedule = environment.scheduleSnapshot()
+        val post = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
+        val expectedDigest = QwyObservedSemanticDigest.compute(
+            ownerGeneration = snap.generation,
+            effective = effective,
+            schedule = schedule,
+        )
+        val authoritativeWindowIsValid = when {
+            authoritativeSource == null -> false
+            expectedOracleOwnerPackage == null || expectedOracleOwnerUid == null -> false
+            classifyAuthoritativeWindow(
+                pre = pre,
+                post = post,
+                expectedPackage = expectedOracleOwnerPackage,
+                expectedUid = expectedOracleOwnerUid,
+            ) != AuthoritativeWindowVerdict.VALID -> false
+            pre?.qwySemanticDigest != expectedDigest -> false
+            post?.qwySemanticDigest != expectedDigest -> false
+            else -> true
+        }
+        val coverageWire = when {
+            authoritativeSource == null -> snap.coverageWire
+            authoritativeWindowIsValid -> ContinuityCoverageV1.FULL.wire
+            else -> ContinuityCoverageV1.NONE.wire
+        }
+        val continuitySince = when {
+            authoritativeSource == null -> snap.continuitySinceElapsedRealtimeMs
+            authoritativeWindowIsValid -> windowStartElapsedRealtimeMs
+            else -> null
+        }
 
         val observation = EnvironmentObservationV1(
             leaseId = lease.leaseId,
@@ -47,12 +85,12 @@ class EnvironmentObserver(
             observedAtElapsedRealtimeMs = clock.elapsedRealtimeMs(),
             environmentRevision = snap.revision,
             environmentFingerprint = effective.environmentFingerprint,
-            continuityCoverageWire = snap.coverageWire,
-            continuitySinceEpochMs = snap.continuitySinceElapsedRealtimeMs?.let {
+            continuityCoverageWire = coverageWire,
+            continuitySinceEpochMs = continuitySince?.let {
                 // Convert elapsed to epoch for the epoch field (audit only)
                 clock.epochMs() - (clock.elapsedRealtimeMs() - it)
             },
-            continuitySinceElapsedRealtimeMs = snap.continuitySinceElapsedRealtimeMs,
+            continuitySinceElapsedRealtimeMs = continuitySince,
             deliveryModeWire = effective.deliveryModeWire,
             verificationLevelWire = effective.verificationLevelWire,
             effectiveLatitude = effective.latitude,

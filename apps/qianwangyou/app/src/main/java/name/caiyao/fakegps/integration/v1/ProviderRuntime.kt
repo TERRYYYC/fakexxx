@@ -186,6 +186,9 @@ object ProviderRuntime {
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
             environment = QwyEnvironmentController(appContext),
+            authoritativeSource = BinderAuthoritativeContinuitySource(),
+            expectedOracleOwnerPackage = appContext.packageName,
+            expectedOracleOwnerUid = appContext.applicationInfo.uid,
         )
     }
 
@@ -208,6 +211,9 @@ object ProviderRuntime {
         clock: MonotonicClock,
         resolver: PackageIdentityResolver,
         environment: QwyEnvironment,
+        authoritativeSource: AuthoritativeContinuitySource? = null,
+        expectedOracleOwnerPackage: String? = null,
+        expectedOracleOwnerUid: Int? = null,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -215,7 +221,15 @@ object ProviderRuntime {
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
-        val observer = EnvironmentObserver(tracker, environment, clock, audit)
+        val observer = EnvironmentObserver(
+            tracker,
+            environment,
+            clock,
+            audit,
+            authoritativeSource,
+            expectedOracleOwnerPackage,
+            expectedOracleOwnerUid,
+        )
 
         val handler = EnvironmentControlHandler(
             authorizer = authorizer,
