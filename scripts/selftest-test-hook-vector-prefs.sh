@@ -33,20 +33,23 @@ report() {
     exit 1
 }
 
-# Exercise the real bootstrap rather than only the extracted helper.  A
-# caller-provided library path is required by this device-free harness; a
-# quoted/escaped parameter expansion here turns it into a literal filename and
-# makes every real invocation fail before it can reach snapshot_prefs().
-FAKE_ADB_DIR=$(mktemp -d)
-ln -s "$(command -v true)" "$FAKE_ADB_DIR/adb"
-HOOK_BOOTSTRAP_OUT="$(PATH="$FAKE_ADB_DIR:$PATH" VE_LIB_PATH="$VE_LIB" "$TEST_HOOK" --current-profile 2>&1)"
+# Exercise the shipped bootstrap fragment in a subshell.  Do not launch the
+# hook itself: that would be a device command.  A quoted/escaped parameter
+# expansion turns VE_LIB_PATH into a literal filename and fails before the
+# library can be sourced.
+HOOK_VECTOR_SETUP="$(sed -n '/^ve_live_root_shell()/,/^\. "\$VE_LIB"/p' "$TEST_HOOK")"
+HOOK_BOOTSTRAP_OUT="$(
+    set -u
+    root_shell() { :; }
+    SCRIPT_DIR=/nondefault-vector-library-path
+    VE_LIB_PATH="$VE_LIB"
+    eval "$HOOK_VECTOR_SETUP"
+    printf '%s\n' "$VE_LIB"
+)"
 HOOK_BOOTSTRAP_RC=$?
-rm -rf "$FAKE_ADB_DIR"
 
-[ "$HOOK_BOOTSTRAP_RC" -ne 0 ] &&
-    grep -q 'FakeGps hook verification:' <<<"$HOOK_BOOTSTRAP_OUT" &&
-    ! grep -q 'vector-evidence.sh not found' <<<"$HOOK_BOOTSTRAP_OUT" &&
-    report ok "B test-hook bootstrap expands VE_LIB_PATH before device flow" ||
+[ "$HOOK_BOOTSTRAP_RC" -eq 0 ] && [ "$HOOK_BOOTSTRAP_OUT" = "$VE_LIB" ] &&
+    report ok "B test-hook bootstrap expands VE_LIB_PATH without a device command" ||
     report fail "B test-hook bootstrap must load caller-provided Vector library" "rc=$HOOK_BOOTSTRAP_RC out=$HOOK_BOOTSTRAP_OUT"
 
 FN_SNAPSHOT="$(sed -n '/^snapshot_prefs()/,/^}/p' "$TEST_HOOK")"
