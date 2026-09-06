@@ -6,13 +6,13 @@ import com.example.cellrebelauto.automation.AutomationService.Companion as SvcCo
 import com.example.cellrebelauto.model.AutomationState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -47,26 +47,41 @@ import org.robolectric.RobolectricTestRunner
 class AutomationServiceRecycleStateTest {
 
     @Test
-    fun `a cancelled run cannot be replaced until its non-cancellable retirement completes`() = runBlocking {
+    fun `a cancelled run cannot be replaced until its non-cancellable retirement completes`() = runTest {
         val retirementRelease = CompletableDeferred<Unit>()
+        val enteredRun = CompletableDeferred<Unit>()
         val enteredRetirement = CompletableDeferred<Unit>()
-        val job = CoroutineScope(Dispatchers.Default).launch {
+        // Explicitly delay the launch until this test suspends: cancellation-before-start must
+        // not depend on a lucky scheduling turn of Dispatchers.Default.
+        val job = launch(StandardTestDispatcher(testScheduler)) {
             try {
+                enteredRun.complete(Unit)
                 awaitCancellation()
             } finally {
                 withContext(NonCancellable) {
                     enteredRetirement.complete(Unit)
-                    retirementRelease.await()
+                    withTimeout(5_000) { retirementRelease.await() }
                 }
             }
         }
 
-        job.cancel()
-        enteredRetirement.await()
-        assertFalse("cancelled is not the same as durably retired", mayStartAutomation(job))
-        retirementRelease.complete(Unit)
-        job.join()
-        assertTrue(mayStartAutomation(job))
+        try {
+            // A cancelled-before-start coroutine never executes this try/finally. Wait for the
+            // run body so this oracle actually tests cancellation during durable retirement.
+            withTimeout(5_000) { enteredRun.await() }
+            job.cancel()
+            withTimeout(5_000) { enteredRetirement.await() }
+            assertFalse("cancelled is not the same as durably retired", mayStartAutomation(job))
+            retirementRelease.complete(Unit)
+            withTimeout(5_000) { job.join() }
+            assertTrue(mayStartAutomation(job))
+        } finally {
+            retirementRelease.complete(Unit)
+            job.cancel()
+            withContext(NonCancellable) {
+                withTimeout(5_000) { job.join() }
+            }
+        }
     }
 
     @Test
@@ -155,5 +170,40 @@ class AutomationServiceRecycleStateTest {
         assertNull("cooldown must be cleared on destroy", SvcCompanion.cooldown.value)
         assertFalse("isRunning must be false after destroy", SvcCompanion.isRunning.value)
         assertEquals(false, SvcCompanion.isServiceConnected.value)
+    }
+
+    @Test
+    fun `service recycle invalidates an in-flight supersession request instead of manufacturing proof`() {
+        val service = newConnectedService()
+        val activeRequest = AutomationService::class.java
+            .getDeclaredField("activeSupersessionStopRequestId")
+            .apply { isAccessible = true }
+        activeRequest.set(service, "replace-recycled")
+        companionFlow("_supersessionStopStatus").value =
+            SupersessionStopStatus.Stopping("replace-recycled", 1L, 2L)
+
+        val destroy = AutomationService::class.java.getDeclaredMethod("onDestroy")
+        destroy.isAccessible = true
+        destroy.invoke(service)
+
+        assertEquals(
+            SupersessionStopStatus.Blocked("replace-recycled", "SERVICE_RECYCLED"),
+            SvcCompanion.supersessionStopStatus.value
+        )
+    }
+
+    @Test
+    fun `missing accessibility service fails a supersession request closed`() {
+        val service = newConnectedService()
+        val destroy = AutomationService::class.java.getDeclaredMethod("onDestroy")
+        destroy.isAccessible = true
+        destroy.invoke(service)
+
+        SvcCompanion.stopAndVerifyForSupersession(1L, 2L, "replace-no-service")
+
+        assertEquals(
+            SupersessionStopStatus.Blocked("replace-no-service", "SERVICE_NOT_CONNECTED"),
+            SvcCompanion.supersessionStopStatus.value
+        )
     }
 }

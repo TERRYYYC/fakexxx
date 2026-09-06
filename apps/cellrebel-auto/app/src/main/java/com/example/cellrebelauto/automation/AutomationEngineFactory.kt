@@ -61,7 +61,8 @@ object AutomationEngineFactory {
         commitClockMs: () -> Long = productionCommitClockMs,
         // R44 (Sol GREEN-review-3 F3): the execution-evidence elapsed clock — same production default
         // wiring, observable by tests through the same factory path.
-        elapsedClockMs: () -> Long = productionElapsedClockMs
+        elapsedClockMs: () -> Long = productionElapsedClockMs,
+        initialRunSessionId: Long? = null
     ): AutomationEngine = AutomationEngine(
         planId = planId,
         planRepository = planRepository,
@@ -78,6 +79,7 @@ object AutomationEngineFactory {
         nowMs = nowMs,
         delayMs = delayMs,
         commitClockMs = commitClockMs,
-        elapsedClockMs = elapsedClockMs
+        elapsedClockMs = elapsedClockMs,
+        initialRunSessionId = initialRunSessionId
     )
 }

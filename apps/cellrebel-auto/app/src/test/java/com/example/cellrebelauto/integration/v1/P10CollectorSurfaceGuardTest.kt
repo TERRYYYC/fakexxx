@@ -507,19 +507,21 @@ class P10CollectorSurfaceGuardTest {
             1,
             Regex(Regex.escape(sentinel)).findAll(mainAll).count(),
         )
-        // 3. accept branch: _isRunning := true BEFORE launch, NO synchronous addLog (lambda wiring only)
+        // 3. acceptance is published only after durable session admission, never optimistically.
         val rejectLog = code.indexOf("addLog(\"$sentinel\")")
         val launch = code.indexOf("automationJob = serviceScope.launch")
         assertTrue("the reject branch must precede the launch", rejectLog in 0 until launch)
-        val acceptRegion = code.substring(rejectLog + 1, launch)
+        val acceptRegion = code.substring(rejectLog + 1)
+        val beforeLaunchRegion = code.substring(rejectLog + 1, launch)
         assertTrue(
-            "the accept branch must set _isRunning.value = true before launching",
-            acceptRegion.contains("_isRunning.value = true"),
+            "the accept branch must durably admit a run session before projecting running",
+            acceptRegion.indexOf("RunStartCoordinator(planRepository).admit") in 0 until
+                acceptRegion.indexOf("_isRunning.value = true"),
         )
         assertEquals(
             "the accept branch must publish no log before launch (every addLog( there must be lambda wiring)",
-            Regex("""\{\s*addLog\(it\)\s*\}""").findAll(acceptRegion).count(),
-            Regex("""addLog\(""").findAll(acceptRegion).count(),
+            Regex("""\{\s*addLog\(it\)\s*\}""").findAll(beforeLaunchRegion).count(),
+            Regex("""addLog\(""").findAll(beforeLaunchRegion).count(),
         )
         // 4. the entry point is a synchronous direct call, and logs are public
         assertTrue(

@@ -1,0 +1,133 @@
+package com.example.cellrebelauto.ui
+
+import android.app.Application
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.SupersessionStopStatus
+import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.plan.LocationPlan
+import com.example.cellrebelauto.model.plan.LocationTask
+import com.example.cellrebelauto.model.plan.WorklistRow
+import com.example.cellrebelauto.repository.PlanRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+class SupersedingImportViewModelTest {
+    private lateinit var db: AppDatabase
+
+    private class FakeStopClient : SupersessionStopClient {
+        val mutableStatus = MutableStateFlow<SupersessionStopStatus>(SupersessionStopStatus.Idle)
+        override val status: StateFlow<SupersessionStopStatus> = mutableStatus
+        val requests = mutableListOf<Triple<Long, Long, String>>()
+        override fun request(planId: Long, sessionId: Long, requestId: String) {
+            requests += Triple(planId, sessionId, requestId)
+        }
+    }
+
+    @Before
+    fun setUp() {
+        Dispatchers.setMain(UnconfinedTestDispatcher())
+        db = Room.inMemoryDatabaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            AppDatabase::class.java
+        ).allowMainThreadQueries().build()
+    }
+
+    @After
+    fun tearDown() {
+        db.close()
+        Dispatchers.resetMain()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun stageProposal(vm: MainViewModel, proposal: ImportProposal) {
+        val field = MainViewModel::class.java.getDeclaredField("_importProposal")
+        field.isAccessible = true
+        (field.get(vm) as MutableStateFlow<ImportProposal?>).value = proposal
+    }
+
+    private fun await(message: String, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000L
+        while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(20L)
+        assertTrue(message, condition())
+    }
+
+    @Test
+    fun `explicit confirmation binds one stop request and imports only its verified durable proof`() = runTest {
+        val oldPlanId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "old.csv",
+                importedAt = 100L,
+                globalBufferSeconds = 5,
+                totalRows = 1,
+                totalRequiredSuccesses = 1
+            ),
+            listOf(LocationTask(planId = 0L, csvRow = 1, longitude = 30.5, latitude = 50.4,
+                priority = 1, requiredSuccesses = 1))
+        )
+        val sessionId = db.runSessionDao().insert(
+            RunSession(startedAt = 200L, status = "paused", planId = oldPlanId)
+        )
+        val client = FakeStopClient()
+        val vm = MainViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            injectedDb = db,
+            supersessionStopClient = client
+        )
+        stageProposal(
+            vm,
+            ImportProposal(oldPlanId, "old.csv", "new.csv", 5,
+                listOf(WorklistRow(31.5, 51.4, 1, 1, 1)))
+        )
+
+        vm.confirmImportReplacement()
+        await("confirmation requests stop verification") { client.requests.size == 1 }
+        val firstRequest = client.requests.single()
+        assertEquals(Triple(oldPlanId, sessionId, firstRequest.third), firstRequest)
+        assertTrue(vm.isImportReplacementStopping.value)
+        assertNotNull(vm.importProposal.value)
+
+        vm.confirmImportReplacement()
+        assertEquals("repeated confirm cannot create a second request", 1, client.requests.size)
+        client.mutableStatus.value = SupersessionStopStatus.Blocked("late-other-request", "late")
+        assertTrue("a late foreign callback is ignored", vm.isImportReplacementStopping.value)
+
+        client.mutableStatus.value = SupersessionStopStatus.Blocked(firstRequest.third, "retryable")
+        await("the matching block permits a retry") { !vm.isImportReplacementStopping.value }
+        assertNotNull("the in-memory CSV proposal survives a retryable block", vm.importProposal.value)
+
+        vm.confirmImportReplacement()
+        await("retry gets a fresh request id") { client.requests.size == 2 }
+        val retryRequest = client.requests.last()
+        assertNotEquals(firstRequest.third, retryRequest.third)
+        val proof = (PlanRepository(db).verifyAndStopForSupersession(
+            retryRequest.third, oldPlanId, sessionId, 300L
+        ) as PlanRepository.SupersessionStopVerification.Verified).proof
+
+        client.mutableStatus.value = SupersessionStopStatus.Verified(retryRequest.third, proof)
+        await("the matching proof atomically imports the replacement") {
+            vm.importProposal.value == null
+        }
+        assertEquals("new.csv", db.planDao().getLatestPlan()?.sourceFileName)
+        assertEquals(300L, db.runSessionDao().getById(sessionId)!!.endedAt)
+        assertEquals("stopped", db.runSessionDao().getById(sessionId)!!.status)
+    }
+}

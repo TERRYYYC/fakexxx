@@ -152,6 +152,9 @@ interface TestAttemptDao {
     @Query("UPDATE test_attempts SET aplusState = :aplusState WHERE id = :attemptId")
     suspend fun markAplusState(attemptId: Long, aplusState: String)
 
+    @Query("UPDATE test_attempts SET aplusState = :next WHERE id = :attemptId AND aplusState = :expected")
+    suspend fun compareAndSetAplusState(attemptId: Long, expected: String, next: String): Int
+
     /**
      * Atomically mark RECOVERY_REQUIRED with a typed reason (Sol R2 P1-3: durable leg-specific reason).
      * The reason is stored in `failureReason` — the test can read it back to verify which specific
@@ -210,10 +213,19 @@ interface TestAttemptDao {
      * A+ recoverable attempts: non-terminal rows that entered the A+ lifecycle (aplusState non-null) —
      * recovery branches on their persisted phase, never on a generic `starting|running` status
      * (Sol round-8 P1-3).
+     * Legacy RELEASED history can have a falsely terminal generic status. Include that phase and
+     * its explicit recovery provenance until the real owner reaches CLOSED; never reopen CLOSED
+     * historical rows merely because an older legacy audit still exists.
      */
     @Query(
         "SELECT a.* FROM test_attempts a INNER JOIN location_tasks t ON a.taskId = t.id " +
-            "WHERE t.planId = :planId AND a.aplusState IS NOT NULL AND a.status IN ('starting','running')"
+            "WHERE t.planId = :planId AND a.aplusState IS NOT NULL AND (" +
+            "a.status IN ('starting','running') OR a.aplusState = 'RELEASED' OR (" +
+            "a.aplusState IN ('RECOVERY_REQUIRED','RELEASE_PENDING','ADVANCE_PENDING'," +
+            "'ADVANCE_OBSERVING','ADVANCE_STATE_READBACK') AND EXISTS (" +
+            "SELECT 1 FROM auto_audit_events e WHERE e.attemptId = a.id AND " +
+            "e.eventType = 'RECOVERY_REQUIRED' AND " +
+            "instr(e.payloadDigest, 'RELEASED->RECOVERY_REQUIRED[') = 1)))"
     )
     suspend fun findAplusRecoverableAttempts(planId: Long): List<TestAttempt>
 }

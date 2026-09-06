@@ -4,19 +4,19 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
 import com.example.cellrebelauto.automation.aplus.APlusBackend
-import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.data.PlanConfigStore
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.StageToggles
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,6 +44,8 @@ class AutomationService : AccessibilityService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     // # 当前运行的自动化任务
     private var automationJob: Job? = null
+    private var supersessionStopJob: Job? = null
+    private var activeSupersessionStopRequestId: String? = null
     // # 当前引擎实例
     private var engine: AutomationEngine? = null
     private val projectionFence = ServiceProjectionFence()
@@ -78,6 +80,14 @@ class AutomationService : AccessibilityService() {
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning
 
+        /** #80 public admission projection; Accepted is impossible without a durable session row. */
+        private val _startStatus = MutableStateFlow<AutomationStartStatus>(AutomationStartStatus.IDLE)
+        val startStatus: StateFlow<AutomationStartStatus> = _startStatus
+
+        private val _supersessionStopStatus =
+            MutableStateFlow<SupersessionStopStatus>(SupersessionStopStatus.Idle)
+        val supersessionStopStatus: StateFlow<SupersessionStopStatus> = _supersessionStopStatus
+
         private val _currentState = MutableStateFlow(AutomationState.IDLE)
         val currentState: StateFlow<AutomationState> = _currentState
 
@@ -110,6 +120,7 @@ class AutomationService : AccessibilityService() {
         fun startAutomation(planId: Long) {
             instance?.startWithPlan(planId) ?: run {
                 Log.e(TAG, "Service not connected — cannot start")
+                _startStatus.value = AutomationStartStatus.Rejected("SERVICE_NOT_CONNECTED")
             }
         }
 
@@ -119,6 +130,16 @@ class AutomationService : AccessibilityService() {
          */
         fun stopAutomation() {
             instance?.stopRunning()
+        }
+
+        /** Explicit #97 replacement confirmation: retire the run, then prove the durable stop. */
+        fun stopAndVerifyForSupersession(planId: Long, sessionId: Long, requestId: String) {
+            instance?.stopAndVerifyForSupersession(planId, sessionId, requestId) ?: run {
+                _supersessionStopStatus.value = SupersessionStopStatus.Blocked(
+                    requestId,
+                    "SERVICE_NOT_CONNECTED"
+                )
+            }
         }
 
         /**
@@ -287,9 +308,19 @@ class AutomationService : AccessibilityService() {
         }
     }
 
+    private fun abortSupersessionStopForServiceRecycle() {
+        activeSupersessionStopRequestId?.let { requestId ->
+            _supersessionStopStatus.value =
+                SupersessionStopStatus.Blocked(requestId, "SERVICE_RECYCLED")
+        }
+        activeSupersessionStopRequestId = null
+        supersessionStopJob?.cancel()
+    }
+
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         // # Issue #15：系统解绑路径（禁用开关）先于 recycle——同一类型化终态，防 Run 页残留运行假象。
         publishServiceRecycledTerminal()
+        abortSupersessionStopForServiceRecycle()
         automationJob?.cancel()
         return super.onUnbind(intent)
     }
@@ -298,6 +329,7 @@ class AutomationService : AccessibilityService() {
         // # Issue #15：先同步发布类型化终态（见 publishServiceRecycledTerminal），再取消协程——
         // 顺序反过来会留出"取消已发生、终态未发布"的窗口（转发器随作用域一起死亡）。
         publishServiceRecycledTerminal()
+        abortSupersessionStopForServiceRecycle()
         automationJob?.cancel()
         binderExecutor?.unbind()
         binderExecutor = null
@@ -315,6 +347,11 @@ class AutomationService : AccessibilityService() {
      * # 创建引擎和处理器，启动计划驱动的自动化协程
      */
     private fun startWithPlan(planId: Long) {
+        if (supersessionStopJob?.isActive == true) {
+            addLog("Stop verification is in progress, ignoring start request")
+            _startStatus.value = AutomationStartStatus.Rejected("STOP_VERIFICATION_IN_PROGRESS")
+            return
+        }
         if (!mayStartAutomation(automationJob)) {
             addLog("Previous automation run is still retiring, ignoring start request")
             return
@@ -329,11 +366,7 @@ class AutomationService : AccessibilityService() {
         val planRepository = PlanRepository(db)
         val configStore = PlanConfigStore(applicationContext)
 
-        val cellRebelHandler = CellRebelHandler(bridge, onLog = { addLog(it) })
-        val fakeGpsHandler = FakeGpsHandler(bridge) { addLog(it) }
-
-        val runGeneration = projectionFence.beginRun()
-        projectionFence.publish(runGeneration) { _isRunning.value = true }
+        _startStatus.value = AutomationStartStatus.STARTING
 
         automationJob = serviceScope.launch {
             // # 读取计划与高级配置（超时/GPS 稳定）
@@ -341,43 +374,30 @@ class AutomationService : AccessibilityService() {
             val planConfig = configStore.config.first()
             if (plan == null) {
                 addLog("ERROR: plan #$planId not found")
-                projectionFence.publish(runGeneration) { _isRunning.value = false }
+                _startStatus.value = AutomationStartStatus.Rejected("PLAN_NOT_FOUND")
                 return@launch
             }
+            if (!planConfig.locationStageEnabled && !planConfig.testStageEnabled) {
+                addLog("ERROR: both stages are OFF — nothing would be executed")
+                _startStatus.value = AutomationStartStatus.Rejected("BOTH_STAGES_OFF")
+                return@launch
+            }
+            val startReceipt = RunStartCoordinator(planRepository).admit(planId, System.currentTimeMillis())
+            val sessionId = when (startReceipt) {
+                is RunStartReceipt.Accepted -> startReceipt.sessionId
+                is RunStartReceipt.Resumed -> startReceipt.sessionId
+                is RunStartReceipt.Rejected -> {
+                    addLog("ERROR: start rejected (${startReceipt.reason})")
+                    _startStatus.value = AutomationStartStatus.Rejected(startReceipt.reason)
+                    return@launch
+                }
+            }
+            val runGeneration = projectionFence.beginRun()
+            projectionFence.publish(runGeneration) { _isRunning.value = true }
+            _startStatus.value = AutomationStartStatus.Accepted(sessionId)
 
-            // # R8-F1/F2（Sol round-7 P1-1 / round-11 P1-1）：A+ 组合根。生产经 engineAplusParams 从
-            // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
-            // R43 GREEN (F1): the REAL production backend over the frozen contract — reusing the
-            // SERVICE-LIFECYCLE binder executor (bound at onServiceConnected) + the Room receipt
-            // store; an unbound provider fail-closes inside the adapters, not by stubs.
-            val aplusBackend: APlusBackend = APlusComposition.productionBackend(
-                applicationContext, db,
-                // R45 (Sol R45 P1-1): the SAME timeout config the engine's apply intent uses — the
-                // evidence source must recompute the identical (startedAt → startedAt+timeout) window.
-                attemptValidityTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
-                serviceLifecycleExecutor = binderExecutor
-            )
-            val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
-            // R43 (Sol R42 P1-2): the ENTIRE production engine construction delegates to the pure
-            // factory — the monotonic commit-clock default lives there (production wiring, observable
-            // by the factory-wiring test), not in an invisible call-site lambda.
-            val newEngine = AutomationEngineFactory.productionEngine(
-                planId = planId,
-                planRepository = planRepository,
-                cellRebelRunner = cellRebelHandler,
-                gpsSetter = fakeGpsHandler,
-                globalBufferSeconds = plan.globalBufferSeconds,
-                testTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
-                gpsSettleMs = planConfig.gpsSettleSeconds * 1000L,
-                // # F003：每次 attempt 重新读取开关（AC-F3-5 中途切换下个 attempt 生效）
-                stageToggles = {
-                    val c = configStore.config.first()
-                    StageToggles(c.locationStageEnabled, c.testStageEnabled)
-                },
-                auditDao = db.auditEventDao(),
-                aplusCoordinator = aplusCoordinator,
-                aplusEvidence = aplusEvidence,
-                bridge = bridge
+            val newEngine = buildProductionEngine(
+                planId, sessionId, plan, planConfig, planRepository, db, configStore, bridge
             )
             engine = newEngine
 
@@ -403,6 +423,111 @@ class AutomationService : AccessibilityService() {
                 } finally {
                     projectionFence.publish(runGeneration) { _isRunning.value = false }
                     engine = null
+                }
+            }
+        }
+    }
+
+    /** One production composition root shared by ordinary run and #97 stop-only recovery. */
+    private fun buildProductionEngine(
+        planId: Long,
+        sessionId: Long,
+        plan: com.example.cellrebelauto.model.plan.LocationPlan,
+        planConfig: com.example.cellrebelauto.model.plan.PlanConfig,
+        planRepository: PlanRepository,
+        db: AppDatabase,
+        configStore: PlanConfigStore,
+        bridge: AccessibilityBridge
+    ): AutomationEngine {
+        val aplusBackend: APlusBackend = APlusComposition.productionBackend(
+            applicationContext,
+            db,
+            attemptValidityTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
+            serviceLifecycleExecutor = binderExecutor
+        )
+        val (aplusCoordinator, aplusEvidence) = APlusComposition.engineAplusParams(aplusBackend)
+        return AutomationEngineFactory.productionEngine(
+            planId = planId,
+            planRepository = planRepository,
+            cellRebelRunner = CellRebelHandler(bridge, onLog = { addLog(it) }),
+            gpsSetter = FakeGpsHandler(bridge) { addLog(it) },
+            globalBufferSeconds = plan.globalBufferSeconds,
+            testTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
+            gpsSettleMs = planConfig.gpsSettleSeconds * 1000L,
+            stageToggles = {
+                val c = configStore.config.first()
+                StageToggles(c.locationStageEnabled, c.testStageEnabled)
+            },
+            auditDao = db.auditEventDao(),
+            aplusCoordinator = aplusCoordinator,
+            aplusEvidence = aplusEvidence,
+            bridge = bridge,
+            initialRunSessionId = sessionId
+        )
+    }
+
+    private fun stopAndVerifyForSupersession(planId: Long, sessionId: Long, requestId: String) {
+        if (activeSupersessionStopRequestId == requestId && supersessionStopJob?.isActive == true) {
+            return
+        }
+        val previousStopJob = supersessionStopJob
+        activeSupersessionStopRequestId = requestId
+        _supersessionStopStatus.value = SupersessionStopStatus.Stopping(requestId, planId, sessionId)
+
+        supersessionStopJob = serviceScope.launch {
+            previousStopJob?.cancelAndJoin()
+            if (activeSupersessionStopRequestId != requestId) return@launch
+            try {
+                val db = AppDatabase.getInstance(applicationContext)
+                val repository = PlanRepository(db)
+                val configStore = PlanConfigStore(applicationContext)
+                val bridge = AccessibilityBridge(this@AutomationService)
+                val coordinator = SupersessionStopCoordinator(
+                    cancelAndJoinRun = {
+                        automationJob?.cancelAndJoin()
+                    },
+                    verifyDurableStop = {
+                        repository.verifyAndStopForSupersession(
+                            requestId = requestId,
+                            expectedPlanId = planId,
+                            expectedSessionId = sessionId,
+                            stoppedAt = System.currentTimeMillis()
+                        )
+                    },
+                    convergeExistingOwner = {
+                        val plan = repository.getPlan(planId)
+                        if (plan == null) {
+                            false
+                        } else {
+                            val planConfig = configStore.config.first()
+                            buildProductionEngine(
+                                planId, sessionId, plan, planConfig, repository, db, configStore, bridge
+                            ).convergeForSupersessionStop()
+                        }
+                    }
+                )
+                val result = coordinator.execute()
+                if (activeSupersessionStopRequestId != requestId) return@launch
+                _supersessionStopStatus.value = when (result) {
+                    is PlanRepository.SupersessionStopVerification.Verified ->
+                        SupersessionStopStatus.Verified(requestId, result.proof)
+                    is PlanRepository.SupersessionStopVerification.Blocked ->
+                        SupersessionStopStatus.Blocked(requestId, result.reason)
+                    is PlanRepository.SupersessionStopVerification.NeedsConvergence ->
+                        SupersessionStopStatus.Blocked(requestId, result.reason)
+                    PlanRepository.SupersessionStopVerification.StalePlan ->
+                        SupersessionStopStatus.Blocked(requestId, "STALE_PLAN")
+                }
+                activeSupersessionStopRequestId = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                if (activeSupersessionStopRequestId == requestId) {
+                    _supersessionStopStatus.value = SupersessionStopStatus.Blocked(
+                        requestId,
+                        "STOP_VERIFICATION_FAILED:${failure.javaClass.simpleName}"
+                    )
+                    activeSupersessionStopRequestId = null
                 }
             }
         }

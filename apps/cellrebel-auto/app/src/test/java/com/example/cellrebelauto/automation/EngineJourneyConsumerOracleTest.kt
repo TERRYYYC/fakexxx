@@ -2,6 +2,7 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptState
 import com.example.cellrebelauto.db.AppDatabase
@@ -25,6 +26,7 @@ import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -97,6 +99,8 @@ class EngineJourneyConsumerOracleTest {
     private val storedAdvances = mutableMapOf<String, StoredAdvance>()
     private var advanceInvocationCount = 0
     private var advanceEffectCount = 0
+    private var beforeAdvanceDispatch: (CompleteAndAdvanceRequestV1) -> Unit = {}
+    private var afterAdvanceEffect: () -> Unit = {}
 
     /** Test hook: mutate the armed post-advance observation (tamper one four-leg). */
     private var observationTamper: (EnvironmentObservationV1) -> EnvironmentObservationV1 = { it }
@@ -107,6 +111,7 @@ class EngineJourneyConsumerOracleTest {
             return ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
         }
         override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome {
+            org.junit.Assert.assertFalse("provider release must execute outside the Auto transaction", db.inTransaction())
             events += "release"
             return ApplyOutcome("RELEASED", false)
         }
@@ -141,6 +146,8 @@ class EngineJourneyConsumerOracleTest {
             return null
         }
         override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+            org.junit.Assert.assertFalse("advance must execute outside the Auto transaction", db.inTransaction())
+            beforeAdvanceDispatch(request)
             advanceInvocationCount += 1
             advanceCalls += request
             events += "advance"
@@ -192,6 +199,7 @@ class EngineJourneyConsumerOracleTest {
                     scheduleVersion = signed.scheduleVersionAfter
                 )
             }
+            afterAdvanceEffect()
             return signed
         }
     }
@@ -365,6 +373,60 @@ class EngineJourneyConsumerOracleTest {
             completionEvidenceSource = evidenceSource,
             elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
         )
+    }
+
+    @Test
+    fun `supersession stop with no provider owner succeeds without discovery or new work`() = runTest {
+        val (planId, taskId) = seedPlan()
+        repo.createSession(planId, 500L)
+
+        val converged = buildEngine(planId, VClock(), null).convergeForSupersessionStop()
+
+        assertTrue(converged)
+        assertEquals("stop-only never discovers when there is no owner", 0, discoverCalls.size)
+        assertEquals("stop-only never preflights a new owner", 0, preflightCalls.size)
+        assertEquals("stop-only never dispatches external work", emptyList<String>(), events)
+        assertEquals("stop-only never admits a new attempt", emptyList<TestAttempt>(),
+            db.testAttemptDao().getAttemptsForTask(taskId))
+    }
+
+    @Test
+    fun `supersession stop refuses CREATED instead of promoting it to provider work`() = runTest {
+        val (planId, taskId, attemptId) = seedCreatedRecoveryOwner()
+
+        val converged = buildEngine(
+            planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).convergeForSupersessionStop()
+
+        assertFalse(converged)
+        assertEquals("stop-only never discovers for CREATED", 0, discoverCalls.size)
+        assertEquals("stop-only never preflights CREATED", 0, preflightCalls.size)
+        assertEquals("stop-only never promotes CREATED into an external effect", emptyList<String>(), events)
+        assertEquals(AttemptState.CREATED.name, db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
+        assertEquals(listOf(attemptId), db.testAttemptDao().getAttemptsForTask(taskId).map { it.id })
+    }
+
+    @Test
+    fun `supersession stop refuses APPLY_PENDING without a durable receipt instead of replaying apply`() = runTest {
+        val (planId, taskId, attemptId) = seedCreatedRecoveryOwner()
+        repo.markAplusState(attemptId, AttemptState.APPLY_PENDING.name)
+
+        val converged = buildEngine(
+            planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).convergeForSupersessionStop()
+
+        assertFalse(converged)
+        assertEquals("stop-only never preflights a persisted APPLY_PENDING owner", 0, preflightCalls.size)
+        assertEquals("stop-only never replays provider apply without its durable receipt",
+            emptyList<String>(), events)
+        assertNull(db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attemptId)))
+        assertEquals(AttemptState.APPLY_PENDING.name,
+            db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
+        assertEquals(listOf(attemptId), db.testAttemptDao().getAttemptsForTask(taskId).map { it.id })
     }
 
     @Test
@@ -846,7 +908,8 @@ class EngineJourneyConsumerOracleTest {
     }
 
     private suspend fun assertExactApplyReceiptConvergesWithoutRedispatch(
-        capabilities: CapabilitySnapshotV1?
+        capabilities: CapabilitySnapshotV1?,
+        stopOnly: Boolean = false
     ) {
         val (planId, taskId, attemptId) = seedCreatedRecoveryOwner()
         repo.markAplusState(attemptId, AttemptState.APPLY_PENDING.name)
@@ -873,11 +936,16 @@ class EngineJourneyConsumerOracleTest {
         )
         discoverAnswer = capabilities
 
-        buildEngine(
+        val engine = buildEngine(
             planId,
             VClock(),
             com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
-        ).run()
+        )
+        if (stopOnly) {
+            assertTrue("stop-only convergence reaches a durable terminal owner", engine.convergeForSupersessionStop())
+        } else {
+            engine.run()
+        }
 
         assertEquals("the durable apply receipt is consumed without another provider apply",
             listOf("release"), events)
@@ -895,6 +963,13 @@ class EngineJourneyConsumerOracleTest {
     @Test
     fun `APPLY_PENDING with an exact durable receipt converges cleanup when discovery is unavailable`() = runTest {
         assertExactApplyReceiptConvergesWithoutRedispatch(null)
+    }
+
+    @Test
+    fun `supersession stop converges an existing APPLY_PENDING receipt without normal admission`() = runTest {
+        assertExactApplyReceiptConvergesWithoutRedispatch(null, stopOnly = true)
+        assertEquals("stop-only never enters the normal test runner", 0, cellRebelRunCalls)
+        assertEquals("stop-only never opens a fresh preflight", 0, preflightCalls.size)
     }
 
     @Test
@@ -1107,6 +1182,21 @@ class EngineJourneyConsumerOracleTest {
                     createdAt = 750L
                 )
             )
+            if (phase in setOf(
+                    AttemptState.ADVANCE_PENDING.name,
+                    AttemptState.ADVANCE_OBSERVING.name,
+                    AttemptState.ADVANCE_STATE_READBACK.name
+                )) {
+                repo.persistAdvanceReplayCarrier(
+                    attemptId,
+                    expectedTerminalAdvanceRequest(
+                        attemptId,
+                        repo.trustedCountForTask(firstTaskId),
+                        ownerRequiredSuccesses
+                    ),
+                    createdAt = 751L
+                )
+            }
         }
 
         advanceAnswer = AdvanceReceiptV1(
@@ -1178,6 +1268,12 @@ class EngineJourneyConsumerOracleTest {
 
     private suspend fun assertTerminalOwnerRecoveryClosesBeforeSecondTask(phase: String) {
         val fixture = seedExhaustedRecoveryFixture(phase)
+        if (phase == "RELEASED") {
+            // Compatibility success requires an exact pre-existing request, never reconstruction
+            // from the current clock after an external advance may already have happened.
+            repo.persistAdvanceReplayCarrier(fixture.attemptId,
+                expectedTerminalAdvanceRequest(fixture.attemptId, 1, 1), createdAt = 751L)
+        }
         val planId = fixture.planId
         val firstTaskId = fixture.firstTaskId
         val secondTaskId = fixture.secondTaskId
@@ -1292,12 +1388,16 @@ class EngineJourneyConsumerOracleTest {
             com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
         ).run()
 
-        assertEquals("terminal admission is the only provider read", 1, discoverCalls.size)
+        assertEquals("invalid local authority is classified before provider admission", 0, discoverCalls.size)
         assertEquals("an unproven legacy phase cannot replay advance", 0, advanceCalls.size)
         assertEquals("the original terminal effect remains singular", 1, advanceEffectCount)
         assertEquals("no release or advance call is permitted", emptyList<String>(), events)
-        assertEquals("the compatibility owner stays intact", "RELEASED",
+        assertEquals("the compatibility owner gets an atomic local rejection", "RECOVERY_REQUIRED",
             db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING",
+            repo.getAttempt(fixture.attemptId)!!.failureReason)
+        assertEquals(listOf("RELEASED->RECOVERY_REQUIRED[LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING]"),
+            db.auditEventDao().forAttempt(fixture.attemptId).map { it.payloadDigest })
         assertEquals("the unproven owner remains recoverable", "running",
             db.testAttemptDao().getAttemptById(fixture.attemptId)!!.status)
         assertEquals("the stop is durable", "paused",
@@ -1639,6 +1739,7 @@ class EngineJourneyConsumerOracleTest {
     fun `quota-met release recovery still converges release but protocol skew blocks advance`() = runTest {
         val fixture = seedExhaustedRecoveryFixture(
             phase = "RELEASE_PENDING",
+            persistReleaseReceipt = false,
             seedProviderAdvanceEffect = false
         )
         discoverAnswer = discoverAnswer!!.copy(
@@ -1924,6 +2025,69 @@ class EngineJourneyConsumerOracleTest {
             1, advanceCalls.size
         )
         assertEquals("the advancing proof carries the FULL quota count", 2, advanceCalls[0].completionProof.trustedSuccessCount)
+    }
+
+    @Test
+    fun `normal quota release audit failure exposes none of the atomic boundary`() = runTest {
+        val (planId, taskId) = seedPlan()
+        db.openHelper.writableDatabase.execSQL("""
+            CREATE TRIGGER fail_normal_release_audit BEFORE INSERT ON auto_audit_events
+            WHEN NEW.eventType = 'RELEASE_RECEIPT'
+            BEGIN SELECT RAISE(ABORT, 'injected normal release audit failure'); END
+        """.trimIndent())
+        runCatching { buildEngine(planId, VClock(), null).run() }
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals(listOf("apply", "release"), events)
+        assertNull(db.releaseReceiptDao().byLease("lease-${attempt.id}"))
+        assertNull(repo.getAdvanceReplayRequest(attempt.id))
+        assertEquals("RELEASE_PENDING", attempt.aplusState)
+        assertTrue(db.auditEventDao().forAttempt(attempt.id).none { it.eventType == "RELEASE_RECEIPT" })
+        assertEquals(0, advanceInvocationCount)
+    }
+
+    @Test
+    fun `death after atomic normal release before advance dispatch replays the complete stored request`() = runTest {
+        val (planId, taskId) = seedPlan()
+        var original: CompleteAndAdvanceRequestV1? = null
+        beforeAdvanceDispatch = { request ->
+            original = request
+            throw AssertionError("simulated death before advance dispatch")
+        }
+        runCatching { buildEngine(planId, VClock(), null).run() }
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertNotNull("the production path reached the advance seam", original)
+        assertEquals(0, advanceInvocationCount)
+        assertEquals("ADVANCE_PENDING", attempt.aplusState)
+        assertNotNull(db.releaseReceiptDao().byLease("lease-${attempt.id}"))
+        assertEquals(original, repo.getAdvanceReplayRequest(attempt.id))
+        assertEquals(1, db.auditEventDao().forAttempt(attempt.id).count { it.eventType == "RELEASE_RECEIPT" })
+
+        beforeAdvanceDispatch = {}
+        buildEngine(planId, VClock().apply { now = 999_999 }, null).run()
+        assertEquals(listOf(original), advanceCalls)
+        assertEquals(1, advanceEffectCount)
+        assertEquals("CLOSED", repo.getAttempt(attempt.id)!!.aplusState)
+    }
+
+    @Test
+    fun `death after provider advance effect before receipt delivery replays one exact request and one effect`() = runTest {
+        val (planId, taskId) = seedPlan()
+        afterAdvanceEffect = { throw AssertionError("simulated receipt delivery loss") }
+        runCatching { buildEngine(planId, VClock(), null).run() }
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        val original = advanceCalls.single()
+        assertEquals(1, advanceEffectCount)
+        assertEquals("ADVANCE_PENDING", attempt.aplusState)
+        assertEquals(original, repo.getAdvanceReplayRequest(attempt.id))
+        assertNull(repo.getAdvanceReceipt(attempt.id))
+
+        afterAdvanceEffect = {}
+        buildEngine(planId, VClock().apply { now = 999_999 }, null).run()
+        assertEquals(listOf(original, original), advanceCalls)
+        assertEquals(2, advanceInvocationCount)
+        assertEquals(1, advanceEffectCount)
+        assertNotNull(repo.getAdvanceReceipt(attempt.id))
+        assertEquals("CLOSED", repo.getAttempt(attempt.id)!!.aplusState)
     }
 
     @Test

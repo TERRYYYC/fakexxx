@@ -266,6 +266,30 @@ class RecoveryCoordinator(
         releaseDigest: String,
         now: Long
     ): RecordedReleaseReceipt? {
+        val handoff = prepareReleaseLease(attemptId, idempotencyKey, leaseId, releaseDigest, now)
+            ?: return null
+        if (handoff.alreadyDurable) {
+            return RecordedReleaseReceipt(handoff.idempotencyKey, handoff.leaseId,
+                handoff.releaseDigest, handoff.resultOutcome, handoff.createdAt)
+        }
+        return log.recordReleaseReceipt(
+            handoff.idempotencyKey, handoff.leaseId, handoff.releaseDigest,
+            handoff.resultOutcome, handoff.createdAt
+        )
+    }
+
+    /**
+     * Drive/replay the provider release outside Room, without committing an Auto receipt.
+     * The caller must pass this handoff to PlanRepository's release transaction before advancing.
+     * A death before that commit retries the SAME provider key; there is no distributed transaction.
+     */
+    fun prepareReleaseLease(
+        attemptId: Long,
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        now: Long
+    ): ProviderReleaseHandoff? {
         // INV-13 conflict preflight (Sol round-14 P1-2): any existing receipt is authoritative. Replay
         // ONLY the exact tuple (key + lease + digest) with a RELEASED outcome; any mismatch (same key /
         // different lease-or-digest, same lease / different key-or-digest, or FAILED) is fail-closed with
@@ -281,17 +305,33 @@ class RecoveryCoordinator(
                 // Release incomplete / failed → fail-closed (§8.1 RELEASE_INCOMPLETE → RECOVERY_REQUIRED).
                 return null
             }
-            return log.recordReleaseReceipt(idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now)
+            return ProviderReleaseHandoff(
+                idempotencyKey, leaseId, releaseDigest, releaseOutcome.outcome, now,
+                alreadyDurable = false
+            )
         }
         if (byKey == null || byLease == null || byKey != byLease) {
             return null
         }
         if (byKey.leaseId == leaseId && byKey.releaseDigest == releaseDigest && byKey.resultOutcome == "RELEASED") {
-            return byKey
+            return ProviderReleaseHandoff(
+                byKey.idempotencyKey, byKey.leaseId, byKey.releaseDigest,
+                byKey.resultOutcome, byKey.createdAt, alreadyDurable = true
+            )
         }
         return null
     }
 }
+
+/** Provider result only: this value does not itself prove an Auto commit. */
+class ProviderReleaseHandoff internal constructor(
+    val idempotencyKey: String,
+    val leaseId: String,
+    val releaseDigest: String,
+    val resultOutcome: String,
+    val createdAt: Long,
+    val alreadyDurable: Boolean
+)
 
 /**
  * Typed result of a recovery reconcile (Sol round-9 P1-3): carries the durable apply receipt + provider
