@@ -39,7 +39,11 @@ class CutoverRestoreProtocolTest {
         )
         assertState(journal, CutoverRestorePhase.DATASTORE_WRITTEN, CutoverRestoreAction.VERIFY, visible = false)
 
-        journal = advance(journal, CutoverRestoreEvent.Verified(identity), CutoverRestorePhase.VERIFIED)
+        journal = advance(
+            journal,
+            CutoverRestoreEvent.Verified(identity, DIGEST_A),
+            CutoverRestorePhase.VERIFIED
+        )
         assertState(
             journal,
             CutoverRestorePhase.VERIFIED,
@@ -59,7 +63,7 @@ class CutoverRestoreProtocolTest {
     fun `out of order proof is rejected without changing durable state`() {
         val staged = begin()
         val skippedRoom = reducer.reduce(staged, CutoverRestoreEvent.DataStoreWritten(identity))
-        val skippedDataStore = reducer.reduce(staged, CutoverRestoreEvent.Verified(identity))
+        val skippedDataStore = reducer.reduce(staged, CutoverRestoreEvent.Verified(identity, DIGEST_A))
         val prematurePublish = reducer.reduce(
             staged,
             CutoverRestoreEvent.PublishReady(identity, CutoverEligibility.ELIGIBLE)
@@ -132,6 +136,21 @@ class CutoverRestoreProtocolTest {
             assertFalse(journal.isVisible)
             assertEquals(CutoverRestoreAction.ROLLBACK, reducer.nextAction(journal))
         }
+    }
+
+    @Test
+    fun `readback digest mismatch cannot mint verified state`() {
+        val dataStoreWritten = dataStoreWritten()
+
+        val result = reducer.reduce(
+            dataStoreWritten,
+            CutoverRestoreEvent.Verified(identity, DIGEST_B)
+        )
+
+        val rollback = assertAdvanced(result, CutoverRestorePhase.ROLLBACK_REQUIRED)
+        assertEquals(CutoverRestoreFailureReason.ARCHIVE_VERIFICATION_FAILED, rollback.failureReason)
+        assertFalse(rollback.isVisible)
+        assertEquals(CutoverRestoreAction.ROLLBACK, reducer.nextAction(rollback))
     }
 
     @Test
@@ -271,7 +290,7 @@ class CutoverRestoreProtocolTest {
 
     private fun verified(): CutoverRestoreJournal = advance(
         dataStoreWritten(),
-        CutoverRestoreEvent.Verified(identity),
+        CutoverRestoreEvent.Verified(identity, DIGEST_A),
         CutoverRestorePhase.VERIFIED
     )
 

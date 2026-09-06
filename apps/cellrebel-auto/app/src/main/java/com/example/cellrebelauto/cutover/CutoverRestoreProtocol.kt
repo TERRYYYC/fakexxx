@@ -82,7 +82,8 @@ sealed interface CutoverRestoreEvent {
     ) : CutoverRestoreEvent
 
     data class Verified(
-        override val identity: CutoverRestoreIdentity
+        override val identity: CutoverRestoreIdentity,
+        val readbackArchiveDigest: String
     ) : CutoverRestoreEvent
 
     data class PublishReady(
@@ -158,11 +159,7 @@ class CutoverRestoreReducer {
                 expected = CutoverRestorePhase.ROOM_WRITTEN,
                 completed = CutoverRestorePhase.DATASTORE_WRITTEN
             )
-            is CutoverRestoreEvent.Verified -> completedStep(
-                current,
-                expected = CutoverRestorePhase.DATASTORE_WRITTEN,
-                completed = CutoverRestorePhase.VERIFIED
-            )
+            is CutoverRestoreEvent.Verified -> verify(current, event.readbackArchiveDigest)
             is CutoverRestoreEvent.PublishReady -> publishReady(current, event.eligibility)
             is CutoverRestoreEvent.Failed -> fail(current, event.reason)
             is CutoverRestoreEvent.RollbackCompleted -> rollbackCompleted(current)
@@ -238,6 +235,32 @@ class CutoverRestoreReducer {
                 )
             )
         }
+    }
+
+    private fun verify(
+        current: CutoverRestoreJournal,
+        readbackArchiveDigest: String
+    ): CutoverRestoreTransition {
+        if (current.phase == CutoverRestorePhase.DATASTORE_WRITTEN) {
+            return if (readbackArchiveDigest == current.identity.archiveDigest) {
+                advanced(current.copy(phase = CutoverRestorePhase.VERIFIED))
+            } else {
+                advanced(
+                    current.copy(
+                        phase = CutoverRestorePhase.ROLLBACK_REQUIRED,
+                        failureReason = CutoverRestoreFailureReason.ARCHIVE_VERIFICATION_FAILED
+                    )
+                )
+            }
+        }
+        if (current.phase == CutoverRestorePhase.VERIFIED || current.phase == CutoverRestorePhase.READY) {
+            return if (readbackArchiveDigest == current.identity.archiveDigest) {
+                CutoverRestoreTransition.Idempotent(current)
+            } else {
+                rejected(current, CutoverRestoreRejectionReason.INVALID_PHASE)
+            }
+        }
+        return rejected(current, CutoverRestoreRejectionReason.INVALID_PHASE)
     }
 
     private fun fail(
