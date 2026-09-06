@@ -180,7 +180,8 @@ jobs:
 
       - name: cutover identity APK contract
         working-directory: .
-        run: ./scripts/check-cutover-identity-variants.sh \
+        run: |
+          ./scripts/check-cutover-identity-variants.sh \
           apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk \
           apps/cellrebel-auto/app/build/outputs/apk/productId/debug/app-productId-debug.apk \
           apps/cellrebel-auto/app/build/outputs/apk/legacyId/glmbench/app-legacyId-glmbench.apk \
