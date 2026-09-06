@@ -65,7 +65,9 @@ suspend fun transitionToRecoveryRequired(
 
 The transaction re-reads the durable owner, runs `APlusAttemptDriver`/`AttemptTransitions`, requires `RECOVERY_REQUIRED`, writes `failureReason`, and appends exactly one event row whose payload is `<from>->RECOVERY_REQUIRED[<reason>]`. An immutable `UnverifiedAttemptRecord` is written and read back before this transition for every non-wire-1 CellRebel outcome; advance failure retains the existing trusted quota carrier and never fabricates an unverified completion.
 
-### #79 bound worklist (requires QWY owner confirmation before implementation)
+### #79 bound worklist (QWY owner-confirmed contract)
+
+The QWY owner froze the cross-app contract on 2026-09-07. Binding-capable discovery is advertised only by exact `serviceVersion = "1.1.0"`; merged `1.0.0` is permanently non-binding-capable. QWY may emit `1.1.0` only after its four-field schedule projection and identity/version invariants are implemented and host-tested. Auto uses an exact allowlist, never lexical version comparison or feature inference from non-empty catalogs.
 
 Proposed CSV v2 header:
 
@@ -83,7 +85,9 @@ DurableObservationRecord.scheduleItemId: String?
 DurableObservationRecord.scheduleVersion: Long?
 ```
 
-For a v2 plan every row must name the same non-blank `schedule_id`, item ids must be non-blank and unique, and partial binding is rejected atomically. The active authority tuple is QWY `currentScheduleId/currentItemId/scheduleVersion/exhausted`; `profileRefs` is catalog/diagnostic only. New bound attempts use `currentItemId` for `EnvironmentIntentV1.profileRef`; legacy attempts with null `aplusIntentProfileRef` recompute the existing literal `plan-$planId`, preserving all old digests and replays. An exact `serviceVersion` allowlist gates the new interpretation; version-only preflight→apply drift may have dispatched an apply, so Auto claims only zero trusted count, never zero external effect.
+For a v2 plan every row must name the same non-blank `schedule_id`, item ids must be non-blank and unique, and partial binding is rejected atomically. The active authority is one QWY snapshot containing `currentScheduleId/currentItemId/scheduleVersion/exhausted`: all four are non-null for an active schedule or all four are null when absent; a partial group fails closed. Within a schedule generation, schedule id and item ids are immutable and unique. An identity-changing reinitialization/reimport mints a new schedule id; other state mutations that affect the current item or terminality advance the monotonic schedule version. An additional Auto success for the same item does not itself advance QWY's version.
+
+`profileRefs` remains catalog/diagnostic only. New bound attempts use the active `currentItemId` for `EnvironmentIntentV1.profileRef`; legacy attempts with null `aplusIntentProfileRef` recompute the existing literal `plan-$planId`, preserving all old digests and replays. Auto binds the exact pre-apply tuple to the attempt and accepts provider advancement only after a fresh four-field readback proves a newer version and the expected next item or terminal state. Version regression, same-id semantic drift, a wrong schedule/item, or provider exhaustion without all real local quotas yields zero trusted count/recovery rather than completion. Preflight→apply drift may already have dispatched an apply, so Auto claims zero trusted count but never zero external effect.
 
 ## Stateful-object census
 
@@ -221,6 +225,6 @@ Adversarial tests cover: audit insertion rollback; duplicate recovery replay; pr
 
 ## Open questions
 
-- **Technical OQ (cross-end):** exact QWY `serviceVersion` that first guarantees the active schedule projection plus stable item identity. The QWY owner must confirm before #79 code; Auto will use an explicit allowlist, not lexical version comparison.
+- **Resolved cross-end decision:** exact QWY `serviceVersion = "1.1.0"` first guarantees the coherent four-field active schedule projection plus stable generation/item identity; `1.0.0` must never enter bound interpretation. QWY owns readiness emission, Auto owns exact allowlisting.
 - **Technical OQ (compatibility):** whether v2 CSV coordinates are retained only for legacy UI/GPS-stage compatibility or must exactly mirror a QWY profile projection. Auto cannot validate provider-internal coordinates and will not claim that equality.
 - **Value OQ:** none. Ownership, fail-closed behavior and legacy preservation are already frozen by the canonical A+ spec and issues #79/#86.
