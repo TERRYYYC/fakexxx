@@ -27,6 +27,8 @@ import name.caiyao.fakegps.mockprovider.MockProviderGateway
  */
 interface QwyEnvironment {
 
+    /** Ordered, read-only profile owner projection. Empty is an honest unavailable projection. */
+    fun profileRefsSnapshot(): List<String> = emptyList()
     fun scheduleSnapshot(): ScheduleSnapshot?
     fun advancePointer(fromItemId: String): AdvancePointerOutcome
     fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean = false
@@ -118,25 +120,30 @@ class QwyEnvironmentController(
     }
 
     private fun initScheduleFromDb() {
-        AppDatabase.ensureLegacyDatabaseRecovered(appContext)
-        val dbFile = appContext.getDatabasePath("fakegps.db")
-        if (!dbFile.exists()) return
-        val db = SQLiteDatabase.openDatabase(
-            dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
-        )
-        val profileIds = try {
-            val cursor = db.rawQuery("SELECT id FROM temp ORDER BY id ASC", null)
-            val ids = mutableListOf<Long>()
-            while (cursor.moveToNext()) {
-                ids.add(cursor.getLong(0))
-            }
-            cursor.close()
-            ids
-        } finally {
-            db.close()
-        }
+        val profileIds = readProfileIds()
         if (profileIds.isNotEmpty()) {
             scheduleStore.initFromProfileIds(profileIds)
+        }
+    }
+
+    override fun profileRefsSnapshot(): List<String> =
+        ProfileRefProjection.fromLegacyIds(readProfileIds())
+
+    private fun readProfileIds(): List<Long> {
+        val dbFile = appContext.getDatabasePath("fakegps.db")
+        if (!dbFile.exists()) return emptyList()
+        return try {
+            SQLiteDatabase.openDatabase(
+                dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
+            ).use { db ->
+                db.rawQuery("SELECT id FROM temp ORDER BY id ASC", null).use { cursor ->
+                    buildList {
+                        while (cursor.moveToNext()) add(cursor.getLong(0))
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 

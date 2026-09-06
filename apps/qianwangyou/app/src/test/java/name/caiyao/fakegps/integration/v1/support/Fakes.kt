@@ -151,6 +151,7 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     // --- config (memory by design) ---
     var scheduleId: String = "sched-1"
     var itemIds: MutableList<String> = mutableListOf("item-1", "item-2", "item-3")
+    var profileRefs: List<String> = emptyList()
     var cleanupOutcome: CleanupOutcome = CleanupOutcome.Complete
     var isMock: Boolean? = true
     var fingerprint: String = "fp-1"
@@ -214,6 +215,8 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var hasSchedule: Boolean
         get() = kv.read(SCHEDULE_NAMESPACE, "present") != "0"
         set(value) = kv.write(SCHEDULE_NAMESPACE, "present", if (value) "1" else "0")
+
+    override fun profileRefsSnapshot(): List<String> = profileRefs
 
     override fun scheduleSnapshot(): ScheduleSnapshot? =
         if (!hasSchedule) {

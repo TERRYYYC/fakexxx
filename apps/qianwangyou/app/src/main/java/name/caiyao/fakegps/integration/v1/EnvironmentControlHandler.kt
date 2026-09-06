@@ -110,7 +110,7 @@ class EnvironmentControlHandler(
             ),
             continuityCoverageWire = snap.coverageWire,
             environmentRevision = snap.revision,
-            profileRefs = emptyList(),
+            profileRefs = environment.profileRefsSnapshot(),
             scheduleRefs = if (schedule != null) listOf(schedule.scheduleId) else emptyList(),
             // v1.55 schedule projection group: all four null together when no
             // active schedule, all four non-null together otherwise.
