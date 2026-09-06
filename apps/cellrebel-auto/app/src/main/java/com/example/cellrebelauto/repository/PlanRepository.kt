@@ -8,6 +8,7 @@ import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.AttemptWithTask
@@ -262,9 +263,31 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markAplusState(attemptId: Long, aplusState: String) =
         db.testAttemptDao().markAplusState(attemptId, aplusState)
 
-    /** Atomically mark RECOVERY_REQUIRED with durable typed reason (Sol R2 P1-3). */
-    suspend fun markRecoveryRequired(attemptId: Long, reason: String) =
+    /**
+     * Persist a recovery-required fact as one transaction: the Attempt remains the state owner,
+     * while the append-only audit row records the same typed reason. Neither durable half may be
+     * observed on its own after this call returns.
+     */
+    suspend fun markRecoveryRequired(
+        attemptId: Long,
+        reason: String,
+        nowMs: Long = System.currentTimeMillis()
+    ) = db.withTransaction {
+        val previous = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+            "cannot mark missing attempt $attemptId recovery-required"
+        }
         db.testAttemptDao().markRecoveryRequired(attemptId, reason)
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = db.auditEventDao().count().toLong() + 1,
+                attemptId = attemptId,
+                correlationRef = null,
+                eventType = "RECOVERY_REQUIRED",
+                payloadDigest = "${previous.aplusState ?: "null"}->RECOVERY_REQUIRED[$reason]",
+                recordedAt = nowMs
+            )
+        )
+    }
 
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
         db.testAttemptDao().markAplusLease(attemptId, leaseId)

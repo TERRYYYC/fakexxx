@@ -408,6 +408,10 @@ class AdvanceMatrixTest {
                 val receipt = journeyExecutor.completeAndAdvance(request, expectedIntentHash) ?: return null
                 return receipt.copy(receiptDigest = "forged-${receipt.receiptDigest}")
             }
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
         }
         val (planId, _) = seedAdvanceCrash("ADVANCE_PENDING")
         buildEngine(planId, VClock(), forgedExecutor).run()
@@ -423,6 +427,10 @@ class AdvanceMatrixTest {
         val tamperedExecutor = object : ExternalApplyExecutor by journeyExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 journeyExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = journeyExecutor.observe(leaseId, operationId, expectedIntentHash)
                 return honest?.copy(acceptedIntentHash = "wrong-intent")
@@ -451,6 +459,10 @@ class AdvanceMatrixTest {
         val tamperedExecutor = object : ExternalApplyExecutor by journeyExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 journeyExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = journeyExecutor.observe(leaseId, operationId, expectedIntentHash)
                 return honest?.copy(environmentRevision = 999L)

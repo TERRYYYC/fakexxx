@@ -418,6 +418,10 @@ class EngineAdvanceRecoveryOracleTest {
                 val receipt = realExecutor.completeAndAdvance(request, expectedIntentHash) ?: return null
                 return receipt.copy(receiptDigest = "forged-${receipt.receiptDigest}")
             }
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
         }
         val (planId, taskId) = seedCrashedAt("ADVANCE_PENDING")
         val clock = VClock()
@@ -530,6 +534,10 @@ class EngineAdvanceRecoveryOracleTest {
                 val receipt = realExecutor.completeAndAdvance(request, expectedIntentHash) ?: return null
                 return receipt.copy(receiptDigest = "forged-exhausted-${receipt.receiptDigest}")
             }
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
         }
         val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
         buildEngineWith(planId, VClock(), forgedExecutor).run()
@@ -556,6 +564,10 @@ class EngineAdvanceRecoveryOracleTest {
         val exhaustedExecutor = object : ExternalApplyExecutor by realExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun discover(): CapabilitySnapshotV1? {
                 // Aligned terminal-recovery control: provider and local plan are both complete, so
                 // Issue #88 must still permit the idempotent replay that closes the crashed attempt.
@@ -615,6 +627,10 @@ class EngineAdvanceRecoveryOracleTest {
         val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
                 // Tamper ONLY the intentHash leg — all other legs still match
@@ -650,6 +666,10 @@ class EngineAdvanceRecoveryOracleTest {
         val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
                 // Tamper ONLY the environmentRevision leg
@@ -676,6 +696,10 @@ class EngineAdvanceRecoveryOracleTest {
         val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
                 // Tamper ONLY the scheduleVersion leg
