@@ -31,10 +31,9 @@ set -u
 # convention as mock_provider_acceptance.sh).
 # Guarded device-free by scripts/selftest-test-hook-package-identity.sh.
 #
-# Known residual (needs on-device path verification before pinning):
-# snapshot_prefs()/has_pending_recovery() scan /data/misc for
-# spoof_config.xml without a package filter; with BOTH production and bench
-# installed the fingerprint helpers fail loud (values != 1), never silent.
+# Vector-backed preference reads are exact-package, exactly-one-source and
+# fail closed through vector-evidence.sh. They never scan another installed
+# package's safe-zone or treat app-private state as canonical.
 BENCH_PACKAGE="name.caiyao.fakegps.bench"
 ACT="$BENCH_PACKAGE/name.caiyao.fakegps.ui.ComposeActivity"
 ACCEPTANCE_ACT="$BENCH_PACKAGE/name.caiyao.fakegps.probe.HookAcceptanceActivity"
@@ -104,15 +103,218 @@ snapshot_db() {
         sed -n '/^Row:/p'
 }
 
-snapshot_prefs() {
-    local live_path
-    if ! live_path=$(ve_resolve_single_live_path "$BENCH_PACKAGE" spoof_config.xml); then
-        echo "TEST_HOOK_FAIL cannot resolve exactly one live Vector prefs source for $BENCH_PACKAGE — fail-closed, no app-private fallback" >&2
-        return 1
+parse_vector_prefs_xml() { # mode=(json|pending) input-file
+    if [ "$#" -ne 2 ]; then
+        echo "TEST_HOOK_FAIL semantic Vector XML parser expects <json|pending> <file>" >&2
+        return 2
     fi
-    ve_live_root_shell "cat $live_path" 2>/dev/null |
-        sed -n '/<string name="json">/p' |
-        LC_ALL=C sort
+    local mode="$1" input_file="$2" parser_rc
+    case "$mode" in json|pending) ;; *)
+        echo "TEST_HOOK_FAIL unknown semantic Vector XML mode: $mode" >&2
+        return 2 ;;
+    esac
+    [ -s "$input_file" ] && [ ! -L "$input_file" ] || {
+        echo "TEST_HOOK_FAIL semantic Vector XML input is missing, empty, or a symlink: $input_file" >&2
+        return 2
+    }
+    "$PY" - "$mode" "$input_file" <<'PY'
+import html
+import json
+import re
+import sys
+import xml.etree.ElementTree as ElementTree
+
+mode, input_path = sys.argv[1:]
+
+
+def reject(message):
+    print(f"semantic Vector XML rejected: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def reject_nonfinite_json(value):
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+try:
+    with open(input_path, "rb") as source:
+        xml_bytes = source.read()
+    if not xml_bytes:
+        reject("input is empty")
+    if xml_bytes.startswith((
+        b"\xef\xbb\xbf",
+        b"\xff\xfe\x00\x00",
+        b"\x00\x00\xfe\xff",
+        b"\xff\xfe",
+        b"\xfe\xff",
+    )):
+        reject("byte-order marks are forbidden; transport must be plain UTF-8")
+    if b"\x00" in xml_bytes:
+        reject("NUL bytes are forbidden; UTF-16/32 transports are not accepted")
+    xml_text = xml_bytes.decode("utf-8", errors="strict")
+    declaration = re.match(r"\A\s*<\?xml\s+([^?]*)\?>", xml_text, flags=re.IGNORECASE)
+    if declaration is not None:
+        encoding = re.search(
+            r"\bencoding\s*=\s*(['\"])([^'\"]+)\1",
+            declaration.group(1),
+            flags=re.IGNORECASE,
+        )
+        if encoding is not None and encoding.group(2).casefold() != "utf-8":
+            reject(f"XML declaration encoding is not UTF-8: {encoding.group(2)!r}")
+    upper_xml = xml_text.upper()
+    if "<!DOCTYPE" in upper_xml or "<!ENTITY" in upper_xml:
+        reject("DTD/entity declarations are forbidden")
+    root = ElementTree.fromstring(xml_text)
+    if root.tag != "map":
+        reject(f"SharedPreferences root must be map, got {root.tag!r}")
+    if root.attrib:
+        reject("SharedPreferences map root must not have attributes")
+    if root.text is not None and root.text.strip():
+        reject("SharedPreferences map contains non-whitespace character data")
+
+    direct_children = list(root)
+    direct_ids = {id(child) for child in direct_children}
+    seen_names = set()
+    for child in direct_children:
+        name = child.attrib.get("name")
+        if not name:
+            reject(f"direct {child.tag!r} entry has no nonempty name")
+        if name in seen_names:
+            reject(f"duplicate direct SharedPreferences key: {name}")
+        seen_names.add(name)
+        if child.tail is not None and child.tail.strip():
+            reject(f"non-whitespace text follows SharedPreferences key: {name}")
+
+    target_name = "json" if mode == "json" else "pending"
+    for descendant in root.iter():
+        if descendant is root or id(descendant) in direct_ids:
+            continue
+        if descendant.attrib.get("name") == target_name:
+            reject(f"target key {target_name!r} must be a direct child of map")
+
+    target_nodes = [
+        child for child in direct_children
+        if child.attrib.get("name") == target_name
+    ]
+    if mode == "json":
+        if len(target_nodes) != 1:
+            reject(f"expected exactly one direct string[name=json], got {len(target_nodes)}")
+        node = target_nodes[0]
+        if node.tag != "string" or set(node.attrib) != {"name"}:
+            reject("json key must be exactly string[name=json]")
+        if list(node):
+            reject("string[name=json] must contain text only")
+        payload = node.text
+        if payload is None or payload == "":
+            reject("string[name=json] is empty")
+        decoded = json.loads(
+            payload,
+            object_pairs_hook=reject_duplicate_json_keys,
+            parse_constant=reject_nonfinite_json,
+        )
+        if not isinstance(decoded, dict):
+            reject("string[name=json] must contain a JSON object")
+        # Preserve the exact decoded payload bytes used by the app's fingerprint,
+        # but encode it as one stable line for the existing fingerprint/refresh
+        # consumers. html.unescape() reconstructs the original payload exactly.
+        escaped = html.escape(payload, quote=False)
+        escaped = escaped.replace("\r", "&#13;").replace("\n", "&#10;")
+        print(f'<string name="json">{escaped}</string>')
+    else:
+        if len(target_nodes) == 0:
+            print("false")
+        elif len(target_nodes) == 1:
+            node = target_nodes[0]
+            if node.tag != "boolean" or set(node.attrib) != {"name", "value"}:
+                reject("pending key must be exactly boolean[name=pending,value=true|false]")
+            if list(node) or (node.text is not None and node.text.strip()):
+                reject("boolean[name=pending] must not contain text or child elements")
+            value = node.attrib.get("value")
+            if value not in {"true", "false"}:
+                reject(f"pending boolean has invalid value: {value!r}")
+            print(value)
+        else:
+            reject(f"expected at most one direct boolean[name=pending], got {len(target_nodes)}")
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError, ElementTree.ParseError) as error:
+    reject(error)
+PY
+    parser_rc=$?
+    if [ "$parser_rc" -ne 0 ]; then
+        echo "TEST_HOOK_FAIL semantic Vector XML parser failed mode=$mode rc=$parser_rc" >&2
+        return 2
+    fi
+    return 0
+}
+
+cleanup_vector_prefs_temp_dir() { # temp-dir label=(prefs|recovery)
+    if [ "$#" -ne 2 ]; then
+        echo "TEST_HOOK_FAIL temporary Vector cleanup expects <dir> <prefs|recovery>" >&2
+        return 2
+    fi
+    local temp_dir="$1" label="$2" cleanup_rc temp_root="${TMPDIR:-/tmp}"
+    while [ "$temp_root" != / ] && [ "${temp_root%/}" != "$temp_root" ]; do
+        temp_root=${temp_root%/}
+    done
+    case "$label:$temp_dir" in
+        prefs:"$temp_root"/fakegps-vector-prefs.*|recovery:"$temp_root"/fakegps-vector-recovery.*) ;;
+        *)
+            echo "TEST_HOOK_FAIL refusing unsafe temporary Vector $label cleanup target: $temp_dir" >&2
+            return 2 ;;
+    esac
+    rm -rf -- "$temp_dir" 2>/dev/null
+    cleanup_rc=$?
+    if [ "$cleanup_rc" -ne 0 ]; then
+        echo "TEST_HOOK_FAIL temporary Vector $label cleanup failed rc=$cleanup_rc: $temp_dir" >&2
+        return 2
+    fi
+    if [ -e "$temp_dir" ] || [ -L "$temp_dir" ]; then
+        echo "TEST_HOOK_FAIL temporary Vector $label directory survived cleanup: $temp_dir" >&2
+        return 2
+    fi
+    return 0
+}
+
+snapshot_prefs() {
+    local read_dir read_file snapshot="" read_rc=0 parser_rc=0 cleanup_rc
+    local temp_root="${TMPDIR:-/tmp}"
+    while [ "$temp_root" != / ] && [ "${temp_root%/}" != "$temp_root" ]; do
+        temp_root=${temp_root%/}
+    done
+    read_dir=$(mktemp -d "$temp_root/fakegps-vector-prefs.XXXXXX") || {
+        echo "TEST_HOOK_FAIL cannot create local staging directory for Vector prefs" >&2
+        return 2
+    }
+    read_file="$read_dir/spoof_config.xml"
+    ve_read_single_live_file "$BENCH_PACKAGE" spoof_config.xml "$read_file"
+    read_rc=$?
+    if [ "$read_rc" -eq 0 ]; then
+        snapshot=$(parse_vector_prefs_xml json "$read_file")
+        parser_rc=$?
+    fi
+    cleanup_vector_prefs_temp_dir "$read_dir" prefs
+    cleanup_rc=$?
+    if [ "$cleanup_rc" -ne 0 ]; then
+        return 2
+    fi
+    if [ "$read_rc" -ne 0 ]; then
+        echo "TEST_HOOK_FAIL cannot read exactly one live Vector prefs source for $BENCH_PACKAGE — fail-closed, no app-private fallback" >&2
+        return "$read_rc"
+    fi
+    if [ "$parser_rc" -ne 0 ] || [ -z "$snapshot" ]; then
+        echo "TEST_HOOK_FAIL live Vector prefs XML is not one strict json payload (parser_rc=$parser_rc)" >&2
+        return 2
+    fi
+    printf '%s\n' "$snapshot"
+    return 0
 }
 
 prefs_payload_fingerprint() {
@@ -180,10 +382,44 @@ has_state() {
 }
 
 has_pending_recovery() {
-    root_shell \
-        "find /data/misc -type f -name hook_acceptance_recovery.xml -exec cat {} \;" \
-        2>/dev/null |
-        grep -F 'name="pending" value="true"' >/dev/null
+    # Return 0=pending, 1=present and clear, 2=source/read failure. Callers
+    # must not collapse status 2 into "no pending recovery".
+    local read_dir read_file pending_state="" read_rc=0 parser_rc=0 cleanup_rc
+    local temp_root="${TMPDIR:-/tmp}"
+    while [ "$temp_root" != / ] && [ "${temp_root%/}" != "$temp_root" ]; do
+        temp_root=${temp_root%/}
+    done
+    read_dir=$(mktemp -d "$temp_root/fakegps-vector-recovery.XXXXXX") || {
+        echo "TEST_HOOK_FAIL cannot create local staging directory for recovery prefs" >&2
+        return 2
+    }
+    read_file="$read_dir/hook_acceptance_recovery.xml"
+    ve_read_single_live_file "$BENCH_PACKAGE" hook_acceptance_recovery.xml "$read_file"
+    read_rc=$?
+    if [ "$read_rc" -eq 0 ]; then
+        pending_state=$(parse_vector_prefs_xml pending "$read_file")
+        parser_rc=$?
+    fi
+    cleanup_vector_prefs_temp_dir "$read_dir" recovery
+    cleanup_rc=$?
+    if [ "$cleanup_rc" -ne 0 ]; then
+        return 2
+    fi
+    if [ "$read_rc" -ne 0 ]; then
+        echo "TEST_HOOK_FAIL cannot read exactly one live Vector recovery source for $BENCH_PACKAGE" >&2
+        return 2
+    fi
+    if [ "$parser_rc" -ne 0 ]; then
+        echo "TEST_HOOK_FAIL recovery XML semantic parser failed (rc=$parser_rc)" >&2
+        return 2
+    fi
+    case "$pending_state" in
+        true) return 0 ;;
+        false) return 1 ;;
+        *)
+            echo "TEST_HOOK_FAIL recovery XML parser emitted invalid state: ${pending_state:-<empty>}" >&2
+            return 2 ;;
+    esac
 }
 
 # Poll for the payload-less fail-fast abort signature: the real probe's
@@ -216,7 +452,10 @@ restore_database_payload() {
 
     attempt=0
     while [ "$attempt" -lt 12 ]; do
-        current=$(snapshot_prefs)
+        if ! current=$(snapshot_prefs); then
+            echo "HARNESS_ERROR live Vector transport read failed during restore" >&2
+            return 1
+        fi
         if [ -n "$PREFS_BEFORE" ] && [ "$current" = "$PREFS_BEFORE" ]; then
             return 0
         fi
@@ -253,8 +492,10 @@ cleanup_transaction() {
             echo "VERIFIED restore.database unchanged"
         fi
 
-        prefs_after=$(snapshot_prefs)
-        if [ "$prefs_after" != "$PREFS_BEFORE" ]; then
+        if ! prefs_after=$(snapshot_prefs); then
+            echo "HARNESS_ERROR live Vector transport read failed during cleanup verification" >&2
+            RESTORE_FAILED=1
+        elif [ "$prefs_after" != "$PREFS_BEFORE" ]; then
             echo "HARNESS_ERROR transport does not match pre-test fingerprint" >&2
             RESTORE_FAILED=1
         else
@@ -481,8 +722,12 @@ run_current_profile() {
     [ -n "$probe" ] ||
         { echo "HARNESS_ERROR no public-API probe diagnostic" >&2; return 1; }
 
+    prefs=$(snapshot_prefs) || {
+        echo "HARNESS_ERROR live Vector transport read failed" >&2
+        return 2
+    }
     echo "[DB] $db"
-    echo "[transport] $(snapshot_prefs)"
+    echo "[transport] $prefs"
     echo "[hook] $diag"
     echo "[probe] $probe"
     echo "DIAGNOSTIC_ONLY current profile was not substituted with a distinct matrix"
@@ -498,9 +743,9 @@ run_current_profile() {
 #     onCreate fails fast on the missing session extra and aborts BEFORE any
 #     transaction step (no recovery prepare, no publish). A "published" state
 #     log means a transaction was entered and this mode FAILS.
-# Deliberately does NOT reuse snapshot_prefs()/has_pending_recovery():
-# their unfiltered /data/misc scans loud-fail on two-package devices
-# (production + .bench coinstalled).
+# Deliberately does not read preferences here: the two-sided component proof is
+# complete without sampling mutable business state. The shared preference
+# readers above remain exact-package and fail closed when independently used.
 # Guarded device-free by scripts/selftest-test-hook-acceptance-readiness.sh.
 run_acceptance_readiness() {
     # Bounded-excerpt pattern sets, declared ONCE and emitted verbatim in the
@@ -824,11 +1069,21 @@ verify_durable_recovery() {
         read_acceptance_logs >&2
         return 1
     }
-    has_pending_recovery || {
-        echo "HARNESS_ERROR durable recovery record missing before overwrite" >&2
-        return 1
+    has_pending_recovery
+    pending_rc=$?
+    case "$pending_rc" in
+        0) ;;
+        1)
+            echo "HARNESS_ERROR durable recovery record missing before overwrite" >&2
+            return 1 ;;
+        *)
+            echo "HARNESS_ERROR durable recovery record could not be read before overwrite" >&2
+            return 2 ;;
+    esac
+    during=$(snapshot_prefs) || {
+        echo "HARNESS_ERROR live Vector transport read failed during recovery test" >&2
+        return 2
     }
-    during=$(snapshot_prefs)
     [ "$during" != "$PREFS_BEFORE" ] || {
         echo "HARNESS_ERROR recovery probe did not publish a distinct payload" >&2
         return 1
@@ -852,15 +1107,24 @@ verify_durable_recovery() {
     }
     attempt=0
     while [ "$attempt" -lt 12 ]; do
-        current=$(snapshot_prefs)
-        if [ "$current" = "$PREFS_BEFORE" ] &&
-            ! has_pending_recovery &&
-            adb logcat -d -v brief -s FakeGPSAcceptanceRecovery:W '*:S' \
+        current=$(snapshot_prefs) || {
+            echo "HARNESS_ERROR live Vector transport read failed after recovery restart" >&2
+            return 2
+        }
+        has_pending_recovery
+        pending_rc=$?
+        if [ "$pending_rc" -eq 2 ]; then
+            echo "HARNESS_ERROR durable recovery record could not be read after restart" >&2
+            return 2
+        fi
+        if [ "$current" = "$PREFS_BEFORE" ] && [ "$pending_rc" -eq 1 ]; then
+            if adb logcat -d -v brief -s FakeGPSAcceptanceRecovery:W '*:S' \
                 2>/dev/null |
                 grep -F "recovered_pending fp=$PREFS_BEFORE_FINGERPRINT" >/dev/null
-        then
-            echo "VERIFIED recovery.sigkill durable record restored pre-test payload"
-            return 0
+            then
+                echo "VERIFIED recovery.sigkill durable record restored pre-test payload"
+                return 0
+            fi
         fi
         sleep 1
         attempt=$((attempt + 1))
@@ -878,7 +1142,10 @@ run_cellular_matrix() {
     DB_BEFORE=$(snapshot_db)
     [ -n "$DB_BEFORE" ] ||
         { echo "HARNESS_ERROR no saved profile to protect" >&2; return 2; }
-    PREFS_BEFORE=$(snapshot_prefs)
+    PREFS_BEFORE=$(snapshot_prefs) || {
+        echo "HARNESS_ERROR live Vector transport source unavailable" >&2
+        return 2
+    }
     [ -n "$PREFS_BEFORE" ] ||
         { echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2; return 2; }
     PREFS_BEFORE_FINGERPRINT=$(prefs_payload_fingerprint "$PREFS_BEFORE") ||
@@ -917,7 +1184,10 @@ run_runtime_verify() {
         echo "HARNESS_ERROR runtime verification tool missing" >&2
         return 2
     }
-    prefs=$(snapshot_prefs)
+    prefs=$(snapshot_prefs) || {
+        echo "HARNESS_ERROR live Vector transport source unavailable" >&2
+        return 2
+    }
     [ -n "$prefs" ] || {
         echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2
         return 2
