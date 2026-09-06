@@ -13,6 +13,8 @@ import androidx.annotation.Nullable;
 
 import java.io.File;
 
+import name.caiyao.fakegps.data.db.AppDatabase;
+
 public class AppInfoProvider extends ContentProvider {
     private static final String TAG = "AppInfoProvider";
     public static final Uri APP_CONTENT_URI = Uri.parse("content://" + ProviderAuthority.AUTHORITY + "/app");
@@ -43,6 +45,14 @@ public class AppInfoProvider extends ContentProvider {
      * Uses WAL mode for safe concurrent reads alongside Room's own connection.
      */
     private synchronized SQLiteDatabase getDatabase() {
+        // A pre-Room v0 file cannot be safely read through this raw SQLite handle. Recovery may
+        // replace the file, so only retain a cache when no replacement occurred on this call.
+        if (AppDatabase.Companion.ensureLegacyDatabaseRecovered(getContext())) {
+            if (mSQLiteDatabase != null && mSQLiteDatabase.isOpen()) {
+                mSQLiteDatabase.close();
+            }
+            mSQLiteDatabase = null;
+        }
         if (mSQLiteDatabase != null && mSQLiteDatabase.isOpen()) {
             return mSQLiteDatabase;
         }

@@ -8,6 +8,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import java.io.File
+import java.io.RandomAccessFile
 
 @Database(entities = [ProfileEntity::class], version = 2, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
@@ -48,8 +49,13 @@ abstract class AppDatabase : RoomDatabase() {
          * Call this before any direct read of fakegps.db; Room callers receive it through
          * [getInstance].
          */
-        fun ensureLegacyDatabaseRecovered(context: Context) {
-            synchronized(this) {
+        /**
+         * @return true when this call promoted (or resumed promotion of) a legacy database.
+         * Callers with their own SQLite handle use this to discard a handle that may point at a
+         * file that was just moved to the retained backup.
+         */
+        fun ensureLegacyDatabaseRecovered(context: Context): Boolean {
+            return synchronized(this) {
                 val appContext = context.applicationContext
                 val live = appContext.getDatabasePath(DATABASE_NAME)
                 val backup = appContext.getDatabasePath("$DATABASE_NAME$BACKUP_SUFFIX")
@@ -60,15 +66,28 @@ abstract class AppDatabase : RoomDatabase() {
                         check(!backup.exists()) {
                             "Refusing to overwrite preserved legacy database: ${backup.name}"
                         }
-                        ensureStagingDatabase(appContext, live, staging)
-                        moveDatabaseFiles(live, backup)
-                        promoteStagingDatabase(staging, live)
+                        // A stage beside a still-live source may have been made before a writer
+                        // appended more WAL frames. It is not authoritative; rebuild it from the
+                        // current source rather than ever promoting a stale snapshot.
+                        removeStagingDatabase(staging)
+                        try {
+                            ensureStagingDatabase(appContext, live, staging)
+                            moveDatabaseFiles(live, backup)
+                            promoteStagingDatabase(staging, live)
+                        } catch (failure: Throwable) {
+                            removeStagingDatabase(staging)
+                            throw failure
+                        }
+                        true
                     }
 
                     !live.exists() && backup.exists() -> {
                         ensureStagingDatabase(appContext, backup, staging)
                         promoteStagingDatabase(staging, live)
+                        true
                     }
+
+                    else -> false
                 }
             }
         }
@@ -96,8 +115,11 @@ abstract class AppDatabase : RoomDatabase() {
                 check(isLegacyV0Database(source)) {
                     "Legacy recovery source no longer matches the v0 non-Room schema: ${legacy.name}"
                 }
-                // Make the source main file self-contained before it is preserved as a backup.
-                source.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { }
+                // The source main file is renamed before the staged file is promoted. Do not
+                // cross that boundary until every WAL frame is in the main database: a reader
+                // holding a WAL snapshot must make recovery fail closed rather than preserve a
+                // backup that is missing committed profile rows.
+                requireFullyCheckpointed(source, legacy)
 
                 val sourceColumns = tableColumns(source, "temp")
                 val sourceCount = tableRowCount(source, "temp")
@@ -133,7 +155,7 @@ abstract class AppDatabase : RoomDatabase() {
                     check(integrityCheck(target) == "ok") {
                         "Legacy recovery staging integrity check failed"
                     }
-                    target.query("PRAGMA wal_checkpoint(TRUNCATE)").use { }
+                    requireFullyCheckpointed(target, staging)
                 } finally {
                     stagedRoom.close()
                 }
@@ -175,17 +197,73 @@ abstract class AppDatabase : RoomDatabase() {
 
         private fun moveDatabaseFiles(source: File, destination: File) {
             check(!destination.exists()) { "Database destination already exists: ${destination.name}" }
+            requireNoDatabaseSidecars(source)
             check(source.renameTo(destination)) {
                 "Unable to move database ${source.name} to ${destination.name}"
             }
-            listOf("-journal", "-wal", "-shm").forEach { suffix ->
-                val sourceSidecar = File(source.absolutePath + suffix)
-                if (sourceSidecar.exists()) {
-                    check(sourceSidecar.renameTo(File(destination.absolutePath + suffix))) {
-                        "Unable to move database sidecar ${sourceSidecar.name}"
-                    }
+        }
+
+        private fun removeStagingDatabase(staging: File) {
+            listOf(staging, *listOf("-journal", "-wal", "-shm").map { File(staging.absolutePath + it) }.toTypedArray())
+                .filter(File::exists)
+                .forEach { file ->
+                    check(file.delete()) { "Unable to discard stale legacy recovery staging file ${file.name}" }
+                }
+        }
+
+        private fun requireFullyCheckpointed(database: SQLiteDatabase, file: File) {
+            database.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { cursor ->
+                check(cursor.moveToFirst()) { "WAL checkpoint did not return a result" }
+                val busy = cursor.getInt(0)
+                val logFrames = cursor.getInt(1)
+                val checkpointedFrames = cursor.getInt(2)
+                check(busy == 0 &&
+                    ((logFrames == -1 && checkpointedFrames == -1) ||
+                        (logFrames == 0 && checkpointedFrames == 0))) {
+                    "Legacy recovery refuses to move ${file.name} while WAL frames are still " +
+                        "owned by another reader (busy=$busy, log=$logFrames, checkpointed=$checkpointedFrames)"
                 }
             }
+        }
+
+        private fun requireFullyCheckpointed(database: SupportSQLiteDatabase, file: File) {
+            database.query("PRAGMA wal_checkpoint(TRUNCATE)").use { cursor ->
+                check(cursor.moveToFirst()) { "WAL checkpoint did not return a result" }
+                val busy = cursor.getInt(0)
+                val logFrames = cursor.getInt(1)
+                val checkpointedFrames = cursor.getInt(2)
+                check(busy == 0 &&
+                    ((logFrames == -1 && checkpointedFrames == -1) ||
+                        (logFrames == 0 && checkpointedFrames == 0))) {
+                    "Legacy recovery refuses to move ${file.name} while WAL frames remain " +
+                        "(busy=$busy, log=$logFrames, checkpointed=$checkpointedFrames)"
+                }
+            }
+        }
+
+        private fun requireNoDatabaseSidecars(file: File) {
+            removeInactiveRollbackJournal(file)
+            val sidecars = listOf("-wal", "-shm")
+                .map { File(file.absolutePath + it) }
+                .filter(File::exists)
+            check(sidecars.isEmpty()) {
+                "Legacy recovery refuses to rename ${file.name} with SQLite sidecars: " +
+                    sidecars.joinToString { it.name }
+            }
+        }
+
+        /** A zero-header rollback journal is a clean-close PERSIST/TRUNCATE residue, not data. */
+        private fun removeInactiveRollbackJournal(file: File) {
+            val journal = File(file.absolutePath + "-journal")
+            if (!journal.exists()) return
+            val inactive = journal.length() == 0L || RandomAccessFile(journal, "r").use { input ->
+                val header = ByteArray(8)
+                input.read(header) == header.size && header.all { it == 0.toByte() }
+            }
+            check(inactive) {
+                "Legacy recovery refuses to rename ${file.name} with an active rollback journal"
+            }
+            check(journal.delete()) { "Unable to remove inactive rollback journal ${journal.name}" }
         }
 
         private fun tableColumns(database: SQLiteDatabase, table: String): List<String> =
