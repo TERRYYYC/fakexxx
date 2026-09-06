@@ -173,23 +173,31 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest
+        run: ./gradlew --no-daemon testLegacyIdDebugUnitTest testProductIdDebugUnitTest
 
-      - name: assemble
-        run: ./gradlew --no-daemon assembleDebug
+      - name: assemble both cutover identities and retained glmbench lanes
+        run: ./gradlew --no-daemon assembleLegacyIdDebug assembleProductIdDebug assembleLegacyIdGlmbench assembleProductIdGlmbench
+
+      - name: cutover identity APK contract
+        working-directory: .
+        run: ./scripts/check-cutover-identity-variants.sh \
+          apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk \
+          apps/cellrebel-auto/app/build/outputs/apk/productId/debug/app-productId-debug.apk
 
       # P10 (G2 §3 P10): the fault/revoke collector is debug-only by hard
       # constraint — the release variant must not carry it. Building release
       # and byte-scanning the dex pool is the artifact half of that proof;
       # source placement alone is necessary, not sufficient.
       - name: release build (P10 purity gate)
-        run: ./gradlew --no-daemon assembleRelease
+        run: ./gradlew --no-daemon assembleLegacyIdRelease assembleProductIdRelease
 
       - name: debug-only collector purity (P10)
         working-directory: .
         run: |
           ./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app \
-            --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release.apk
+            --apk apps/cellrebel-auto/app/build/outputs/apk/legacyId/release/app-legacyId-release.apk
+          ./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app \
+            --apk apps/cellrebel-auto/app/build/outputs/apk/productId/release/app-productId-release.apk
 
       # Lint runs through the debt ratchet rather than as `lintDebug`, so a
       # green check never hides a growing error count. Budget for this app is 0.
@@ -200,9 +208,10 @@ jobs:
       - name: record apk digest
         run: |
           set -euo pipefail
-          apk=app/build/outputs/apk/debug/app-debug.apk
           printf 'source HEAD : %s\n' "$GITHUB_SHA"
-          printf 'apk sha256  : %s\n' "$(sha256sum "$apk" | cut -d' ' -f1)"
+          for apk in app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk app/build/outputs/apk/productId/debug/app-productId-debug.apk; do
+            printf '%s sha256: %s\n' "$apk" "$(sha256sum "$apk" | cut -d' ' -f1)"
+          done
 
       # F-18: a random runner-rolled debug.keystore once shipped in a downloaded
       # artifact and made the bench device uninstallable-over. The signer is now
@@ -210,9 +219,9 @@ jobs:
       - name: debug signer pinned to repo keystore (F-18)
         working-directory: .
         run: |
-          ./scripts/check-debug-signer.sh \
-            apps/cellrebel-auto/keystores/bench.keystore \
-            apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk
+          for apk in apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk apps/cellrebel-auto/app/build/outputs/apk/productId/debug/app-productId-debug.apk; do
+            ./scripts/check-debug-signer.sh apps/cellrebel-auto/keystores/bench.keystore "$apk"
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -221,7 +230,7 @@ jobs:
           path: |
             apps/cellrebel-auto/app/build/reports/**
             apps/cellrebel-auto/app/build/test-results/**
-            apps/cellrebel-auto/app/build/outputs/apk/debug/*.apk
+            apps/cellrebel-auto/app/build/outputs/apk/**/*.apk
           if-no-files-found: warn
 
   qianwangyou:
