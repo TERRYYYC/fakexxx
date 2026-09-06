@@ -70,6 +70,49 @@ public class MainHook implements IXposedHookLoadPackage {
     /** Serializes timer and verification-triggered reloads into one coherent publish order. */
     private static final Object SNAPSHOT_LOCK = new Object();
 
+    /**
+     * Single daemon worker that owns ALL runtime prefs-file IO (heartbeat reloads, observer
+     * reloads, observer re-arming). The Vector XSharedPreferences shim loads the file
+     * asynchronously and {@code getString()} blocks the caller in {@code awaitLoadedLocked()}
+     * until its loader thread finishes — when that loader stalls (frozen-process FUSE, storage
+     * stall), a caller on the TARGET app's main thread hangs forever. Heartbeat ticks used to
+     * run on the main looper (ANR trace: {@code MainHook$1.handleMessage -> loadSnapshot ->
+     * XSharedPreferences.getString -> Object.wait}), so one stalled read froze the host app.
+     * The heartbeat Handler now only POSTS to this worker; the main thread never touches prefs.
+     * A wedged worker degrades to a frozen snapshot (last-known-good keeps spoofing) instead of
+     * a dead main thread.
+     */
+    private static final java.util.concurrent.Executor SNAPSHOT_IO =
+            java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+                Thread worker = new Thread(runnable, "FakeGPS-snapshot-io");
+                worker.setDaemon(true);
+                return worker;
+            });
+
+    /**
+     * ONE XSharedPreferences instance per process, reused by every reload and by the observer
+     * pre-flight (path lookup). The Vector shim's CONSTRUCTOR unconditionally parses the module
+     * APK's zip central directory (VectorMetaDataReader → JarFile.getEntry) with no caching, and
+     * the module APK is our own base.apk here — constructing per heartbeat used to re-read the
+     * whole APK every tick (the ZipFile.initCEN frames in the HyperOS ANR trace). The shim's
+     * {@code reload()} is cheap for an unchanged file (mtime/size stat gate), so a single
+     * instance gives the same freshness at a one-time construction cost. Lazily built on first
+     * use; the synchronous initial load in handleLoadPackage runs before any tick, so steady
+     * state never races the CAS.
+     */
+    private static final AtomicReference<XSharedPreferences> PREFS = new AtomicReference<>();
+
+    private static XSharedPreferences prefs() {
+        XSharedPreferences instance = PREFS.get();
+        if (instance == null) {
+            instance = new XSharedPreferences(
+                    name.caiyao.fakegps.BuildConfig.APPLICATION_ID, PREFS_NAME);
+            PREFS.compareAndSet(null, instance);
+            instance = PREFS.get();
+        }
+        return instance;
+    }
+
     /** One owner per module classloader/process, even if LSPosed repeats the callback. */
     private static final HookRuntimeOwnership RUNTIME_OWNERSHIP = new HookRuntimeOwnership();
     private static final HookRefreshScheduler REFRESH_SCHEDULER = new HookRefreshScheduler();
@@ -94,7 +137,11 @@ public class MainHook implements IXposedHookLoadPackage {
             return;
         }
 
-        // 1. Load initial config (XSharedPreferences works here — it's a file read, no app context needed)
+        // 1. Load initial config (XSharedPreferences works here — it's a file read, no app context
+        //    needed). Deliberately SYNCHRONOUS on the load-package thread: hooks must not serve
+        //    passthrough (real device data) in the window before the first snapshot lands, and at
+        //    process-start the storage stack is idle. Runtime reloads never block any looper —
+        //    see SNAPSHOT_IO.
         Snapshot initial = reloadSnapshot(null);
         XposedBridge.log(TAG + ": Loaded config for " + lpparam.packageName
                 + " | location=" + initial.hasLocation()
@@ -132,14 +179,19 @@ public class MainHook implements IXposedHookLoadPackage {
             @Override
             public void handleMessage(Message msg) {
                 if (msg.what == 1) {
+                    // The main thread only POSTS work; every prefs-file read runs on
+                    // SNAPSHOT_IO (see the executor doc — the XSharedPreferences shim can
+                    // block its caller indefinitely while a load is pending).
                     // Lazy retry: re-arm observer if initial arm failed or observer died.
                     // Cost: one tryArmObserver per heartbeat tick until success — acceptable
                     // because ticks are ≥5s apart and arm() is a single stat+inotify syscall.
                     if (prefsObserver == null || !prefsObserver.isArmed()) {
-                        tryArmObserver(lpparam.processName);
+                        SNAPSHOT_IO.execute(() -> tryArmObserver(lpparam.processName));
                     }
-                    Snapshot refreshed = reloadSnapshot(lpparam.processName);
-                    debug("timer refresh -> hasLocation=" + refreshed.hasLocation());
+                    SNAPSHOT_IO.execute(() -> {
+                        Snapshot refreshed = reloadSnapshot(lpparam.processName);
+                        debug("timer refresh -> hasLocation=" + refreshed.hasLocation());
+                    });
                 }
                 sendEmptyMessageDelayed(1, REFRESH_SCHEDULER.currentDelayMs());
             }
@@ -195,8 +247,7 @@ public class MainHook implements IXposedHookLoadPackage {
             final int evaluationHour = java.util.Calendar.getInstance()
                     .get(java.util.Calendar.HOUR_OF_DAY);
 
-            XSharedPreferences prefs = new XSharedPreferences(
-                    name.caiyao.fakegps.BuildConfig.APPLICATION_ID, PREFS_NAME);
+            XSharedPreferences prefs = prefs();
             prefs.makeWorldReadable();
             prefs.reload();
 
@@ -357,14 +408,14 @@ public class MainHook implements IXposedHookLoadPackage {
             if (prefsObserver != null) {
                 try { prefsObserver.stopWatching(); } catch (Throwable ignored) {}
             }
-            XSharedPreferences probePrefs = new XSharedPreferences(
-                    name.caiyao.fakegps.BuildConfig.APPLICATION_ID, PREFS_NAME);
-            java.io.File prefsFile = probePrefs.getFile();
+            // Reuses the shared instance — constructing a fresh XSharedPreferences here would
+            // re-parse the module APK's zip directory on every observer re-arm.
+            java.io.File prefsFile = prefs().getFile();
             String dirPath = prefsFile.getParent();
             String fileName = prefsFile.getName();
 
             PrefsDirectoryObserver obs = new PrefsDirectoryObserver(
-                    dirPath, fileName, () -> reloadSnapshot(processName));
+                    dirPath, fileName, () -> SNAPSHOT_IO.execute(() -> reloadSnapshot(processName)));
             if (obs.arm()) {
                 prefsObserver = obs;
                 XposedBridge.log(RuntimeEvidence.observerArmed(processName, dirPath));
