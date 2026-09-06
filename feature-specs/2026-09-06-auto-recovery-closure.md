@@ -136,12 +136,13 @@ The terminal state is a history-preserving replacement flow and crash-safe recov
 ### Task 5: End-to-end verification and review
 
 1. Run the relevant unit/migration/matrix suites, `:app:assembleDebug`, `git diff --check`, and the repository's CI-equivalent checks.
-2. Use an explicitly created isolated emulator to verify: old paused plan → valid different CSV → confirmation → old history remains and new plan becomes home plan; cancellation and invalid input leave old plan intact. Do not target a physical serial.
+2. Use an explicitly created isolated emulator to verify the two distinct #97 outcomes: (a) a terminal old session → valid different CSV → confirmation → old history remains and the new plan becomes the home plan; (b) a `paused` / `running` / `recovering` old session → valid different CSV → explicit refusal with no archive or new plan. Cancellation and invalid input leave the old plan intact. Do not target a physical serial. A paused session can retain an unproven lease, so it is not safely archivable until a separately proven terminalization path exists.
 3. Obtain fresh-context scan and non-author exact-HEAD review; address findings red→green.
 4. Push a stacked PR with scope/remaining-issue truth, update issues with evidence, and send exact SHA, verification, dependencies and remaining work to the primary task. Do not merge, tag, release, or close issues without the parent gate.
 
 ## Open questions
 
+- **Product / safety gap (#97):** the current history-preserving policy deliberately refuses replacement while the old session is `paused`, `running`, or `recovering`. This is a safe refusal, not a paused-plan replacement capability. #97 remains open until the product offers an operator-approved, externally proven terminalization/abandonment protocol or selects queue/resume-only behavior for those sessions; neither CSV replacement nor archive may manufacture that proof.
 - **Technical (self-resolve):** choose a deterministic request encoding that round-trips `CompleteAndAdvanceRequestV1` without changing the frozen Binder contract; validate against the canonical digest and existing golden vectors.
 - **Technical (self-resolve):** preserve existing terminal/completed plan behavior while selecting the latest non-superseded plan.
 - **Coordination:** AppDatabase/Migrations and `AutomationService` are shared paths. Parent response determines whether another active branch owns one of them; do not modify overlapping files until that response or an explicit no-conflict check.
