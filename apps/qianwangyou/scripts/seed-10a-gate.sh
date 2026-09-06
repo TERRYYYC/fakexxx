@@ -64,6 +64,7 @@ usage() {
 
 # Device seam — the ONLY edge the selftest fakes.
 dev() { adb "$@"; }
+ve_live_root_shell() { dev shell su -c "$1"; }
 
 # #90: Vector-aware evidence resolver (exact-package, live-zone, fail-closed).
 # When this gate is executed, $0 is the gate itself; when the selftest sources

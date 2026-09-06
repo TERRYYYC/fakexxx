@@ -91,27 +91,26 @@ root_shell() {
     adb shell "su -c '$1'"
 }
 
+# #90: both evidence consumers delegate exact-package source identity to this
+# shared resolver; only their privileged transport seam differs.
+ve_live_root_shell() { root_shell "$1"; }
+VE_LIB="\${VE_LIB_PATH:-$SCRIPT_DIR/vector-evidence.sh}"
+[ -r "$VE_LIB" ] || { echo "HARNESS_ERROR vector-evidence.sh not found at $VE_LIB" >&2; exit 2; }
+# shellcheck source=vector-evidence.sh
+. "$VE_LIB"
+
 snapshot_db() {
     root_shell "content query --uri $PROVIDER" 2>/dev/null |
         sed -n '/^Row:/p'
 }
 
 snapshot_prefs() {
-    # #90: exact-package Vector zone resolution. The old find-based scan had no
-    # package filter — with BOTH production and bench installed, equal payloads
-    # collapsed to one value and the source identity was lost. The live zone is
-    # /data/misc/*/prefs/<exact-package>/; anything else is a stale mirror.
-    # Exactly one source required; zero/many fail closed (never silent-pick).
-    local glob="/data/misc/*/prefs/$BENCH_PACKAGE/spoof_config.xml"
-    local paths n
-    paths=$(root_shell "ls -d $glob" 2>/dev/null | tr -d '\r')
-    paths=$(printf '%s\n' "$paths" | sed '/^$/d')
-    n=$(printf '%s\n' "$paths" | grep -c .)
-    if [ "$n" -ne 1 ]; then
-        echo "TEST_HOOK_FAIL expected exactly 1 live Vector prefs source for $BENCH_PACKAGE (glob $glob), found $n — fail-closed, no silent pick, no app-private fallback" >&2
+    local live_path
+    if ! live_path=$(ve_resolve_single_live_path "$BENCH_PACKAGE" spoof_config.xml); then
+        echo "TEST_HOOK_FAIL cannot resolve exactly one live Vector prefs source for $BENCH_PACKAGE — fail-closed, no app-private fallback" >&2
         return 1
     fi
-    root_shell "cat $(printf '%s\n' "$paths" | head -1)" 2>/dev/null |
+    ve_live_root_shell "cat $live_path" 2>/dev/null |
         sed -n '/<string name="json">/p' |
         LC_ALL=C sort
 }

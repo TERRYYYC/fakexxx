@@ -34,17 +34,21 @@
 
 VE_LIVE_GLOB_TEMPLATE='/data/misc/*/prefs/%s/%s'
 
-ve_capture_evidence() {
-    # $1 package, $2 prefs file name, $3 destination dir. Uses dev().
-    if [ "$#" -ne 3 ]; then
-        echo "VE_FAIL ve_capture_evidence expects <package> <file> <dest-dir>, got $#" >&2
+ve_resolve_single_live_path() {
+    # $1 package, $2 prefs file name. Caller supplies ve_live_root_shell().
+    if [ "$#" -ne 2 ]; then
+        echo "VE_FAIL ve_resolve_single_live_path expects <package> <file>, got $#" >&2
         return 1
     fi
-    ve_pkg="$1"; ve_file="$2"; ve_dest="$3"
+    if ! command -v ve_live_root_shell >/dev/null 2>&1; then
+        echo "VE_FAIL no privileged Vector read seam was supplied" >&2
+        return 1
+    fi
 
+    ve_pkg="$1"; ve_file="$2"
     ve_glob=$(printf "$VE_LIVE_GLOB_TEMPLATE" "$ve_pkg" "$ve_file")
-    if ! ve_paths=$(dev shell su -c "ls -d $ve_glob" 2>/dev/null | tr -d '\r'); then
-        echo "VE_FAIL package=$ve_pkg file=$ve_file root (su) unavailable or transport failed — cannot read the live Vector zone, refusing to emit any canonical marker" >&2
+    if ! ve_paths=$(ve_live_root_shell "ls -d $ve_glob" 2>/dev/null | tr -d '\r'); then
+        echo "VE_FAIL package=$ve_pkg file=$ve_file root (su) unavailable or transport failed — cannot resolve the live Vector zone" >&2
         return 1
     fi
     ve_paths=$(printf '%s\n' "$ve_paths" | sed '/^$/d')
@@ -53,13 +57,26 @@ ve_capture_evidence() {
         echo "VE_FAIL package=$ve_pkg file=$ve_file expected exactly 1 live Vector source, found $ve_count — $(printf 'candidate-paths: %s ' $ve_paths)fail-closed; the app-private shared_prefs copy is a stale mirror, never canonical" >&2
         return 1
     fi
-    ve_live_path=$(printf '%s\n' "$ve_paths" | head -1)
+    printf '%s\n' "$ve_paths"
+}
+
+ve_capture_evidence() {
+    # $1 package, $2 prefs file name, $3 destination dir.
+    if [ "$#" -ne 3 ]; then
+        echo "VE_FAIL ve_capture_evidence expects <package> <file> <dest-dir>, got $#" >&2
+        return 1
+    fi
+    ve_pkg="$1"; ve_file="$2"; ve_dest="$3"
+
+    if ! ve_live_path=$(ve_resolve_single_live_path "$ve_pkg" "$ve_file"); then
+        return 1
+    fi
 
     mkdir -p "$ve_dest/vector-prefs" "$ve_dest/app-private-mirror" 2>/dev/null || {
         echo "VE_FAIL cannot create evidence dirs under $ve_dest" >&2
         return 1
     }
-    if ! dev shell su -c "cat $ve_live_path" >"$ve_dest/vector-prefs/$ve_file.raw" 2>/dev/null \
+    if ! ve_live_root_shell "cat $ve_live_path" >"$ve_dest/vector-prefs/$ve_file.raw" 2>/dev/null \
         || [ ! -s "$ve_dest/vector-prefs/$ve_file.raw" ]; then
         rm -f "$ve_dest/vector-prefs/$ve_file.raw"
         echo "VE_FAIL package=$ve_pkg live read failed or empty at $ve_live_path" >&2
@@ -87,7 +104,7 @@ ve_capture_evidence() {
     fi
 
     printf 'package=%s\nfile=%s\nsourceZone=vector-live\nremotePath=%s\ncardinality=%s/1\nsha256=%s\nmirror=%s\n' \
-        "$ve_pkg" "$ve_file" "$ve_live_path" "$ve_count" "$ve_live_hash" "$ve_mirror_note" \
+        "$ve_pkg" "$ve_file" "$ve_live_path" "1" "$ve_live_hash" "$ve_mirror_note" \
         >"$ve_dest/vector-prefs/$ve_file.provenance"
     echo "VE_OK package=$ve_pkg file=$ve_file zone=vector-live path=$ve_live_path sha256=$ve_live_hash mirror=$ve_mirror_note" >&2
     return 0
