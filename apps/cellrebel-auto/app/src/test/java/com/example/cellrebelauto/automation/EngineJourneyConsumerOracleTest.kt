@@ -1107,6 +1107,21 @@ class EngineJourneyConsumerOracleTest {
                     createdAt = 750L
                 )
             )
+            if (phase in setOf(
+                    AttemptState.ADVANCE_PENDING.name,
+                    AttemptState.ADVANCE_OBSERVING.name,
+                    AttemptState.ADVANCE_STATE_READBACK.name
+                )) {
+                repo.persistAdvanceReplayCarrier(
+                    attemptId,
+                    expectedTerminalAdvanceRequest(
+                        attemptId,
+                        repo.trustedCountForTask(firstTaskId),
+                        ownerRequiredSuccesses
+                    ),
+                    createdAt = 751L
+                )
+            }
         }
 
         advanceAnswer = AdvanceReceiptV1(

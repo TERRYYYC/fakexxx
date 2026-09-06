@@ -407,6 +407,7 @@ class EngineTrustedPathRedTest {
         val auditDao = db.auditEventDao()
         val executor = RecordingExternalApplyExecutor()
         var ownerStateAtAdvance: String? = null
+        var carrierDigestAtAdvance: String? = null
         val capturingExecutor = object : ExternalApplyExecutor by executor {
             override fun completeAndAdvance(
                 request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
@@ -416,6 +417,11 @@ class EngineTrustedPathRedTest {
                     db.testAttemptDao().getAttemptsForTask(taskId)
                         .first { it.id > 77L }
                         .aplusState
+                }
+                carrierDigestAtAdvance = kotlinx.coroutines.runBlocking {
+                    db.advanceReplayCarrierDao().byAttempt(
+                        db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
+                    )?.requestDigest
                 }
                 return executor.completeAndAdvance(request, expectedIntentHash)
             }
@@ -461,6 +467,16 @@ class EngineTrustedPathRedTest {
             "the durable owner must be ADVANCE_PENDING before the first completeAndAdvance call",
             "ADVANCE_PENDING",
             ownerStateAtAdvance
+        )
+        assertEquals(
+            "the exact advance request must be durable before the first provider call",
+            executor.advanceCalls.single().requestDigest,
+            carrierDigestAtAdvance
+        )
+        assertEquals(
+            "the provider advance receipt is durable before receipt-driven close",
+            executor.advanceCalls.single().requestDigest,
+            db.advanceReceiptDao().byAttempt(realAttemptId)?.requestDigest
         )
         assertEquals(
             listOf(

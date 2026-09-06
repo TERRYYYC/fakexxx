@@ -16,6 +16,14 @@ import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.model.plan.WorklistRow
+import com.example.cellrebelauto.recovery.AdvanceReplayCarrierRow
+import com.example.cellrebelauto.recovery.AdvanceReceiptRow
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 
@@ -508,6 +516,153 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getUnverifiedRecord(attemptId: Long): UnverifiedAttemptRecord? =
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
 
+    /** Mirrors the release receipt into the transaction owner DB and verifies an exact replay. */
+    suspend fun persistReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        createdAt: Long
+    ) = db.withTransaction {
+        val row = ReleaseReceiptRow(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        db.releaseReceiptDao().insertIfAbsent(row)
+        val persisted = requireNotNull(db.releaseReceiptDao().byKey(idempotencyKey)) {
+            "RELEASE_RECEIPT_NOT_DURABLE:$idempotencyKey"
+        }
+        check(
+            persisted.leaseId == leaseId && persisted.releaseDigest == releaseDigest &&
+                persisted.resultOutcome == outcome
+        ) { "RELEASE_RECEIPT_CONFLICT:$idempotencyKey" }
+    }
+
+    /**
+     * #85: atomically bind an exact advance request to the already durable matching release
+     * receipt. The full request is deliberately retained, including the timestamp excluded from
+     * its canonical digest, so a recovery cannot create a timestamp-only rewrite under the same
+     * idempotency key.
+     */
+    suspend fun persistAdvanceReplayCarrier(
+        attemptId: Long,
+        request: CompleteAndAdvanceRequestV1,
+        createdAt: Long
+    ) = db.withTransaction {
+        requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+            "ADVANCE_CARRIER_ATTEMPT_MISSING:$attemptId"
+        }
+        check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
+            "ADVANCE_CARRIER_REQUEST_DIGEST_INVALID:$attemptId"
+        }
+        val releaseKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+            .releaseIdempotencyKey(attemptId)
+        val release = requireNotNull(db.releaseReceiptDao().byKey(releaseKey)) {
+            "ADVANCE_CARRIER_RELEASE_RECEIPT_MISSING:$attemptId"
+        }
+        val expectedReleaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+            .releaseDigest(request.leaseId)
+        check(
+            release.leaseId == request.leaseId &&
+                release.releaseDigest == expectedReleaseDigest &&
+                release.resultOutcome == "RELEASED"
+        ) { "ADVANCE_CARRIER_RELEASE_RECEIPT_MISMATCH:$attemptId" }
+        val row = AdvanceReplayCarrierRow(
+            attemptId = attemptId,
+            releaseIdempotencyKey = releaseKey,
+            releaseLeaseId = release.leaseId,
+            releaseDigest = release.releaseDigest,
+            leaseId = request.leaseId,
+            idempotencyKey = request.idempotencyKey,
+            requestDigest = request.requestDigest,
+            expectedScheduleId = request.expectedScheduleId,
+            expectedScheduleVersion = request.expectedScheduleVersion,
+            expectedCurrentItemId = request.expectedCurrentItemId,
+            proofScheduleItemId = request.completionProof.scheduleItemId,
+            proofTrustedSuccessCount = request.completionProof.trustedSuccessCount,
+            proofQuotaRequired = request.completionProof.quotaRequired,
+            proofLedgerRef = request.completionProof.ledgerRef,
+            proofVerifiedAtElapsedRealtimeMs = request.completionProof.verifiedAtElapsedRealtimeMs,
+            callerProtocolVersion = request.callerProtocolVersion,
+            createdAt = createdAt
+        )
+        db.advanceReplayCarrierDao().insertIfAbsent(row)
+        val persisted = requireNotNull(db.advanceReplayCarrierDao().byAttempt(attemptId)) {
+            "ADVANCE_CARRIER_NOT_DURABLE:$attemptId"
+        }
+        // createdAt is audit metadata, not request identity: same exact request may race/replay
+        // at a later wall time, while any wire-field difference is a conflict.
+        check(persisted.copy(createdAt = createdAt) == row) {
+            "ADVANCE_CARRIER_CONFLICT:$attemptId"
+        }
+    }
+
+    /** Reads and validates the exact replay request; no mutable projection is consulted. */
+    suspend fun getAdvanceReplayRequest(attemptId: Long): CompleteAndAdvanceRequestV1? =
+        db.withTransaction {
+            val row = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return@withTransaction null
+            val request = row.toAdvanceRequest()
+            check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
+                "ADVANCE_CARRIER_DURABLE_DIGEST_INVALID:$attemptId"
+            }
+            val release = db.releaseReceiptDao().byKey(row.releaseIdempotencyKey)
+            check(
+                release != null && release.leaseId == row.releaseLeaseId &&
+                    release.releaseDigest == row.releaseDigest && release.resultOutcome == "RELEASED" &&
+                    row.releaseLeaseId == request.leaseId
+            ) { "ADVANCE_CARRIER_RELEASE_AUTHORITY_INVALID:$attemptId" }
+            request
+        }
+
+    /** Persist a provider advance receipt before projecting any receipt-driven owner state. */
+    suspend fun persistAdvanceReceipt(
+        attemptId: Long,
+        request: CompleteAndAdvanceRequestV1,
+        receipt: AdvanceReceiptV1,
+        recordedAt: Long
+    ) = db.withTransaction {
+        val carrier = requireNotNull(db.advanceReplayCarrierDao().byAttempt(attemptId)) {
+            "ADVANCE_RECEIPT_CARRIER_MISSING:$attemptId"
+        }
+        check(carrier.toAdvanceRequest() == request) { "ADVANCE_RECEIPT_REQUEST_CONFLICT:$attemptId" }
+        check(
+            CanonicalAdvanceReceiptDigestV1.verify(
+                receipt,
+                request.requestDigest,
+                request.idempotencyKey
+            )
+        ) { "ADVANCE_RECEIPT_DIGEST_INVALID:$attemptId" }
+        val row = AdvanceReceiptRow(
+            attemptId = attemptId,
+            idempotencyKey = request.idempotencyKey,
+            requestDigest = request.requestDigest,
+            outcomeWire = receipt.outcomeWire,
+            advancedFromItemId = receipt.advancedFromItemId,
+            advancedToItemId = receipt.advancedToItemId,
+            scheduleVersionAfter = receipt.scheduleVersionAfter,
+            effectiveIntentHash = receipt.effectiveIntentHash,
+            effectiveEnvironmentRevision = receipt.effectiveEnvironmentRevision,
+            receiptDigest = receipt.receiptDigest,
+            recordedAt = recordedAt
+        )
+        db.advanceReceiptDao().insertIfAbsent(row)
+        check(db.advanceReceiptDao().byAttempt(attemptId) == row) {
+            "ADVANCE_RECEIPT_CONFLICT:$attemptId"
+        }
+    }
+
+    /** Returns only a receipt whose stored request binding still verifies. */
+    suspend fun getAdvanceReceipt(attemptId: Long): AdvanceReceiptV1? = db.withTransaction {
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return@withTransaction null
+        val row = db.advanceReceiptDao().byAttempt(attemptId) ?: return@withTransaction null
+        val request = carrier.toAdvanceRequest()
+        check(row.idempotencyKey == request.idempotencyKey && row.requestDigest == request.requestDigest) {
+            "ADVANCE_RECEIPT_REQUEST_BINDING_INVALID:$attemptId"
+        }
+        val receipt = row.toAdvanceReceipt()
+        check(CanonicalAdvanceReceiptDigestV1.verify(receipt, row.requestDigest, row.idempotencyKey)) {
+            "ADVANCE_RECEIPT_DURABLE_DIGEST_INVALID:$attemptId"
+        }
+        receipt
+    }
+
     /**
      * #86's negative complement to a trusted mint. Replays are allowed only when the immutable
      * typed reason and evidence digest match exactly; a conflicting pre-existing row is corruption,
@@ -805,3 +960,32 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun finishSession(sessionId: Long, status: String, endedAt: Long, totalCycles: Int) =
         db.runSessionDao().finish(sessionId, endedAt, status, totalCycles)
 }
+
+private fun AdvanceReplayCarrierRow.toAdvanceRequest(): CompleteAndAdvanceRequestV1 =
+    CompleteAndAdvanceRequestV1(
+        leaseId = leaseId,
+        idempotencyKey = idempotencyKey,
+        requestDigest = requestDigest,
+        expectedScheduleId = expectedScheduleId,
+        expectedScheduleVersion = expectedScheduleVersion,
+        expectedCurrentItemId = expectedCurrentItemId,
+        completionProof = CompletionProofV1(
+            scheduleItemId = proofScheduleItemId,
+            trustedSuccessCount = proofTrustedSuccessCount,
+            quotaRequired = proofQuotaRequired,
+            ledgerRef = proofLedgerRef,
+            verifiedAtElapsedRealtimeMs = proofVerifiedAtElapsedRealtimeMs
+        ),
+        callerProtocolVersion = callerProtocolVersion
+    )
+
+private fun AdvanceReceiptRow.toAdvanceReceipt(): AdvanceReceiptV1 =
+    AdvanceReceiptV1(
+        outcomeWire = outcomeWire,
+        advancedFromItemId = advancedFromItemId,
+        advancedToItemId = advancedToItemId,
+        scheduleVersionAfter = scheduleVersionAfter,
+        effectiveIntentHash = effectiveIntentHash,
+        effectiveEnvironmentRevision = effectiveEnvironmentRevision,
+        receiptDigest = receiptDigest
+    )

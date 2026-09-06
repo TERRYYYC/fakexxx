@@ -2,6 +2,7 @@ package com.example.cellrebelauto.recovery
 
 import androidx.room.Dao
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
@@ -55,6 +56,52 @@ data class ReleaseReceiptRow(
     val createdAt: Long
 )
 
+/**
+ * #85: the complete, exact CompleteAndAdvance request accepted for an attempt. It is written
+ * before the Binder call and never updated: recovery reconstructs the request from this row, not
+ * from a new clock or from mutable projections. The release tuple proves the request was admitted
+ * only after the matching lease release was durable.
+ */
+@Entity(
+    tableName = "advance_replay_carriers",
+    indices = [Index(value = ["idempotencyKey"], unique = true)]
+)
+data class AdvanceReplayCarrierRow(
+    @PrimaryKey val attemptId: Long,
+    val releaseIdempotencyKey: String,
+    val releaseLeaseId: String,
+    val releaseDigest: String,
+    val leaseId: String,
+    val idempotencyKey: String,
+    val requestDigest: String,
+    val expectedScheduleId: String,
+    val expectedScheduleVersion: Long,
+    val expectedCurrentItemId: String,
+    val proofScheduleItemId: String,
+    val proofTrustedSuccessCount: Int,
+    val proofQuotaRequired: Int,
+    val proofLedgerRef: String,
+    val proofVerifiedAtElapsedRealtimeMs: Long,
+    val callerProtocolVersion: Int,
+    val createdAt: Long
+)
+
+/** Provider receipt for an exact stored advance request. Insert-only and verified on every read. */
+@Entity(tableName = "advance_receipts")
+data class AdvanceReceiptRow(
+    @PrimaryKey val attemptId: Long,
+    val idempotencyKey: String,
+    val requestDigest: String,
+    val outcomeWire: Int,
+    val advancedFromItemId: String,
+    val advancedToItemId: String?,
+    val scheduleVersionAfter: Long,
+    val effectiveIntentHash: String,
+    val effectiveEnvironmentRevision: Long,
+    val receiptDigest: String,
+    val recordedAt: Long
+)
+
 @Dao
 interface OperationReceiptDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -83,6 +130,24 @@ interface ReleaseReceiptDao {
 
     @Query("SELECT * FROM release_receipts WHERE leaseId = :leaseId LIMIT 1")
     suspend fun byLease(leaseId: String): ReleaseReceiptRow?
+}
+
+@Dao
+interface AdvanceReplayCarrierDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(row: AdvanceReplayCarrierRow): Long
+
+    @Query("SELECT * FROM advance_replay_carriers WHERE attemptId = :attemptId LIMIT 1")
+    suspend fun byAttempt(attemptId: Long): AdvanceReplayCarrierRow?
+}
+
+@Dao
+interface AdvanceReceiptDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(row: AdvanceReceiptRow): Long
+
+    @Query("SELECT * FROM advance_receipts WHERE attemptId = :attemptId LIMIT 1")
+    suspend fun byAttempt(attemptId: Long): AdvanceReceiptRow?
 }
 
 /**

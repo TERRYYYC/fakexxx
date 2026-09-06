@@ -313,3 +313,58 @@ val MIGRATION_6_7 = object : Migration(6, 7) {
         db.execSQL("ALTER TABLE location_plans ADD COLUMN supersededByPlanId INTEGER")
     }
 }
+
+/**
+ * v7 → v8 (#85): add-only exact advance request/receipt carriers. Historical rows are untouched;
+ * an in-flight v7 ADVANCE_* owner without a pre-dispatch carrier is deliberately not replayable.
+ */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `advance_replay_carriers` (
+                `attemptId` INTEGER NOT NULL,
+                `releaseIdempotencyKey` TEXT NOT NULL,
+                `releaseLeaseId` TEXT NOT NULL,
+                `releaseDigest` TEXT NOT NULL,
+                `leaseId` TEXT NOT NULL,
+                `idempotencyKey` TEXT NOT NULL,
+                `requestDigest` TEXT NOT NULL,
+                `expectedScheduleId` TEXT NOT NULL,
+                `expectedScheduleVersion` INTEGER NOT NULL,
+                `expectedCurrentItemId` TEXT NOT NULL,
+                `proofScheduleItemId` TEXT NOT NULL,
+                `proofTrustedSuccessCount` INTEGER NOT NULL,
+                `proofQuotaRequired` INTEGER NOT NULL,
+                `proofLedgerRef` TEXT NOT NULL,
+                `proofVerifiedAtElapsedRealtimeMs` INTEGER NOT NULL,
+                `callerProtocolVersion` INTEGER NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`attemptId`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_advance_replay_carriers_idempotencyKey` " +
+                "ON `advance_replay_carriers` (`idempotencyKey`)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `advance_receipts` (
+                `attemptId` INTEGER NOT NULL,
+                `idempotencyKey` TEXT NOT NULL,
+                `requestDigest` TEXT NOT NULL,
+                `outcomeWire` INTEGER NOT NULL,
+                `advancedFromItemId` TEXT NOT NULL,
+                `advancedToItemId` TEXT,
+                `scheduleVersionAfter` INTEGER NOT NULL,
+                `effectiveIntentHash` TEXT NOT NULL,
+                `effectiveEnvironmentRevision` INTEGER NOT NULL,
+                `receiptDigest` TEXT NOT NULL,
+                `recordedAt` INTEGER NOT NULL,
+                PRIMARY KEY(`attemptId`)
+            )
+            """.trimIndent()
+        )
+    }
+}

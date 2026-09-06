@@ -781,7 +781,8 @@ class AutomationEngine(
                                             task.id,
                                             applyOutcome.operationId,
                                             intentDigest,
-                                            releasedState
+                                            releasedState,
+                                            allowCarrierCreation = true
                                         )) {
                                         AdvanceVerificationResult.FAILED -> return@coroutineScope
                                         AdvanceVerificationResult.ADVANCED -> Unit
@@ -1692,6 +1693,13 @@ class AutomationEngine(
             aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
             return false
         }
+        planRepository.persistReleaseReceipt(
+            receipt.idempotencyKey,
+            receipt.leaseId,
+            receipt.releaseDigest,
+            receipt.resultOutcome,
+            receipt.createdAt
+        )
         val releaseRoute = resolveReleaseReceiptRoute(crashed) ?: return false
         val postReleaseState = driveAplusReleaseReceipt(
             crashed.id,
@@ -2120,7 +2128,8 @@ class AutomationEngine(
                             crashed.taskId,
                             null,
                             intentDigest,
-                            postReleaseState
+                            postReleaseState,
+                            allowCarrierCreation = true
                         )) {
                         AdvanceVerificationResult.FAILED -> return false
                         AdvanceVerificationResult.ADVANCED -> Unit
@@ -2250,6 +2259,13 @@ class AutomationEngine(
             aplusPause("release receipt not durable for attempt $attemptId")
             return false
         }
+        planRepository.persistReleaseReceipt(
+            receipt.idempotencyKey,
+            receipt.leaseId,
+            receipt.releaseDigest,
+            receipt.resultOutcome,
+            receipt.createdAt
+        )
         val closedState = driveAplusReleaseReceipt(
             attemptId,
             AttemptState.RELEASE_PENDING,
@@ -2393,7 +2409,8 @@ class AutomationEngine(
         taskId: Long,
         verbatimOperationId: String?,
         intentDigest: String,
-        currentState: AttemptState
+        currentState: AttemptState,
+        allowCarrierCreation: Boolean = false
     ): AdvanceVerificationResult {
         val coordinator = recoveryCoordinator ?: run {
             aplusPause("no coordinator to advance attempt $attemptId")
@@ -2490,9 +2507,25 @@ class AutomationEngine(
             ),
             callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
         )
-        val advanceRequest = baseAdvanceRequest.copy(
+        val reconstructedRequest = baseAdvanceRequest.copy(
             requestDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1.compute(baseAdvanceRequest)
         )
+        // #85: once a request may be sent, recovery must use its exact stored identity. In
+        // particular, verifiedAtElapsedRealtimeMs is outside the digest but remains part of the
+        // request, so it cannot be silently regenerated with a new clock under the same key.
+        val advanceRequest = planRepository.getAdvanceReplayRequest(attemptId) ?: run {
+            if (!allowCarrierCreation) {
+                return rejectAdvanceReplayAuthority(
+                    attemptId,
+                    "ADVANCE_REPLAY_CARRIER_MISSING",
+                    "no exact durable request exists for recovery replay"
+                )
+            }
+            planRepository.persistAdvanceReplayCarrier(attemptId, reconstructedRequest, nowMs())
+            requireNotNull(planRepository.getAdvanceReplayRequest(attemptId)) {
+                "ADVANCE_REPLAY_CARRIER_NOT_READABLE:$attemptId"
+            }
+        }
         if (currentState !in setOf(
                 AttemptState.ADVANCE_PENDING,
                 AttemptState.ADVANCE_OBSERVING,
@@ -2508,7 +2541,7 @@ class AutomationEngine(
         }
         // The owner is already ADVANCE_PENDING (or a later verification phase) before this first
         // external call. Recovery replays from its persisted phase and never rewinds it to PENDING.
-        val advanceReceipt = when (
+        val providerAdvanceReceipt = when (
             val advanceOutcome = coordinator.executorBackend().completeAndAdvanceOutcome(
                 advanceRequest,
                 intentDigest
@@ -2529,6 +2562,7 @@ class AutomationEngine(
                 return AdvanceVerificationResult.FAILED
             }
         }
+        val advanceReceipt = providerAdvanceReceipt
         // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
         // (requestDigest, idempotencyKey) together with the outcome the provider claims.
         val expectedReceiptDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
@@ -2544,11 +2578,17 @@ class AutomationEngine(
             aplusPause("advance receipt digest mismatch for attempt $attemptId — the receipt does not bind this request")
             return AdvanceVerificationResult.FAILED
         }
+        // The provider's self-description is durable BEFORE any receipt-driven owner transition.
+        // A crash now replays the same request and reads this exact receipt back for verification.
+        planRepository.persistAdvanceReceipt(attemptId, advanceRequest, advanceReceipt, nowMs())
+        val durableAdvanceReceipt = requireNotNull(planRepository.getAdvanceReceipt(attemptId)) {
+            "ADVANCE_RECEIPT_NOT_READABLE:$attemptId"
+        }
         // R45 (Sol R45 P1-5 / §6.7.5): the receipt is the provider's SELF-DESCRIPTION, not proof
         // the environment moved. Independent verification is mandatory — non-terminal: observe()
         // four legs; terminal (exhausted): a fresh discover() readback with the v1.55 non-null
         // group precondition then its own four legs.
-        val exhausted = advanceReceipt.advancedToItemId == null
+        val exhausted = durableAdvanceReceipt.advancedToItemId == null
         if (!exhausted) {
             if (currentState == AttemptState.ADVANCE_STATE_READBACK) {
                 planRepository.markRecoveryRequired(
@@ -2593,17 +2633,17 @@ class AutomationEngine(
                 return AdvanceVerificationResult.FAILED
             }
             val observed = coordinator.executorBackend().observe(
-                advanceLease, operationId, advanceReceipt.effectiveIntentHash
+                advanceLease, operationId, durableAdvanceReceipt.effectiveIntentHash
             )
             // P1-3 (Sol Issue #19/#20 R2): typed reason identifies WHICH leg failed independently.
             // Each leg is verified separately so the failure reason names the exact mismatch —
             // a generic "four-leg" message hides which verification surface is broken.
             val mismatchLeg: String? = when {
                 observed == null -> "OBSERVE_NULL"
-                observed.scheduleItemId != advanceReceipt.advancedToItemId -> "scheduleItemId"
-                observed.scheduleVersion != advanceReceipt.scheduleVersionAfter -> "scheduleVersion"
-                observed.acceptedIntentHash != advanceReceipt.effectiveIntentHash -> "acceptedIntentHash"
-                observed.environmentRevision != advanceReceipt.effectiveEnvironmentRevision -> "environmentRevision"
+                observed.scheduleItemId != durableAdvanceReceipt.advancedToItemId -> "scheduleItemId"
+                observed.scheduleVersion != durableAdvanceReceipt.scheduleVersionAfter -> "scheduleVersion"
+                observed.acceptedIntentHash != durableAdvanceReceipt.effectiveIntentHash -> "acceptedIntentHash"
+                observed.environmentRevision != durableAdvanceReceipt.effectiveEnvironmentRevision -> "environmentRevision"
                 else -> null
             }
             if (mismatchLeg != null) {
@@ -2676,8 +2716,8 @@ class AutomationEngine(
                 readback.scheduleVersion == null -> "scheduleVersion_null"
                 readback.exhausted == null -> "exhausted_null"
                 readback.currentScheduleId != anchor.first -> "currentScheduleId"
-                readback.currentItemId != advanceReceipt.advancedFromItemId -> "currentItemId"
-                readback.scheduleVersion != advanceReceipt.scheduleVersionAfter -> "scheduleVersion"
+                readback.currentItemId != durableAdvanceReceipt.advancedFromItemId -> "currentItemId"
+                readback.scheduleVersion != durableAdvanceReceipt.scheduleVersionAfter -> "scheduleVersion"
                 readback.exhausted != true -> "exhausted"
                 else -> null
             }
@@ -2761,6 +2801,13 @@ class AutomationEngine(
             aplusPause("release receipt not durable for attempt $attemptId")
             return null
         }
+        planRepository.persistReleaseReceipt(
+            receipt.idempotencyKey,
+            receipt.leaseId,
+            receipt.releaseDigest,
+            receipt.resultOutcome,
+            receipt.createdAt
+        )
         val postReleaseState = driveAplusReleaseReceipt(
             attemptId,
             AttemptState.RELEASE_PENDING,

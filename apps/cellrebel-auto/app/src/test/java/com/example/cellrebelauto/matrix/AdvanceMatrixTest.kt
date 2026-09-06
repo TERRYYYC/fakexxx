@@ -31,6 +31,7 @@ import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1
@@ -223,6 +224,23 @@ class AdvanceMatrixTest {
                     resultOutcome = "RELEASED",
                     createdAt = 8500L
                 )
+            )
+            val base = CompleteAndAdvanceRequestV1(
+                leaseId = leaseId,
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                requestDigest = "",
+                expectedScheduleId = anchorScheduleId,
+                expectedScheduleVersion = anchorVersion,
+                expectedCurrentItemId = anchorItemId,
+                completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
+                    anchorItemId, 1, requiredSuccesses, "ledger-$attemptId", 99999L
+                ),
+                callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+            )
+            repo.persistAdvanceReplayCarrier(
+                attemptId,
+                base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base)),
+                createdAt = 8501L
             )
             repo.completeTaskIfQuotaReached(task.id)
         }

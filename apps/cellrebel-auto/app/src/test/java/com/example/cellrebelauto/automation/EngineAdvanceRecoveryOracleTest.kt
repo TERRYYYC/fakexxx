@@ -195,7 +195,7 @@ class EngineAdvanceRecoveryOracleTest {
 
     /** Seeds a plan/task plus a crashed attempt at [phase] with the full durable advance state:
      *  anchor triple, trusted mint, persisted lease, Room apply receipt (operationId leg). */
-    private suspend fun seedCrashedAt(phase: String): Pair<Long, Long> {
+    private suspend fun seedCrashedAt(phase: String, withReplayCarrier: Boolean = true): Pair<Long, Long> {
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(sourceFileName = "r.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = 1))
@@ -238,6 +238,11 @@ class EngineAdvanceRecoveryOracleTest {
                 createdAt = 8500L
             )
         )
+        // #85: an ADVANCE_* crash is only replayable from its exact pre-dispatch request carrier;
+        // no fixture may rely on a recovery-time clock to synthesize that request.
+        if (withReplayCarrier) {
+            repo.persistAdvanceReplayCarrier(attemptId, expectedAdvanceRequest(), createdAt = 9001L)
+        }
         repo.completeTaskIfQuotaReached(task.id)
         return planId to task.id
     }
@@ -305,6 +310,17 @@ class EngineAdvanceRecoveryOracleTest {
                 ) }
                 .map { it.payloadDigest }
         )
+    }
+
+    @Test
+    fun `an ADVANCE_PENDING crash without an exact request carrier pauses without dispatching`() = runTest {
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING", withReplayCarrier = false)
+        buildEngine(planId, VClock()).run()
+
+        assertEquals("no request may be recreated with a new clock after crash", 0, advanceReplays.size)
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals("ADVANCE_REPLAY_CARRIER_MISSING", attempt.failureReason)
     }
 
     @Test
