@@ -57,7 +57,7 @@ data class CutoverRestoreJournal(
 }
 
 enum class CutoverRestoreAction {
-    WRITE_ROOM,
+    RECHECK_ELIGIBILITY_AND_WRITE_ROOM,
     WRITE_DATASTORE,
     VERIFY,
     RECHECK_ELIGIBILITY_AND_PUBLISH,
@@ -167,7 +167,7 @@ class CutoverRestoreReducer {
     }
 
     fun nextAction(journal: CutoverRestoreJournal): CutoverRestoreAction = when (journal.phase) {
-        CutoverRestorePhase.STAGED -> CutoverRestoreAction.WRITE_ROOM
+        CutoverRestorePhase.STAGED -> CutoverRestoreAction.RECHECK_ELIGIBILITY_AND_WRITE_ROOM
         CutoverRestorePhase.ROOM_WRITTEN -> CutoverRestoreAction.WRITE_DATASTORE
         CutoverRestorePhase.DATASTORE_WRITTEN -> CutoverRestoreAction.VERIFY
         CutoverRestorePhase.VERIFIED -> CutoverRestoreAction.RECHECK_ELIGIBILITY_AND_PUBLISH
@@ -181,10 +181,28 @@ class CutoverRestoreReducer {
         event: CutoverRestoreEvent.Begin
     ): CutoverRestoreTransition {
         if (current != null && current.phase != CutoverRestorePhase.ROLLED_BACK) {
-            return if (current.identity == event.identity) {
-                CutoverRestoreTransition.Idempotent(current)
-            } else {
-                rejected(current, CutoverRestoreRejectionReason.ARCHIVE_CONFLICT)
+            if (current.identity != event.identity) {
+                return rejected(current, CutoverRestoreRejectionReason.ARCHIVE_CONFLICT)
+            }
+            return when (current.phase) {
+                CutoverRestorePhase.STAGED,
+                CutoverRestorePhase.ROOM_WRITTEN,
+                CutoverRestorePhase.DATASTORE_WRITTEN,
+                CutoverRestorePhase.VERIFIED -> {
+                    if (event.eligibility == CutoverEligibility.ELIGIBLE) {
+                        CutoverRestoreTransition.Idempotent(current)
+                    } else {
+                        advanced(
+                            current.copy(
+                                phase = CutoverRestorePhase.ROLLBACK_REQUIRED,
+                                failureReason = CutoverRestoreFailureReason.ELIGIBILITY_LOST
+                            )
+                        )
+                    }
+                }
+                CutoverRestorePhase.READY,
+                CutoverRestorePhase.ROLLBACK_REQUIRED -> CutoverRestoreTransition.Idempotent(current)
+                CutoverRestorePhase.ROLLED_BACK -> error("rolled back handled above")
             }
         }
         if (event.eligibility != CutoverEligibility.ELIGIBLE) {
@@ -253,7 +271,19 @@ class CutoverRestoreReducer {
                 )
             }
         }
-        if (current.phase == CutoverRestorePhase.VERIFIED || current.phase == CutoverRestorePhase.READY) {
+        if (current.phase == CutoverRestorePhase.VERIFIED) {
+            return if (readbackArchiveDigest == current.identity.archiveDigest) {
+                CutoverRestoreTransition.Idempotent(current)
+            } else {
+                advanced(
+                    current.copy(
+                        phase = CutoverRestorePhase.ROLLBACK_REQUIRED,
+                        failureReason = CutoverRestoreFailureReason.ARCHIVE_VERIFICATION_FAILED
+                    )
+                )
+            }
+        }
+        if (current.phase == CutoverRestorePhase.READY) {
             return if (readbackArchiveDigest == current.identity.archiveDigest) {
                 CutoverRestoreTransition.Idempotent(current)
             } else {

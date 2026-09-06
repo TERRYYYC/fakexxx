@@ -1,7 +1,5 @@
 package com.example.cellrebelauto.cutover
 
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -55,14 +53,18 @@ data class DecodedCutoverArchiveV2(
 data class CutoverArchiveLimits(
     val maxArchiveBytes: Int = 64 * 1024 * 1024,
     val maxTables: Int = 256,
-    val maxRowsPerTable: Int = 1_000_000,
-    val maxEncodedFieldChars: Int = 16 * 1024 * 1024
+    val maxRowsPerTable: Int = 100_000,
+    val maxTotalRows: Int = 100_000,
+    val maxEncodedFieldChars: Int = 4 * 1024 * 1024,
+    val maxArchiveLines: Int = 100_512
 ) {
     init {
         require(maxArchiveBytes > 0) { "archive byte limit must be positive" }
         require(maxTables > 0) { "table limit must be positive" }
         require(maxRowsPerTable >= 0) { "row limit cannot be negative" }
+        require(maxTotalRows >= 0) { "total row limit cannot be negative" }
         require(maxEncodedFieldChars > 0) { "field limit must be positive" }
+        require(maxArchiveLines > 0) { "line limit must be positive" }
     }
 }
 
@@ -114,100 +116,130 @@ class CutoverArchiveV2Codec(
 ) {
     fun encode(archive: CutoverArchiveV2): EncodedCutoverArchiveV2 {
         validateArchive(archive)
+        val totalRows = archive.tables.sumOf { it.rows.size.toLong() }
+        val totalLines = HEADER_LINE_COUNT + archive.preferences.size.toLong() +
+            archive.tables.size.toLong() + totalRows + ARCHIVE_DIGEST_LINE_COUNT
+        require(totalLines <= policy.limits.maxArchiveLines) { "archive line count exceeds limit" }
 
-        val body = buildList {
-            add(FORMAT)
-            add("source=${encodeUtf8(archive.sourcePackage)}")
-            add("capture=${encodeUtf8(archive.captureId)}")
-            add("schemaVersion=${archive.schemaVersion}")
-            archive.preferences.sortedBy { it.key }.forEach { preference ->
-                val presence = if (preference.present) PRESENT else ABSENT
-                val value = if (preference.present) encodeUtf8(requireNotNull(preference.value)) else "-"
-                add("preference=${encodeUtf8(preference.key)}|${preference.type.name}|$presence|$value")
+        val builder = StringBuilder()
+        fun appendLine(line: String) {
+            val delimiterChars = if (builder.isEmpty()) 0L else 1L
+            require(builder.length.toLong() + delimiterChars + line.length <= policy.limits.maxArchiveBytes) {
+                "archive exceeds byte limit"
             }
-            archive.tables.sortedBy { it.name }.forEach { table ->
-                val rows = table.rows.sortedBy { it.orderKeyBase64Url }
-                add(
-                    "table=${encodeUtf8(table.name)}|${encodeUtf8(table.schemaDigest)}|" +
-                        "${table.restorationMode.name}|${rows.size}|${rowDigest(rows)}"
-                )
-                rows.forEach { row ->
-                    add("row=${row.orderKeyBase64Url}|${row.canonicalRowBase64Url}")
-                }
+            if (builder.isNotEmpty()) builder.append('\n')
+            builder.append(line)
+        }
+
+        appendLine(FORMAT)
+        appendLine("source=${encodeUtf8(archive.sourcePackage)}")
+        appendLine("capture=${encodeUtf8(archive.captureId)}")
+        appendLine("schemaVersion=${archive.schemaVersion}")
+        archive.preferences.sortedBy { it.key }.forEach { preference ->
+            val presence = if (preference.present) PRESENT else ABSENT
+            val value = if (preference.present) encodeUtf8(requireNotNull(preference.value)) else "-"
+            appendLine("preference=${encodeUtf8(preference.key)}|${preference.type.name}|$presence|$value")
+        }
+        archive.tables.sortedBy { it.name }.forEach { table ->
+            val rows = table.rows.sortedBy { it.orderKeyBase64Url }
+            appendLine(
+                "table=${encodeUtf8(table.name)}|${encodeUtf8(table.schemaDigest)}|" +
+                    "${table.restorationMode.name}|${rows.size}|${rowDigest(rows)}"
+            )
+            rows.forEach { row ->
+                appendLine("row=${row.orderKeyBase64Url}|${row.canonicalRowBase64Url}")
             }
-        }.joinToString("\n")
-        val archiveDigest = sha256(body.toByteArray(Charsets.UTF_8))
-        val serialized = "$body\narchiveDigest=$archiveDigest"
-        require(byteSize(serialized) <= policy.limits.maxArchiveBytes) { "archive exceeds byte limit" }
+        }
+        val archiveDigest = sha256Ascii(builder)
+        appendLine("$ARCHIVE_DIGEST_PREFIX$archiveDigest")
+        val serialized = builder.toString()
         return EncodedCutoverArchiveV2(serialized, archiveDigest)
     }
 
     fun decode(serialized: String): DecodedCutoverArchiveV2 {
-        require(byteSize(serialized) <= policy.limits.maxArchiveBytes) { "archive exceeds byte limit" }
+        validateSerializedBounds(serialized)
         require(!serialized.endsWith('\n')) { "archive has trailing data" }
-        val lines = serialized.split('\n')
-        require(lines.size >= 6 && lines.first() == FORMAT) { "unsupported cutover archive format" }
-        require(lines.none { it.isEmpty() }) { "archive cannot contain blank lines" }
-
-        val digestLine = lines.last()
+        val digestSeparator = serialized.lastIndexOf('\n')
+        require(digestSeparator > 0) { "missing archive digest" }
+        val digestLineLength = serialized.length - digestSeparator - 1
+        require(digestLineLength == ARCHIVE_DIGEST_PREFIX.length + DIGEST_LENGTH) {
+            "missing archive digest"
+        }
+        val digestLine = serialized.substring(digestSeparator + 1)
         require(digestLine.startsWith(ARCHIVE_DIGEST_PREFIX)) { "missing archive digest" }
         val claimedArchiveDigest = digestLine.removePrefix(ARCHIVE_DIGEST_PREFIX)
         requireDigest(claimedArchiveDigest, "archive digest")
-        val body = lines.dropLast(1).joinToString("\n")
-        require(sha256(body.toByteArray(Charsets.UTF_8)) == claimedArchiveDigest) {
+        require(sha256Ascii(serialized, digestSeparator) == claimedArchiveDigest) {
             "archive digest mismatch"
         }
 
-        val sourcePackage = decodeNamedUtf8(lines[1], "source")
-        val captureId = decodeNamedUtf8(lines[2], "capture")
-        val schemaVersion = decodeNamed(lines[3], "schemaVersion").toIntOrNull()
+        val reader = BoundedLineReader(
+            source = serialized,
+            endExclusive = digestSeparator,
+            maxLineChars = maxLineChars()
+        )
+        require(reader.nextLine() == FORMAT) { "unsupported cutover archive format" }
+        val sourcePackage = decodeNamedUtf8(reader.nextLine(), "source")
+        val captureId = decodeNamedUtf8(reader.nextLine(), "capture")
+        val schemaVersionValue = decodeNamed(reader.nextLine(), "schemaVersion")
+        val schemaVersion = schemaVersionValue.toIntOrNull()
             ?: throw IllegalArgumentException("invalid schema version")
+        require(schemaVersionValue == schemaVersion.toString()) { "schema version is not canonical" }
         val preferences = mutableListOf<CutoverPreferenceEntry>()
         val tables = mutableListOf<CutoverTableSection>()
 
-        var index = 4
-        while (index < lines.lastIndex) {
-            when {
-                lines[index].startsWith(PREFERENCE_PREFIX) -> {
-                    preferences += decodePreference(lines[index])
-                    index += 1
-                }
-                lines[index].startsWith(TABLE_PREFIX) -> {
-                    val fields = lines[index].removePrefix(TABLE_PREFIX).split('|')
-                    require(fields.size == 5) { "invalid table section" }
-                    val tableName = decodeUtf8(fields[0], "table name", allowEmpty = false)
-                    val schemaDigest = decodeUtf8(fields[1], "schema digest", allowEmpty = false)
-                    val restorationMode = enumValue<CutoverRestorationMode>(fields[2], "restoration mode")
-                    val rowCount = fields[3].toIntOrNull()
-                        ?: throw IllegalArgumentException("invalid table row count")
-                    require(rowCount in 0..policy.limits.maxRowsPerTable) { "table row count exceeds limit" }
-                    val claimedRowDigest = fields[4]
-                    requireDigest(claimedRowDigest, "row digest")
-                    index += 1
-
-                    val rows = ArrayList<CutoverRowPayload>(rowCount)
-                    repeat(rowCount) {
-                        require(index < lines.lastIndex && lines[index].startsWith(ROW_PREFIX)) {
-                            "truncated table rows"
-                        }
-                        val rowFields = lines[index].removePrefix(ROW_PREFIX).split('|')
-                        require(rowFields.size == 2) { "invalid row payload" }
-                        requireCanonicalBase64Url(rowFields[0], "row order key", allowEmpty = false)
-                        requireCanonicalBase64Url(rowFields[1], "row payload", allowEmpty = true)
-                        rows += CutoverRowPayload(rowFields[0], rowFields[1])
-                        index += 1
-                    }
-                    require(rowDigest(rows) == claimedRowDigest) { "table row digest mismatch" }
-                    tables += CutoverTableSection(
-                        name = tableName,
-                        schemaDigest = schemaDigest,
-                        restorationMode = restorationMode,
-                        rows = rows
-                    )
-                }
-                else -> throw IllegalArgumentException("unknown archive field")
-            }
+        repeat(policy.preferenceTypes.size) {
+            val line = reader.nextLine()
+            require(line.startsWith(PREFERENCE_PREFIX)) { "expected preference entry" }
+            preferences += decodePreference(line)
         }
+        require(preferences.map { it.key } == policy.preferenceTypes.keys.sorted()) {
+            "preference entries are not canonical"
+        }
+
+        var totalRows = 0L
+        repeat(policy.requiredTableSchemaDigests.size) {
+            val line = reader.nextLine()
+            require(line.startsWith(TABLE_PREFIX)) { "expected table section" }
+            val fields = splitExact(line, TABLE_PREFIX, expectedFields = 5, field = "table section")
+            val tableName = decodeUtf8(fields[0], "table name", allowEmpty = false)
+            val schemaDigest = decodeUtf8(fields[1], "schema digest", allowEmpty = false)
+            val restorationMode = enumValue<CutoverRestorationMode>(fields[2], "restoration mode")
+            val rowCount = fields[3].toIntOrNull()
+                ?: throw IllegalArgumentException("invalid table row count")
+            require(fields[3] == rowCount.toString()) { "table row count is not canonical" }
+            require(rowCount in 0..policy.limits.maxRowsPerTable) { "table row count exceeds limit" }
+            totalRows += rowCount
+            require(totalRows <= policy.limits.maxTotalRows) { "total row count exceeds limit" }
+            val claimedRowDigest = fields[4]
+            requireDigest(claimedRowDigest, "row digest")
+
+            val rows = ArrayList<CutoverRowPayload>(rowCount)
+            var previousOrderKey: String? = null
+            repeat(rowCount) {
+                val rowLine = reader.nextLine()
+                require(rowLine.startsWith(ROW_PREFIX)) { "truncated table rows" }
+                val rowFields = splitExact(rowLine, ROW_PREFIX, expectedFields = 2, field = "row payload")
+                requireCanonicalBase64Url(rowFields[0], "row order key", allowEmpty = false)
+                requireCanonicalBase64Url(rowFields[1], "row payload", allowEmpty = true)
+                require(previousOrderKey == null || previousOrderKey!! < rowFields[0]) {
+                    "row order keys are not canonical"
+                }
+                previousOrderKey = rowFields[0]
+                rows += CutoverRowPayload(rowFields[0], rowFields[1])
+            }
+            require(rowDigest(rows) == claimedRowDigest) { "table row digest mismatch" }
+            tables += CutoverTableSection(
+                name = tableName,
+                schemaDigest = schemaDigest,
+                restorationMode = restorationMode,
+                rows = rows
+            )
+        }
+        require(tables.map { it.name } == policy.requiredTableSchemaDigests.keys.sorted()) {
+            "table sections are not canonical"
+        }
+        require(!reader.hasNext()) { "unknown archive field" }
 
         val archive = CutoverArchiveV2(
             sourcePackage = sourcePackage,
@@ -216,8 +248,7 @@ class CutoverArchiveV2Codec(
             tables = tables,
             preferences = preferences
         )
-        val canonical = encode(archive)
-        require(canonical.serialized == serialized) { "archive is not canonical" }
+        validateArchive(archive)
         return DecodedCutoverArchiveV2(archive, claimedArchiveDigest)
     }
 
@@ -229,6 +260,9 @@ class CutoverArchiveV2Codec(
         }
         require(archive.schemaVersion == policy.schemaVersion) { "unexpected schema version" }
         require(archive.tables.size <= policy.limits.maxTables) { "table count exceeds limit" }
+        require(archive.tables.sumOf { it.rows.size.toLong() } <= policy.limits.maxTotalRows) {
+            "total row count exceeds limit"
+        }
 
         val tableNames = archive.tables.map { it.name }
         require(tableNames.distinct().size == tableNames.size) { "duplicate table section" }
@@ -249,12 +283,12 @@ class CutoverArchiveV2Codec(
                 "unexpected restoration mode for ${table.name}"
             }
             require(table.rows.size <= policy.limits.maxRowsPerTable) { "table row count exceeds limit" }
-            val rowKeys = table.rows.map { row ->
+            val rowKeys = HashSet<String>()
+            table.rows.forEach { row ->
                 requireCanonicalBase64Url(row.orderKeyBase64Url, "row order key", allowEmpty = false)
                 requireCanonicalBase64Url(row.canonicalRowBase64Url, "row payload", allowEmpty = true)
-                row.orderKeyBase64Url
+                require(rowKeys.add(row.orderKeyBase64Url)) { "duplicate row order key" }
             }
-            require(rowKeys.distinct().size == rowKeys.size) { "duplicate row order key" }
         }
 
         val preferenceKeys = archive.preferences.map { it.key }
@@ -276,8 +310,7 @@ class CutoverArchiveV2Codec(
     }
 
     private fun decodePreference(line: String): CutoverPreferenceEntry {
-        val fields = line.removePrefix(PREFERENCE_PREFIX).split('|')
-        require(fields.size == 4) { "invalid preference entry" }
+        val fields = splitExact(line, PREFERENCE_PREFIX, expectedFields = 4, field = "preference entry")
         val key = decodeUtf8(fields[0], "preference key", allowEmpty = false)
         val type = enumValue<CutoverPreferenceType>(fields[1], "preference type")
         return when (fields[2]) {
@@ -296,18 +329,23 @@ class CutoverArchiveV2Codec(
     }
 
     private fun rowDigest(rows: List<CutoverRowPayload>): String {
-        val preimage = ByteArrayOutputStream()
-        DataOutputStream(preimage).use { output ->
-            rows.forEach { row ->
-                val orderKey = decodeBase64Url(row.orderKeyBase64Url, "row order key", allowEmpty = false)
-                val payload = decodeBase64Url(row.canonicalRowBase64Url, "row payload", allowEmpty = true)
-                output.writeInt(orderKey.size)
-                output.write(orderKey)
-                output.writeInt(payload.size)
-                output.write(payload)
-            }
+        val digest = MessageDigest.getInstance("SHA-256")
+        rows.forEach { row ->
+            val orderKey = decodeBase64Url(row.orderKeyBase64Url, "row order key", allowEmpty = false)
+            val payload = decodeBase64Url(row.canonicalRowBase64Url, "row payload", allowEmpty = true)
+            updateLength(digest, orderKey.size)
+            digest.update(orderKey)
+            updateLength(digest, payload.size)
+            digest.update(payload)
         }
-        return sha256(preimage.toByteArray())
+        return formatDigest(digest.digest())
+    }
+
+    private fun updateLength(digest: MessageDigest, value: Int) {
+        digest.update((value ushr 24).toByte())
+        digest.update((value ushr 16).toByte())
+        digest.update((value ushr 8).toByte())
+        digest.update(value.toByte())
     }
 
     private fun validatePreferenceValue(type: CutoverPreferenceType, value: String) {
@@ -330,6 +368,26 @@ class CutoverArchiveV2Codec(
         val prefix = "$name="
         require(line.startsWith(prefix)) { "missing $name" }
         return line.removePrefix(prefix)
+    }
+
+    private fun splitExact(
+        line: String,
+        prefix: String,
+        expectedFields: Int,
+        field: String
+    ): List<String> {
+        require(line.startsWith(prefix)) { "invalid $field" }
+        val fields = ArrayList<String>(expectedFields)
+        var start = prefix.length
+        repeat(expectedFields - 1) {
+            val separator = line.indexOf('|', start)
+            require(separator >= 0) { "invalid $field" }
+            fields += line.substring(start, separator)
+            start = separator + 1
+        }
+        require(line.indexOf('|', start) == -1) { "invalid $field" }
+        fields += line.substring(start)
+        return fields
     }
 
     private fun encodeUtf8(value: String): String = ENCODER.encodeToString(value.toByteArray(Charsets.UTF_8))
@@ -363,11 +421,44 @@ class CutoverArchiveV2Codec(
         require(DIGEST.matches(value)) { "invalid $field" }
     }
 
-    private fun byteSize(value: String): Int = value.toByteArray(Charsets.UTF_8).size
+    private fun validateSerializedBounds(serialized: String) {
+        require(serialized.length <= policy.limits.maxArchiveBytes) { "archive exceeds byte limit" }
+        var lineCount = 1
+        serialized.forEach { character ->
+            require(character.code <= ASCII_MAX) { "archive must be canonical ASCII" }
+            if (character == '\n') {
+                lineCount += 1
+                require(lineCount <= policy.limits.maxArchiveLines) { "archive line count exceeds limit" }
+            }
+        }
+    }
 
-    private fun sha256(bytes: ByteArray): String = "sha256:" +
-        MessageDigest.getInstance("SHA-256").digest(bytes)
-            .joinToString(separator = "") { byte -> "%02x".format(byte) }
+    private fun maxLineChars(): Int = minOf(
+        policy.limits.maxArchiveBytes,
+        (policy.limits.maxEncodedFieldChars.toLong() * 2L + ROW_PREFIX.length + 1L)
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+    )
+
+    private fun sha256Ascii(value: CharSequence, endExclusive: Int = value.length): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(DIGEST_BUFFER_BYTES)
+        var cursor = 0
+        while (cursor < endExclusive) {
+            val chunkSize = minOf(buffer.size, endExclusive - cursor)
+            repeat(chunkSize) { offset ->
+                val character = value[cursor + offset]
+                require(character.code <= ASCII_MAX) { "archive must be canonical ASCII" }
+                buffer[offset] = character.code.toByte()
+            }
+            digest.update(buffer, 0, chunkSize)
+            cursor += chunkSize
+        }
+        return formatDigest(digest.digest())
+    }
+
+    private fun formatDigest(bytes: ByteArray): String = "sha256:" +
+        bytes.joinToString(separator = "") { byte -> "%02x".format(byte) }
 
     private companion object {
         const val FORMAT = "cutover-archive-v2"
@@ -378,10 +469,37 @@ class CutoverArchiveV2Codec(
         const val ARCHIVE_DIGEST_PREFIX = "archiveDigest="
         const val PRESENT = "PRESENT"
         const val ABSENT = "ABSENT"
+        const val HEADER_LINE_COUNT = 4L
+        const val ARCHIVE_DIGEST_LINE_COUNT = 1L
+        const val DIGEST_LENGTH = 71
+        const val DIGEST_BUFFER_BYTES = 8 * 1024
+        const val ASCII_MAX = 0x7f
         val ENCODER: Base64.Encoder = Base64.getUrlEncoder().withoutPadding()
         val DECODER: Base64.Decoder = Base64.getUrlDecoder()
         val BASE64_URL = Regex("[A-Za-z0-9_-]*")
         val DIGEST = Regex("sha256:[0-9a-f]{64}")
         val CANONICAL_INT = Regex("0|-?[1-9][0-9]*")
     }
+}
+
+private class BoundedLineReader(
+    private val source: String,
+    private val endExclusive: Int,
+    private val maxLineChars: Int
+) {
+    private var cursor = 0
+
+    fun nextLine(): String {
+        require(hasNext()) { "truncated cutover archive" }
+        val separator = source.indexOf('\n', cursor).let { found ->
+            if (found == -1 || found >= endExclusive) endExclusive else found
+        }
+        require(separator - cursor <= maxLineChars) { "archive line exceeds limit" }
+        val line = source.substring(cursor, separator)
+        require(line.isNotEmpty()) { "archive cannot contain blank lines" }
+        cursor = if (separator < endExclusive) separator + 1 else endExclusive
+        return line
+    }
+
+    fun hasNext(): Boolean = cursor < endExclusive
 }

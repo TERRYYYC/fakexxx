@@ -191,6 +191,69 @@ class CutoverArchiveV2CodecTest {
     }
 
     @Test
+    fun `line amplification below byte limit is rejected by a preallocation bound`() {
+        val lineBoundedCodec = CutoverArchiveV2Codec(
+            policy(
+                limits = CutoverArchiveLimits(
+                    maxArchiveBytes = 1_000_000,
+                    maxArchiveLines = 16
+                )
+            )
+        )
+        val lineBomb = buildString {
+            append("cutover-archive-v2\n")
+            repeat(100) { append("x\n") }
+            append("x")
+        }
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            lineBoundedCodec.decode(lineBomb)
+        }
+
+        assertTrue(error.message.orEmpty().contains("line count exceeds limit"))
+    }
+
+    @Test
+    fun `reviewer eight megabyte line bomb is rejected without materializing four million lines`() {
+        val lineBomb = "cutover-archive-v2\n" + "x\n".repeat(4_000_000) + "x"
+        assertEquals(8_000_020, lineBomb.length)
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            codec.decode(lineBomb)
+        }
+
+        assertTrue(error.message.orEmpty().contains("line count exceeds limit"))
+    }
+
+    @Test
+    fun `total row bound rejects an allocation-valid table census`() {
+        val rowBoundedCodec = CutoverArchiveV2Codec(
+            policy(limits = CutoverArchiveLimits(maxTotalRows = 2))
+        )
+        val encodedWithDefaultLimits = codec.encode(archive()).serialized
+
+        assertThrows(IllegalArgumentException::class.java) {
+            rowBoundedCodec.encode(archive())
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            rowBoundedCodec.decode(encodedWithDefaultLimits)
+        }
+    }
+
+    @Test
+    fun `field delimiter amplification is rejected without unbounded splitting`() {
+        val serialized = codec.encode(archive()).serialized
+        val rowLine = serialized.lines().first { it.startsWith("row=") }
+        val delimiterBomb = "row=" + "|".repeat(1_000_000)
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            codec.decode(resign(serialized.replace(rowLine, delimiterBomb)))
+        }
+
+        assertTrue(error.message.orEmpty().contains("invalid row payload"))
+    }
+
+    @Test
     fun `wrong source package schema version and malformed fields are rejected`() {
         assertRejected(archive().copy(sourcePackage = "come.xx.fakeaauto"))
         assertRejected(archive().copy(schemaVersion = 10))

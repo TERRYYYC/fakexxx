@@ -27,7 +27,12 @@ class CutoverRestoreProtocolTest {
     @Test
     fun `happy path is exact and invisible until fresh eligibility publishes ready`() {
         var journal: CutoverRestoreJournal? = begin()
-        assertState(journal, CutoverRestorePhase.STAGED, CutoverRestoreAction.WRITE_ROOM, visible = false)
+        assertState(
+            journal,
+            CutoverRestorePhase.STAGED,
+            CutoverRestoreAction.RECHECK_ELIGIBILITY_AND_WRITE_ROOM,
+            visible = false
+        )
 
         journal = advance(journal, CutoverRestoreEvent.RoomWritten(identity), CutoverRestorePhase.ROOM_WRITTEN)
         assertState(journal, CutoverRestorePhase.ROOM_WRITTEN, CutoverRestoreAction.WRITE_DATASTORE, visible = false)
@@ -99,6 +104,24 @@ class CutoverRestoreProtocolTest {
     }
 
     @Test
+    fun `same archive reentry cannot reuse stale eligibility in any non-ready phase`() {
+        val nonReadyStates = listOf(begin(), roomWritten(), dataStoreWritten(), verified())
+
+        nonReadyStates.forEach { state ->
+            listOf(CutoverEligibility.INELIGIBLE, CutoverEligibility.INDETERMINATE).forEach { eligibility ->
+                val result = reducer.reduce(
+                    state,
+                    CutoverRestoreEvent.Begin(identity, eligibility)
+                )
+
+                val rollback = assertAdvanced(result, CutoverRestorePhase.ROLLBACK_REQUIRED)
+                assertEquals(CutoverRestoreFailureReason.ELIGIBILITY_LOST, rollback.failureReason)
+                assertFalse(rollback.isVisible)
+            }
+        }
+    }
+
+    @Test
     fun `different archive cannot interleave with an active or ready generation`() {
         val staged = begin()
         val other = CutoverRestoreIdentity(DIGEST_B, "capture-b")
@@ -151,6 +174,20 @@ class CutoverRestoreProtocolTest {
         assertEquals(CutoverRestoreFailureReason.ARCHIVE_VERIFICATION_FAILED, rollback.failureReason)
         assertFalse(rollback.isVisible)
         assertEquals(CutoverRestoreAction.ROLLBACK, reducer.nextAction(rollback))
+    }
+
+    @Test
+    fun `new readback mismatch revokes an unpublished verified state`() {
+        val verified = verified()
+
+        val result = reducer.reduce(
+            verified,
+            CutoverRestoreEvent.Verified(identity, DIGEST_B)
+        )
+
+        val rollback = assertAdvanced(result, CutoverRestorePhase.ROLLBACK_REQUIRED)
+        assertEquals(CutoverRestoreFailureReason.ARCHIVE_VERIFICATION_FAILED, rollback.failureReason)
+        assertFalse(rollback.isVisible)
     }
 
     @Test
@@ -228,7 +265,7 @@ class CutoverRestoreProtocolTest {
     @Test
     fun `restart projection resumes only the next unproven phase`() {
         val states = listOf(
-            begin() to CutoverRestoreAction.WRITE_ROOM,
+            begin() to CutoverRestoreAction.RECHECK_ELIGIBILITY_AND_WRITE_ROOM,
             roomWritten() to CutoverRestoreAction.WRITE_DATASTORE,
             dataStoreWritten() to CutoverRestoreAction.VERIFY,
             verified() to CutoverRestoreAction.RECHECK_ELIGIBILITY_AND_PUBLISH
