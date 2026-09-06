@@ -64,4 +64,26 @@ class OracleBundleCodecTest {
         assertNull(OracleBundleCodec.decodeFields(negativeSequence))
         assertNull(OracleBundleCodec.decodeFields(splitOwner))
     }
+
+    @Test
+    fun `nullable v1 strings reject a nonnull value of the wrong type`() {
+        listOf(
+            OracleBundleCodec.KEY_OWNER_PACKAGE,
+            OracleBundleCodec.KEY_QWY_SEMANTIC_DIGEST,
+            OracleBundleCodec.KEY_LAST_COMPLETED_QWY_MUTATION_ID,
+        ).forEach { key ->
+            val malformed = OracleBundleCodec.encodeFields(valid).toMutableMap().apply {
+                this[key] = 123
+            }
+            assertNull("wrong type for $key must not become absent", OracleBundleCodec.decodeFields(malformed))
+        }
+    }
+
+    @Test
+    fun `nullable v1 strings retain explicit null semantics`() {
+        val noOwner = valid.copy(ownerUid = null, ownerPackage = null)
+        val noOptionalMetadata = noOwner.copy(qwySemanticDigest = null, lastCompletedQwyMutationId = null)
+
+        assertEquals(noOptionalMetadata, OracleBundleCodec.decodeFields(OracleBundleCodec.encodeFields(noOptionalMetadata)))
+    }
 }

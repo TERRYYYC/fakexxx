@@ -124,7 +124,9 @@ object OracleBundleCodec {
         val rawOwnerUid = fields[KEY_OWNER_UID] as? Int ?: return null
         val ownerUid = rawOwnerUid.takeUnless { it == NO_OWNER_UID }
         if (ownerUid != null && ownerUid < 0) return null
-        val ownerPackage = fields[KEY_OWNER_PACKAGE] as? String
+        val rawOwnerPackage = fields[KEY_OWNER_PACKAGE]
+        if (rawOwnerPackage != null && rawOwnerPackage !is String) return null
+        val ownerPackage = rawOwnerPackage as String?
         if ((ownerUid == null) != (ownerPackage == null) || ownerPackage?.isBlank() == true) return null
         val gpsEnabled = fields[KEY_GPS_PROVIDER_ENABLED] as? Boolean ?: return null
         val networkEnabled = fields[KEY_NETWORK_PROVIDER_ENABLED] as? Boolean ?: return null
@@ -132,8 +134,12 @@ object OracleBundleCodec {
         val installedMask = (fields[KEY_INSTALLED_COVERAGE_MASK] as? Long)?.takeIf { it >= 0L } ?: return null
         val health = (fields[KEY_HEALTH] as? String)
             ?.let { value -> OracleWireHealth.entries.firstOrNull { it.name == value } } ?: return null
-        val semanticDigest = fields[KEY_QWY_SEMANTIC_DIGEST] as? String
-        val mutationId = fields[KEY_LAST_COMPLETED_QWY_MUTATION_ID] as? String
+        val rawSemanticDigest = fields[KEY_QWY_SEMANTIC_DIGEST]
+        val rawMutationId = fields[KEY_LAST_COMPLETED_QWY_MUTATION_ID]
+        if (rawSemanticDigest != null && rawSemanticDigest !is String) return null
+        if (rawMutationId != null && rawMutationId !is String) return null
+        val semanticDigest = rawSemanticDigest as String?
+        val mutationId = rawMutationId as String?
         if (semanticDigest?.isBlank() == true || mutationId?.isBlank() == true) return null
 
         return OracleWireSnapshot(
