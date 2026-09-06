@@ -129,6 +129,12 @@
             android:name=".integration.v1.EnvironmentControlService"
             android:exported="true" />
 
+        <!-- Private system_server oracle registrar; every registration independently checks UID 1000. -->
+        <service
+            android:name=".oracle.OracleBridgeService"
+            android:directBootAware="true"
+            android:exported="true" />
+
     </application>
 
 </manifest>
