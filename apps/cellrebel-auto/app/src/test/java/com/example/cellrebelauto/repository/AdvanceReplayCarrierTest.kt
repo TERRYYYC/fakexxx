@@ -11,7 +11,9 @@ import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.recovery.ReleaseReceiptRow
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
@@ -76,5 +78,32 @@ class AdvanceReplayCarrierTest {
             runTest { repository.persistAdvanceReplayCarrier(attemptId, request(verifiedAt = 999_999L), createdAt = 5) }
         }
         assertEquals(original, repository.getAdvanceReplayRequest(attemptId))
+    }
+
+    @Test fun `identical advance receipt replays retain the first audit timestamp`() = runTest {
+        val request = request(verifiedAt = 123_456L)
+        repository.persistAdvanceReplayCarrier(attemptId, request, createdAt = 4)
+        val unsignedReceipt = AdvanceReceiptV1(
+            outcomeWire = 1,
+            advancedFromItemId = "item-1",
+            advancedToItemId = "item-2",
+            scheduleVersionAfter = 8,
+            effectiveIntentHash = "effective-intent",
+            effectiveEnvironmentRevision = 2,
+            receiptDigest = ""
+        )
+        val receipt = unsignedReceipt.copy(
+            receiptDigest = CanonicalAdvanceReceiptDigestV1.compute(
+                unsignedReceipt,
+                request.requestDigest,
+                request.idempotencyKey
+            )
+        )
+
+        repository.persistAdvanceReceipt(attemptId, request, receipt, recordedAt = 10)
+        repository.persistAdvanceReceipt(attemptId, request, receipt, recordedAt = 20)
+
+        assertEquals(receipt, repository.getAdvanceReceipt(attemptId))
+        assertEquals(10, db.advanceReceiptDao().byAttempt(attemptId)!!.recordedAt)
     }
 }

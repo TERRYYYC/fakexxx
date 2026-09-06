@@ -643,7 +643,10 @@ class PlanRepository(private val db: AppDatabase) {
             recordedAt = recordedAt
         )
         db.advanceReceiptDao().insertIfAbsent(row)
-        check(db.advanceReceiptDao().byAttempt(attemptId) == row) {
+        // recordedAt describes when this process observed the receipt, not what the provider
+        // attested. A restart can replay the same immutable receipt at a later clock value.
+        val persisted = requireNotNull(db.advanceReceiptDao().byAttempt(attemptId))
+        check(persisted.copy(recordedAt = recordedAt) == row) {
             "ADVANCE_RECEIPT_CONFLICT:$attemptId"
         }
     }

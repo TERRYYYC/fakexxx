@@ -2539,9 +2539,13 @@ class AutomationEngine(
             aplusPause("attempt $attemptId cannot replay advance from $currentState")
             return AdvanceVerificationResult.FAILED
         }
+        // A verified durable receipt is already sufficient provider authority. It may have been
+        // persisted immediately before a process death, so consume it rather than needlessly
+        // replaying an external command. A missing receipt alone permits the first dispatch.
+        val existingDurableReceipt = planRepository.getAdvanceReceipt(attemptId)
         // The owner is already ADVANCE_PENDING (or a later verification phase) before this first
         // external call. Recovery replays from its persisted phase and never rewinds it to PENDING.
-        val providerAdvanceReceipt = when (
+        val advanceReceipt = existingDurableReceipt ?: when (
             val advanceOutcome = coordinator.executorBackend().completeAndAdvanceOutcome(
                 advanceRequest,
                 intentDigest
@@ -2549,8 +2553,8 @@ class AutomationEngine(
         ) {
             is com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Receipt -> advanceOutcome.value
             is com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Failure -> {
-            // Fail-closed: the provider could not prove the advance — the quota is committed
-            // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
+                // Fail-closed: the provider could not prove the advance — the quota is committed
+                // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
                 planRepository.markRecoveryRequired(
                     attemptId,
                     "ADVANCE_NOT_PROVEN:${advanceOutcome.reason}"
@@ -2562,7 +2566,6 @@ class AutomationEngine(
                 return AdvanceVerificationResult.FAILED
             }
         }
-        val advanceReceipt = providerAdvanceReceipt
         // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
         // (requestDigest, idempotencyKey) together with the outcome the provider claims.
         val expectedReceiptDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1.compute(
@@ -2579,11 +2582,13 @@ class AutomationEngine(
             return AdvanceVerificationResult.FAILED
         }
         // The provider's self-description is durable BEFORE any receipt-driven owner transition.
-        // A crash now replays the same request and reads this exact receipt back for verification.
-        planRepository.persistAdvanceReceipt(attemptId, advanceRequest, advanceReceipt, nowMs())
-        val durableAdvanceReceipt = requireNotNull(planRepository.getAdvanceReceipt(attemptId)) {
-            "ADVANCE_RECEIPT_NOT_READABLE:$attemptId"
+        // A crash after that persistence consumes this verified receipt without another dispatch.
+        if (existingDurableReceipt == null) {
+            planRepository.persistAdvanceReceipt(attemptId, advanceRequest, advanceReceipt, nowMs())
         }
+        val durableAdvanceReceipt = existingDurableReceipt ?: requireNotNull(
+            planRepository.getAdvanceReceipt(attemptId)
+        ) { "ADVANCE_RECEIPT_NOT_READABLE:$attemptId" }
         // R45 (Sol R45 P1-5 / §6.7.5): the receipt is the provider's SELF-DESCRIPTION, not proof
         // the environment moved. Independent verification is mandatory — non-terminal: observe()
         // four legs; terminal (exhausted): a fresh discover() readback with the v1.55 non-null

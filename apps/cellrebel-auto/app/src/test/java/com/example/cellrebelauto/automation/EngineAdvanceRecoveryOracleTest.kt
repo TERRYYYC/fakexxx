@@ -313,6 +313,32 @@ class EngineAdvanceRecoveryOracleTest {
     }
 
     @Test
+    fun `an ADVANCE_PENDING crash consumes its durable receipt without redispatching`() = runTest {
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        val originalRequest = expectedAdvanceRequest()
+        seedAdvanceEffect(originalRequest)
+        repo.persistAdvanceReceipt(
+            attemptId = 31L,
+            request = originalRequest,
+            receipt = checkNotNull(storedAdvances[originalRequest.idempotencyKey]).receipt,
+            recordedAt = 10L
+        )
+
+        val restartClock = VClock().apply { now = 20L }
+        buildEngine(planId, restartClock).run()
+
+        assertEquals(
+            "the durable provider receipt is sufficient authority after restart; recovery must not dispatch again",
+            1,
+            advanceInvocationCount
+        )
+        assertEquals("the original provider effect remains the only effect", 1, advanceEffectCount)
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("a later audit clock must not block receipt recovery", "succeeded", attempt.status)
+        assertEquals("CLOSED", attempt.aplusState)
+    }
+
+    @Test
     fun `an ADVANCE_PENDING crash without an exact request carrier pauses without dispatching`() = runTest {
         val (planId, _) = seedCrashedAt("ADVANCE_PENDING", withReplayCarrier = false)
         buildEngine(planId, VClock()).run()
