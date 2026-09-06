@@ -1246,7 +1246,8 @@ class AutomationEngine(
 
         for (crashed in effectOwners) {
             if (!recoverCrashedAttempt(crashed, coordinator, recoveryCapabilities,
-                    legacyExpected = crashed.id in locallyValidLegacyOwnerIds)) return false
+                    legacyExpected = crashed.id in locallyValidLegacyOwnerIds,
+                    allowApplyRedispatch = !stopOnly)) return false
         }
         if (!recoveryOwnersConverged()) return false
         if (recoveryCapabilities?.exhausted == true &&
@@ -1443,7 +1444,8 @@ class AutomationEngine(
         candidate: TestAttempt,
         coordinator: RecoveryCoordinator,
         recoveryCapabilities: CapabilitySnapshotV1?,
-        legacyExpected: Boolean
+        legacyExpected: Boolean,
+        allowApplyRedispatch: Boolean = true
     ): Boolean {
         // Admission may suspend for discovery. A concurrent terminal projection must not be
         // revived using its older census snapshot; legacy convergence also revalidates in Room.
@@ -1728,7 +1730,7 @@ class AutomationEngine(
             // Only the no-receipt branch may dispatch a new provider apply, so bind that effect to
             // protocol v1 plus the complete live schedule anchor. Explicit exhausted=true blocks;
             // exhausted=null preserves the contract's stated compatibility boundary.
-            val allowExternalApply = recoveryCapabilities?.let { capabilities ->
+            val allowExternalApply = allowApplyRedispatch && recoveryCapabilities?.let { capabilities ->
                 capabilities.protocolVersion == ContractV1.PROTOCOL_VERSION &&
                     capabilities.exhausted != true &&
                     crashed.aplusAnchorItemId != null &&

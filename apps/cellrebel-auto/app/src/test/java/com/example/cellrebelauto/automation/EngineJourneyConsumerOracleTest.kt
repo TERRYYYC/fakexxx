@@ -2,6 +2,7 @@ package com.example.cellrebelauto.automation
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptState
 import com.example.cellrebelauto.db.AppDatabase
@@ -404,6 +405,27 @@ class EngineJourneyConsumerOracleTest {
         assertEquals("stop-only never preflights CREATED", 0, preflightCalls.size)
         assertEquals("stop-only never promotes CREATED into an external effect", emptyList<String>(), events)
         assertEquals(AttemptState.CREATED.name, db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
+        assertEquals(listOf(attemptId), db.testAttemptDao().getAttemptsForTask(taskId).map { it.id })
+    }
+
+    @Test
+    fun `supersession stop refuses APPLY_PENDING without a durable receipt instead of replaying apply`() = runTest {
+        val (planId, taskId, attemptId) = seedCreatedRecoveryOwner()
+        repo.markAplusState(attemptId, AttemptState.APPLY_PENDING.name)
+
+        val converged = buildEngine(
+            planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).convergeForSupersessionStop()
+
+        assertFalse(converged)
+        assertEquals("stop-only never preflights a persisted APPLY_PENDING owner", 0, preflightCalls.size)
+        assertEquals("stop-only never replays provider apply without its durable receipt",
+            emptyList<String>(), events)
+        assertNull(db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attemptId)))
+        assertEquals(AttemptState.APPLY_PENDING.name,
+            db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
         assertEquals(listOf(attemptId), db.testAttemptDao().getAttemptsForTask(taskId).map { it.id })
     }
 
