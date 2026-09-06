@@ -25,7 +25,7 @@ exact HEAD 重新构建并重新取证。
 | Issue | 当前责任 | 现有 PR / SHA | 本轮状态 | 仍需的验收 |
 | --- | --- | --- | --- | --- |
 | #13 applicationId cutover | 本发布任务（设计实现），主任务统筹共享 Gradle/Release | #14（设计，open） | 未实施，**阻断 applicationId mutation、旧 Auto 移除和 release candidate** | `legacyId`/`productId` source set 与 SAF UI；五表+配置 bundle round-trip；variant CI；`M-AC-03` 真机 old→new→rollback |
-| #46 QWY legacy v0 DB | 本发布任务 | `4f624a422251862ca0265c78aaad43acc6d3c953` + follow-up 未提交 | WAL/rollback-journal 门、重启状态、全列三行和 provider raw-open instrumentation GREEN；尚未合入/复审 | integration/v1 two direct-open calls；非作者复审；最终 HEAD emulator regression；production legacy-state仍属未知，发布材料必须如实标注 |
+| #46 QWY legacy v0 DB | 本发布任务 | `445f18b42da914baf00ff9aaf86d41cd82f12418`（PR #102） | WAL/rollback-journal 门、重启状态、全列三行和 provider raw-open instrumentation GREEN；尚未合入/复审 | integration/v1 two direct-open calls；非作者复审；最终 HEAD emulator regression；production legacy-state仍属未知，发布材料必须如实标注 |
 | #66 authoritative continuity oracle | 可信任务 | #68 / #98（均 open） | 不在本任务改动面 | successor integration 的 exact-HEAD review、主任务合并次序与 G2 验收 |
 | #71 Binder / Vector transport | Vector 任务 | #72、#99（open） | 框架/运维边界 | 设备+Vector 版本证据；不得用文档替代 transport 验收 |
 | #79 / #83 QWY discovery & audit scale | 可信任务 | 无独立 PR 已核实 | 未完成 | profileRefs readback、存储/TTL 语义及回归 |
