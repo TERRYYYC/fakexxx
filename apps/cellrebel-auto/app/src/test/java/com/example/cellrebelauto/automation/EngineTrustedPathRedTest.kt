@@ -1087,7 +1087,7 @@ class EngineTrustedPathRedTest {
 
         // The release is provider-driven + lease-bound: never re-apply; the release receipt is exact-bound.
         assertEquals("release-in-flight recovery must never re-invoke apply", 1, executor.invocationCount(applyKey(77L)))
-        val receipt = log.releaseReceiptFor("lease-77")
+        val receipt = db.releaseReceiptDao().byLease("lease-77")
         assertNotNull("the release must converge a durable receipt bound to the lease", receipt)
         assertEquals("release receipt idempotencyKey", releaseKey(77L), receipt!!.idempotencyKey)
         assertEquals("release receipt leaseId", "lease-77", receipt.leaseId)
@@ -1143,7 +1143,7 @@ class EngineTrustedPathRedTest {
 
         // DECIDING already has a durable apply → release-only, never re-applied (P1-4).
         assertEquals("a DECIDING crash must not re-invoke apply", 1, executor.invocationCount(applyKey(77L)))
-        assertNotNull("a DECIDING crash must converge a release receipt", log.releaseReceiptFor("lease-77"))
+        assertNotNull("a DECIDING crash must converge a release receipt", db.releaseReceiptDao().byLease("lease-77"))
     }
 
     // ---- R10-F4: the complete ordered §8.1 audit trail (driver no-op ⇒ RED) ----

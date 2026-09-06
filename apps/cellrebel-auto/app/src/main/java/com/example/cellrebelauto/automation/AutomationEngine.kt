@@ -781,8 +781,7 @@ class AutomationEngine(
                                             task.id,
                                             applyOutcome.operationId,
                                             intentDigest,
-                                            releasedState,
-                                            allowCarrierCreation = true
+                                            releasedState
                                         )) {
                                         AdvanceVerificationResult.FAILED -> return@coroutineScope
                                         AdvanceVerificationResult.ADVANCED -> Unit
@@ -1674,7 +1673,8 @@ class AutomationEngine(
             aplusPause("no durable leaseId to release for recovered attempt ${crashed.id}")
             return false
         }
-        val receipt = coordinator.releaseLease(
+        val releaseRoute = resolveReleaseReceiptRoute(crashed) ?: return false
+        val receipt = coordinator.prepareReleaseLease(
             crashed.id,
             APlusOperationIdentity.releaseIdempotencyKey(crashed.id),
             leaseId,
@@ -1693,19 +1693,7 @@ class AutomationEngine(
             aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
             return false
         }
-        planRepository.persistReleaseReceipt(
-            receipt.idempotencyKey,
-            receipt.leaseId,
-            receipt.releaseDigest,
-            receipt.resultOutcome,
-            receipt.createdAt
-        )
-        val releaseRoute = resolveReleaseReceiptRoute(crashed) ?: return false
-        val postReleaseState = driveAplusReleaseReceipt(
-            crashed.id,
-            AttemptState.RELEASE_PENDING,
-            releaseRoute
-        )
+        val postReleaseState = commitAplusRelease(crashed.id, receipt, releaseRoute) ?: return false
         val expectedPostReleaseState = when (releaseRoute) {
             ReleaseReceiptRoute.NOT_COMMITTED,
             ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA -> AttemptState.CLOSED
@@ -1722,7 +1710,6 @@ class AutomationEngine(
             )
             return false
         }
-        planRepository.markAplusState(crashed.id, postReleaseState.name)
         return advanceAfterRelease(
             crashed,
             postReleaseState,
@@ -2128,8 +2115,7 @@ class AutomationEngine(
                             crashed.taskId,
                             null,
                             intentDigest,
-                            postReleaseState,
-                            allowCarrierCreation = true
+                            postReleaseState
                         )) {
                         AdvanceVerificationResult.FAILED -> return false
                         AdvanceVerificationResult.ADVANCED -> Unit
@@ -2240,7 +2226,7 @@ class AutomationEngine(
             aplusPause("no durable leaseId to release for attempt $attemptId")
             return false
         }
-        val receipt = recoveryCoordinator?.releaseLease(
+        val receipt = recoveryCoordinator?.prepareReleaseLease(
             attemptId,
             APlusOperationIdentity.releaseIdempotencyKey(attemptId),
             leaseId,
@@ -2259,18 +2245,8 @@ class AutomationEngine(
             aplusPause("release receipt not durable for attempt $attemptId")
             return false
         }
-        planRepository.persistReleaseReceipt(
-            receipt.idempotencyKey,
-            receipt.leaseId,
-            receipt.releaseDigest,
-            receipt.resultOutcome,
-            receipt.createdAt
-        )
-        val closedState = driveAplusReleaseReceipt(
-            attemptId,
-            AttemptState.RELEASE_PENDING,
-            ReleaseReceiptRoute.NOT_COMMITTED
-        )
+        val closedState = commitAplusRelease(attemptId, receipt, ReleaseReceiptRoute.NOT_COMMITTED)
+            ?: return false
         if (closedState != AttemptState.CLOSED) {
             planRepository.markRecoveryRequired(
                 attemptId,
@@ -2279,7 +2255,6 @@ class AutomationEngine(
             aplusPause("release receipt did not close non-committed attempt $attemptId (got $closedState)")
             return false
         }
-        planRepository.markAplusState(attemptId, closedState.name)
         if (success) {
             planRepository.finalizeAplusSuccess(attemptId, taskId, endedAt, webScore, videoScore)
         } else {
@@ -2383,20 +2358,35 @@ class AutomationEngine(
         planRepository.markRecoveryRequired(attemptId, recoveryReason)
     }
 
-    private suspend fun driveAplusReleaseReceipt(
+    private suspend fun commitAplusRelease(
         attemptId: Long,
-        currentState: AttemptState,
+        handoff: com.example.cellrebelauto.recovery.ProviderReleaseHandoff,
         route: ReleaseReceiptRoute
-    ): AttemptState = attemptDriver?.driveReleaseReceipt(attemptId, currentState, route)
-        ?: AttemptTransitions.nextAfterReleaseReceipt(currentState, route)
+    ): AttemptState? = try {
+        val committed = planRepository.commitReleaseReceipt(attemptId, handoff, route, commitClockMs(), nowMs())
+        val expected = AttemptTransitions.nextAfterReleaseReceipt(AttemptState.RELEASE_PENDING, route)
+        if (committed != expected) {
+            // A stale release caller may return after another caller has advanced/closed the
+            // same owner. Preserve that later state; do not report it as a recovery mutation.
+            aplusPause("release already committed for attempt $attemptId at $committed")
+            null
+        } else committed
+    } catch (e: IllegalStateException) {
+        // The release transaction has rolled back. Persist a separate, audited recovery reason;
+        // a legacy release with no exact request cannot invent a historical advance request.
+        if (planRepository.getAttempt(attemptId)?.aplusState != AttemptState.CLOSED.name) {
+            planRepository.markRecoveryRequired(attemptId, "RELEASE_COMMIT_REJECTED:${e.message}")
+        }
+        aplusPause("release commit rejected for attempt $attemptId: ${e.message}")
+        null
+    }
 
     /**
      * R46 (Sol R46 P1-1/P1-2): the SINGLE advance replay+verify routine shared by the normal
-     * quota-reached path and the ADVANCE_* crash recovery. Rebuilds the advance request from
-     * DURABLE state only (the attempt-open anchor triple + the trusted projection + the persisted
-     * lease) — the rebuild is byte-identical to the original request (the digest preimage excludes
-     * verifiedAtElapsedRealtimeMs), so an idempotent provider returns the STORED receipt for the
-     * same (key, digest) and a crash never pushes a second advance. The result distinguishes a
+     * quota-reached path and the ADVANCE_* crash recovery. Reads the exact request owned by the
+     * atomic release commit, including verifiedAtElapsedRealtimeMs, so an idempotent provider
+     * returns the STORED receipt for the same request and a crash never pushes a second advance.
+     * The result distinguishes a
      * verified non-terminal advance from verified EXHAUSTED; failures are already fail-closed
      * (RECOVERY_REQUIRED + pause) before returning [AdvanceVerificationResult.FAILED].
      *
@@ -2409,8 +2399,7 @@ class AutomationEngine(
         taskId: Long,
         verbatimOperationId: String?,
         intentDigest: String,
-        currentState: AttemptState,
-        allowCarrierCreation: Boolean = false
+        currentState: AttemptState
     ): AdvanceVerificationResult {
         val coordinator = recoveryCoordinator ?: run {
             aplusPause("no coordinator to advance attempt $attemptId")
@@ -2484,47 +2473,22 @@ class AutomationEngine(
         }
         val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
         val releaseDigest = APlusOperationIdentity.releaseDigest(advanceLease)
-        if (!coordinator.hasMatchingDurableReleaseReceipt(releaseKey, advanceLease, releaseDigest)) {
+        if (!planRepository.hasMatchingReleaseReceipt(releaseKey, advanceLease, releaseDigest)) {
             return rejectAdvanceReplayAuthority(
                 attemptId,
                 "ADVANCE_RELEASE_AUTHORITY_MISSING",
                 "matching durable RELEASED receipt is missing"
             )
         }
-        val baseAdvanceRequest = io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
-            leaseId = advanceLease,
-            idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
-            requestDigest = "",
-            expectedScheduleId = anchor.first,
-            expectedScheduleVersion = anchor.third,
-            expectedCurrentItemId = anchor.second,
-            completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
-                scheduleItemId = anchor.second,
-                trustedSuccessCount = trustedSuccessCount,
-                quotaRequired = task.requiredSuccesses,
-                ledgerRef = "ledger-$attemptId",
-                verifiedAtElapsedRealtimeMs = commitClockMs()
-            ),
-            callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
-        )
-        val reconstructedRequest = baseAdvanceRequest.copy(
-            requestDigest = io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1.compute(baseAdvanceRequest)
-        )
         // #85: once a request may be sent, recovery must use its exact stored identity. In
         // particular, verifiedAtElapsedRealtimeMs is outside the digest but remains part of the
         // request, so it cannot be silently regenerated with a new clock under the same key.
         val advanceRequest = planRepository.getAdvanceReplayRequest(attemptId) ?: run {
-            if (!allowCarrierCreation) {
-                return rejectAdvanceReplayAuthority(
-                    attemptId,
-                    "ADVANCE_REPLAY_CARRIER_MISSING",
-                    "no exact durable request exists for recovery replay"
-                )
-            }
-            planRepository.persistAdvanceReplayCarrier(attemptId, reconstructedRequest, nowMs())
-            requireNotNull(planRepository.getAdvanceReplayRequest(attemptId)) {
-                "ADVANCE_REPLAY_CARRIER_NOT_READABLE:$attemptId"
-            }
+            return rejectAdvanceReplayAuthority(
+                attemptId,
+                "ADVANCE_REPLAY_CARRIER_MISSING",
+                "no exact durable request exists for recovery replay"
+            )
         }
         if (currentState !in setOf(
                 AttemptState.ADVANCE_PENDING,
@@ -2787,7 +2751,7 @@ class AutomationEngine(
             aplusPause("no durable leaseId to release for attempt $attemptId")
             return null
         }
-        val receipt = recoveryCoordinator?.releaseLease(
+        val receipt = recoveryCoordinator?.prepareReleaseLease(
             attemptId,
             APlusOperationIdentity.releaseIdempotencyKey(attemptId),
             leaseId,
@@ -2806,18 +2770,7 @@ class AutomationEngine(
             aplusPause("release receipt not durable for attempt $attemptId")
             return null
         }
-        planRepository.persistReleaseReceipt(
-            receipt.idempotencyKey,
-            receipt.leaseId,
-            receipt.releaseDigest,
-            receipt.resultOutcome,
-            receipt.createdAt
-        )
-        val postReleaseState = driveAplusReleaseReceipt(
-            attemptId,
-            AttemptState.RELEASE_PENDING,
-            releaseRoute
-        )
+        val postReleaseState = commitAplusRelease(attemptId, receipt, releaseRoute) ?: return null
         val expectedState = when (releaseRoute) {
             ReleaseReceiptRoute.NOT_COMMITTED,
             ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA -> AttemptState.CLOSED
@@ -2834,7 +2787,6 @@ class AutomationEngine(
             )
             return null
         }
-        planRepository.markAplusState(attemptId, postReleaseState.name)
         return postReleaseState
     }
 

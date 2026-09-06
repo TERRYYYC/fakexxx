@@ -279,6 +279,28 @@ class EngineAdvanceRecoveryOracleTest {
     }
 
     @Test
+    fun `quota release audit failure rolls back receipt carrier and owner together`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASE_PENDING", withReplayCarrier = false)
+        db.openHelper.writableDatabase.execSQL("DELETE FROM release_receipts")
+        db.openHelper.writableDatabase.execSQL("""
+            CREATE TRIGGER fail_release_audit BEFORE INSERT ON auto_audit_events
+            WHEN NEW.eventType = 'RELEASE_RECEIPT'
+            BEGIN SELECT RAISE(ABORT, 'injected release audit failure'); END
+        """.trimIndent())
+
+        runCatching { buildEngine(planId, VClock()).run() }
+
+        assertEquals("failed atomic commit must not expose an orphan release receipt", null,
+            db.releaseReceiptDao().byKey(
+                com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey(31L)
+            ))
+        assertEquals(null, repo.getAdvanceReplayRequest(31L))
+        assertEquals("RELEASE_PENDING", repo.getAttempt(31L)!!.aplusState)
+        assertEquals(0, advanceInvocationCount)
+        assertTrue(db.auditEventDao().forAttempt(31L).none { it.eventType == "RELEASE_RECEIPT" })
+    }
+
+    @Test
     fun `an ADVANCE_PENDING crash replays the same durable request and closes trusted`() = runTest {
         val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
         val clock = VClock()

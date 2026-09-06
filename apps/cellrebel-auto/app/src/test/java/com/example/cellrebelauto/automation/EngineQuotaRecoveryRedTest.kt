@@ -262,18 +262,18 @@ class EngineQuotaRecoveryRedTest {
     // ---- RELEASED crash + quota REACHED → advance MUST be dispatched ----
 
     @Test
-    fun `a RELEASED crash with quota reached dispatches the external advance`() = runTest {
+    fun `a legacy RELEASED crash without an exact carrier cannot manufacture an advance request`() = runTest {
         val (planId, _) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
         buildEngine(planId, VClock()).run()
 
         assertEquals(
-            "recovery from RELEASED MUST dispatch the advance when quota is reached " +
-                "(killing mutation: no advance dispatch ⇒ 0 replays)",
-            1, advanceReplays.size
+            "a durable release alone cannot prove the exact historical advance request",
+            0, advanceReplays.size
         )
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
-        assertEquals("the crashed attempt must close as succeeded", "succeeded", attempt.status)
-        assertEquals("CLOSED", attempt.aplusState)
+        assertEquals("the unproven advance remains recoverable", "running", attempt.status)
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals("RELEASE_COMMIT_REJECTED:ADVANCE_REPLAY_CARRIER_MISSING:31", attempt.failureReason)
         assertEquals("legacy RELEASED must replay its durable receipt without a provider call", 0, releaseAttempts.count { it == 31L })
     }
 

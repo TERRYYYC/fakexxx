@@ -1,6 +1,11 @@
 package com.example.cellrebelauto.repository
 
 import androidx.room.withTransaction
+import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+import com.example.cellrebelauto.automation.aplus.AttemptState
+import com.example.cellrebelauto.automation.aplus.AttemptTransitions
+import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
@@ -19,6 +24,7 @@ import com.example.cellrebelauto.model.plan.WorklistRow
 import com.example.cellrebelauto.recovery.AdvanceReplayCarrierRow
 import com.example.cellrebelauto.recovery.AdvanceReceiptRow
 import com.example.cellrebelauto.recovery.ReleaseReceiptRow
+import com.example.cellrebelauto.recovery.ProviderReleaseHandoff
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
@@ -515,6 +521,98 @@ class PlanRepository(private val db: AppDatabase) {
 
     suspend fun getUnverifiedRecord(attemptId: Long): UnverifiedAttemptRecord? =
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
+
+    /**
+     * The sole production RELEASE_RECEIPT owner boundary. Provider I/O has already completed
+     * outside Room. Release, exact quota request, legal owner transition and its audit either
+     * commit together or all roll back. Recovery never fills a historical carrier gap.
+     */
+    suspend fun commitReleaseReceipt(
+        attemptId: Long,
+        handoff: ProviderReleaseHandoff,
+        expectedRoute: ReleaseReceiptRoute,
+        verifiedAtElapsedRealtimeMs: Long,
+        recordedAt: Long
+    ): AttemptState = db.withTransaction {
+        val attempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId))
+        val current = AttemptState.valueOf(requireNotNull(attempt.aplusState))
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+        check(handoff.idempotencyKey == releaseKey && handoff.leaseId == attempt.aplusLeaseId &&
+            handoff.releaseDigest == APlusOperationIdentity.releaseDigest(handoff.leaseId) &&
+            handoff.resultOutcome == "RELEASED") { "RELEASE_HANDOFF_OWNER_MISMATCH:$attemptId" }
+        val priorRelease = db.releaseReceiptDao().byKey(releaseKey)
+        val priorByLease = db.releaseReceiptDao().byLease(handoff.leaseId)
+        check(priorRelease == priorByLease) { "RELEASE_RECEIPT_INDEX_CONFLICT:$attemptId" }
+        val trusted = db.trustedQuotaDao().getByAttempt(attemptId)
+        val negative = db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
+        check(trusted == null || (negative == null && trusted.taskId == attempt.taskId)) {
+            "RELEASE_TRUST_CARRIER_CONFLICT:$attemptId"
+        }
+        val task = requireNotNull(db.locationTaskDao().getTaskById(attempt.taskId))
+        val trustedCount = trustedCountForTask(attempt.taskId)
+        val route = when {
+            trusted == null -> ReleaseReceiptRoute.NOT_COMMITTED
+            trustedCount < task.requiredSuccesses -> ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA
+            else -> ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED
+        }
+        check(route == expectedRoute) { "RELEASE_ROUTE_CONFLICT:$attemptId:$route:$expectedRoute" }
+        val existingRequest = getAdvanceReplayRequest(attemptId)
+        if (route == ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED) {
+            // A legacy receipt without the exact request cannot prove whether advance was sent.
+            // Only an entirely new Auto release commit may mint a request using today's clock.
+            check(existingRequest != null || (priorRelease == null && !handoff.alreadyDurable)) {
+                "ADVANCE_REPLAY_CARRIER_MISSING:$attemptId"
+            }
+        } else {
+            check(existingRequest == null) { "NON_QUOTA_ADVANCE_CARRIER:$attemptId" }
+        }
+        if (current != AttemptState.RELEASE_PENDING) {
+            // A repeated handoff can observe a later phase, but cannot rewind it or emit another
+            // release event. Receipt/carrier plus the original audit must prove the first commit.
+            check(current in setOf(AttemptState.ADVANCE_PENDING, AttemptState.ADVANCE_OBSERVING,
+                AttemptState.ADVANCE_STATE_READBACK, AttemptState.CLOSED, AttemptState.RECOVERY_REQUIRED) &&
+                priorRelease != null && db.auditEventDao().forAttempt(attemptId).any {
+                    it.eventType == "RELEASE_RECEIPT" && it.payloadDigest ==
+                        "RELEASE_PENDING->${AttemptTransitions.nextAfterReleaseReceipt(AttemptState.RELEASE_PENDING, route)}[$route]"
+                }) { "RELEASE_RECEIPT_ILLEGAL_STATE:$attemptId:$current" }
+        }
+        persistReleaseReceipt(handoff.idempotencyKey, handoff.leaseId, handoff.releaseDigest,
+            handoff.resultOutcome, handoff.createdAt)
+        if (route == ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED && existingRequest == null) {
+            val scheduleId = checkNotNull(attempt.aplusAnchorScheduleId) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
+            val itemId = checkNotNull(attempt.aplusAnchorItemId) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
+            val version = checkNotNull(attempt.aplusAnchorVersion) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
+            val base = CompleteAndAdvanceRequestV1(
+                leaseId = handoff.leaseId,
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                requestDigest = "", expectedScheduleId = scheduleId,
+                expectedScheduleVersion = version, expectedCurrentItemId = itemId,
+                completionProof = CompletionProofV1(itemId, trustedCount, task.requiredSuccesses,
+                    "ledger-$attemptId", verifiedAtElapsedRealtimeMs),
+                callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+            )
+            persistAdvanceReplayCarrier(attemptId,
+                base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base)), recordedAt)
+        }
+        if (current != AttemptState.RELEASE_PENDING) return@withTransaction current
+        val next = AttemptTransitions.nextAfterReleaseReceipt(current, route)
+        check(next != current) { "RELEASE_RECEIPT_UNDEFINED_EDGE:$attemptId:$current" }
+        check(db.testAttemptDao().compareAndSetAplusState(attemptId, current.name, next.name) == 1) {
+            "RELEASE_RECEIPT_OWNER_CHANGED:$attemptId"
+        }
+        check(APlusAttemptDriver(db.auditEventDao()) { recordedAt }
+            .driveReleaseReceipt(attemptId, current, route) == next)
+        next
+    }
+
+    /** Release authority now belongs to this transaction owner, including for advance replay. */
+    suspend fun hasMatchingReleaseReceipt(key: String, lease: String, digest: String): Boolean =
+        db.withTransaction {
+            val byKey = db.releaseReceiptDao().byKey(key)
+            val byLease = db.releaseReceiptDao().byLease(lease)
+            byKey != null && byKey == byLease && byKey.leaseId == lease &&
+                byKey.releaseDigest == digest && byKey.resultOutcome == "RELEASED"
+        }
 
     /** Mirrors the release receipt into the transaction owner DB and verifies an exact replay. */
     suspend fun persistReleaseReceipt(

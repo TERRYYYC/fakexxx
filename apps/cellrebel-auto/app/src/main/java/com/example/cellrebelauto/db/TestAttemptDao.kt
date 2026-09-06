@@ -152,6 +152,9 @@ interface TestAttemptDao {
     @Query("UPDATE test_attempts SET aplusState = :aplusState WHERE id = :attemptId")
     suspend fun markAplusState(attemptId: Long, aplusState: String)
 
+    @Query("UPDATE test_attempts SET aplusState = :next WHERE id = :attemptId AND aplusState = :expected")
+    suspend fun compareAndSetAplusState(attemptId: Long, expected: String, next: String): Int
+
     /**
      * Atomically mark RECOVERY_REQUIRED with a typed reason (Sol R2 P1-3: durable leg-specific reason).
      * The reason is stored in `failureReason` — the test can read it back to verify which specific

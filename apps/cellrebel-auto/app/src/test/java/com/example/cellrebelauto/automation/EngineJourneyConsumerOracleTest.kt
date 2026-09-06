@@ -97,6 +97,8 @@ class EngineJourneyConsumerOracleTest {
     private val storedAdvances = mutableMapOf<String, StoredAdvance>()
     private var advanceInvocationCount = 0
     private var advanceEffectCount = 0
+    private var beforeAdvanceDispatch: (CompleteAndAdvanceRequestV1) -> Unit = {}
+    private var afterAdvanceEffect: () -> Unit = {}
 
     /** Test hook: mutate the armed post-advance observation (tamper one four-leg). */
     private var observationTamper: (EnvironmentObservationV1) -> EnvironmentObservationV1 = { it }
@@ -107,6 +109,7 @@ class EngineJourneyConsumerOracleTest {
             return ApplyOutcome("APPLIED", false, "lease-$attemptId", operationId = "op-$attemptId")
         }
         override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): ApplyOutcome {
+            org.junit.Assert.assertFalse("provider release must execute outside the Auto transaction", db.inTransaction())
             events += "release"
             return ApplyOutcome("RELEASED", false)
         }
@@ -141,6 +144,8 @@ class EngineJourneyConsumerOracleTest {
             return null
         }
         override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? {
+            org.junit.Assert.assertFalse("advance must execute outside the Auto transaction", db.inTransaction())
+            beforeAdvanceDispatch(request)
             advanceInvocationCount += 1
             advanceCalls += request
             events += "advance"
@@ -192,6 +197,7 @@ class EngineJourneyConsumerOracleTest {
                     scheduleVersion = signed.scheduleVersionAfter
                 )
             }
+            afterAdvanceEffect()
             return signed
         }
     }
@@ -1193,6 +1199,12 @@ class EngineJourneyConsumerOracleTest {
 
     private suspend fun assertTerminalOwnerRecoveryClosesBeforeSecondTask(phase: String) {
         val fixture = seedExhaustedRecoveryFixture(phase)
+        if (phase == "RELEASED") {
+            // Compatibility success requires an exact pre-existing request, never reconstruction
+            // from the current clock after an external advance may already have happened.
+            repo.persistAdvanceReplayCarrier(fixture.attemptId,
+                expectedTerminalAdvanceRequest(fixture.attemptId, 1, 1), createdAt = 751L)
+        }
         val planId = fixture.planId
         val firstTaskId = fixture.firstTaskId
         val secondTaskId = fixture.secondTaskId
@@ -1654,6 +1666,7 @@ class EngineJourneyConsumerOracleTest {
     fun `quota-met release recovery still converges release but protocol skew blocks advance`() = runTest {
         val fixture = seedExhaustedRecoveryFixture(
             phase = "RELEASE_PENDING",
+            persistReleaseReceipt = false,
             seedProviderAdvanceEffect = false
         )
         discoverAnswer = discoverAnswer!!.copy(
@@ -1939,6 +1952,69 @@ class EngineJourneyConsumerOracleTest {
             1, advanceCalls.size
         )
         assertEquals("the advancing proof carries the FULL quota count", 2, advanceCalls[0].completionProof.trustedSuccessCount)
+    }
+
+    @Test
+    fun `normal quota release audit failure exposes none of the atomic boundary`() = runTest {
+        val (planId, taskId) = seedPlan()
+        db.openHelper.writableDatabase.execSQL("""
+            CREATE TRIGGER fail_normal_release_audit BEFORE INSERT ON auto_audit_events
+            WHEN NEW.eventType = 'RELEASE_RECEIPT'
+            BEGIN SELECT RAISE(ABORT, 'injected normal release audit failure'); END
+        """.trimIndent())
+        runCatching { buildEngine(planId, VClock(), null).run() }
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertEquals(listOf("apply", "release"), events)
+        assertNull(db.releaseReceiptDao().byLease("lease-${attempt.id}"))
+        assertNull(repo.getAdvanceReplayRequest(attempt.id))
+        assertEquals("RELEASE_PENDING", attempt.aplusState)
+        assertTrue(db.auditEventDao().forAttempt(attempt.id).none { it.eventType == "RELEASE_RECEIPT" })
+        assertEquals(0, advanceInvocationCount)
+    }
+
+    @Test
+    fun `death after atomic normal release before advance dispatch replays the complete stored request`() = runTest {
+        val (planId, taskId) = seedPlan()
+        var original: CompleteAndAdvanceRequestV1? = null
+        beforeAdvanceDispatch = { request ->
+            original = request
+            throw AssertionError("simulated death before advance dispatch")
+        }
+        runCatching { buildEngine(planId, VClock(), null).run() }
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        assertNotNull("the production path reached the advance seam", original)
+        assertEquals(0, advanceInvocationCount)
+        assertEquals("ADVANCE_PENDING", attempt.aplusState)
+        assertNotNull(db.releaseReceiptDao().byLease("lease-${attempt.id}"))
+        assertEquals(original, repo.getAdvanceReplayRequest(attempt.id))
+        assertEquals(1, db.auditEventDao().forAttempt(attempt.id).count { it.eventType == "RELEASE_RECEIPT" })
+
+        beforeAdvanceDispatch = {}
+        buildEngine(planId, VClock().apply { now = 999_999 }, null).run()
+        assertEquals(listOf(original), advanceCalls)
+        assertEquals(1, advanceEffectCount)
+        assertEquals("CLOSED", repo.getAttempt(attempt.id)!!.aplusState)
+    }
+
+    @Test
+    fun `death after provider advance effect before receipt delivery replays one exact request and one effect`() = runTest {
+        val (planId, taskId) = seedPlan()
+        afterAdvanceEffect = { throw AssertionError("simulated receipt delivery loss") }
+        runCatching { buildEngine(planId, VClock(), null).run() }
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        val original = advanceCalls.single()
+        assertEquals(1, advanceEffectCount)
+        assertEquals("ADVANCE_PENDING", attempt.aplusState)
+        assertEquals(original, repo.getAdvanceReplayRequest(attempt.id))
+        assertNull(repo.getAdvanceReceipt(attempt.id))
+
+        afterAdvanceEffect = {}
+        buildEngine(planId, VClock().apply { now = 999_999 }, null).run()
+        assertEquals(listOf(original, original), advanceCalls)
+        assertEquals(2, advanceInvocationCount)
+        assertEquals(1, advanceEffectCount)
+        assertNotNull(repo.getAdvanceReceipt(attempt.id))
+        assertEquals("CLOSED", repo.getAttempt(attempt.id)!!.aplusState)
     }
 
     @Test
