@@ -145,3 +145,23 @@ The terminal state is a history-preserving replacement flow and crash-safe recov
 - **Technical (self-resolve):** choose a deterministic request encoding that round-trips `CompleteAndAdvanceRequestV1` without changing the frozen Binder contract; validate against the canonical digest and existing golden vectors.
 - **Technical (self-resolve):** preserve existing terminal/completed plan behavior while selecting the latest non-superseded plan.
 - **Coordination:** AppDatabase/Migrations and `AutomationService` are shared paths. Parent response determines whether another active branch owns one of them; do not modify overlapping files until that response or an explicit no-conflict check.
+
+## #13 application-id cutover consumer boundary
+
+The release/cutover lane may add source sets, codecs and SAF UI, but it does not write the Auto
+database or recovery paths. Its importer must consume a versioned, explicit Auto snapshot rather
+than assuming that the old five-table inventory is complete.
+
+| Durable object currently owned here | Cutover rule |
+|---|---|
+| `location_plans` including v7 `supersededAt` / `supersededByPlanId` | Transfer both active and archived history; never reactivate an archived plan by omission. |
+| `location_tasks`, `test_attempts`, `run_sessions` (including `starting`) | Import as historical data only. Any `starting` / `running` / `recovering` / `paused` session blocks cutover until safely terminalized; a new package must not resume it. |
+| trusted ledger, unverified records, execution, completion/observation records and audit events | Preserve immutable rows and identifiers; never synthesize a trusted mint or discard a negative carrier during import. |
+| operation, release and recovery checkpoint receipts | Preserve only as history after all associated external operations are terminal. A new sandbox may not claim a provider mutation from a copied receipt without fresh provider discovery/trust. |
+| provider pairing and `PlanConfig` | Import cannot restore pairing approval, accessibility enablement, or a running permission; these require fresh operator/system approval. |
+| planned #85 advance request/receipt carrier | Until its schema and exact serialization are frozen, it is a cutover blocker whenever present; it cannot be approximated or rebuilt from current clocks/profile state. |
+
+**Cutover precondition:** no active session and no nonterminal A+ attempt / unproven lease / pending
+advance carrier. A snapshot that violates it is rejected without partially importing into the new
+package. The import validates row counts and immutable digests before exposing the transferred plan;
+it does not auto-start automation or consume quota.
