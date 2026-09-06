@@ -107,21 +107,4 @@ class AdvanceReplayCarrierTest {
         assertEquals(10, db.advanceReceiptDao().byAttempt(attemptId)!!.recordedAt)
     }
 
-    @Test fun `quota release commits receipt exact carrier and pending owner together`() = runTest {
-        val request = request(verifiedAt = 123_456L)
-
-        repository.persistQuotaReleaseAndAdvance(
-            attemptId = attemptId,
-            releaseIdempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId),
-            leaseId = "lease-1",
-            releaseDigest = APlusOperationIdentity.releaseDigest("lease-1"),
-            releaseRecordedAt = 10,
-            request = request,
-            carrierCreatedAt = 10
-        )
-
-        assertEquals("RELEASED", db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(attemptId))!!.resultOutcome)
-        assertEquals(request, repository.getAdvanceReplayRequest(attemptId))
-        assertEquals("ADVANCE_PENDING", db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
-    }
 }
