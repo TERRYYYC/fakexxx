@@ -12,6 +12,7 @@ import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PayloadRead
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.SpoofConfig
+import name.caiyao.fakegps.data.db.AppDatabase
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolution
@@ -117,6 +118,7 @@ class QwyEnvironmentController(
     }
 
     private fun initScheduleFromDb() {
+        AppDatabase.ensureLegacyDatabaseRecovered(appContext)
         val dbFile = appContext.getDatabasePath("fakegps.db")
         if (!dbFile.exists()) return
         val db = SQLiteDatabase.openDatabase(
@@ -235,6 +237,11 @@ class QwyEnvironmentController(
     private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? {
         if (!itemId.startsWith("profile-")) return null
         val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
+        try {
+            AppDatabase.ensureLegacyDatabaseRecovered(appContext)
+        } catch (_: Exception) {
+            return null
+        }
         val dbFile = appContext.getDatabasePath("fakegps.db")
         if (!dbFile.exists()) return null
         return try {
