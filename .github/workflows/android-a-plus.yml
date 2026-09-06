@@ -182,7 +182,9 @@ jobs:
         working-directory: .
         run: ./scripts/check-cutover-identity-variants.sh \
           apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk \
-          apps/cellrebel-auto/app/build/outputs/apk/productId/debug/app-productId-debug.apk
+          apps/cellrebel-auto/app/build/outputs/apk/productId/debug/app-productId-debug.apk \
+          apps/cellrebel-auto/app/build/outputs/apk/legacyId/glmbench/app-legacyId-glmbench.apk \
+          apps/cellrebel-auto/app/build/outputs/apk/productId/glmbench/app-productId-glmbench.apk
 
       # P10 (G2 §3 P10): the fault/revoke collector is debug-only by hard
       # constraint — the release variant must not carry it. Building release
@@ -430,7 +432,7 @@ jobs:
 
       - name: advance matrix tests (M_AD_14..19)
         working-directory: apps/cellrebel-auto
-        run: ./gradlew --no-daemon :app:testDebugUnitTest --tests "com.example.cellrebelauto.matrix.AdvanceMatrixTest"
+        run: ./gradlew --no-daemon :app:testLegacyIdDebugUnitTest :app:testProductIdDebugUnitTest --tests "com.example.cellrebelauto.matrix.AdvanceMatrixTest"
 
   acceptance:
     # Independent acceptance harness (#6). Exercises the v1 contract through a

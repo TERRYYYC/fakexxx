@@ -77,9 +77,9 @@ exact_head: 280eb021d501c489dedb6eabedbc42cbf40ee6c3
 ## 4. 构建
 
 ```bash
-# Auto（CellRebel Auto，applicationId=com.example.cellrebelauto，debug 无后缀）
-cd apps/cellrebel-auto && ./gradlew :app:assembleDebug
-# 产物：apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk
+# Auto（CellRebel Auto，legacyId applicationId=com.example.cellrebelauto，debug 无后缀）
+cd apps/cellrebel-auto && ./gradlew :app:assembleLegacyIdDebug
+# 产物：apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk
 
 # 千网游（applicationId=name.caiyao.fakegps，debug 后缀 .bench → name.caiyao.fakegps.bench）
 cd apps/qianwangyou && ./gradlew :app:assembleDebug
@@ -95,7 +95,7 @@ cd apps/qianwangyou && ./gradlew :app:assembleDebug
 
 ```bash
 shasum -a 256 apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk \
-              apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk
+              apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk
 ```
 
 ## 5. 安装（顺序重要）
@@ -103,8 +103,11 @@ shasum -a 256 apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk \
 ```bash
 # 先装 provider（千网游 bench），再装 client（Auto）——顺序只影响后续解释，不改变行为
 adb install -r apps/qianwangyou/app/build/outputs/apk/debug/app-debug.apk      # → name.caiyao.fakegps.bench
-adb install -r apps/cellrebel-auto/app/build/outputs/apk/debug/app-debug.apk  # → com.example.cellrebelauto
+adb install -r apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk  # → com.example.cellrebelauto
 ```
+
+`productId`（`come.xx.fakeaauto`）在本阶段只做构建与身份契约验证。SAF 导入和切换
+资格门禁完成前，不安装或验收该新包。
 
 - 用 `-r`：`name.caiyao.fakegps.bench` 与生产包 `name.caiyao.fakegps` 是**两个独立安装**，
   互不打扰；`-r` 保留已装数据（千网游释放/调试共享同一把 keystore，`-r` 无需卸载）。

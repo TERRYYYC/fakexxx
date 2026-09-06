@@ -49,8 +49,12 @@ Binder 配对只证明两只已安装 App 可以通信，不证明 APK 的发布
 ```sh
 ./scripts/verify-a-plus.sh --stage full
 ./apps/qianwangyou/gradlew -p apps/qianwangyou assembleRelease
-./apps/cellrebel-auto/gradlew -p apps/cellrebel-auto assembleRelease
+./apps/cellrebel-auto/gradlew -p apps/cellrebel-auto assembleLegacyIdRelease
 ```
+
+在 SAF 导入与切换资格门禁交付前，Auto 的可安装候选版本固定为 `legacyId`
+（`com.example.cellrebelauto`）。`productId`（`come.xx.fakeaauto`）仅用于构建与
+身份契约验证，尚不可安装或发布。
 
 发布前对最终 APK 运行 Release 纯度检查：
 
