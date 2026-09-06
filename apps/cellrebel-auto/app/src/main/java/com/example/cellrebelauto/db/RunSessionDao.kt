@@ -33,8 +33,18 @@ interface RunSessionDao {
     @Query("UPDATE run_sessions SET status = 'interrupted', endedAt = :endedAt WHERE id = :id")
     suspend fun interruptForRecoveryConflict(id: Long, endedAt: Long)
 
+    /** #97: terminalize only the exact active owner after Stop/Verify has joined the engine job. */
+    @Query(
+        "UPDATE run_sessions SET status = 'stopped', endedAt = :endedAt " +
+            "WHERE id = :id AND status IN ('starting','running','recovering','paused')"
+    )
+    suspend fun stopForSupersession(id: Long, endedAt: Long): Int
+
     @Query("SELECT * FROM run_sessions WHERE id = :id")
     suspend fun getById(id: Long): RunSession?
+
+    @Query("SELECT * FROM run_sessions WHERE planId = :planId ORDER BY startedAt DESC, id DESC LIMIT 1")
+    suspend fun getLatestForPlan(planId: Long): RunSession?
 
     /**
      * The active session for a plan — the crashed owner session the A+ recovery must TRANSITION

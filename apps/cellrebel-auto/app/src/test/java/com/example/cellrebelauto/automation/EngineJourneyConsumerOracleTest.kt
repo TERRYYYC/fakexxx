@@ -25,6 +25,7 @@ import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -371,6 +372,39 @@ class EngineJourneyConsumerOracleTest {
             completionEvidenceSource = evidenceSource,
             elapsedClockMs = { 5000L }, commitClockMs = { 99999L }
         )
+    }
+
+    @Test
+    fun `supersession stop with no provider owner succeeds without discovery or new work`() = runTest {
+        val (planId, taskId) = seedPlan()
+        repo.createSession(planId, 500L)
+
+        val converged = buildEngine(planId, VClock(), null).convergeForSupersessionStop()
+
+        assertTrue(converged)
+        assertEquals("stop-only never discovers when there is no owner", 0, discoverCalls.size)
+        assertEquals("stop-only never preflights a new owner", 0, preflightCalls.size)
+        assertEquals("stop-only never dispatches external work", emptyList<String>(), events)
+        assertEquals("stop-only never admits a new attempt", emptyList<TestAttempt>(),
+            db.testAttemptDao().getAttemptsForTask(taskId))
+    }
+
+    @Test
+    fun `supersession stop refuses CREATED instead of promoting it to provider work`() = runTest {
+        val (planId, taskId, attemptId) = seedCreatedRecoveryOwner()
+
+        val converged = buildEngine(
+            planId,
+            VClock(),
+            com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
+        ).convergeForSupersessionStop()
+
+        assertFalse(converged)
+        assertEquals("stop-only never discovers for CREATED", 0, discoverCalls.size)
+        assertEquals("stop-only never preflights CREATED", 0, preflightCalls.size)
+        assertEquals("stop-only never promotes CREATED into an external effect", emptyList<String>(), events)
+        assertEquals(AttemptState.CREATED.name, db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
+        assertEquals(listOf(attemptId), db.testAttemptDao().getAttemptsForTask(taskId).map { it.id })
     }
 
     @Test
@@ -852,7 +886,8 @@ class EngineJourneyConsumerOracleTest {
     }
 
     private suspend fun assertExactApplyReceiptConvergesWithoutRedispatch(
-        capabilities: CapabilitySnapshotV1?
+        capabilities: CapabilitySnapshotV1?,
+        stopOnly: Boolean = false
     ) {
         val (planId, taskId, attemptId) = seedCreatedRecoveryOwner()
         repo.markAplusState(attemptId, AttemptState.APPLY_PENDING.name)
@@ -879,11 +914,16 @@ class EngineJourneyConsumerOracleTest {
         )
         discoverAnswer = capabilities
 
-        buildEngine(
+        val engine = buildEngine(
             planId,
             VClock(),
             com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
-        ).run()
+        )
+        if (stopOnly) {
+            assertTrue("stop-only convergence reaches a durable terminal owner", engine.convergeForSupersessionStop())
+        } else {
+            engine.run()
+        }
 
         assertEquals("the durable apply receipt is consumed without another provider apply",
             listOf("release"), events)
@@ -901,6 +941,13 @@ class EngineJourneyConsumerOracleTest {
     @Test
     fun `APPLY_PENDING with an exact durable receipt converges cleanup when discovery is unavailable`() = runTest {
         assertExactApplyReceiptConvergesWithoutRedispatch(null)
+    }
+
+    @Test
+    fun `supersession stop converges an existing APPLY_PENDING receipt without normal admission`() = runTest {
+        assertExactApplyReceiptConvergesWithoutRedispatch(null, stopOnly = true)
+        assertEquals("stop-only never enters the normal test runner", 0, cellRebelRunCalls)
+        assertEquals("stop-only never opens a fresh preflight", 0, preflightCalls.size)
     }
 
     @Test

@@ -56,6 +56,25 @@ sealed interface LegacyReleaseValidation {
  */
 class PlanRepository(private val db: AppDatabase) {
 
+    /**
+     * A derived, one-shot #97 proof. Durable session/attempt/receipt rows remain the truth owners;
+     * this value only binds the exact snapshot that [confirmSupersedingImport] must re-read.
+     */
+    data class SupersessionStopProof(
+        val requestId: String,
+        val planId: Long,
+        val sessionId: Long,
+        val sessionStartedAt: Long,
+        val evidenceDigest: String
+    )
+
+    sealed interface SupersessionStopVerification {
+        data class Verified(val proof: SupersessionStopProof) : SupersessionStopVerification
+        data class NeedsConvergence(val reason: String) : SupersessionStopVerification
+        data class Blocked(val reason: String) : SupersessionStopVerification
+        data object StalePlan : SupersessionStopVerification
+    }
+
     // ---- Reads ----
 
     suspend fun getPlan(planId: Long): LocationPlan? = db.planDao().getPlanById(planId)
@@ -248,7 +267,260 @@ class PlanRepository(private val db: AppDatabase) {
     sealed interface SupersedingImportResult {
         data class Imported(val planId: Long) : SupersedingImportResult
         data class ActiveSession(val sessionId: Long) : SupersedingImportResult
+        data class StopVerificationRequired(val sessionId: Long) : SupersedingImportResult
+        data object StaleStopProof : SupersedingImportResult
         data object StalePlan : SupersedingImportResult
+    }
+
+    /** Verifies the complete durable attempt shape before stopping a plan for replacement. */
+    suspend fun verifyAndStopForSupersession(
+        requestId: String,
+        expectedPlanId: Long,
+        expectedSessionId: Long,
+        stoppedAt: Long
+    ): SupersessionStopVerification = db.withTransaction {
+        if (requestId.isBlank()) {
+            return@withTransaction SupersessionStopVerification.Blocked("REQUEST_ID_MISSING")
+        }
+        if (db.planDao().getSelectablePlanById(expectedPlanId) == null) {
+            return@withTransaction SupersessionStopVerification.StalePlan
+        }
+        val session = db.runSessionDao().getById(expectedSessionId)
+            ?: return@withTransaction SupersessionStopVerification.Blocked("SESSION_MISSING")
+        if (session.planId != expectedPlanId) {
+            return@withTransaction SupersessionStopVerification.Blocked("SESSION_PLAN_MISMATCH")
+        }
+        val attempts = db.testAttemptDao().getAttemptsForPlan(expectedPlanId)
+        val classifications = attempts.map { classifySupersessionStopAttempt(it) }
+        classifications.filterIsInstance<StopAttemptEvidence.Blocked>().firstOrNull()?.let {
+            return@withTransaction SupersessionStopVerification.Blocked(it.reason)
+        }
+        classifications.filterIsInstance<StopAttemptEvidence.NeedsConvergence>().firstOrNull()?.let {
+            return@withTransaction SupersessionStopVerification.NeedsConvergence(it.reason)
+        }
+        classifications.filterIsInstance<StopAttemptEvidence.Safe>().filter { it.interrupt }.forEach {
+            db.testAttemptDao().markInterruptedIfNonTerminal(it.attemptId, stoppedAt)
+        }
+        if (session.status in setOf("starting", "running", "recovering", "paused")) {
+            check(db.runSessionDao().stopForSupersession(expectedSessionId, stoppedAt) == 1) {
+                "supersession stop lost its session owner"
+            }
+        } else if (session.status != "stopped") {
+            return@withTransaction SupersessionStopVerification.Blocked("SESSION_NOT_STOPPABLE:${session.status}")
+        }
+        val stopped = requireNotNull(db.runSessionDao().getById(expectedSessionId))
+        val digest = requireNotNull(
+            readSupersessionStopEvidenceDigest(expectedPlanId, stopped, requestId)
+        )
+        SupersessionStopVerification.Verified(
+            SupersessionStopProof(
+                requestId = requestId,
+                planId = expectedPlanId,
+                sessionId = stopped.id,
+                sessionStartedAt = stopped.startedAt,
+                evidenceDigest = digest
+            )
+        )
+    }
+
+    private sealed interface StopAttemptEvidence {
+        data class Safe(val attemptId: Long, val interrupt: Boolean, val line: String) : StopAttemptEvidence
+        data class NeedsConvergence(val reason: String) : StopAttemptEvidence
+        data class Blocked(val reason: String) : StopAttemptEvidence
+    }
+
+    /**
+     * Classifies only durable Auto-owned rows. A generic terminal projection or bare CLOSED phase
+     * never proves an external effect safe; lease, release, advance and decision carriers must form
+     * one exact terminal shape. CREATED is locally interruptible only before every effect carrier.
+     */
+    private suspend fun classifySupersessionStopAttempt(
+        attempt: com.example.cellrebelauto.model.plan.TestAttempt
+    ): StopAttemptEvidence {
+        val apply = db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attempt.id))
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
+        val releaseByKey = db.releaseReceiptDao().byKey(releaseKey)
+        val releaseByLease = attempt.aplusLeaseId?.let { db.releaseReceiptDao().byLease(it) }
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attempt.id)
+        val advanceReceipt = db.advanceReceiptDao().byAttempt(attempt.id)
+        val trusted = db.trustedQuotaDao().getByAttempt(attempt.id)
+        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(attempt.id)
+        val audits = db.auditEventDao().forAttempt(attempt.id)
+        val executions = db.attemptExecutionDao().forAttempt(attempt.id)
+        val locallyInterruptible = attempt.status in setOf("starting", "running")
+
+        if (attempt.aplusState == null) {
+            if (attempt.aplusLeaseId != null || apply != null || releaseByKey != null || carrier != null ||
+                advanceReceipt != null || trusted != null || unverified != null ||
+                executions.isNotEmpty() || audits.isNotEmpty()
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_EXTERNAL_OWNER_WITHOUT_APLUS_STATE")
+            }
+            if (!locallyInterruptible && attempt.endedAt == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_LOCAL_PROJECTION_INCOMPLETE")
+            }
+            return StopAttemptEvidence.Safe(
+                attempt.id,
+                interrupt = locallyInterruptible,
+                line = "${attempt.id}|${attempt.taskId}|${attempt.runSessionId}|legacy-local|" +
+                    "${attempt.status}|${attempt.endedAt}"
+            )
+        }
+
+        val noEffectCreated = attempt.aplusState == AttemptState.CREATED.name &&
+            attempt.aplusLeaseId == null && attempt.currentExecutionId == null && apply == null &&
+            releaseByKey == null && carrier == null && advanceReceipt == null && trusted == null &&
+            unverified == null && executions.isEmpty() && audits.isEmpty()
+        if (noEffectCreated) {
+            if (!locallyInterruptible && attempt.endedAt == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_CREATED_PROJECTION_INCOMPLETE")
+            }
+            return StopAttemptEvidence.Safe(
+                attempt.id,
+                interrupt = locallyInterruptible,
+                line = "${attempt.id}|${attempt.taskId}|${attempt.runSessionId}|created-no-effect|" +
+                    "${attempt.status}|${attempt.endedAt}|${attempt.aplusAnchorScheduleId}|" +
+                    "${attempt.aplusAnchorItemId}|${attempt.aplusAnchorVersion}"
+            )
+        }
+        if (attempt.aplusState == AttemptState.CREATED.name) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_CREATED_EXTERNAL_EFFECT_UNKNOWN")
+        }
+        if (attempt.aplusState != AttemptState.CLOSED.name) {
+            return StopAttemptEvidence.NeedsConvergence(
+                "ATTEMPT_${attempt.id}_UNRESOLVED_APLUS:${attempt.aplusState}"
+            )
+        }
+        if (attempt.status in setOf("starting", "running") || attempt.endedAt == null) {
+            return StopAttemptEvidence.NeedsConvergence("ATTEMPT_${attempt.id}_CLOSED_PROJECTION_NOT_TERMINAL")
+        }
+        if (trusted != null && (unverified != null || trusted.taskId != attempt.taskId)) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_DECISION_CARRIER_CONFLICT")
+        }
+
+        val lease = attempt.aplusLeaseId
+        if (lease == null) {
+            if (attempt.currentExecutionId != null || apply != null || releaseByKey != null ||
+                carrier != null || advanceReceipt != null || trusted != null || unverified != null ||
+                executions.isNotEmpty() || audits.isNotEmpty()
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_CLOSED_EXTERNAL_EFFECT_UNKNOWN")
+            }
+        } else {
+            if (releaseByKey == null || releaseByLease == null || releaseByKey != releaseByLease ||
+                db.releaseReceiptDao().countForLease(lease) != 1 || releaseByKey.leaseId != lease ||
+                releaseByKey.releaseDigest != APlusOperationIdentity.releaseDigest(lease) ||
+                releaseByKey.resultOutcome != "RELEASED"
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_RELEASE_AUTHORITY_INVALID")
+            }
+            if (trusted == null && unverified == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_DECISION_CARRIER_MISSING")
+            }
+            if (apply != null && (apply.resultOutcome != "APPLIED" || apply.leaseId != lease)) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_APPLY_AUTHORITY_INVALID")
+            }
+        }
+
+        if (unverified != null && (carrier != null || advanceReceipt != null)) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_UNVERIFIED_ADVANCE_CONFLICT")
+        }
+        var trustedTask: LocationTask? = null
+        var trustedOrdinal: Int? = null
+        if (trusted != null) {
+            val task = db.locationTaskDao().getTaskById(attempt.taskId)
+                ?: return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_TRUSTED_TASK_MISSING")
+            val entries = db.trustedQuotaDao().entriesForTask(attempt.taskId)
+            val ordinal = entries.indexOfFirst { it.attemptId == attempt.id } + 1
+            if (ordinal <= 0) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_TRUSTED_LEDGER_INDEX_MISSING")
+            }
+            if (ordinal > task.requiredSuccesses) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_TRUSTED_QUOTA_OVERFLOW")
+            }
+            trustedTask = task
+            trustedOrdinal = ordinal
+            if (ordinal == task.requiredSuccesses && carrier == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_REQUIRED_AT_QUOTA")
+            }
+            if (ordinal < task.requiredSuccesses && (carrier != null || advanceReceipt != null)) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_UNEXPECTED_BELOW_QUOTA")
+            }
+        }
+
+        if (advanceReceipt != null && carrier == null) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_RECEIPT_WITHOUT_CARRIER")
+        }
+        if (carrier != null) {
+            val request = carrier.toAdvanceRequest()
+            if (CanonicalAdvanceDigestV1.compute(request) != request.requestDigest ||
+                carrier.releaseIdempotencyKey != releaseKey || carrier.releaseLeaseId != lease ||
+                carrier.releaseDigest != releaseByKey?.releaseDigest || request.leaseId != lease ||
+                request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id) ||
+                request.expectedScheduleId != attempt.aplusAnchorScheduleId ||
+                request.expectedCurrentItemId != attempt.aplusAnchorItemId ||
+                request.expectedScheduleVersion != attempt.aplusAnchorVersion ||
+                request.completionProof.scheduleItemId != attempt.aplusAnchorItemId ||
+                request.completionProof.quotaRequired != trustedTask?.requiredSuccesses ||
+                request.completionProof.trustedSuccessCount != trustedOrdinal ||
+                request.completionProof.ledgerRef != "ledger-${attempt.id}" ||
+                request.callerProtocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_CARRIER_INVALID")
+            }
+            if (advanceReceipt == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_NOT_VERIFIED")
+            }
+            val receipt = advanceReceipt.toAdvanceReceipt()
+            if (advanceReceipt.idempotencyKey != request.idempotencyKey ||
+                advanceReceipt.requestDigest != request.requestDigest ||
+                !CanonicalAdvanceReceiptDigestV1.verify(
+                    receipt,
+                    advanceReceipt.requestDigest,
+                    advanceReceipt.idempotencyKey
+                )
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_RECEIPT_INVALID")
+            }
+        }
+
+        val line = buildString {
+            append(attempt.id).append('|').append(attempt.taskId).append('|')
+            append(attempt.runSessionId).append('|').append(attempt.status).append('|')
+            append(attempt.endedAt).append('|').append(attempt.aplusState).append('|')
+            append(lease).append('|').append(apply).append('|').append(releaseByKey).append('|')
+            append(carrier).append('|').append(advanceReceipt).append('|')
+            append(trusted).append('|').append(unverified).append('|')
+            append(executions.joinToString(";")).append('|').append(audits.joinToString(";"))
+        }
+        return StopAttemptEvidence.Safe(attempt.id, interrupt = false, line = line)
+    }
+
+    private suspend fun readSupersessionStopEvidenceDigest(
+        planId: Long,
+        session: RunSession,
+        requestId: String
+    ): String? {
+        if (session.planId != planId || session.status != "stopped" || session.endedAt == null) return null
+        val attempts = db.testAttemptDao().getAttemptsForPlan(planId)
+        val evidence = attempts.map { classifySupersessionStopAttempt(it) }
+        if (evidence.any {
+                it is StopAttemptEvidence.Blocked || it is StopAttemptEvidence.NeedsConvergence
+            }
+        ) return null
+        val taskLines = db.locationTaskDao().getTasksForPlan(planId).joinToString(";") {
+            "${it.id}|${it.csvRow}|${it.status}|${it.requiredSuccesses}|${it.completedSuccesses}"
+        }
+        val attemptLines = evidence.filterIsInstance<StopAttemptEvidence.Safe>()
+            .sortedBy { it.attemptId }
+            .joinToString(";") { it.line }
+        val preimage = listOf(
+            "stop-proof-v1", requestId, planId.toString(), session.id.toString(), session.startedAt.toString(),
+            session.endedAt.toString(), session.status, session.totalCycles.toString(), taskLines, attemptLines
+        ).joinToString("|")
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(preimage.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -262,7 +534,8 @@ class PlanRepository(private val db: AppDatabase) {
         globalBufferSeconds: Int,
         rows: List<WorklistRow>,
         importedAt: Long,
-        supersededAt: Long
+        supersededAt: Long,
+        stopProof: SupersessionStopProof? = null
     ): SupersedingImportResult = db.withTransaction {
         val activePlan = db.planDao().getLatestPlan()
             ?: return@withTransaction SupersedingImportResult.StalePlan
@@ -271,6 +544,23 @@ class PlanRepository(private val db: AppDatabase) {
         }
         db.runSessionDao().findActiveRunningSession(expectedOldPlanId)?.let {
             return@withTransaction SupersedingImportResult.ActiveSession(it.id)
+        }
+        val latestSession = db.runSessionDao().getLatestForPlan(expectedOldPlanId)
+        if (latestSession != null) {
+            val proof = stopProof
+                ?: return@withTransaction SupersedingImportResult.StopVerificationRequired(latestSession.id)
+            if (proof.planId != expectedOldPlanId || proof.sessionId != latestSession.id ||
+                proof.sessionStartedAt != latestSession.startedAt || proof.requestId.isBlank() ||
+                readSupersessionStopEvidenceDigest(
+                    expectedOldPlanId,
+                    latestSession,
+                    proof.requestId
+                ) != proof.evidenceDigest
+            ) {
+                return@withTransaction SupersedingImportResult.StaleStopProof
+            }
+        } else if (stopProof != null) {
+            return@withTransaction SupersedingImportResult.StaleStopProof
         }
         val successorId = db.planDao().insertPlanWithTasks(
             LocationPlan(

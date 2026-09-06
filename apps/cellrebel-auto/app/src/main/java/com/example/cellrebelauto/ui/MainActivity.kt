@@ -50,6 +50,7 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     val importErrors by vm.importErrors.collectAsState()
     val importNotice by vm.importNotice.collectAsState()
     val importProposal by vm.importProposal.collectAsState()
+    val isImportReplacementStopping by vm.isImportReplacementStopping.collectAsState()
     val currentTask by vm.currentTask.collectAsState()
     val cooldown by vm.cooldown.collectAsState()
     val lastFailure by vm.lastFailure.collectAsState()
@@ -70,6 +71,7 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 importErrors = importErrors,
                 importNotice = importNotice,
                 importProposal = importProposal,
+                isImportReplacementStopping = isImportReplacementStopping,
                 onImport = { vm.importCsv(it) },
                 onConfirmImportReplacement = { vm.confirmImportReplacement() },
                 onCancelImportReplacement = { vm.cancelImportReplacement() },

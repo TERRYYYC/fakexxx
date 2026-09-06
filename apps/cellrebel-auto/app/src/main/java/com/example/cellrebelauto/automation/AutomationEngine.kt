@@ -175,6 +175,37 @@ class AutomationEngine(
     private val _lastFailure = MutableStateFlow<LastFailureInfo?>(null)
     val lastFailure: StateFlow<LastFailureInfo?> = _lastFailure
 
+    /**
+     * #97 stop-only entrypoint. It may converge an already-persisted provider owner, but it never
+     * enters [run]'s sweep, session admission, task selection, or new-attempt path.
+     */
+    internal suspend fun convergeForSupersessionStop(maxRecoverySteps: Int = 16): Boolean {
+        val initialOwners = planRepository.findAPlusRecoverableAttempts(planId)
+        if (initialOwners.isEmpty()) return true
+        if (initialOwners.any { it.aplusState == AttemptState.CREATED.name }) return false
+        val coordinator = recoveryCoordinator ?: return false
+        if (completionEvidenceSource == null) return false
+
+        var previous = stopOnlyOwnerFingerprint(initialOwners)
+        repeat(maxRecoverySteps) {
+            recoverAPlusBeforeSweep(coordinator, stopOnly = true)
+            val remaining = planRepository.findAPlusRecoverableAttempts(planId)
+            if (remaining.isEmpty()) return true
+            if (remaining.any { it.aplusState == AttemptState.CREATED.name }) return false
+            val current = stopOnlyOwnerFingerprint(remaining)
+            if (current == previous) return false
+            previous = current
+        }
+        return false
+    }
+
+    private fun stopOnlyOwnerFingerprint(owners: List<TestAttempt>): String = owners
+        .sortedBy { it.id }
+        .joinToString(";") {
+            "${it.id}|${it.runSessionId}|${it.status}|${it.endedAt}|${it.aplusState}|" +
+                "${it.aplusLeaseId}|${it.currentExecutionId}"
+        }
+
     private var runSessionId: Long = initialRunSessionId ?: 0
     // # 在途尝试（停止/取消时标记 interrupted）
     private var currentAttemptId: Long? = null
@@ -1126,12 +1157,14 @@ class AutomationEngine(
      * represented as a durable pause plus `false`.
      */
     private suspend fun recoverAPlusBeforeSweep(
-        coordinator: RecoveryCoordinator
+        coordinator: RecoveryCoordinator,
+        stopOnly: Boolean = false
     ): Boolean {
         // Query plan-scoped owners before trusting the session projection. An older process may have
         // terminalized the session while leaving its A+ owner starting/running; the generic sweep
         // deliberately excludes such rows, so returning early here would admit a second owner.
         val recoverableAttempts = planRepository.findAPlusRecoverableAttempts(planId)
+        if (stopOnly && recoverableAttempts.isEmpty()) return true
         // Local historical authority is independent of permission to resume. Validate EVERY
         // candidate before any session/cardinality/CLOSED-projection/provider early return.
         // Healthy classifications do not change phase and cannot authorize later convergence.
@@ -1140,10 +1173,15 @@ class AutomationEngine(
         }
         val existingSession = planRepository.findActiveRunSession(planId)
         if (existingSession == null) {
+            if (stopOnly) return false
             val orphanedEffectOwners =
                 projectClosedRecoveryOwners(recoverableAttempts) ?: return false
             if (orphanedEffectOwners.isEmpty()) return true
             quarantineRecoveryOwners(orphanedEffectOwners, activeSessionId = null)
+            return false
+        }
+
+        if (stopOnly && initialRunSessionId != null && existingSession.id != initialRunSessionId) {
             return false
         }
 
@@ -1153,7 +1191,22 @@ class AutomationEngine(
         updateState(AutomationState.RECOVERING)
 
         val effectOwners = projectClosedRecoveryOwners(recoverableAttempts) ?: return false
-        if (!admitRecoveryOwners(effectOwners, existingSession.id)) return false
+        if (stopOnly) {
+            if (effectOwners.any { it.runSessionId != existingSession.id } || effectOwners.size > 1) {
+                aplusPause("supersession stop found ambiguous provider ownership")
+                return false
+            }
+            if (effectOwners.any { it.aplusState == AttemptState.CREATED.name }) {
+                aplusPause("supersession stop will not promote a CREATED owner")
+                return false
+            }
+            if (effectOwners.isEmpty()) {
+                planRepository.markSessionStatus(runSessionId, "paused")
+                return true
+            }
+        } else if (!admitRecoveryOwners(effectOwners, existingSession.id)) {
+            return false
+        }
         if (legacyValidation.values.any { it is LegacyReleaseValidation.Rejected }) {
             aplusPause("legacy release authority rejected locally — owner reason and audit preserved without provider access")
             return false
@@ -1205,7 +1258,7 @@ class AutomationEngine(
             )
             return false
         }
-        planRepository.markSessionStatus(runSessionId, "running")
+        planRepository.markSessionStatus(runSessionId, if (stopOnly) "paused" else "running")
         return true
     }
 

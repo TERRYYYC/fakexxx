@@ -10,6 +10,7 @@ import com.example.cellrebelauto.automation.AutomationService
 import com.example.cellrebelauto.automation.CooldownInfo
 import com.example.cellrebelauto.automation.EngineTaskSnapshot
 import com.example.cellrebelauto.automation.LastFailureInfo
+import com.example.cellrebelauto.automation.SupersessionStopStatus
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.data.PlanConfigStore
 import com.example.cellrebelauto.db.AppDatabase
@@ -77,6 +78,19 @@ data class ImportProposal(
     val rows: List<com.example.cellrebelauto.model.plan.WorklistRow>
 )
 
+/** Testable UI boundary over the accessibility service's request-id-bound stop proof flow. */
+interface SupersessionStopClient {
+    val status: StateFlow<SupersessionStopStatus>
+    fun request(planId: Long, sessionId: Long, requestId: String)
+}
+
+private object AutomationServiceSupersessionStopClient : SupersessionStopClient {
+    override val status: StateFlow<SupersessionStopStatus> = AutomationService.supersessionStopStatus
+    override fun request(planId: Long, sessionId: Long, requestId: String) {
+        AutomationService.stopAndVerifyForSupersession(planId, sessionId, requestId)
+    }
+}
+
 /**
  * ViewModel for the main UI. Bridges AutomationService state
  * and provides actions for the Compose screens.
@@ -88,7 +102,8 @@ class MainViewModel @JvmOverloads constructor(
     application: Application,
     // R44 (DSF review P2-1): test-injectable DB — production keeps the singleton; oracles seed an
     // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
-    private val injectedDb: AppDatabase? = null
+    private val injectedDb: AppDatabase? = null,
+    private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient
 ) : AndroidViewModel(application) {
 
     private val db = injectedDb ?: AppDatabase.getInstance(application)
@@ -342,6 +357,10 @@ class MainViewModel @JvmOverloads constructor(
     // The parsed rows remain memory-only until the operator explicitly confirms replacement.
     private val _importProposal = MutableStateFlow<ImportProposal?>(null)
     val importProposal: StateFlow<ImportProposal?> = _importProposal
+    private val _isImportReplacementStopping = MutableStateFlow(false)
+    val isImportReplacementStopping: StateFlow<Boolean> = _isImportReplacementStopping
+    private var activeReplacementConfirmationId: String? = null
+    private var activeReplacementStopRequestId: String? = null
 
     init {
         viewModelScope.launch {
@@ -357,6 +376,30 @@ class MainViewModel @JvmOverloads constructor(
                         _importNotice.value = "Start rejected: ${status.reason}"
                     }
                     else -> Unit
+                }
+            }
+        }
+        viewModelScope.launch {
+            supersessionStopClient.status.collect { status ->
+                val activeRequestId = activeReplacementStopRequestId ?: return@collect
+                when (status) {
+                    is SupersessionStopStatus.Stopping -> {
+                        if (status.requestId == activeRequestId) {
+                            _isImportReplacementStopping.value = true
+                        }
+                    }
+                    is SupersessionStopStatus.Verified -> {
+                        if (status.requestId != activeRequestId) return@collect
+                        commitVerifiedReplacement(status.proof)
+                    }
+                    is SupersessionStopStatus.Blocked -> {
+                        if (status.requestId != activeRequestId) return@collect
+                        activeReplacementStopRequestId = null
+                        _isImportReplacementStopping.value = false
+                        _importNotice.value =
+                            "Current plan could not be safely stopped (${status.reason}); review and retry"
+                    }
+                    SupersessionStopStatus.Idle -> Unit
                 }
             }
         }
@@ -439,11 +482,11 @@ class MainViewModel @JvmOverloads constructor(
 
     /**
      * Imports a worklist CSV chosen via SAF. Atomic: any invalid row rejects
-     * the whole file and lists ALL row errors; nothing is persisted. Rejects
-     * when the global buffer is unset (first-run required) or when the current
-     * plan is unfinished (progress hint).
+     * the whole file and lists ALL row errors; nothing is persisted. A missing
+     * global buffer rejects the import; an unfinished current plan produces an
+     * in-memory replacement proposal that requires explicit confirmation.
      * # 导入 SAF 选择的 CSV 清单：任一行无效整份拒绝并列出全部错误；
-     * # buffer 未设置或当前计划未完成时拒绝
+     * # buffer 未设置时拒绝；当前计划未完成时仅生成待确认的内存提案
      */
     fun importCsv(uri: Uri) {
         viewModelScope.launch {
@@ -508,37 +551,109 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Commits a validated replacement only after the Plan screen's explicit confirmation. */
     fun confirmImportReplacement() {
+        if (activeReplacementConfirmationId != null || activeReplacementStopRequestId != null) return
         val proposal = _importProposal.value ?: return
+        val confirmationId = java.util.UUID.randomUUID().toString()
+        activeReplacementConfirmationId = confirmationId
+        _isImportReplacementStopping.value = true
         viewModelScope.launch {
-            when (val result = withContext(Dispatchers.IO) {
-                planRepository.confirmSupersedingImport(
-                    expectedOldPlanId = proposal.expectedOldPlanId,
-                    sourceFileName = proposal.sourceFileName,
-                    globalBufferSeconds = proposal.globalBufferSeconds,
-                    rows = proposal.rows,
-                    importedAt = System.currentTimeMillis(),
-                    supersededAt = System.currentTimeMillis()
-                )
-            }) {
-                is PlanRepository.SupersedingImportResult.Imported -> {
-                    _importProposal.value = null
-                    _importNotice.value =
-                        "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    planRepository.confirmSupersedingImport(
+                        expectedOldPlanId = proposal.expectedOldPlanId,
+                        sourceFileName = proposal.sourceFileName,
+                        globalBufferSeconds = proposal.globalBufferSeconds,
+                        rows = proposal.rows,
+                        importedAt = System.currentTimeMillis(),
+                        supersededAt = System.currentTimeMillis()
+                    )
                 }
-                is PlanRepository.SupersedingImportResult.ActiveSession -> {
-                    _importNotice.value =
-                        "Stop or safely finish the current plan before replacing it"
+                if (activeReplacementConfirmationId != confirmationId) return@launch
+                when (result) {
+                    is PlanRepository.SupersedingImportResult.Imported -> {
+                        _importProposal.value = null
+                        _importNotice.value =
+                            "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+                    }
+                    is PlanRepository.SupersedingImportResult.ActiveSession -> {
+                        requestSupersessionStop(proposal, result.sessionId)
+                    }
+                    is PlanRepository.SupersedingImportResult.StopVerificationRequired -> {
+                        requestSupersessionStop(proposal, result.sessionId)
+                    }
+                    PlanRepository.SupersedingImportResult.StaleStopProof -> {
+                        _importNotice.value =
+                            "The stopped plan changed; verify it again before replacing it"
+                    }
+                    PlanRepository.SupersedingImportResult.StalePlan -> {
+                        _importProposal.value = null
+                        _importNotice.value = "Current plan changed; review the CSV again before replacing it"
+                    }
                 }
-                PlanRepository.SupersedingImportResult.StalePlan -> {
-                    _importProposal.value = null
-                    _importNotice.value = "Current plan changed; review the CSV again before replacing it"
+            } finally {
+                if (activeReplacementConfirmationId == confirmationId) {
+                    activeReplacementConfirmationId = null
+                    if (activeReplacementStopRequestId == null) {
+                        _isImportReplacementStopping.value = false
+                    }
                 }
             }
         }
     }
 
+    private fun requestSupersessionStop(proposal: ImportProposal, sessionId: Long) {
+        val requestId = java.util.UUID.randomUUID().toString()
+        activeReplacementStopRequestId = requestId
+        _isImportReplacementStopping.value = true
+        _importNotice.value = "Safely stopping ${proposal.oldSourceFileName} before import"
+        supersessionStopClient.request(proposal.expectedOldPlanId, sessionId, requestId)
+    }
+
+    private suspend fun commitVerifiedReplacement(proof: PlanRepository.SupersessionStopProof) {
+        val proposal = _importProposal.value
+        if (proposal == null || proof.requestId != activeReplacementStopRequestId ||
+            proof.planId != proposal.expectedOldPlanId
+        ) {
+            activeReplacementStopRequestId = null
+            _isImportReplacementStopping.value = false
+            return
+        }
+        when (val result = withContext(Dispatchers.IO) {
+            planRepository.confirmSupersedingImport(
+                expectedOldPlanId = proposal.expectedOldPlanId,
+                sourceFileName = proposal.sourceFileName,
+                globalBufferSeconds = proposal.globalBufferSeconds,
+                rows = proposal.rows,
+                importedAt = System.currentTimeMillis(),
+                supersededAt = System.currentTimeMillis(),
+                stopProof = proof
+            )
+        }) {
+            is PlanRepository.SupersedingImportResult.Imported -> {
+                _importProposal.value = null
+                _importNotice.value =
+                    "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+            }
+            PlanRepository.SupersedingImportResult.StaleStopProof,
+            is PlanRepository.SupersedingImportResult.ActiveSession,
+            is PlanRepository.SupersedingImportResult.StopVerificationRequired -> {
+                _importNotice.value =
+                    "The stopped plan changed; review and retry the replacement"
+            }
+            PlanRepository.SupersedingImportResult.StalePlan -> {
+                _importProposal.value = null
+                _importNotice.value = "Current plan changed; review the CSV again before replacing it"
+            }
+        }
+        activeReplacementStopRequestId = null
+        _isImportReplacementStopping.value = false
+    }
+
     /** Dismissing confirmation deliberately preserves the latest plan and all of its history. */
     fun cancelImportReplacement() {
+        activeReplacementConfirmationId = null
+        activeReplacementStopRequestId = null
+        _isImportReplacementStopping.value = false
         _importProposal.value = null
         _importNotice.value = "Kept the current plan; no CSV was imported"
     }

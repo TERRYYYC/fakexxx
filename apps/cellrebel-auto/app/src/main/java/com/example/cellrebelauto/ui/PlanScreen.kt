@@ -65,6 +65,7 @@ fun PlanScreen(
     importErrors: List<RowError>,
     importNotice: String?,
     importProposal: ImportProposal?,
+    isImportReplacementStopping: Boolean = false,
     onImport: (Uri) -> Unit,
     onConfirmImportReplacement: () -> Unit,
     onCancelImportReplacement: () -> Unit,
@@ -89,7 +90,7 @@ fun PlanScreen(
 
     importProposal?.let { proposal ->
         AlertDialog(
-            onDismissRequest = onCancelImportReplacement,
+            onDismissRequest = { if (!isImportReplacementStopping) onCancelImportReplacement() },
             title = { Text("Archive current plan and import new CSV?") },
             text = {
                 Text(
@@ -99,10 +100,18 @@ fun PlanScreen(
                 )
             },
             confirmButton = {
-                Button(onClick = onConfirmImportReplacement) { Text("Archive & Import") }
+                Button(
+                    onClick = onConfirmImportReplacement,
+                    enabled = !isImportReplacementStopping
+                ) {
+                    Text(if (isImportReplacementStopping) "Stopping Safely…" else "Stop Safely & Import")
+                }
             },
             dismissButton = {
-                OutlinedButton(onClick = onCancelImportReplacement) { Text("Keep Current Plan") }
+                OutlinedButton(
+                    onClick = onCancelImportReplacement,
+                    enabled = !isImportReplacementStopping
+                ) { Text("Keep Current Plan") }
             }
         )
     }
