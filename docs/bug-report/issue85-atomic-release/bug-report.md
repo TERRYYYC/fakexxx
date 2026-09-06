@@ -104,3 +104,86 @@ An existing independent test flake in `AutomationServiceRecycleStateTest` was re
 primary task while these gates completed successfully. It concerns cancellation before a launched
 test coroutine enters its `try/finally`. It will be fixed in a separate test-only commit, so a
 successful run here is not presented as evidence that the flake cannot occur.
+
+## Review P1: preserve legacy RELEASED authority before reconciliation
+
+Review baseline: `32e3b93b2bc7b2f6b8b21f120a1cc045d72931dc` (production
+`aef5a03c8298fc424c595fef7d6b1e14a04158f6`). The former SHA includes the separate retirement-test
+race fix described above. Both review anchors are retained without amendment.
+
+The independent reviewer found the receipt-absent complement of the legacy carrier gap:
+`RELEASED` entered `enterRecoveryReleasePending`, which directly rewrote the state without audit.
+With both release indices absent, provider release then ran again, and the owner transaction
+mistook this historical release for a first local commit and minted a new advance request.
+Missing local evidence cannot establish that no historical advance was dispatched.
+
+The new `PlanRepository.recoverLegacyRelease` runs before the Engine's general release path. One
+owner transaction validates the complete release/request/receipt tuple and decision authority.
+Invalid history records `RECOVERY_REQUIRED`, a typed `LEGACY_RELEASED_AUTHORITY` reason and audit
+atomically, without provider release/advance or carrier writes. The original `RELEASED` audit source
+keeps the quarantine effective on later `RECOVERY_REQUIRED` or `RELEASE_PENDING` restarts, even
+though the current phase no longer says `RELEASED`. Later `ADVANCE_*` and `CLOSED` are not rewound.
+
+Valid history is not blocked: its existing receipt enters the legal, audited
+`RECOVERY_REQUIRED → RECONCILE → RELEASE_PENDING → RELEASE_RECEIPT` route in the same Room
+transaction. No provider release is called. Quota requests are read verbatim; no new clock or
+trusted-count projection replaces the historical wire fields. An existing verified advance receipt
+also avoids advance redispatch. Non-quota and negative controls retain no advance carrier.
+
+Validation reads share the transaction directly, rather than catching an exception thrown out of
+a nested Room transaction. The matrix exposed that Room would otherwise roll back the outer
+transaction even after the validation exception was caught, losing the new rejection audit.
+
+### Failure-Mode Sweep
+
+All new behavior tests use the real Engine, PlanRepository and Room with provider-call capture.
+Rejected cases assert zero release/advance calls, unchanged carrier/receipt rows and atomic typed
+owner/audit facts across two Engine runs.
+
+| Historical shape / route | Evidence and disposition |
+|---|---|
+| Neither release index exists; with or without an existing request | `RELEASE_RECEIPT_MISSING`; no fresh release or minted request. This is the actual behavior RED. |
+| Key-only, lease-only, divergent indices, duplicate lease rows hidden by `LIMIT 1` | `RELEASE_INDEX_CONFLICT`; the DAO count prevents accepting an arbitrary first duplicate. |
+| Release digest mismatch or failed outcome | `RELEASE_RECEIPT_MISMATCH`; no state progression from unproven release. |
+| Missing exact quota carrier | `ADVANCE_CARRIER_MISSING`; durable release is not enough to recreate a historical request. |
+| Bad canonical digest or foreign release binding | `ADVANCE_CARRIER_INVALID`; rejection reason/audit still commit despite invalid readback. |
+| Canonically valid request with foreign schedule, operation key or completion proof | `ADVANCE_CARRIER_OWNER_MISMATCH`; canonical validity alone does not establish ownership. |
+| Bad advance receipt digest or request binding | `ADVANCE_RECEIPT_INVALID`; no migration or redispatch from corrupted provider evidence. |
+| Missing/conflicting decision carriers, or under-quota plus advance carrier | Typed decision/route rejection before provider effects. |
+| Later bare `RELEASE_PENDING` with a recorded legacy source | Legacy audit provenance prevents treating it as a fresh release after restart. |
+| Exact healthy request, even after trusted count grows | Zero release calls; exact request (including proof count and elapsed clock) replayed; audited reconcile and eventual `CLOSED`/success. |
+| Exact request plus durable verified advance receipt | Zero release and advance calls; receipt consumed unchanged and owner closes successfully. |
+| Healthy under-quota or negative release | Zero release calls for that owner; closes without an advance carrier and retains negative evidence. |
+| Audit failure during rejection or healthy RECONCILE | Entire owner migration rolls back to `RELEASED`, including reason and all audit rows; stored request/release unchanged. |
+| Provider already exhausted | Existing `EngineJourneyConsumerOracleTest` admission preserves unproven owners read-only. A matching terminal successor with durable release and exact carrier reaches the same validated legacy recovery path. |
+| Production call-site sweep | The sole bare `RELEASED → RELEASE_PENDING` conversion is removed. All three nonlegacy release sites still use `prepareReleaseLease → commitReleaseReceipt`; legacy never enters that provider-release path. |
+
+### Actual RED and final host GREEN
+
+Before changing production code, the new no-receipt test compiled and failed on the review baseline:
+
+```text
+./gradlew :app:testDebugUnitTest --tests '*EngineQuotaRecoveryRedTest.legacy RELEASED without release authority*' --console=plain
+BUILD FAILED in 6s; 1 test completed, 1 failed.
+unknown released history must not cause a fresh provider release expected:<0> but was:<1>
+```
+
+Final source verification: Gradle runs from
+`/Users/terry/Desktop/coding/fakexxx-auto-atomic-release/apps/cellrebel-auto`; purity and Git checks
+run from that worktree's repository root.
+
+```text
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:lintDebug --no-daemon --console=plain
+BUILD SUCCESSFUL in 25s; 72 suites, 658 tests, 0 failures, 0 errors, 0 skipped.
+./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release.apk
+ok: debug-only collector boundary holds (+ release APK scanned)
+git diff --check: exit 0
+```
+
+This is a durability/behavior-high, schema/wire-unchanged slice; no permissions, provider code or
+irreversible action changed. The repository has no Clowder-specific hotfix/fallback/architecture
+checker scripts or `.pen` designs; no UI was changed. Dogfood exemption: internal Room consistency
+fix, exercised through production Engine orchestration in host tests. Device/emulator proof is
+explicitly unavailable under the user's freeze and remains required for feature closure, not
+silently waived. Original-reviewer re-verification is required; the author is not approval authority.
+Actual implementation identity is Codex; older commit labels came from shared Git configuration.

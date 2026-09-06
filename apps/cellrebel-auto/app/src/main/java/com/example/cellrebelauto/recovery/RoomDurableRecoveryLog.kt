@@ -130,6 +130,9 @@ interface ReleaseReceiptDao {
 
     @Query("SELECT * FROM release_receipts WHERE leaseId = :leaseId LIMIT 1")
     suspend fun byLease(leaseId: String): ReleaseReceiptRow?
+
+    @Query("SELECT COUNT(*) FROM release_receipts WHERE leaseId = :leaseId")
+    suspend fun countForLease(leaseId: String): Int
 }
 
 @Dao

@@ -20,6 +20,9 @@ import com.example.cellrebelauto.recovery.RoomDurableRecoveryLog
 import org.json.JSONArray
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
+import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
@@ -262,19 +265,294 @@ class EngineQuotaRecoveryRedTest {
     // ---- RELEASED crash + quota REACHED → advance MUST be dispatched ----
 
     @Test
-    fun `a legacy RELEASED crash without an exact carrier cannot manufacture an advance request`() = runTest {
-        val (planId, _) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
+    fun `legacy RELEASED without release authority never redispatches or mints a request`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("DELETE FROM release_receipts")
+
         buildEngine(planId, VClock()).run()
 
-        assertEquals(
-            "a durable release alone cannot prove the exact historical advance request",
-            0, advanceReplays.size
-        )
-        val attempt = db.testAttemptDao().getAttemptById(31L)!!
-        assertEquals("the unproven advance remains recoverable", "running", attempt.status)
+        assertEquals("unknown released history must not cause a fresh provider release", 0, releaseAttempts.size)
+        assertEquals(0, advanceReplays.size)
+        assertEquals(null, repo.getAdvanceReplayRequest(31L))
+        assertEquals(null, db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31L)))
+        val attempt = repo.getAttempt(31L)!!
         assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
-        assertEquals("RELEASE_COMMIT_REJECTED:ADVANCE_REPLAY_CARRIER_MISSING:31", attempt.failureReason)
-        assertEquals("legacy RELEASED must replay its durable receipt without a provider call", 0, releaseAttempts.count { it == 31L })
+        assertEquals("LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING", attempt.failureReason)
+        val audit = db.auditEventDao().forAttempt(31L)
+        assertEquals(listOf("RECOVERY_REQUIRED"), audit.map { it.eventType })
+        assertEquals("RELEASED->RECOVERY_REQUIRED[${attempt.failureReason}]", audit.single().payloadDigest)
+
+        // The first rejection must not erase the legacy provenance used on the next restart.
+        buildEngine(planId, VClock().apply { now = 999_999 }).run()
+        assertEquals(0, releaseAttempts.size)
+        assertEquals(0, advanceReplays.size)
+        assertEquals(null, repo.getAdvanceReplayRequest(31L))
+        assertEquals(audit, db.auditEventDao().forAttempt(31L))
+    }
+
+    @Test
+    fun `a legacy RELEASED crash without an exact carrier cannot manufacture an advance request`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED", requiredSuccesses = 1)
+        assertLegacyRejected(planId, "ADVANCE_CARRIER_MISSING")
+    }
+
+    private fun legacyRequest(): CompleteAndAdvanceRequestV1 = CompleteAndAdvanceRequestV1(
+        leaseId = "lease-31", idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(31), requestDigest = "",
+        expectedScheduleId = anchorScheduleId, expectedScheduleVersion = anchorVersion,
+        expectedCurrentItemId = anchorItemId,
+        completionProof = CompletionProofV1(anchorItemId, 1, 1, "ledger-31", 123_456_789L),
+        callerProtocolVersion = ContractV1.PROTOCOL_VERSION
+    )
+
+    private suspend fun persistLegacyRequest(request: CompleteAndAdvanceRequestV1 = legacyRequest()): CompleteAndAdvanceRequestV1 {
+        val signed = request.copy(requestDigest = CanonicalAdvanceDigestV1.compute(request))
+        repo.persistAdvanceReplayCarrier(31, signed, 1200)
+        return signed
+    }
+
+    private suspend fun assertLegacyRejected(planId: Long, failure: String) {
+        val beforeCarrier = db.advanceReplayCarrierDao().byAttempt(31)
+        val beforeRelease = db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31))
+        val beforeByLease = db.releaseReceiptDao().byLease("lease-31")
+        val beforeAdvanceReceipt = db.advanceReceiptDao().byAttempt(31)
+        repeat(2) {
+            buildEngine(planId, VClock().apply { now = it * 999_999L }).run()
+            assertEquals("a rejected legacy owner cannot call provider release", 0, releaseAttempts.size)
+            assertEquals("a rejected legacy owner cannot call provider advance", 0, advanceReplays.size)
+            assertEquals(beforeCarrier, db.advanceReplayCarrierDao().byAttempt(31))
+            assertEquals(beforeRelease, db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31)))
+            assertEquals(beforeByLease, db.releaseReceiptDao().byLease("lease-31"))
+            assertEquals(beforeAdvanceReceipt, db.advanceReceiptDao().byAttempt(31))
+            assertEquals("RECOVERY_REQUIRED", repo.getAttempt(31)!!.aplusState)
+            assertEquals("LEGACY_RELEASED_AUTHORITY:$failure", repo.getAttempt(31)!!.failureReason)
+            val audit = db.auditEventDao().forAttempt(31)
+            assertEquals(listOf("RECOVERY_REQUIRED"), audit.map { event -> event.eventType })
+            assertEquals("RELEASED->RECOVERY_REQUIRED[LEGACY_RELEASED_AUTHORITY:$failure]", audit.single().payloadDigest)
+        }
+    }
+
+    @Test fun `legacy key-only release index rejects before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET leaseId = 'foreign-lease'")
+        assertLegacyRejected(planId, "RELEASE_INDEX_CONFLICT")
+    }
+
+    @Test fun `legacy lease-only release index rejects before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET idempotencyKey = 'foreign-key'")
+        assertLegacyRejected(planId, "RELEASE_INDEX_CONFLICT")
+    }
+
+    @Test fun `legacy divergent release indices reject before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET leaseId = 'foreign-lease'")
+        db.releaseReceiptDao().insertIfAbsent(ReleaseReceiptRow("foreign-key", "lease-31",
+            APlusOperationIdentity.releaseDigest("lease-31"), "RELEASED", 1000))
+        assertLegacyRejected(planId, "RELEASE_INDEX_CONFLICT")
+    }
+
+    @Test fun `legacy duplicate lease receipt rejects even if LIMIT one returns matching row`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.releaseReceiptDao().insertIfAbsent(ReleaseReceiptRow("foreign-key", "lease-31",
+            APlusOperationIdentity.releaseDigest("lease-31"), "RELEASED", 1000))
+        assertLegacyRejected(planId, "RELEASE_INDEX_CONFLICT")
+    }
+
+    @Test fun `legacy release with wrong digest rejects before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET releaseDigest = 'wrong'")
+        assertLegacyRejected(planId, "RELEASE_RECEIPT_MISMATCH")
+    }
+
+    @Test fun `legacy release with failed outcome rejects before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET resultOutcome = 'FAILED'")
+        assertLegacyRejected(planId, "RELEASE_RECEIPT_MISMATCH")
+    }
+
+    @Test fun `legacy request without release receipt cannot authorize fresh release`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyRequest()
+        db.openHelper.writableDatabase.execSQL("DELETE FROM release_receipts")
+        assertLegacyRejected(planId, "RELEASE_RECEIPT_MISSING")
+    }
+
+    @Test fun `legacy quarantine provenance blocks a later bare RELEASE_PENDING projection`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("DELETE FROM release_receipts")
+        assertLegacyRejected(planId, "RELEASE_RECEIPT_MISSING")
+        // Simulate an old recovery projection after the legacy fact was recorded. Current state
+        // alone is insufficient authority to treat this as a never-committed fresh release.
+        repo.markAplusState(31, "RELEASE_PENDING")
+        buildEngine(planId, VClock().apply { now = 999_999 }).run()
+        assertEquals(0, releaseAttempts.size)
+        assertEquals(0, advanceReplays.size)
+        assertEquals(null, db.releaseReceiptDao().byLease("lease-31"))
+        assertEquals(null, db.advanceReplayCarrierDao().byAttempt(31))
+        assertEquals("RECOVERY_REQUIRED", repo.getAttempt(31)!!.aplusState)
+        assertEquals("LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING", repo.getAttempt(31)!!.failureReason)
+        assertEquals(listOf(
+            "RELEASED->RECOVERY_REQUIRED[LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING]",
+            "RELEASE_PENDING->RECOVERY_REQUIRED[LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING]"
+        ), db.auditEventDao().forAttempt(31).map { it.payloadDigest })
+    }
+
+    @Test fun `legacy request with invalid canonical digest cannot reach provider`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyRequest()
+        db.openHelper.writableDatabase.execSQL("UPDATE advance_replay_carriers SET requestDigest = 'wrong'")
+        assertLegacyRejected(planId, "ADVANCE_CARRIER_INVALID")
+    }
+
+    @Test fun `legacy request with foreign release binding cannot reach provider`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyRequest()
+        db.openHelper.writableDatabase.execSQL("UPDATE advance_replay_carriers SET releaseIdempotencyKey = 'wrong'")
+        assertLegacyRejected(planId, "ADVANCE_CARRIER_INVALID")
+    }
+
+    @Test fun `legacy request with valid digest but foreign schedule cannot reach provider`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyRequest(legacyRequest().copy(expectedScheduleId = "foreign-schedule"))
+        assertLegacyRejected(planId, "ADVANCE_CARRIER_OWNER_MISMATCH")
+    }
+
+    @Test fun `legacy request with valid digest but foreign operation key cannot reach provider`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyRequest(legacyRequest().copy(idempotencyKey = "foreign-key"))
+        assertLegacyRejected(planId, "ADVANCE_CARRIER_OWNER_MISMATCH")
+    }
+
+    @Test fun `legacy request with valid digest but foreign proof cannot reach provider`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        val request = legacyRequest()
+        persistLegacyRequest(request.copy(completionProof = request.completionProof.copy(ledgerRef = "ledger-foreign")))
+        assertLegacyRejected(planId, "ADVANCE_CARRIER_OWNER_MISMATCH")
+    }
+
+    private suspend fun persistLegacyAdvanceReceipt(request: CompleteAndAdvanceRequestV1) {
+        val base = requireNotNull(advanceAnswer)
+        repo.persistAdvanceReceipt(31, request, base.copy(
+            receiptDigest = CanonicalAdvanceReceiptDigestV1.compute(base, request.requestDigest, request.idempotencyKey)
+        ), 1300)
+    }
+
+    @Test fun `legacy advance receipt with invalid digest rejects before owner migration`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyAdvanceReceipt(persistLegacyRequest())
+        db.openHelper.writableDatabase.execSQL("UPDATE advance_receipts SET receiptDigest = 'wrong'")
+        assertLegacyRejected(planId, "ADVANCE_RECEIPT_INVALID")
+    }
+
+    @Test fun `legacy advance receipt with foreign request binding rejects before owner migration`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        persistLegacyAdvanceReceipt(persistLegacyRequest())
+        db.openHelper.writableDatabase.execSQL("UPDATE advance_receipts SET idempotencyKey = 'foreign-key'")
+        assertLegacyRejected(planId, "ADVANCE_RECEIPT_INVALID")
+    }
+
+    @Test fun `legacy under-quota owner with an advance carrier rejects conflicting history`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED", requiredSuccesses = 3)
+        persistLegacyRequest()
+        assertLegacyRejected(planId, "NON_QUOTA_ADVANCE_CARRIER")
+    }
+
+    @Test fun `legacy missing decision authority rejects before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("DELETE FROM trusted_quota_entries")
+        assertLegacyRejected(planId, "DECISION_CARRIER_MISSING")
+    }
+
+    @Test fun `legacy conflicting trusted and negative decisions reject before provider effects`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        repo.recordUnverifiedOutcome(31, "UNTRUSTED", "negative-evidence")
+        assertLegacyRejected(planId, "TRUST_CARRIER_CONFLICT")
+    }
+
+    @Test fun `healthy legacy release replays its exact historical request through audited reconcile`() = runTest {
+        val (planId, taskId) = seedCrashedAt("RELEASED")
+        val original = persistLegacyRequest()
+        // Mutable ledger totals may have grown since the historical request was frozen. They
+        // validate quota authority but must not rewrite the original proof count or wire clock.
+        db.trustedQuotaDao().insert(com.example.cellrebelauto.model.ledger.TrustedQuotaEntry(
+            attemptId = 30, taskId = taskId, evidenceDigest = "prior-evidence", committedAt = 8000))
+        buildEngine(planId, VClock()).run()
+        assertEquals(0, releaseAttempts.size)
+        assertEquals(listOf(original), advanceReplays)
+        assertEquals(original, repo.getAdvanceReplayRequest(31))
+        assertEquals("CLOSED", repo.getAttempt(31)!!.aplusState)
+        assertEquals("succeeded", repo.getAttempt(31)!!.status)
+        assertEquals(listOf(
+            "RELEASED->RECOVERY_REQUIRED[LEGACY_RELEASED_RECONCILE]",
+            "RECOVERY_REQUIRED->RELEASE_PENDING",
+            "RELEASE_PENDING->ADVANCE_PENDING[COMMITTED_QUOTA_REACHED]"
+        ), db.auditEventDao().forAttempt(31).take(3).map { it.payloadDigest })
+    }
+
+    @Test fun `healthy legacy request and advance receipt converge with zero redispatch`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        val original = persistLegacyRequest()
+        persistLegacyAdvanceReceipt(original)
+        val receipt = db.advanceReceiptDao().byAttempt(31)
+        buildEngine(planId, VClock()).run()
+        assertEquals(0, releaseAttempts.size)
+        assertEquals(0, advanceReplays.size)
+        assertEquals(original, repo.getAdvanceReplayRequest(31))
+        assertEquals(receipt, db.advanceReceiptDao().byAttempt(31))
+        assertEquals("CLOSED", repo.getAttempt(31)!!.aplusState)
+        assertEquals("succeeded", repo.getAttempt(31)!!.status)
+    }
+
+    @Test fun `healthy legacy negative release preserves rejection with no advance carrier`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("DELETE FROM trusted_quota_entries")
+        repo.recordUnverifiedOutcome(31, "UNTRUSTED", "negative-evidence")
+        val negative = repo.getUnverifiedRecord(31)
+        buildEngine(planId, VClock()).run()
+        assertEquals(0, releaseAttempts.count { it == 31L })
+        assertEquals(0, advanceReplays.size)
+        assertEquals(null, repo.getAdvanceReplayRequest(31))
+        assertEquals(negative, repo.getUnverifiedRecord(31))
+        assertEquals("CLOSED", repo.getAttempt(31)!!.aplusState)
+        assertEquals("failed", repo.getAttempt(31)!!.status)
+        assertEquals("RELEASE_PENDING->CLOSED[NOT_COMMITTED]",
+            db.auditEventDao().forAttempt(31).single { it.eventType == "RELEASE_RECEIPT" }.payloadDigest)
+    }
+
+    @Test fun `legacy rejection audit failure rolls back owner and reason with no provider call`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        db.openHelper.writableDatabase.execSQL("DELETE FROM release_receipts")
+        db.openHelper.writableDatabase.execSQL("""
+            CREATE TRIGGER fail_legacy_audit BEFORE INSERT ON auto_audit_events
+            WHEN NEW.eventType = 'RECOVERY_REQUIRED'
+            BEGIN SELECT RAISE(ABORT, 'injected legacy audit failure'); END
+        """.trimIndent())
+        buildEngine(planId, VClock()).run()
+        assertEquals(0, releaseAttempts.size)
+        assertEquals(0, advanceReplays.size)
+        assertEquals("RELEASED", repo.getAttempt(31)!!.aplusState)
+        assertEquals(null, repo.getAttempt(31)!!.failureReason)
+        assertEquals(null, db.advanceReplayCarrierDao().byAttempt(31))
+        assertTrue(db.auditEventDao().forAttempt(31).isEmpty())
+    }
+
+    @Test fun `healthy legacy reconcile audit failure rolls back the entire owner migration`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        val original = persistLegacyRequest()
+        val release = db.releaseReceiptDao().byLease("lease-31")
+        db.openHelper.writableDatabase.execSQL("""
+            CREATE TRIGGER fail_legacy_reconcile BEFORE INSERT ON auto_audit_events
+            WHEN NEW.eventType = 'RECONCILE'
+            BEGIN SELECT RAISE(ABORT, 'injected legacy reconcile failure'); END
+        """.trimIndent())
+        buildEngine(planId, VClock()).run()
+        assertEquals(0, releaseAttempts.size)
+        assertEquals(0, advanceReplays.size)
+        assertEquals("RELEASED", repo.getAttempt(31)!!.aplusState)
+        assertEquals(null, repo.getAttempt(31)!!.failureReason)
+        assertEquals(original, repo.getAdvanceReplayRequest(31))
+        assertEquals(release, db.releaseReceiptDao().byLease("lease-31"))
+        assertTrue(db.auditEventDao().forAttempt(31).isEmpty())
     }
 
     // ====================================================================================

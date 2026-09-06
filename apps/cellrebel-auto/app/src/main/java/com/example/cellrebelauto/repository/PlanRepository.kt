@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
 import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
 import com.example.cellrebelauto.automation.aplus.AttemptState
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptTransitions
 import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.PlanScheduler
@@ -32,6 +33,12 @@ import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+
+sealed interface LegacyReleaseRecovery {
+    data object NotLegacy : LegacyReleaseRecovery
+    data class Ready(val state: AttemptState) : LegacyReleaseRecovery
+    data class Rejected(val reason: String) : LegacyReleaseRecovery
+}
 
 /**
  * Plan-level repository (O1–O4 data owner). Wraps the plan/task/attempt/session
@@ -523,6 +530,98 @@ class PlanRepository(private val db: AppDatabase) {
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
 
     /**
+     * Legacy RELEASED is historical external-effect provenance, never permission for a fresh
+     * release. Validate its existing release/request tuple before any owner change. The original
+     * RELEASED audit source keeps this quarantine sticky across subsequent RECOVERY_REQUIRED runs.
+     */
+    suspend fun recoverLegacyRelease(attemptId: Long, recordedAt: Long): LegacyReleaseRecovery =
+        db.withTransaction {
+            val attempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId))
+            val legacyHistory = attempt.aplusState == "RELEASED" ||
+                (attempt.aplusState in setOf("RECOVERY_REQUIRED", "RELEASE_PENDING") &&
+                    db.auditEventDao().forAttempt(attemptId).any {
+                        it.eventType == "RECOVERY_REQUIRED" &&
+                            it.payloadDigest.startsWith("RELEASED->RECOVERY_REQUIRED[")
+                    })
+            if (!legacyHistory) return@withTransaction LegacyReleaseRecovery.NotLegacy
+            val failure = legacyReleaseAuthorityFailure(attempt)
+            if (failure != null) {
+                val reason = "LEGACY_RELEASED_AUTHORITY:$failure"
+                if (attempt.aplusState != "RECOVERY_REQUIRED" || attempt.failureReason != reason) {
+                    markRecoveryRequired(attemptId, reason, recordedAt)
+                }
+                return@withTransaction LegacyReleaseRecovery.Rejected(reason)
+            }
+            val trusted = db.trustedQuotaDao().getByAttempt(attemptId)
+            val task = requireNotNull(db.locationTaskDao().getTaskById(attempt.taskId))
+            val route = when {
+                trusted == null -> ReleaseReceiptRoute.NOT_COMMITTED
+                trustedCountForTask(attempt.taskId) < task.requiredSuccesses -> ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA
+                else -> ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED
+            }
+            val release = requireNotNull(db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(attemptId)))
+            // RELEASED is outside the frozen reducer. Record an explicit owner recovery fact,
+            // then consume its legal RECONCILE edge, all in this same owner transaction.
+            markRecoveryRequired(attemptId, "LEGACY_RELEASED_RECONCILE", recordedAt)
+            val next = APlusAttemptDriver(db.auditEventDao()) { recordedAt }.driveTransition(
+                attemptId, AttemptState.RECOVERY_REQUIRED, AttemptEvent.RECONCILE)
+            check(next == AttemptState.RELEASE_PENDING)
+            check(db.testAttemptDao().compareAndSetAplusState(attemptId, "RECOVERY_REQUIRED", next.name) == 1)
+            LegacyReleaseRecovery.Ready(commitReleaseReceipt(
+                attemptId,
+                ProviderReleaseHandoff(release.idempotencyKey, release.leaseId, release.releaseDigest,
+                    release.resultOutcome, release.createdAt, alreadyDurable = true),
+                route,
+                // Quota requests were validated above and must already exist; this value can
+                // never build a request. No recovery clock is consulted for historical identity.
+                verifiedAtElapsedRealtimeMs = 0,
+                recordedAt = recordedAt
+            ))
+        }
+
+    private suspend fun legacyReleaseAuthorityFailure(attempt: TestAttempt): String? {
+        val lease = attempt.aplusLeaseId?.takeIf { it.isNotBlank() } ?: return "LEASE_MISSING"
+        val key = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
+        val byKey = db.releaseReceiptDao().byKey(key)
+        val byLease = db.releaseReceiptDao().byLease(lease)
+        if (byKey == null && byLease == null) return "RELEASE_RECEIPT_MISSING"
+        if (byKey == null || byLease == null || byKey != byLease ||
+            db.releaseReceiptDao().countForLease(lease) != 1) return "RELEASE_INDEX_CONFLICT"
+        if (byKey.leaseId != lease || byKey.releaseDigest != APlusOperationIdentity.releaseDigest(lease) ||
+            byKey.resultOutcome != "RELEASED") return "RELEASE_RECEIPT_MISMATCH"
+        val trusted = db.trustedQuotaDao().getByAttempt(attempt.id)
+        val negative = db.unverifiedAttemptRecordDao().getByAttempt(attempt.id)
+        if (trusted != null && (negative != null || trusted.taskId != attempt.taskId)) return "TRUST_CARRIER_CONFLICT"
+        if (trusted == null && negative == null) return "DECISION_CARRIER_MISSING"
+        val task = db.locationTaskDao().getTaskById(attempt.taskId) ?: return "TASK_MISSING"
+        val count = trustedCountForTask(attempt.taskId)
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attempt.id)
+        if (trusted == null || count < task.requiredSuccesses) {
+            return if (carrier != null || db.advanceReceiptDao().byAttempt(attempt.id) != null)
+                "NON_QUOTA_ADVANCE_CARRIER" else null
+        }
+        if (carrier == null) return "ADVANCE_CARRIER_MISSING"
+        val request = try {
+            readAdvanceReplayRequest(attempt.id)
+        } catch (_: IllegalStateException) { return "ADVANCE_CARRIER_INVALID" }
+        if (request == null || carrier.releaseIdempotencyKey != key || request.leaseId != lease ||
+            request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id) ||
+            request.expectedScheduleId != attempt.aplusAnchorScheduleId ||
+            request.expectedCurrentItemId != attempt.aplusAnchorItemId ||
+            request.expectedScheduleVersion != attempt.aplusAnchorVersion ||
+            request.completionProof.scheduleItemId != attempt.aplusAnchorItemId ||
+            request.completionProof.quotaRequired != task.requiredSuccesses ||
+            request.completionProof.trustedSuccessCount !in task.requiredSuccesses..count ||
+            request.completionProof.ledgerRef != "ledger-${attempt.id}" ||
+            request.callerProtocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        ) return "ADVANCE_CARRIER_OWNER_MISMATCH"
+        try {
+            readAdvanceReceipt(attempt.id)
+        } catch (_: IllegalStateException) { return "ADVANCE_RECEIPT_INVALID" }
+        return null
+    }
+
+    /**
      * The sole production RELEASE_RECEIPT owner boundary. Provider I/O has already completed
      * outside Room. Release, exact quota request, legal owner transition and its audit either
      * commit together or all roll back. Recovery never fills a historical carrier gap.
@@ -694,20 +793,24 @@ class PlanRepository(private val db: AppDatabase) {
 
     /** Reads and validates the exact replay request; no mutable projection is consulted. */
     suspend fun getAdvanceReplayRequest(attemptId: Long): CompleteAndAdvanceRequestV1? =
-        db.withTransaction {
-            val row = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return@withTransaction null
-            val request = row.toAdvanceRequest()
-            check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
-                "ADVANCE_CARRIER_DURABLE_DIGEST_INVALID:$attemptId"
-            }
-            val release = db.releaseReceiptDao().byKey(row.releaseIdempotencyKey)
-            check(
-                release != null && release.leaseId == row.releaseLeaseId &&
-                    release.releaseDigest == row.releaseDigest && release.resultOutcome == "RELEASED" &&
-                    row.releaseLeaseId == request.leaseId
-            ) { "ADVANCE_CARRIER_RELEASE_AUTHORITY_INVALID:$attemptId" }
-            request
+        db.withTransaction { readAdvanceReplayRequest(attemptId) }
+
+    // Call within the owner's transaction. Validation rejection must not throw out of a nested
+    // Room transaction: even a caught nested failure poisons the owner's subsequent audit commit.
+    private suspend fun readAdvanceReplayRequest(attemptId: Long): CompleteAndAdvanceRequestV1? {
+        val row = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return null
+        val request = row.toAdvanceRequest()
+        check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
+            "ADVANCE_CARRIER_DURABLE_DIGEST_INVALID:$attemptId"
         }
+        val release = db.releaseReceiptDao().byKey(row.releaseIdempotencyKey)
+        check(
+            release != null && release.leaseId == row.releaseLeaseId &&
+                release.releaseDigest == row.releaseDigest && release.resultOutcome == "RELEASED" &&
+                row.releaseLeaseId == request.leaseId
+        ) { "ADVANCE_CARRIER_RELEASE_AUTHORITY_INVALID:$attemptId" }
+        return request
+    }
 
     /** Persist a provider advance receipt before projecting any receipt-driven owner state. */
     suspend fun persistAdvanceReceipt(
@@ -750,9 +853,12 @@ class PlanRepository(private val db: AppDatabase) {
     }
 
     /** Returns only a receipt whose stored request binding still verifies. */
-    suspend fun getAdvanceReceipt(attemptId: Long): AdvanceReceiptV1? = db.withTransaction {
-        val carrier = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return@withTransaction null
-        val row = db.advanceReceiptDao().byAttempt(attemptId) ?: return@withTransaction null
+    suspend fun getAdvanceReceipt(attemptId: Long): AdvanceReceiptV1? =
+        db.withTransaction { readAdvanceReceipt(attemptId) }
+
+    private suspend fun readAdvanceReceipt(attemptId: Long): AdvanceReceiptV1? {
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return null
+        val row = db.advanceReceiptDao().byAttempt(attemptId) ?: return null
         val request = carrier.toAdvanceRequest()
         check(row.idempotencyKey == request.idempotencyKey && row.requestDigest == request.requestDigest) {
             "ADVANCE_RECEIPT_REQUEST_BINDING_INVALID:$attemptId"
@@ -761,7 +867,7 @@ class PlanRepository(private val db: AppDatabase) {
         check(CanonicalAdvanceReceiptDigestV1.verify(receipt, row.requestDigest, row.idempotencyKey)) {
             "ADVANCE_RECEIPT_DURABLE_DIGEST_INVALID:$attemptId"
         }
-        receipt
+        return receipt
     }
 
     /**

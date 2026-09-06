@@ -1382,6 +1382,20 @@ class AutomationEngine(
             return projectClosedAttempt(crashed)
         }
 
+        // Historical RELEASED must never enter the fresh provider-release path. The owner
+        // transaction validates all stored authority before either a legal reconcile or rejection;
+        // its original audit provenance also protects later RECOVERY_REQUIRED restarts.
+        when (val legacy = planRepository.recoverLegacyRelease(crashed.id, nowMs())) {
+            com.example.cellrebelauto.repository.LegacyReleaseRecovery.NotLegacy -> Unit
+            is com.example.cellrebelauto.repository.LegacyReleaseRecovery.Rejected -> {
+                aplusPause("legacy release recovery rejected for attempt ${crashed.id}: ${legacy.reason}")
+                return false
+            }
+            is com.example.cellrebelauto.repository.LegacyReleaseRecovery.Ready -> {
+                return advanceAfterRelease(crashed, legacy.state, recoveryProtocolCompatible)
+            }
+        }
+
         if (recoveryOwnerState == AttemptState.CREATED.name) {
             if (!promoteCreatedOwnerToApplyPending(
                     crashed,
@@ -1785,10 +1799,6 @@ class AutomationEngine(
         attemptId: Long,
         durableOwnerState: String?
     ): Boolean {
-        if (durableOwnerState == "RELEASED") {
-            planRepository.markAplusState(attemptId, AttemptState.RELEASE_PENDING.name)
-            return true
-        }
         val current = durableOwnerState?.let {
             runCatching { AttemptState.valueOf(it) }.getOrNull()
         }
