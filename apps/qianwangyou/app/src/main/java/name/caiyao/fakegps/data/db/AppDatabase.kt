@@ -72,7 +72,7 @@ abstract class AppDatabase : RoomDatabase() {
                         removeStagingDatabase(staging)
                         try {
                             ensureStagingDatabase(appContext, live, staging)
-                            moveDatabaseFiles(live, backup)
+                            moveDatabaseFiles(live, backup, discardCheckpointedSharedMemory = true)
                             promoteStagingDatabase(staging, live)
                         } catch (failure: Throwable) {
                             removeStagingDatabase(staging)
@@ -159,6 +159,7 @@ abstract class AppDatabase : RoomDatabase() {
                 } finally {
                     stagedRoom.close()
                 }
+                closeLegacyWal(source, legacy)
             }
 
             check(isCompletedRoomV2Database(staging)) {
@@ -195,9 +196,13 @@ abstract class AppDatabase : RoomDatabase() {
             moveDatabaseFiles(staging, live)
         }
 
-        private fun moveDatabaseFiles(source: File, destination: File) {
+        private fun moveDatabaseFiles(
+            source: File,
+            destination: File,
+            discardCheckpointedSharedMemory: Boolean = false,
+        ) {
             check(!destination.exists()) { "Database destination already exists: ${destination.name}" }
-            requireNoDatabaseSidecars(source)
+            requireNoDatabaseSidecars(source, discardCheckpointedSharedMemory)
             check(source.renameTo(destination)) {
                 "Unable to move database ${source.name} to ${destination.name}"
             }
@@ -241,14 +246,29 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        private fun requireNoDatabaseSidecars(file: File) {
+        private fun requireNoDatabaseSidecars(file: File, discardCheckpointedSharedMemory: Boolean) {
             removeInactiveRollbackJournal(file)
-            val sidecars = listOf("-wal", "-shm")
-                .map { File(file.absolutePath + it) }
-                .filter(File::exists)
-            check(sidecars.isEmpty()) {
-                "Legacy recovery refuses to rename ${file.name} with SQLite sidecars: " +
-                    sidecars.joinToString { it.name }
+            val wal = File(file.absolutePath + "-wal")
+            check(!wal.exists()) {
+                "Legacy recovery refuses to rename ${file.name} with a residual WAL"
+            }
+            val shm = File(file.absolutePath + "-shm")
+            if (shm.exists()) {
+                check(discardCheckpointedSharedMemory) {
+                    "Legacy recovery refuses to rename ${file.name} with an unexpected shared-memory sidecar"
+                }
+                // closeLegacyWal() obtained DELETE mode after the checkpoint: it can only do so
+                // after active WAL readers are gone. SHM is an index/cache, never a source of
+                // committed rows, so this post-checkpoint residue is safe to discard pre-rename.
+                check(shm.delete()) { "Unable to discard checkpointed shared-memory sidecar ${shm.name}" }
+            }
+        }
+
+        private fun closeLegacyWal(database: SQLiteDatabase, file: File) {
+            database.rawQuery("PRAGMA journal_mode=DELETE", null).use { cursor ->
+                check(cursor.moveToFirst() && cursor.getString(0).equals("delete", ignoreCase = true)) {
+                    "Legacy recovery refuses to move ${file.name} while SQLite cannot leave WAL mode"
+                }
             }
         }
 

@@ -119,7 +119,7 @@ class AppDatabaseMigrationTest {
                     try {
                         AppDatabase.ensureLegacyDatabaseRecovered(context)
                         fail("Recovery must not move a database with WAL frames held by a reader")
-                    } catch (expected: IllegalStateException) {
+                    } catch (expected: RuntimeException) {
                         // The assertion below is the contract: the recovery may fail at the
                         // checkpoint gate or the subsequent sidecar gate, but it must leave the
                         // source untouched in either case.
@@ -190,6 +190,36 @@ class AppDatabaseMigrationTest {
             assertEquals(3, cursor?.count)
         }
         assertAllLegacyRowsPreserved(context, "fakegps.db")
+    }
+
+    @Test
+    fun legacyWithCheckpointedSharedMemoryResidueIsRecovered() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val databaseName = "fakegps.db"
+        createLegacyV0Fixture(context, databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        val staleShm = java.io.File(databaseFile.path + "-shm")
+        val capturedSharedMemory = SQLiteDatabase.openDatabase(
+            databaseFile.path,
+            null,
+            SQLiteDatabase.OPEN_READWRITE,
+        ).use { legacy ->
+            assertTrue(legacy.enableWriteAheadLogging())
+            legacy.rawQuery("PRAGMA wal_checkpoint(TRUNCATE)", null).use { }
+            assertTrue(staleShm.exists())
+            staleShm.readBytes()
+        }
+        // This mirrors the sealed fixture shape: an empty WAL plus a real 32 KiB shared-memory
+        // index from a database that has already checkpointed all profile frames.
+        staleShm.writeBytes(capturedSharedMemory)
+        java.io.File(databaseFile.path + "-wal").outputStream().use { }
+        assertTrue(staleShm.exists())
+        assertEquals(32 * 1024, staleShm.length())
+
+        AppDatabase.getInstance(context)
+
+        assertFalse(staleShm.exists())
+        assertAllLegacyRowsPreserved(context, databaseName)
     }
 
     private fun createLegacyV0Fixture(context: android.content.Context, databaseName: String, rows: Int = 3) {
