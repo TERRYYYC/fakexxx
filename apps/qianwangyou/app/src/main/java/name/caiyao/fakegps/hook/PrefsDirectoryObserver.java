@@ -24,9 +24,11 @@ import de.robv.android.xposed.XposedBridge;
  * {@code MainHook.loadSnapshot()} makes the redundant reload a no-op.
  *
  * <h3>Thread safety</h3>
- * {@code onEvent} runs on the static {@code FileObserver.ObserverThread}. The callback acquires
- * {@code MainHook.SNAPSHOT_LOCK} via {@code reloadSnapshot()}, which serializes against timer
- * ticks and probe reloads. At steady state the thread sits in {@code epoll_wait} (zero CPU).
+ * {@code onEvent} runs on the static {@code FileObserver.ObserverThread}. The callback only
+ * POSTS the reload onto {@code MainHook.SNAPSHOT_IO} (the single prefs-IO worker, which
+ * serializes against timer ticks and probe reloads via {@code MainHook.SNAPSHOT_LOCK}); the
+ * observer thread itself never performs file IO, so a stalled prefs read cannot block inotify
+ * delivery for the process. At steady state the thread sits in {@code epoll_wait} (zero CPU).
  */
 final class PrefsDirectoryObserver extends FileObserver {
 
