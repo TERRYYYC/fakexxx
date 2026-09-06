@@ -366,6 +366,79 @@ class LocationDeliveryOrchestratorTest {
     }
 
     @Test
+    fun `refresh rebuilds provider immediately when framework dropped the test provider`() {
+        val dropped = IllegalArgumentException("gps provider is not a test provider")
+        val fixture = Fixture(
+            initialMode = LocationDeliveryMode.SYSTEM_MOCK,
+            publishFailureCalls = setOf(2),
+            publishFailureThrowable = dropped,
+        )
+
+        fixture.orchestrator.enable()
+        fixture.events.clear()
+
+        val result = fixture.orchestrator.refresh()
+
+        assertTrue(result is MockProviderState.Running)
+        assertEquals(
+            listOf(
+                "provider:publish",
+                "provider:remove",
+                "provider:remove", "provider:replace", "provider:publish",
+            ),
+            fixture.events,
+        )
+    }
+
+    @Test
+    fun `refresh reports failure after an immediate rebuild also fails`() {
+        val dropped = IllegalArgumentException("gps provider is not a test provider")
+        val fixture = Fixture(
+            initialMode = LocationDeliveryMode.SYSTEM_MOCK,
+            publishFailureCalls = (2..99).toSet(),
+            publishFailureThrowable = dropped,
+        )
+
+        fixture.orchestrator.enable()
+        fixture.events.clear()
+
+        val result = fixture.orchestrator.refresh()
+
+        assertTrue(result is MockProviderState.Failed)
+        assertEquals(
+            listOf(
+                "provider:publish",
+                "provider:remove",
+                "provider:remove", "provider:replace", "provider:publish",
+                "provider:remove",
+            ),
+            fixture.events,
+        )
+    }
+
+    @Test
+    fun `refresh tick permission denial does not trigger a rebuild attempt`() {
+        val denied = SecurityException("not allowed to perform MOCK_LOCATION")
+        val fixture = Fixture(
+            initialMode = LocationDeliveryMode.SYSTEM_MOCK,
+            publishFailureCalls = setOf(2),
+            publishFailureThrowable = denied,
+        )
+
+        fixture.orchestrator.enable()
+        fixture.events.clear()
+
+        val result = fixture.orchestrator.refresh()
+
+        assertTrue(result is MockProviderState.Failed)
+        assertEquals(
+            MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED,
+            (result as MockProviderState.Failed).reason,
+        )
+        assertEquals(listOf("provider:publish", "provider:remove"), fixture.events)
+    }
+
+    @Test
     fun `refresh after persisted hook switch disables runtime instead of restarting provider`() {
         val fixture = Fixture(initialMode = LocationDeliveryMode.HOOK)
 
@@ -511,12 +584,15 @@ class LocationDeliveryOrchestratorTest {
         private val providerFailure: String? = null,
         private val providerFailureThrowable: Throwable? = null,
         private val removeFailureCalls: Set<Int> = emptySet(),
+        private val publishFailureCalls: Set<Int> = emptySet(),
+        private val publishFailureThrowable: Throwable? = null,
         readPublished: () -> PublishedConfig? = { published(50.4501, 30.5234) },
     ) {
         val events = mutableListOf<String>()
         var mode = initialMode
         var cleanupRequired = initialCleanupRequired
         private var removeCallCount = 0
+        private var publishCallCount = 0
         private val gateway = object : MockProviderGateway {
             override fun replaceGpsProvider() {
                 events += "provider:replace"
@@ -526,6 +602,10 @@ class LocationDeliveryOrchestratorTest {
             }
             override fun publish(config: MockLocationConfig) {
                 events += "provider:publish"
+                publishCallCount += 1
+                if (publishCallCount in publishFailureCalls) {
+                    throw publishFailureThrowable ?: error("publish $publishCallCount failed")
+                }
                 if (providerFailure == "publish") {
                     throw providerFailureThrowable ?: error("publish failed")
                 }
