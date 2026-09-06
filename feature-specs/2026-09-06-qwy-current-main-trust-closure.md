@@ -12,7 +12,7 @@ created: 2026-09-06
 **Acceptance Criteria:** #66 AC1–7; #79 ordered profile-1..10 `discover()` readback; #83 append identity/durability, no TTL pruning, bounded caller-driven admission backed by measurement; #90 exact-source evidence remains fail-closed.
 **Architecture cell:** `fakexxx::android-dual-app-contract`
 **Map delta:** update required
-**Map delta why:** QWY gains an explicit read-only consumer edge to the system-server oracle; Vector owns the producer/hook, QWY owns only the Binder bridge and claim projection.
+**Map delta why:** QWY owns both its private system-server oracle producer/installer and its read-only Binder consumer; Vector supplies independent framework/readback validation only.
 **Architecture:** The authoritative oracle remains outside QWY’s authority. QWY reads PRE and POST snapshots around the complete observed projection (tracker, effective environment, and schedule) and only projects `FULL` for a valid stable window. QWY persists its local acknowledgement/revision and the observation audit together; that record is a replay watermark, never a source of continuity truth.
 **Tech Stack:** Kotlin/JUnit, existing `DurableKv` transaction seam, Android Binder private bridge.
 **前端验证:** No — Binder/provider and persistence behavior only.
@@ -21,13 +21,13 @@ created: 2026-09-06
 
 ## Finish line and exclusions
 
-The terminal system has one trusted `FULL` source: a system-server producer tracked by the Vector/#71 owner, consumed through a strict read-only QWY bridge. Missing producer, malformed wire data, callback/Binder failure, boot/instance change, odd/advanced/regressed sequence, incomplete coverage, unhealthy source, owner mismatch, provider disablement, or semantic-digest mismatch all produce `NONE`; QWY-local state never upgrades them.
+The terminal system has one trusted `FULL` source: QWY's own system-server producer, consumed through a strict read-only QWY bridge. Missing producer, malformed wire data, callback/Binder failure, boot/instance change, odd/advanced/regressed sequence, incomplete coverage, unhealthy source, owner mismatch, provider disablement, or semantic-digest mismatch all produce `NONE`; QWY-local state never upgrades them.
 
 This plan does **not** modify CellRebel Auto database/migrations/service, QWY’s legacy profile database schema (#46), Gradle/application IDs, Vector’s system-server hook, release documentation, or real devices. #98’s fail-closed removal is included unchanged as the first successor commit. #90 is an external dependency: #100@`c3f561b` is still open, so its host-only checks are evidence for that PR rather than current-main capability.
 
 ## Frozen v1 producer/consumer boundary
 
-QWY owns the consumer schema and bridge; the Vector/#71 owner owns the system-server producer implementation. The candidate is extracted from draft #68@`8c8bd250513a6c8284101152eeec99d8d26f46b3`:
+QWY owns the consumer schema, bridge, and its in-module system-server producer/installer. Vector/#71 owns independent framework validation only. The candidate is extracted from draft #68@`8c8bd250513a6c8284101152eeec99d8d26f46b3`:
 
 - AIDL: `apps/qianwangyou/app/src/main/aidl/name/caiyao/fakegps/oracle/IAuthoritativeContinuityOracle.aidl` and `IContinuityOracleRegistrar.aidl`;
 - strict v1 Bundle schema: `apps/qianwangyou/app/src/main/java/name/caiyao/fakegps/oracle/OracleBundleCodec.kt`;
@@ -40,7 +40,7 @@ The producer must register through that UID-1000 Binder only, send the exact v1 
 
 | Object | Sole lifecycle owner | Events | Forbidden bypass |
 |---|---|---|---|
-| System-server oracle journal | Vector/#71 producer | begin/finish covered mutation, owner/provider transition, boot/restart, QWY session death | QWY may not write state or synthesize a snapshot |
+| System-server oracle journal | QWY Xposed producer/installer | begin/finish covered mutation, owner/provider transition, boot/restart, QWY session death | consumer process may not write state or synthesize a snapshot |
 | QWY oracle bridge client | QWY process | UID-1000 registration, Binder death/rebind, strict decode | app-local tracker may not promote `FULL` or cache a dead producer |
 | QWY local continuity acknowledgement | `ContinuityTracker` under `DurableKv.transaction` | valid window ACK, authoritative mutation ACK, restart/replay | direct writes to revision namespace |
 | Observation audit sequence/event | `IntegrationAuditStore` | durable append, crash/reopen, authorized observe admission | TTL/pruning, unbacked evidence reply |
@@ -94,7 +94,7 @@ The producer must register through that UID-1000 Binder only, send the exact v1 
 1. Cherry-pick #98 (`019a02f`) unchanged; preserve its regression.
 2. Port only the pure #68 oracle domain classifier, AIDL, strict QWY Binder decoding, and UID-1000 registration guard needed by current main; do not port Auto or stale lifecycle changes.
 3. Add failing source-schema/death tests and observation-window tests for every #66 failure mode, then wire an explicit atomic observation commit and replay watermark.
-4. Add a static writer-map guard plus QWY semantic registration/mutation seams after the Vector/#71 producer confirms the frozen bridge schema; source absence remains `NONE`.
+4. Add a static writer-map guard plus QWY semantic registration/mutation seams and adapt the QWY producer/installer to the frozen bridge schema; source absence remains `NONE`.
 5. Add #79 `profileRefsSnapshot()` and its provider regression without changing legacy profile storage.
 6. Add `resolve(seq)`, production-backing crash tests, current-growth measurement, and bounded admission; select/migrate an append-oriented backend only from those measurements.
 7. Run QWY JVM suite and release assembly, quality gate, and a non-author exact-HEAD formal review. Keep #66 open until separately authorized exact-build emulator/rooted-device evidence.
