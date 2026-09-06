@@ -43,7 +43,7 @@ interface RunSessionDao {
      * and a cancel/throw persists `paused` with a still-live lease that the next start must reconcile, not
      * orphan (Sol round-10 P1-5).
      */
-    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status IN ('running','recovering','paused') ORDER BY startedAt DESC LIMIT 1")
+    @Query("SELECT * FROM run_sessions WHERE planId = :planId AND status IN ('starting','running','recovering','paused') ORDER BY startedAt DESC LIMIT 1")
     suspend fun findActiveRunningSession(planId: Long): RunSession?
 
     /**

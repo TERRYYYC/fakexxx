@@ -741,6 +741,32 @@ class PlanRepository(private val db: AppDatabase) {
 
     // ---- Session lifecycle ----
 
+    /** Durable start admission for #80; only this transaction creates a newly accepted session. */
+    sealed interface RunSessionAdmission {
+        data class Created(val sessionId: Long) : RunSessionAdmission
+        data class Existing(val sessionId: Long) : RunSessionAdmission
+        data object MissingPlan : RunSessionAdmission
+    }
+
+    suspend fun admitRunSession(planId: Long, startedAt: Long): RunSessionAdmission = db.withTransaction {
+        if (db.planDao().getPlanById(planId) == null) {
+            return@withTransaction RunSessionAdmission.MissingPlan
+        }
+        db.runSessionDao().findActiveRunningSession(planId)?.let {
+            return@withTransaction RunSessionAdmission.Existing(it.id)
+        }
+        RunSessionAdmission.Created(
+            db.runSessionDao().insert(
+                RunSession(
+                    startedAt = startedAt,
+                    status = "starting",
+                    configSnapshot = "plan:$planId",
+                    planId = planId
+                )
+            )
+        )
+    }
+
     suspend fun createSession(planId: Long, startedAt: Long): Long =
         db.runSessionDao().insert(
             RunSession(startedAt = startedAt, planId = planId, configSnapshot = "plan:$planId")

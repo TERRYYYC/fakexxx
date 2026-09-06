@@ -291,6 +291,10 @@ class MainViewModel @JvmOverloads constructor(
     val cycleCount: StateFlow<Int> = AutomationService.cycleCount
     val logs: StateFlow<List<String>> = AutomationService.logs
     val isServiceConnected: StateFlow<Boolean> = AutomationService.isServiceConnected
+    val startStatus: StateFlow<com.example.cellrebelauto.automation.AutomationStartStatus> =
+        AutomationService.startStatus
+
+    private val _startRequested = MutableStateFlow(false)
 
     // # Run 页投影流（Task 11）
     val currentTask: StateFlow<EngineTaskSnapshot?> = AutomationService.currentTask
@@ -339,6 +343,25 @@ class MainViewModel @JvmOverloads constructor(
     private val _importProposal = MutableStateFlow<ImportProposal?>(null)
     val importProposal: StateFlow<ImportProposal?> = _importProposal
 
+    init {
+        viewModelScope.launch {
+            startStatus.collect { status ->
+                if (!_startRequested.value) return@collect
+                when (status) {
+                    is com.example.cellrebelauto.automation.AutomationStartStatus.Accepted -> {
+                        _startRequested.value = false
+                        _currentScreen.value = Screen.RUN
+                    }
+                    is com.example.cellrebelauto.automation.AutomationStartStatus.Rejected -> {
+                        _startRequested.value = false
+                        _importNotice.value = "Start rejected: ${status.reason}"
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+
     // ---- Data from repository ----
 
     // # History 页：尝试行联接任务上下文（最新在前，AC-C3）
@@ -370,8 +393,8 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         val plan = planUiState.value.plan ?: return
+        _startRequested.value = true
         AutomationService.startAutomation(plan.id)
-        _currentScreen.value = Screen.RUN
     }
 
     fun stopAutomation() {

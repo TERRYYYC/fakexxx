@@ -128,7 +128,9 @@ class AutomationEngine(
     private val recoveryCoordinator: RecoveryCoordinator? = null,
     // # R8-F1（Sol round-7 P1-2）：A+ 证据获取 seam（观察/分类/回执 artifact）。目标坐标与本地重算
     // # hash 不由它提供——ctx 由持久 attempt intent 组装（INV-23）。默认 null = legacy。
-    private val completionEvidenceSource: APlusEvidenceSource? = null
+    private val completionEvidenceSource: APlusEvidenceSource? = null,
+    /** #80: service admission owns this durable session before the engine begins work. */
+    private val initialRunSessionId: Long? = null
 ) {
     private enum class AdvanceVerificationResult {
         FAILED,
@@ -172,7 +174,7 @@ class AutomationEngine(
     private val _lastFailure = MutableStateFlow<LastFailureInfo?>(null)
     val lastFailure: StateFlow<LastFailureInfo?> = _lastFailure
 
-    private var runSessionId: Long = 0
+    private var runSessionId: Long = initialRunSessionId ?: 0
     // # 在途尝试（停止/取消时标记 interrupted）
     private var currentAttemptId: Long? = null
 
@@ -232,9 +234,12 @@ class AutomationEngine(
                 return@coroutineScope
             }
 
-            // # A+ 模式下 session 已在恢复段创建（recovering→running）；legacy 在此创建
+            // #80: the service may already have admitted a durable `starting` session. It is the
+            // sole normal-run owner; legacy direct construction retains the historical fallback.
             if (runSessionId == 0L) {
                 runSessionId = planRepository.createSession(planId, nowMs())
+            } else {
+                planRepository.markSessionStatus(runSessionId, "running")
             }
             _cycleCount.value = 0
             log("=== Plan run started (plan #$planId, session #$runSessionId) ===")

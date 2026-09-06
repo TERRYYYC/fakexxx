@@ -78,6 +78,10 @@ class AutomationService : AccessibilityService() {
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning
 
+        /** #80 public admission projection; Accepted is impossible without a durable session row. */
+        private val _startStatus = MutableStateFlow<AutomationStartStatus>(AutomationStartStatus.IDLE)
+        val startStatus: StateFlow<AutomationStartStatus> = _startStatus
+
         private val _currentState = MutableStateFlow(AutomationState.IDLE)
         val currentState: StateFlow<AutomationState> = _currentState
 
@@ -110,6 +114,7 @@ class AutomationService : AccessibilityService() {
         fun startAutomation(planId: Long) {
             instance?.startWithPlan(planId) ?: run {
                 Log.e(TAG, "Service not connected — cannot start")
+                _startStatus.value = AutomationStartStatus.Rejected("SERVICE_NOT_CONNECTED")
             }
         }
 
@@ -332,8 +337,7 @@ class AutomationService : AccessibilityService() {
         val cellRebelHandler = CellRebelHandler(bridge, onLog = { addLog(it) })
         val fakeGpsHandler = FakeGpsHandler(bridge) { addLog(it) }
 
-        val runGeneration = projectionFence.beginRun()
-        projectionFence.publish(runGeneration) { _isRunning.value = true }
+        _startStatus.value = AutomationStartStatus.STARTING
 
         automationJob = serviceScope.launch {
             // # 读取计划与高级配置（超时/GPS 稳定）
@@ -341,9 +345,27 @@ class AutomationService : AccessibilityService() {
             val planConfig = configStore.config.first()
             if (plan == null) {
                 addLog("ERROR: plan #$planId not found")
-                projectionFence.publish(runGeneration) { _isRunning.value = false }
+                _startStatus.value = AutomationStartStatus.Rejected("PLAN_NOT_FOUND")
                 return@launch
             }
+            if (!planConfig.locationStageEnabled && !planConfig.testStageEnabled) {
+                addLog("ERROR: both stages are OFF — nothing would be executed")
+                _startStatus.value = AutomationStartStatus.Rejected("BOTH_STAGES_OFF")
+                return@launch
+            }
+            val startReceipt = RunStartCoordinator(planRepository).admit(planId, System.currentTimeMillis())
+            val sessionId = when (startReceipt) {
+                is RunStartReceipt.Accepted -> startReceipt.sessionId
+                is RunStartReceipt.Resumed -> startReceipt.sessionId
+                is RunStartReceipt.Rejected -> {
+                    addLog("ERROR: start rejected (${startReceipt.reason})")
+                    _startStatus.value = AutomationStartStatus.Rejected(startReceipt.reason)
+                    return@launch
+                }
+            }
+            val runGeneration = projectionFence.beginRun()
+            projectionFence.publish(runGeneration) { _isRunning.value = true }
+            _startStatus.value = AutomationStartStatus.Accepted(sessionId)
 
             // # R8-F1/F2（Sol round-7 P1-1 / round-11 P1-1）：A+ 组合根。生产经 engineAplusParams 从
             // # productionBackend() 取得非 null fail-closed 骨架束；测试经同一 engineAplusParams 接线（同一组合点）。
@@ -377,7 +399,8 @@ class AutomationService : AccessibilityService() {
                 auditDao = db.auditEventDao(),
                 aplusCoordinator = aplusCoordinator,
                 aplusEvidence = aplusEvidence,
-                bridge = bridge
+                bridge = bridge,
+                initialRunSessionId = sessionId
             )
             engine = newEngine
 
