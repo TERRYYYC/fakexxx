@@ -55,6 +55,24 @@ class APlusAttemptDriver(
         return next
     }
 
+    /**
+     * Drive a typed edge into RECOVERY_REQUIRED and bind the exact durable reason to its audit row.
+     * The repository invokes this inside the same Room transaction as the Attempt owner CAS.
+     */
+    suspend fun driveRecoveryTransition(
+        attemptId: Long,
+        current: AttemptState,
+        event: AttemptEvent,
+        reason: String
+    ): AttemptState {
+        val next = AttemptTransitions.next(current, event)
+        check(next == AttemptState.RECOVERY_REQUIRED) {
+            "$event does not own a recovery transition from $current"
+        }
+        appendAudit(attemptId, current, event, next, detail = reason)
+        return next
+    }
+
     /** Drive the conditional §8.1 release-receipt edge without losing its authoritative route. */
     suspend fun driveReleaseReceipt(
         attemptId: Long,
@@ -71,7 +89,8 @@ class APlusAttemptDriver(
         current: AttemptState,
         event: AttemptEvent,
         next: AttemptState,
-        releaseRoute: ReleaseReceiptRoute? = null
+        releaseRoute: ReleaseReceiptRoute? = null,
+        detail: String? = null
     ) {
         val seq = auditDao.count().toLong() + 1
         auditDao.insert(
@@ -83,6 +102,7 @@ class APlusAttemptDriver(
                 payloadDigest = buildString {
                     append("$current->$next")
                     releaseRoute?.let { append("[$it]") }
+                    detail?.let { append("[$it]") }
                 },
                 recordedAt = nowMs()
             )

@@ -227,6 +227,53 @@ class AttemptTransitionsRedTest {
     }
 
     @Test
+    fun `distinct missing-evidence and unproven-advance events fail closed from their exact owners`() {
+        val cases = listOf(
+            AttemptState.CELLREBEL_START_PENDING to "START_FAILED_BEFORE_RUNNING",
+            AttemptState.POST_OBSERVE_PENDING to "POST_OBSERVATION_MISSING",
+            AttemptState.DECIDING to "COMPLETION_EVIDENCE_MISSING",
+            AttemptState.ADVANCE_PENDING to "ADVANCE_NOT_PROVEN",
+            AttemptState.ADVANCE_OBSERVING to "ADVANCE_NOT_PROVEN",
+            AttemptState.ADVANCE_STATE_READBACK to "ADVANCE_NOT_PROVEN"
+        )
+
+        cases.forEach { (current, eventName) ->
+            val event = AttemptEvent.valueOf(eventName)
+            assertEquals(
+                "$current + $eventName must be a frozen RECOVERY_REQUIRED edge",
+                AttemptState.RECOVERY_REQUIRED,
+                AttemptTransitions.next(current, event)
+            )
+        }
+    }
+
+    @Test
+    fun `new failure events are owner-specific and cannot become generic recovery shortcuts`() {
+        val cases = listOf(
+            AttemptEvent.valueOf("START_FAILED_BEFORE_RUNNING") to setOf(AttemptState.CELLREBEL_START_PENDING),
+            AttemptEvent.valueOf("POST_OBSERVATION_MISSING") to setOf(AttemptState.POST_OBSERVE_PENDING),
+            AttemptEvent.valueOf("COMPLETION_EVIDENCE_MISSING") to setOf(AttemptState.DECIDING),
+            AttemptEvent.valueOf("ADVANCE_NOT_PROVEN") to setOf(
+                AttemptState.ADVANCE_PENDING,
+                AttemptState.ADVANCE_OBSERVING,
+                AttemptState.ADVANCE_STATE_READBACK
+            )
+        )
+
+        cases.forEach { (event, owners) ->
+            AttemptState.entries
+                .filter { it !in owners && it != AttemptState.CLOSED }
+                .forEach { other ->
+                    assertEquals(
+                        "$event must not bypass the frozen owners $owners from $other",
+                        other,
+                        AttemptTransitions.next(other, event)
+                    )
+                }
+        }
+    }
+
+    @Test
     fun `a verified non-terminal advance receipt enters independent observation`() {
         assertEquals(
             AttemptState.ADVANCE_OBSERVING,

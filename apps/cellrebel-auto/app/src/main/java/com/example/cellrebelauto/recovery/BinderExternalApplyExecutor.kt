@@ -207,16 +207,18 @@ class BinderExternalApplyExecutor(
         request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
         expectedIntentHash: String
     ): CompleteAndAdvanceOutcome {
-        val api = remote ?: return CompleteAndAdvanceOutcome.Failure("PROVIDER_NOT_BOUND")
+        val api = remote ?: return CompleteAndAdvanceOutcome.Failure(AdvanceFailure.ProviderNotBound)
         return try {
             when (val v = ContractResponseValidator.validateCompleteAndAdvance(api.completeAndAdvance(request), expectedIntentHash, request.requestDigest, request.idempotencyKey)) {
                 is ContractResponseValidator.ValidatedContractResponse.Success ->
                     CompleteAndAdvanceOutcome.Receipt(v.payload)
                 is ContractResponseValidator.ValidatedContractResponse.Failure ->
-                    CompleteAndAdvanceOutcome.Failure(v.typedOutcome)
+                    CompleteAndAdvanceOutcome.Failure(
+                        AdvanceFailure.fromProviderOutcome(v.typedOutcome)
+                    )
             }
         } catch (e: Exception) {
-            CompleteAndAdvanceOutcome.Failure("PROVIDER_TRANSPORT_FAILURE")
+            CompleteAndAdvanceOutcome.Failure(AdvanceFailure.TransportFailure)
         }
     }
 }

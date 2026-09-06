@@ -647,7 +647,9 @@ class PlanRepository(private val db: AppDatabase) {
         val previous = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
             "cannot mark missing attempt $attemptId recovery-required"
         }
-        db.testAttemptDao().markRecoveryRequired(attemptId, reason)
+        check(db.testAttemptDao().markRecoveryRequired(attemptId, reason) == 1) {
+            "recovery owner mutation failed for attempt $attemptId"
+        }
         db.auditEventDao().insert(
             AutoAuditEvent(
                 seq = db.auditEventDao().count().toLong() + 1,
@@ -658,6 +660,39 @@ class PlanRepository(private val db: AppDatabase) {
                 recordedAt = nowMs
             )
         )
+    }
+
+    /**
+     * Persist a named reducer failure as one durable fact. The current phase is re-read inside the
+     * transaction, the exact event must own that edge, and the owner CAS plus audit either both
+     * commit or both roll back.
+     */
+    suspend fun transitionToRecoveryRequired(
+        attemptId: Long,
+        event: AttemptEvent,
+        reason: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): AttemptState = db.withTransaction {
+        val owner = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+            "cannot transition missing attempt $attemptId to recovery-required"
+        }
+        val current = owner.aplusState?.let {
+            runCatching { AttemptState.valueOf(it) }.getOrNull()
+        } ?: error("attempt $attemptId has no recognized A+ phase: ${owner.aplusState}")
+        val next = APlusAttemptDriver(db.auditEventDao()) { nowMs }.driveRecoveryTransition(
+            attemptId = attemptId,
+            current = current,
+            event = event,
+            reason = reason
+        )
+        check(
+            db.testAttemptDao().compareAndSetRecoveryRequired(
+                attemptId = attemptId,
+                expected = current.name,
+                reason = reason
+            ) == 1
+        ) { "stale recovery owner for attempt $attemptId at ${current.name}" }
+        next
     }
 
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =

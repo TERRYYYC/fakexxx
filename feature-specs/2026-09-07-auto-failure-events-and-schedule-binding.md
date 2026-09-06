@@ -50,7 +50,7 @@ The finish line is one reviewable Auto branch in which #86's four named failure 
 | `CELLREBEL_RUNNING` | `TIMEOUT_INTERRUPTED` | `RECOVERY_REQUIRED` | `CELLREBEL_TIMEOUT_INTERRUPTED:<FailureReason>` / `RECOVERY_TIMEOUT_INTERRUPTED` | guess success |
 | `POST_OBSERVE_PENDING` | `POST_OBSERVATION_MISSING` | `RECOVERY_REQUIRED` | `POST_OBSERVATION_UNAVAILABLE` or `RECOVERY_EVIDENCE_UNAVAILABLE:POST_OBSERVE_PENDING` | emit `OBSERVATION_UNTRUSTED` when no observation exists |
 | `DECIDING` | `COMPLETION_EVIDENCE_MISSING` | `RECOVERY_REQUIRED` | `COMPLETION_EVIDENCE_UNAVAILABLE` or `RECOVERY_EVIDENCE_UNAVAILABLE:DECIDING` | emit an observation event for an absent completion carrier |
-| `ADVANCE_PENDING` | `ADVANCE_NOT_PROVEN` | `RECOVERY_REQUIRED` | `ADVANCE_NOT_PROVEN:<ProviderError(code) | InvalidResponse(detail) | TransportFailure | ProviderUnavailable>` | invent a receipt or classify absence as `ADVANCE_DIGEST_MISMATCH` |
+| `ADVANCE_PENDING` / `ADVANCE_OBSERVING` / `ADVANCE_STATE_READBACK` | `ADVANCE_NOT_PROVEN` | `RECOVERY_REQUIRED` | `ADVANCE_NOT_PROVEN:<ProviderError(code) | InvalidResponse(detail) | TransportFailure | ProviderNotBound>` | invent a receipt or classify absence as `ADVANCE_DIGEST_MISMATCH` |
 
 `PRE_EXISTING_RUN` deliberately remains `CELLREBEL_START_PENDING → CELLREBEL_RUNNING`; only after that classification may `TIMEOUT_INTERRUPTED` be emitted. All named recovery edges use one repository transaction:
 
@@ -127,7 +127,7 @@ Adversarial tests cover: audit insertion rollback; duplicate recovery replay; pr
 2. Add normal-path assertions for each named event, exact payload reason, negative-carrier ordering and forbidden old event.
 3. Add crash recovery negatives that assert exact immutable carrier and named event.
 4. Add provider-error 16, malformed response and transport failures for both normal and `ADVANCE_PENDING` replay paths.
-5. Seed a conflicting audit sequence to force insertion failure and prove the owner/reason rolls back.
+5. Install a test-only SQLite trigger that aborts the named audit insert and prove the owner/reason rolls back.
 6. Run only the six affected test classes; expected RED is missing named events/typed outcome, never environment setup failure.
 
 ### Task 2: Implement the minimal #86 event/atomic path
@@ -141,7 +141,7 @@ Adversarial tests cover: audit insertion rollback; duplicate recovery replay; pr
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/repository/PlanRepository.kt`
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/automation/AutomationEngine.kt`
 
-1. Add the four enum values and only the four frozen reducer edges.
+1. Add the four event families and only their frozen owner edges (including all three `ADVANCE_*` replay phases for `ADVANCE_NOT_PROVEN`).
 2. Replace string-only advance failure with sealed provider-error/invalid-response/transport/unavailable values and a stable audit string.
 3. Add the repository transaction that drives the reducer and persists owner/reason/event together; require one affected owner row.
 4. Route normal and recovery missing-evidence paths through immutable negative-carrier persistence followed by the transaction.

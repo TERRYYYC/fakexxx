@@ -161,7 +161,14 @@ interface TestAttemptDao {
      * invariant was violated (e.g., "OBSERVED_TUPLE_MISMATCH:acceptedIntentHash").
      */
     @Query("UPDATE test_attempts SET aplusState = 'RECOVERY_REQUIRED', failureReason = :reason WHERE id = :attemptId")
-    suspend fun markRecoveryRequired(attemptId: Long, reason: String)
+    suspend fun markRecoveryRequired(attemptId: Long, reason: String): Int
+
+    /** Named reducer failures may mutate only the durable phase that owns that exact edge. */
+    @Query(
+        "UPDATE test_attempts SET aplusState = 'RECOVERY_REQUIRED', failureReason = :reason " +
+            "WHERE id = :attemptId AND aplusState = :expected"
+    )
+    suspend fun compareAndSetRecoveryRequired(attemptId: Long, expected: String, reason: String): Int
 
     /** Persist the provider-returned lease id (NOT derivable — must be durable, Sol round-8 P1-4). */
     @Query("UPDATE test_attempts SET aplusLeaseId = :leaseId WHERE id = :attemptId")

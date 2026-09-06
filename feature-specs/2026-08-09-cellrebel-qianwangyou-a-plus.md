@@ -164,6 +164,7 @@ source_threads:
 | **v1.76** | PR-2 第二十二轮（#18 unproven 唯一化） | **我把 observe 例外窗的谓词搬进了 advance 门，于是它在首次 advance 上无定义。** ①v1.75 的步 3b 把 `unproven` 写成「不是本 caller **最近一次成功 advance** 的历史引用」——该措辞出自 §6.3.3 的 **post-advance observe 例外窗**，那是规定 advance **之后** observe 能用哪个 lease；而 §6.7.4a 冻结 advance **当时**的 lease 来自「先 `release` 再 advance」，由 apply→release 周期产生。**同一个词，两个时刻，两个来源。**②三处错：循环（首次 advance 无「上一次 advance」）、来源错、无增益（item 绑定已由 `wrong-item` 承担）。且最近性会**误杀 §4.4 崩溃恢复重放**——同幂等键重放一个较旧但仍可证明、item 相符的自有 lease 正是恢复的正常形态。③唯一化为：`unproven` = provider **无法证明**该 leaseId 是它授予本 caller 且**已完成 release** 的 lease（不存在，或从未到达 `RELEASED`，含伪造）。**不定义最近性排序。**④补 L1/L2 判例：真实 L1（旧、item-1）推进 item-1 **通过 3b**；以 L2（新、item-2）推进 item-1 落 `wrong-item` → 8。⑤由 Sol 在 `4a17071` 上做 exact 文本审查时发现——**一个二义如果两种实现都能自洽，它就会一直活到测试替 contract 猜答案那一刻**。见 §6.7.4b |
 | **v1.77** | PR #32 formal review（KB-5 活跃投影闭合） | **步 3b 已经冻结 foreign → 8，§6.3.3 与 §20.1 却仍把同一问题写成 `unfrozen`。** ①以 §6.7.4b 步 3b 为规范性真相源：`completeAndAdvance` 的历史引用若属于别的 caller，必须在任何 schedule 状态比较之前返回 `STALE_LEASE(8)`；wrong-item 是同属兄弟，二者不再留白。②同步清除顶部告示、§6.3.3、§19、§20 与 §20.1 五处陈旧活跃投影；`KB-5` 从开放边界总表转为闭合记录。历史 v1.42 行保留其当时事实，本行明确取代其现态投影，不改写历史。③PR #32 的 provider 证据仍须等 stacked candidate 真正抵达 `main` 才完成集成记账；**集成状态不重新打开已经冻结的契约语义**。本轮无 AIDL／DTO／wire／provider 行为变更。见 §6.3.3 / §6.7.4b / §19 / §20.1 |
 | **v1.78** | PR #41 R4（Sol 契约裁定） | **步 3b 的 `unproven` 曾经把「存在但从未到达 `RELEASED`」与「无 provider record／无 originating-item attribution」混作一谈——活跃性与归因被写成同一条判据，与步 5 的 `LEASE_CONFLICT(7)` 直接矛盾（canonical §6.7.4b 自身两处互撞：`unproven` 定义写 8，同一步的注写本步不判活跃性、活跃性归步 5）。** 裁定：**归因与活跃性正交**。存在且 caller/item 可归因的 non-RELEASED 行**不是** unproven——它通过步 3b，由步 5 的设备全局 lease 门判 `LEASE_CONFLICT(7)`（§6.7.4a / `M-AD-12` / 当前 handler 三者本已如此实现）；`unproven → 8` 收窄为「无 provider record」或「无 originating-item attribution」；`foreign`／`wrong-item` 仍为 8。同步修步 3b 的 `unproven` 定义与 `STALE_LEASE(8)` KDoc，保留 `M-AD-12` 的 own-ACTIVE → 7 killing assertion。本轮无 AIDL／DTO／wire／provider 行为变更（实现本就是 7，仅契约投影此前写错）。见 §6.3.3 / §6.7.4b / §6.7.4a / §10 |
+| **v1.79** | Issue #86（Auto 失败事件闭合） | **通用 `RECOVERY_REQUIRED` 审计不能说明失败发生在哪条边，也允许 reducer 事件与 durable owner 分两次写入。** 新增四个命名事件：`START_FAILED_BEFORE_RUNNING`、`POST_OBSERVATION_MISSING`、`COMPLETION_EVIDENCE_MISSING`、`ADVANCE_NOT_PROVEN`；最后一项覆盖 `ADVANCE_PENDING`／`ADVANCE_OBSERVING`／`ADVANCE_STATE_READBACK` 三个可能发起或重放 provider 调用的 owner。命名失败必须在同一 Room transaction 内完成 durable phase re-read、合法 reducer edge 校验、精确事件审计（含 typed reason）与 owner CAS；任一写失败则整体回滚。正常执行与崩溃恢复共用该路径。`PRE_EXISTING_RUN` 仍先分类到 `CELLREBEL_RUNNING`，随后只有 `TIMEOUT_INTERRUPTED` 可拥有其 recovery edge；不得伪造成“启动前失败”。provider `ERROR(16)`、transport failure、invalid response 保留不同 typed failure，统一由 `ADVANCE_NOT_PROVEN` 承载，且都不伪造 receipt、不进入 `CLOSED`。见 §8.1 |
 
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
@@ -2224,11 +2225,14 @@ QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
 | `PRE_OBSERVED` | `START_CELLREBEL` | `CELLREBEL_START_PENDING` | 先写 executionId | 先点击再写 execution |
 | `CELLREBEL_START_PENDING` | `NEW_RUN_OBSERVED` | `CELLREBEL_RUNNING` | 写新运行证据 | 假定点击即开始 |
 | `CELLREBEL_START_PENDING` | `PRE_EXISTING_RUN` | `CELLREBEL_RUNNING` | 分类并记录，不计旧结果 | 把旧完成当新完成 |
+| `CELLREBEL_START_PENDING` | `START_FAILED_BEFORE_RUNNING` | `RECOVERY_REQUIRED` | **同事务**写精确事件 + typed reason + owner CAS；先落 attempt-bound `UnverifiedAttemptRecord` | 伪造 `TIMEOUT_INTERRUPTED`；把未证明 RUNNING 当成曾经 RUNNING |
 | `CELLREBEL_RUNNING` | `COMPLETION_OBSERVED` | `POST_OBSERVE_PENDING` | 保存 CellRebel 证据 | 先加配额 |
 | `CELLREBEL_RUNNING` | `TIMEOUT/INTERRUPTED` | `RECOVERY_REQUIRED` | 保存 typed outcome | 猜成功 |
 | `POST_OBSERVE_PENDING` | `POST_OBSERVATION_OK` | `DECIDING` | 保存 observation digest | 单看 UI 成功 |
+| `POST_OBSERVE_PENDING` | `POST_OBSERVATION_MISSING` | `RECOVERY_REQUIRED` | **同事务**写精确事件 + typed reason + owner CAS；先落 attempt-bound `UnverifiedAttemptRecord` | 伪造 `OBSERVATION_UNTRUSTED`；无负向载体直接 release/close |
 | `DECIDING` | `TRUST_POLICY_PASS` | `QUOTA_COMMITTED` | 单事务插入 UNIQUE ledger + close decision | 单独递增计数列 |
 | `DECIDING` | `TRUST_POLICY_FAIL` | `UNVERIFIED_RECORDED` | 写独立未验证记录 | 写可信 ledger |
+| `DECIDING` | `COMPLETION_EVIDENCE_MISSING` | `RECOVERY_REQUIRED` | **同事务**写精确事件 + typed reason + owner CAS；先落 attempt-bound `UnverifiedAttemptRecord`；已有 append-only decision carrier 时不得制造矛盾 negative | 用 generic reason 抹平缺失阶段；覆盖已有 trusted/unverified authority |
 | `QUOTA_COMMITTED` | `BEGIN_RELEASE` | `RELEASE_PENDING` | 保存 release key | 忘记清理环境 |
 | `UNVERIFIED_RECORDED` | `BEGIN_RELEASE` | `RELEASE_PENDING` | 保存 release key | 自动升级为可信 |
 | `RECOVERY_REQUIRED` | `RECONCILE` | 合法中间态或 `RELEASE_PENDING` | 先 observe/取 receipt | 无证据跳状态 |
@@ -2238,6 +2242,7 @@ QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
 | `ADVANCE_PENDING` | `ADVANCE_RECEIPT_VERIFIED` | `ADVANCE_OBSERVING` | 保存 receipt（`receiptDigest` **已重算通过**才保存） | 收到 receipt 就认定环境已换 |
 | `ADVANCE_PENDING` | `CRASH_RECOVER` | `ADVANCE_PENDING` | **同键**重放 `completeAndAdvance` 取回原 receipt | 换新键重发——会撞 `M-AD-04` 并可能双推进 |
 | `ADVANCE_PENDING` | `ADVANCE_DIGEST_MISMATCH` | `RECOVERY_REQUIRED` | 拒绝该 receipt、暂停、告警 | 当作「弱一点的证据」继续 |
+| `ADVANCE_PENDING` / `ADVANCE_OBSERVING` / `ADVANCE_STATE_READBACK` | `ADVANCE_NOT_PROVEN` | `RECOVERY_REQUIRED` | **同事务**写精确事件 + typed reason + owner CAS；`PROVIDER_ERROR_16`／`PROVIDER_TRANSPORT_FAILURE`／invalid-response detail 分型保留 | 伪造 receipt；把 provider error、transport 与 malformed response 压成同一无来源字符串；继续到 `CLOSED` |
 | `ADVANCE_PENDING` | `ADVANCE_EXHAUSTED_VERIFIED` | `ADVANCE_STATE_READBACK` | 保存耗尽 receipt（`outcomeWire = EXHAUSTED`、target 为 null；**`receiptDigest` 已重算通过才保存**）；**不落终态**——先独立回读 schedule 状态（§6.7.5 v1.58） | 当作失败去重试；或**跳过重算**直接落终态——§6.7.3 冻结「重算不上的 receipt 不是「弱一点的 receipt」，它不是 receipt」，而 `outcomeWire` 本身就在 preimage 里；或**据可验证的 receipt 直接 CLOSED**——digest 只证明 provider 为它自己填写的字段做了 framing，不证明状态已持久化 |
 | `ADVANCE_STATE_READBACK` | `EXHAUSTED_STATE_CONFIRMED` | `CLOSED` | **先验组**：`discover()` 的 schedule 投影组四字段同时全非 null（v1.55 组不变量），否则不得进入本边。**再比四条腿合取**（§6.7.5 v1.68）：`readback.currentScheduleId == receipt 所属 schedule id` **∧** `readback.currentItemId == receipt.advancedFromItemId` **∧** `readback.scheduleVersion == receipt.scheduleVersionAfter` **∧** `readback.exhausted == true`；落终态，plan 正常完成 | 只比 `exhausted` 一条腿——放过指针回绕与 version 错写；**跳过身份腿**——`(item, version)` 跨 schedule 不保证唯一，切到另一 schedule 后可能四腿之外全过而把上一个 schedule 错误 CLOSED；**跳过组前置**——`currentScheduleId = null` 的非法投影会带着其余腿命中本边；或用 receipt 自己的字段冒充回读值 |
 | `ADVANCE_STATE_READBACK` | `EXHAUSTED_STATE_MISMATCH`（**组前置不满足，或四条腿任一**不成立） | `RECOVERY_REQUIRED` | **不落终态**、暂停、告警；typed reason 必须记录**是哪条腿**不成立 | 当作「弱一点的证据」继续；或因为 receipt 可验证就放行——receipt 正是本步要验证的对象，不能同时充当唯一证据源 |
@@ -2245,6 +2250,8 @@ QUOTA_COMMITTED → BEGIN_RELEASE → RELEASE_PENDING → RELEASED
 | `ADVANCE_OBSERVING` | `OBSERVED_TUPLE_MISMATCH`（**四条腿任一**不成立） | `RECOVERY_REQUIRED` | 判**错环境归因**：不计数、不继续；typed reason 必须记录**是哪条腿**不成立 | 继续下一项；或只在 item 失配时进恢复而放过 version/hash/revision 失配。**漏 `scheduleVersion` 腿的具体后果**：advance 后发生同拓扑 reinit，version 前移而 item／hash／environmentRevision 三者不变，三腿读法会 CLOSED，而 §6.7.1 表 2 要求进恢复——`M-AD-24` 让 version bump 成为证据，消费侧却没消费它 |
 | `RELEASE_PENDING` | `RELEASE_INCOMPLETE` | `RECOVERY_REQUIRED` | 暂停 plan、现场提示 | 继续下一地址 |
 | `CLOSED` | 任意重复事件 | `CLOSED` | no-op + audit | 复活 attempt |
+
+**命名 recovery 写入规则（v1.79）**：实现必须在 transaction 内重新读取 Attempt 的 durable phase，确认 `(phase,event)` 经本表恰好得到 `RECOVERY_REQUIRED`，追加带 typed reason 的命名审计，再以原 phase 做 owner CAS。事件无权拥有当前 phase、CAS 失败或审计 insert 失败时，owner 与 audit 都不得留下半条事实。`UnverifiedAttemptRecord` 是 release/close 前必须存在的负向结果载体，但不取代 owner/audit 的原子性；已有 trusted 或 unverified append-only decision carrier 时，恢复流程消费既有 authority，禁止再制造相反载体。
 
 ### 8.2 PlanRun 状态机
 

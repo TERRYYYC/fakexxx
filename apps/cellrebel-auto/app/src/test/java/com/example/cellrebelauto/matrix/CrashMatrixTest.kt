@@ -12,6 +12,7 @@ import com.example.cellrebelauto.automation.aplus.APlusBackend
 import com.example.cellrebelauto.automation.aplus.APlusCompletionEvidence
 import com.example.cellrebelauto.automation.aplus.APlusEvidenceSource
 import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.environment.ObservationSnapshot
@@ -428,6 +429,15 @@ class CrashMatrixTest {
         val recovered = seedPhaseCrash("CELLREBEL_START_PENDING", reacquirable = false)
         assertNotEquals("M-CR-04: a CELLREBEL_START_PENDING crash must classify, not be interrupted", "interrupted", recovered.status)
         assertEquals("M-CR-04 negative: classification failure is a typed UNTRUSTED failure", "failed", recovered.status)
+        assertEquals(
+            "CELLREBEL_START_PENDING->RECOVERY_REQUIRED[RECOVERY_EVIDENCE_UNAVAILABLE:CELLREBEL_START_PENDING]",
+            db.auditEventDao().forAttempt(77L)
+                .single { it.eventType == AttemptEvent.START_FAILED_BEFORE_RUNNING.name }.payloadDigest
+        )
+        assertEquals(
+            "RECOVERY_EVIDENCE_UNAVAILABLE:CELLREBEL_START_PENDING",
+            db.unverifiedAttemptRecordDao().getByAttempt(77L)?.reason
+        )
     }
 
     @Test
@@ -548,6 +558,15 @@ class CrashMatrixTest {
         val recovered = seedPhaseCrash("POST_OBSERVE_PENDING", reacquirable = false)
         assertNotEquals("M-CR-05: a POST_OBSERVE_PENDING crash must post-observe, not be interrupted", "interrupted", recovered.status)
         assertEquals("M-CR-05 negative: post-observe failure is a typed UNTRUSTED failure", "failed", recovered.status)
+        assertEquals(
+            "POST_OBSERVE_PENDING->RECOVERY_REQUIRED[RECOVERY_EVIDENCE_UNAVAILABLE:POST_OBSERVE_PENDING]",
+            db.auditEventDao().forAttempt(77L)
+                .single { it.eventType == AttemptEvent.POST_OBSERVATION_MISSING.name }.payloadDigest
+        )
+        assertEquals(
+            "RECOVERY_EVIDENCE_UNAVAILABLE:POST_OBSERVE_PENDING",
+            db.unverifiedAttemptRecordDao().getByAttempt(77L)?.reason
+        )
     }
 
     @Test
@@ -655,6 +674,15 @@ class CrashMatrixTest {
         assertEquals("M-CR-06 null polarity: absent durable evidence must mint ZERO ledger rows", 0, db.trustedQuotaDao().countAll())
         val recovered = db.testAttemptDao().getAttemptsForTask(42L).first { it.id == 77L }
         assertNotEquals("M-CR-06 null polarity: absent durable evidence must NOT project to succeeded", "succeeded", recovered.status)
+        assertEquals(
+            "DECIDING->RECOVERY_REQUIRED[RECOVERY_EVIDENCE_UNAVAILABLE:DECIDING]",
+            db.auditEventDao().forAttempt(77L)
+                .single { it.eventType == AttemptEvent.COMPLETION_EVIDENCE_MISSING.name }.payloadDigest
+        )
+        assertEquals(
+            "RECOVERY_EVIDENCE_UNAVAILABLE:DECIDING",
+            db.unverifiedAttemptRecordDao().getByAttempt(77L)?.reason
+        )
     }
 
     // ---- §6.4 discriminator negatives: each asserts BOTH zero-mint AND UnverifiedAttemptRecord ----

@@ -634,12 +634,13 @@ class AutomationEngine(
                                     outcome.reason.name
                                 )
                             } else {
-                                recordUnverifiedNegativeAndRequireRecovery(
+                                aplusState = transitionToRecoveryRequired(
                                     attemptId,
+                                    aplusState,
+                                    AttemptEvent.START_FAILED_BEFORE_RUNNING,
                                     "CELLREBEL_FAILURE_BEFORE_RUNNING:${outcome.reason.name}",
                                     outcome.reason.name
                                 )
-                                aplusState = AttemptState.RECOVERY_REQUIRED
                             }
                             aplusState = driveAplusTransition(attemptId, aplusState, AttemptEvent.RECONCILE)
                             planRepository.markAplusState(attemptId, aplusState.name)
@@ -716,8 +717,10 @@ class AutomationEngine(
                             planRepository.markAplusState(attemptId, "POST_OBSERVE_PENDING")
                             val postObservation = aplusEvidenceSrc.acquirePostObservation(attemptId, runSessionId)
                             if (postObservation == null) {
-                                recordUnverifiedNegativeAndRequireRecovery(
+                                aplusState = transitionToRecoveryRequired(
                                     attemptId,
+                                    AttemptState.POST_OBSERVE_PENDING,
+                                    AttemptEvent.POST_OBSERVATION_MISSING,
                                     "POST_OBSERVATION_UNAVAILABLE"
                                 )
                                 aplusState = driveAplusTransition(
@@ -741,8 +744,10 @@ class AutomationEngine(
                             // # DECIDE：ctx 由持久 intent（本地重算 hash，KB-8 后不含坐标）+ 后端 artifact 组装（INV-23）
                             val evidence = aplusEvidenceSrc.acquireCompletionEvidence(attemptId, runSessionId)
                             if (evidence == null) {
-                                recordUnverifiedNegativeAndRequireRecovery(
+                                aplusState = transitionToRecoveryRequired(
                                     attemptId,
+                                    AttemptState.DECIDING,
+                                    AttemptEvent.COMPLETION_EVIDENCE_MISSING,
                                     "COMPLETION_EVIDENCE_UNAVAILABLE"
                                 )
                                 aplusState = driveAplusTransition(
@@ -1904,16 +1909,12 @@ class AutomationEngine(
                 current,
                 AttemptEvent.OBSERVATION_UNTRUSTED
             )
-            AttemptState.PRE_OBSERVED,
-            AttemptState.CELLREBEL_START_PENDING,
-            AttemptState.POST_OBSERVE_PENDING,
-            AttemptState.DECIDING -> {
-                // §8.1 has no failure edge for these owner states. Persist the typed recovery
-                // condition, then use the explicit RECOVERY_REQUIRED + RECONCILE edge instead of
-                // inventing an audit event for evidence that was never obtained.
+            AttemptState.PRE_OBSERVED -> {
+                val reason = "RECOVERY_EVIDENCE_UNAVAILABLE:${current.name}"
+                recordUnverifiedNegative(attemptId, reason)
                 planRepository.markRecoveryRequired(
                     attemptId,
-                    "RECOVERY_EVIDENCE_UNAVAILABLE:${current.name}"
+                    reason
                 )
                 driveAplusTransition(
                     attemptId,
@@ -1921,14 +1922,48 @@ class AutomationEngine(
                     AttemptEvent.RECONCILE
                 )
             }
-            AttemptState.CELLREBEL_RUNNING -> {
-                val recoveryRequired = driveAplusTransition(
+            AttemptState.CELLREBEL_START_PENDING,
+            AttemptState.POST_OBSERVE_PENDING,
+            AttemptState.DECIDING -> {
+                val reason = "RECOVERY_EVIDENCE_UNAVAILABLE:${current.name}"
+                val alreadyDecided = planRepository.getTrustedEntry(attemptId) != null ||
+                    planRepository.getUnverifiedRecord(attemptId) != null
+                if (alreadyDecided) {
+                    // An append-only decision carrier is stronger than re-acquisition failure.
+                    // Preserve it for resolveReleaseReceiptRoute instead of manufacturing a
+                    // contradictory negative carrier or a false missing-evidence event.
+                    planRepository.markRecoveryRequired(attemptId, reason)
+                    val next = driveAplusTransition(
+                        attemptId,
+                        AttemptState.RECOVERY_REQUIRED,
+                        AttemptEvent.RECONCILE
+                    )
+                    planRepository.markAplusState(attemptId, next.name)
+                    return next == AttemptState.RELEASE_PENDING
+                }
+                val event = when (current) {
+                    AttemptState.CELLREBEL_START_PENDING -> AttemptEvent.START_FAILED_BEFORE_RUNNING
+                    AttemptState.POST_OBSERVE_PENDING -> AttemptEvent.POST_OBSERVATION_MISSING
+                    AttemptState.DECIDING -> AttemptEvent.COMPLETION_EVIDENCE_MISSING
+                    else -> error("unreachable evidence-recovery phase $current")
+                }
+                val recoveryRequired = transitionToRecoveryRequired(
                     attemptId,
                     current,
-                    AttemptEvent.TIMEOUT_INTERRUPTED
+                    event,
+                    reason
                 )
-                planRepository.markRecoveryRequired(
+                driveAplusTransition(
                     attemptId,
+                    recoveryRequired,
+                    AttemptEvent.RECONCILE
+                )
+            }
+            AttemptState.CELLREBEL_RUNNING -> {
+                val recoveryRequired = transitionToRecoveryRequired(
+                    attemptId,
+                    current,
+                    AttemptEvent.TIMEOUT_INTERRUPTED,
                     "RECOVERY_TIMEOUT_INTERRUPTED"
                 )
                 driveAplusTransition(
@@ -2397,8 +2432,16 @@ class AutomationEngine(
         recoveryReason: String,
         unverifiedReason: String = recoveryReason
     ): AttemptState {
-        val recoveryRequired = driveAplusTransition(attemptId, currentState, event)
-        recordUnverifiedNegativeAndRequireRecovery(attemptId, recoveryReason, unverifiedReason)
+        check(AttemptTransitions.next(currentState, event) == AttemptState.RECOVERY_REQUIRED) {
+            "$event does not own recovery from $currentState"
+        }
+        recordUnverifiedNegative(attemptId, unverifiedReason)
+        val recoveryRequired = planRepository.transitionToRecoveryRequired(
+            attemptId = attemptId,
+            event = event,
+            reason = recoveryReason,
+            nowMs = nowMs()
+        )
         return recoveryRequired
     }
 
@@ -2406,17 +2449,16 @@ class AutomationEngine(
     private suspend fun missingStartInteractionRecovery(
         attemptId: Long,
         currentState: AttemptState
-    ): AttemptState = if (currentState == AttemptState.CELLREBEL_RUNNING) {
-        transitionToRecoveryRequired(
-            attemptId,
-            currentState,
-            AttemptEvent.TIMEOUT_INTERRUPTED,
-            "MISSING_START_INTERACTION_EVIDENCE"
-        )
-    } else {
-        recordUnverifiedNegativeAndRequireRecovery(attemptId, "MISSING_START_INTERACTION_EVIDENCE")
-        AttemptState.RECOVERY_REQUIRED
-    }
+    ): AttemptState = transitionToRecoveryRequired(
+        attemptId = attemptId,
+        currentState = currentState,
+        event = if (currentState == AttemptState.CELLREBEL_RUNNING) {
+            AttemptEvent.TIMEOUT_INTERRUPTED
+        } else {
+            AttemptEvent.START_FAILED_BEFORE_RUNNING
+        },
+        recoveryReason = "MISSING_START_INTERACTION_EVIDENCE"
+    )
 
     /**
      * #86: before a non-wire-1 path can release or close an attempt, persist the exact durable
@@ -2424,10 +2466,9 @@ class AutomationEngine(
      * digest; otherwise bind the durable absence fact to this attempt and typed reason. Replays
      * therefore cannot silently replace either kind of negative evidence.
      */
-    private suspend fun recordUnverifiedNegativeAndRequireRecovery(
+    private suspend fun recordUnverifiedNegative(
         attemptId: Long,
-        recoveryReason: String,
-        unverifiedReason: String = recoveryReason
+        unverifiedReason: String
     ) {
         val execution = planRepository.getCurrentExecutionId(attemptId)
             ?.let { planRepository.getExecutionByExecutionId(it) }
@@ -2441,7 +2482,6 @@ class AutomationEngine(
             reason = unverifiedReason,
             evidenceDigest = execution?.evidencePayloadDigest ?: "absence:$unverifiedReason:attempt:$attemptId"
         )
-        planRepository.markRecoveryRequired(attemptId, recoveryReason)
     }
 
     private suspend fun commitAplusRelease(
@@ -2605,9 +2645,12 @@ class AutomationEngine(
             is com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Failure -> {
                 // Fail-closed: the provider could not prove the advance — the quota is committed
                 // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
-                planRepository.markRecoveryRequired(
-                    attemptId,
-                    "ADVANCE_NOT_PROVEN:${advanceOutcome.reason}"
+                val failureReason = "ADVANCE_NOT_PROVEN:${advanceOutcome.reason}"
+                planRepository.transitionToRecoveryRequired(
+                    attemptId = attemptId,
+                    event = AttemptEvent.ADVANCE_NOT_PROVEN,
+                    reason = failureReason,
+                    nowMs = nowMs()
                 )
                 aplusPause(
                     "completeAndAdvance not proven for attempt $attemptId " +
