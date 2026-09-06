@@ -84,6 +84,9 @@ class AppDatabaseMigrationTest {
         val databaseName = "fakegps.db"
         val databaseFile = context.getDatabasePath(databaseName)
 
+        // Other instrumentation classes use the app singleton; discard that process-local cache
+        // before replacing the on-disk fixture below.
+        AppDatabase.closeInstanceForTests()
         context.deleteDatabase(databaseName)
         context.deleteDatabase("$databaseName.legacy-v0-backup")
         context.deleteDatabase("$databaseName.legacy-v0-migrating")
