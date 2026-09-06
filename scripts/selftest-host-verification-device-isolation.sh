@@ -27,6 +27,9 @@ expect_fail() {
 expect_pass bash "$checker" "$fixtures/host-verification-good.sh"
 expect_fail bash "$checker" "$fixtures/host-verification-gradle-install.sh"
 expect_fail bash "$checker" "$fixtures/host-verification-connected-test.sh"
+expect_pass env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-good.sh"
+expect_fail env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-gradle-install.sh"
+expect_fail env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-connected-test.sh"
 
 printf 'host-verification-device-isolation: %d passed, %d failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]

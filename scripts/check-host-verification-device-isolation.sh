@@ -12,13 +12,20 @@ if [ "$#" -eq 0 ]; then
 fi
 
 failed=0
+pattern='gradlew?[[:space:]].*(install[A-Za-z0-9_]*|connected[A-Za-z0-9_]*AndroidTest)'
 for target in "$@"; do
   [ -f "$target" ] || {
     printf 'missing verification target: %s\n' "$target" >&2
     failed=1
     continue
   }
-  if rg -n -i 'gradlew?[[:space:]].*(install[A-Za-z0-9_]*|connected[A-Za-z0-9_]*AndroidTest)' "$target"; then
+  if command -v rg >/dev/null 2>&1; then
+    matches="$(rg -n -i "$pattern" "$target" || true)"
+  else
+    matches="$(grep -E -n -i "$pattern" "$target" || true)"
+  fi
+  if [ -n "$matches" ]; then
+    printf '%s\n' "$matches"
     printf 'device-dispatching Gradle task is forbidden in regular verification: %s\n' "$target" >&2
     failed=1
   fi
