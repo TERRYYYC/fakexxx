@@ -94,7 +94,7 @@ root_shell() {
 # #90: both evidence consumers delegate exact-package source identity to this
 # shared resolver; only their privileged transport seam differs.
 ve_live_root_shell() { root_shell "$1"; }
-VE_LIB="\${VE_LIB_PATH:-$SCRIPT_DIR/vector-evidence.sh}"
+VE_LIB="${VE_LIB_PATH:-$SCRIPT_DIR/vector-evidence.sh}"
 [ -r "$VE_LIB" ] || { echo "HARNESS_ERROR vector-evidence.sh not found at $VE_LIB" >&2; exit 2; }
 # shellcheck source=vector-evidence.sh
 . "$VE_LIB"

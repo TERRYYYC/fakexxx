@@ -33,6 +33,22 @@ report() {
     exit 1
 }
 
+# Exercise the real bootstrap rather than only the extracted helper.  A
+# caller-provided library path is required by this device-free harness; a
+# quoted/escaped parameter expansion here turns it into a literal filename and
+# makes every real invocation fail before it can reach snapshot_prefs().
+FAKE_ADB_DIR=$(mktemp -d)
+ln -s "$(command -v true)" "$FAKE_ADB_DIR/adb"
+HOOK_BOOTSTRAP_OUT="$(PATH="$FAKE_ADB_DIR:$PATH" VE_LIB_PATH="$VE_LIB" "$TEST_HOOK" --current-profile 2>&1)"
+HOOK_BOOTSTRAP_RC=$?
+rm -rf "$FAKE_ADB_DIR"
+
+[ "$HOOK_BOOTSTRAP_RC" -ne 0 ] &&
+    grep -q 'FakeGps hook verification:' <<<"$HOOK_BOOTSTRAP_OUT" &&
+    ! grep -q 'vector-evidence.sh not found' <<<"$HOOK_BOOTSTRAP_OUT" &&
+    report ok "B test-hook bootstrap expands VE_LIB_PATH before device flow" ||
+    report fail "B test-hook bootstrap must load caller-provided Vector library" "rc=$HOOK_BOOTSTRAP_RC out=$HOOK_BOOTSTRAP_OUT"
+
 FN_SNAPSHOT="$(sed -n '/^snapshot_prefs()/,/^}/p' "$TEST_HOOK")"
 [ -n "$FN_SNAPSHOT" ] || { echo "could not extract snapshot_prefs" >&2; exit 1; }
 
