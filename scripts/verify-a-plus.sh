@@ -109,9 +109,13 @@ fi
 # checker only reads declared command text; its paired self-test never invokes
 # Gradle, adb, an emulator, or a physical device.
 printf 'verify-a-plus: host verification device-isolation preflight\n'
-bash ./scripts/check-host-verification-device-isolation.sh
+if ! bash ./scripts/check-host-verification-device-isolation.sh; then
+  exit 1
+fi
 if [ "${VERIFY_A_PLUS_SKIP_HOST_ISOLATION_SELFTEST:-0}" != "1" ]; then
-  bash ./scripts/selftest-host-verification-device-isolation.sh
+  if ! bash ./scripts/selftest-host-verification-device-isolation.sh; then
+    exit 1
+  fi
 fi
 
 # Toolchain preconditions — reported once, explicitly, instead of surfacing as

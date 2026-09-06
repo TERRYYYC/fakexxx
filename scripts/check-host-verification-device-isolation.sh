@@ -48,8 +48,8 @@ for target in "$@"; do
       return n
     }
     function forbidden(statement) {
-      gradle = "(^|[[:space:];|&])([.]/)?gradlew?([[:space:];|&]|$)"
-      task = "(^|[[:space:]])(:[[:alnum:]_.-]+:)?(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*)([[:space:];|&]|$)"
+      gradle = "(^|[[:space:];|&])([^[:space:];|&]*/)?gradlew?([[:space:];|&]|$)"
+      task = "(^|[[:space:]])((:[[:alnum:]_.-]+)*:(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*)|(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*))([[:space:];|&]|$)"
       return statement ~ gradle && statement ~ task
     }
     function report(statement, start_line) {
