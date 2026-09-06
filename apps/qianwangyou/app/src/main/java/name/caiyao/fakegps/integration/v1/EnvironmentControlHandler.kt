@@ -287,8 +287,9 @@ class EnvironmentControlHandler(
 
             // Bump revision for the environment change
             tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
-            // Mark continuity established from now
-            tracker.markContinuityEstablished()
+            // An app-local apply cannot establish uninterrupted continuity.
+            // Until an authoritative source proves the full history window,
+            // the tracker remains degraded and observations fail closed.
 
             val receipt = ApplyReceiptV1(
                 operationId = operationId,
