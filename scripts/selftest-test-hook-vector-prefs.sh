@@ -222,6 +222,27 @@ run_snapshot "$BENCH_PATH" "$FINITE_EXPONENT_XML" ''
     report fail "G1c finite exponent must not be over-rejected" "rc=$RC out=$OUT"
 rm -f "$CALLS"
 
+# Snapshot equality is defined by the decoded json payload, not sibling
+# publication metadata. This behavioral case catches a parser regression that
+# validates json but prints the complete SharedPreferences XML instead.
+METADATA_A_XML='<map><long name="published_at" value="111" /><string name="payload_sha256">deadbeef</string><string name="json">{"source":"same-payload"}</string></map>'
+METADATA_B_XML='<map><long name="published_at" value="222" /><string name="payload_sha256">cafebabe</string><string name="json">{"source":"same-payload"}</string></map>'
+run_snapshot "$BENCH_PATH" "$METADATA_A_XML" ''
+METADATA_A_RC=$RC
+METADATA_A_OUT=$OUT
+rm -f "$CALLS"
+run_snapshot "$BENCH_PATH" "$METADATA_B_XML" ''
+METADATA_B_RC=$RC
+METADATA_B_OUT=$OUT
+rm -f "$CALLS"
+{ [ "$METADATA_A_RC" -eq 0 ] && [ "$METADATA_B_RC" -eq 0 ] \
+  && [ "$METADATA_A_OUT" = "$METADATA_B_OUT" ] \
+  && grep -q '"source":"same-payload"' <<<"$METADATA_A_OUT" \
+  && ! grep -q 'published_at\|payload_sha256\|deadbeef\|cafebabe' <<<"$METADATA_A_OUT$METADATA_B_OUT"; } &&
+    report ok "G1d snapshot projects only json and ignores sibling publish metadata" ||
+    report fail "G1d equal payloads must yield equal metadata-free snapshots" \
+        "rc=$METADATA_A_RC/$METADATA_B_RC outA=$METADATA_A_OUT outB=$METADATA_B_OUT"
+
 # Different bytes prove the selected value is from bench rather than whichever
 # copy happens to be enumerated first.
 run_snapshot "$BENCH_PATH" "$BENCH_XML" '<map><string name="json">{"source":"production"}</string></map>'
