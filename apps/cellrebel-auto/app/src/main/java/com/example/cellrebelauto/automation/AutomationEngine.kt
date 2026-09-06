@@ -589,12 +589,12 @@ class AutomationEngine(
                                 planRepository.markAplusState(attemptId, aplusState.name)
                             }
                             if (aplusState == AttemptState.CELLREBEL_RUNNING) {
-                                aplusState = driveAplusTransition(
+                                aplusState = transitionToRecoveryRequired(
                                     attemptId,
                                     aplusState,
-                                    AttemptEvent.TIMEOUT_INTERRUPTED
+                                    AttemptEvent.TIMEOUT_INTERRUPTED,
+                                    "CELLREBEL_TIMEOUT_INTERRUPTED:${outcome.reason.name}"
                                 )
-                                planRepository.markAplusState(attemptId, aplusState.name)
                             } else {
                                 planRepository.markRecoveryRequired(
                                     attemptId,
@@ -620,11 +620,7 @@ class AutomationEngine(
                                 // A successful result without a successfully dispatched Start interaction
                                 // cannot own §7.1 execution evidence. Fail closed before writing a wire-1
                                 // row instead of relying on a later trust predicate to reject a forged 0.
-                                aplusState = driveAplusTransition(
-                                    attemptId,
-                                    aplusState,
-                                    AttemptEvent.TIMEOUT_INTERRUPTED
-                                )
+                                aplusState = missingStartInteractionRecovery(attemptId, aplusState)
                                 aplusState = driveAplusTransition(
                                     attemptId,
                                     aplusState,
@@ -1674,12 +1670,12 @@ class AutomationEngine(
         if (receipt == null) {
             // RELEASE_INCOMPLETE → RECOVERY_REQUIRED (§8.1): the release failed, the lease is unresolved —
             // persist the phase, never silently advance (Sol round-13 P1-4).
-            val incompleteState = driveAplusTransition(
+            driveAplusTransition(
                 crashed.id,
                 AttemptState.RELEASE_PENDING,
                 AttemptEvent.RELEASE_INCOMPLETE
             )
-            planRepository.markAplusState(crashed.id, incompleteState.name)
+            planRepository.markRecoveryRequired(crashed.id, "RELEASE_RECEIPT_NOT_DURABLE")
             aplusPause("release receipt not durable for recovered attempt ${crashed.id}")
             return false
         }
@@ -1695,7 +1691,10 @@ class AutomationEngine(
             ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED -> AttemptState.ADVANCE_PENDING
         }
         if (postReleaseState != expectedPostReleaseState) {
-            planRepository.markAplusState(crashed.id, AttemptState.RECOVERY_REQUIRED.name)
+            planRepository.markRecoveryRequired(
+                crashed.id,
+                "RECOVERY_RELEASE_ROUTE_STATE_MISMATCH:$postReleaseState:$expectedPostReleaseState"
+            )
             aplusPause(
                 "recovered release route $releaseRoute produced $postReleaseState for attempt " +
                     "${crashed.id} (expected $expectedPostReleaseState)"
@@ -1833,7 +1832,11 @@ class AutomationEngine(
                     attemptId,
                     current,
                     AttemptEvent.TIMEOUT_INTERRUPTED
-                ).also { planRepository.markAplusState(attemptId, it.name) }
+                )
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    "RECOVERY_TIMEOUT_INTERRUPTED"
+                )
                 driveAplusTransition(
                     attemptId,
                     recoveryRequired,
@@ -2036,7 +2039,7 @@ class AutomationEngine(
         // Conflicting append-only truths (both a trusted mint AND an unverified record) are a fail-closed
         // invariant break (§8.1 PASS/FAIL are mutually exclusive), never silently promoted to trusted.
         if (trusted != null && unverified != null) {
-            planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+            planRepository.markRecoveryRequired(crashed.id, "CONFLICTING_TRUST_CARRIERS")
             aplusPause("conflicting trusted + unverified carriers for attempt ${crashed.id}")
             return false
         }
@@ -2058,7 +2061,7 @@ class AutomationEngine(
                 // is unreachable without a lifecycle violation. Fail-closed unconditionally.
                 val task = planRepository.getTask(crashed.taskId)
                 if (task == null) {
-                    planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                    planRepository.markRecoveryRequired(crashed.id, "TRUSTED_TASK_MISSING")
                     aplusPause("trusted recovery: task ${crashed.taskId} not found for attempt ${crashed.id} — invariant break")
                     return false
                 }
@@ -2066,7 +2069,10 @@ class AutomationEngine(
                 val anchor = planRepository.getAplusAdvanceAnchor(crashed.id)
                 if (trustedCount >= task.requiredSuccesses && anchor != null) {
                     if (postReleaseState != AttemptState.ADVANCE_PENDING) {
-                        planRepository.markAplusState(crashed.id, AttemptState.RECOVERY_REQUIRED.name)
+                        planRepository.markRecoveryRequired(
+                            crashed.id,
+                            "TRUSTED_QUOTA_RELEASE_ROUTE_MISMATCH:$postReleaseState:ADVANCE_PENDING"
+                        )
                         aplusPause(
                             "trusted quota-reached attempt ${crashed.id} is $postReleaseState after release " +
                                 "(expected ADVANCE_PENDING)"
@@ -2121,7 +2127,10 @@ class AutomationEngine(
                     aplusPause("trusted recovery: anchor missing with quota met for attempt ${crashed.id} (snapshot phase=${crashed.aplusState}) — invariant break")
                     return false
                 } else if (postReleaseState != AttemptState.CLOSED) {
-                    planRepository.markAplusState(crashed.id, AttemptState.RECOVERY_REQUIRED.name)
+                    planRepository.markRecoveryRequired(
+                        crashed.id,
+                        "TRUSTED_UNDER_QUOTA_RELEASE_ROUTE_MISMATCH:$postReleaseState:CLOSED"
+                    )
                     aplusPause(
                         "trusted under-quota attempt ${crashed.id} is $postReleaseState after release " +
                             "(expected CLOSED)"
@@ -2132,13 +2141,16 @@ class AutomationEngine(
             }
             trusted != null && trusted.taskId != crashed.taskId -> {
                 // A wrong-task carrier violates §7.1 attempt+task binding → fail-closed, never succeeded.
-                planRepository.markAplusState(crashed.id, "RECOVERY_REQUIRED")
+                planRepository.markRecoveryRequired(crashed.id, "TRUSTED_CARRIER_TASK_MISMATCH")
                 aplusPause("trusted carrier taskId mismatch for attempt ${crashed.id} (${trusted.taskId} != ${crashed.taskId})")
                 return false
             }
             unverified != null -> {
                 if (postReleaseState != AttemptState.CLOSED) {
-                    planRepository.markAplusState(crashed.id, AttemptState.RECOVERY_REQUIRED.name)
+                    planRepository.markRecoveryRequired(
+                        crashed.id,
+                        "UNVERIFIED_RELEASE_ROUTE_MISMATCH:$postReleaseState:CLOSED"
+                    )
                     aplusPause("unverified attempt ${crashed.id} did not close after release (got $postReleaseState)")
                     return false
                 }
@@ -2146,7 +2158,10 @@ class AutomationEngine(
             }
             else -> {
                 if (postReleaseState != AttemptState.CLOSED) {
-                    planRepository.markAplusState(crashed.id, AttemptState.RECOVERY_REQUIRED.name)
+                    planRepository.markRecoveryRequired(
+                        crashed.id,
+                        "UNCOMMITTED_RELEASE_ROUTE_MISMATCH:$postReleaseState:CLOSED"
+                    )
                     aplusPause("non-committed attempt ${crashed.id} did not close after release (got $postReleaseState)")
                     return false
                 }
@@ -2218,7 +2233,7 @@ class AutomationEngine(
                 AttemptState.RELEASE_PENDING,
                 AttemptEvent.RELEASE_INCOMPLETE
             )
-            planRepository.markAplusState(attemptId, incompleteState.name)
+            planRepository.markRecoveryRequired(attemptId, "RELEASE_RECEIPT_NOT_DURABLE")
             aplusPause("release receipt not durable for attempt $attemptId")
             return false
         }
@@ -2228,7 +2243,10 @@ class AutomationEngine(
             ReleaseReceiptRoute.NOT_COMMITTED
         )
         if (closedState != AttemptState.CLOSED) {
-            planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+            planRepository.markRecoveryRequired(
+                attemptId,
+                "NON_COMMITTED_RELEASE_CLOSE_MISMATCH:$closedState"
+            )
             aplusPause("release receipt did not close non-committed attempt $attemptId (got $closedState)")
             return false
         }
@@ -2260,7 +2278,10 @@ class AutomationEngine(
             )
         }
         if (releasePendingState != AttemptState.RELEASE_PENDING) {
-            planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+            planRepository.markRecoveryRequired(
+                attemptId,
+                "ILLEGAL_RELEASE_TRANSITION:$currentState:$releasePendingState"
+            )
             aplusPause(
                 "attempt $attemptId cannot enter release from $currentState " +
                     "(BEGIN_RELEASE produced $releasePendingState)"
@@ -2277,6 +2298,34 @@ class AutomationEngine(
         event: AttemptEvent
     ): AttemptState = attemptDriver?.driveTransition(attemptId, currentState, event)
         ?: AttemptTransitions.next(currentState, event)
+
+    /** A reducer edge that reaches RECOVERY_REQUIRED must persist its owner/audit fact together. */
+    private suspend fun transitionToRecoveryRequired(
+        attemptId: Long,
+        currentState: AttemptState,
+        event: AttemptEvent,
+        reason: String
+    ): AttemptState {
+        val recoveryRequired = driveAplusTransition(attemptId, currentState, event)
+        planRepository.markRecoveryRequired(attemptId, reason)
+        return recoveryRequired
+    }
+
+    /** Handles missing Start evidence without inventing an undefined START_PENDING timeout edge. */
+    private suspend fun missingStartInteractionRecovery(
+        attemptId: Long,
+        currentState: AttemptState
+    ): AttemptState = if (currentState == AttemptState.CELLREBEL_RUNNING) {
+        transitionToRecoveryRequired(
+            attemptId,
+            currentState,
+            AttemptEvent.TIMEOUT_INTERRUPTED,
+            "MISSING_START_INTERACTION_EVIDENCE"
+        )
+    } else {
+        planRepository.markRecoveryRequired(attemptId, "MISSING_START_INTERACTION_EVIDENCE")
+        AttemptState.RECOVERY_REQUIRED
+    }
 
     private suspend fun driveAplusReleaseReceipt(
         attemptId: Long,
@@ -2410,19 +2459,35 @@ class AutomationEngine(
                 AttemptState.ADVANCE_STATE_READBACK
             )
         ) {
-            planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+            planRepository.markRecoveryRequired(
+                attemptId,
+                "ADVANCE_REPLAY_ILLEGAL_STATE:$currentState"
+            )
             aplusPause("attempt $attemptId cannot replay advance from $currentState")
             return AdvanceVerificationResult.FAILED
         }
         // The owner is already ADVANCE_PENDING (or a later verification phase) before this first
         // external call. Recovery replays from its persisted phase and never rewinds it to PENDING.
-        val advanceReceipt = coordinator.executorBackend().completeAndAdvance(advanceRequest, intentDigest)
-        if (advanceReceipt == null) {
+        val advanceReceipt = when (
+            val advanceOutcome = coordinator.executorBackend().completeAndAdvanceOutcome(
+                advanceRequest,
+                intentDigest
+            )
+        ) {
+            is com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Receipt -> advanceOutcome.value
+            is com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Failure -> {
             // Fail-closed: the provider could not prove the advance — the quota is committed
             // locally but the schedule did NOT move. Pause for operator visibility (§6.7.3).
-            planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
-            aplusPause("completeAndAdvance not proven for attempt $attemptId — schedule did not advance")
-            return AdvanceVerificationResult.FAILED
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    "ADVANCE_NOT_PROVEN:${advanceOutcome.reason}"
+                )
+                aplusPause(
+                    "completeAndAdvance not proven for attempt $attemptId " +
+                        "(${advanceOutcome.reason}) — schedule did not advance"
+                )
+                return AdvanceVerificationResult.FAILED
+            }
         }
         // R46 (Sol R46 P1-2): recompute the receipt digest — it must bind THIS request's
         // (requestDigest, idempotencyKey) together with the outcome the provider claims.
@@ -2435,7 +2500,7 @@ class AutomationEngine(
                 currentState,
                 AttemptEvent.ADVANCE_DIGEST_MISMATCH
             )
-            planRepository.markAplusState(attemptId, mismatchState.name)
+            planRepository.markRecoveryRequired(attemptId, "ADVANCE_RECEIPT_DIGEST_MISMATCH")
             aplusPause("advance receipt digest mismatch for attempt $attemptId — the receipt does not bind this request")
             return AdvanceVerificationResult.FAILED
         }
@@ -2467,7 +2532,10 @@ class AutomationEngine(
                 else -> currentState
             }
             if (observingState != AttemptState.ADVANCE_OBSERVING) {
-                planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    "ADVANCE_RECEIPT_STATE_CONFLICT:$currentState:$observingState"
+                )
                 aplusPause(
                     "non-terminal advance receipt conflicts with persisted phase $currentState " +
                         "for attempt $attemptId"
@@ -2480,7 +2548,7 @@ class AutomationEngine(
             // recovery-shaped fallback.
             val operationId = verbatimOperationId ?: planRepository.getApplyOperationId(attemptId)
             if (operationId == null) {
-                planRepository.markAplusState(attemptId, "RECOVERY_REQUIRED")
+                planRepository.markRecoveryRequired(attemptId, "APPLY_OPERATION_ID_MISSING")
                 aplusPause("apply operationId missing for attempt $attemptId — cannot observe the new environment")
                 return AdvanceVerificationResult.FAILED
             }
@@ -2505,9 +2573,6 @@ class AutomationEngine(
                     AttemptEvent.OBSERVED_TUPLE_MISMATCH
                 )
                 planRepository.markRecoveryRequired(attemptId, "OBSERVED_TUPLE_MISMATCH:$mismatchLeg")
-                if (mismatchState != AttemptState.RECOVERY_REQUIRED) {
-                    planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
-                }
                 aplusPause("post-advance observe mismatch for attempt $attemptId — leg $mismatchLeg does not match receipt (OBSERVED_TUPLE_MISMATCH)")
                 return AdvanceVerificationResult.FAILED
             }
@@ -2517,7 +2582,10 @@ class AutomationEngine(
                 AttemptEvent.OBSERVED_TUPLE_MATCHES
             )
             if (closedState != AttemptState.CLOSED) {
-                planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    "POST_ADVANCE_CLOSE_MISMATCH:$closedState"
+                )
                 aplusPause("post-advance verification did not close attempt $attemptId (got $closedState)")
                 return AdvanceVerificationResult.FAILED
             }
@@ -2545,7 +2613,10 @@ class AutomationEngine(
                 else -> currentState
             }
             if (readbackState != AttemptState.ADVANCE_STATE_READBACK) {
-                planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    "ADVANCE_EXHAUSTED_STATE_CONFLICT:$currentState:$readbackState"
+                )
                 aplusPause(
                     "exhausted advance receipt conflicts with persisted phase $currentState " +
                         "for attempt $attemptId"
@@ -2577,9 +2648,6 @@ class AutomationEngine(
                     AttemptEvent.EXHAUSTED_STATE_MISMATCH
                 )
                 planRepository.markRecoveryRequired(attemptId, "READBACK_TUPLE_MISMATCH:$readbackMismatchLeg")
-                if (mismatchState != AttemptState.RECOVERY_REQUIRED) {
-                    planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
-                }
                 aplusPause("exhausted readback mismatch for attempt $attemptId — leg $readbackMismatchLeg (READBACK_TUPLE_MISMATCH)")
                 return AdvanceVerificationResult.FAILED
             }
@@ -2589,7 +2657,10 @@ class AutomationEngine(
                 AttemptEvent.EXHAUSTED_STATE_CONFIRMED
             )
             if (closedState != AttemptState.CLOSED) {
-                planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+                planRepository.markRecoveryRequired(
+                    attemptId,
+                    "EXHAUSTED_READBACK_CLOSE_MISMATCH:$closedState"
+                )
                 aplusPause("exhausted readback did not close attempt $attemptId (got $closedState)")
                 return AdvanceVerificationResult.FAILED
             }
@@ -2641,12 +2712,12 @@ class AutomationEngine(
         if (receipt == null) {
             // RELEASE_INCOMPLETE → RECOVERY_REQUIRED (§8.1): the release failed, the lease is unresolved —
             // persist the phase, never silently advance (Sol round-13 P1-4).
-            val incompleteState = driveAplusTransition(
+            driveAplusTransition(
                 attemptId,
                 AttemptState.RELEASE_PENDING,
                 AttemptEvent.RELEASE_INCOMPLETE
             )
-            planRepository.markAplusState(attemptId, incompleteState.name)
+            planRepository.markRecoveryRequired(attemptId, "RELEASE_RECEIPT_NOT_DURABLE")
             aplusPause("release receipt not durable for attempt $attemptId")
             return null
         }
@@ -2661,7 +2732,10 @@ class AutomationEngine(
             ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED -> AttemptState.ADVANCE_PENDING
         }
         if (postReleaseState != expectedState) {
-            planRepository.markAplusState(attemptId, AttemptState.RECOVERY_REQUIRED.name)
+            planRepository.markRecoveryRequired(
+                attemptId,
+                "RELEASE_RECEIPT_ROUTE_MISMATCH:$postReleaseState:$expectedState"
+            )
             aplusPause(
                 "release receipt route $releaseRoute produced $postReleaseState for attempt $attemptId " +
                     "(expected $expectedState)"

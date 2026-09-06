@@ -419,6 +419,12 @@ class EngineTrustedPathRedTest {
                 }
                 return executor.completeAndAdvance(request, expectedIntentHash)
             }
+            override fun completeAndAdvanceOutcome(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+                expectedIntentHash: String
+            ) = com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                completeAndAdvance(request, expectedIntentHash)
+            )
         }
         val log = FakeDurableRecoveryLog()
         val backend = FakeBackend(capturingExecutor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
@@ -547,6 +553,7 @@ class EngineTrustedPathRedTest {
     fun `a successful runner without Start interaction evidence fails closed before persisting execution`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
         val clock = VirtualClock()
         val runner = object : CellRebelRunner {
             override suspend fun runTest(
@@ -571,6 +578,7 @@ class EngineTrustedPathRedTest {
             runner,
             FakeGpsSetter(listOf(GpsOutcome.Active)),
             clock,
+            driver = APlusAttemptDriver(auditDao),
             backend = passingBackend()
         ).run()
 
@@ -578,7 +586,59 @@ class EngineTrustedPathRedTest {
         assertEquals("no semantic-invalid wire-1 execution row", 0, db.attemptExecutionDao().forAttempt(attempt.id).size)
         assertNull("missing Start evidence can never mint quota", db.trustedQuotaDao().getByAttempt(attempt.id))
         assertEquals(FailureReason.UNTRUSTED.name, attempt.failureReason)
+        assertEquals(
+            "CELLREBEL_RUNNING->RECOVERY_REQUIRED[MISSING_START_INTERACTION_EVIDENCE]",
+            auditDao.forAttempt(attempt.id).single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+        )
         assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `a successful runner without Start or RUNNING evidence enters direct recovery once`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome = AttemptOutcome.Success(
+                webScore = 8.0,
+                videoScore = 7.0,
+                runningObservedAt = clock.nowMs(),
+                startedAt = startedAt,
+                endedAt = clock.nowMs()
+            )
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            driver = APlusAttemptDriver(auditDao),
+            backend = passingBackend()
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        val trail = auditDao.forAttempt(attempt.id)
+        assertEquals(
+            "CELLREBEL_START_PENDING->RECOVERY_REQUIRED[MISSING_START_INTERACTION_EVIDENCE]",
+            trail.single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+        )
+        assertEquals(
+            "undefined START_PENDING timeout must not be invented",
+            0,
+            trail.count { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }
+        )
+        assertEquals(
+            "direct recovery prevents a later illegal-release overwrite",
+            1,
+            trail.count { it.eventType == "RECOVERY_REQUIRED" }
+        )
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----
@@ -806,6 +866,10 @@ class EngineTrustedPathRedTest {
         assertEquals(
             "CELLREBEL_RUNNING->RECOVERY_REQUIRED",
             trail.single { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }.payloadDigest
+        )
+        assertEquals(
+            "CELLREBEL_RUNNING->RECOVERY_REQUIRED[CELLREBEL_TIMEOUT_INTERRUPTED:PRE_EXISTING_RUN]",
+            trail.single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
         )
         assertEquals(
             "RECOVERY_REQUIRED->RELEASE_PENDING",
