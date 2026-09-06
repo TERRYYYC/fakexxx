@@ -43,6 +43,10 @@ interface PlanDao {
     @Query("SELECT * FROM location_plans WHERE id = :planId")
     suspend fun getPlanById(planId: Long): LocationPlan?
 
+    /** Admission may target only the current selectable plan, never retained archive history. */
+    @Query("SELECT * FROM location_plans WHERE id = :planId AND supersededAt IS NULL")
+    suspend fun getSelectablePlanById(planId: Long): LocationPlan?
+
     // # 更新计划的缓冲快照（仅允许计划未启动时调用，F6）
     @Query("UPDATE location_plans SET globalBufferSeconds = :seconds WHERE id = :planId")
     suspend fun updateGlobalBuffer(planId: Long, seconds: Int)

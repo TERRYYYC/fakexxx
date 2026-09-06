@@ -76,4 +76,20 @@ class RunStartCoordinatorTest {
         }
         assertEquals(0, count)
     }
+
+    @Test
+    fun `an archived plan is rejected without creating a stale starting session`() = runTest {
+        val successor = db.planDao().insertPlanWithTasks(
+            LocationPlan(sourceFileName = "successor.csv", importedAt = 101L, globalBufferSeconds = 5, totalRows = 1, totalRequiredSuccesses = 1),
+            listOf(LocationTask(planId = 0, csvRow = 1, longitude = 31.0, latitude = 51.0, priority = 1, requiredSuccesses = 1))
+        )
+        db.planDao().markSuperseded(planId, successor, 102L)
+
+        val result = coordinator.admit(planId, startedAt = 200L)
+
+        assertTrue(result is RunStartReceipt.Rejected)
+        assertEquals(0, db.openHelper.readableDatabase.query(
+            "SELECT COUNT(*) FROM run_sessions WHERE planId = ?", arrayOf(planId.toString())
+        ).use { it.moveToFirst(); it.getInt(0) })
+    }
 }

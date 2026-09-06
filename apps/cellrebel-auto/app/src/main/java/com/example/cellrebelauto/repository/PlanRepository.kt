@@ -536,6 +536,28 @@ class PlanRepository(private val db: AppDatabase) {
     }
 
     /**
+     * #85 quota boundary: after the provider has returned a RELEASED receipt, this is the only
+     * local commit that makes the quota-reached release visible. The receipt, exact immutable
+     * advance request, and ADVANCE_PENDING owner state share one Room transaction; callers must
+     * never publish ADVANCE_PENDING through a separate write.
+     */
+    suspend fun persistQuotaReleaseAndAdvance(
+        attemptId: Long,
+        releaseIdempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        releaseRecordedAt: Long,
+        request: CompleteAndAdvanceRequestV1,
+        carrierCreatedAt: Long
+    ) = db.withTransaction {
+        persistReleaseReceipt(
+            releaseIdempotencyKey, leaseId, releaseDigest, "RELEASED", releaseRecordedAt
+        )
+        persistAdvanceReplayCarrier(attemptId, request, carrierCreatedAt)
+        db.testAttemptDao().markAplusState(attemptId, "ADVANCE_PENDING")
+    }
+
+    /**
      * #85: atomically bind an exact advance request to the already durable matching release
      * receipt. The full request is deliberately retained, including the timestamp excluded from
      * its canonical digest, so a recovery cannot create a timestamp-only rewrite under the same
@@ -937,7 +959,7 @@ class PlanRepository(private val db: AppDatabase) {
     }
 
     suspend fun admitRunSession(planId: Long, startedAt: Long): RunSessionAdmission = db.withTransaction {
-        if (db.planDao().getPlanById(planId) == null) {
+        if (db.planDao().getSelectablePlanById(planId) == null) {
             return@withTransaction RunSessionAdmission.MissingPlan
         }
         db.runSessionDao().findActiveRunningSession(planId)?.let {
