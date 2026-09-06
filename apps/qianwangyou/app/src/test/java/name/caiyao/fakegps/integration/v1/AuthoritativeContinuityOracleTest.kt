@@ -323,4 +323,3 @@ class AuthoritativeContinuityOracleTest {
         const val QWY_PACKAGE = "name.caiyao.fakegps"
     }
 }
-

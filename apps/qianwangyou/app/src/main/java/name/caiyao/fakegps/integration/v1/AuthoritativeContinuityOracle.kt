@@ -4,7 +4,6 @@ package name.caiyao.fakegps.integration.v1
 object AuthoritativeContinuityProtocol {
     const val VERSION = 1
 }
-
 /**
  * Independently attestable mutation surfaces required by protocol v1.
  *
@@ -384,4 +383,3 @@ class AuthoritativeContinuityOracle(
         outerUncertain = false
     }
 }
-
