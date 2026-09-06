@@ -172,6 +172,12 @@ jobs:
       - name: gradle wrapper is executable
         run: chmod +x ./gradlew
 
+      - name: host verification device isolation
+        working-directory: .
+        run: |
+          bash scripts/check-host-verification-device-isolation.sh
+          bash scripts/selftest-host-verification-device-isolation.sh
+
       - name: unit tests
         run: ./gradlew --no-daemon testLegacyIdDebugUnitTest testProductIdDebugUnitTest
 
