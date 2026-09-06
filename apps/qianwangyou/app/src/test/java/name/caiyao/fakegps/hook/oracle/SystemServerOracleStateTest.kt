@@ -32,6 +32,10 @@ class SystemServerOracleStateTest {
         var uid = qwyUid
         val session = Session()
         var drain: () -> Unit = {}
+        var endpointReads = 0
+        var readEndpoint: () -> SystemServerOracleState.EndpointSample = {
+            SystemServerOracleState.EndpointSample(qwyUid, qwyPackage, true, true, true, null)
+        }
         val producer = SystemServerOracleState(
             bootId, true, attested,
             object : SystemServerOracleState.CallerIdentity {
@@ -40,7 +44,8 @@ class SystemServerOracleStateTest {
             },
             Runnable { drain() },
             SystemServerOracleState.EndpointReader {
-                SystemServerOracleState.EndpointSample(qwyUid, qwyPackage, true, true, true, null)
+                endpointReads++
+                readEndpoint()
             },
         ).apply { configureExpectedQwyIdentity(qwyUid, qwyPackage) }
 
@@ -155,5 +160,75 @@ class SystemServerOracleStateTest {
         f.connect()
         f.producer.registerQwySession("digest-a", f.session)
         assertEquals(OracleWireHealth.BUILD_UNATTESTED, f.producer.snapshot().health)
+    }
+
+    @Test
+    fun `pre bridge covered completion preserves history without reading unavailable context`() {
+        val f = Fixture()
+        var contextReady = false
+        f.readEndpoint = {
+            if (contextReady) {
+                SystemServerOracleState.EndpointSample(qwyUid, qwyPackage, true, true, true, null)
+            } else {
+                // Same error returned by the real Android reader if called before phase 600.
+                SystemServerOracleState.EndpointSample(null, null, false, false, false,
+                    NullPointerException("system Context has not been published"))
+            }
+        }
+        val token = f.producer.beginCoveredMutation(1000, 1, null, null)
+        assertEquals(1L, f.producer.snapshot().sequence)
+        f.producer.finishCoveredMutation(token, false)
+        f.producer.refreshEndpoint()
+        assertEquals("pre-bridge state must not invoke the platform reader", 0, f.endpointReads)
+        val early = f.producer.snapshot()
+        assertEquals(2L, early.sequence)
+        assertFalse(early.gpsProviderEnabled)
+        assertFalse(early.networkProviderEnabled)
+        assertNull(early.ownerUid)
+        assertEquals(OracleWireHealth.HOOKS_INCOMPLETE, early.health)
+
+        contextReady = true
+        f.connect()
+        assertEquals("bridge establishes the first actual endpoint sample", 1, f.endpointReads)
+        f.producer.registerQwySession("digest-a", f.session)
+        f.producer.refreshEndpoint()
+        assertEquals(OracleWireHealth.HOOKS_INCOMPLETE, f.producer.snapshot().health)
+        assertEquals(4L, f.producer.snapshot().sequence)
+    }
+
+    @Test
+    fun `real endpoint failure after bridge readiness remains permanently fail closed`() {
+        val f = Fixture()
+        f.connect()
+        f.producer.registerQwySession("digest-a", f.session)
+        f.producer.onBridgeDisconnected(1)
+        f.readEndpoint = {
+            SystemServerOracleState.EndpointSample(null, null, false, false, false,
+                IllegalStateException("injected platform I O failure after readiness"))
+        }
+        val token = f.producer.beginCoveredMutation(1000, 1, null, null)
+        f.producer.finishCoveredMutation(token, false)
+        assertEquals("disconnect must not turn a real failure into normal startup", 2, f.endpointReads)
+        assertEquals(OracleWireHealth.CALLBACK_POISONED, f.producer.snapshot().health)
+        f.readEndpoint = {
+            SystemServerOracleState.EndpointSample(qwyUid, qwyPackage, true, true, true, null)
+        }
+        f.producer.onBridgeConnected(2)
+        f.producer.registerQwySession("digest-a", Session())
+        f.producer.refreshEndpoint()
+        assertEquals(OracleWireHealth.CALLBACK_POISONED, f.producer.snapshot().health)
+    }
+
+    @Test
+    fun `retired bridge callback cannot prematurely enable endpoint sampling`() {
+        val f = Fixture()
+        f.producer.onBridgeBindingDied(1)
+        f.producer.onBridgeConnected(1)
+        val token = f.producer.beginCoveredMutation(1000, 1, null, null)
+        f.producer.finishCoveredMutation(token, false)
+        assertEquals(0, f.endpointReads)
+        f.producer.onBridgeConnected(2)
+        assertEquals(1, f.endpointReads)
+        assertEquals(OracleWireHealth.HOOKS_INCOMPLETE, f.producer.snapshot().health)
     }
 }

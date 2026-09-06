@@ -28,6 +28,8 @@ final class SystemServerOracleState {
 
     private final Object lock = new Object();
     private final Object endpointRefreshLock = new Object();
+    /** Guarded by endpointRefreshLock; readiness is not revoked by a QWY bridge disconnect. */
+    private boolean endpointReaderReady;
     private final String bootId;
     private final String oracleInstanceId = UUID.randomUUID().toString();
     private final boolean supportedPlatform;
@@ -377,6 +379,9 @@ final class SystemServerOracleState {
             installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_BRIDGE_SESSION;
         }
         synchronized (endpointRefreshLock) {
+            // The Binder publishes a non-null system Context before this phase-600 callback.
+            // Before this boundary, covered mutations still advance history but cannot sample.
+            endpointReaderReady = true;
             EndpointSample sample = endpointReader.read();
             synchronized (lock) {
                 if (bridgeConnectionGeneration != connectionGeneration
@@ -423,6 +428,9 @@ final class SystemServerOracleState {
     }
 
     private void refreshEndpointSerialized() {
+        // Normal boot ordering is not a permanent I/O failure. Keep the endpoint unavailable
+        // until the first real bridge sample; once ready, real failures remain sticky poison.
+        if (!endpointReaderReady) return;
         EndpointSample sample = endpointReader.read();
         synchronized (lock) {
             publishEndpointSampleLocked(sample);

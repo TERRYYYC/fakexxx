@@ -53,7 +53,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     long beginCoveredMutation(int uid, int pid, String pkg, String tag) {
         return state.beginCoveredMutation(uid, pid, pkg, tag);
     }
-    void finishCoveredMutation(long token, boolean uncertain, Context context) {
+    void finishCoveredMutation(long token, boolean uncertain) {
         state.finishCoveredMutation(token, uncertain);
     }
     void abandonCoveredMutation(long token, Throwable failure) { state.abandonCoveredMutation(token, failure); }
@@ -70,7 +70,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     }
 
     void onBridgeConnected(Context context, long generation) {
-        systemContext = context;
+        systemContext = java.util.Objects.requireNonNull(context, "system Context is required");
         state.onBridgeConnected(generation);
     }
     void onBridgeDisconnected(long generation) { state.onBridgeDisconnected(generation); }

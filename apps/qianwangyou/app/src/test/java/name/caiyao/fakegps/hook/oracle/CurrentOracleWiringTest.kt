@@ -54,4 +54,18 @@ class CurrentOracleWiringTest {
         assertTrue(binder.contains("OracleBundleCodec.encode(state.snapshot())"))
         assertTrue(binder.contains("attested && Android15OracleHookPlan.isFingerprintAttested(fingerprint)"))
     }
+
+    @Test
+    fun `actual bridge adapter publishes non null context before enabling state sampling`() {
+        val binder = File(root, "src/main/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleBinder.java").readText()
+        val connection = binder.substringAfter("void onBridgeConnected(Context context, long generation)")
+            .substringBefore("void onBridgeDisconnected(")
+        val contextAt = connection.indexOf("systemContext = java.util.Objects.requireNonNull(context,")
+        val readyAt = connection.indexOf("state.onBridgeConnected(generation)")
+        assertTrue(contextAt >= 0 && readyAt > contextAt)
+        assertTrue(binder.contains("() -> AndroidOracleEndpointReader.sample(systemContext)"))
+        val installer = File(root, "src/main/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleInstaller.java").readText()
+        assertTrue(installer.contains("oracleBinder.finishCoveredMutation(token, uncertain)"))
+        assertTrue(installer.contains("oracleBinder.onBridgeConnected(context, connectionGeneration)"))
+    }
 }

@@ -38,7 +38,6 @@ public final class SystemServerOracleInstaller {
             new OrderedCoveredMutationFinisher("fakexxx-oracle-endpoint-sampler");
 
     private static volatile SystemServerOracleBinder oracleBinder;
-    private static volatile Context systemContext;
 
     private static final class CoveredCallerProvenance {
         final int uid;
@@ -354,7 +353,6 @@ public final class SystemServerOracleInstaller {
      * return; the single finisher samples all framework managers without making the callback wait.
      */
     private static void scheduleCoveredMutationFinish(long token, boolean uncertain) {
-        Context context = systemContext;
         AtomicBoolean tokenRetired = new AtomicBoolean();
         Runnable abandonOnce = () -> {
             if (tokenRetired.compareAndSet(false, true)) {
@@ -368,7 +366,7 @@ public final class SystemServerOracleInstaller {
                     () -> {
                         if (tokenRetired.get()) return;
                         try {
-                            oracleBinder.finishCoveredMutation(token, uncertain, context);
+                            oracleBinder.finishCoveredMutation(token, uncertain);
                             tokenRetired.compareAndSet(false, true);
                         } catch (Throwable callbackFailure) {
                             if (tokenRetired.compareAndSet(false, true)) {
@@ -431,7 +429,6 @@ public final class SystemServerOracleInstaller {
             return;
         }
         Context context = (Context) rawContext;
-        systemContext = context;
         oracleBinder.configureExpectedQwyIdentity(context, BuildConfig.APPLICATION_ID);
         bindBridge(context);
     }
