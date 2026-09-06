@@ -77,8 +77,6 @@ GATES="
 1|auto-unit-tests|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew testLegacyIdDebugUnitTest testProductIdDebugUnitTest
 1|auto-assemble|PR-1|apps/cellrebel-auto/gradlew|cd apps/cellrebel-auto && ./gradlew assembleLegacyIdDebug assembleProductIdDebug
 1|auto-identity-artifacts|PR-13|scripts/check-cutover-identity-variants.sh|./scripts/check-cutover-identity-variants.sh apps/cellrebel-auto/app/build/outputs/apk/legacyId/debug/app-legacyId-debug.apk apps/cellrebel-auto/app/build/outputs/apk/productId/debug/app-productId-debug.apk
-1|host-verification-device-isolation|PR-13|scripts/check-host-verification-device-isolation.sh|bash ./scripts/check-host-verification-device-isolation.sh
-1|host-verification-device-isolation-selftest|PR-13|scripts/selftest-host-verification-device-isolation.sh|bash ./scripts/selftest-host-verification-device-isolation.sh
 1|qwy-unit-tests|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew testDebugUnitTest
 1|qwy-assemble|PR-1|apps/qianwangyou/gradlew|cd apps/qianwangyou && ./gradlew assembleDebug
 1|inherited-lint-debt|PR-1|scripts/check-inherited-lint-debt.sh|./scripts/check-inherited-lint-debt.sh
@@ -104,6 +102,16 @@ if [ "$LIST_ONLY" -eq 1 ]; then
 $(printf '%s\n' "$GATES")
 EOF
   exit 0
+fi
+
+# This is deliberately outside the aggregate gate loop and before toolchain
+# checks: a failure must stop before *any* Gradle task can be dispatched.  The
+# checker only reads declared command text; its paired self-test never invokes
+# Gradle, adb, an emulator, or a physical device.
+printf 'verify-a-plus: host verification device-isolation preflight\n'
+bash ./scripts/check-host-verification-device-isolation.sh
+if [ "${VERIFY_A_PLUS_SKIP_HOST_ISOLATION_SELFTEST:-0}" != "1" ]; then
+  bash ./scripts/selftest-host-verification-device-isolation.sh
 fi
 
 # Toolchain preconditions — reported once, explicitly, instead of surfacing as

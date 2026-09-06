@@ -10,26 +10,32 @@ package com.example.cellrebelauto.cutover
 object CutoverSchemaV8 {
     const val ROOM_VERSION = 8
 
-    /** SHA-256 of each v8 Room JSON entity's canonical table+column slice. */
+    /**
+     * SHA-256 of each v8 Room JSON entity's UTF-8 canonical preimage:
+     * `table=<name>\\n` followed by its Room JSON field-order
+     * `column=<name>|<affinity>|<notNull>\\n` lines.  The frozen source is
+     * e2444fdfcabb87711544951d5ed62661b452ebb6's AppDatabase/8.json; tests
+     * independently recompute these values from its checked-in projection.
+     */
     val expectedSchemaDigests: Map<String, String> = mapOf(
-        "test_results" to "sha256:d30a1a2f1355b094e6ea085197994f9042ad6acc87b472c5d2f9bec333227270",
-        "run_sessions" to "sha256:3ecd3405c92976857fb16526521e2ca1c89aba8b9957345e208fca51499a3b39",
-        "location_plans" to "sha256:48df8fa192f0ef62548e0a0a467cb9cf51173a416bb3872d4d8e1a96e623e322",
-        "location_tasks" to "sha256:c9aa5b57968349255c54c2947f8b17c03451426da47cbb7f290b0840e16bb728",
-        "test_attempts" to "sha256:bc8ffe71f14f7408f65c8e8d9ba6df4d6ba019a8e00e8ffa68e530bbadc91833",
-        "trusted_quota_entries" to "sha256:4dea0097bf13143fa202e331d3c9e02f506545365f4176e4ec7cbbf656bcb353",
-        "cellrebel_executions" to "sha256:8062b222a0646e5ecb78b5b1e33759cd96a0deed506de8057413b5cb7cd47dec",
-        "auto_audit_events" to "sha256:18bc51da6dddd702fcccc44d2e41eb4c36bbba4ae504905aa5a03211f7c407ef",
-        "legacy_completion_snapshots" to "sha256:b3bc917d5a038c57cb2f3f155ecdcebf6a6777ae1130f7dbf7002aec911ec1ef",
-        "provider_pairing_records" to "sha256:08fa0ff5429dcd9b90f8bb011713fc923dd0fcaca6b7766ab4d0221d62d4bbf9",
-        "unverified_attempt_records" to "sha256:17e5d3d5240cd04a9e8bd67d92f2e4420cd5029c82b30aa102a5f9ced9431156",
-        "durable_observation_records" to "sha256:52a4464083dc673b57803ed83667c692bd28fedefd09034f1a873917ce91d741",
-        "durable_completion_receipts" to "sha256:39e2c849f880d3a5139106f26fe78b8ae42646eba53a3fae96fe7a048da9e77d",
-        "operation_receipts" to "sha256:d47ecd9a2173ae120496309fc2fa0674ca5a61e7935b8d8436debf02bfe68a4b",
-        "recovery_checkpoints" to "sha256:1be9e69611d8fedd3b0f3bdf228f8d8ac98ed24a84873758f16b34a7ce88d0b1",
-        "release_receipts" to "sha256:51f387be95fb1025f8dc8d1abcc57437781fad6b548c3dff09ceaf31a8ec9edf",
-        "advance_replay_carriers" to "sha256:9d7c5bfb6b995c08ff81c0d6c7735a6e1e8388c1361fe2052b626b9b1da08133",
-        "advance_receipts" to "sha256:1a0606ab0bf6b76d2e7c647fd8adea78a8cdf904bb2a4a117b62151ffc4c59e3"
+        "test_results" to "sha256:3f2e7f966388a6f42937adc45fb50b7c1ab31c92ca13775a452cbebb51e93412",
+        "run_sessions" to "sha256:cacc3969ff552f0e851c3c19e96d253c7b3ee6ddac2f7516976468ec92048df9",
+        "location_plans" to "sha256:59a9321e1ee1de8530edd7b4c0111d4638de89beb4d99b3b5cd0e53ccbe90e58",
+        "location_tasks" to "sha256:d2b3d56f8fcaa9f58d7b1760c54ae96dfd2fe283c5db8c0f978d7a493331a0c6",
+        "test_attempts" to "sha256:84ecf5e3decff2a8879c884272cb61c7032fc784fd8a97996a93158b4d7c9607",
+        "trusted_quota_entries" to "sha256:03d39ce7ea6b04caba2a3346bd2662cbbd2f1d530407a4019e14c3fb29db3baf",
+        "cellrebel_executions" to "sha256:e511bc7aa14753b18ffdfcef07d812ddb0aec42f9c9134d2de428c9f94aaca1c",
+        "auto_audit_events" to "sha256:ce3346416ac5a59ef4129ebaf6ff190bf76a19a928aa6cbddf560cca58507d6e",
+        "legacy_completion_snapshots" to "sha256:1a7f9d3a72a5415738bf9b21cb3337954ebcf6efa183c80428e6402a0453825b",
+        "provider_pairing_records" to "sha256:b8ed6e924367d3031891d6eb043da54d06fc5615a3eb3ebc06c16d46ae816279",
+        "unverified_attempt_records" to "sha256:cbc2f7130ff46c9228ca59b0188feb848045535a74a5de25414d375e2ada2f0b",
+        "durable_observation_records" to "sha256:778a5eb7775556a711b0c69d7a8ee0410c0852a799746bb92e92d4bdd9bffacf",
+        "durable_completion_receipts" to "sha256:815f8bcffafc3ebe57ce4758242c54ee9877ef120d3c2f7d96ad9845cfbf769b",
+        "operation_receipts" to "sha256:780c72af84c3903d2d27b5f86af1b43e2e2624dea1e07d60a94877e97fc08824",
+        "recovery_checkpoints" to "sha256:572b2e34e698023d237a61d5ab851359141fb82763a7c622a7dc30b7cbd5105f",
+        "release_receipts" to "sha256:7b620faba8fe876e59ea95c796b5fe0552847807e8a83b8b3fc69feeeb61bf58",
+        "advance_replay_carriers" to "sha256:c36572903d00490233023ca2f714ca9540ce4de19fbc4827fe3586245831433c",
+        "advance_receipts" to "sha256:6ab1c0a299c1a7df00a724fc7ed5c223df53819bb23b349bec512acc3cb83a24"
     )
 
     val requiredTables: Set<String> = expectedSchemaDigests.keys
@@ -48,9 +54,10 @@ data class CutoverPairingHistory(
 )
 
 /**
- * Metadata-only canonical carrier. It proves the future producer captured all Room v8 tables and
- * DataStore under one capture id, but cannot itself claim that the capture was atomic. That proof
- * remains the Auto-owned snapshot interface's responsibility.
+ * Metadata-only canonical carrier. It proves the future producer declared every Room v8 table and
+ * a DataStore digest under one capture id, but does not recompute the opaque row/DataStore digest
+ * tokens from content. It also cannot claim that capture was atomic. Content verification and the
+ * transactional Room + DataStore snapshot proof remain the Auto-owned snapshot interface's work.
  */
 data class CutoverBundleV1(
     val sourcePackage: String,
