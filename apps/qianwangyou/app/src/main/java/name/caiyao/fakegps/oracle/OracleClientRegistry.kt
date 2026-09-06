@@ -7,6 +7,10 @@ object OracleBridgePolicy {
 
     @JvmStatic
     fun acceptsRegistrarCaller(callingUid: Int): Boolean = callingUid == SYSTEM_UID
+
+    @JvmStatic
+    fun acceptsQwyCaller(callingUid: Int, expectedQwyUid: Int?): Boolean =
+        expectedQwyUid != null && expectedQwyUid >= 0 && callingUid == expectedQwyUid
 }
 
 fun interface OracleDeathLink {

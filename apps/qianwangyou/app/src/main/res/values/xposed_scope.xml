@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Advertises the dedicated, fingerprint-gated branch; does not configure any device scope. -->
+    <string-array name="xposed_scope">
+        <item>system</item>
+    </string-array>
+</resources>

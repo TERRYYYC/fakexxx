@@ -130,6 +130,7 @@
             android:exported="true" />
 
         <!-- Private system_server oracle registrar; every registration independently checks UID 1000. -->
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
         <service
             android:name=".oracle.OracleBridgeService"
             android:directBootAware="true"

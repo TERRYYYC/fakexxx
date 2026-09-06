@@ -23,6 +23,8 @@ import name.caiyao.fakegps.config.TransportSchemaContract;
 import name.caiyao.fakegps.verify.RuntimeSelfHookPolicy;
 import name.caiyao.fakegps.verify.RuntimeHookSentinel;
 import name.caiyao.fakegps.verify.RuntimeEvidence;
+import name.caiyao.fakegps.hook.oracle.SystemServerOracleEntryPolicy;
+import name.caiyao.fakegps.hook.oracle.SystemServerOracleInstaller;
 
 /**
  * Xposed module entry point.
@@ -121,6 +123,10 @@ public class MainHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
+        if (SystemServerOracleEntryPolicy.isSystemServer(lpparam.packageName, lpparam.processName)) {
+            SystemServerOracleInstaller.install(lpparam.classLoader);
+            return;
+        }
         // The configuration process is never self-hooked in release. The sole shipped exception
         // is the private one-shot :hook_verify process, selected by the shared policy below.
         //
