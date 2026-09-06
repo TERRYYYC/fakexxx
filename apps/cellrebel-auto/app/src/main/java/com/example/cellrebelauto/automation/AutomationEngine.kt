@@ -20,6 +20,7 @@ import com.example.cellrebelauto.recovery.ReconcileResult
 import com.example.cellrebelauto.recovery.RecoveryCoordinator
 import com.example.cellrebelauto.recovery.ScheduleAdvanceState
 import com.example.cellrebelauto.repository.PlanRepository
+import com.example.cellrebelauto.repository.LegacyReleaseValidation
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
@@ -1131,6 +1132,12 @@ class AutomationEngine(
         // terminalized the session while leaving its A+ owner starting/running; the generic sweep
         // deliberately excludes such rows, so returning early here would admit a second owner.
         val recoverableAttempts = planRepository.findAPlusRecoverableAttempts(planId)
+        // Local historical authority is independent of permission to resume. Validate EVERY
+        // candidate before any session/cardinality/CLOSED-projection/provider early return.
+        // Healthy classifications do not change phase and cannot authorize later convergence.
+        val legacyValidation = recoverableAttempts.associate { owner ->
+            owner.id to planRepository.validateLegacyRelease(owner.id, nowMs())
+        }
         val existingSession = planRepository.findActiveRunSession(planId)
         if (existingSession == null) {
             val orphanedEffectOwners =
@@ -1147,11 +1154,23 @@ class AutomationEngine(
 
         val effectOwners = projectClosedRecoveryOwners(recoverableAttempts) ?: return false
         if (!admitRecoveryOwners(effectOwners, existingSession.id)) return false
+        if (legacyValidation.values.any { it is LegacyReleaseValidation.Rejected }) {
+            aplusPause("legacy release authority rejected locally — owner reason and audit preserved without provider access")
+            return false
+        }
 
         // Provider terminal truth stops NEW work, but cannot strand the durable owner of the
         // terminal transition itself. CLOSED rows were projected locally above and do not consume
         // provider-effect cardinality.
         val recoveryCapabilities = coordinator.executorBackend().discover()
+        val locallyValidLegacyOwnerIds = legacyValidation.filterValues {
+            it is LegacyReleaseValidation.Valid && it.reconcileLegacyRelease
+        }.keys
+        if (locallyValidLegacyOwnerIds.isNotEmpty() &&
+            recoveryCapabilities?.protocolVersion != ContractV1.PROTOCOL_VERSION) {
+            aplusPause("legacy release convergence requires compatible provider discovery — healthy history preserved")
+            return false
+        }
         val planCompleteBeforeRecovery =
             PlanScheduler.isPlanComplete(planRepository.getTasks(planId))
         val exhaustedWithoutOwner = recoveryCapabilities?.exhausted == true &&
@@ -1162,7 +1181,7 @@ class AutomationEngine(
                 effectOwners,
                 existingSession.id,
                 recoveryCapabilities,
-                coordinator
+                locallyValidLegacyOwnerIds
             )
         if (exhaustedWithoutOwner || exhaustedWithUnprovenOwner) {
             aplusPause(
@@ -1173,7 +1192,8 @@ class AutomationEngine(
         }
 
         for (crashed in effectOwners) {
-            if (!recoverCrashedAttempt(crashed, coordinator, recoveryCapabilities)) return false
+            if (!recoverCrashedAttempt(crashed, coordinator, recoveryCapabilities,
+                    legacyExpected = crashed.id in locallyValidLegacyOwnerIds)) return false
         }
         if (!recoveryOwnersConverged()) return false
         if (recoveryCapabilities?.exhausted == true &&
@@ -1367,10 +1387,14 @@ class AutomationEngine(
      * @return true to continue the plan; false = fail-closed PAUSED (caller returns).
      */
     private suspend fun recoverCrashedAttempt(
-        crashed: TestAttempt,
+        candidate: TestAttempt,
         coordinator: RecoveryCoordinator,
-        recoveryCapabilities: CapabilitySnapshotV1?
+        recoveryCapabilities: CapabilitySnapshotV1?,
+        legacyExpected: Boolean
     ): Boolean {
+        // Admission may suspend for discovery. A concurrent terminal projection must not be
+        // revived using its older census snapshot; legacy convergence also revalidates in Room.
+        val crashed = requireNotNull(planRepository.getAttempt(candidate.id))
         val recoveryProtocolCompatible =
             recoveryCapabilities?.protocolVersion == ContractV1.PROTOCOL_VERSION
         var recoveryOwnerState = crashed.aplusState
@@ -1386,7 +1410,14 @@ class AutomationEngine(
         // transaction validates all stored authority before either a legal reconcile or rejection;
         // its original audit provenance also protects later RECOVERY_REQUIRED restarts.
         when (val legacy = planRepository.recoverLegacyRelease(crashed.id, nowMs())) {
-            com.example.cellrebelauto.repository.LegacyReleaseRecovery.NotLegacy -> Unit
+            com.example.cellrebelauto.repository.LegacyReleaseRecovery.NotLegacy -> {
+                if (legacyExpected) {
+                    // The transaction saw a different owner after our census/re-read. Do not
+                    // reinterpret an obsolete legacy snapshot through the generic release path.
+                    aplusPause("legacy owner ${crashed.id} changed during admission — current owner preserved")
+                    return false
+                }
+            }
             is com.example.cellrebelauto.repository.LegacyReleaseRecovery.Rejected -> {
                 aplusPause("legacy release recovery rejected for attempt ${crashed.id}: ${legacy.reason}")
                 return false
@@ -1735,7 +1766,7 @@ class AutomationEngine(
         recoverableAttempts: List<TestAttempt>,
         activeSessionId: Long,
         exhaustedCapabilities: io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1?,
-        coordinator: RecoveryCoordinator
+        locallyValidLegacyOwnerIds: Set<Long>
     ): Boolean {
         val owner = recoverableAttempts.singleOrNull() ?: return false
         if (owner.runSessionId != activeSessionId) return false
@@ -1751,23 +1782,13 @@ class AutomationEngine(
             capabilities.currentScheduleId == anchor.first &&
             capabilities.currentItemId == anchor.second &&
             capabilities.scheduleVersion == anchor.third + 1
+        // This is only provider/session routing, not release authority. The local phase may be
+        // RELEASED or its quarantined recovery projection. The admitted owner transaction must
+        // re-read every receipt/request before making any transition; no coordinator fallback.
+        if (owner.id in locallyValidLegacyOwnerIds) return isExactTerminalSuccessor
         return when (owner.aplusState) {
             AttemptState.ADVANCE_PENDING.name,
             AttemptState.ADVANCE_STATE_READBACK.name -> isExactTerminalSuccessor
-            // Older builds wrote RELEASED after the physical release but before deciding whether
-            // quota required an advance. Under terminal provider truth it is a legitimate same-key
-            // convergence owner only when its exact dual-index release receipt is already durable;
-            // admission must never turn this compatibility phase into a fresh release effect.
-            "RELEASED" -> {
-                val leaseId = owner.aplusLeaseId
-                !leaseId.isNullOrBlank() &&
-                    isExactTerminalSuccessor &&
-                    coordinator.hasMatchingDurableReleaseReceipt(
-                        APlusOperationIdentity.releaseIdempotencyKey(owner.id),
-                        leaseId,
-                        APlusOperationIdentity.releaseDigest(leaseId)
-                    )
-            }
             else -> false
         }
     }

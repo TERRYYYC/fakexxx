@@ -1319,12 +1319,16 @@ class EngineJourneyConsumerOracleTest {
             com.example.cellrebelauto.automation.aplus.APlusAttemptDriver(db.auditEventDao())
         ).run()
 
-        assertEquals("terminal admission is the only provider read", 1, discoverCalls.size)
+        assertEquals("invalid local authority is classified before provider admission", 0, discoverCalls.size)
         assertEquals("an unproven legacy phase cannot replay advance", 0, advanceCalls.size)
         assertEquals("the original terminal effect remains singular", 1, advanceEffectCount)
         assertEquals("no release or advance call is permitted", emptyList<String>(), events)
-        assertEquals("the compatibility owner stays intact", "RELEASED",
+        assertEquals("the compatibility owner gets an atomic local rejection", "RECOVERY_REQUIRED",
             db.testAttemptDao().getAttemptById(fixture.attemptId)!!.aplusState)
+        assertEquals("LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING",
+            repo.getAttempt(fixture.attemptId)!!.failureReason)
+        assertEquals(listOf("RELEASED->RECOVERY_REQUIRED[LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING]"),
+            db.auditEventDao().forAttempt(fixture.attemptId).map { it.payloadDigest })
         assertEquals("the unproven owner remains recoverable", "running",
             db.testAttemptDao().getAttemptById(fixture.attemptId)!!.status)
         assertEquals("the stop is durable", "paused",

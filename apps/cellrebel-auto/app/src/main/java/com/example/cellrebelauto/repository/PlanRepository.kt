@@ -40,6 +40,13 @@ sealed interface LegacyReleaseRecovery {
     data class Rejected(val reason: String) : LegacyReleaseRecovery
 }
 
+/** Local classification only, never a capability to advance or dispatch provider work. */
+sealed interface LegacyReleaseValidation {
+    data object NotLegacy : LegacyReleaseValidation
+    data class Valid(val reconcileLegacyRelease: Boolean) : LegacyReleaseValidation
+    data class Rejected(val reason: String) : LegacyReleaseValidation
+}
+
 /**
  * Plan-level repository (O1–O4 data owner). Wraps the plan/task/attempt/session
  * DAOs and hosts the transactional success finalization (INV-3): attempt row +
@@ -530,6 +537,40 @@ class PlanRepository(private val db: AppDatabase) {
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
 
     /**
+     * Runs before session/cardinality/provider admission. Invalid history gets a durable local
+     * rejection; healthy history is strictly unchanged. Convergence must validate again, not
+     * consume this classification as an authority token after a suspension or provider read.
+     */
+    suspend fun validateLegacyRelease(attemptId: Long, recordedAt: Long): LegacyReleaseValidation =
+        db.withTransaction {
+            validateLegacyReleaseOwner(requireNotNull(db.testAttemptDao().getAttemptById(attemptId)), recordedAt)
+        }
+
+    private suspend fun validateLegacyReleaseOwner(attempt: TestAttempt, recordedAt: Long): LegacyReleaseValidation {
+        val releasePhase = attempt.aplusState in setOf("RELEASED", "RECOVERY_REQUIRED", "RELEASE_PENDING")
+        val migratedAdvancePhase = attempt.aplusState in setOf("ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK")
+        if (!releasePhase && !migratedAdvancePhase) return LegacyReleaseValidation.NotLegacy
+        val audit = db.auditEventDao().forAttempt(attempt.id)
+        val legacyHistory = attempt.aplusState == "RELEASED" ||
+            audit.any { it.eventType == "RECOVERY_REQUIRED" &&
+                it.payloadDigest.startsWith("RELEASED->RECOVERY_REQUIRED[") }
+        if (!legacyHistory) return LegacyReleaseValidation.NotLegacy
+        // Once an advance phase was durably observed, projecting RECOVERY_REQUIRED cannot erase
+        // that fact and later reclassify an impossible non-quota advance as a healthy release.
+        val hadAdvancePhase = migratedAdvancePhase || audit.any {
+            it.payloadDigest.startsWith("ADVANCE_") ||
+                (it.eventType == "RELEASE_RECEIPT" && it.payloadDigest.startsWith("RELEASE_PENDING->ADVANCE_PENDING["))
+        }
+        val failure = legacyReleaseAuthorityFailure(attempt, hadAdvancePhase)
+            ?: return LegacyReleaseValidation.Valid(reconcileLegacyRelease = releasePhase)
+        val reason = "LEGACY_RELEASED_AUTHORITY:$failure"
+        if (attempt.aplusState != "RECOVERY_REQUIRED" || attempt.failureReason != reason) {
+            markRecoveryRequired(attempt.id, reason, recordedAt)
+        }
+        return LegacyReleaseValidation.Rejected(reason)
+    }
+
+    /**
      * Legacy RELEASED is historical external-effect provenance, never permission for a fresh
      * release. Validate its existing release/request tuple before any owner change. The original
      * RELEASED audit source keeps this quarantine sticky across subsequent RECOVERY_REQUIRED runs.
@@ -537,20 +578,14 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun recoverLegacyRelease(attemptId: Long, recordedAt: Long): LegacyReleaseRecovery =
         db.withTransaction {
             val attempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId))
-            val legacyHistory = attempt.aplusState == "RELEASED" ||
-                (attempt.aplusState in setOf("RECOVERY_REQUIRED", "RELEASE_PENDING") &&
-                    db.auditEventDao().forAttempt(attemptId).any {
-                        it.eventType == "RECOVERY_REQUIRED" &&
-                            it.payloadDigest.startsWith("RELEASED->RECOVERY_REQUIRED[")
-                    })
-            if (!legacyHistory) return@withTransaction LegacyReleaseRecovery.NotLegacy
-            val failure = legacyReleaseAuthorityFailure(attempt)
-            if (failure != null) {
-                val reason = "LEGACY_RELEASED_AUTHORITY:$failure"
-                if (attempt.aplusState != "RECOVERY_REQUIRED" || attempt.failureReason != reason) {
-                    markRecoveryRequired(attemptId, reason, recordedAt)
+            when (val validation = validateLegacyReleaseOwner(attempt, recordedAt)) {
+                LegacyReleaseValidation.NotLegacy -> return@withTransaction LegacyReleaseRecovery.NotLegacy
+                is LegacyReleaseValidation.Rejected -> return@withTransaction LegacyReleaseRecovery.Rejected(validation.reason)
+                is LegacyReleaseValidation.Valid -> {
+                    // The legacy source remains relevant for validation/census after migration,
+                    // but later ADVANCE phases must resume their own reducer path, never release.
+                    if (!validation.reconcileLegacyRelease) return@withTransaction LegacyReleaseRecovery.NotLegacy
                 }
-                return@withTransaction LegacyReleaseRecovery.Rejected(reason)
             }
             val trusted = db.trustedQuotaDao().getByAttempt(attemptId)
             val task = requireNotNull(db.locationTaskDao().getTaskById(attempt.taskId))
@@ -579,7 +614,7 @@ class PlanRepository(private val db: AppDatabase) {
             ))
         }
 
-    private suspend fun legacyReleaseAuthorityFailure(attempt: TestAttempt): String? {
+    private suspend fun legacyReleaseAuthorityFailure(attempt: TestAttempt, hadAdvancePhase: Boolean): String? {
         val lease = attempt.aplusLeaseId?.takeIf { it.isNotBlank() } ?: return "LEASE_MISSING"
         val key = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
         val byKey = db.releaseReceiptDao().byKey(key)
@@ -597,6 +632,9 @@ class PlanRepository(private val db: AppDatabase) {
         val count = trustedCountForTask(attempt.taskId)
         val carrier = db.advanceReplayCarrierDao().byAttempt(attempt.id)
         if (trusted == null || count < task.requiredSuccesses) {
+            if (hadAdvancePhase) {
+                return "NON_QUOTA_ADVANCE_STATE"
+            }
             return if (carrier != null || db.advanceReceiptDao().byAttempt(attempt.id) != null)
                 "NON_QUOTA_ADVANCE_CARRIER" else null
         }

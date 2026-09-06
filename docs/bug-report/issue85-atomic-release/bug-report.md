@@ -155,7 +155,7 @@ owner/audit facts across two Engine runs.
 | Exact request plus durable verified advance receipt | Zero release and advance calls; receipt consumed unchanged and owner closes successfully. |
 | Healthy under-quota or negative release | Zero release calls for that owner; closes without an advance carrier and retains negative evidence. |
 | Audit failure during rejection or healthy RECONCILE | Entire owner migration rolls back to `RELEASED`, including reason and all audit rows; stored request/release unchanged. |
-| Provider already exhausted | Existing `EngineJourneyConsumerOracleTest` admission preserves unproven owners read-only. A matching terminal successor with durable release and exact carrier reaches the same validated legacy recovery path. |
+| Provider already exhausted | **Superseded by the next review finding below:** read-only preservation prevented effects but did not persist the required typed invalid-history fact. |
 | Production call-site sweep | The sole bare `RELEASED → RELEASE_PENDING` conversion is removed. All three nonlegacy release sites still use `prepareReleaseLease → commitReleaseReceipt`; legacy never enters that provider-release path. |
 
 ### Actual RED and final host GREEN
@@ -187,3 +187,158 @@ fix, exercised through production Engine orchestration in host tests. Device/emu
 explicitly unavailable under the user's freeze and remains required for feature closure, not
 silently waived. Original-reviewer re-verification is required; the author is not approval authority.
 Actual implementation identity is Codex; older commit labels came from shared Git configuration.
+
+## Review re-entry: validation must precede every recovery admission exit
+
+The original reviewer rejected `468c7c6a3459ed8c4e64903b00ba4950bce7a3f6`: the exhausted-provider
+admission returned before `recoverLegacyRelease`, leaving malformed historical `RELEASED` rows
+without their typed recovery reason/audit. Zero external effects alone did not meet the owner-fact
+invariant. This is the same boundary omission as the previous findings. Under receive-review's
+three-round rule, production changes paused and the primary task, acting as plan owner, confirmed
+the following recovery protocol before implementation.
+
+### Frozen admission/authority protocol (primary-task confirmation)
+
+Stateful-object census: (1) persisted legacy attempt phase/provenance, (2) immutable release
+receipt and its two indices, (3) exact advance request/receipt, (4) session/cardinality admission
+projection. Objects 1–3 have one PlanRepository/Room owner. Engine schedules operations;
+session/provider admission cannot grant missing release/request authority.
+
+| Source / event | Permitted transition |
+|---|---|
+| Nonlegacy local validation | No change. |
+| Healthy legacy, any failed admission | No receipt/request/phase changes; only the existing session pause/re-arm policy. |
+| Invalid legacy at any entrance: inactive session, multiple/foreign owners, CLOSED sibling projection failure, discovery unavailable/skewed, or EXHAUSTED | Before provider access, atomically persist `RECOVERY_REQUIRED` + typed reason + matching audit. |
+| Same rejected history on restart | Retain legacy provenance; no repeated identical rejection audit. |
+| Healthy legacy, all admissions passed | Transactionally re-read authority, then perform legal audited reconciliation without creating a new release request or changing historical key/clock/quota proof. |
+| Already CLOSED | Keep terminal state; only existing terminal-truth projection is allowed. |
+
+1. Invalid local validation calls no discover/preflight/apply/release/advance.
+2. Healthy validation does not advance state or perform any external effect.
+3. Rejection does not lose owner/provenance or create another run session.
+4. Owner/reason/audit commit together or roll back together; repeated restart is idempotent.
+5. Validation is not a reusable admission token: convergence re-reads inside its Room transaction.
+6. EXHAUSTED admits only an authoritative existing terminal convergence; no new work, and a
+   stored advance receipt causes zero redispatch.
+
+The plan-scoped census must also select legacy owners whose generic attempt status was wrongly
+terminalized, without reopening genuine `CLOSED` history. The implementation separates local
+validation/quarantine from admitted convergence rather than moving the previous mixed helper ahead
+of session/cardinality guards.
+
+### Implementation and exhaustive entrance matrix
+
+`validateLegacyRelease` is now a local-only owner transaction invoked for **every** plan-scoped
+recovery candidate before the first admission early return. Rejections are durable before the
+Engine reads provider discovery. Healthy classification leaves all owner data unchanged. Only
+after session/cardinality/protocol/terminal admission does `recoverLegacyRelease` re-read authority
+and converge in its own owner transaction. The Engine also re-reads the attempt after discovery;
+an obsolete legacy scheduling classification cannot fall through into fresh generic release work.
+
+The DAO census includes raw `RELEASED` despite a falsely terminal generic attempt status, and
+includes `RECOVERY_REQUIRED`, `RELEASE_PENDING` and all `ADVANCE_*` descendants with a recorded
+legacy source. Genuine terminal `CLOSED` history is excluded. Local validation follows that same
+provenance into migrated advance phases, but healthy migrated phases resume their existing reducer
+route instead of redoing legacy release. A past advance-phase fact remains relevant after rejection:
+an impossible non-quota advance cannot turn into a healthy under-quota release on the next restart.
+
+The executable matrix is `EngineLegacyAdmissionMatrixTest`. Each entrance below crosses READY and
+EXHAUSTED with all 15 local shapes: healthy exact request, healthy stored advance receipt, healthy
+under-quota, healthy negative, missing receipt+request, missing receipt only, key-only, lease-only,
+divergent indices, duplicate lease, bad release digest, missing request, bad request digest, foreign
+request owner, and bad advance receipt. Every invalid combination is exercised through two Engine
+runs; assertions include zero **all** provider accesses, immutable row snapshots, the typed
+owner/reason/audit fact, no duplicate audit, and unchanged run-session identities.
+
+| Entrance before recovery convergence | Healthy READY / EXHAUSTED disposition | Invalid READY / EXHAUSTED disposition | Executed combinations |
+|---|---|---|---:|
+| One owner in current active session | Exact admitted convergence; stored receipt avoids redispatch | Local atomic quarantine | 30 |
+| No active owner session | Preserve phase and re-arm existing session, no provider access | Quarantine before re-arm | 30 |
+| Foreign newer active session | Preserve owner, interrupt replacement and re-arm original | Quarantine before session repair | 30 |
+| Multiple owners in current session | Preserve all owner phases, no provider access | Quarantine every invalid owner before cardinality refusal | 30 |
+| Multiple owners across sessions | Preserve phases, existing ownership refusal | Quarantine every invalid owner before refusal | 30 |
+| CLOSED sibling projection fails, active session | Healthy legacy remains unchanged | Legacy fact persists before sibling failure return | 30 |
+| CLOSED sibling projection fails, no active session | Healthy legacy remains unchanged | Legacy fact persists before sibling failure return | 30 |
+| Generic status falsely `succeeded` | Selected by legacy census; legal convergence | Selected and quarantined on both restarts | 30 |
+| Generic status falsely `failed` | Selected by legacy census; legal convergence | Selected and quarantined on both restarts | 30 |
+| Generic status falsely `interrupted` | Selected by legacy census; legal convergence | Selected and quarantined on both restarts | 30 |
+
+Additional executable boundaries:
+
+- 49 provider-denial combinations (unavailable, protocol skew, discovery throw, unrelated terminal
+  successor × healthy/missing/malformed authority): healthy phase/rows stay unchanged across two
+  runs; invalid histories still call no provider method.
+- 12 crash-cut combinations: three falsely terminal generic statuses × READY/EXHAUSTED × death
+  before advance dispatch or during observation/terminal readback. Every migrated owner remains
+  discoverable through `ADVANCE_PENDING` / `ADVANCE_OBSERVING` / `ADVANCE_STATE_READBACK`, resumes
+  the exact stored request, consumes a stored receipt without redispatch, and leaves the census
+  only after `CLOSED`.
+- 36 migrated-provenance combinations: each advance phase × READY/EXHAUSTED × healthy, missing,
+  conflicting or impossible non-quota authority. Healthy local validation never rewinds release;
+  invalid migrated owners quarantine before discovery with persistent historical provenance.
+- 11 additional cases cover authority changing between validation and convergence, concurrent
+  `CLOSED`, local audit rollback/retry, genuine `CLOSED` exclusion and healthy inactive-session
+  recovery on the next explicitly resumed run. Together the new matrix has 408 scenarios within
+  18 JUnit test methods; the scenario count is not presented as the unit-test count.
+
+The scan covers all returns in `recoverAPlusBeforeSweep`: no-session/empty-owner, CLOSED projection,
+cardinality/session identity, invalid local authority, discovery/protocol, exhausted-without-owner,
+exhausted-unproven-owner, per-owner recovery failure, unresolved owners, and exhausted-after-owner
+convergence. Empty-owner branches cannot contain a selected legacy owner; census controls prove
+that a false generic terminal status cannot create that empty set. Normal run guards execute only
+after this recovery boundary. Non-A+ test construction (no coordinator/evidence source) is not a
+production legacy-recovery entrance and is unchanged.
+
+### RED evidence for this re-entry
+
+All commands below use the same JBR/SDK and Auto worktree as the earlier host gates.
+
+```text
+# Before production edits, exact 468c7c6 behavior:
+./gradlew :app:testDebugUnitTest --tests '*EngineQuotaRecoveryRedTest.exhausted legacy*' --no-daemon --console=plain
+BUILD FAILED in 12s; 2 tests completed, 2 failed; compilation succeeded.
+expected:<RECOVERY_REQUIRED> but was:<RELEASED>
+
+./gradlew :app:testDebugUnitTest --tests '*EngineLegacyAdmissionMatrixTest' --no-daemon --console=plain
+BUILD FAILED in 13s; 10 entrance tests completed, 10 failed; compilation succeeded.
+# Early-return branches retained RELEASED; READY invalid history accessed discovery;
+# falsely terminal legacy owners were omitted by the census.
+
+# Sweep-discovered boundary: healthy but unavailable provider must not advance phase:
+./gradlew :app:testDebugUnitTest --tests '*EngineLegacyAdmissionMatrixTest.provider denial matrix*' --no-daemon --console=plain
+BUILD FAILED in 12s; unavailable/false/HEALTHY expected:<RELEASED> but was:<ADVANCE_PENDING>
+
+# Sweep-discovered crash continuity: raw legacy inclusion alone was insufficient:
+./gradlew :app:testDebugUnitTest --tests '*EngineLegacyAdmissionMatrixTest.legacy census retains*' --no-daemon --console=plain
+BUILD FAILED in 10s; expected recoverable owners:<[31]> but was:<[]>
+```
+
+The migrated-provenance matrix also caught a second-restart non-quota classification loss
+(`RECOVERY_REQUIRED` expected, `CLOSED` observed). Validation now consumes immutable advance
+provenance rather than forgetting that history when the current phase becomes recovery-required.
+
+Final targeted run of `EngineLegacyAdmissionMatrixTest`, `EngineQuotaRecoveryRedTest` and
+`EngineJourneyConsumerOracleTest`: `BUILD SUCCESSFUL in 13s`, all 121 tests passed. Its XML output
+records all ten 30-case entrance rows, 49 provider-denial cases, 12 migrated crash cuts and 36
+local migrated-provenance cases. No fallback chain was added: the old mixed recovery boundary was
+split into local classification and admitted convergence, with one shared authority validator.
+Architecture cell and ownership remain unchanged; there is no schema, Binder, provider or device
+change. The independent original reviewer still owns the verdict on the new exact commit.
+
+Final full host gate for this re-entry (same worktree/JBR/SDK; Git/purity from repository root):
+
+```text
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:lintDebug --no-daemon --console=plain
+BUILD SUCCESSFUL in 29s; 73 suites, 678 tests, 0 failures, 0 errors, 0 skipped.
+./scripts/check-debug-only-collector.sh apps/cellrebel-auto/app --apk apps/cellrebel-auto/app/build/outputs/apk/release/app-release.apk
+ok: debug-only collector boundary holds (+ release APK scanned)
+git diff --check: exit 0
+Debug SHA-256:   acea8ff3fc0c16d16c6cef5f7069c1a95e899e14abd8ae60754237595bfdeb89
+Release SHA-256: dc3692420780879dadab589ce15d901f01a329fd89c074fa3484dd551f6fd761
+```
+
+Quality-gate disposition remains **host implementation ready for independent re-review**, not
+feature closure or self-approval. No device/emulator command was run. Required exact-build device
+evidence remains unexecuted under the explicit freeze; no acceptance criterion was waived. No
+root media artifacts or UI/design changes were added, and the repository-specific Clowder check
+scripts remain absent. Existing production/test commit anchors were not rewritten.

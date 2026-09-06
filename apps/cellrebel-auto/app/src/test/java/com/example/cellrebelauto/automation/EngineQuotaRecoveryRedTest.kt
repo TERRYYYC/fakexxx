@@ -64,6 +64,8 @@ class EngineQuotaRecoveryRedTest {
 
     private val advanceReplays = mutableListOf<CompleteAndAdvanceRequestV1>()
     private val releaseAttempts = mutableListOf<Long>()
+    private var providerExhausted = false
+    private var discoverCalls = 0
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = anchorItemId, advancedToItemId = "item-after-9z",
         scheduleVersionAfter = anchorVersion + 1, effectiveIntentHash = "eff-quota-recovery",
@@ -77,15 +79,19 @@ class EngineQuotaRecoveryRedTest {
             releaseAttempts += attemptId
             return ApplyOutcome("RELEASED", false)
         }
-        override fun discover(): CapabilitySnapshotV1? = CapabilitySnapshotV1(
+        override fun discover(): CapabilitySnapshotV1? {
+            discoverCalls++
+            return CapabilitySnapshotV1(
             serviceVersion = "fake-1.0",
             supportedModeWires = listOf(io.github.terryyyc.fakexxx.contract.v1.DeliveryModeV1.SYSTEM_MOCK.wire),
             supportedVerificationLevelWires = listOf(io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire),
             continuityCoverageWire = io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1.FULL.wire,
             environmentRevision = 7L,
             profileRefs = listOf("p"), scheduleRefs = listOf("s"),
-            currentScheduleId = anchorScheduleId, currentItemId = anchorItemId, scheduleVersion = anchorVersion, exhausted = false
-        )
+            currentScheduleId = anchorScheduleId, currentItemId = anchorItemId,
+            scheduleVersion = anchorVersion + if (providerExhausted) 1 else 0, exhausted = providerExhausted
+            )
+        }
         override fun preflight(intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): PreflightReportV1? =
             PreflightReportV1(
                 acceptedIntentHash = requestDigest,
@@ -335,6 +341,22 @@ class EngineQuotaRecoveryRedTest {
         val (planId, _) = seedCrashedAt("RELEASED")
         db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET leaseId = 'foreign-lease'")
         assertLegacyRejected(planId, "RELEASE_INDEX_CONFLICT")
+    }
+
+    @Test fun `exhausted legacy missing authority is atomically quarantined before discovery`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        providerExhausted = true
+        db.openHelper.writableDatabase.execSQL("DELETE FROM release_receipts")
+        assertLegacyRejected(planId, "RELEASE_RECEIPT_MISSING")
+        assertEquals("invalid local history needs no provider read", 0, discoverCalls)
+    }
+
+    @Test fun `exhausted legacy malformed authority is atomically quarantined before discovery`() = runTest {
+        val (planId, _) = seedCrashedAt("RELEASED")
+        providerExhausted = true
+        db.openHelper.writableDatabase.execSQL("UPDATE release_receipts SET leaseId = 'foreign-lease'")
+        assertLegacyRejected(planId, "RELEASE_INDEX_CONFLICT")
+        assertEquals("invalid local history needs no provider read", 0, discoverCalls)
     }
 
     @Test fun `legacy lease-only release index rejects before provider effects`() = runTest {
