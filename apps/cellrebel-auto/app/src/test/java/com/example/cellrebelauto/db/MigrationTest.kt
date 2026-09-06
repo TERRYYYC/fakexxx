@@ -98,7 +98,8 @@ class MigrationTest {
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
             .addMigrations(
-                AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6
+                AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
+                MIGRATION_6_7, MIGRATION_7_8
             )
             .build()
 

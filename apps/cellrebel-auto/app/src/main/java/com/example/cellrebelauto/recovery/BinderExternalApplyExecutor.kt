@@ -195,15 +195,28 @@ class BinderExternalApplyExecutor(
     override fun completeAndAdvance(
         request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
         expectedIntentHash: String
-    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? {
-        val api = remote ?: return null
+    ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? =
+        (completeAndAdvanceOutcome(request, expectedIntentHash) as? CompleteAndAdvanceOutcome.Receipt)?.value
+
+    override fun completeAndAdvanceOutcome(
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String
+    ): CompleteAndAdvanceOutcome = completeAndAdvanceTyped(request, expectedIntentHash)
+
+    private fun completeAndAdvanceTyped(
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String
+    ): CompleteAndAdvanceOutcome {
+        val api = remote ?: return CompleteAndAdvanceOutcome.Failure("PROVIDER_NOT_BOUND")
         return try {
             when (val v = ContractResponseValidator.validateCompleteAndAdvance(api.completeAndAdvance(request), expectedIntentHash, request.requestDigest, request.idempotencyKey)) {
-                is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
-                is ContractResponseValidator.ValidatedContractResponse.Failure -> null
+                is ContractResponseValidator.ValidatedContractResponse.Success ->
+                    CompleteAndAdvanceOutcome.Receipt(v.payload)
+                is ContractResponseValidator.ValidatedContractResponse.Failure ->
+                    CompleteAndAdvanceOutcome.Failure(v.typedOutcome)
             }
         } catch (e: Exception) {
-            null
+            CompleteAndAdvanceOutcome.Failure("PROVIDER_TRANSPORT_FAILURE")
         }
     }
 }

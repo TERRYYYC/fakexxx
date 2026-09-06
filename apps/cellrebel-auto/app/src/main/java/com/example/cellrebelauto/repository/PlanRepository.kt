@@ -1,6 +1,12 @@
 package com.example.cellrebelauto.repository
 
 import androidx.room.withTransaction
+import com.example.cellrebelauto.automation.aplus.APlusAttemptDriver
+import com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+import com.example.cellrebelauto.automation.aplus.AttemptState
+import com.example.cellrebelauto.automation.aplus.AttemptEvent
+import com.example.cellrebelauto.automation.aplus.AttemptTransitions
+import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
@@ -8,6 +14,7 @@ import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.model.RunSession
+import com.example.cellrebelauto.model.audit.AutoAuditEvent
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
 import com.example.cellrebelauto.model.ledger.UnverifiedAttemptRecord
 import com.example.cellrebelauto.model.plan.AttemptWithTask
@@ -15,8 +22,30 @@ import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.model.plan.WorklistRow
+import com.example.cellrebelauto.recovery.AdvanceReplayCarrierRow
+import com.example.cellrebelauto.recovery.AdvanceReceiptRow
+import com.example.cellrebelauto.recovery.ReleaseReceiptRow
+import com.example.cellrebelauto.recovery.ProviderReleaseHandoff
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
+import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+
+sealed interface LegacyReleaseRecovery {
+    data object NotLegacy : LegacyReleaseRecovery
+    data class Ready(val state: AttemptState) : LegacyReleaseRecovery
+    data class Rejected(val reason: String) : LegacyReleaseRecovery
+}
+
+/** Local classification only, never a capability to advance or dispatch provider work. */
+sealed interface LegacyReleaseValidation {
+    data object NotLegacy : LegacyReleaseValidation
+    data class Valid(val reconcileLegacyRelease: Boolean) : LegacyReleaseValidation
+    data class Rejected(val reason: String) : LegacyReleaseValidation
+}
 
 /**
  * Plan-level repository (O1–O4 data owner). Wraps the plan/task/attempt/session
@@ -26,6 +55,25 @@ import kotlinx.coroutines.flow.combine
  * # 并承载成功收尾事务（INV-3）：尝试行 + 守卫式任务自增原子完成，幂等
  */
 class PlanRepository(private val db: AppDatabase) {
+
+    /**
+     * A derived, one-shot #97 proof. Durable session/attempt/receipt rows remain the truth owners;
+     * this value only binds the exact snapshot that [confirmSupersedingImport] must re-read.
+     */
+    data class SupersessionStopProof(
+        val requestId: String,
+        val planId: Long,
+        val sessionId: Long,
+        val sessionStartedAt: Long,
+        val evidenceDigest: String
+    )
+
+    sealed interface SupersessionStopVerification {
+        data class Verified(val proof: SupersessionStopProof) : SupersessionStopVerification
+        data class NeedsConvergence(val reason: String) : SupersessionStopVerification
+        data class Blocked(val reason: String) : SupersessionStopVerification
+        data object StalePlan : SupersessionStopVerification
+    }
 
     // ---- Reads ----
 
@@ -215,6 +263,330 @@ class PlanRepository(private val db: AppDatabase) {
         }
     )
 
+    /** The only durable path that replaces an unfinished plan after explicit UI confirmation. */
+    sealed interface SupersedingImportResult {
+        data class Imported(val planId: Long) : SupersedingImportResult
+        data class ActiveSession(val sessionId: Long) : SupersedingImportResult
+        data class StopVerificationRequired(val sessionId: Long) : SupersedingImportResult
+        data object StaleStopProof : SupersedingImportResult
+        data object StalePlan : SupersedingImportResult
+    }
+
+    /** Verifies the complete durable attempt shape before stopping a plan for replacement. */
+    suspend fun verifyAndStopForSupersession(
+        requestId: String,
+        expectedPlanId: Long,
+        expectedSessionId: Long,
+        stoppedAt: Long
+    ): SupersessionStopVerification = db.withTransaction {
+        if (requestId.isBlank()) {
+            return@withTransaction SupersessionStopVerification.Blocked("REQUEST_ID_MISSING")
+        }
+        if (db.planDao().getSelectablePlanById(expectedPlanId) == null) {
+            return@withTransaction SupersessionStopVerification.StalePlan
+        }
+        val session = db.runSessionDao().getById(expectedSessionId)
+            ?: return@withTransaction SupersessionStopVerification.Blocked("SESSION_MISSING")
+        if (session.planId != expectedPlanId) {
+            return@withTransaction SupersessionStopVerification.Blocked("SESSION_PLAN_MISMATCH")
+        }
+        val attempts = db.testAttemptDao().getAttemptsForPlan(expectedPlanId)
+        val classifications = attempts.map { classifySupersessionStopAttempt(it) }
+        classifications.filterIsInstance<StopAttemptEvidence.Blocked>().firstOrNull()?.let {
+            return@withTransaction SupersessionStopVerification.Blocked(it.reason)
+        }
+        classifications.filterIsInstance<StopAttemptEvidence.NeedsConvergence>().firstOrNull()?.let {
+            return@withTransaction SupersessionStopVerification.NeedsConvergence(it.reason)
+        }
+        classifications.filterIsInstance<StopAttemptEvidence.Safe>().filter { it.interrupt }.forEach {
+            db.testAttemptDao().markInterruptedIfNonTerminal(it.attemptId, stoppedAt)
+        }
+        if (session.status in setOf("starting", "running", "recovering", "paused")) {
+            check(db.runSessionDao().stopForSupersession(expectedSessionId, stoppedAt) == 1) {
+                "supersession stop lost its session owner"
+            }
+        } else if (session.status != "stopped") {
+            return@withTransaction SupersessionStopVerification.Blocked("SESSION_NOT_STOPPABLE:${session.status}")
+        }
+        val stopped = requireNotNull(db.runSessionDao().getById(expectedSessionId))
+        val digest = requireNotNull(
+            readSupersessionStopEvidenceDigest(expectedPlanId, stopped, requestId)
+        )
+        SupersessionStopVerification.Verified(
+            SupersessionStopProof(
+                requestId = requestId,
+                planId = expectedPlanId,
+                sessionId = stopped.id,
+                sessionStartedAt = stopped.startedAt,
+                evidenceDigest = digest
+            )
+        )
+    }
+
+    private sealed interface StopAttemptEvidence {
+        data class Safe(val attemptId: Long, val interrupt: Boolean, val line: String) : StopAttemptEvidence
+        data class NeedsConvergence(val reason: String) : StopAttemptEvidence
+        data class Blocked(val reason: String) : StopAttemptEvidence
+    }
+
+    /**
+     * Classifies only durable Auto-owned rows. A generic terminal projection or bare CLOSED phase
+     * never proves an external effect safe; lease, release, advance and decision carriers must form
+     * one exact terminal shape. CREATED is locally interruptible only before every effect carrier.
+     */
+    private suspend fun classifySupersessionStopAttempt(
+        attempt: com.example.cellrebelauto.model.plan.TestAttempt
+    ): StopAttemptEvidence {
+        val apply = db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attempt.id))
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
+        val releaseByKey = db.releaseReceiptDao().byKey(releaseKey)
+        val releaseByLease = attempt.aplusLeaseId?.let { db.releaseReceiptDao().byLease(it) }
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attempt.id)
+        val advanceReceipt = db.advanceReceiptDao().byAttempt(attempt.id)
+        val trusted = db.trustedQuotaDao().getByAttempt(attempt.id)
+        val unverified = db.unverifiedAttemptRecordDao().getByAttempt(attempt.id)
+        val audits = db.auditEventDao().forAttempt(attempt.id)
+        val executions = db.attemptExecutionDao().forAttempt(attempt.id)
+        val locallyInterruptible = attempt.status in setOf("starting", "running")
+
+        if (attempt.aplusState == null) {
+            if (attempt.aplusLeaseId != null || apply != null || releaseByKey != null || carrier != null ||
+                advanceReceipt != null || trusted != null || unverified != null ||
+                executions.isNotEmpty() || audits.isNotEmpty()
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_EXTERNAL_OWNER_WITHOUT_APLUS_STATE")
+            }
+            if (!locallyInterruptible && attempt.endedAt == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_LOCAL_PROJECTION_INCOMPLETE")
+            }
+            return StopAttemptEvidence.Safe(
+                attempt.id,
+                interrupt = locallyInterruptible,
+                line = "${attempt.id}|${attempt.taskId}|${attempt.runSessionId}|legacy-local|" +
+                    "${attempt.status}|${attempt.endedAt}"
+            )
+        }
+
+        val noEffectCreated = attempt.aplusState == AttemptState.CREATED.name &&
+            attempt.aplusLeaseId == null && attempt.currentExecutionId == null && apply == null &&
+            releaseByKey == null && carrier == null && advanceReceipt == null && trusted == null &&
+            unverified == null && executions.isEmpty() && audits.isEmpty()
+        if (noEffectCreated) {
+            if (!locallyInterruptible && attempt.endedAt == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_CREATED_PROJECTION_INCOMPLETE")
+            }
+            return StopAttemptEvidence.Safe(
+                attempt.id,
+                interrupt = locallyInterruptible,
+                line = "${attempt.id}|${attempt.taskId}|${attempt.runSessionId}|created-no-effect|" +
+                    "${attempt.status}|${attempt.endedAt}|${attempt.aplusAnchorScheduleId}|" +
+                    "${attempt.aplusAnchorItemId}|${attempt.aplusAnchorVersion}"
+            )
+        }
+        if (attempt.aplusState == AttemptState.CREATED.name) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_CREATED_EXTERNAL_EFFECT_UNKNOWN")
+        }
+        if (attempt.aplusState != AttemptState.CLOSED.name) {
+            return StopAttemptEvidence.NeedsConvergence(
+                "ATTEMPT_${attempt.id}_UNRESOLVED_APLUS:${attempt.aplusState}"
+            )
+        }
+        if (attempt.status in setOf("starting", "running") || attempt.endedAt == null) {
+            return StopAttemptEvidence.NeedsConvergence("ATTEMPT_${attempt.id}_CLOSED_PROJECTION_NOT_TERMINAL")
+        }
+        if (trusted != null && (unverified != null || trusted.taskId != attempt.taskId)) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_DECISION_CARRIER_CONFLICT")
+        }
+
+        val lease = attempt.aplusLeaseId
+        if (lease == null) {
+            if (attempt.currentExecutionId != null || apply != null || releaseByKey != null ||
+                carrier != null || advanceReceipt != null || trusted != null || unverified != null ||
+                executions.isNotEmpty() || audits.isNotEmpty()
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_CLOSED_EXTERNAL_EFFECT_UNKNOWN")
+            }
+        } else {
+            if (releaseByKey == null || releaseByLease == null || releaseByKey != releaseByLease ||
+                db.releaseReceiptDao().countForLease(lease) != 1 || releaseByKey.leaseId != lease ||
+                releaseByKey.releaseDigest != APlusOperationIdentity.releaseDigest(lease) ||
+                releaseByKey.resultOutcome != "RELEASED"
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_RELEASE_AUTHORITY_INVALID")
+            }
+            if (trusted == null && unverified == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_DECISION_CARRIER_MISSING")
+            }
+            if (apply != null && (apply.resultOutcome != "APPLIED" || apply.leaseId != lease)) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_APPLY_AUTHORITY_INVALID")
+            }
+        }
+
+        if (unverified != null && (carrier != null || advanceReceipt != null)) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_UNVERIFIED_ADVANCE_CONFLICT")
+        }
+        var trustedTask: LocationTask? = null
+        var trustedOrdinal: Int? = null
+        if (trusted != null) {
+            val task = db.locationTaskDao().getTaskById(attempt.taskId)
+                ?: return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_TRUSTED_TASK_MISSING")
+            val entries = db.trustedQuotaDao().entriesForTask(attempt.taskId)
+            val ordinal = entries.indexOfFirst { it.attemptId == attempt.id } + 1
+            if (ordinal <= 0) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_TRUSTED_LEDGER_INDEX_MISSING")
+            }
+            if (ordinal > task.requiredSuccesses) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_TRUSTED_QUOTA_OVERFLOW")
+            }
+            trustedTask = task
+            trustedOrdinal = ordinal
+            if (ordinal == task.requiredSuccesses && carrier == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_REQUIRED_AT_QUOTA")
+            }
+            if (ordinal < task.requiredSuccesses && (carrier != null || advanceReceipt != null)) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_UNEXPECTED_BELOW_QUOTA")
+            }
+        }
+
+        if (advanceReceipt != null && carrier == null) {
+            return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_RECEIPT_WITHOUT_CARRIER")
+        }
+        if (carrier != null) {
+            val request = carrier.toAdvanceRequest()
+            if (CanonicalAdvanceDigestV1.compute(request) != request.requestDigest ||
+                carrier.releaseIdempotencyKey != releaseKey || carrier.releaseLeaseId != lease ||
+                carrier.releaseDigest != releaseByKey?.releaseDigest || request.leaseId != lease ||
+                request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id) ||
+                request.expectedScheduleId != attempt.aplusAnchorScheduleId ||
+                request.expectedCurrentItemId != attempt.aplusAnchorItemId ||
+                request.expectedScheduleVersion != attempt.aplusAnchorVersion ||
+                request.completionProof.scheduleItemId != attempt.aplusAnchorItemId ||
+                request.completionProof.quotaRequired != trustedTask?.requiredSuccesses ||
+                request.completionProof.trustedSuccessCount != trustedOrdinal ||
+                request.completionProof.ledgerRef != "ledger-${attempt.id}" ||
+                request.callerProtocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_CARRIER_INVALID")
+            }
+            if (advanceReceipt == null) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_NOT_VERIFIED")
+            }
+            val receipt = advanceReceipt.toAdvanceReceipt()
+            if (advanceReceipt.idempotencyKey != request.idempotencyKey ||
+                advanceReceipt.requestDigest != request.requestDigest ||
+                !CanonicalAdvanceReceiptDigestV1.verify(
+                    receipt,
+                    advanceReceipt.requestDigest,
+                    advanceReceipt.idempotencyKey
+                )
+            ) {
+                return StopAttemptEvidence.Blocked("ATTEMPT_${attempt.id}_ADVANCE_RECEIPT_INVALID")
+            }
+        }
+
+        val line = buildString {
+            append(attempt.id).append('|').append(attempt.taskId).append('|')
+            append(attempt.runSessionId).append('|').append(attempt.status).append('|')
+            append(attempt.endedAt).append('|').append(attempt.aplusState).append('|')
+            append(lease).append('|').append(apply).append('|').append(releaseByKey).append('|')
+            append(carrier).append('|').append(advanceReceipt).append('|')
+            append(trusted).append('|').append(unverified).append('|')
+            append(executions.joinToString(";")).append('|').append(audits.joinToString(";"))
+        }
+        return StopAttemptEvidence.Safe(attempt.id, interrupt = false, line = line)
+    }
+
+    private suspend fun readSupersessionStopEvidenceDigest(
+        planId: Long,
+        session: RunSession,
+        requestId: String
+    ): String? {
+        if (session.planId != planId || session.status != "stopped" || session.endedAt == null) return null
+        val attempts = db.testAttemptDao().getAttemptsForPlan(planId)
+        val evidence = attempts.map { classifySupersessionStopAttempt(it) }
+        if (evidence.any {
+                it is StopAttemptEvidence.Blocked || it is StopAttemptEvidence.NeedsConvergence
+            }
+        ) return null
+        val taskLines = db.locationTaskDao().getTasksForPlan(planId).joinToString(";") {
+            "${it.id}|${it.csvRow}|${it.status}|${it.requiredSuccesses}|${it.completedSuccesses}"
+        }
+        val attemptLines = evidence.filterIsInstance<StopAttemptEvidence.Safe>()
+            .sortedBy { it.attemptId }
+            .joinToString(";") { it.line }
+        val preimage = listOf(
+            "stop-proof-v1", requestId, planId.toString(), session.id.toString(), session.startedAt.toString(),
+            session.endedAt.toString(), session.status, session.totalCycles.toString(), taskLines, attemptLines
+        ).joinToString("|")
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(preimage.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * #97 replacement boundary. The old plan and all descendants are retained. This transaction
+     * accepts only the proposal's still-current active plan, refuses a recoverable session, inserts
+     * the successor, then links the old row to it. A cancellation or parse failure never calls here.
+     */
+    suspend fun confirmSupersedingImport(
+        expectedOldPlanId: Long,
+        sourceFileName: String,
+        globalBufferSeconds: Int,
+        rows: List<WorklistRow>,
+        importedAt: Long,
+        supersededAt: Long,
+        stopProof: SupersessionStopProof? = null
+    ): SupersedingImportResult = db.withTransaction {
+        val activePlan = db.planDao().getLatestPlan()
+            ?: return@withTransaction SupersedingImportResult.StalePlan
+        if (activePlan.id != expectedOldPlanId || activePlan.supersededAt != null) {
+            return@withTransaction SupersedingImportResult.StalePlan
+        }
+        db.runSessionDao().findActiveRunningSession(expectedOldPlanId)?.let {
+            return@withTransaction SupersedingImportResult.ActiveSession(it.id)
+        }
+        val latestSession = db.runSessionDao().getLatestForPlan(expectedOldPlanId)
+        if (latestSession != null) {
+            val proof = stopProof
+                ?: return@withTransaction SupersedingImportResult.StopVerificationRequired(latestSession.id)
+            if (proof.planId != expectedOldPlanId || proof.sessionId != latestSession.id ||
+                proof.sessionStartedAt != latestSession.startedAt || proof.requestId.isBlank() ||
+                readSupersessionStopEvidenceDigest(
+                    expectedOldPlanId,
+                    latestSession,
+                    proof.requestId
+                ) != proof.evidenceDigest
+            ) {
+                return@withTransaction SupersedingImportResult.StaleStopProof
+            }
+        } else if (stopProof != null) {
+            return@withTransaction SupersedingImportResult.StaleStopProof
+        }
+        val successorId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = sourceFileName,
+                importedAt = importedAt,
+                globalBufferSeconds = globalBufferSeconds,
+                totalRows = rows.size,
+                totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses }
+            ),
+            rows.map {
+                LocationTask(
+                    planId = 0,
+                    csvRow = it.csvRow,
+                    longitude = it.longitude,
+                    latitude = it.latitude,
+                    priority = it.priority,
+                    requiredSuccesses = it.requiredSuccesses
+                )
+            }
+        )
+        check(db.planDao().markSuperseded(expectedOldPlanId, successorId, supersededAt) == 1) {
+            "superseding import lost its active-plan owner"
+        }
+        SupersedingImportResult.Imported(successorId)
+    }
+
     // ---- Recovery (INV-9 / O4) ----
 
     suspend fun markNonTerminalInterrupted(nowMs: Long): Int =
@@ -262,9 +634,31 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markAplusState(attemptId: Long, aplusState: String) =
         db.testAttemptDao().markAplusState(attemptId, aplusState)
 
-    /** Atomically mark RECOVERY_REQUIRED with durable typed reason (Sol R2 P1-3). */
-    suspend fun markRecoveryRequired(attemptId: Long, reason: String) =
+    /**
+     * Persist a recovery-required fact as one transaction: the Attempt remains the state owner,
+     * while the append-only audit row records the same typed reason. Neither durable half may be
+     * observed on its own after this call returns.
+     */
+    suspend fun markRecoveryRequired(
+        attemptId: Long,
+        reason: String,
+        nowMs: Long = System.currentTimeMillis()
+    ) = db.withTransaction {
+        val previous = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+            "cannot mark missing attempt $attemptId recovery-required"
+        }
         db.testAttemptDao().markRecoveryRequired(attemptId, reason)
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = db.auditEventDao().count().toLong() + 1,
+                attemptId = attemptId,
+                correlationRef = null,
+                eventType = "RECOVERY_REQUIRED",
+                payloadDigest = "${previous.aplusState ?: "null"}->RECOVERY_REQUIRED[$reason]",
+                recordedAt = nowMs
+            )
+        )
+    }
 
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
         db.testAttemptDao().markAplusLease(attemptId, leaseId)
@@ -431,6 +825,399 @@ class PlanRepository(private val db: AppDatabase) {
 
     suspend fun getUnverifiedRecord(attemptId: Long): UnverifiedAttemptRecord? =
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
+
+    /**
+     * Runs before session/cardinality/provider admission. Invalid history gets a durable local
+     * rejection; healthy history is strictly unchanged. Convergence must validate again, not
+     * consume this classification as an authority token after a suspension or provider read.
+     */
+    suspend fun validateLegacyRelease(attemptId: Long, recordedAt: Long): LegacyReleaseValidation =
+        db.withTransaction {
+            validateLegacyReleaseOwner(requireNotNull(db.testAttemptDao().getAttemptById(attemptId)), recordedAt)
+        }
+
+    private suspend fun validateLegacyReleaseOwner(attempt: TestAttempt, recordedAt: Long): LegacyReleaseValidation {
+        val releasePhase = attempt.aplusState in setOf("RELEASED", "RECOVERY_REQUIRED", "RELEASE_PENDING")
+        val migratedAdvancePhase = attempt.aplusState in setOf("ADVANCE_PENDING", "ADVANCE_OBSERVING", "ADVANCE_STATE_READBACK")
+        if (!releasePhase && !migratedAdvancePhase) return LegacyReleaseValidation.NotLegacy
+        val audit = db.auditEventDao().forAttempt(attempt.id)
+        val legacyHistory = attempt.aplusState == "RELEASED" ||
+            audit.any { it.eventType == "RECOVERY_REQUIRED" &&
+                it.payloadDigest.startsWith("RELEASED->RECOVERY_REQUIRED[") }
+        if (!legacyHistory) return LegacyReleaseValidation.NotLegacy
+        // Once an advance phase was durably observed, projecting RECOVERY_REQUIRED cannot erase
+        // that fact and later reclassify an impossible non-quota advance as a healthy release.
+        val hadAdvancePhase = migratedAdvancePhase || audit.any {
+            it.payloadDigest.startsWith("ADVANCE_") ||
+                (it.eventType == "RELEASE_RECEIPT" && it.payloadDigest.startsWith("RELEASE_PENDING->ADVANCE_PENDING["))
+        }
+        val failure = legacyReleaseAuthorityFailure(attempt, hadAdvancePhase)
+            ?: return LegacyReleaseValidation.Valid(reconcileLegacyRelease = releasePhase)
+        val reason = "LEGACY_RELEASED_AUTHORITY:$failure"
+        if (attempt.aplusState != "RECOVERY_REQUIRED" || attempt.failureReason != reason) {
+            markRecoveryRequired(attempt.id, reason, recordedAt)
+        }
+        return LegacyReleaseValidation.Rejected(reason)
+    }
+
+    /**
+     * Legacy RELEASED is historical external-effect provenance, never permission for a fresh
+     * release. Validate its existing release/request tuple before any owner change. The original
+     * RELEASED audit source keeps this quarantine sticky across subsequent RECOVERY_REQUIRED runs.
+     */
+    suspend fun recoverLegacyRelease(attemptId: Long, recordedAt: Long): LegacyReleaseRecovery =
+        db.withTransaction {
+            val attempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId))
+            when (val validation = validateLegacyReleaseOwner(attempt, recordedAt)) {
+                LegacyReleaseValidation.NotLegacy -> return@withTransaction LegacyReleaseRecovery.NotLegacy
+                is LegacyReleaseValidation.Rejected -> return@withTransaction LegacyReleaseRecovery.Rejected(validation.reason)
+                is LegacyReleaseValidation.Valid -> {
+                    // The legacy source remains relevant for validation/census after migration,
+                    // but later ADVANCE phases must resume their own reducer path, never release.
+                    if (!validation.reconcileLegacyRelease) return@withTransaction LegacyReleaseRecovery.NotLegacy
+                }
+            }
+            val trusted = db.trustedQuotaDao().getByAttempt(attemptId)
+            val task = requireNotNull(db.locationTaskDao().getTaskById(attempt.taskId))
+            val route = when {
+                trusted == null -> ReleaseReceiptRoute.NOT_COMMITTED
+                trustedCountForTask(attempt.taskId) < task.requiredSuccesses -> ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA
+                else -> ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED
+            }
+            val release = requireNotNull(db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(attemptId)))
+            // RELEASED is outside the frozen reducer. Record an explicit owner recovery fact,
+            // then consume its legal RECONCILE edge, all in this same owner transaction.
+            markRecoveryRequired(attemptId, "LEGACY_RELEASED_RECONCILE", recordedAt)
+            val next = APlusAttemptDriver(db.auditEventDao()) { recordedAt }.driveTransition(
+                attemptId, AttemptState.RECOVERY_REQUIRED, AttemptEvent.RECONCILE)
+            check(next == AttemptState.RELEASE_PENDING)
+            check(db.testAttemptDao().compareAndSetAplusState(attemptId, "RECOVERY_REQUIRED", next.name) == 1)
+            LegacyReleaseRecovery.Ready(commitReleaseReceipt(
+                attemptId,
+                ProviderReleaseHandoff(release.idempotencyKey, release.leaseId, release.releaseDigest,
+                    release.resultOutcome, release.createdAt, alreadyDurable = true),
+                route,
+                // Quota requests were validated above and must already exist; this value can
+                // never build a request. No recovery clock is consulted for historical identity.
+                verifiedAtElapsedRealtimeMs = 0,
+                recordedAt = recordedAt
+            ))
+        }
+
+    private suspend fun legacyReleaseAuthorityFailure(attempt: TestAttempt, hadAdvancePhase: Boolean): String? {
+        val lease = attempt.aplusLeaseId?.takeIf { it.isNotBlank() } ?: return "LEASE_MISSING"
+        val key = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
+        val byKey = db.releaseReceiptDao().byKey(key)
+        val byLease = db.releaseReceiptDao().byLease(lease)
+        if (byKey == null && byLease == null) return "RELEASE_RECEIPT_MISSING"
+        if (byKey == null || byLease == null || byKey != byLease ||
+            db.releaseReceiptDao().countForLease(lease) != 1) return "RELEASE_INDEX_CONFLICT"
+        if (byKey.leaseId != lease || byKey.releaseDigest != APlusOperationIdentity.releaseDigest(lease) ||
+            byKey.resultOutcome != "RELEASED") return "RELEASE_RECEIPT_MISMATCH"
+        val trusted = db.trustedQuotaDao().getByAttempt(attempt.id)
+        val negative = db.unverifiedAttemptRecordDao().getByAttempt(attempt.id)
+        if (trusted != null && (negative != null || trusted.taskId != attempt.taskId)) return "TRUST_CARRIER_CONFLICT"
+        if (trusted == null && negative == null) return "DECISION_CARRIER_MISSING"
+        val task = db.locationTaskDao().getTaskById(attempt.taskId) ?: return "TASK_MISSING"
+        val count = trustedCountForTask(attempt.taskId)
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attempt.id)
+        if (trusted == null || count < task.requiredSuccesses) {
+            if (hadAdvancePhase) {
+                return "NON_QUOTA_ADVANCE_STATE"
+            }
+            return if (carrier != null || db.advanceReceiptDao().byAttempt(attempt.id) != null)
+                "NON_QUOTA_ADVANCE_CARRIER" else null
+        }
+        if (carrier == null) return "ADVANCE_CARRIER_MISSING"
+        val request = try {
+            readAdvanceReplayRequest(attempt.id)
+        } catch (_: IllegalStateException) { return "ADVANCE_CARRIER_INVALID" }
+        if (request == null || carrier.releaseIdempotencyKey != key || request.leaseId != lease ||
+            request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id) ||
+            request.expectedScheduleId != attempt.aplusAnchorScheduleId ||
+            request.expectedCurrentItemId != attempt.aplusAnchorItemId ||
+            request.expectedScheduleVersion != attempt.aplusAnchorVersion ||
+            request.completionProof.scheduleItemId != attempt.aplusAnchorItemId ||
+            request.completionProof.quotaRequired != task.requiredSuccesses ||
+            request.completionProof.trustedSuccessCount !in task.requiredSuccesses..count ||
+            request.completionProof.ledgerRef != "ledger-${attempt.id}" ||
+            request.callerProtocolVersion != io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        ) return "ADVANCE_CARRIER_OWNER_MISMATCH"
+        try {
+            readAdvanceReceipt(attempt.id)
+        } catch (_: IllegalStateException) { return "ADVANCE_RECEIPT_INVALID" }
+        return null
+    }
+
+    /**
+     * The sole production RELEASE_RECEIPT owner boundary. Provider I/O has already completed
+     * outside Room. Release, exact quota request, legal owner transition and its audit either
+     * commit together or all roll back. Recovery never fills a historical carrier gap.
+     */
+    suspend fun commitReleaseReceipt(
+        attemptId: Long,
+        handoff: ProviderReleaseHandoff,
+        expectedRoute: ReleaseReceiptRoute,
+        verifiedAtElapsedRealtimeMs: Long,
+        recordedAt: Long
+    ): AttemptState = db.withTransaction {
+        val attempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId))
+        val current = AttemptState.valueOf(requireNotNull(attempt.aplusState))
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+        check(handoff.idempotencyKey == releaseKey && handoff.leaseId == attempt.aplusLeaseId &&
+            handoff.releaseDigest == APlusOperationIdentity.releaseDigest(handoff.leaseId) &&
+            handoff.resultOutcome == "RELEASED") { "RELEASE_HANDOFF_OWNER_MISMATCH:$attemptId" }
+        val priorRelease = db.releaseReceiptDao().byKey(releaseKey)
+        val priorByLease = db.releaseReceiptDao().byLease(handoff.leaseId)
+        check(priorRelease == priorByLease) { "RELEASE_RECEIPT_INDEX_CONFLICT:$attemptId" }
+        val trusted = db.trustedQuotaDao().getByAttempt(attemptId)
+        val negative = db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
+        check(trusted == null || (negative == null && trusted.taskId == attempt.taskId)) {
+            "RELEASE_TRUST_CARRIER_CONFLICT:$attemptId"
+        }
+        val task = requireNotNull(db.locationTaskDao().getTaskById(attempt.taskId))
+        val trustedCount = trustedCountForTask(attempt.taskId)
+        val route = when {
+            trusted == null -> ReleaseReceiptRoute.NOT_COMMITTED
+            trustedCount < task.requiredSuccesses -> ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA
+            else -> ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED
+        }
+        check(route == expectedRoute) { "RELEASE_ROUTE_CONFLICT:$attemptId:$route:$expectedRoute" }
+        val existingRequest = getAdvanceReplayRequest(attemptId)
+        if (route == ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED) {
+            // A legacy receipt without the exact request cannot prove whether advance was sent.
+            // Only an entirely new Auto release commit may mint a request using today's clock.
+            check(existingRequest != null || (priorRelease == null && !handoff.alreadyDurable)) {
+                "ADVANCE_REPLAY_CARRIER_MISSING:$attemptId"
+            }
+        } else {
+            check(existingRequest == null) { "NON_QUOTA_ADVANCE_CARRIER:$attemptId" }
+        }
+        if (current != AttemptState.RELEASE_PENDING) {
+            // A repeated handoff can observe a later phase, but cannot rewind it or emit another
+            // release event. Receipt/carrier plus the original audit must prove the first commit.
+            check(current in setOf(AttemptState.ADVANCE_PENDING, AttemptState.ADVANCE_OBSERVING,
+                AttemptState.ADVANCE_STATE_READBACK, AttemptState.CLOSED, AttemptState.RECOVERY_REQUIRED) &&
+                priorRelease != null && db.auditEventDao().forAttempt(attemptId).any {
+                    it.eventType == "RELEASE_RECEIPT" && it.payloadDigest ==
+                        "RELEASE_PENDING->${AttemptTransitions.nextAfterReleaseReceipt(AttemptState.RELEASE_PENDING, route)}[$route]"
+                }) { "RELEASE_RECEIPT_ILLEGAL_STATE:$attemptId:$current" }
+        }
+        persistReleaseReceipt(handoff.idempotencyKey, handoff.leaseId, handoff.releaseDigest,
+            handoff.resultOutcome, handoff.createdAt)
+        if (route == ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED && existingRequest == null) {
+            val scheduleId = checkNotNull(attempt.aplusAnchorScheduleId) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
+            val itemId = checkNotNull(attempt.aplusAnchorItemId) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
+            val version = checkNotNull(attempt.aplusAnchorVersion) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
+            val base = CompleteAndAdvanceRequestV1(
+                leaseId = handoff.leaseId,
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                requestDigest = "", expectedScheduleId = scheduleId,
+                expectedScheduleVersion = version, expectedCurrentItemId = itemId,
+                completionProof = CompletionProofV1(itemId, trustedCount, task.requiredSuccesses,
+                    "ledger-$attemptId", verifiedAtElapsedRealtimeMs),
+                callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+            )
+            persistAdvanceReplayCarrier(attemptId,
+                base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base)), recordedAt)
+        }
+        if (current != AttemptState.RELEASE_PENDING) return@withTransaction current
+        val next = AttemptTransitions.nextAfterReleaseReceipt(current, route)
+        check(next != current) { "RELEASE_RECEIPT_UNDEFINED_EDGE:$attemptId:$current" }
+        check(db.testAttemptDao().compareAndSetAplusState(attemptId, current.name, next.name) == 1) {
+            "RELEASE_RECEIPT_OWNER_CHANGED:$attemptId"
+        }
+        check(APlusAttemptDriver(db.auditEventDao()) { recordedAt }
+            .driveReleaseReceipt(attemptId, current, route) == next)
+        next
+    }
+
+    /** Release authority now belongs to this transaction owner, including for advance replay. */
+    suspend fun hasMatchingReleaseReceipt(key: String, lease: String, digest: String): Boolean =
+        db.withTransaction {
+            val byKey = db.releaseReceiptDao().byKey(key)
+            val byLease = db.releaseReceiptDao().byLease(lease)
+            byKey != null && byKey == byLease && byKey.leaseId == lease &&
+                byKey.releaseDigest == digest && byKey.resultOutcome == "RELEASED"
+        }
+
+    /** Mirrors the release receipt into the transaction owner DB and verifies an exact replay. */
+    suspend fun persistReleaseReceipt(
+        idempotencyKey: String,
+        leaseId: String,
+        releaseDigest: String,
+        outcome: String,
+        createdAt: Long
+    ) = db.withTransaction {
+        val row = ReleaseReceiptRow(idempotencyKey, leaseId, releaseDigest, outcome, createdAt)
+        db.releaseReceiptDao().insertIfAbsent(row)
+        val persisted = requireNotNull(db.releaseReceiptDao().byKey(idempotencyKey)) {
+            "RELEASE_RECEIPT_NOT_DURABLE:$idempotencyKey"
+        }
+        check(
+            persisted.leaseId == leaseId && persisted.releaseDigest == releaseDigest &&
+                persisted.resultOutcome == outcome
+        ) { "RELEASE_RECEIPT_CONFLICT:$idempotencyKey" }
+    }
+
+    /**
+     * #85: atomically bind an exact advance request to the already durable matching release
+     * receipt. The full request is deliberately retained, including the timestamp excluded from
+     * its canonical digest, so a recovery cannot create a timestamp-only rewrite under the same
+     * idempotency key.
+     */
+    suspend fun persistAdvanceReplayCarrier(
+        attemptId: Long,
+        request: CompleteAndAdvanceRequestV1,
+        createdAt: Long
+    ) = db.withTransaction {
+        requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+            "ADVANCE_CARRIER_ATTEMPT_MISSING:$attemptId"
+        }
+        check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
+            "ADVANCE_CARRIER_REQUEST_DIGEST_INVALID:$attemptId"
+        }
+        val releaseKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+            .releaseIdempotencyKey(attemptId)
+        val release = requireNotNull(db.releaseReceiptDao().byKey(releaseKey)) {
+            "ADVANCE_CARRIER_RELEASE_RECEIPT_MISSING:$attemptId"
+        }
+        val expectedReleaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+            .releaseDigest(request.leaseId)
+        check(
+            release.leaseId == request.leaseId &&
+                release.releaseDigest == expectedReleaseDigest &&
+                release.resultOutcome == "RELEASED"
+        ) { "ADVANCE_CARRIER_RELEASE_RECEIPT_MISMATCH:$attemptId" }
+        val row = AdvanceReplayCarrierRow(
+            attemptId = attemptId,
+            releaseIdempotencyKey = releaseKey,
+            releaseLeaseId = release.leaseId,
+            releaseDigest = release.releaseDigest,
+            leaseId = request.leaseId,
+            idempotencyKey = request.idempotencyKey,
+            requestDigest = request.requestDigest,
+            expectedScheduleId = request.expectedScheduleId,
+            expectedScheduleVersion = request.expectedScheduleVersion,
+            expectedCurrentItemId = request.expectedCurrentItemId,
+            proofScheduleItemId = request.completionProof.scheduleItemId,
+            proofTrustedSuccessCount = request.completionProof.trustedSuccessCount,
+            proofQuotaRequired = request.completionProof.quotaRequired,
+            proofLedgerRef = request.completionProof.ledgerRef,
+            proofVerifiedAtElapsedRealtimeMs = request.completionProof.verifiedAtElapsedRealtimeMs,
+            callerProtocolVersion = request.callerProtocolVersion,
+            createdAt = createdAt
+        )
+        db.advanceReplayCarrierDao().insertIfAbsent(row)
+        val persisted = requireNotNull(db.advanceReplayCarrierDao().byAttempt(attemptId)) {
+            "ADVANCE_CARRIER_NOT_DURABLE:$attemptId"
+        }
+        // createdAt is audit metadata, not request identity: same exact request may race/replay
+        // at a later wall time, while any wire-field difference is a conflict.
+        check(persisted.copy(createdAt = createdAt) == row) {
+            "ADVANCE_CARRIER_CONFLICT:$attemptId"
+        }
+    }
+
+    /** Reads and validates the exact replay request; no mutable projection is consulted. */
+    suspend fun getAdvanceReplayRequest(attemptId: Long): CompleteAndAdvanceRequestV1? =
+        db.withTransaction { readAdvanceReplayRequest(attemptId) }
+
+    // Call within the owner's transaction. Validation rejection must not throw out of a nested
+    // Room transaction: even a caught nested failure poisons the owner's subsequent audit commit.
+    private suspend fun readAdvanceReplayRequest(attemptId: Long): CompleteAndAdvanceRequestV1? {
+        val row = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return null
+        val request = row.toAdvanceRequest()
+        check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
+            "ADVANCE_CARRIER_DURABLE_DIGEST_INVALID:$attemptId"
+        }
+        val release = db.releaseReceiptDao().byKey(row.releaseIdempotencyKey)
+        check(
+            release != null && release.leaseId == row.releaseLeaseId &&
+                release.releaseDigest == row.releaseDigest && release.resultOutcome == "RELEASED" &&
+                row.releaseLeaseId == request.leaseId
+        ) { "ADVANCE_CARRIER_RELEASE_AUTHORITY_INVALID:$attemptId" }
+        return request
+    }
+
+    /** Persist a provider advance receipt before projecting any receipt-driven owner state. */
+    suspend fun persistAdvanceReceipt(
+        attemptId: Long,
+        request: CompleteAndAdvanceRequestV1,
+        receipt: AdvanceReceiptV1,
+        recordedAt: Long
+    ) = db.withTransaction {
+        val carrier = requireNotNull(db.advanceReplayCarrierDao().byAttempt(attemptId)) {
+            "ADVANCE_RECEIPT_CARRIER_MISSING:$attemptId"
+        }
+        check(carrier.toAdvanceRequest() == request) { "ADVANCE_RECEIPT_REQUEST_CONFLICT:$attemptId" }
+        check(
+            CanonicalAdvanceReceiptDigestV1.verify(
+                receipt,
+                request.requestDigest,
+                request.idempotencyKey
+            )
+        ) { "ADVANCE_RECEIPT_DIGEST_INVALID:$attemptId" }
+        val row = AdvanceReceiptRow(
+            attemptId = attemptId,
+            idempotencyKey = request.idempotencyKey,
+            requestDigest = request.requestDigest,
+            outcomeWire = receipt.outcomeWire,
+            advancedFromItemId = receipt.advancedFromItemId,
+            advancedToItemId = receipt.advancedToItemId,
+            scheduleVersionAfter = receipt.scheduleVersionAfter,
+            effectiveIntentHash = receipt.effectiveIntentHash,
+            effectiveEnvironmentRevision = receipt.effectiveEnvironmentRevision,
+            receiptDigest = receipt.receiptDigest,
+            recordedAt = recordedAt
+        )
+        db.advanceReceiptDao().insertIfAbsent(row)
+        // recordedAt describes when this process observed the receipt, not what the provider
+        // attested. A restart can replay the same immutable receipt at a later clock value.
+        val persisted = requireNotNull(db.advanceReceiptDao().byAttempt(attemptId))
+        check(persisted.copy(recordedAt = recordedAt) == row) {
+            "ADVANCE_RECEIPT_CONFLICT:$attemptId"
+        }
+    }
+
+    /** Returns only a receipt whose stored request binding still verifies. */
+    suspend fun getAdvanceReceipt(attemptId: Long): AdvanceReceiptV1? =
+        db.withTransaction { readAdvanceReceipt(attemptId) }
+
+    private suspend fun readAdvanceReceipt(attemptId: Long): AdvanceReceiptV1? {
+        val carrier = db.advanceReplayCarrierDao().byAttempt(attemptId) ?: return null
+        val row = db.advanceReceiptDao().byAttempt(attemptId) ?: return null
+        val request = carrier.toAdvanceRequest()
+        check(row.idempotencyKey == request.idempotencyKey && row.requestDigest == request.requestDigest) {
+            "ADVANCE_RECEIPT_REQUEST_BINDING_INVALID:$attemptId"
+        }
+        val receipt = row.toAdvanceReceipt()
+        check(CanonicalAdvanceReceiptDigestV1.verify(receipt, row.requestDigest, row.idempotencyKey)) {
+            "ADVANCE_RECEIPT_DURABLE_DIGEST_INVALID:$attemptId"
+        }
+        return receipt
+    }
+
+    /**
+     * #86's negative complement to a trusted mint. Replays are allowed only when the immutable
+     * typed reason and evidence digest match exactly; a conflicting pre-existing row is corruption,
+     * not a second outcome that a recovery path may overwrite.
+     */
+    suspend fun recordUnverifiedOutcome(attemptId: Long, reason: String, evidenceDigest: String) =
+        db.withTransaction {
+            val row = UnverifiedAttemptRecord(
+                attemptId = attemptId,
+                reason = reason,
+                evidenceDigest = evidenceDigest
+            )
+            db.unverifiedAttemptRecordDao().insert(row)
+            val persisted = requireNotNull(db.unverifiedAttemptRecordDao().getByAttempt(attemptId)) {
+                "unverified carrier was not durable for attempt $attemptId"
+            }
+            check(persisted.reason == reason && persisted.evidenceDigest == evidenceDigest) {
+                "UNVERIFIED_CARRIER_CONFLICT:$attemptId"
+            }
+        }
 
     /** R44 (DSF review P1-2): the trusted-count projection for the completeAndAdvance proof. */
     suspend fun trustedCountForTask(taskId: Long): Int =
@@ -658,12 +1445,47 @@ class PlanRepository(private val db: AppDatabase) {
                     evidenceDigest = ctx.execution.evidencePayloadDigest
                 )
             )
+            val persisted = requireNotNull(
+                db.unverifiedAttemptRecordDao().getByAttempt(ctx.execution.attemptId)
+            ) { "unverified carrier was not durable for attempt ${ctx.execution.attemptId}" }
+            check(
+                persisted.reason == "UNTRUSTED" &&
+                    persisted.evidenceDigest == ctx.execution.evidencePayloadDigest
+            ) {
+                "UNVERIFIED_CARRIER_CONFLICT:${ctx.execution.attemptId}"
+            }
         }
         if (attempt == null) return@withTransaction TrustDecision.FAIL
         decision
     }
 
     // ---- Session lifecycle ----
+
+    /** Durable start admission for #80; only this transaction creates a newly accepted session. */
+    sealed interface RunSessionAdmission {
+        data class Created(val sessionId: Long) : RunSessionAdmission
+        data class Existing(val sessionId: Long) : RunSessionAdmission
+        data object MissingPlan : RunSessionAdmission
+    }
+
+    suspend fun admitRunSession(planId: Long, startedAt: Long): RunSessionAdmission = db.withTransaction {
+        if (db.planDao().getSelectablePlanById(planId) == null) {
+            return@withTransaction RunSessionAdmission.MissingPlan
+        }
+        db.runSessionDao().findActiveRunningSession(planId)?.let {
+            return@withTransaction RunSessionAdmission.Existing(it.id)
+        }
+        RunSessionAdmission.Created(
+            db.runSessionDao().insert(
+                RunSession(
+                    startedAt = startedAt,
+                    status = "starting",
+                    configSnapshot = "plan:$planId",
+                    planId = planId
+                )
+            )
+        )
+    }
 
     suspend fun createSession(planId: Long, startedAt: Long): Long =
         db.runSessionDao().insert(
@@ -673,3 +1495,32 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun finishSession(sessionId: Long, status: String, endedAt: Long, totalCycles: Int) =
         db.runSessionDao().finish(sessionId, endedAt, status, totalCycles)
 }
+
+private fun AdvanceReplayCarrierRow.toAdvanceRequest(): CompleteAndAdvanceRequestV1 =
+    CompleteAndAdvanceRequestV1(
+        leaseId = leaseId,
+        idempotencyKey = idempotencyKey,
+        requestDigest = requestDigest,
+        expectedScheduleId = expectedScheduleId,
+        expectedScheduleVersion = expectedScheduleVersion,
+        expectedCurrentItemId = expectedCurrentItemId,
+        completionProof = CompletionProofV1(
+            scheduleItemId = proofScheduleItemId,
+            trustedSuccessCount = proofTrustedSuccessCount,
+            quotaRequired = proofQuotaRequired,
+            ledgerRef = proofLedgerRef,
+            verifiedAtElapsedRealtimeMs = proofVerifiedAtElapsedRealtimeMs
+        ),
+        callerProtocolVersion = callerProtocolVersion
+    )
+
+private fun AdvanceReceiptRow.toAdvanceReceipt(): AdvanceReceiptV1 =
+    AdvanceReceiptV1(
+        outcomeWire = outcomeWire,
+        advancedFromItemId = advancedFromItemId,
+        advancedToItemId = advancedToItemId,
+        scheduleVersionAfter = scheduleVersionAfter,
+        effectiveIntentHash = effectiveIntentHash,
+        effectiveEnvironmentRevision = effectiveEnvironmentRevision,
+        receiptDigest = receiptDigest
+    )

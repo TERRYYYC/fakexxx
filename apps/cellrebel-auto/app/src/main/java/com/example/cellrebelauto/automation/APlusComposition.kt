@@ -158,8 +158,21 @@ object APlusComposition {
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1? =
                 if (trusted()) rawExecutor.observe(leaseId, operationId, expectedIntentHash) else null
 
-            override fun completeAndAdvance(request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1, expectedIntentHash: String): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? =
-                if (trusted()) rawExecutor.completeAndAdvance(request, expectedIntentHash) else null
+            override fun completeAndAdvance(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+                expectedIntentHash: String
+            ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1? =
+                (completeAndAdvanceOutcome(request, expectedIntentHash) as?
+                    com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Receipt)?.value
+
+            override fun completeAndAdvanceOutcome(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+                expectedIntentHash: String
+            ): com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome =
+                if (trusted()) rawExecutor.completeAndAdvanceOutcome(request, expectedIntentHash)
+                else com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Failure(
+                    "PROVIDER_SIGNER_UNTRUSTED"
+                )
         }
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
             db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()

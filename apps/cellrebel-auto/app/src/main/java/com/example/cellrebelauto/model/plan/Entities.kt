@@ -12,8 +12,8 @@ import com.example.cellrebelauto.model.RunSession
  */
 
 /**
- * One imported CSV worklist. NO status field — plan status is a pure projection.
- * # 一次导入的 CSV 工作清单。无 status 字段——计划状态是纯投影
+ * One imported CSV worklist. Completion remains a pure task projection; a confirmed replacement
+ * records immutable archival linkage rather than deleting the worklist or its descendants.
  */
 @Entity(tableName = "location_plans")
 data class LocationPlan(
@@ -27,7 +27,11 @@ data class LocationPlan(
     // # CSV 数据行总数
     val totalRows: Int,
     // # 全部位置所需成功总数
-    val totalRequiredSuccesses: Int
+    val totalRequiredSuccesses: Int,
+    /** #97: null while selectable; non-null means history-only after a confirmed replacement. */
+    val supersededAt: Long? = null,
+    /** The successor plan created in the same replacement transaction; never rewrites history. */
+    val supersededByPlanId: Long? = null
 )
 
 /**

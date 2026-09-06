@@ -113,14 +113,17 @@ class Migration5to6Test {
                     generateSequence { if (c.moveToNext()) c.getString(0) else null }.toList()
                 }
             assertEquals(listOf("healthy-v5-marker"), sessions)
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(8, db.openHelper.readableDatabase.version)
 
-            // The identity hash after the bump is the (unchanged) committed hash — v6 is
-            // table-for-table v5, executable proof that the bump carried no schema change.
+            // The identity hash after the full production ladder is the committed v8 hash;
+            // v5→v6 itself remains table-for-table unchanged (asserted below).
             val hash = db.openHelper.readableDatabase
                 .query("SELECT identity_hash FROM room_master_table LIMIT 1")
                 .use { c -> if (c.moveToFirst()) c.getString(0) else null }
-            assertEquals(AppDatabase.V5_HEALTHY_IDENTITY_HASH, hash)
+            assertEquals(
+                JSONObject(committedSchemaJson(8).readText()).getJSONObject("database").getString("identityHash"),
+                hash
+            )
         } finally {
             db.close()
         }

@@ -33,17 +33,28 @@ interface PlanDao {
     }
 
     // # 获取最近导入的计划
-    @Query("SELECT * FROM location_plans ORDER BY importedAt DESC LIMIT 1")
+    @Query("SELECT * FROM location_plans WHERE supersededAt IS NULL ORDER BY importedAt DESC LIMIT 1")
     suspend fun getLatestPlan(): LocationPlan?
 
     // # 观察最近导入的计划（Plan 页实时刷新）
-    @Query("SELECT * FROM location_plans ORDER BY importedAt DESC LIMIT 1")
+    @Query("SELECT * FROM location_plans WHERE supersededAt IS NULL ORDER BY importedAt DESC LIMIT 1")
     fun observeLatestPlan(): Flow<LocationPlan?>
 
     @Query("SELECT * FROM location_plans WHERE id = :planId")
     suspend fun getPlanById(planId: Long): LocationPlan?
 
+    /** Admission may target only the current selectable plan, never retained archive history. */
+    @Query("SELECT * FROM location_plans WHERE id = :planId AND supersededAt IS NULL")
+    suspend fun getSelectablePlanById(planId: Long): LocationPlan?
+
     // # 更新计划的缓冲快照（仅允许计划未启动时调用，F6）
     @Query("UPDATE location_plans SET globalBufferSeconds = :seconds WHERE id = :planId")
     suspend fun updateGlobalBuffer(planId: Long, seconds: Int)
+
+    /** Archives exactly one still-selectable plan after its successor has been inserted. */
+    @Query(
+        "UPDATE location_plans SET supersededAt = :supersededAt, supersededByPlanId = :successorPlanId " +
+            "WHERE id = :planId AND supersededAt IS NULL"
+    )
+    suspend fun markSuperseded(planId: Long, successorPlanId: Long, supersededAt: Long): Int
 }

@@ -407,6 +407,7 @@ class EngineTrustedPathRedTest {
         val auditDao = db.auditEventDao()
         val executor = RecordingExternalApplyExecutor()
         var ownerStateAtAdvance: String? = null
+        var carrierDigestAtAdvance: String? = null
         val capturingExecutor = object : ExternalApplyExecutor by executor {
             override fun completeAndAdvance(
                 request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
@@ -417,8 +418,19 @@ class EngineTrustedPathRedTest {
                         .first { it.id > 77L }
                         .aplusState
                 }
+                carrierDigestAtAdvance = kotlinx.coroutines.runBlocking {
+                    db.advanceReplayCarrierDao().byAttempt(
+                        db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
+                    )?.requestDigest
+                }
                 return executor.completeAndAdvance(request, expectedIntentHash)
             }
+            override fun completeAndAdvanceOutcome(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+                expectedIntentHash: String
+            ) = com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                completeAndAdvance(request, expectedIntentHash)
+            )
         }
         val log = FakeDurableRecoveryLog()
         val backend = FakeBackend(capturingExecutor, log, SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()), FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true))
@@ -455,6 +467,16 @@ class EngineTrustedPathRedTest {
             "the durable owner must be ADVANCE_PENDING before the first completeAndAdvance call",
             "ADVANCE_PENDING",
             ownerStateAtAdvance
+        )
+        assertEquals(
+            "the exact advance request must be durable before the first provider call",
+            executor.advanceCalls.single().requestDigest,
+            carrierDigestAtAdvance
+        )
+        assertEquals(
+            "the provider advance receipt is durable before receipt-driven close",
+            executor.advanceCalls.single().requestDigest,
+            db.advanceReceiptDao().byAttempt(realAttemptId)?.requestDigest
         )
         assertEquals(
             listOf(
@@ -547,6 +569,7 @@ class EngineTrustedPathRedTest {
     fun `a successful runner without Start interaction evidence fails closed before persisting execution`() = runTest {
         val taskId = 42L
         val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
         val clock = VirtualClock()
         val runner = object : CellRebelRunner {
             override suspend fun runTest(
@@ -571,6 +594,7 @@ class EngineTrustedPathRedTest {
             runner,
             FakeGpsSetter(listOf(GpsOutcome.Active)),
             clock,
+            driver = APlusAttemptDriver(auditDao),
             backend = passingBackend()
         ).run()
 
@@ -578,7 +602,59 @@ class EngineTrustedPathRedTest {
         assertEquals("no semantic-invalid wire-1 execution row", 0, db.attemptExecutionDao().forAttempt(attempt.id).size)
         assertNull("missing Start evidence can never mint quota", db.trustedQuotaDao().getByAttempt(attempt.id))
         assertEquals(FailureReason.UNTRUSTED.name, attempt.failureReason)
+        assertEquals(
+            "CELLREBEL_RUNNING->RECOVERY_REQUIRED[MISSING_START_INTERACTION_EVIDENCE]",
+            auditDao.forAttempt(attempt.id).single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+        )
         assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `a successful runner without Start or RUNNING evidence enters direct recovery once`() = runTest {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val clock = VirtualClock()
+        val runner = object : CellRebelRunner {
+            override suspend fun runTest(
+                startedAt: Long,
+                testTimeoutMs: Long,
+                onStartInteraction: suspend () -> Unit,
+                onRunningObserved: suspend (Long) -> Unit
+            ): AttemptOutcome = AttemptOutcome.Success(
+                webScore = 8.0,
+                videoScore = 7.0,
+                runningObservedAt = clock.nowMs(),
+                startedAt = startedAt,
+                endedAt = clock.nowMs()
+            )
+        }
+
+        buildEngine(
+            planId,
+            runner,
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            driver = APlusAttemptDriver(auditDao),
+            backend = passingBackend()
+        ).run()
+
+        val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
+        val trail = auditDao.forAttempt(attempt.id)
+        assertEquals(
+            "CELLREBEL_START_PENDING->RECOVERY_REQUIRED[MISSING_START_INTERACTION_EVIDENCE]",
+            trail.single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+        )
+        assertEquals(
+            "undefined START_PENDING timeout must not be invented",
+            0,
+            trail.count { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }
+        )
+        assertEquals(
+            "direct recovery prevents a later illegal-release overwrite",
+            1,
+            trail.count { it.eventType == "RECOVERY_REQUIRED" }
+        )
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----
@@ -687,6 +763,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals("POST_OBSERVATION_UNAVAILABLE", attempt.failureReason)
+        assertEquals(
+            "absence of POST evidence is itself a durable negative outcome before release",
+            "POST_OBSERVATION_UNAVAILABLE",
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -722,6 +803,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals("COMPLETION_EVIDENCE_UNAVAILABLE", attempt.failureReason)
+        assertEquals(
+            "absence of completion evidence is itself a durable negative outcome before release",
+            "COMPLETION_EVIDENCE_UNAVAILABLE",
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -764,6 +850,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals(FailureReason.NO_RUNNING_EVIDENCE.name, attempt.failureReason)
+        assertEquals(
+            "a runner failure must have an immutable negative carrier before release",
+            FailureReason.NO_RUNNING_EVIDENCE.name,
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -808,11 +899,20 @@ class EngineTrustedPathRedTest {
             trail.single { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }.payloadDigest
         )
         assertEquals(
+            "CELLREBEL_RUNNING->RECOVERY_REQUIRED[CELLREBEL_TIMEOUT_INTERRUPTED:PRE_EXISTING_RUN]",
+            trail.single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+        )
+        assertEquals(
             "RECOVERY_REQUIRED->RELEASE_PENDING",
             trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals(FailureReason.PRE_EXISTING_RUN.name, attempt.failureReason)
+        assertEquals(
+            "pre-existing RUNNING is not disposable: persist its negative carrier before release",
+            FailureReason.PRE_EXISTING_RUN.name,
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -987,7 +1087,7 @@ class EngineTrustedPathRedTest {
 
         // The release is provider-driven + lease-bound: never re-apply; the release receipt is exact-bound.
         assertEquals("release-in-flight recovery must never re-invoke apply", 1, executor.invocationCount(applyKey(77L)))
-        val receipt = log.releaseReceiptFor("lease-77")
+        val receipt = db.releaseReceiptDao().byLease("lease-77")
         assertNotNull("the release must converge a durable receipt bound to the lease", receipt)
         assertEquals("release receipt idempotencyKey", releaseKey(77L), receipt!!.idempotencyKey)
         assertEquals("release receipt leaseId", "lease-77", receipt.leaseId)
@@ -1043,7 +1143,7 @@ class EngineTrustedPathRedTest {
 
         // DECIDING already has a durable apply → release-only, never re-applied (P1-4).
         assertEquals("a DECIDING crash must not re-invoke apply", 1, executor.invocationCount(applyKey(77L)))
-        assertNotNull("a DECIDING crash must converge a release receipt", log.releaseReceiptFor("lease-77"))
+        assertNotNull("a DECIDING crash must converge a release receipt", db.releaseReceiptDao().byLease("lease-77"))
     }
 
     // ---- R10-F4: the complete ordered §8.1 audit trail (driver no-op ⇒ RED) ----

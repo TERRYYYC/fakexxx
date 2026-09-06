@@ -101,6 +101,30 @@ interface ExternalApplyExecutor {
         request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
         expectedIntentHash: String
     ): io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1?
+
+    /**
+     * One-shot advance result. Callers that need a typed failure must use this result rather than
+     * make a second provider call or read a mutable side channel after the call returns.
+     */
+    fun completeAndAdvanceOutcome(
+        request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+        expectedIntentHash: String
+    ): CompleteAndAdvanceOutcome = CompleteAndAdvanceOutcome.fromReceipt(
+        completeAndAdvance(request, expectedIntentHash)
+    )
+}
+
+/** Bound result of exactly one complete-and-advance invocation. */
+sealed interface CompleteAndAdvanceOutcome {
+    data class Receipt(val value: io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1) :
+        CompleteAndAdvanceOutcome
+
+    data class Failure(val reason: String) : CompleteAndAdvanceOutcome
+
+    companion object {
+        fun fromReceipt(receipt: io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1?):
+            CompleteAndAdvanceOutcome = receipt?.let(::Receipt) ?: Failure("ADVANCE_NOT_PROVEN")
+    }
 }
 
 /**

@@ -31,6 +31,7 @@ import com.example.cellrebelauto.recovery.TrustedQuotaAcquirer
 import com.example.cellrebelauto.repository.PlanRepository
 import io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceReceiptDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.CanonicalAdvanceDigestV1
 import io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1
@@ -224,6 +225,23 @@ class AdvanceMatrixTest {
                     createdAt = 8500L
                 )
             )
+            val base = CompleteAndAdvanceRequestV1(
+                leaseId = leaseId,
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                requestDigest = "",
+                expectedScheduleId = anchorScheduleId,
+                expectedScheduleVersion = anchorVersion,
+                expectedCurrentItemId = anchorItemId,
+                completionProof = io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1(
+                    anchorItemId, 1, requiredSuccesses, "ledger-$attemptId", 99999L
+                ),
+                callerProtocolVersion = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+            )
+            repo.persistAdvanceReplayCarrier(
+                attemptId,
+                base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base)),
+                createdAt = 8501L
+            )
             repo.completeTaskIfQuotaReached(task.id)
         }
         return planId to task.id
@@ -408,6 +426,10 @@ class AdvanceMatrixTest {
                 val receipt = journeyExecutor.completeAndAdvance(request, expectedIntentHash) ?: return null
                 return receipt.copy(receiptDigest = "forged-${receipt.receiptDigest}")
             }
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
         }
         val (planId, _) = seedAdvanceCrash("ADVANCE_PENDING")
         buildEngine(planId, VClock(), forgedExecutor).run()
@@ -423,6 +445,10 @@ class AdvanceMatrixTest {
         val tamperedExecutor = object : ExternalApplyExecutor by journeyExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 journeyExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = journeyExecutor.observe(leaseId, operationId, expectedIntentHash)
                 return honest?.copy(acceptedIntentHash = "wrong-intent")
@@ -451,6 +477,10 @@ class AdvanceMatrixTest {
         val tamperedExecutor = object : ExternalApplyExecutor by journeyExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
                 journeyExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = journeyExecutor.observe(leaseId, operationId, expectedIntentHash)
                 return honest?.copy(environmentRevision = 999L)
