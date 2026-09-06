@@ -747,6 +747,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals("POST_OBSERVATION_UNAVAILABLE", attempt.failureReason)
+        assertEquals(
+            "absence of POST evidence is itself a durable negative outcome before release",
+            "POST_OBSERVATION_UNAVAILABLE",
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -782,6 +787,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals("COMPLETION_EVIDENCE_UNAVAILABLE", attempt.failureReason)
+        assertEquals(
+            "absence of completion evidence is itself a durable negative outcome before release",
+            "COMPLETION_EVIDENCE_UNAVAILABLE",
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -824,6 +834,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals(FailureReason.NO_RUNNING_EVIDENCE.name, attempt.failureReason)
+        assertEquals(
+            "a runner failure must have an immutable negative carrier before release",
+            FailureReason.NO_RUNNING_EVIDENCE.name,
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
@@ -877,6 +892,11 @@ class EngineTrustedPathRedTest {
         )
         val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
         assertEquals(FailureReason.PRE_EXISTING_RUN.name, attempt.failureReason)
+        assertEquals(
+            "pre-existing RUNNING is not disposable: persist its negative carrier before release",
+            FailureReason.PRE_EXISTING_RUN.name,
+            db.unverifiedAttemptRecordDao().getByAttempt(attemptId)?.reason
+        )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
         assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))

@@ -508,6 +508,27 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun getUnverifiedRecord(attemptId: Long): UnverifiedAttemptRecord? =
         db.unverifiedAttemptRecordDao().getByAttempt(attemptId)
 
+    /**
+     * #86's negative complement to a trusted mint. Replays are allowed only when the immutable
+     * typed reason and evidence digest match exactly; a conflicting pre-existing row is corruption,
+     * not a second outcome that a recovery path may overwrite.
+     */
+    suspend fun recordUnverifiedOutcome(attemptId: Long, reason: String, evidenceDigest: String) =
+        db.withTransaction {
+            val row = UnverifiedAttemptRecord(
+                attemptId = attemptId,
+                reason = reason,
+                evidenceDigest = evidenceDigest
+            )
+            db.unverifiedAttemptRecordDao().insert(row)
+            val persisted = requireNotNull(db.unverifiedAttemptRecordDao().getByAttempt(attemptId)) {
+                "unverified carrier was not durable for attempt $attemptId"
+            }
+            check(persisted.reason == reason && persisted.evidenceDigest == evidenceDigest) {
+                "UNVERIFIED_CARRIER_CONFLICT:$attemptId"
+            }
+        }
+
     /** R44 (DSF review P1-2): the trusted-count projection for the completeAndAdvance proof. */
     suspend fun trustedCountForTask(taskId: Long): Int =
         db.trustedQuotaDao().trustedCountForTask(taskId)
@@ -734,6 +755,15 @@ class PlanRepository(private val db: AppDatabase) {
                     evidenceDigest = ctx.execution.evidencePayloadDigest
                 )
             )
+            val persisted = requireNotNull(
+                db.unverifiedAttemptRecordDao().getByAttempt(ctx.execution.attemptId)
+            ) { "unverified carrier was not durable for attempt ${ctx.execution.attemptId}" }
+            check(
+                persisted.reason == "UNTRUSTED" &&
+                    persisted.evidenceDigest == ctx.execution.evidencePayloadDigest
+            ) {
+                "UNVERIFIED_CARRIER_CONFLICT:${ctx.execution.attemptId}"
+            }
         }
         if (attempt == null) return@withTransaction TrustDecision.FAIL
         decision
