@@ -302,3 +302,14 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
         // Intentionally empty — see the chronicle above.
     }
 }
+
+/**
+ * v6 → v7 (#97): add-only replacement provenance. Existing plans remain active/selectable and
+ * untouched; a future confirmed replacement fills both nullable columns in its own transaction.
+ */
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN supersededAt INTEGER")
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN supersededByPlanId INTEGER")
+    }
+}

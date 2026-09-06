@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -63,7 +64,10 @@ fun PlanScreen(
     serviceStatusLine: String? = null,
     importErrors: List<RowError>,
     importNotice: String?,
+    importProposal: ImportProposal?,
     onImport: (Uri) -> Unit,
+    onConfirmImportReplacement: () -> Unit,
+    onCancelImportReplacement: () -> Unit,
     onSetGlobalBuffer: (Int) -> Unit,
     onSetTestTimeout: (Int) -> Unit,
     onSetGpsSettle: (Int) -> Unit,
@@ -81,6 +85,26 @@ fun PlanScreen(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) onImport(uri)
+    }
+
+    importProposal?.let { proposal ->
+        AlertDialog(
+            onDismissRequest = onCancelImportReplacement,
+            title = { Text("Archive current plan and import new CSV?") },
+            text = {
+                Text(
+                    "${proposal.oldSourceFileName} stays in History with its attempts, quota, " +
+                        "receipts and audit. Import ${proposal.sourceFileName} only after the " +
+                        "current plan has safely stopped."
+                )
+            },
+            confirmButton = {
+                Button(onClick = onConfirmImportReplacement) { Text("Archive & Import") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = onCancelImportReplacement) { Text("Keep Current Plan") }
+            }
+        )
     }
 
     LazyColumn(

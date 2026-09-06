@@ -49,6 +49,7 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     val planConfig by vm.planConfig.collectAsState()
     val importErrors by vm.importErrors.collectAsState()
     val importNotice by vm.importNotice.collectAsState()
+    val importProposal by vm.importProposal.collectAsState()
     val currentTask by vm.currentTask.collectAsState()
     val cooldown by vm.cooldown.collectAsState()
     val lastFailure by vm.lastFailure.collectAsState()
@@ -68,7 +69,10 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 serviceStatusLine = serviceStatusLine,
                 importErrors = importErrors,
                 importNotice = importNotice,
+                importProposal = importProposal,
                 onImport = { vm.importCsv(it) },
+                onConfirmImportReplacement = { vm.confirmImportReplacement() },
+                onCancelImportReplacement = { vm.cancelImportReplacement() },
                 onSetGlobalBuffer = { vm.setGlobalBuffer(it) },
                 onSetTestTimeout = { vm.setTestTimeout(it) },
                 onSetGpsSettle = { vm.setGpsSettle(it) },

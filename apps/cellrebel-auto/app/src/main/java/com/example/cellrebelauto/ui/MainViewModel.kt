@@ -68,6 +68,15 @@ data class PlanUiState(
         get() = plan != null && tasks.isNotEmpty() && tasks.all { it.status == "completed" }
 }
 
+/** A validated but not-yet-durable #97 replacement proposal. */
+data class ImportProposal(
+    val expectedOldPlanId: Long,
+    val oldSourceFileName: String,
+    val sourceFileName: String,
+    val globalBufferSeconds: Int,
+    val rows: List<com.example.cellrebelauto.model.plan.WorklistRow>
+)
+
 /**
  * ViewModel for the main UI. Bridges AutomationService state
  * and provides actions for the Compose screens.
@@ -326,6 +335,10 @@ class MainViewModel @JvmOverloads constructor(
     private val _importNotice = MutableStateFlow<String?>(null)
     val importNotice: StateFlow<String?> = _importNotice
 
+    // The parsed rows remain memory-only until the operator explicitly confirms replacement.
+    private val _importProposal = MutableStateFlow<ImportProposal?>(null)
+    val importProposal: StateFlow<ImportProposal?> = _importProposal
+
     // ---- Data from repository ----
 
     // # History 页：尝试行联接任务上下文（最新在前，AC-C3）
@@ -442,13 +455,19 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     val state = planUiState.value
                     val plan = state.plan
-                    if (plan != null && state.isUnfinished) {
-                        _importNotice.value =
-                            "Current plan unfinished (${state.completedSuccesses}/${plan.totalRequiredSuccesses})"
-                        return@launch
-                    }
                     val fileName = withContext(Dispatchers.IO) { queryDisplayName(uri) }
                         ?: "worklist.csv"
+                    if (plan != null && state.isUnfinished) {
+                        _importProposal.value = ImportProposal(
+                            expectedOldPlanId = plan.id,
+                            oldSourceFileName = plan.sourceFileName,
+                            sourceFileName = fileName,
+                            globalBufferSeconds = buffer,
+                            rows = result.rows
+                        )
+                        _importNotice.value = "Review replacement before importing ${fileName}"
+                        return@launch
+                    }
                     withContext(Dispatchers.IO) {
                         planRepository.importPlan(
                             sourceFileName = fileName,
@@ -462,6 +481,43 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
         }
+    }
+
+    /** Commits a validated replacement only after the Plan screen's explicit confirmation. */
+    fun confirmImportReplacement() {
+        val proposal = _importProposal.value ?: return
+        viewModelScope.launch {
+            when (val result = withContext(Dispatchers.IO) {
+                planRepository.confirmSupersedingImport(
+                    expectedOldPlanId = proposal.expectedOldPlanId,
+                    sourceFileName = proposal.sourceFileName,
+                    globalBufferSeconds = proposal.globalBufferSeconds,
+                    rows = proposal.rows,
+                    importedAt = System.currentTimeMillis(),
+                    supersededAt = System.currentTimeMillis()
+                )
+            }) {
+                is PlanRepository.SupersedingImportResult.Imported -> {
+                    _importProposal.value = null
+                    _importNotice.value =
+                        "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+                }
+                is PlanRepository.SupersedingImportResult.ActiveSession -> {
+                    _importNotice.value =
+                        "Stop or safely finish the current plan before replacing it"
+                }
+                PlanRepository.SupersedingImportResult.StalePlan -> {
+                    _importProposal.value = null
+                    _importNotice.value = "Current plan changed; review the CSV again before replacing it"
+                }
+            }
+        }
+    }
+
+    /** Dismissing confirmation deliberately preserves the latest plan and all of its history. */
+    fun cancelImportReplacement() {
+        _importProposal.value = null
+        _importNotice.value = "Kept the current plan; no CSV was imported"
     }
 
     // # 从 SAF Uri 查询显示文件名

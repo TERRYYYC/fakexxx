@@ -216,6 +216,59 @@ class PlanRepository(private val db: AppDatabase) {
         }
     )
 
+    /** The only durable path that replaces an unfinished plan after explicit UI confirmation. */
+    sealed interface SupersedingImportResult {
+        data class Imported(val planId: Long) : SupersedingImportResult
+        data class ActiveSession(val sessionId: Long) : SupersedingImportResult
+        data object StalePlan : SupersedingImportResult
+    }
+
+    /**
+     * #97 replacement boundary. The old plan and all descendants are retained. This transaction
+     * accepts only the proposal's still-current active plan, refuses a recoverable session, inserts
+     * the successor, then links the old row to it. A cancellation or parse failure never calls here.
+     */
+    suspend fun confirmSupersedingImport(
+        expectedOldPlanId: Long,
+        sourceFileName: String,
+        globalBufferSeconds: Int,
+        rows: List<WorklistRow>,
+        importedAt: Long,
+        supersededAt: Long
+    ): SupersedingImportResult = db.withTransaction {
+        val activePlan = db.planDao().getLatestPlan()
+            ?: return@withTransaction SupersedingImportResult.StalePlan
+        if (activePlan.id != expectedOldPlanId || activePlan.supersededAt != null) {
+            return@withTransaction SupersedingImportResult.StalePlan
+        }
+        db.runSessionDao().findActiveRunningSession(expectedOldPlanId)?.let {
+            return@withTransaction SupersedingImportResult.ActiveSession(it.id)
+        }
+        val successorId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = sourceFileName,
+                importedAt = importedAt,
+                globalBufferSeconds = globalBufferSeconds,
+                totalRows = rows.size,
+                totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses }
+            ),
+            rows.map {
+                LocationTask(
+                    planId = 0,
+                    csvRow = it.csvRow,
+                    longitude = it.longitude,
+                    latitude = it.latitude,
+                    priority = it.priority,
+                    requiredSuccesses = it.requiredSuccesses
+                )
+            }
+        )
+        check(db.planDao().markSuperseded(expectedOldPlanId, successorId, supersededAt) == 1) {
+            "superseding import lost its active-plan owner"
+        }
+        SupersedingImportResult.Imported(successorId)
+    }
+
     // ---- Recovery (INV-9 / O4) ----
 
     suspend fun markNonTerminalInterrupted(nowMs: Long): Int =

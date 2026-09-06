@@ -29,7 +29,7 @@ import com.example.cellrebelauto.recovery.RecoveryCheckpointRoomDao
 import com.example.cellrebelauto.recovery.ReleaseReceiptDao
 
 /**
- * Room database singleton, version 6 (F-19; table-for-table identical to v5's committed end-state).
+ * Room database singleton, version 7.
  *
  * v5 introduced the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables
  * (MIGRATION_4_5). `cellrebel_executions` is born in v5 carrying its FULL §7.1 / §8.6 completion-
@@ -78,7 +78,7 @@ import com.example.cellrebelauto.recovery.ReleaseReceiptDao
         RecoveryCheckpointRow::class,
         ReleaseReceiptRow::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -248,7 +248,7 @@ abstract class AppDatabase : RoomDatabase() {
         internal fun buildProductionDatabase(context: Context, dbName: String): AppDatabase {
             quarantineDriftedV5Database(context, dbName)
             return Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()
         }
