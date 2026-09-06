@@ -97,9 +97,21 @@ snapshot_db() {
 }
 
 snapshot_prefs() {
-    root_shell \
-        "find /data/misc -type f -name spoof_config.xml -exec cat {} \\;" \
-        2>/dev/null |
+    # #90: exact-package Vector zone resolution. The old find-based scan had no
+    # package filter — with BOTH production and bench installed, equal payloads
+    # collapsed to one value and the source identity was lost. The live zone is
+    # /data/misc/*/prefs/<exact-package>/; anything else is a stale mirror.
+    # Exactly one source required; zero/many fail closed (never silent-pick).
+    local glob="/data/misc/*/prefs/$BENCH_PACKAGE/spoof_config.xml"
+    local paths n
+    paths=$(root_shell "ls -d $glob" 2>/dev/null | tr -d '\r')
+    paths=$(printf '%s\n' "$paths" | sed '/^$/d')
+    n=$(printf '%s\n' "$paths" | grep -c .)
+    if [ "$n" -ne 1 ]; then
+        echo "TEST_HOOK_FAIL expected exactly 1 live Vector prefs source for $BENCH_PACKAGE (glob $glob), found $n — fail-closed, no silent pick, no app-private fallback" >&2
+        return 1
+    fi
+    root_shell "cat $(printf '%s\n' "$paths" | head -1)" 2>/dev/null |
         sed -n '/<string name="json">/p' |
         LC_ALL=C sort
 }
