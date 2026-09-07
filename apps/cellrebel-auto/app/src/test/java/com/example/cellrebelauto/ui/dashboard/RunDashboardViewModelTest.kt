@@ -3,6 +3,7 @@ package com.example.cellrebelauto.ui.dashboard
 import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.ledger.TrustedQuotaEntry
@@ -10,6 +11,7 @@ import com.example.cellrebelauto.model.plan.LocationPlan
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 import com.example.cellrebelauto.ui.MainViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
@@ -63,12 +65,27 @@ class RunDashboardViewModelTest {
     @After
     fun tearDown() {
         collectorScope.cancel()
+        // Test hygiene (Wave-1 #111 lesson): cancel every constructed MainViewModel's
+        // scope BEFORE resetMain — leaked Main-dispatcher coroutines race the next
+        // test class's setMain (the PlanProfileConsistencyViewModelTest flake).
+        createdViewModels.forEach { it.viewModelScope.cancel() }
+        createdViewModels.clear()
         db.close()
         Dispatchers.resetMain()
     }
 
+    // Every MainViewModel this class constructs, so tearDown can drain them all.
+    private val createdViewModels = mutableListOf<MainViewModel>()
+
     private fun vm(): MainViewModel =
-        MainViewModel(ApplicationProvider.getApplicationContext(), injectedDb = db)
+        MainViewModel(
+            ApplicationProvider.getApplicationContext(),
+            injectedDb = db,
+            // #103 cutover architecture: the app-singleton gate is recoveryRequired under
+            // Robolectric, which would hide the seeded data behind CutoverDataState.
+            injectedAccessGate = CutoverAccessGate.open(),
+        )
+            .also { createdViewModels += it }
 
     /**
      * stateIn(Lazily) starts on the first SUBSCRIBER (not on .value), so the
@@ -215,9 +232,10 @@ class RunDashboardViewModelTest {
         val viewModel = MainViewModel(
             ApplicationProvider.getApplicationContext(),
             injectedDb = db,
+            injectedAccessGate = CutoverAccessGate.open(),
             providerHealthProbe = { HealthLampsProjection.ProviderHandshake(exhausted = false, profileCount = 3) },
             publishTimestampProbe = { System.currentTimeMillis() - 60_000L },
-        )
+        ).also { createdViewModels += it }
         viewModel.refreshDeviceReadiness()   // a11y enablement probe (Robolectric: empty list)
         startDashboard(viewModel)
         viewModel.refreshDashboardHealth()

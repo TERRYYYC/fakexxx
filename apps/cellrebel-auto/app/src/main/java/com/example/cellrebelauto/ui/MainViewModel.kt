@@ -1121,17 +1121,21 @@ class MainViewModel @JvmOverloads constructor(
 
     fun resumeRun() {
         _resumeFailure.value = null
-        if (planUiState.value.plan == null) {
+        // #103 cutover architecture: planUiState is a gated CutoverDataState —
+        // unwrap before reading the plan (was planUiState.value.plan in the lane tree).
+        if (planUiState.value.readyValueOrNull()?.plan == null) {
             _resumeFailure.value = "NO_PLAN"
             _resumeOutcome.value = ResumeOutcome(succeeded = false, reason = "NO_PLAN")
             return
         }
         _resumeAwaiting.value = true
         startOrResumePlan()
-        if (!_startRequested.value) {
-            // startOrResumePlan refused synchronously (no plan / BOTH_STAGES_OFF
-            // — it posted importNotice instead of touching the engine), so no
-            // startStatus emission will ever arrive. Fail loudly HERE.
+        // startOrResumePlan may refuse synchronously (no plan / BOTH_STAGES_OFF —
+        // it posts importNotice instead of touching the engine), so no startStatus
+        // emission would ever arrive: fail HERE. On a synchronous-emission path
+        // (Unconfined collectors) the Rejected/Accepted handler may already have
+        // consumed the outcome (_resumeAwaiting cleared) — never overwrite it.
+        if (!_startRequested.value && _resumeAwaiting.value) {
             _resumeAwaiting.value = false
             _resumeFailure.value = "PLAN_NOT_READY"
             _resumeOutcome.value = ResumeOutcome(succeeded = false, reason = "PLAN_NOT_READY")
@@ -1238,7 +1242,7 @@ class MainViewModel @JvmOverloads constructor(
                     it.contains("ERROR") || it.contains("EXHAUSTED") ||
                         it.contains("ANCHOR_MISMATCH") || it.contains("trust gate rejected")
                 },
-                planState = plan,
+                planState = plan.readyValueOrNull() ?: PlanUiState(),
                 currentCsvRow = currentTask.value?.csvRow,
             )
         }

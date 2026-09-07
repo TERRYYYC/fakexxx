@@ -120,7 +120,6 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                     }
                 }
             }
-
             Screen.RUN -> {
                 // T7 P1.1: the RUN surface IS the run dashboard — the app's landing
                 // page. Entry refreshes the lamps + the a11y enablement probe.
@@ -130,9 +129,11 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 }
                 RunDashboardScreen(
                     state = vm.dashboardState.collectAsState().value,
+                    metricSelection = vm.metricSelection.collectAsState().value,
                     logs = logs,
                     selfHealConfig = vm.selfHealConfig.collectAsState().value,
-                    onResume = { vm.startOrResumePlan() },
+                    // T7v2: 重启恢复/启动 = 同一 startOrResumePlan 入口；停止/导出/导航同 v1
+                    onResume = { vm.resumeRun() },
                     onStop = { vm.stopAutomation() },
                     onOpenPlan = { vm.navigateTo(Screen.PLAN) },
                     onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
@@ -142,6 +143,9 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                     onSetAttemptWatchdog = { vm.setAttemptWatchdogEnabled(it) },
                     onSetCoordinateGuard = { vm.setCoordinateGuardEnabled(it) },
                     onSetServiceAutoResume = { vm.setServiceReconnectAutoResumeEnabled(it) },
+                    onSetMetricSelection = { vm.setMetricSelection(it) },
+                    resumeOutcome = vm.resumeOutcome.collectAsState().value,
+                    onConsumeResumeOutcome = { vm.consumeResumeOutcome() },
                 )
             }
 

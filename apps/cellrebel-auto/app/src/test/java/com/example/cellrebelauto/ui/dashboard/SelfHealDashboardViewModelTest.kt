@@ -5,8 +5,10 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.data.SelfHealSettings
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.ui.MainViewModel
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -77,10 +79,18 @@ class SelfHealDashboardViewModelTest {
     @After
     fun tearDown() {
         dataStoreScope.cancel()
+        // Test hygiene (Wave-1 #111 lesson): cancel every constructed MainViewModel's
+        // scope BEFORE resetMain — leaked Main-dispatcher coroutines race the next
+        // test class's setMain (the PlanProfileConsistencyViewModelTest flake).
+        createdViewModels.forEach { it.viewModelScope.cancel() }
+        createdViewModels.clear()
         db.close()
         Dispatchers.resetMain()
         dataStoreFile.delete()
     }
+
+    // Every MainViewModel this class constructs, so tearDown can drain them all.
+    private val createdViewModels = mutableListOf<MainViewModel>()
 
     private fun settings() = SelfHealSettings(
         PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { dataStoreFile })
@@ -90,8 +100,11 @@ class SelfHealDashboardViewModelTest {
         MainViewModel(
             ApplicationProvider.getApplicationContext(),
             injectedDb = db,
+            // #103 cutover architecture: inject an open gate (app gate = recoveryRequired
+            // under Robolectric would gate every protected projection).
+            injectedAccessGate = CutoverAccessGate.open(),
             injectedSelfHealSettings = selfHeal
-        )
+        ).also { createdViewModels += it }
 
     @Test
     fun `config flow surfaces the persisted defaults`() = runTest {

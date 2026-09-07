@@ -67,8 +67,13 @@ class TelephonyServingCellPoller(private val context: Context) {
                 ci = id.ci.takeUnless { it == Int.MAX_VALUE || it < 0 }?.toLong(),
                 tac = id.tac.takeUnless { it == Int.MAX_VALUE || it < 0 },
                 pci = id.pci.takeUnless { it == Int.MAX_VALUE || it < 0 },
-                mcc = id.mccString,
-                mnc = id.mncString,
+                // getMccString/getMncString are API 28+; below that the int
+                // mcc/mnc getters (deprecated AT 28, functional before) carry
+                // the same value — MAX_VALUE is the framework's "unknown".
+                mcc = if (Build.VERSION.SDK_INT >= 28) id.mccString
+                else @Suppress("DEPRECATION") id.mcc.takeUnless { it == Int.MAX_VALUE }?.toString(),
+                mnc = if (Build.VERSION.SDK_INT >= 28) id.mncString
+                else @Suppress("DEPRECATION") id.mnc.takeUnless { it == Int.MAX_VALUE }?.toString(),
                 rsrpDbm = strength?.rsrp?.takeUnless { it == CellInfo.UNAVAILABLE || it == 0 },
                 registered = info.isRegistered,
                 readAtMs = System.currentTimeMillis(),
