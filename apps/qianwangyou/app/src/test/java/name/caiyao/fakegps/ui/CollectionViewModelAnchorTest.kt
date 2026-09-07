@@ -145,4 +145,15 @@ class CollectionViewModelAnchorTest {
         await("failure notice is surfaced") { vm.activationNotice.value != null }
         assertTrue(vm.activationNotice.value!!.contains("发布失败"))
     }
+    @org.junit.Test
+    fun `viewmodelprovider reflection finds the single-Application constructor`() {
+        // Device evidence 2026-09-07 (mi14 e53cfd3d AND emulator-5572, independently): tapping
+        // 收藏档案 crashed with NoSuchMethodException because the repoOverride default param
+        // hid the (Application) ctor from AndroidViewModelFactory reflection. JVM tests that
+        // construct the VM directly never exercise that reflective lookup — this one does.
+        org.junit.Assert.assertNotNull(
+            CollectionViewModel::class.java.getConstructor(android.app.Application::class.java)
+        )
+    }
+
 }
