@@ -320,25 +320,57 @@ root_skip() { # idx
 }
 
 # ---------------------------------------------------------------------------
-# step 1: mock_location
+# step 1: mock_location + location appops hardening
+#   FINE/COARSE_LOCATION appops must be "allow", not "foreground": on HyperOS
+#   the foreground mode lets PowerKeeper drop the test provider while the app
+#   has no visible activity, which is the freeze chain root cause of #106
+#   (incident remediation: appops foreground->allow on both apps).
 # ---------------------------------------------------------------------------
 step_mock_location() {
-    local idx="$1"
+    local idx="$1" pkg op cur all_allow=1
     if [ "$DRY_RUN" -eq 0 ]; then
-        local cur
+        all_allow=1
+        for pkg in "$QWY_PKG" "$AUTO_PKG"; do
+            for op in FINE_LOCATION COARSE_LOCATION; do
+                cur="$(q_sh "appops get $pkg $op")"
+                case "$cur" in
+                    *": allow"*) ;;
+                    *) all_allow=0 ;;
+                esac
+            done
+        done
         cur="$(q_sh "appops get $QWY_PKG android:mock_location")"
         case "$cur" in
-            *": allow"*) skip_step "$idx" "already allow: appops get -> $cur"; return ;;
+            *": allow"*) if [ "$all_allow" -eq 1 ]; then
+                    skip_step "$idx" "already allow: mock_location + FINE/COARSE on both apps"
+                    return
+                fi ;;
         esac
     fi
     run_sh "appops set $QWY_PKG android:mock_location allow"
+    for pkg in "$QWY_PKG" "$AUTO_PKG"; do
+        for op in FINE_LOCATION COARSE_LOCATION; do
+            run_sh "appops set $pkg $op allow"
+        done
+    done
     if [ "$DRY_RUN" -eq 0 ]; then
-        local now
+        local now bad=""
         now="$(q_sh "appops get $QWY_PKG android:mock_location")"
-        case "$now" in
-            *": allow"*) done_step "$idx" "appops set ok; appops get -> $now" ;;
-            *) die_step "$idx" "mock_location did not stick: appops get -> ${now:-<empty>}" ;;
-        esac
+        case "$now" in *": allow"*) ;; *) bad="mock_location: $now" ;; esac
+        for pkg in "$QWY_PKG" "$AUTO_PKG"; do
+            for op in FINE_LOCATION COARSE_LOCATION; do
+                cur="$(q_sh "appops get $pkg $op")"
+                case "$cur" in
+                    *": allow"*) ;;
+                    *) bad="$bad${bad:+; }$pkg/$op: ${cur:-<empty>}" ;;
+                esac
+            done
+        done
+        if [ -z "$bad" ]; then
+            done_step "$idx" "appops ok: mock_location + FINE/COARSE=allow on both apps (#106 hardening)"
+        else
+            die_step "$idx" "appops did not stick: $bad"
+        fi
     fi
 }
 

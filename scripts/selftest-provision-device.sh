@@ -194,6 +194,10 @@ routing (single source: <pkg-base>[.<lane>]; release has no suffix):
 steps (cold path; at run time every step first self-checks and SKIPs finished work):
   [1/10] mock_location
       $ adb -s FAKEDEV001 shell appops set name.caiyao.fakegps.glmbench android:mock_location allow
+      $ adb -s FAKEDEV001 shell appops set name.caiyao.fakegps.glmbench FINE_LOCATION allow
+      $ adb -s FAKEDEV001 shell appops set name.caiyao.fakegps.glmbench COARSE_LOCATION allow
+      $ adb -s FAKEDEV001 shell appops set com.example.cellrebelauto.glmbench FINE_LOCATION allow
+      $ adb -s FAKEDEV001 shell appops set com.example.cellrebelauto.glmbench COARSE_LOCATION allow
   [2/10] permissions
       $ adb -s FAKEDEV001 shell pm grant name.caiyao.fakegps.glmbench android.permission.ACCESS_FINE_LOCATION
       $ adb -s FAKEDEV001 shell pm grant name.caiyao.fakegps.glmbench android.permission.ACCESS_COARSE_LOCATION
@@ -252,6 +256,10 @@ routing (single source: <pkg-base>[.<lane>]; release has no suffix):
 steps (cold path; at run time every step first self-checks and SKIPs finished work):
   [1/10] mock_location
       $ adb -s FAKEDEV001 shell appops set name.caiyao.fakegps android:mock_location allow
+      $ adb -s FAKEDEV001 shell appops set name.caiyao.fakegps FINE_LOCATION allow
+      $ adb -s FAKEDEV001 shell appops set name.caiyao.fakegps COARSE_LOCATION allow
+      $ adb -s FAKEDEV001 shell appops set com.example.cellrebelauto FINE_LOCATION allow
+      $ adb -s FAKEDEV001 shell appops set com.example.cellrebelauto COARSE_LOCATION allow
   [2/10] permissions
       $ adb -s FAKEDEV001 shell pm grant name.caiyao.fakegps android.permission.ACCESS_FINE_LOCATION
       $ adb -s FAKEDEV001 shell pm grant name.caiyao.fakegps android.permission.ACCESS_COARSE_LOCATION
