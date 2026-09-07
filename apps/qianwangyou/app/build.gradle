@@ -69,6 +69,16 @@ android {
             applicationIdSuffix ".glmbench"
             matchingFallbacks = ['debug']
         }
+        // fakexxx lane: the renamed identity for the Wave-1 integrated build — installs as
+        // ANOTHER separate app (name.caiyao.fakegps.fakexxx, launcher label "fakexxx-map")
+        // so production/bench/glmbench packages and their saved state stay untouched.
+        // Same Xposed-module caveats as glmbench: LSPosed sees a distinct module (scope it
+        // separately if HOOK delivery is wanted; identify it by PACKAGE, not description).
+        fakexxx {
+            initWith debug
+            applicationIdSuffix ".fakexxx"
+            matchingFallbacks = ['debug']
+        }
         release {
             signingConfig signingConfigs.bench
             minifyEnabled true
@@ -82,6 +92,12 @@ android {
         // fault collector, acceptance probes); src/glmbench stays available for lane-only
         // additions. The aliased manifest brings the exported debug seam activities.
         glmbench {
+            java.srcDirs += ['src/debug/java']
+            manifest.srcFile 'src/debug/AndroidManifest.xml'
+        }
+        // fakexxx lane reuses the same debug seam sources; src/fakexxx carries the
+        // lane-only launcher label.
+        fakexxx {
             java.srcDirs += ['src/debug/java']
             manifest.srcFile 'src/debug/AndroidManifest.xml'
         }

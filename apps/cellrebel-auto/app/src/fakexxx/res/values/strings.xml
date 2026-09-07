@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- fakexxx lane: renamed identity (was CellRebel Auto) for the Wave-1 integrated
+         build. Distinct launcher name; existing lanes keep their own labels. -->
+    <string name="app_name">fakexxx-auto</string>
+</resources>
