@@ -260,6 +260,24 @@ class RemoteControlReceiverTest {
     }
 
     @Test
+    fun `self dispatch uid - STATUS is processed, never DENIED (mi14 dispatch-path regression)`() = runBlocking {
+        // Device evidence 2026-09-07, mi14 e53cfd3d (HyperOS/16): manifest receivers are
+        // dispatched with Binder.getCallingUid() == the app's OWN uid — the sender's
+        // identity never propagates. The defense-in-depth check must exempt self or
+        // every `su -c am broadcast` ops call is rejected with caller=<own package>.
+        ShadowBinder.setCallingPid(callerPid)
+        ShadowBinder.setCallingUid(android.os.Process.myUid())
+
+        handleSync(RemoteControlContract.actionStatus(pkg))
+
+        assertTrue(
+            "self-uid dispatch must not log DENIED: " +
+                denyLogs().joinToString { it.msg },
+            denyLogs().isEmpty()
+        )
+    }
+
+    @Test
     fun `granted stranger - RESUME routes through the same start entry (Resume == Start, INV-9)`() = runBlocking {
         asStranger()
         grantStranger()

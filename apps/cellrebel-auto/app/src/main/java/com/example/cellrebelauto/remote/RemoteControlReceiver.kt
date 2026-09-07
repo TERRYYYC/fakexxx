@@ -150,7 +150,19 @@ class RemoteControlReceiver : BroadcastReceiver() {
         // Root (uid 0 — the adb `su -c am broadcast` ops path) and the system's
         // own delivery identity are exempt, mirroring the framework's
         // component-permission check that already guards the manifest attribute.
-        if (callerUid == Process.ROOT_UID || callerUid == Process.SYSTEM_UID) return true
+        //
+        // Own uid must ALSO be exempt: manifest receivers are dispatched through the
+        // app's own message queue, and on that dispatch path Binder.getCallingUid()
+        // returns the LOCAL uid, not the sender's — the sender's identity never
+        // propagates here. Device evidence (mi14 e53cfd3d, HyperOS/16): every
+        // `su -c am broadcast` was DENIED with caller=<this app's own package>,
+        // i.e. the defense-in-depth check rejected the very ops path it exists to
+        // allow. Real sender-side enforcement stays with the manifest permission
+        // attribute; this check can only ever see system/self, never the sender.
+        if (callerUid == Process.ROOT_UID ||
+            callerUid == Process.SYSTEM_UID ||
+            callerUid == Process.myUid()
+        ) return true
         val permission = RemoteControlContract.permissionName(context.packageName)
         val granted = context.checkPermission(permission, Binder.getCallingPid(), callerUid) ==
             PackageManager.PERMISSION_GRANTED
