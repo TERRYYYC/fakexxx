@@ -562,9 +562,29 @@ Implementation order for the first independently reviewable adapter/core slice:
 
 Use only operator-selected URIs, never repository/log paths. Compile-time/static tests must prove productId has no exporter and legacyId has no importer.
 
+Task 5 local implementation state (review pending):
+
+| Flavor owner | Entry/result flow | Side-effect boundary |
+| --- | --- | --- |
+| `legacyId` | `CreateDocument` → selected URI → exclusive canonical snapshot → UTF-8 document write → digest-only result | cancellation or capture rejection opens no stream; the exporter accepts no file/path API |
+| `productId` | `OpenDocument` → selected URI → exact media check → bounded strict UTF-8 decode → canonical V2 validation → restore coordinator | cancellation, wrong media, CSV, malformed UTF-8, oversize, invalid archive, and missing stream reach zero restore calls; the importer accepts no file/path API |
+| `productId` eligibility | observe installed legacy and product package state at the coordinator's first-write and publication checks | exact version code plus an intersecting single-signer lineage is required; missing/mismatch is `INELIGIBLE`, unreadable state is `INDETERMINATE` |
+
+The Plan surface keeps the flavor entry point outside the normal protected-data projection so an
+interrupted product restore can select the same operator-held archive while ordinary readers remain
+recovery-closed. `CutoverSafSourceSetContractTest` proves directional source/manifest absence and the
+URI/log/path boundary; `CutoverSafActivityResultContractTest` proves launch and result parsing for
+both host flavors. Flavor-specific exporter/importer and eligibility tests cover the side-effect
+table above. Interactive rendering and the device journey remain deferred to the frozen Task 6
+boundary.
+
 ### Task 6: Final gates and device-deferred acceptance
 
 Run only new/affected host tests while implementation is in progress. Before review, run the risk-matched Auto host gate, inspect the exact diff, and request a non-author review of the new behavior delta. `M-AC-03`, permission re-grant, accessibility re-enable, notification permission, installation, applicationId runtime mutation, release, tag, merge, and issue closure remain explicitly deferred and frozen.
+
+Device/interactive evidence owner remains the Issue #13 carrier owner. Its trigger is explicit operator
+authorization for the device cutover acceptance window; until then it blocks feature closure, not
+Task 5 host review, and no author-side device substitute is permitted.
 
 ## Verified host commands
 

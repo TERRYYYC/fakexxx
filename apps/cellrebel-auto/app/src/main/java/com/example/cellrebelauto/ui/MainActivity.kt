@@ -4,7 +4,10 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -12,6 +15,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.cellrebelauto.cutover.CutoverDataState
 import com.example.cellrebelauto.cutover.CutoverUnavailableReason
@@ -65,34 +69,44 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     Box(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
         when (currentScreen) {
             Screen.PLAN -> {
-                // # Issue #9：进入 Plan 页即重探无障碍启用态（从系统设置返回后也会重新进入本页）
-                androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshDeviceReadiness() }
-                CutoverDataBoundary(planState) { readyPlanState ->
-                    CutoverDataBoundary(planConfig) { readyPlanConfig ->
-                        PlanScreen(
-                            planState = readyPlanState,
-                            planConfig = readyPlanConfig,
-                            isRunning = isRunning,
-                            isServiceConnected = isServiceConnected,
-                            serviceStatusLine = serviceStatusLine,
-                            importErrors = importErrors,
-                            importNotice = importNotice,
-                            importProposal = importProposal,
-                            isImportReplacementStopping = isImportReplacementStopping,
-                            onImport = { vm.importCsv(it) },
-                            onConfirmImportReplacement = { vm.confirmImportReplacement() },
-                            onCancelImportReplacement = { vm.cancelImportReplacement() },
-                            onSetGlobalBuffer = { vm.setGlobalBuffer(it) },
-                            onSetTestTimeout = { vm.setTestTimeout(it) },
-                            onSetGpsSettle = { vm.setGpsSettle(it) },
-                            onSetLocationStage = { vm.setLocationStageEnabled(it) },
-                            onSetTestStage = { vm.setTestStageEnabled(it) },
-                            onStartOrResume = { vm.startOrResumePlan() },
-                            onStop = { vm.stopAutomation() },
-                            onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
-                            onOpenRun = { vm.navigateTo(Screen.RUN) },
-                            onOpenHistory = { vm.navigateTo(Screen.HISTORY) }
-                        )
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // The product importer must stay reachable while normal data is recovery-closed.
+                    CutoverSafSurface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                    Box(modifier = Modifier.weight(1f)) {
+                        // # Issue #9：进入 Plan 页即重探无障碍启用态（从系统设置返回后也会重新进入本页）
+                        androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshDeviceReadiness() }
+                        CutoverDataBoundary(planState) { readyPlanState ->
+                            CutoverDataBoundary(planConfig) { readyPlanConfig ->
+                                PlanScreen(
+                                    planState = readyPlanState,
+                                    planConfig = readyPlanConfig,
+                                    isRunning = isRunning,
+                                    isServiceConnected = isServiceConnected,
+                                    serviceStatusLine = serviceStatusLine,
+                                    importErrors = importErrors,
+                                    importNotice = importNotice,
+                                    importProposal = importProposal,
+                                    isImportReplacementStopping = isImportReplacementStopping,
+                                    onImport = { vm.importCsv(it) },
+                                    onConfirmImportReplacement = { vm.confirmImportReplacement() },
+                                    onCancelImportReplacement = { vm.cancelImportReplacement() },
+                                    onSetGlobalBuffer = { vm.setGlobalBuffer(it) },
+                                    onSetTestTimeout = { vm.setTestTimeout(it) },
+                                    onSetGpsSettle = { vm.setGpsSettle(it) },
+                                    onSetLocationStage = { vm.setLocationStageEnabled(it) },
+                                    onSetTestStage = { vm.setTestStageEnabled(it) },
+                                    onStartOrResume = { vm.startOrResumePlan() },
+                                    onStop = { vm.stopAutomation() },
+                                    onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
+                                    onOpenRun = { vm.navigateTo(Screen.RUN) },
+                                    onOpenHistory = { vm.navigateTo(Screen.HISTORY) }
+                                )
+                            }
+                        }
                     }
                 }
             }
