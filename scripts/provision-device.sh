@@ -502,8 +502,9 @@ stay_on_ok() {
 whitelist_ok() {
     local wl
     wl="$(q_sh 'dumpsys deviceidle whitelist')"
-    case "$wl" in *" $QWY_PKG"*|*"$QWY_PKG $AUTO_PKG"*|*"+$QWY_PKG"*) ;; *) return 1 ;; esac
-    case "$wl" in *"+$AUTO_PKG"*|*" $AUTO_PKG"*) ;; *) return 1 ;; esac
+    # Android 16/HyperOS emits CSV rows: "user,<pkg>,<uid>" (system entries: "system-excidle,<pkg>,<uid>")
+    case "$wl" in *",$QWY_PKG,"*) ;; *) return 1 ;; esac
+    case "$wl" in *",$AUTO_PKG,"*) ;; *) return 1 ;; esac
     return 0
 }
 
