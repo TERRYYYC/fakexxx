@@ -568,8 +568,8 @@ step_vector_scope() {
         local cli_ok list_out scope_out
         cli_ok="$(q_su "test -x $LSPD_CLI && echo ok")"
         [ "$cli_ok" = "ok" ] || die_step "$idx" "$LSPD_CLI not present — reboot the device so the Vector/LSPosed daemon starts, then re-run this script (steps 1-6 will SKIP)"
-        list_out="$(q_su "$LSPD_CLI modules list")"
-        scope_out="$(q_su "$LSPD_CLI scope get $QWY_PKG")"
+        list_out="$(q_su "$LSPD_CLI modules ls")"
+        scope_out="$(q_su "$LSPD_CLI scope ls $QWY_PKG")"
         if printf '%s' "$list_out" | grep -q "$QWY_PKG" &&
            printf '%s' "$scope_out" | grep -q "$CELLREBEL_PKG" &&
            printf '%s' "$scope_out" | grep -q "$AUTO_PKG" &&
@@ -582,13 +582,13 @@ step_vector_scope() {
     run_su "$LSPD_CLI scope set $QWY_PKG $CELLREBEL_PKG/0 $AUTO_PKG/0 $QWY_PKG/0"
     if [ "$DRY_RUN" -eq 0 ]; then
         local scope_out
-        scope_out="$(q_su "$LSPD_CLI scope get $QWY_PKG")"
+        scope_out="$(q_su "$LSPD_CLI scope ls $QWY_PKG")"
         if printf '%s' "$scope_out" | grep -q "$CELLREBEL_PKG" &&
            printf '%s' "$scope_out" | grep -q "$AUTO_PKG" &&
            printf '%s' "$scope_out" | grep -q "$QWY_PKG"; then
             done_step "$idx" "module enabled; scope = $CELLREBEL_PKG/0 + $AUTO_PKG/0 + $QWY_PKG/0 (Auto in scope so the signed config read-back works)"
         else
-            die_step "$idx" "scope verify failed — scope get $QWY_PKG -> $(oneline "$scope_out")"
+            die_step "$idx" "scope verify failed — scope ls $QWY_PKG -> $(oneline "$scope_out")"
         fi
     fi
 }
