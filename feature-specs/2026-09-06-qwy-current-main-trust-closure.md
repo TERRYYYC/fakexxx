@@ -7,9 +7,9 @@ created: 2026-09-06
 
 # QWY current-main trust closure implementation plan
 
-**Feature:** #66 / #79 / #83 / #90 — QWY authoritative continuity, ordered profile readback, and durable evidence.
+**Feature:** #66 / #79 / #83 — QWY authoritative continuity, ordered profile readback, and durable evidence.
 **Goal:** On current main, QWY can mint `FULL` only from a live independent oracle window, return an ordered provider-owned profile projection, and retain durable observation evidence without silently weakening retention or crash semantics.
-**Acceptance Criteria:** #66 AC1–7; #79 ordered profile-1..10 `discover()` readback; #83 append identity/durability, no TTL pruning, bounded caller-driven admission backed by measurement; #90 exact-source evidence remains fail-closed.
+**Acceptance Criteria:** #66 AC1–7; #79 ordered profile-1..10 `discover()` readback; #83 append identity/durability, no TTL pruning, bounded caller-driven admission backed by measurement.
 **Architecture cell:** `fakexxx::android-dual-app-contract`
 **Map delta:** update required
 **Map delta why:** QWY owns both its private system-server oracle producer/installer and its read-only Binder consumer; Vector supplies independent framework/readback validation only. A future #83 admission candidate must be provider-owned: authorization and effective-lease validation remain in `EnvironmentControlHandler`; any quota state is non-evidence state and must share the audit append's one `DurableKv` commit. No admission candidate is active after the withdrawn `16749ff8` experiment.
@@ -23,7 +23,7 @@ created: 2026-09-06
 
 The terminal system has one trusted `FULL` source: QWY's own system-server producer, consumed through a strict read-only QWY bridge. Missing producer, malformed wire data, callback/Binder failure, boot/instance change, odd/advanced/regressed sequence, incomplete coverage, unhealthy source, owner mismatch, provider disablement, or semantic-digest mismatch all produce `NONE`; QWY-local state never upgrades them.
 
-This plan does **not** modify CellRebel Auto database/migrations/service, QWY’s legacy profile database schema (#46), Gradle/application IDs, Vector’s system-server hook, release documentation, or real devices. #98’s fail-closed removal is included unchanged as the first successor commit. #90 is an external dependency: #100@`c3f561b` is still open, so its host-only checks are evidence for that PR rather than current-main capability.
+This plan does **not** modify CellRebel Auto database/migrations/service, QWY’s legacy profile database schema (#46), Gradle/application IDs, Vector’s system-server hook, release documentation, or real devices. #98’s fail-closed removal is included unchanged as the first successor commit. #90's host-evidence fix reached `main` through PR #100 merge `10275b4dedbd51d41e43a708a41b00fc38f54f01` and Issue #90 is closed; it is historical provenance, not an open dependency or a claim about #66 production capability.
 
 ## Frozen v1 producer/consumer boundary
 
@@ -231,7 +231,7 @@ admission state.
 | semantic writers | static source-map guard lists each writer; mutation exception/death/late callback/restart leaves coverage absent or NONE |
 | ordered profiles | IDs 1..10 return exact deterministic `profile-<id>` order with no DB write; missing/corrupt/duplicate input fails honestly |
 | audit scale | baseline bytes/latency at increasing audit sizes on `FileDurableKv`; crash/reopen exact resolver plus concurrent over-limit/retry tests precede backend selection |
-| #90 | external #100 exact-head gate tracks all issue AC (resolver, source metadata/mirror divergence, UI and negative-search/runbook); it is not a current-main completion claim |
+| #90 (closed) | PR #100 merge `10275b4` supplies its host-evidence closure; it does not establish #66 production continuity or device/framework acceptance |
 
 ## Implementation order
 
