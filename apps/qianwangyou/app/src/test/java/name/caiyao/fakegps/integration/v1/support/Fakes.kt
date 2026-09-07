@@ -151,13 +151,12 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     // --- config (memory by design) ---
     var scheduleId: String = "sched-1"
     var itemIds: MutableList<String> = mutableListOf("item-1", "item-2", "item-3")
+
+    /** P0.1-5: the profile collection discover() must project (default: none known). */
     var profileRefs: List<String> = emptyList()
     var cleanupOutcome: CleanupOutcome = CleanupOutcome.Complete
     var isMock: Boolean? = true
     var fingerprint: String = "fp-1"
-
-    /** P0.1-5: the profile collection discover() must project (default: none known). */
-    var profileRefs: List<String> = emptyList()
 
     // --- call-count instrumentation (memory by design; counts across restarts) ---
     var applyCount: Int = 0
@@ -366,8 +365,6 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {
         relevantChangeListener = listener
     }
-
-    override fun profileRefs(): List<String> = profileRefs
 
     /**
      * M-RC-03: an external app steals the mock-location owner and gives it
