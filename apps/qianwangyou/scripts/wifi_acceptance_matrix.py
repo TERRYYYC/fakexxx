@@ -185,7 +185,7 @@ def payload_for(name: str, session_id: str) -> Dict[str, Any]:
         # MUST equal ConfigPrefsSync.SCHEMA_VERSION (the writer contract),
         # exactly like the cellular matrix — HookAcceptancePayload.validate
         # rejects any other value and the scenario aborts before report_ready.
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "acceptanceSessionId": session_id,
         "mode": "always_on",
         "fields": dict(scenario.fields),

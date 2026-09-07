@@ -174,7 +174,7 @@ class HookAcceptancePayloadTest {
             "acceptance-wifi-123",
             """
                 {
-                  "schemaVersion": 4,
+                  "schemaVersion": 5,
                   "acceptanceSessionId": "acceptance-wifi-123",
                   "mode": "always_on",
                   "fields": {
