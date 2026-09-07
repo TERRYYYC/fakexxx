@@ -84,6 +84,31 @@ interface SupersessionStopClient {
     fun request(planId: Long, sessionId: Long, requestId: String)
 }
 
+/**
+ * P0.1-5: seam over the EXISTING discover channel (EnvironmentControlClient →
+ * CapabilitySnapshotV1.profileRefs) that yields the QWY provider's profile count.
+ * Null = the count is unobtainable right now — the consistency check silently skips.
+ * JVM tests inject a fake; production builds the real Binder client lazily.
+ */
+fun interface ProfileCountProbe {
+    fun providerProfileCount(): Int?
+}
+
+/** Production probe: one synchronous handshake on the caller's (IO) thread. */
+private class DiscoverProfileCountProbe(private val context: android.content.Context) :
+    ProfileCountProbe {
+    override fun providerProfileCount(): Int? = try {
+        when (val result =
+            com.example.cellrebelauto.integration.v1.EnvironmentControlClient(context).handshake()) {
+            is com.example.cellrebelauto.integration.v1.EnvironmentControlClient.HandshakeResult.Connected ->
+                result.snapshot.profileRefs.size
+            else -> null
+        }
+    } catch (_: Throwable) {
+        null
+    }
+}
+
 private object AutomationServiceSupersessionStopClient : SupersessionStopClient {
     override val status: StateFlow<SupersessionStopStatus> = AutomationService.supersessionStopStatus
     override fun request(planId: Long, sessionId: Long, requestId: String) {
@@ -103,7 +128,9 @@ class MainViewModel @JvmOverloads constructor(
     // R44 (DSF review P2-1): test-injectable DB — production keeps the singleton; oracles seed an
     // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
     private val injectedDb: AppDatabase? = null,
-    private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient
+    private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient,
+    // P0.1-5: the plan↔profile consistency probe (discover channel); tests inject a fake.
+    private val profileCountProbe: ProfileCountProbe? = null
 ) : AndroidViewModel(application) {
 
     private val db = injectedDb ?: AppDatabase.getInstance(application)
@@ -318,9 +345,13 @@ class MainViewModel @JvmOverloads constructor(
 
     // ---- Plan config (O6, DataStore-persisted) ----
 
-    // # 计划配置：buffer 首次必填，timeout/settle 有内部默认
+    // # 计划配置：buffer 缺省即默认 10（P0.1-4），timeout/settle 有内部默认
     val planConfig: StateFlow<PlanConfig> = planConfigStore.config
-        .stateIn(viewModelScope, SharingStarted.Lazily, PlanConfig(globalBufferSeconds = null))
+        .stateIn(
+            viewModelScope,
+            SharingStarted.Lazily,
+            PlanConfig(globalBufferSeconds = PlanConfig.DEFAULT_GLOBAL_BUFFER_SECONDS)
+        )
 
     // ---- Plan screen state ----
 
@@ -349,6 +380,13 @@ class MainViewModel @JvmOverloads constructor(
     // # 原子导入的行级错误（面板一次列出全部，AC-A2）
     private val _importErrors = MutableStateFlow<List<RowError>>(emptyList())
     val importErrors: StateFlow<List<RowError>> = _importErrors
+
+    // # P0.1-5 计划-档案一致性警告：51 行计划配 52 档案会整体错位一档空转烧配额。
+    // # null = 无警告（数字相等，或通道取不到档案数 → 静默跳过）。
+    private val _planProfileMismatch =
+        MutableStateFlow<com.example.cellrebelauto.model.plan.PlanProfileMismatch?>(null)
+    val planProfileMismatch: StateFlow<com.example.cellrebelauto.model.plan.PlanProfileMismatch?> =
+        _planProfileMismatch
 
     // # 导入提示（拒绝原因或成功摘要）
     private val _importNotice = MutableStateFlow<String?>(null)
@@ -481,17 +519,45 @@ class MainViewModel @JvmOverloads constructor(
     // ---- CSV import (atomic, AC-A2) ----
 
     /**
+     * P0.1-5: after a plan import, compare the imported row count against the provider's
+     * profile count over the EXISTING discover channel. A mismatch is a prominent warning;
+     * an unobtainable count silently skips (never an error, never a crash).
+     * # 导入后经既有 AIDL discover 通道取 QWY 档案数做一致性校验；取不到即静默跳过。
+     */
+    private fun checkPlanProfileConsistency(planRows: Int) {
+        if (planRows <= 0) {
+            _planProfileMismatch.value = null
+            return
+        }
+        viewModelScope.launch {
+            val providerCount = withContext(Dispatchers.IO) {
+                runCatching {
+                    (profileCountProbe ?: DiscoverProfileCountProbe(getApplication()))
+                        .providerProfileCount()
+                }.getOrNull()
+            }
+            _planProfileMismatch.value =
+                com.example.cellrebelauto.model.plan.PlanProfileConsistency.evaluate(
+                    planRows,
+                    providerCount,
+                )
+        }
+    }
+
+    /**
      * Imports a worklist CSV chosen via SAF. Atomic: any invalid row rejects
-     * the whole file and lists ALL row errors; nothing is persisted. A missing
-     * global buffer rejects the import; an unfinished current plan produces an
-     * in-memory replacement proposal that requires explicit confirmation.
+     * the whole file and lists ALL row errors; nothing is persisted. The global
+     * buffer seeds from the DataStore default (10) so a fresh device is never
+     * blocked; an unfinished current plan produces an in-memory replacement
+     * proposal that requires explicit confirmation.
      * # 导入 SAF 选择的 CSV 清单：任一行无效整份拒绝并列出全部错误；
-     * # buffer 未设置时拒绝；当前计划未完成时仅生成待确认的内存提案
+     * # buffer 缺省即默认 10 不再卡死导入；当前计划未完成时仅生成待确认的内存提案
      */
     fun importCsv(uri: Uri) {
         viewModelScope.launch {
             _importErrors.value = emptyList()
             _importNotice.value = null
+            _planProfileMismatch.value = null
 
             val text = withContext(Dispatchers.IO) {
                 try {
@@ -513,7 +579,7 @@ class MainViewModel @JvmOverloads constructor(
                         "Import rejected — ${result.errors.size} invalid row(s). Fix the file and re-import."
                 }
                 is ParseResult.Success -> {
-                    // # buffer 取自当前 PlanConfig；首次必填（设计稿 v2.1 §1.1）
+                    // # buffer 取自当前 PlanConfig；缺省即默认 10（P0.1-4），不再卡死导入
                     val buffer = planConfig.value.globalBufferSeconds
                     if (buffer == null) {
                         _importNotice.value = "Set global buffer first"
@@ -544,6 +610,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     _importNotice.value =
                         "Imported ${result.rows.size} rows, ${result.rows.sumOf { it.requiredSuccesses }} successes total"
+                    checkPlanProfileConsistency(result.rows.size)
                 }
             }
         }
@@ -574,6 +641,7 @@ class MainViewModel @JvmOverloads constructor(
                         _importProposal.value = null
                         _importNotice.value =
                             "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+                        checkPlanProfileConsistency(proposal.rows.size)
                     }
                     is PlanRepository.SupersedingImportResult.ActiveSession -> {
                         requestSupersessionStop(proposal, result.sessionId)
@@ -633,6 +701,7 @@ class MainViewModel @JvmOverloads constructor(
                 _importProposal.value = null
                 _importNotice.value =
                     "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+                checkPlanProfileConsistency(proposal.rows.size)
             }
             PlanRepository.SupersedingImportResult.StaleStopProof,
             is PlanRepository.SupersedingImportResult.ActiveSession,
