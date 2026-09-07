@@ -31,11 +31,7 @@ class EnvironmentObserver(
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
      *   not match the lease's accepted intent (M-IN-02 counterpart, provider side)
      */
-    fun observe(
-        lease: LeaseRecord,
-        request: ObserveRequestV1,
-        admitBeforeAudit: (ObservationAdmissionWindow) -> Unit = {},
-    ): EnvironmentObservationV1 {
+    fun observe(lease: LeaseRecord, request: ObserveRequestV1): EnvironmentObservationV1 {
         // Intent hash drift check
         if (request.expectedIntentHash != lease.acceptedIntentHash) {
             throw ContractException(
@@ -107,11 +103,6 @@ class EnvironmentObserver(
             scheduleItemId = schedule?.currentItemId ?: "",
             scheduleVersion = schedule?.scheduleVersion ?: 0L,
         )
-
-        // Admission runs after the complete projection has selected its
-        // monotonic revision window, but before any audit write. It cannot
-        // affect FULL eligibility, which was fixed above from the oracle.
-        admitBeforeAudit(ObservationAdmissionWindow(snap.generation, snap.revision))
 
         // The reference crosses Binder only after its backing row is durable.
         // A write failure therefore fails the whole observe call closed; it can
