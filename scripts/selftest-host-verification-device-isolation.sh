@@ -42,6 +42,7 @@ expect_fail nested-qualified bash "$checker" "$fixtures/host-verification-nested
 expect_fail yaml-sequence-folded-connected bash "$checker" "$fixtures/host-verification-yaml-sequence-folded-connected.yml"
 expect_fail single-quoted-install bash "$checker" "$fixtures/host-verification-single-quoted-install.sh"
 expect_fail double-quoted-connected bash "$checker" "$fixtures/host-verification-double-quoted-connected.sh"
+expect_pass yaml-sequence-folded-host-siblings bash "$checker" "$fixtures/host-verification-yaml-sequence-folded-host-siblings.yml"
 expect_pass good-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-good.sh"
 expect_fail install-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-gradle-install.sh"
 expect_fail connected-test-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-connected-test.sh"
@@ -54,6 +55,7 @@ expect_fail nested-qualified-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fi
 expect_fail yaml-sequence-folded-connected-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-yaml-sequence-folded-connected.yml"
 expect_fail single-quoted-install-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-single-quoted-install.sh"
 expect_fail double-quoted-connected-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-double-quoted-connected.sh"
+expect_pass yaml-sequence-folded-host-siblings-no-rg env PATH="/usr/bin:/bin" bash "$checker" "$fixtures/host-verification-yaml-sequence-folded-host-siblings.yml"
 
 # The aggregate verifier must fail during preflight, before even a harmless
 # Gradle wrapper is invoked.  This is a deliberately minimal sandbox: only the
@@ -91,6 +93,19 @@ for hostile_target in \
     passed=$((passed + 1))
   fi
 done
+
+: > "$sandbox/gradle-invocations.log"
+ANDROID_HOME="$sandbox/android-sdk" \
+  HOST_VERIFICATION_ADDITIONAL_TARGETS="$fixtures/host-verification-yaml-sequence-folded-host-siblings.yml" \
+  VERIFY_A_PLUS_SKIP_HOST_ISOLATION_SELFTEST=1 \
+  VERIFY_A_PLUS_STUB_LOG="$sandbox/gradle-invocations.log" \
+  bash "$sandbox/scripts/verify-a-plus.sh" --stage import >/dev/null 2>&1 || true
+if [ -s "$sandbox/gradle-invocations.log" ]; then
+  passed=$((passed + 1))
+else
+  printf 'aggregate verifier did not reach a harmless wrapper after a safe folded workflow preflight\n' >&2
+  failed=$((failed + 1))
+fi
 
 : > "$sandbox/gradle-invocations.log"
 ANDROID_HOME="$sandbox/android-sdk" \

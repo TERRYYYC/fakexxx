@@ -47,6 +47,12 @@ for target in "$@"; do
       }
       return n
     }
+    function folded_key_indent(line,    indent, header) {
+      indent = indent_width(line)
+      header = substr(line, indent + 1)
+      if (match(header, /^-[[:space:]]+/)) indent += RLENGTH
+      return indent
+    }
     function forbidden(statement) {
       quote_boundary = "[[:space:]" sprintf("%c", 39) sprintf("%c", 34) "]"
       gradle = "(^|[[:space:];|&])([^[:space:];|&]*/)?gradlew?([[:space:];|&]|$)"
@@ -80,7 +86,9 @@ for target in "$@"; do
 
       if (line ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*>[-+]?([[:space:]]*(#.*)?)$/) {
         yaml_active = 1
-        yaml_indent = indent_width(line)
+        # Enter at the actual run-key column. Blank or more-indented lines
+        # continue the scalar; the first nonblank sibling/next step ends it.
+        yaml_indent = folded_key_indent(line)
         yaml_start = NR
         yaml_statement = ""
         next
