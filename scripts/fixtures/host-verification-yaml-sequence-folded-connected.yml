@@ -1,0 +1,8 @@
+name: host-verification-fixture
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: >-
+          ./gradlew
+          :tools:app:connectedDebugAndroidTest

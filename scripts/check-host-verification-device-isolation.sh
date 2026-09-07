@@ -48,8 +48,9 @@ for target in "$@"; do
       return n
     }
     function forbidden(statement) {
+      quote_boundary = "[[:space:]" sprintf("%c", 39) sprintf("%c", 34) "]"
       gradle = "(^|[[:space:];|&])([^[:space:];|&]*/)?gradlew?([[:space:];|&]|$)"
-      task = "(^|[[:space:]])((:[[:alnum:]_.-]+)*:(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*)|(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*))([[:space:];|&]|$)"
+      task = "(^|" quote_boundary ")((:[[:alnum:]_.-]+)*:(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*)|(install[[:alnum:]_.-]*|connected[[:alnum:]_.-]*))(" quote_boundary "|[;|&]|$)"
       return statement ~ gradle && statement ~ task
     }
     function report(statement, start_line) {
@@ -77,7 +78,7 @@ for target in "$@"; do
         flush_yaml()
       }
 
-      if (line ~ /^[[:space:]]*run:[[:space:]]*>[-+]?([[:space:]]*(#.*)?)$/) {
+      if (line ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*>[-+]?([[:space:]]*(#.*)?)$/) {
         yaml_active = 1
         yaml_indent = indent_width(line)
         yaml_start = NR
