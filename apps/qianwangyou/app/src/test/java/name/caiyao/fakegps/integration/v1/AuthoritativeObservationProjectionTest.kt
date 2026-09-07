@@ -141,14 +141,13 @@ class AuthoritativeObservationProjectionTest {
             AuthoritativeObservationCommitStore(h.kv))
         val request = ObserveRequestV1(receipt.leaseId, receipt.operationId, receipt.acceptedIntentHash)
         val full = h.kv.transaction { observer.observe(lease, request) }
-        val none = h.kv.transaction { observer.observe(lease, request) }
-
         assertEquals(ContinuityCoverageV1.FULL.wire, full.continuityCoverageWire)
-        assertEquals(ContinuityCoverageV1.NONE.wire, none.continuityCoverageWire)
         assertNotEquals(ContinuityCoverageV1.FULL.wire, h.handler.discover(ProviderHarness.AUTO_UID).continuityCoverageWire)
         assertNotEquals(ContinuityCoverageV1.FULL.wire, h.handler.preflight(
             ProviderHarness.AUTO_UID, PreflightRequestV1(h.intent(), "authoritative-public-preflight", 1),
         ).continuityCoverageWire)
+        val none = h.kv.transaction { observer.observe(lease, request) }
+        assertEquals(ContinuityCoverageV1.NONE.wire, none.continuityCoverageWire)
     }
 
     @Test

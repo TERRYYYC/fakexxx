@@ -43,6 +43,7 @@ The producer must register through that UID-1000 Binder only, send the exact v1 
 | System-server oracle journal | QWY Xposed producer/installer | begin/finish covered mutation, owner/provider transition, boot/restart, QWY session death | consumer process may not write state or synthesize a snapshot |
 | QWY oracle bridge client | QWY process | UID-1000 registration, Binder death/rebind, strict decode | app-local tracker may not promote `FULL` or cache a dead producer |
 | QWY local continuity acknowledgement | `ContinuityTracker` under `DurableKv.transaction` | valid window ACK, authoritative mutation ACK, restart/replay | direct writes to revision namespace |
+| Authoritative observation interval timing | `EnvironmentObserver` under the handler transaction | a fresh valid PRE/POST window begins | writing public tracker `FULL`, or using durable timing/cursor state as a later source snapshot |
 | Observation audit sequence/event | `IntegrationAuditStore` | durable append, crash/reopen, authorized observe admission | TTL/pruning, unbacked evidence reply |
 | Proposed observation admission quota | future `EnvironmentControlHandler` helper after `CallerAuthorizer` + effective `EnvironmentLeaseStore` gate | if authorized by a later decision, admit or typed-reject before audit append | minting `FULL`, changing audit retention, bypassing caller/lease gates |
 | Profile projection | `QwyEnvironment` profile reader | read-only discover snapshot, profile change | caller-provided ordering or a duplicate cache |
@@ -68,6 +69,12 @@ read the binding for diagnosis/replay control, but no local record ever creates
 `FULL`: only a fresh valid PRE/POST read does that. This slice does not add the
 semantic-writer inventory, #79 provider behavior, Auto changes, a new Binder
 field, or #83 admission control.
+
+The interval start recorded for a valid authoritative observation is timing for
+that observation, not public local coverage. In particular, it must not write
+the `ContinuityTracker` public `FULL` field: `discover` and `preflight` read
+that field without a new oracle window, so after source/Binder loss they must
+already be non-`FULL` before any later observe can report a gap.
 
 **Terminal schema.** The provider-private durable record is
 `ObservationCommitRecord(cursor, localGeneration, localRevision, evidenceSeq,
@@ -113,6 +120,11 @@ that returns coverage or an observation.
 - **INV-66-12 (concurrency):** two concurrent valid observations may receive
   distinct monotonic evidence sequences, but cannot create divergent first
   acknowledgements for the same cursor. Test real threads over one durable KV.
+- **INV-66-13 (public-reader boundary):** an authoritative observation may
+  record its interval start but cannot promote public local coverage. After a
+  valid `observe`, immediate `discover` and `preflight` remain non-`FULL` if
+  source/Binder loss has occurred but no second observe has yet detected it.
+  Test this before separately exercising the next failed observation.
 
 | Adversarial scenario | Required observation |
 |---|---|
@@ -135,7 +147,10 @@ that returns coverage or an observation.
    audit append, acknowledgement and record commit together.
 4. Add an observer integration RED/GREEN asserting a valid source record binds
    the exact audit event and a later failed source cannot reuse it for `FULL`.
-5. Run targeted commit/observer tests, the full QWY JVM suite, release assembly
+5. Add the public-reader regression: a valid observation can record timing but
+   cannot make `discover`/`preflight` sticky `FULL` before source loss is next
+   observed; separately prove that failed observation returns `NONE`.
+6. Run targeted commit/observer tests, the full QWY JVM suite, release assembly
    and an independent exact-head review. Do not start semantic-writer coverage,
    #79, Auto changes or #83 admission in this slice.
 
@@ -211,6 +226,7 @@ admission state.
 | bridge identity/lifecycle | wrong UID, unknown/extra/wrong-typed/wrong-version field, Binder death/rebind all become absent source; no cached FULL |
 | ordinary refresh | equal valid sequence/digest remains valid |
 | local self-certification | current #98 guard stays green; no `markContinuityEstablished()` apply path |
+| public coverage after oracle source loss | valid authoritative observe, then immediate `discover`/`preflight` before another observe are non-`FULL`; a later failed observe is `NONE` |
 | ACK crash/replay | inject every observation-commit write; reopen has no mixed FULL/audit state and current #96 advance boundary remains consistent |
 | semantic writers | static source-map guard lists each writer; mutation exception/death/late callback/restart leaves coverage absent or NONE |
 | ordered profiles | IDs 1..10 return exact deterministic `profile-<id>` order with no DB write; missing/corrupt/duplicate input fails honestly |
