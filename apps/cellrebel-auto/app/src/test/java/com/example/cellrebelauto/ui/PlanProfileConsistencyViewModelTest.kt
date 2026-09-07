@@ -67,9 +67,23 @@ class PlanProfileConsistencyViewModelTest {
         }
     }
 
-    private fun await(condition: () -> Boolean) {
+    // Rebase note: importCsv refuses with "Plan data is unavailable or still loading" until the
+    // DataStore config flow AND the Room-backed plan projection both land their first Ready
+    // emission. Waiting on planConfig alone left a race where importCsv early-returned while
+    // planUiState was still Loading — the mismatch/notice asserts then saw stale state.
+    private fun awaitConfigReady(vm: MainViewModel) {
+        await("plan config projection reached Ready") {
+            vm.planConfig.value is com.example.cellrebelauto.cutover.CutoverDataState.Ready<*>
+        }
+        await("plan UI projection reached Ready") {
+            vm.planUiState.value is com.example.cellrebelauto.cutover.CutoverDataState.Ready<*>
+        }
+    }
+
+    private fun await(message: String, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 10_000L
         while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(20L)
+        assertTrue(message, condition())
     }
 
     @Test
@@ -78,11 +92,15 @@ class PlanProfileConsistencyViewModelTest {
         val vm = MainViewModel(
             ApplicationProvider.getApplicationContext(),
             injectedDb = db,
+            // Rebase note: without an injected open gate the VM builds recoveryRequired()
+            // (Robolectric has no cutover app state) and every import early-returns.
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
             profileCountProbe = { 52 },
         )
 
+        awaitConfigReady(vm)
         vm.importCsv(Uri.parse("content://test/worklist.csv"))
-        await { vm.planProfileMismatch.value != null }
+        await("mismatch warning raised after import") { vm.planProfileMismatch.value != null }
 
         val mismatch = vm.planProfileMismatch.value!!
         assertEquals(51, mismatch.planRows)
@@ -99,11 +117,15 @@ class PlanProfileConsistencyViewModelTest {
         val vm = MainViewModel(
             ApplicationProvider.getApplicationContext(),
             injectedDb = db,
+            // Rebase note: without an injected open gate the VM builds recoveryRequired()
+            // (Robolectric has no cutover app state) and every import early-returns.
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
             profileCountProbe = { 3 },
         )
 
+        awaitConfigReady(vm)
         vm.importCsv(Uri.parse("content://test/worklist.csv"))
-        await { vm.importNotice.value?.startsWith("Imported") == true }
+        await("import succeeded") { vm.importNotice.value?.startsWith("Imported") == true }
 
         assertNull(vm.planProfileMismatch.value)
     }
@@ -114,11 +136,17 @@ class PlanProfileConsistencyViewModelTest {
         val vm = MainViewModel(
             ApplicationProvider.getApplicationContext(),
             injectedDb = db,
+            // Rebase note: without an injected open gate the VM builds recoveryRequired()
+            // (Robolectric has no cutover app state) and every import early-returns.
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
             profileCountProbe = { throw IllegalStateException("binder death") },
         )
 
+        awaitConfigReady(vm)
         vm.importCsv(Uri.parse("content://test/worklist.csv"))
-        await { vm.importNotice.value?.startsWith("Imported") == true }
+        await("import succeeded despite probe failure") {
+            vm.importNotice.value?.startsWith("Imported") == true
+        }
 
         // 通道异常 → 无警告、导入照常成功、不崩。
         assertNull(vm.planProfileMismatch.value)

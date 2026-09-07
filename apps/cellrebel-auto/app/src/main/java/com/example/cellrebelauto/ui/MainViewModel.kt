@@ -133,7 +133,7 @@ class MainViewModel @JvmOverloads constructor(
     // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
     private val injectedDb: AppDatabase? = null,
     private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient,
-    private val injectedAccessGate: CutoverAccessGate? = null
+    private val injectedAccessGate: CutoverAccessGate? = null,
     // P0.1-5: the plan↔profile consistency probe (discover channel); tests inject a fake.
     private val profileCountProbe: ProfileCountProbe? = null
 ) : AndroidViewModel(application) {
@@ -618,17 +618,10 @@ class MainViewModel @JvmOverloads constructor(
                         "Import rejected — ${result.errors.size} invalid row(s). Fix the file and re-import."
                 }
                 is ParseResult.Success -> {
-                    // # buffer 取自当前 PlanConfig；缺省即默认 10（P0.1-4），不再卡死导入
-                    val config = planConfig.value.readyValueOrNull()
-                    if (config == null) {
-                        _importNotice.value = "Plan configuration is unavailable or still loading"
-                        return@launchNormalAccess
-                    }
-                    val buffer = config.globalBufferSeconds
-                    if (buffer == null) {
-                        _importNotice.value = "Set global buffer first"
-                        return@launchNormalAccess
-                    }
+                    // # buffer 缺省即默认 10（P0.1-4），导入永不被 buffer 卡死：
+                    // # store 层保持 main 契约（null=未设置），配置流不可用（cutover 门）时同样兜底。
+                    val buffer = planConfig.value.readyValueOrNull()?.globalBufferSeconds
+                        ?: PlanConfig.DEFAULT_GLOBAL_BUFFER_SECONDS
                     val state = planUiState.value.readyValueOrNull()
                     if (state == null) {
                         _importNotice.value = "Plan data is unavailable or still loading"
