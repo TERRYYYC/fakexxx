@@ -197,7 +197,20 @@ class MainViewModel @JvmOverloads constructor(
     // T7 P1.1: the Vector publish timestamp probe (null = unreadable → explained grey).
     private val publishTimestampProbe: PublishTimestampProbe? = null,
     // T7: the P1.3 self-heal trio surface; tests inject a file-backed instance.
-    injectedSelfHealSettings: SelfHealSettings? = null
+    injectedSelfHealSettings: SelfHealSettings? = null,
+    // T7v2 §A1-v2 #2: the CI hero's serving-cell probe seam; tests inject fakes.
+    // Production = TelephonyServingCellPoller over the EXISTING COARSE permission.
+    private val cellProbe: (() -> com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading?)? = null,
+    // T7v2 §A1-v2 #2: the effective profile's configured-CI seam; tests inject.
+    // Production = DiscoverConfiguredCiProbe (contract v1 carries no CI → null
+    // → the badge honestly falls to 设备读数).
+    private val configuredCiProbe: com.example.cellrebelauto.ui.dashboard.v2.ConfiguredCellIdentityProbe? = null,
+    // T7v2 §A1-v2 #4: the metric-pill selection store; tests inject a file-backed one.
+    injectedMetricsSettings: com.example.cellrebelauto.data.DashboardMetricsSettings? = null,
+    // T7v2: the CI hero poll cadence/dispatcher (real time — never the test scheduler).
+    private val cellPollIntervalMs: Long = 2_000,
+    private val cellPollDispatcher: kotlinx.coroutines.CoroutineDispatcher =
+        kotlinx.coroutines.Dispatchers.IO,
 ) : AndroidViewModel(application) {
 
     private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
@@ -504,10 +517,22 @@ class MainViewModel @JvmOverloads constructor(
                     is com.example.cellrebelauto.automation.AutomationStartStatus.Accepted -> {
                         _startRequested.value = false
                         _currentScreen.value = Screen.RUN
+                        // T7v2: the run surface's one-tap 重启恢复 listens here —
+                        // the SAME startStatus the Plan page consumes, no second engine.
+                        if (_resumeAwaiting.value) {
+                            _resumeAwaiting.value = false
+                            _resumeFailure.value = null
+                            _resumeOutcome.value = ResumeOutcome(succeeded = true, reason = null)
+                        }
                     }
                     is com.example.cellrebelauto.automation.AutomationStartStatus.Rejected -> {
                         _startRequested.value = false
                         _importNotice.value = "Start rejected: ${status.reason}"
+                        if (_resumeAwaiting.value) {
+                            _resumeAwaiting.value = false
+                            _resumeFailure.value = status.reason
+                            _resumeOutcome.value = ResumeOutcome(succeeded = false, reason = status.reason)
+                        }
                     }
                     else -> Unit
                 }
@@ -1006,7 +1031,10 @@ class MainViewModel @JvmOverloads constructor(
 
     /** P1.3 self-heal trio — the dashboard section edits the SAME DataStore the engine reads. */
     val selfHealConfig: StateFlow<SelfHealConfig> = selfHealSettings.config
-        .stateIn(viewModelScope, SharingStarted.Lazily, SelfHealConfig())
+        // Eagerly (not Lazily): the dashboard must reflect the PERSISTED trio config the
+        // moment the VM exists — a Lazily upstream that never starts also made the
+        // self-heal toggle tests race the defaults (stateIn kept serving initial values).
+        .stateIn(viewModelScope, SharingStarted.Eagerly, SelfHealConfig())
 
     fun setAttemptWatchdogEnabled(enabled: Boolean) {
         viewModelScope.launch { selfHealSettings.setAttemptWatchdogEnabled(enabled) }
@@ -1018,6 +1046,96 @@ class MainViewModel @JvmOverloads constructor(
 
     fun setServiceReconnectAutoResumeEnabled(enabled: Boolean) {
         viewModelScope.launch { selfHealSettings.setServiceReconnectAutoResumeEnabled(enabled) }
+    }
+
+    // ---- T7v2 §A1-v2: CI hero + map + metric pills + one-tap resume ----------
+
+    private val metricsSettings = injectedMetricsSettings
+        ?: com.example.cellrebelauto.data.DashboardMetricsSettings(application)
+
+    /** The 1..3 metric pills; DataStore-backed, sanitized on the way out. */
+    val metricSelection: StateFlow<List<com.example.cellrebelauto.ui.dashboard.v2.MetricKey>> =
+        metricsSettings.selection
+            .stateIn(
+                viewModelScope,
+                SharingStarted.Lazily,
+                com.example.cellrebelauto.ui.dashboard.v2.MetricPillFormatter
+                    .sanitize(emptyList()),
+            )
+
+    fun setMetricSelection(keys: List<com.example.cellrebelauto.ui.dashboard.v2.MetricKey>) {
+        viewModelScope.launch { metricsSettings.setSelection(keys) }
+    }
+
+    private val _servingCell =
+        MutableStateFlow<com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading?>(null)
+    private val _configuredCi = MutableStateFlow<Long?>(null)
+
+    /**
+     * The CI hero poll loop. Deliberately on a REAL dispatcher (never the test
+     * scheduler): the first probe fires immediately, then every
+     * [cellPollIntervalMs]. A failing probe is a null reading — the hero shows
+     * "--", never a crash, never a fabricated value. In Robolectric oracles the
+     * default probe short-circuits on the permission check (null) — harmless.
+     */
+    private val cellPolling: kotlin.Any = run {
+        val probe = cellProbe
+            ?: { com.example.cellrebelauto.ui.dashboard.v2.TelephonyServingCellPoller(
+                    getApplication()
+                ).probe() }
+        val ciProbe = configuredCiProbe
+            ?: com.example.cellrebelauto.ui.dashboard.v2.DiscoverConfiguredCiProbe
+        viewModelScope.launch(cellPollDispatcher) {
+            while (true) {
+                _servingCell.value = runCatching { probe() }.getOrNull()
+                _configuredCi.value = runCatching { ciProbe.configuredCi() }.getOrNull()
+                kotlinx.coroutines.delay(cellPollIntervalMs)
+            }
+        }
+        kotlin.Any()
+    }
+
+    // ---- T7v2 §A1-v2 #1: one-tap 重启恢复 -------------------------------------
+    //
+    // The button funnels into startOrResumePlan() — the SAME entry the Plan
+    // page's Start/Resume uses, the SAME entry T4's auto-resume coordinator
+    // (startWithPlan) and the T3 broadcast RESUME action call. Success/failure
+    // is read from the EXISTING startStatus projection; a typed rejection
+    // flips the primary button to 查看日志 (log drawer) on the run surface.
+
+    /** One-shot resume feedback (snackbar); null = already consumed. */
+    data class ResumeOutcome(val succeeded: Boolean, val reason: String?)
+
+    private val _resumeAwaiting = MutableStateFlow(false)
+    private val _resumeFailure = MutableStateFlow<String?>(null)
+    private val _resumeOutcome = MutableStateFlow<ResumeOutcome?>(null)
+
+    /** Last one-tap resume rejection; drives the OPEN_LOG primary button. */
+    val resumeFailure: StateFlow<String?> = _resumeFailure
+
+    val resumeOutcome: StateFlow<ResumeOutcome?> = _resumeOutcome
+
+    fun consumeResumeOutcome() {
+        _resumeOutcome.value = null
+    }
+
+    fun resumeRun() {
+        _resumeFailure.value = null
+        if (planUiState.value.plan == null) {
+            _resumeFailure.value = "NO_PLAN"
+            _resumeOutcome.value = ResumeOutcome(succeeded = false, reason = "NO_PLAN")
+            return
+        }
+        _resumeAwaiting.value = true
+        startOrResumePlan()
+        if (!_startRequested.value) {
+            // startOrResumePlan refused synchronously (no plan / BOTH_STAGES_OFF
+            // — it posted importNotice instead of touching the engine), so no
+            // startStatus emission will ever arrive. Fail loudly HERE.
+            _resumeAwaiting.value = false
+            _resumeFailure.value = "PLAN_NOT_READY"
+            _resumeOutcome.value = ResumeOutcome(succeeded = false, reason = "PLAN_NOT_READY")
+        }
     }
 
     /** The three lamps; null = not probed yet (the screen renders an unprobed grey). */
@@ -1080,6 +1198,18 @@ class MainViewModel @JvmOverloads constructor(
         val lampAccessibility: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
         val lampProvider: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
         val lampVector: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+        // ---- T7v2 §A1-v2 additions ----
+        /** Plan map points, execution order, trusted-color states. */
+        val mapPoints: List<com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.MapPoint> =
+            emptyList(),
+        /** The currently executing plan row (coordinate pill / map caption). */
+        val currentPoint: com.example.cellrebelauto.ui.dashboard.v2.CurrentPointView? = null,
+        /** CI hero: raw device reading + its honest badge. */
+        val ciHero: com.example.cellrebelauto.ui.dashboard.v2.CiHeroView =
+            com.example.cellrebelauto.ui.dashboard.v2.CiHeroView(null, null),
+        /** Last one-tap resume rejection (drives 查看日志); null = clean. */
+        val resumeFailure: String? = null,
+        val hasPlan: Boolean = false,
     )
 
     private data class DashboardEngineView(
@@ -1088,6 +1218,7 @@ class MainViewModel @JvmOverloads constructor(
         val lastFailure: LastFailureInfo?,
         val latestErrorLog: String?,
         val planState: PlanUiState,
+        val currentCsvRow: Int?,
     )
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -1108,6 +1239,7 @@ class MainViewModel @JvmOverloads constructor(
                         it.contains("ANCHOR_MISMATCH") || it.contains("trust gate rejected")
                 },
                 planState = plan,
+                currentCsvRow = currentTask.value?.csvRow,
             )
         }
             .combine(attempts) { view, attemptRows ->
@@ -1140,11 +1272,62 @@ class MainViewModel @JvmOverloads constructor(
                     lastFailureReason = view.lastFailure?.reason,
                     latestErrorLog = view.latestErrorLog,
                 )
+                // T7v2 §A1-v2 #3: map points are a pure projection over plan
+                // rows + trusted counts (never legacy, never attempt rows).
+                val mapPoints = com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.project(
+                    tasks = view.planState.tasks.map {
+                        com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.Row(
+                            id = it.id,
+                            csvRow = it.csvRow,
+                            latitude = it.latitude,
+                            longitude = it.longitude,
+                            status = it.status,
+                            requiredSuccesses = it.requiredSuccesses,
+                        )
+                    },
+                    trustedCounts = view.planState.trustedCounts,
+                    currentCsvRow = view.currentCsvRow,
+                )
+                val currentRow = view.planState.tasks.firstOrNull {
+                    it.csvRow == view.currentCsvRow
+                }
                 RunDashboardUiState(
                     engineState = view.state,
                     isRunning = view.isRunning,
                     explanation = explanation,
                     progress = progress,
+                    mapPoints = mapPoints,
+                    currentPoint = currentRow?.let {
+                        com.example.cellrebelauto.ui.dashboard.v2.CurrentPointView(
+                            csvRow = it.csvRow, latitude = it.latitude, longitude = it.longitude,
+                        )
+                    },
+                    hasPlan = plan != null,
+                )
+            }
+            // T7v2 §A1-v2 #2: CI hero — the VALUE is the raw device reading;
+            // the badge is the pure three-state classifier over (observed, configured).
+            .combine(_servingCell) { partial, reading ->
+                partial.copy(
+                    ciHero = com.example.cellrebelauto.ui.dashboard.v2.CiHeroView(
+                        reading = reading,
+                        badge = com.example.cellrebelauto.ui.dashboard.v2.CiHeroClassifier
+                            .classify(
+                                observedCi = reading?.ci,
+                                configuredCi = _configuredCi.value,
+                            ),
+                    ),
+                )
+            }
+            .combine(_configuredCi) { partial, configured ->
+                partial.copy(
+                    ciHero = partial.ciHero.copy(
+                        badge = com.example.cellrebelauto.ui.dashboard.v2.CiHeroClassifier
+                            .classify(
+                                observedCi = partial.ciHero.reading?.ci,
+                                configuredCi = configured,
+                            ),
+                    ),
                 )
             }
             // # 三灯与服务连接是独立来源：refreshDashboardHealth 写 _lamps 后必须触发重投影
@@ -1157,6 +1340,9 @@ class MainViewModel @JvmOverloads constructor(
             }
             .combine(isServiceConnected) { partial, connected ->
                 partial.copy(serviceConnected = connected)
+            }
+            .combine(_resumeFailure) { partial, failure ->
+                partial.copy(resumeFailure = failure)
             }
             .stateIn(
                 viewModelScope,

@@ -12,6 +12,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -101,14 +103,23 @@ class SelfHealDashboardViewModelTest {
         org.junit.Assert.assertFalse(config.serviceReconnectAutoResumeEnabled)
     }
 
+
     @Test
     fun `watchdog toggle writes the persisted watchdog key`() = runTest {
         val store = settings()
         val viewModel = vm(store)
+        // selfHealConfig is stateIn(Lazily, defaults): a PERSISTENT subscriber is what
+        // starts the upstream. first()-polling a Lazily StateFlow races the initial
+        // defaults and can silently time out — collect instead, then assert on the tail.
+        val readings = mutableListOf<com.example.cellrebelauto.data.SelfHealConfig>()
+        // Real dispatcher (NOT backgroundScope): the test body blocks its own scheduler
+        // inside awaitUntil's Thread.sleep, which would starve a scheduler-queued collector.
+        val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.Job())
+        val collector = collectScope.launch { viewModel.selfHealConfig.toList(readings) }
         viewModel.setAttemptWatchdogEnabled(false)
-        awaitUntil { !viewModel.selfHealConfig.first().attemptWatchdogEnabled }
-        awaitUntil { !store.config.first().attemptWatchdogEnabled }
-        org.junit.Assert.assertFalse(viewModel.selfHealConfig.first().attemptWatchdogEnabled)
+        awaitUntil { readings.lastOrNull()?.attemptWatchdogEnabled == false }
+        collector.cancel(); collectScope.cancel()
+        org.junit.Assert.assertFalse(readings.last().attemptWatchdogEnabled)
         org.junit.Assert.assertFalse(store.config.first().attemptWatchdogEnabled)
     }
 
@@ -116,10 +127,15 @@ class SelfHealDashboardViewModelTest {
     fun `coordinate guard toggle writes the persisted guard key`() = runTest {
         val store = settings()
         val viewModel = vm(store)
+        val readings = mutableListOf<com.example.cellrebelauto.data.SelfHealConfig>()
+        // Real dispatcher (NOT backgroundScope): the test body blocks its own scheduler
+        // inside awaitUntil's Thread.sleep, which would starve a scheduler-queued collector.
+        val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.Job())
+        val collector = collectScope.launch { viewModel.selfHealConfig.toList(readings) }
         viewModel.setCoordinateGuardEnabled(false)
-        awaitUntil { !viewModel.selfHealConfig.first().coordinateGuardEnabled }
-        awaitUntil { !store.config.first().coordinateGuardEnabled }
-        org.junit.Assert.assertFalse(viewModel.selfHealConfig.first().coordinateGuardEnabled)
+        awaitUntil { readings.lastOrNull()?.coordinateGuardEnabled == false }
+        collector.cancel(); collectScope.cancel()
+        org.junit.Assert.assertFalse(readings.last().coordinateGuardEnabled)
         org.junit.Assert.assertFalse(store.config.first().coordinateGuardEnabled)
     }
 
