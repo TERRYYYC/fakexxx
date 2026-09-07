@@ -326,6 +326,19 @@ object ProviderRuntime {
         handler(context).restartScheduleForOperator()
 
     /**
+     * T8 export surface: read-only pairing fingerprints (applicationId + signer digest)
+     * for the configuration bundle. This is NOT a trust decision — the importing side
+     * must re-walk operator approval; the bundle only carries identity material for
+     * human cross-checking.
+     * # 只读指纹供配置包导出；导入方仍须重新走批准，绝不静默授权
+     */
+    fun pairingFingerprints(context: Context): List<PairingRecord> {
+        handler(context)
+        val kv = kvRef ?: return emptyList()
+        return DurablePairingStore(kv).allPairings()
+    }
+
+    /**
      * Called on orderly teardown of the provider service. Without this, [consume]
      * below can only ever answer false.
      *

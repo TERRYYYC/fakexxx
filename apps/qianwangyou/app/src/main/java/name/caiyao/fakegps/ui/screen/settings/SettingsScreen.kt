@@ -135,6 +135,16 @@ fun SettingsScreen(
     var callerToApprove by remember { mutableStateOf<PendingPairingCandidate?>(null) }
     var showRestartConfirmation by remember { mutableStateOf(false) }
 
+    // T8 (P0.3): 配置包导出/导入（SAF，无需权限）
+    val bundleExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri -> if (uri != null) vm.exportConfigBundle(uri) }
+    val bundleImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) vm.importConfigBundle(uri) }
+    val bundleImportUi by vm.bundleImportUi.collectAsState()
+    val bundleConflictPending by vm.bundleConflictPending.collectAsState()
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -350,6 +360,28 @@ fun SettingsScreen(
             // --- 数据 ---
             SectionHeader("数据管理")
             ListItem(
+                headlineContent = { Text("导出配置包") },
+                supportingContent = {
+                    Text("档案全集 + 生效档案 + 车道配置 + 调用方指纹，单 zip；不含任何密钥/凭据")
+                },
+                modifier = Modifier.clickable {
+                    bundleExportLauncher.launch(
+                        name.caiyao.fakegps.data.bundle.QwyBundleExporter.suggestedFileName(
+                            System.currentTimeMillis(),
+                        ),
+                    )
+                },
+            )
+            ListItem(
+                headlineContent = { Text("导入配置包") },
+                supportingContent = {
+                    Text("选择另一台设备导出的 fakexxx-config-*.zip，一键对齐档案与车道配置")
+                },
+                modifier = Modifier.clickable {
+                    bundleImportLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+                },
+            )
+            ListItem(
                 headlineContent = { Text("导出档案") },
                 supportingContent = { Text("导出所有档案为 JSON") },
             )
@@ -406,6 +438,57 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showRestartConfirmation = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // T8: 冲突策略对话框——覆盖 / 跳过 二选一（默认提示）
+    if (bundleConflictPending) {
+        AlertDialog(
+            onDismissRequest = vm::dismissBundleConflict,
+            title = { Text("本机已有档案") },
+            text = {
+                Text(
+                    "覆盖：用配置包中的档案全集替换本机现有档案，并按包内指针重新锚定生效档案。\n" +
+                        "跳过档案：保留本机现有档案与生效档案，仅应用包内的车道配置。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = vm::confirmBundleReplace) { Text("覆盖") }
+            },
+            dismissButton = {
+                TextButton(onClick = vm::confirmBundleKeepExisting) { Text("跳过档案") }
+            },
+        )
+    }
+
+    // T8: 导入/导出结果（含对账警告与指纹核对提示）
+    bundleImportUi?.let { ui ->
+        AlertDialog(
+            onDismissRequest = vm::dismissBundleImportUi,
+            title = { Text(if (ui.isError) "配置包操作失败" else "配置包") },
+            text = {
+                Column {
+                    Text(ui.message)
+                    ui.warnings.forEach { warning ->
+                        Text(
+                            warning,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                    ui.callerFingerprints.forEach { fingerprint ->
+                        Text(
+                            "待核对：${fingerprint.applicationId}\n签名：${fingerprint.signerDigest}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = vm::dismissBundleImportUi) { Text("知道了") }
             },
         )
     }

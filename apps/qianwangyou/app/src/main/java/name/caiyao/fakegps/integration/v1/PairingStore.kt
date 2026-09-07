@@ -83,6 +83,17 @@ class DurablePairingStore(
             storage.read(CANDIDATE_NS, key)?.let { deserializeCandidate(it) }
         }
 
+    /**
+     * T8 export surface: read-only listing of every pairing record for the
+     * configuration bundle's fingerprint section. Trust mutations stay behind
+     * [approve]/[revoke] — this lists, it never decides.
+     * # 只读清单，供配置包导出指纹；信任变更仍只走 approve/revoke
+     */
+    fun allPairings(): List<PairingRecord> =
+        storage.keys(PAIRING_NS).mapNotNull { key ->
+            storage.read(PAIRING_NS, key)?.let { deserializePairing(it) }
+        }
+
     // --- simple serialization (no JSON lib dependency; fields are pipe-delimited) ---
 
     private fun serializePairing(r: PairingRecord): String =
