@@ -203,6 +203,121 @@ class CutoverArchiveV2CodecTest {
     }
 
     @Test
+    fun `policy rejects blank table name or schema digest after a legal baseline`() {
+        val baselinePolicy = policy(
+            limits = CutoverArchiveLimits(
+                maxArchiveBytes = 10_000,
+                maxEncodedFieldChars = 40
+            )
+        )
+        assertCanonicalRoundTrip(CutoverArchiveV2Codec(baselinePolicy), archive())
+
+        listOf<() -> CutoverArchivePolicy>(
+            {
+                baselinePolicy.copy(
+                    requiredTableSchemaDigests = baselinePolicy.requiredTableSchemaDigests +
+                        ("" to "sha256:blank-name")
+                )
+            },
+            {
+                baselinePolicy.copy(
+                    requiredTableSchemaDigests = baselinePolicy.requiredTableSchemaDigests +
+                        (" \t" to "sha256:blank-name")
+                )
+            },
+            {
+                baselinePolicy.copy(
+                    requiredTableSchemaDigests = baselinePolicy.requiredTableSchemaDigests +
+                        ("provider_pairing_records" to "")
+                )
+            },
+            {
+                baselinePolicy.copy(
+                    requiredTableSchemaDigests = baselinePolicy.requiredTableSchemaDigests +
+                        ("provider_pairing_records" to " \t")
+                )
+            }
+        ).forEach { invalidPolicy ->
+            assertThrows(IllegalArgumentException::class.java) { invalidPolicy() }
+        }
+    }
+
+    @Test
+    fun `field empty rules are symmetric across encode and decode`() {
+        val emptyPayload = archive().copy(
+            tables = archive().tables.map { table ->
+                if (table.name == "alpha") {
+                    table.copy(
+                        rows = table.rows.mapIndexed { index, row ->
+                            if (index == 0) row.copy(canonicalRowBase64Url = "") else row
+                        }
+                    )
+                } else {
+                    table
+                }
+            }
+        )
+        assertCanonicalRoundTrip(codec, emptyPayload)
+
+        assertRejected(archive().copy(sourcePackage = ""))
+        assertRejected(archive().copy(captureId = " \t"))
+        assertRejected(
+            archive().copy(
+                tables = archive().tables.map { table ->
+                    if (table.name == "alpha") {
+                        table.copy(rows = listOf(CutoverRowPayload("", "")))
+                    } else {
+                        table
+                    }
+                }
+            )
+        )
+        assertRejected(
+            archive().copy(
+                preferences = archive().preferences.map { preference ->
+                    if (preference.key == "test_timeout_seconds") preference.copy(value = "")
+                    else preference
+                }
+            )
+        )
+    }
+
+    @Test
+    fun `zero rows and canonical integer minima remain legal`() {
+        assertThrows(IllegalArgumentException::class.java) { policy().copy(schemaVersion = 0) }
+        val zeroRowPolicy = CutoverArchivePolicy(
+            schemaVersion = 1,
+            requiredTableSchemaDigests = mapOf("provider_pairing_records" to "sha256:pairing"),
+            historicalOnlyTables = setOf("provider_pairing_records"),
+            limits = CutoverArchiveLimits(
+                maxArchiveBytes = 10_000,
+                maxRowsPerTable = 0,
+                maxTotalRows = 0,
+                maxEncodedFieldChars = 40
+            )
+        )
+        val candidate = CutoverArchiveV2(
+            sourcePackage = "com.example.cellrebelauto",
+            captureId = "capture-minimum",
+            schemaVersion = 1,
+            tables = listOf(
+                CutoverTableSection(
+                    name = "provider_pairing_records",
+                    schemaDigest = "sha256:pairing",
+                    restorationMode = CutoverRestorationMode.HISTORICAL_ONLY,
+                    rows = emptyList()
+                )
+            ),
+            preferences = preferences().map { preference ->
+                if (preference.key == "test_timeout_seconds") preference.copy(value = Int.MIN_VALUE.toString())
+                else preference
+            }
+        )
+
+        assertCanonicalRoundTrip(CutoverArchiveV2Codec(zeroRowPolicy), candidate)
+    }
+
+    @Test
     fun `pairing records are historical only and exact restore is forbidden`() {
         val baseline = archive()
         val activePairing = baseline.copy(
@@ -299,16 +414,9 @@ class CutoverArchiveV2CodecTest {
             requiredTableSchemaDigests = baselinePolicy.requiredTableSchemaDigests +
                 ("alpha" to oversizedSchemaDigest)
         )
-        val boundedCodec = CutoverArchiveV2Codec(boundedPolicy)
-        val candidate = archive().copy(
-            tables = archive().tables.map { table ->
-                if (table.name == "alpha") table.copy(schemaDigest = oversizedSchemaDigest) else table
-            }
-        )
-
         assertCanonicalRoundTrip(CutoverArchiveV2Codec(baselinePolicy), archive())
         val error = assertThrows(IllegalArgumentException::class.java) {
-            boundedCodec.encode(candidate)
+            CutoverArchiveV2Codec(boundedPolicy)
         }
         assertTrue(error.message.orEmpty().contains("schema digest exceeds field limit"))
     }

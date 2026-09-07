@@ -93,6 +93,12 @@ data class CutoverArchivePolicy(
         require(schemaVersion > 0) { "schema version must be positive" }
         require(requiredTableSchemaDigests.isNotEmpty()) { "table census cannot be empty" }
         require(requiredTableSchemaDigests.size <= limits.maxTables) { "table census exceeds limit" }
+        require(requiredTableSchemaDigests.keys.all { it.isNotBlank() }) {
+            "table name cannot be blank"
+        }
+        require(requiredTableSchemaDigests.values.all { it.isNotBlank() }) {
+            "schema digest cannot be blank"
+        }
         require("provider_pairing_records" in requiredTableSchemaDigests) {
             "pairing history table is required"
         }
@@ -118,6 +124,13 @@ data class CutoverArchivePolicy(
 class CutoverArchiveV2Codec(
     private val policy: CutoverArchivePolicy
 ) {
+    init {
+        policy.requiredTableSchemaDigests.forEach { (tableName, schemaDigest) ->
+            requireEncodedTextWithinLimit(tableName, "table name")
+            requireEncodedTextWithinLimit(schemaDigest, "schema digest")
+        }
+    }
+
     fun encode(archive: CutoverArchiveV2): EncodedCutoverArchiveV2 {
         validateArchive(archive)
         val totalRows = archive.tables.sumOf { it.rows.size.toLong() }
@@ -290,6 +303,7 @@ class CutoverArchiveV2Codec(
         archive.tables.forEach { table ->
             require(table.name.isNotBlank()) { "table name cannot be blank" }
             requireEncodedTextWithinLimit(table.name, "table name")
+            require(table.schemaDigest.isNotBlank()) { "schema digest cannot be blank" }
             requireEncodedTextWithinLimit(table.schemaDigest, "schema digest")
             require(table.schemaDigest == policy.requiredTableSchemaDigests.getValue(table.name)) {
                 "unexpected schema digest for ${table.name}"
