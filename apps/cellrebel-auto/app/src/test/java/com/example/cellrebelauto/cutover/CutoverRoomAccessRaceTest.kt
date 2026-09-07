@@ -77,7 +77,14 @@ class CutoverRoomAccessRaceTest {
             db.planDao().insertPlan(plan("restored.csv", importedAt = 2L))
         }
 
-        assertNull(withTimeoutOrNull(200) { emissions.receive() })
+        val whileExclusive = mutableListOf<LocationPlan>()
+        withTimeoutOrNull(200) {
+            while (true) whileExclusive += emissions.receive()
+        }
+        assertTrue(
+            "the exclusive generation must not escape before reopen: $whileExclusive",
+            whileExclusive.none { it.sourceFileName == "restored.csv" }
+        )
         assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
         assertEquals("restored.csv", withTimeout(2_000) { emissions.receive() }.sourceFileName)
         collector.cancel()

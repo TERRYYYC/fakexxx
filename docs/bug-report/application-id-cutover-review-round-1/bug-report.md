@@ -24,22 +24,28 @@ The exclusive capability counted executor children but release asserted immediat
 ownership instead of asynchronously joining those already-retained children. Separately, the gate
 controlled upstream repository flows but did not own the complete UI projection lifecycle: public
 `stateIn` defaults, pairing's secondary query, and request state set before admission were outside
-the close/cancel/reopen state machine.
+the close/cancel/reopen state machine. The first repair still represented availability with equal
+open values, so `StateFlow` could conflate a complete close/reopen between collector dispatches and
+leave a cold query subscribed to stale data.
 
 ## Fix
 
 Exclusive release now waits non-cancellably for the child-reference drain signal before consuming
 the root capability. Restored-data UI flows share one typed `Loading` / `Ready` / `Unavailable`
 projection boundary driven by gate state; pairing performs its secondary read through typed normal
-admission and recomputes after reopen. Replacement request ids and busy flags retire in `finally`,
-while retryable proposals remain. The same failure-mode sweep also keeps a rejected revoke staged.
-The Room fixture uses a synthetic provider application id without weakening the acceptance guard.
+admission and recomputes after reopen. Availability transitions carry a monotonic, gate-local
+revision, so a reopened cycle cannot compare equal to the cycle whose data it invalidated; both
+typed `dataFlow` and untyped repository `gateFlow` consume that same signal. Replacement request ids
+and busy flags retire in `finally`, while retryable proposals remain. The same failure-mode sweep
+also keeps a rejected revoke staged. The Room fixture uses a synthetic provider application id
+without weakening the acceptance guard.
 
 ## Validation
 
 Regression tests cover executor-tail release, all six recovery-closed public projections, pairing
-close/reopen recomputation, confirmation and verified-stop rejection/retry, and rejected revoke
-retry. Both `testLegacyIdDebugUnitTest` and `testProductIdDebugUnitTest` pass with 838 tests each.
+close/reopen recomputation, a complete close/reopen between collector dispatches for both gate flow
+types, confirmation and verified-stop rejection/retry, and rejected revoke retry. Both
+`testLegacyIdDebugUnitTest` and `testProductIdDebugUnitTest` pass with 840 tests each.
 Debug, glmbench, and release APK assembly passes for both identities, as do both debug lint tasks.
 The identity APK contract, both release debug-only scans, lint-debt check, host/device-isolation
 self-test (20/20), and forbidden-boundary guard (13/13) pass. The existing forbidden-boundary script

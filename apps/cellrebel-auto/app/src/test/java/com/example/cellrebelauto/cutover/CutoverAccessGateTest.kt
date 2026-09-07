@@ -6,6 +6,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.sync.Mutex
@@ -58,6 +61,33 @@ class CutoverAccessGateTest {
         )
         assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
         assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+    }
+
+    @Test
+    fun completeCloseAndReopenBetweenCollectorDispatchesRestartsGateFlow() = runTest {
+        val gate = CutoverAccessGate.open()
+        var subscriptions = 0
+        val observed = mutableListOf<Int>()
+        val collection = backgroundScope.launch {
+            gate.gateFlow(
+                flow {
+                    subscriptions += 1
+                    emit(subscriptions)
+                    awaitCancellation()
+                }
+            ).collect { observed += it }
+        }
+        runCurrent()
+        assertEquals(listOf(1), observed)
+
+        val lease = requireType<CutoverExclusiveAdmission.Granted>(
+            gate.acquireCaptureExclusive("gate-flow-open-cycle") { true }
+        ).lease
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+        runCurrent()
+
+        assertEquals("a distinct open cycle must resubscribe even if close was conflated", listOf(1, 2), observed)
+        collection.cancel()
     }
 
     @Test

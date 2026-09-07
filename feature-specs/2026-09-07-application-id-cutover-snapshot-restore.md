@@ -301,7 +301,9 @@ Every public projection of restored Room/DataStore state is a `CutoverDataState<
 the gate is open but the newly subscribed owner has not produced a value; `Ready(value)` is the only
 state in which an empty list, absent plan, defaulted preference, or trusted pairing is normal data;
 `Unavailable(reason, identity)` means the gate is closed. Reopening cancels no owner permanently: it
-creates a fresh upstream subscription before another `Ready` can be published.
+creates a fresh upstream subscription before another `Ready` can be published. Every visibility
+transition advances a gate-local revision, so even a complete close → reopen that occurs between two
+collector dispatches is distinguishable from the prior open cycle and invalidates stale `Ready` data.
 
 | Public observable | Durable/source owner | Secondary reads | Closed/reopen rule |
 | --- | --- | --- | --- |
