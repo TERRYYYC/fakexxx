@@ -107,6 +107,7 @@ class AuthoritativeObservationProjectionTest {
 
         assertEquals(ContinuityCoverageV1.FULL.wire, first.continuityCoverageWire)
         assertEquals(ContinuityCoverageV1.FULL.wire, second.continuityCoverageWire)
+        assertEquals(first.continuitySinceElapsedRealtimeMs, second.continuitySinceElapsedRealtimeMs)
         assertEquals(
             "replaying one source cursor is an observation, not a local revision",
             first.environmentRevision,

@@ -88,7 +88,8 @@ that returns coverage or an observation.
 | same | acknowledgement for cursor C | another valid observation with C | append a new audit event and its new record; preserve C's first acknowledgement/local revision | changing C's stored first acknowledgement or treating it as replayed evidence |
 | same | acknowledgement for C | valid different cursor D | append audit; write acknowledgement for D and record | comparing arbitrary cursor strings or promoting a local revision to source truth |
 | same | any acknowledgement | absent/malformed/changed PRE/POST | append the honest `NONE` observation under existing behavior; do not write a trusted cursor acknowledgement/record | falling back to an old acknowledgement for `FULL` |
-| same | buffered commit | append/write exception or owner death before outer commit | no new audit sequence, acknowledgement, or record survives; no reply | returning an evidence ref or accepting half a binding |
+| same | pre-append staging failure | no new audit sequence, acknowledgement, or record survives; no reply | returning an evidence ref or accepting half a binding |
+| same | live journal append/sync/close outcome uncertain | old owner fail-stops with no reply; fresh owner sees either the complete prior transaction or the complete new transaction, never a mixed binding | deleting a complete recoverable frame or claiming every error rolled back |
 | same | reopened durable store | same/new valid cursor | read watermark only for idempotent acknowledgement control; re-run fresh PRE/POST before any `FULL` reply | using restart/replay to synthesize a source snapshot |
 
 #### Invariants and hostile matrix
@@ -117,7 +118,7 @@ that returns coverage or an observation.
 |---|---|
 | crash after audit buffer, before acknowledgement/record | outer rollback: no new audit row, acknowledgement, or record |
 | crash after acknowledgement buffer, before outer commit | same rollback; no local truth survives independently |
-| crash after full buffer, before durable commit/reply | no reply; reopen sees only the prior complete state |
+| crash after full buffer, before durable commit/reply | no reply; before live append reopen sees prior state; after an uncertain append/sync/close it may see prior or the complete new transaction, never mixed state |
 | valid C, restart, then source unavailable/changed | `NONE`; stored C remains diagnostic only |
 | repeated valid C | two resolvable evidence rows, one immutable first acknowledgement |
 | concurrent first valid C | one first acknowledgement and two individually bound evidence records |

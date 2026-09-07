@@ -126,6 +126,12 @@ class AuthoritativeObservationCommitStore(
             }
             .maxOfOrNull { it.sequence }
 
+    internal fun digestForAcknowledgedSequence(cursor: AuthoritativeObservationCursor): String? =
+        storage.keys(NAMESPACE).asSequence().filter { it.startsWith(ACK_PREFIX) }
+            .map { decodeAcknowledgement(checkNotNull(storage.read(NAMESPACE, it))).cursor }
+            .firstOrNull { it.bootId == cursor.bootId && it.oracleInstanceId == cursor.oracleInstanceId && it.sequence == cursor.sequence }
+            ?.qwySemanticDigest
+
     /** A source epoch switch within one local owner generation is unproven. */
     internal fun hasAcknowledgementForDifferentSourceEpoch(
         localGeneration: Long,

@@ -85,7 +85,9 @@ class EnvironmentObserver(
         // fail-closed even when its own endpoints match.
         authoritativeCursor?.let { cursor ->
             val highest = authoritativeCommitStore?.highestAcknowledgedSequenceForSourceEpoch(cursor)
-            if (highest != null && cursor.sequence < highest) {
+            val knownDigest = authoritativeCommitStore?.digestForAcknowledgedSequence(cursor)
+            if ((highest != null && cursor.sequence < highest) ||
+                (knownDigest != null && knownDigest != cursor.qwySemanticDigest)) {
                 authoritativeWindowIsValid = false
                 authoritativeCursor = null
             }
@@ -116,6 +118,15 @@ class EnvironmentObserver(
                 snap = tracker.snapshot()
             }
         }
+        if (authoritativeCommitStore != null) {
+            if (authoritativeWindowIsValid && snap.continuitySinceElapsedRealtimeMs == null) {
+                tracker.markContinuityEstablished()
+                snap = tracker.snapshot()
+            } else if (!authoritativeWindowIsValid && authoritativeSource != null) {
+                tracker.reportObserverGap()
+                snap = tracker.snapshot()
+            }
+        }
         val coverageWire = when {
             authoritativeSource == null -> snap.coverageWire
             authoritativeWindowIsValid -> ContinuityCoverageV1.FULL.wire
@@ -123,7 +134,7 @@ class EnvironmentObserver(
         }
         val continuitySince = when {
             authoritativeSource == null -> snap.continuitySinceElapsedRealtimeMs
-            authoritativeWindowIsValid -> windowStartElapsedRealtimeMs
+            authoritativeWindowIsValid -> snap.continuitySinceElapsedRealtimeMs ?: windowStartElapsedRealtimeMs
             else -> null
         }
 
