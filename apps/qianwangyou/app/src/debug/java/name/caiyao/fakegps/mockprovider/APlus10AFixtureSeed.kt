@@ -241,13 +241,17 @@ object APlus10AFixtureSeed {
         val spoofMode: String,
         val activeHourStart: Int,
         val activeHourEnd: Int,
+        /** v5 module switches as persisted; the mirror enumerates the full canonical set. */
+        val spoofModules: Map<String, Boolean> =
+            name.caiyao.fakegps.config.SpoofModules.ALL.associateWith { true },
     )
 
     /**
      * Pure mirror of ConfigPrefsSync.buildFieldMapJson for ONE seeded profile row.
      *
      * Root keys: schemaVersion (the writer's constant, not a literal) / refreshIntervalSec /
-     * locationDeliveryMode / activeHours{start,end} / mode (spoof mode) / fields / unavailable.
+     * locationDeliveryMode / modules (v5: one boolean per canonical module, always in full) /
+     * activeHours{start,end} / mode (spoof mode) / fields / unavailable.
      * `fields` = every NON-NULL profile column except `id` and `unavailable_fields`, keyed by
      * the DB COLUMN NAME (`wifi_ssid`, not the Kotlin property `wifiSsid`) and typed as the
      * cursor delivers it (INTEGER→long, REAL→double — a Float is widened exactly as Room
@@ -274,10 +278,17 @@ object APlus10AFixtureSeed {
         }
         val requested = UnavailableFieldSet.decode(row.unavailableFields).toList()
         val unavailable = UnavailablePayloadContract.validate(fieldNames, requested)
+        // v5: one explicit boolean per canonical module, mirroring the writer's always-in-full
+        // modules object (an absent switch means enabled, but the writer never emits absence).
+        val modules = JSONObject()
+        for (module in name.caiyao.fakegps.config.SpoofModules.ALL) {
+            modules.put(module, settings.spoofModules[module] ?: true)
+        }
         return JSONObject()
             .put("schemaVersion", ConfigPrefsSync.SCHEMA_VERSION)
             .put("refreshIntervalSec", settings.refreshIntervalSec)
             .put("locationDeliveryMode", settings.locationDeliveryMode)
+            .put("modules", modules)
             .put("activeHours", JSONObject().put("start", settings.activeHourStart).put("end", settings.activeHourEnd))
             .put("mode", settings.spoofMode)
             .put("fields", fields)

@@ -40,6 +40,16 @@ data class PublishedConfig(
     val unavailablePresent: Boolean = true,
     val activeHourStart: Int? = null,
     val activeHourEnd: Int? = null,
+    /**
+     * The payload's `modules` object (v5), empty when absent (v4 shape — all-enabled).
+     *
+     * A value that is not a strict JSON boolean, or a key outside [SpoofModules.ALL], makes the
+     * WHOLE payload malformed (parse returns null) — mirroring the hook, which rejects such a
+     * payload and keeps its last-known-good snapshot. Presenting a rejected payload as readable
+     * would have the verify UI describe a config the hook refuses to run.
+     */
+    val modules: Map<String, Boolean> = emptyMap(),
+    val modulesPresent: Boolean = false,
 ) {
     companion object {
         /** No `schemaVersion` key at all — an older or corrupt payload, never assumed compatible. */
@@ -85,6 +95,22 @@ data class PublishedConfig(
                 }.getOrNull() ?: return null
             }
 
+            // Strict JSON booleans only, canonical names only — same contract the hook enforces.
+            val modulesObject = root["modules"] as? JsonObject
+            val modules = if (modulesObject == null) {
+                emptyMap()
+            } else {
+                val parsed = mutableMapOf<String, Boolean>()
+                for ((key, value) in modulesObject) {
+                    if (!SpoofModules.isKnown(key)) return null
+                    val primitive = value as? JsonPrimitive ?: return null
+                    val flag = if (primitive.isString) null else primitive.content.toBooleanStrictOrNull()
+                    flag ?: return null
+                    parsed[key] = flag
+                }
+                parsed
+            }
+
             return PublishedConfig(
                 schemaVersion = root["schemaVersion"]?.intOrNull() ?: SCHEMA_UNKNOWN,
                 mode = (root["mode"] as? JsonPrimitive)?.content ?: DEFAULT_MODE,
@@ -98,6 +124,8 @@ data class PublishedConfig(
                 unavailablePresent = unavailableArray != null,
                 activeHourStart = hours?.get("start")?.intOrNull(),
                 activeHourEnd = hours?.get("end")?.intOrNull(),
+                modules = modules,
+                modulesPresent = modulesObject != null,
             )
         }
 

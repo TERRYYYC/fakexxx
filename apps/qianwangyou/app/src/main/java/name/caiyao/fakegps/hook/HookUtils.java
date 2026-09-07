@@ -74,24 +74,45 @@ class HookUtils {
     /**
      * Single entry point: registers ALL hooks exactly once.
      * Hooks read current config from MainHook.CURRENT at invocation time.
+     *
+     * <p>{@code disabledModules} comes from the ACCEPTED snapshot load (transport schema v5
+     * {@code modules} object; absent = empty = everything enabled, i.e. v4 behaviour). A disabled
+     * module's groups are never registered at all — the most complete dismantling: the target app
+     * reads the fully native stack for that surface and the injected surface shrinks. Registration
+     * happens once per process, so a module switch reaches the target app on its next process
+     * start; it does NOT re-interpret field-level three-state semantics of live hooks.
      */
-    static void registerAllHooks(ClassLoader cl) {
-        safeHook("Location", () -> hookLocation(cl));
-        safeHook("CellIdentity", () -> hookCellIdentity(cl));
-        safeHook("CellIdentityGetters", () -> hookCellIdentityGetters(cl));
-        safeHook("SignalStrength", () -> hookSignalStrengthGetters(cl));
-        safeHook("Telephony", () -> hookTelephony(cl));
-        safeHook("ServiceState", () -> hookServiceState(cl));
-        safeHook("WiFi", () -> hookWifi(cl));
-        safeHook("Network", () -> hookNetwork(cl));
-        safeHook("PhoneStateListener", () -> hookPhoneStateListener(cl));
-        safeHook("GpsStatus", () -> hookGpsStatus(cl));
-        safeHook("LocationManagerCtor", () -> hookLocationManagerConstructor(cl));
-        safeHook("TelephonyCallback", () -> hookTelephonyCallback(cl));
-        safeHook("Connectivity", () -> hookConnectivity(cl));
-        safeHook("PhysicalChannelConfig", () -> hookPhysicalChannelConfig(cl));
-        safeHook("SubscriptionAware", () -> hookSubscriptionAware(cl));
-        safeHook("FusedLocation", () -> hookFusedLocation(cl));
+    static void registerAllHooks(ClassLoader cl, Set<String> disabledModules) {
+        registerGated("Location", cl, disabledModules, () -> hookLocation(cl));
+        registerGated("CellIdentity", cl, disabledModules, () -> hookCellIdentity(cl));
+        registerGated("CellIdentityGetters", cl, disabledModules, () -> hookCellIdentityGetters(cl));
+        registerGated("SignalStrength", cl, disabledModules, () -> hookSignalStrengthGetters(cl));
+        registerGated("Telephony", cl, disabledModules, () -> hookTelephony(cl));
+        registerGated("ServiceState", cl, disabledModules, () -> hookServiceState(cl));
+        registerGated("WiFi", cl, disabledModules, () -> hookWifi(cl));
+        registerGated("Network", cl, disabledModules, () -> hookNetwork(cl));
+        registerGated("PhoneStateListener", cl, disabledModules, () -> hookPhoneStateListener(cl));
+        registerGated("GpsStatus", cl, disabledModules, () -> hookGpsStatus(cl));
+        registerGated("LocationManagerCtor", cl, disabledModules, () -> hookLocationManagerConstructor(cl));
+        registerGated("TelephonyCallback", cl, disabledModules, () -> hookTelephonyCallback(cl));
+        registerGated("Connectivity", cl, disabledModules, () -> hookConnectivity(cl));
+        registerGated("PhysicalChannelConfig", cl, disabledModules, () -> hookPhysicalChannelConfig(cl));
+        registerGated("SubscriptionAware", cl, disabledModules, () -> hookSubscriptionAware(cl));
+        registerGated("FusedLocation", cl, disabledModules, () -> hookFusedLocation(cl));
+    }
+
+    /**
+     * Register one group behind its module switch. A skipped group leaves its own evidence line so
+     * a device acceptance run can tell "hooks off by switch" apart from "hooks failed to install".
+     */
+    private static void registerGated(String group, ClassLoader cl,
+                                      Set<String> disabledModules, Runnable r) {
+        if (!ModuleGate.shouldRegister(group, disabledModules)) {
+            XposedBridge.log(TAG + ": " + group + " hooks SKIPPED (module "
+                    + ModuleGate.moduleOf(group) + " disabled)");
+            return;
+        }
+        safeHook(group, r);
     }
 
     private static void safeHook(String group, Runnable r) {

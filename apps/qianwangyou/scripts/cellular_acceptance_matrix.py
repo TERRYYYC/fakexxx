@@ -226,11 +226,11 @@ def payload_for(name: str, session_id: str) -> Dict[str, Any]:
         # number here makes EVERY --cellular-matrix scenario abort before
         # report_ready — §G becomes unexecutable while the harness looks
         # intact (PR #62 review P1-4: this sat at 3 after the writer moved
-        # to 4). Pinned by test_python_payload_version_is_pinned_to_writer_
+        # to 4, and sat at 4 after the writer moved to 5). Pinned by test_python_payload_version_is_pinned_to_writer_
         # contract, which reads the Kotlin source; that test runs in CI via
         # the hook-matrix-contract gate, so the next drift is a red check,
         # not a device-side abort.
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "acceptanceSessionId": session_id,
         "mode": "always_on",
         "fields": dict(scenario.fields),

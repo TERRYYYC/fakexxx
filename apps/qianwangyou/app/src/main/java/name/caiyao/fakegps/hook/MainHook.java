@@ -65,6 +65,14 @@ public class MainHook implements IXposedHookLoadPackage {
     static final AtomicReference<Snapshot> CURRENT = new AtomicReference<>(Snapshot.PASSTHROUGH);
     /** Fingerprint paired with the last structurally accepted Snapshot. */
     private static final AtomicReference<String> CURRENT_FINGERPRINT = new AtomicReference<>();
+    /**
+     * Disabled modules from the last ACCEPTED payload (transport schema v5). Consumed by the
+     * one-time hook registration; later reloads update it but never re-register, so a module
+     * switch reaches the target app on its next process start. Absent modules (v4 payload or
+     * never published) = empty = every group registered.
+     */
+    private static final AtomicReference<java.util.Set<String>> CURRENT_DISABLED_MODULES =
+            new AtomicReference<>(java.util.Collections.emptySet());
     /** Hour-of-day when the last fingerprint-accepted Snapshot was evaluated.
      *  Ensures time_based mode re-evaluates on hour boundaries even when fingerprint matches.
      *  (Review finding #1, Sol) */
@@ -149,18 +157,22 @@ public class MainHook implements IXposedHookLoadPackage {
         //    process-start the storage stack is idle. Runtime reloads never block any looper —
         //    see SNAPSHOT_IO.
         Snapshot initial = reloadSnapshot(null);
+        java.util.Set<String> disabledModules = CURRENT_DISABLED_MODULES.get();
         XposedBridge.log(TAG + ": Loaded config for " + lpparam.packageName
                 + " | location=" + initial.hasLocation()
-                + " | cellRebuild=" + initial.hasCellReconstructionDecision());
+                + " | cellRebuild=" + initial.hasCellReconstructionDecision()
+                + " | modulesDisabled=" + disabledModules);
 
         // 2. Register once per target classloader. LSPosed may repeat handleLoadPackage in the
-        // same process; without this gate every getter receives duplicate hooks.
+        // same process; without this gate every getter receives duplicate hooks. The snapshot's
+        // module decisions gate WHICH groups register: off = fully native behaviour for that
+        // surface (registration only — field-level three-state semantics are unchanged).
         ClassLoader targetClassLoader = lpparam.classLoader != null
                 ? lpparam.classLoader
                 : MainHook.class.getClassLoader();
         if (RUNTIME_OWNERSHIP.claimHooks(targetClassLoader)) {
             installProbeSentinelIfPresent(targetClassLoader, lpparam.processName);
-            HookUtils.registerAllHooks(targetClassLoader);
+            HookUtils.registerAllHooks(targetClassLoader, disabledModules);
         }
 
         // 3. One background refresh per process. Duplicate callbacks must not multiply timers.
@@ -306,11 +318,25 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG + ": transport accepted schema=" + version
                     + " fp=" + fingerprint);
 
+            // v5 module switches. Validated BEFORE anything from this payload is accepted: an
+            // unknown module name or a non-boolean value means we cannot trust the payload's
+            // module set, so the whole payload takes the existing rejection path — keep
+            // last-known-good, never a partial interpretation, never a revert to real data.
+            java.util.Set<String> disabledModules;
+            try {
+                disabledModules = ModuleGate.fromPayload(root.opt("modules"));
+            } catch (IllegalArgumentException e) {
+                XposedBridge.log(TAG + ": transport rejected modules fp=" + fingerprint
+                        + " : " + e.getMessage());
+                return CURRENT.get();
+            }
+
             String mode = root.optString("mode", "always_on");
             if ("off".equals(mode)) {
                 debug("mode=off -> passthrough");
                 return acceptLoadedSnapshot(
-                        Snapshot.PASSTHROUGH, refreshIntervalSec, fingerprint, evaluationHour);
+                        Snapshot.PASSTHROUGH, refreshIntervalSec, fingerprint, evaluationHour,
+                        disabledModules);
             }
             if ("time_based".equals(mode)) {
                 org.json.JSONObject hours = root.optJSONObject("activeHours");
@@ -324,7 +350,8 @@ public class MainHook implements IXposedHookLoadPackage {
                         debug("outside active hours (" + start + "-" + end
                                 + ") current=" + evaluationHour + " -> passthrough");
                         return acceptLoadedSnapshot(
-                                Snapshot.PASSTHROUGH, refreshIntervalSec, fingerprint, evaluationHour);
+                                Snapshot.PASSTHROUGH, refreshIntervalSec, fingerprint,
+                                evaluationHour, disabledModules);
                     }
                 }
             }
@@ -371,8 +398,10 @@ public class MainHook implements IXposedHookLoadPackage {
                     + " unavailable=" + unavailable.asList().size()
                     + " locationDelivery=" + locationDeliveryMode
                     + " hasLocation=" + s.hasLocation() + " lat=" + s.latitude + " lng=" + s.longitude
-                    + " rebuildCells=" + s.hasCellReconstructionDecision());
-            return acceptLoadedSnapshot(s, refreshIntervalSec, fingerprint, evaluationHour);
+                    + " rebuildCells=" + s.hasCellReconstructionDecision()
+                    + " modulesDisabled=" + disabledModules);
+            return acceptLoadedSnapshot(s, refreshIntervalSec, fingerprint, evaluationHour,
+                    disabledModules);
         } catch (Throwable t) {
             // Read/parse failure: keep last-known-good (do NOT revert to real device data mid-test).
             debug("loadSnapshot prefs error: " + t);
@@ -380,14 +409,16 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    /** Commit Snapshot and delay as one accepted last-known-good transport decision. */
+    /** Commit Snapshot, delay and module decisions as one accepted last-known-good decision. */
     private Snapshot acceptLoadedSnapshot(
             Snapshot snapshot,
             Integer refreshIntervalSec,
             String fingerprint,
-            int evaluationHour) {
+            int evaluationHour,
+            java.util.Set<String> disabledModules) {
         REFRESH_SCHEDULER.acceptPayloadInterval(refreshIntervalSec, true);
         CURRENT_FINGERPRINT.set(fingerprint);
+        CURRENT_DISABLED_MODULES.set(disabledModules);
         LAST_EVALUATED_HOUR.set(evaluationHour);
         return snapshot;
     }

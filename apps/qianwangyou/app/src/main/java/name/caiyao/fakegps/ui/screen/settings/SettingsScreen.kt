@@ -268,6 +268,9 @@ fun SettingsScreen(
             )
             HorizontalDivider()
 
+            // --- 模块（v5 注册开关；独立 composable，避免碰既有区块） ---
+            ModulesSection(vm)
+
             SectionHeader("Auto 协作")
             environmentControlMessage?.let { message ->
                 ListItem(

@@ -92,6 +92,14 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    testOptions {
+        unitTests {
+            // Robolectric needs the merged resources/manifest to stand up the manifest-declared
+            // AppInfoProvider the publish path queries.
+            includeAndroidResources = true
+        }
+    }
+
     kotlinOptions {
         jvmTarget = '17'
     }
@@ -160,6 +168,10 @@ dependencies {
 
     // Unit testing — config channel contract (Phase A, JVM-only, no device needed)
     testImplementation 'junit:junit:4.13.2'
+    // Robolectric — publish→readback transport tests run the REAL ConfigPrefsSync write path
+    // (world-readable prefs + provider + Room) on the JVM, and read it back with
+    // XSharedPreferences-equivalent file semantics. JVM-only; no device needed.
+    testImplementation 'org.robolectric:robolectric:4.14.1'
     // G2 §5A 10-address fixture seed: the seeder parses the frozen fixture JSON
     // (a-plus-10a-fixture.json) on-device via org.json; this brings the SAME
     // parser onto the JVM lane so payload parsing + explicit-id derivation are

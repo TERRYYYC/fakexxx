@@ -6,6 +6,7 @@ import androidx.core.content.edit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import name.caiyao.fakegps.config.PublishPropagation
+import name.caiyao.fakegps.config.SpoofModules
 
 enum class LocationDeliveryMode(val wireValue: String) {
     HOOK("hook"),
@@ -31,6 +32,13 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
         const val KEY_ACTIVE_HOUR_END = "active_hour_end"
         const val KEY_LOCATION_DELIVERY_MODE = "location_delivery_mode"
         const val KEY_MOCK_PROVIDER_CLEANUP_REQUIRED = "mock_provider_cleanup_required"
+
+        /**
+         * Per-module hook switches (transport schema v5). Stored as `spoof_module_<wire-name>`
+         * booleans; a missing entry defaults to true so a pre-v5 install behaves exactly like the
+         * v4 all-enabled payload after upgrade.
+         */
+        const val KEY_MODULE_PREFIX = "spoof_module_"
 
         /**
          * How often the hook re-reads the published payload, in seconds.
@@ -73,6 +81,11 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
     private val _locationDeliveryMode = MutableStateFlow(readLocationDeliveryMode())
     val locationDeliveryMode: StateFlow<LocationDeliveryMode> = _locationDeliveryMode
 
+    private val _modulesEnabled = MutableStateFlow(readModulesEnabled())
+
+    /** Wire name → enabled, covering exactly the canonical [SpoofModules.ALL] vocabulary. */
+    val modulesEnabled: StateFlow<Map<String, Boolean>> = _modulesEnabled
+
     fun setSpoofMode(mode: String) {
         prefs.edit().putString(KEY_SPOOF_MODE, mode).apply()
         _spoofMode.value = mode
@@ -104,6 +117,28 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
         val committed = prefs.edit().putString(KEY_LOCATION_DELIVERY_MODE, mode.wireValue).commit()
         if (committed) _locationDeliveryMode.value = mode
         return committed
+    }
+
+    /**
+     * Read the module switches as the writer publishes them. Unknown stored entries (a module
+     * removed from the vocabulary) are ignored; absent entries default to ENABLED so the
+     * first publish after an upgrade is v4-equivalent.
+     */
+    fun readModulesEnabled(): Map<String, Boolean> = buildMap {
+        for (module in SpoofModules.ALL) {
+            put(module, prefs.getBoolean(KEY_MODULE_PREFIX + module, true))
+        }
+    }
+
+    /**
+     * Persist one module switch and update the flow. The wire name is validated here too (not
+     * only at the UI seam): persisting a typo'd key would silently write a preference no publish
+     * ever reads back.
+     */
+    fun setModuleEnabled(module: String, enabled: Boolean) {
+        require(SpoofModules.isKnown(module)) { "unknown module: $module" }
+        prefs.edit().putBoolean(KEY_MODULE_PREFIX + module, enabled).apply()
+        _modulesEnabled.value = readModulesEnabled()
     }
 
     fun readLocationDeliveryMode(): LocationDeliveryMode = LocationDeliveryMode.fromWireValue(

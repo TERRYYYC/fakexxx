@@ -77,7 +77,9 @@ enum class HookApplicability {
                 activeStart = parsed.activeHourStart,
                 activeEnd = parsed.activeHourEnd,
                 fieldsPresent = parsed.fieldsPresent &&
-                    (parsed.schemaVersion == ConfigPrefsSync.LEGACY_SCHEMA_VERSION || parsed.unavailablePresent),
+                    // v2 predates the `unavailable` array; every later generation must carry it.
+                    (parsed.schemaVersion == ConfigPrefsSync.OLDEST_READABLE_SCHEMA_VERSION ||
+                        parsed.unavailablePresent),
             )
             read is PayloadRead.ReadError -> PAYLOAD_UNREADABLE
             read is PayloadRead.Raw -> PAYLOAD_MALFORMED
