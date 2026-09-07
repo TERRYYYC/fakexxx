@@ -104,6 +104,8 @@ class AutoCutoverRestoreCoordinator(
         val lease = (admission as CutoverExclusiveAdmission.Granted).lease
         var terminal: AutoCutoverRestoreResult? = null
 
+        suspend fun <T> roomAccess(block: suspend () -> T): T = lease.withExclusiveAccess(block)
+
         suspend fun readCurrent(): CutoverRestoreJournal? {
             durableReadConfirmed = false
             val durable = journalPort.read()
@@ -145,7 +147,7 @@ class AutoCutoverRestoreCoordinator(
                 ).also { terminal = it }
             }
             if (current == null || current?.phase == CutoverRestorePhase.ROLLED_BACK) {
-                val roomState = roomPort.classify(decoded.archive)
+                val roomState = roomAccess { roomPort.classify(decoded.archive) }
                 val preferenceState = preferencePort.classify(decoded.archive)
                 if (!roomState.isEmpty || !preferenceState.isEmpty) {
                     return AutoCutoverRestoreResult.Rejected(
@@ -181,10 +183,10 @@ class AutoCutoverRestoreCoordinator(
                             ) ?: return invalidTransition(journal).also { terminal = it }
                             continue
                         }
-                        val roomState = roomPort.classify(decoded.archive)
+                        val roomState = roomAccess { roomPort.classify(decoded.archive) }
                         when {
                             roomState.matchesArchive -> Unit
-                            roomState.isEmpty -> roomPort.restore(decoded.archive)
+                            roomState.isEmpty -> roomAccess { roomPort.restore(decoded.archive) }
                             else -> {
                                 current = persistFailureTracked(
                                     journal,
@@ -193,7 +195,7 @@ class AutoCutoverRestoreCoordinator(
                                 continue
                             }
                         }
-                        if (!roomPort.classify(decoded.archive).matchesArchive) {
+                        if (!roomAccess { roomPort.classify(decoded.archive) }.matchesArchive) {
                             current = persistFailureTracked(
                                 journal,
                                 CutoverRestoreFailureReason.ROOM_WRITE_FAILED
@@ -231,7 +233,7 @@ class AutoCutoverRestoreCoordinator(
                     }
 
                     CutoverRestorePhase.DATASTORE_WRITTEN -> {
-                        val exact = roomPort.classify(decoded.archive).matchesArchive &&
+                        val exact = roomAccess { roomPort.classify(decoded.archive) }.matchesArchive &&
                             preferencePort.classify(decoded.archive).matchesArchive
                         val readbackDigest = if (exact) identity.archiveDigest else "sha256:${"0".repeat(64)}"
                         current = persistTracked(
@@ -250,8 +252,8 @@ class AutoCutoverRestoreCoordinator(
 
                     CutoverRestorePhase.ROLLBACK_REQUIRED -> {
                         preferencePort.clear()
-                        roomPort.clear()
-                        val empty = roomPort.classify(decoded.archive).isEmpty &&
+                        roomAccess { roomPort.clear() }
+                        val empty = roomAccess { roomPort.classify(decoded.archive) }.isEmpty &&
                             preferencePort.classify(decoded.archive).isEmpty
                         if (!empty) {
                             return AutoCutoverRestoreResult.RecoveryRequired(journal).also { terminal = it }

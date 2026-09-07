@@ -113,7 +113,7 @@ class APlusTemplateRedTest {
 
     @Test
     fun `an unseen provider is not trusted`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         // GREEN-from-skeleton: an unseen applicationId has no active pairing — no silent TOFU.
         assertNull(store.findActive("com.cellrebel.app", "sha256:abc"))
         assertEquals(0, db.providerPairingDao().count())
@@ -121,7 +121,7 @@ class APlusTemplateRedTest {
 
     @Test
     fun `operator approval makes a provider active`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val approved = store.approve("com.cellrebel.app", signerDigest = "sha256:abc", versionCode = 10, approvedAt = 1000L)
         // RED: skeleton.approve returns null and findActive stays null → both fail until GREEN.
         assertNotNull("approve must persist and return the active record", approved)
@@ -133,7 +133,7 @@ class APlusTemplateRedTest {
 
     @Test
     fun `revocation is a state transition not a delete`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         store.approve("com.cellrebel.app", "sha256:abc", 10, 1000L)
         val revoked = store.revoke("com.cellrebel.app", "sha256:abc", revokedAt = 2000L)
         // RED: skeleton.revoke returns false (no-op). GREEN must set revokedAt and stop findActive.

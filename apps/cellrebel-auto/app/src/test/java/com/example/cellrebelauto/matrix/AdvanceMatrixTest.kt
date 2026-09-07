@@ -149,7 +149,7 @@ class AdvanceMatrixTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = PlanRepository(db)
+        repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -321,7 +321,7 @@ class AdvanceMatrixTest {
     private fun buildEngine(planId: Long, clock: VClock, executor: ExternalApplyExecutor = journeyExecutor): AutomationEngine {
         val coordinator = RecoveryCoordinator(
             executor,
-            RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()),
+            RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open()),
             realObserveAcquirer(),
             realReceiptAcquirer(),
             realTrustedQuotaAcquirer()

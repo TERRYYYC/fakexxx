@@ -39,12 +39,12 @@ class AutoCutoverSnapshotPort(
                 return AutoCutoverSnapshotResult.Rejected(CutoverSnapshotRejection.QUIESCENCE_FAILED)
         }
         return try {
-            val policy = roomPort.schemaPolicy()
+            val policy = lease.withExclusiveAccess { roomPort.schemaPolicy() }
             val archive = CutoverArchiveV2(
                 sourcePackage = SOURCE_PACKAGE,
                 captureId = captureId,
                 schemaVersion = policy.schemaVersion,
-                tables = roomPort.captureTables(),
+                tables = lease.withExclusiveAccess { roomPort.captureTables() },
                 preferences = preferencePort.captureCutoverPreferences()
             )
             AutoCutoverSnapshotResult.Completed(CutoverArchiveV2Codec(policy).encode(archive))

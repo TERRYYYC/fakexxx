@@ -35,7 +35,7 @@ class RecoveryRequiredAuditTransactionTest {
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        repository = PlanRepository(db)
+        repository = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(
                 sourceFileName = "audit.csv",

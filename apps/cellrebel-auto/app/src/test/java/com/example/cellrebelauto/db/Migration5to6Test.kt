@@ -106,7 +106,11 @@ class Migration5to6Test {
             )
         }
 
-        val db = AppDatabase.buildProductionDatabase(context, dbName)
+        val db = AppDatabase.buildProductionDatabase(
+            context,
+            dbName,
+            com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        )
         try {
             val sessions = db.openHelper.readableDatabase
                 .query("SELECT configSnapshot FROM run_sessions").use { c ->

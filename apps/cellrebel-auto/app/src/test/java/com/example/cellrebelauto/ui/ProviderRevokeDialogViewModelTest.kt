@@ -72,7 +72,7 @@ class ProviderRevokeDialogViewModelTest {
     @Test
     fun `requestRevoke only stages the dialog - the principal stays active`() = runTest {
         val entry = seedApproved()
-        val vm = MainViewModel(ApplicationProvider.getApplicationContext<Application>(), injectedDb = db)
+        val vm = viewModel()
 
         vm.requestRevoke(entry)
 
@@ -86,7 +86,7 @@ class ProviderRevokeDialogViewModelTest {
     @Test
     fun `confirmRevoke revokes clears the dialog and posts the engine impact notice`() = runTest {
         val entry = seedApproved()
-        val vm = MainViewModel(ApplicationProvider.getApplicationContext<Application>(), injectedDb = db)
+        val vm = viewModel()
         vm.requestRevoke(entry)
 
         vm.confirmRevoke()
@@ -118,7 +118,7 @@ class ProviderRevokeDialogViewModelTest {
     @Test
     fun `dismissRevokeDialog leaves the principal active with no notice`() = runTest {
         val entry = seedApproved()
-        val vm = MainViewModel(ApplicationProvider.getApplicationContext<Application>(), injectedDb = db)
+        val vm = viewModel()
         vm.requestRevoke(entry)
 
         vm.dismissRevokeDialog()
@@ -134,7 +134,7 @@ class ProviderRevokeDialogViewModelTest {
     @Test
     fun `dismissRevokeNotice clears the banner only`() = runTest {
         val entry = seedApproved()
-        val vm = MainViewModel(ApplicationProvider.getApplicationContext<Application>(), injectedDb = db)
+        val vm = viewModel()
         vm.requestRevoke(entry)
         vm.confirmRevoke()
         val deadline = System.currentTimeMillis() + 5_000
@@ -146,4 +146,10 @@ class ProviderRevokeDialogViewModelTest {
         vm.dismissRevokeNotice()
         assertNull(vm.revokeImpactNotice.value)
     }
+
+    private fun viewModel() = MainViewModel(
+        ApplicationProvider.getApplicationContext<Application>(),
+        injectedDb = db,
+        injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+    )
 }

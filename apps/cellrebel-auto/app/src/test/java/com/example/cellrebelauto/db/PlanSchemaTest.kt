@@ -73,7 +73,7 @@ class PlanSchemaTest {
     @Test
     fun `legacy results are readable for history and export`() = runTest {
         // # C1 回归：v2 遗留 test_results 行必须能从 repository 读到（History + 导出）
-        val repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        val repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val sessionId = seedSession()
         db.testResultDao().insert(
             com.example.cellrebelauto.model.TestResult(
@@ -93,7 +93,7 @@ class PlanSchemaTest {
     fun `buffer sync updates unstarted plan snapshot and refuses once started`() = runTest {
         // # F6 回归：UI 改 buffer 必须同步 engine 执行的 plan 快照（计划未启动），
         // # 计划一旦启动则拒绝（next-plan-only），二者绝不发散
-        val repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        val repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val (planId, taskIds) = seedPlanWithTasks()
 
         // # 未启动：同步成功，plan 行（engine BufferGate 的唯一来源）被更新
@@ -139,7 +139,7 @@ class PlanSchemaTest {
 
     @Test
     fun `A plus attempt id reservation commits the sequence and admission persists a recoverable owner`() = runTest {
-        val repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        val repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val (_, taskIds) = seedPlanWithTasks()
         val taskId = taskIds[0]
         val sessionId = seedSession()

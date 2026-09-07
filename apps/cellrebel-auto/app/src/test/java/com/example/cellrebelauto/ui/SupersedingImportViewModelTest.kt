@@ -90,7 +90,8 @@ class SupersedingImportViewModelTest {
         val vm = MainViewModel(
             ApplicationProvider.getApplicationContext<Application>(),
             injectedDb = db,
-            supersessionStopClient = client
+            supersessionStopClient = client,
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
         )
         stageProposal(
             vm,
@@ -118,7 +119,7 @@ class SupersedingImportViewModelTest {
         await("retry gets a fresh request id") { client.requests.size == 2 }
         val retryRequest = client.requests.last()
         assertNotEquals(firstRequest.third, retryRequest.third)
-        val proof = (PlanRepository(db).verifyAndStopForSupersession(
+        val proof = (PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open()).verifyAndStopForSupersession(
             retryRequest.third, oldPlanId, sessionId, 300L
         ) as PlanRepository.SupersessionStopVerification.Verified).proof
 

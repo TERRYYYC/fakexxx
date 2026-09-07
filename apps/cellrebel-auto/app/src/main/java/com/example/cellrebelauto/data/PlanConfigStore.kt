@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.cellrebelauto.cutover.CutoverArchiveV2
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.cutover.CutoverGenerationState
 import com.example.cellrebelauto.cutover.CutoverPlanConfigSchema
 import com.example.cellrebelauto.cutover.CutoverPreferenceEntry
@@ -32,9 +33,13 @@ private val Context.planConfigDataStore: DataStore<Preferences> by preferencesDa
  * # 缓冲键在首次设置前保持缺省（默认 null）
  */
 class PlanConfigStore(
-    private val dataStore: DataStore<Preferences>
+    private val dataStore: DataStore<Preferences>,
+    private val accessGate: CutoverAccessGate
 ) : CutoverPreferenceGenerationPort, CutoverPreferenceSnapshotPort {
-    constructor(context: Context) : this(context.planConfigDataStore)
+    constructor(context: Context, accessGate: CutoverAccessGate) : this(
+        context.planConfigDataStore,
+        accessGate
+    )
 
     private object Keys {
         val GLOBAL_BUFFER_SECONDS = intPreferencesKey("global_buffer_seconds")
@@ -45,36 +50,48 @@ class PlanConfigStore(
         val TEST_STAGE_ENABLED = booleanPreferencesKey("test_stage_enabled")
     }
 
-    val config: Flow<PlanConfig> = dataStore.data.map { prefs ->
-        PlanConfig(
-            globalBufferSeconds = prefs[Keys.GLOBAL_BUFFER_SECONDS],
-            testTimeoutSeconds = prefs[Keys.TEST_TIMEOUT_SECONDS] ?: 90,
-            gpsSettleSeconds = prefs[Keys.GPS_SETTLE_SECONDS] ?: 60,
-            locationStageEnabled = prefs[Keys.LOCATION_STAGE_ENABLED] ?: true,
-            testStageEnabled = prefs[Keys.TEST_STAGE_ENABLED] ?: true
-        )
-    }
+    val config: Flow<PlanConfig> = accessGate.gateFlow(
+        dataStore.data.map { prefs ->
+            PlanConfig(
+                globalBufferSeconds = prefs[Keys.GLOBAL_BUFFER_SECONDS],
+                testTimeoutSeconds = prefs[Keys.TEST_TIMEOUT_SECONDS] ?: 90,
+                gpsSettleSeconds = prefs[Keys.GPS_SETTLE_SECONDS] ?: 60,
+                locationStageEnabled = prefs[Keys.LOCATION_STAGE_ENABLED] ?: true,
+                testStageEnabled = prefs[Keys.TEST_STAGE_ENABLED] ?: true
+            )
+        }
+    )
 
     suspend fun setGlobalBufferSeconds(seconds: Int) {
-        dataStore.edit { it[Keys.GLOBAL_BUFFER_SECONDS] = seconds }
+        accessGate.withNormalAccessOrThrow {
+            dataStore.edit { it[Keys.GLOBAL_BUFFER_SECONDS] = seconds }
+        }
     }
 
     suspend fun setTestTimeoutSeconds(seconds: Int) {
-        dataStore.edit { it[Keys.TEST_TIMEOUT_SECONDS] = seconds }
+        accessGate.withNormalAccessOrThrow {
+            dataStore.edit { it[Keys.TEST_TIMEOUT_SECONDS] = seconds }
+        }
     }
 
     suspend fun setGpsSettleSeconds(seconds: Int) {
-        dataStore.edit { it[Keys.GPS_SETTLE_SECONDS] = seconds }
+        accessGate.withNormalAccessOrThrow {
+            dataStore.edit { it[Keys.GPS_SETTLE_SECONDS] = seconds }
+        }
     }
 
     // # F003：位置阶段开关（运行时偏好，下个 attempt 生效）
     suspend fun setLocationStageEnabled(enabled: Boolean) {
-        dataStore.edit { it[Keys.LOCATION_STAGE_ENABLED] = enabled }
+        accessGate.withNormalAccessOrThrow {
+            dataStore.edit { it[Keys.LOCATION_STAGE_ENABLED] = enabled }
+        }
     }
 
     // # F003：CellRebel 测试阶段开关（运行时偏好，下个 attempt 生效）
     suspend fun setTestStageEnabled(enabled: Boolean) {
-        dataStore.edit { it[Keys.TEST_STAGE_ENABLED] = enabled }
+        accessGate.withNormalAccessOrThrow {
+            dataStore.edit { it[Keys.TEST_STAGE_ENABLED] = enabled }
+        }
     }
 
     /** Raw five-key projection for cutover. Mapped runtime defaults are deliberately not read here. */

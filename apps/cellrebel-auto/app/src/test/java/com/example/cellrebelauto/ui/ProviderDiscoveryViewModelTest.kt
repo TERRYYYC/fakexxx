@@ -79,7 +79,11 @@ class ProviderDiscoveryViewModelTest {
             )
         )
 
-        val vm = MainViewModel(app, injectedDb = db)
+        val vm = MainViewModel(
+            app,
+            injectedDb = db,
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        )
         vm.refreshProviders()
         // The refresh launches on viewModelScope; Room suspend calls hop to Room's own executor,
         // which is OUTSIDE runTest's scheduler — await the StateFlow value with a bounded spin.
@@ -116,7 +120,11 @@ class ProviderDiscoveryViewModelTest {
                 approvedAt = 1000L, revokedAt = null, approvedVersionCode = 3
             )
         )
-        val vm = MainViewModel(app, injectedDb = db)
+        val vm = MainViewModel(
+            app,
+            injectedDb = db,
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        )
         vm.refreshProviders()
         var entries = vm.providerEntries.value
         val deadline = System.currentTimeMillis() + 5_000

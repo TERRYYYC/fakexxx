@@ -94,6 +94,7 @@ class ProductionEvidenceSourceOracleTest {
     private fun backend() = APlusComposition.productionBackend(
         ApplicationProvider.getApplicationContext(),
         db,
+        accessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
         providerSignerDigest = { if (signerTrusted) "sha256:trusted" else "sha256:other" },
         attemptValidityTimeoutMs = attemptTimeoutMs,
         serviceLifecycleExecutor = fakeExecutor

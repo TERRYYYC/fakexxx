@@ -47,7 +47,7 @@ class ProviderTrustStorePrincipalTest {
 
     @Test
     fun `authorization is precise to the current signer - a different signer of the same app is NOT trusted`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         store.approve("com.qwy.app", "sha256:signerA", versionCode = 10, approvedAt = 1000L)
         assertNotNull(
             "the approved (app, signerA) principal must be active",
@@ -61,7 +61,7 @@ class ProviderTrustStorePrincipalTest {
 
     @Test
     fun `signer rotation coexists - revoking the old principal never blocks the new one`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         store.approve("com.qwy.app", "sha256:old", 10, 1000L)
         store.revoke("com.qwy.app", "sha256:old", 2000L)
         val rotated = store.approve("com.qwy.app", "sha256:new", 11, 3000L)
@@ -76,7 +76,7 @@ class ProviderTrustStorePrincipalTest {
 
     @Test
     fun `M-PA-10 re-approval after revocation appends a new row and re-activates the principal`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val first = store.approve("com.qwy.app", "sha256:signerA", 10, 1000L)
         store.revoke("com.qwy.app", "sha256:signerA", 2000L)
         assertNull(store.findActive("com.qwy.app", "sha256:signerA"))
@@ -96,7 +96,7 @@ class ProviderTrustStorePrincipalTest {
 
     @Test
     fun `approving an already-active principal is idempotent - never a duplicate row`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val first = store.approve("com.qwy.app", "sha256:signerA", 10, 1000L)
         val second = store.approve("com.qwy.app", "sha256:signerA", 10, 2000L)
         assertEquals("re-approving an ACTIVE principal returns the same record", first.id, second.id)
@@ -105,7 +105,7 @@ class ProviderTrustStorePrincipalTest {
 
     @Test
     fun `revoke is scoped to the exact principal - a coexisting signer row is untouched`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         store.approve("com.qwy.app", "sha256:signerA", 10, 1000L)
         store.approve("com.qwy.app", "sha256:signerB", 10, 1500L)
         assertTrue(store.revoke("com.qwy.app", "sha256:signerA", 2000L))

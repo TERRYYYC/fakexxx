@@ -428,6 +428,9 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 | `CUT-A31` | cancellation while waiting for drain, cleaning a normal token, or releasing an exclusive lease | cleanup completes or reopens safely; no permanent gate/token leak |
 | `CUT-A32` | blocked normal call races the exclusive owner's release | caller receives the typed rejection captured at admission; no state-change exception |
 | `CUT-A33` | canonical, digest-valid `HISTORICAL_ONLY` pairing payload contains `revokedAt == null` | Room owner rejects before any target insert; the generation can never reach `READY` |
+| `CUT-A34` | app starts with a non-terminal or unreadable restore journal | journal is read before lazy Room/DataStore construction; admission starts recovery-closed and no mapped default is emitted |
+| `CUT-A35` | cutover closes admission while an AutomationService run or supersession-stop owner is active | both jobs are cancelled and joined; admitted durable cleanup may re-enter/dispatch Room work; exclusive begins only after both retire |
+| `CUT-A36` | Room reader and normal Room/DataStore writer race an exclusive restored generation | reader emits nothing until reopen then re-reads fresh state; writer gets typed rejection before any side effect |
 
 ## Implementation tasks
 
@@ -487,6 +490,23 @@ snapshot/restore API; mapped `PlanConfig` defaults are not a round-trip carrier.
 edits, add source-capture and target-restore state/owner/side-effect tables, a complete writer/reader
 census, and crash/retry/concurrency RED tests. Do not duplicate #79 DAO/schema logic or treat its
 review status as merged.
+
+The frozen production consumer census for this slice is:
+
+- `CellRebelAutoApp` reads `CutoverControlStore` synchronously in `onCreate`, derives the one gate,
+  and only then permits lazy construction of the production `AppDatabase` or `PlanConfigStore`.
+  An unreadable journal is recovery-closed, never assumed absent.
+- `AutomationService` owns two ordinary lifetimes: the active automation job and the supersession-
+  stop/convergence job. Each enters one normal lease; cutover closes new admission first, then
+  cancels and joins both. Their cancellation cleanup may re-enter that admitted lease and propagate
+  it through Room executors before the exclusive owner is admitted.
+- The only direct production DAO consumers are `APlusComposition`, `AutomationService`,
+  `PlanRepository`, and `MainViewModel`. Production database/config/repository factories are rooted
+  only in the application/service/view-model owners above; recovery and trust adapters receive the
+  same gate explicitly. Debug collectors also use the application gate and cannot create a bypass.
+- `PlanRepository` observable reads and mapped `PlanConfigStore.config` suppress the non-ready
+  generation and resubscribe on reopen. Normal Room executor submissions and the five mapped
+  preference setters reject synchronously before effects when no admitted owner token exists.
 
 Implementation order for the first independently reviewable adapter/core slice:
 

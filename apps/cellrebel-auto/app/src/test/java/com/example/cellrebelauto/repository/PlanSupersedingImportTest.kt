@@ -36,7 +36,7 @@ class PlanSupersedingImportTest {
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java
         ).allowMainThreadQueries().build()
-        repository = PlanRepository(db)
+        repository = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         oldPlanId = db.planDao().insertPlanWithTasks(
             LocationPlan(
                 sourceFileName = "old.csv", importedAt = 100L, globalBufferSeconds = 5,

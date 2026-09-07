@@ -1,10 +1,20 @@
 package com.example.cellrebelauto.cutover
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.asContextElement
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executor
 
 enum class CutoverGatePhase {
     OPEN,
@@ -41,6 +51,11 @@ sealed interface CutoverAccessResult<out T> {
     ) : CutoverAccessResult<Nothing>
 }
 
+class CutoverAccessUnavailableException(
+    val reason: CutoverUnavailableReason,
+    val identity: CutoverRestoreIdentity?
+) : IllegalStateException("cutover access unavailable: $reason")
+
 sealed interface CutoverExclusiveAdmission {
     data class Granted(val lease: CutoverExclusiveLease) : CutoverExclusiveAdmission
     data class Busy(val identity: CutoverRestoreIdentity?) : CutoverExclusiveAdmission
@@ -67,34 +82,107 @@ class CutoverAccessGate private constructor(initial: GateState) {
     private val mutex = Mutex()
     private var state: GateState = initial
     private var nextLeaseId = 1L
+    private val normalAvailable = MutableStateFlow(initial is GateState.Open)
+    private val currentAccess = ThreadLocal<GateAccessContext?>()
 
     suspend fun <T> withNormalAccess(block: suspend () -> T): CutoverAccessResult<T> {
-        val unavailable: CutoverAccessResult.Unavailable? = mutex.withLock {
-            when (val current = state) {
-                is GateState.Open -> {
-                    state = current.copy(activeNormalAccesses = current.activeNormalAccesses + 1)
-                    null
-                }
-                is GateState.Draining -> CutoverAccessResult.Unavailable(
-                    CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
-                    current.owner.restoreIdentity
-                )
-                is GateState.Exclusive -> CutoverAccessResult.Unavailable(
-                    CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
-                    current.owner.restoreIdentity
-                )
-                is GateState.RecoveryRequired -> CutoverAccessResult.Unavailable(
-                    CutoverUnavailableReason.RECOVERY_REQUIRED,
-                    current.identity
-                )
-            }
+        val inherited = currentAccess.get()
+        if (inherited?.isActiveNormalFor(this) == true) {
+            return CutoverAccessResult.Granted(block())
         }
-        if (unavailable != null) return unavailable
+        val admission = acquireNormalAccess()
+        if (admission is CutoverAccessResult.Unavailable) return admission
+        val access = (admission as CutoverAccessResult.Granted).value
 
         return try {
-            CutoverAccessResult.Granted(block())
+            withContext(currentAccess.asContextElement(access)) {
+                CutoverAccessResult.Granted(block())
+            }
         } finally {
-            withContext(NonCancellable) { releaseNormalAccess() }
+            withContext(NonCancellable) { releaseAccessReference(access) }
+        }
+    }
+
+    private suspend fun acquireNormalAccess(): CutoverAccessResult<GateAccessContext> = mutex.withLock {
+        when (val current = state) {
+            is GateState.Open -> {
+                setState(current.copy(activeNormalAccesses = current.activeNormalAccesses + 1))
+                CutoverAccessResult.Granted(GateAccessContext(this, GateAccessKind.NORMAL))
+            }
+            is GateState.Draining -> CutoverAccessResult.Unavailable(
+                CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+                current.owner.restoreIdentity
+            )
+            is GateState.Exclusive -> CutoverAccessResult.Unavailable(
+                CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+                current.owner.restoreIdentity
+            )
+            is GateState.RecoveryRequired -> CutoverAccessResult.Unavailable(
+                CutoverUnavailableReason.RECOVERY_REQUIRED,
+                current.identity
+            )
+        }
+    }
+
+    suspend fun <T> withNormalAccessOrThrow(block: suspend () -> T): T =
+        when (val result = withNormalAccess(block)) {
+            is CutoverAccessResult.Granted -> result.value
+            is CutoverAccessResult.Unavailable -> throw result.toException()
+        }
+
+    fun <T> withNormalAccessBlockingOrThrow(block: () -> T): T = runBlocking {
+        withNormalAccessOrThrow { block() }
+    }
+
+    /**
+     * Room executors preserve an already-admitted owner across their worker-thread hop. A query
+     * submitted without an owner acquires synchronously, so a closed gate rejects the DAO call at
+     * submission instead of throwing later on a worker and stranding Room's continuation.
+     */
+    fun guardExecutor(delegate: Executor): Executor = Executor { command ->
+        val inherited = currentAccess.get()?.retainIfActiveFor(this)
+        val access = inherited ?: runBlocking {
+            when (val admission = acquireNormalAccess()) {
+                is CutoverAccessResult.Granted -> admission.value
+                is CutoverAccessResult.Unavailable -> throw admission.toException()
+            }
+        }
+        try {
+            delegate.execute { runGuardedCommand(access, command) }
+        } catch (failure: Throwable) {
+            runBlocking { releaseAccessReference(access) }
+            throw failure
+        }
+    }
+
+    private fun runGuardedCommand(access: GateAccessContext, command: Runnable) {
+        val prior = currentAccess.get()
+        currentAccess.set(access)
+        try {
+            command.run()
+        } finally {
+            currentAccess.set(prior)
+            runBlocking { releaseAccessReference(access) }
+        }
+    }
+
+    private suspend fun releaseAccessReference(access: GateAccessContext) {
+        if (access.releaseReference() && access.kind == GateAccessKind.NORMAL) {
+            releaseNormalAccess()
+        }
+    }
+
+    /** Closed generations stop collection; reopening resubscribes and reads a fresh projection. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun <T> gateFlow(upstream: Flow<T>): Flow<T> = normalAvailable.flatMapLatest { open ->
+        if (open) {
+            upstream.retryWhen { failure, _ ->
+                if (failure !is CutoverAccessUnavailableException) return@retryWhen false
+                normalAvailable.first { it }
+                true
+            }
+        } else {
+            emptyFlow()
         }
     }
 
@@ -120,7 +208,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
                 is GateState.Open -> {
                     val drained = CompletableDeferred<Unit>()
                     val requestId = nextLeaseId++
-                    state = GateState.Draining(owner, current.activeNormalAccesses, drained, requestId)
+                    setState(GateState.Draining(owner, current.activeNormalAccesses, drained, requestId))
                     if (current.activeNormalAccesses == 0) drained.complete(Unit)
                     DrainRequest(drained, requestId)
                 }
@@ -130,7 +218,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
                     ) {
                         return CutoverExclusiveAdmission.Busy(current.identity)
                     }
-                    state = GateState.Exclusive(owner, nextLeaseId++)
+                    setState(GateState.Exclusive(owner, nextLeaseId++))
                     return CutoverExclusiveAdmission.Granted(newExclusiveLease(owner, state.leaseId()))
                 }
                 is GateState.Draining -> return CutoverExclusiveAdmission.Busy(current.owner.restoreIdentity)
@@ -158,7 +246,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
                 }
                 check(current.activeNormalAccesses == 0) { "cutover drain completed with active access" }
                 val leaseId = nextLeaseId++
-                state = GateState.Exclusive(owner, leaseId)
+                setState(GateState.Exclusive(owner, leaseId))
                 CutoverExclusiveAdmission.Granted(newExclusiveLease(owner, leaseId))
             }
         } catch (failure: Throwable) {
@@ -195,15 +283,24 @@ class CutoverAccessGate private constructor(initial: GateState) {
     private fun newExclusiveLease(
         owner: GateOwner,
         leaseId: Long
-    ): CutoverExclusiveLease = CutoverExclusiveLease { release ->
-        releaseExclusive(owner, leaseId, release)
+    ): CutoverExclusiveLease = CutoverExclusiveLease(
+        gate = this,
+        access = GateAccessContext(this, GateAccessKind.EXCLUSIVE)
+    ) { release -> releaseExclusive(owner, leaseId, release) }
+
+    internal suspend fun <T> withExclusiveAccess(
+        access: GateAccessContext,
+        block: suspend () -> T
+    ): T {
+        check(access.isActiveExclusiveFor(this)) { "exclusive cutover lease is not active" }
+        return withContext(currentAccess.asContextElement(access)) { block() }
     }
 
     private suspend fun reopenFailedDrain(owner: GateOwner, requestId: Long) {
         mutex.withLock {
             val current = state
             if (current is GateState.Draining && current.owner == owner && current.requestId == requestId) {
-                state = GateState.Open(current.activeNormalAccesses)
+                setState(GateState.Open(current.activeNormalAccesses))
             }
         }
     }
@@ -213,12 +310,12 @@ class CutoverAccessGate private constructor(initial: GateState) {
             when (val current = state) {
                 is GateState.Open -> {
                     check(current.activeNormalAccesses > 0) { "normal access underflow" }
-                    state = current.copy(activeNormalAccesses = current.activeNormalAccesses - 1)
+                    setState(current.copy(activeNormalAccesses = current.activeNormalAccesses - 1))
                 }
                 is GateState.Draining -> {
                     check(current.activeNormalAccesses > 0) { "normal access underflow while draining" }
                     val remaining = current.activeNormalAccesses - 1
-                    state = current.copy(activeNormalAccesses = remaining)
+                    setState(current.copy(activeNormalAccesses = remaining))
                     if (remaining == 0) current.drained.complete(Unit)
                 }
                 is GateState.Exclusive,
@@ -236,16 +333,24 @@ class CutoverAccessGate private constructor(initial: GateState) {
         if (current !is GateState.Exclusive || current.owner != owner || current.leaseId != leaseId) {
             return@withLock false
         }
-        state = when (release) {
+        setState(when (release) {
             CutoverExclusiveRelease.OPEN -> GateState.Open(activeNormalAccesses = 0)
             CutoverExclusiveRelease.RECOVERY_REQUIRED -> GateState.RecoveryRequired(owner.restoreIdentity)
             is CutoverExclusiveRelease.RecoveryRequiredFor -> GateState.RecoveryRequired(release.identity)
-        }
+        })
         true
+    }
+
+    private fun setState(next: GateState) {
+        state = next
+        normalAvailable.value = next is GateState.Open
     }
 
     companion object {
         fun open(): CutoverAccessGate = CutoverAccessGate(GateState.Open(activeNormalAccesses = 0))
+
+        fun recoveryRequired(identity: CutoverRestoreIdentity? = null): CutoverAccessGate =
+            CutoverAccessGate(GateState.RecoveryRequired(identity))
 
         fun fromJournal(journal: CutoverRestoreJournal?): CutoverAccessGate {
             val open = journal == null || journal.phase == CutoverRestorePhase.READY ||
@@ -260,20 +365,76 @@ class CutoverAccessGate private constructor(initial: GateState) {
 }
 
 class CutoverExclusiveLease internal constructor(
+    private val gate: CutoverAccessGate,
+    private val access: GateAccessContext,
     private val releaseAction: suspend (CutoverExclusiveRelease) -> Boolean
 ) {
     private val mutex = Mutex()
     private var released = false
 
+    suspend fun <T> withExclusiveAccess(block: suspend () -> T): T = mutex.withLock {
+        check(!released) { "exclusive cutover lease already released" }
+        gate.withExclusiveAccess(access, block)
+    }
+
     suspend fun release(release: CutoverExclusiveRelease): Boolean = withContext(NonCancellable) {
         mutex.withLock {
             if (released) return@withLock false
+            check(access.hasOnlyExclusiveRoot()) { "exclusive cutover work is still running" }
             val result = releaseAction(release)
             released = true
+            check(access.releaseExclusiveRoot())
             result
         }
     }
 }
+
+internal enum class GateAccessKind { NORMAL, EXCLUSIVE }
+
+internal class GateAccessContext(
+    private val gate: CutoverAccessGate,
+    internal val kind: GateAccessKind
+) {
+    private val referenceLock = Any()
+    private var references: Int = 1
+    @Volatile private var active: Boolean = true
+
+    fun isActiveFor(expected: CutoverAccessGate): Boolean = active && gate === expected
+    fun isActiveNormalFor(expected: CutoverAccessGate): Boolean =
+        isActiveFor(expected) && kind == GateAccessKind.NORMAL
+    fun isActiveExclusiveFor(expected: CutoverAccessGate): Boolean =
+        isActiveFor(expected) && kind == GateAccessKind.EXCLUSIVE
+
+    fun retainIfActiveFor(expected: CutoverAccessGate): GateAccessContext? = synchronized(referenceLock) {
+        if (!active || gate !== expected) return@synchronized null
+        references += 1
+        this
+    }
+
+    /** Returns true when the final owner released this token. */
+    fun releaseReference(): Boolean = synchronized(referenceLock) {
+        check(references > 0) { "cutover access reference underflow" }
+        references -= 1
+        if (references == 0) active = false
+        references == 0
+    }
+
+    fun releaseExclusiveRoot(): Boolean = synchronized(referenceLock) {
+        if (!active || kind != GateAccessKind.EXCLUSIVE || references != 1) {
+            return@synchronized false
+        }
+        references = 0
+        active = false
+        true
+    }
+
+    fun hasOnlyExclusiveRoot(): Boolean = synchronized(referenceLock) {
+        active && kind == GateAccessKind.EXCLUSIVE && references == 1
+    }
+}
+
+private fun CutoverAccessResult.Unavailable.toException() =
+    CutoverAccessUnavailableException(reason, identity)
 
 private sealed interface GateState {
     data class Open(val activeNormalAccesses: Int) : GateState

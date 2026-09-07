@@ -119,7 +119,8 @@ class PlanConfigCutoverStoreTest {
             "cutover-plan-config-${UUID.randomUUID()}.preferences_pb"
         ).also(files::add)
         return PlanConfigStore(
-            PreferenceDataStoreFactory.create(scope = scope, produceFile = { file })
+            PreferenceDataStoreFactory.create(scope = scope, produceFile = { file }),
+            CutoverAccessGate.open()
         )
     }
 

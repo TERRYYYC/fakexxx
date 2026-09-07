@@ -8,6 +8,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.TestResult
 import com.example.cellrebelauto.model.audit.AutoAuditEvent
@@ -31,6 +32,8 @@ import com.example.cellrebelauto.recovery.RecoveryCheckpointRoomDao
 import com.example.cellrebelauto.recovery.ReleaseReceiptDao
 import com.example.cellrebelauto.recovery.AdvanceReplayCarrierDao
 import com.example.cellrebelauto.recovery.AdvanceReceiptDao
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
 
 /**
  * Room database singleton, version 9.
@@ -253,9 +256,16 @@ abstract class AppDatabase : RoomDatabase() {
          * #      (MIGRATION_5_6 is a documented no-op; fallback does NOT fire when a path exists);
          * #   3. fallbackToDestructiveMigration — belt for v1/unknown versions with no path.
          */
-        internal fun buildProductionDatabase(context: Context, dbName: String): AppDatabase {
+        internal fun buildProductionDatabase(
+            context: Context,
+            dbName: String,
+            accessGate: CutoverAccessGate
+        ): AppDatabase {
             quarantineDriftedV5Database(context, dbName)
+            val roomExecutor = accessGate.guardExecutor(Dispatchers.IO.asExecutor())
             return Room.databaseBuilder(context, AppDatabase::class.java, dbName)
+                .setQueryExecutor(roomExecutor)
+                .setTransactionExecutor(roomExecutor)
                 .addMigrations(
                     MIGRATION_2_3,
                     MIGRATION_3_4,
@@ -269,9 +279,13 @@ abstract class AppDatabase : RoomDatabase() {
                 .build()
         }
 
-        fun getInstance(context: Context): AppDatabase {
+        fun getInstance(context: Context, accessGate: CutoverAccessGate): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: buildProductionDatabase(context.applicationContext, "cellrebel_auto.db")
+                INSTANCE ?: buildProductionDatabase(
+                    context.applicationContext,
+                    "cellrebel_auto.db",
+                    accessGate
+                )
                     .also { INSTANCE = it }
             }
         }

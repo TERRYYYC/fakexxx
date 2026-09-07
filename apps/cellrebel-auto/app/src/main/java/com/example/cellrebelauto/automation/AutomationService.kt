@@ -4,7 +4,10 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.cellrebelauto.CellRebelAutoApp
 import com.example.cellrebelauto.automation.aplus.APlusBackend
+import com.example.cellrebelauto.cutover.CutoverAccessResult
+import com.example.cellrebelauto.cutover.CutoverUnavailableReason
 import com.example.cellrebelauto.data.PlanConfigStore
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.AutomationState
@@ -131,6 +134,10 @@ class AutomationService : AccessibilityService() {
         fun stopAutomation() {
             instance?.stopRunning()
         }
+
+        /** Capture/restore quiescence: join every admitted service owner and its durable cleanup. */
+        suspend fun quiesceForCutover(): Boolean =
+            instance?.quiesceServiceOwnersForCutover() ?: true
 
         /** Explicit #97 replacement confirmation: retire the run, then prove the durable stop. */
         fun stopAndVerifyForSupersession(planId: Long, sessionId: Long, requestId: String) {
@@ -362,25 +369,28 @@ class AutomationService : AccessibilityService() {
         }
 
         val bridge = AccessibilityBridge(this)
-        val db = AppDatabase.getInstance(applicationContext)
-        val planRepository = PlanRepository(db)
-        val configStore = PlanConfigStore(applicationContext)
+        val app = application as CellRebelAutoApp
+        val accessGate = app.cutoverAccessGate
+        val db = app.database
+        val planRepository = PlanRepository(db, accessGate)
+        val configStore = app.planConfigStore
 
         _startStatus.value = AutomationStartStatus.STARTING
 
         automationJob = serviceScope.launch {
+            val access = accessGate.withNormalAccess access@{
             // # 读取计划与高级配置（超时/GPS 稳定）
             val plan = planRepository.getPlan(planId)
             val planConfig = configStore.config.first()
             if (plan == null) {
                 addLog("ERROR: plan #$planId not found")
                 _startStatus.value = AutomationStartStatus.Rejected("PLAN_NOT_FOUND")
-                return@launch
+                return@access
             }
             if (!planConfig.locationStageEnabled && !planConfig.testStageEnabled) {
                 addLog("ERROR: both stages are OFF — nothing would be executed")
                 _startStatus.value = AutomationStartStatus.Rejected("BOTH_STAGES_OFF")
-                return@launch
+                return@access
             }
             val startReceipt = RunStartCoordinator(planRepository).admit(planId, System.currentTimeMillis())
             val sessionId = when (startReceipt) {
@@ -389,7 +399,7 @@ class AutomationService : AccessibilityService() {
                 is RunStartReceipt.Rejected -> {
                     addLog("ERROR: start rejected (${startReceipt.reason})")
                     _startStatus.value = AutomationStartStatus.Rejected(startReceipt.reason)
-                    return@launch
+                    return@access
                 }
             }
             val runGeneration = projectionFence.beginRun()
@@ -425,6 +435,15 @@ class AutomationService : AccessibilityService() {
                     engine = null
                 }
             }
+            }
+            if (access is CutoverAccessResult.Unavailable) {
+                val reason = when (access.reason) {
+                    CutoverUnavailableReason.CUTOVER_IN_PROGRESS -> "CUTOVER_IN_PROGRESS"
+                    CutoverUnavailableReason.RECOVERY_REQUIRED -> "CUTOVER_RECOVERY_REQUIRED"
+                }
+                _startStatus.value = AutomationStartStatus.Rejected(reason)
+                addLog("Automation start rejected: $reason")
+            }
         }
     }
 
@@ -442,6 +461,7 @@ class AutomationService : AccessibilityService() {
         val aplusBackend: APlusBackend = APlusComposition.productionBackend(
             applicationContext,
             db,
+            accessGate = (application as CellRebelAutoApp).cutoverAccessGate,
             attemptValidityTimeoutMs = planConfig.testTimeoutSeconds * 1000L,
             serviceLifecycleExecutor = binderExecutor
         )
@@ -471,16 +491,19 @@ class AutomationService : AccessibilityService() {
             return
         }
         val previousStopJob = supersessionStopJob
+        val app = application as CellRebelAutoApp
+        val accessGate = app.cutoverAccessGate
         activeSupersessionStopRequestId = requestId
         _supersessionStopStatus.value = SupersessionStopStatus.Stopping(requestId, planId, sessionId)
 
         supersessionStopJob = serviceScope.launch {
+            val access = accessGate.withNormalAccess stop@{
             previousStopJob?.cancelAndJoin()
-            if (activeSupersessionStopRequestId != requestId) return@launch
+            if (activeSupersessionStopRequestId != requestId) return@stop
             try {
-                val db = AppDatabase.getInstance(applicationContext)
-                val repository = PlanRepository(db)
-                val configStore = PlanConfigStore(applicationContext)
+                val db = app.database
+                val repository = PlanRepository(db, accessGate)
+                val configStore = app.planConfigStore
                 val bridge = AccessibilityBridge(this@AutomationService)
                 val coordinator = SupersessionStopCoordinator(
                     cancelAndJoinRun = {
@@ -507,7 +530,7 @@ class AutomationService : AccessibilityService() {
                     }
                 )
                 val result = coordinator.execute()
-                if (activeSupersessionStopRequestId != requestId) return@launch
+                if (activeSupersessionStopRequestId != requestId) return@stop
                 _supersessionStopStatus.value = when (result) {
                     is PlanRepository.SupersessionStopVerification.Verified ->
                         SupersessionStopStatus.Verified(requestId, result.proof)
@@ -530,6 +553,15 @@ class AutomationService : AccessibilityService() {
                     activeSupersessionStopRequestId = null
                 }
             }
+            }
+            if (access is CutoverAccessResult.Unavailable && activeSupersessionStopRequestId == requestId) {
+                val reason = when (access.reason) {
+                    CutoverUnavailableReason.CUTOVER_IN_PROGRESS -> "CUTOVER_IN_PROGRESS"
+                    CutoverUnavailableReason.RECOVERY_REQUIRED -> "CUTOVER_RECOVERY_REQUIRED"
+                }
+                _supersessionStopStatus.value = SupersessionStopStatus.Blocked(requestId, reason)
+                activeSupersessionStopRequestId = null
+            }
         }
     }
 
@@ -542,6 +574,14 @@ class AutomationService : AccessibilityService() {
             addLog("Stopping automation...")
             automationJob?.cancel()
         }
+    }
+
+    private suspend fun quiesceServiceOwnersForCutover(): Boolean {
+        automationJob?.cancelAndJoin()
+        supersessionStopJob?.cancelAndJoin()
+        return automationJob?.isActive != true &&
+            supersessionStopJob?.isActive != true &&
+            engine == null
     }
 
     private fun addLog(message: String) {

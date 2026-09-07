@@ -9,6 +9,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.sync.Mutex
+import java.util.concurrent.Executor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -294,6 +295,33 @@ class CutoverAccessGateTest {
 
         assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
         assertEquals(CutoverAccessResult.Granted("open"), gate.withNormalAccess { "open" })
+    }
+
+    @Test
+    fun admittedOwnerCanReenterAndDispatchRoomCleanupAfterDrainClosesNewAdmission() = runTest {
+        val gate = CutoverAccessGate.open()
+        val normalEntered = CompletableDeferred<Unit>()
+        val drainStarted = CompletableDeferred<Unit>()
+        var executorRuns = 0
+        val directExecutor = Executor { command -> command.run() }
+        val normal = async {
+            gate.withNormalAccess {
+                normalEntered.complete(Unit)
+                drainStarted.await()
+                assertEquals(CutoverAccessResult.Granted("cleanup"), gate.withNormalAccess { "cleanup" })
+                gate.guardExecutor(directExecutor).execute { executorRuns += 1 }
+            }
+        }
+        normalEntered.await()
+        val exclusive = async { gate.acquireExclusive(identity) }
+        runCurrent()
+        assertEquals(CutoverGatePhase.DRAINING, gate.snapshot().phase)
+        drainStarted.complete(Unit)
+
+        normal.await()
+        assertEquals(1, executorRuns)
+        val lease = requireType<CutoverExclusiveAdmission.Granted>(exclusive.await()).lease
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
     }
 
     private fun mutexOf(gate: CutoverAccessGate): Mutex {

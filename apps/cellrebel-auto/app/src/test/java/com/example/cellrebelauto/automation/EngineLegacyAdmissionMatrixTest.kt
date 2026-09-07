@@ -44,7 +44,7 @@ class EngineLegacyAdmissionMatrixTest {
 
     private class Fixture(val entrance: Entrance, val shape: Shape, val exhausted: Boolean) : AutoCloseable {
         val db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext(), AppDatabase::class.java).build()
-        val repo = PlanRepository(db)
+        val repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         var planId = 0L
         var taskId = 0L
         var sessionId = 0L
@@ -220,7 +220,7 @@ class EngineLegacyAdmissionMatrixTest {
             stageToggles = { StageToggles(false, false) }, nowMs = { 10000 }, delayMs = {},
             attemptDriver = APlusAttemptDriver(db.auditEventDao()),
             recoveryCoordinator = RecoveryCoordinator(backend,
-                RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()),
+                RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open()),
                 observe = ObserveIntentAcquirer { true }, receiptRevision = ReceiptRevisionAcquirer { _, _ -> true },
                 trustedQuota = TrustedQuotaAcquirer { true }),
             completionEvidenceSource = object : APlusEvidenceSource {

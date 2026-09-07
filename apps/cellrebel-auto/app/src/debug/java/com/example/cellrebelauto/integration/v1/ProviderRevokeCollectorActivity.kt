@@ -7,7 +7,7 @@ import android.os.Process
 import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
-import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.CellRebelAutoApp
 import androidx.room.withTransaction
 import com.example.cellrebelauto.environment.ProviderTrustStore
 import java.io.File
@@ -73,7 +73,10 @@ class ProviderRevokeCollectorActivity : Activity() {
         view.text = "P10 provider-revoke collector — working…"
         val cmd = intent?.getStringExtra(EXTRA_CMD)?.trim()
         thread(name = "ec-p10-auto-collector") {
-            val report = runCatching { dispatch(cmd, intent) }
+            val app = application as CellRebelAutoApp
+            val report = runCatching {
+                app.cutoverAccessGate.withNormalAccessBlockingOrThrow { dispatch(cmd, intent) }
+            }
                 .getOrElse { "FAILED: ${it::class.java.name}: ${it.message}" }
             Log.i(TAG, report)
             runOnUiThread { view.text = report }
@@ -103,7 +106,7 @@ class ProviderRevokeCollectorActivity : Activity() {
      * is in these tables, not in the engine's memory or logcat.
      */
     private fun snapshot(): AutoRunSnapshot = runBlocking {
-        val db = AppDatabase.getInstance(applicationContext)
+        val db = (application as CellRebelAutoApp).database
         val attempts = db.testAttemptDao().getAllAttempts()
         val running = attempts.filter { it.status == "starting" || it.status == "running" }
         AutoRunSnapshot(
@@ -122,7 +125,7 @@ class ProviderRevokeCollectorActivity : Activity() {
         // inside a single db.withTransaction so the whole readback is one
         // consistent generation. Each running row also carries its OWN session
         // status + attempt status + aplusState + both plan legs.
-        val db = AppDatabase.getInstance(applicationContext)
+        val db = (application as CellRebelAutoApp).database
         val snapshot = runBlocking {
             db.withTransaction {
                 val allAttempts = db.testAttemptDao().getAllAttempts()
@@ -183,9 +186,11 @@ class ProviderRevokeCollectorActivity : Activity() {
         // exact-principal activeFor query — broad byApplicationId rows are
         // context, never proof.
         val (revoked, activeAfter, contextRows) = runBlocking {
-            val db = AppDatabase.getInstance(applicationContext)
+            val app = application as CellRebelAutoApp
+            val db = app.database
             val dao = db.providerPairingDao()
-            val flipped = ProviderTrustStore(dao).revoke(appId, signer, System.currentTimeMillis())
+            val flipped = ProviderTrustStore(dao, app.cutoverAccessGate)
+                .revoke(appId, signer, System.currentTimeMillis())
             Triple(
                 flipped,
                 dao.activeFor(appId, signer) != null,
@@ -285,9 +290,10 @@ class ProviderRevokeCollectorActivity : Activity() {
                 // R2 (gpt55 P1-2): same principal-bound proof as the at-rest
                 // revoke — store boolean + exact-principal activeFor.
                 val (revoked, activeAfter, contextRows) = runBlocking {
-                    val db = AppDatabase.getInstance(applicationContext)
+                    val app = application as CellRebelAutoApp
+                    val db = app.database
                     val dao = db.providerPairingDao()
-                    val flipped = ProviderTrustStore(dao)
+                    val flipped = ProviderTrustStore(dao, app.cutoverAccessGate)
                         .revoke(spec.providerApplicationId!!, spec.providerSignerDigest!!,
                             System.currentTimeMillis())
                     Triple(
