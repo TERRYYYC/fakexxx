@@ -12,6 +12,7 @@ import name.caiyao.fakegps.data.db.ProfileEntity
 import name.caiyao.fakegps.data.db.ProfileEntityCodec
 import name.caiyao.fakegps.data.repository.ProfileRepository
 import name.caiyao.fakegps.hook.BaselineExtractionGuard
+import name.caiyao.fakegps.motion.RouteSummary
 import name.caiyao.fakegps.ui.SingleFlightGate
 import name.caiyao.fakegps.verify.DeviceObserver
 import name.caiyao.fakegps.verify.ObservationScope
@@ -53,6 +54,17 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
     private var editingId: Long = 0L
     private var editingNameOverride: String? = null
 
+    /**
+     * P3.1 运动链: the profile's route column is NOT an editable text field — it is owned by the
+     * route CSV import — so the editor carries it opaquely and MUST hand it back on save (a plain
+     * round-trip through the field draft would silently strip it, turning a route profile into a
+     * single point on the first unrelated edit).
+     */
+    private var editingRouteWaypointsJson: String? = null
+
+    private val _routeSummary = MutableStateFlow<RouteSummary?>(null)
+    val routeSummary: StateFlow<RouteSummary?> = _routeSummary
+
     fun load(profileId: Long, defaultLat: Double, defaultLon: Double) {
         viewModelScope.launch {
             runCatching {
@@ -61,6 +73,8 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (entity != null) {
                         editingId = entity.id
                         editingNameOverride = profileNameOverride(entity)
+                        editingRouteWaypointsJson = entity.routeWaypointsJson
+                        _routeSummary.value = RouteSummary.of(entity.routeWaypointsJson)
                         _fieldValues.value = runCatching { entityToMap(entity) }
                             .getOrElse {
                                 _notice.value =
@@ -73,6 +87,8 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 editingId = 0L
                 editingNameOverride = null
+                editingRouteWaypointsJson = null
+                _routeSummary.value = null
                 _fieldValues.value = mapOf(
                     "latitude" to defaultLat.toString(),
                     "longitude" to defaultLon.toString(),
@@ -119,6 +135,7 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 runCatching {
                     val entity = mapToEntity(values, editingId, editingNameOverride)
+                        .copy(routeWaypointsJson = editingRouteWaypointsJson)
                     val result = repo.save(entity)
                     editingId = result.id
                     when (postSaveAction(result.published, thenVerify)) {

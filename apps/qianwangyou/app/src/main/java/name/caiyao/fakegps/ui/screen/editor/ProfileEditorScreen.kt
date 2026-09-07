@@ -72,6 +72,7 @@ fun ProfileEditorScreen(
     val saving by vm.saving.collectAsState()
     val fieldErrors by vm.fieldErrors.collectAsState()
     val notice by vm.notice.collectAsState()
+    val routeSummary by vm.routeSummary.collectAsState()
 
     LaunchedEffect(profileId) {
         vm.load(if (isNew) -1L else profileId, lat, lon)
@@ -140,6 +141,38 @@ fun ProfileEditorScreen(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+            }
+            // P3.1 运动链: a route profile announces itself here (waypoint count / total length /
+            // play time at the speed profile). The waypoints themselves come from a route CSV or
+            // the plan-adjacent synthesis — they are not typed into the field grid.
+            routeSummary?.let { summary ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "路线",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            text = "${summary.waypointCount} 个路点 · " +
+                                "%.1f km".format(summary.lengthMeters / 1000.0) + " · " +
+                                "预计 %d 分钟".format(
+                                    (summary.estimatedDurationSeconds / 60.0).toInt().coerceAtLeast(1),
+                                ),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            text = "开启「运动链」模块后，System Mock 沿该路线以 1 Hz 连续投递（速度剖面 + GPS 抖动）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
             for ((category, fields) in categories) {
                 val expanded = expandedState[category] ?: (category == "定位")

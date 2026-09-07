@@ -54,6 +54,12 @@ internal object SpoofModuleUiCatalog {
             "融合定位",
             "Google 融合定位（FusedLocation）回调",
         ),
+        Entry(
+            SpoofModules.MOTION,
+            "运动链",
+            "路线播放（连续轨迹 + 速度剖面 + GPS 抖动）；后续含传感器合成。" +
+                "默认关 = 静态点位现行为，完全可拆卸",
+        ),
     )
 
     init {
