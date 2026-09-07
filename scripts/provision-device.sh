@@ -513,7 +513,13 @@ step_power_whitelist() {
         skip_step "$idx" "stay_on_while_plugged_in has USB bit (stay=$(q_sh 'settings get global stay_on_while_plugged_in')); deviceidle whitelist contains both pkgs"
         return
     fi
-    run_sh "svc power stayon usb"
+    # HyperOS/16: `svc power stayon` from shell uid silently fails (setting stays 0);
+    # only the su path lands. Verified on mi14 e53cfd3d: shell -> 0, su -> 2.
+    if [ "$ROOTED" -eq 1 ]; then
+        run_su "svc power stayon usb"
+    else
+        run_sh "svc power stayon usb"
+    fi
     run_sh "dumpsys deviceidle whitelist +$QWY_PKG"
     run_sh "dumpsys deviceidle whitelist +$AUTO_PKG"
     if [ "$DRY_RUN" -eq 0 ]; then
