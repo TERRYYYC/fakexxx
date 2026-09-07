@@ -49,6 +49,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import name.caiyao.fakegps.data.SpoofSettings
 import name.caiyao.fakegps.BuildConfig
 import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
+import name.caiyao.fakegps.ui.onboarding.OnboardingPermissionPolicy
+import name.caiyao.fakegps.ui.onboarding.missingRuntimePermissions
 import kotlin.math.roundToInt
 
 @SuppressLint("InlinedApi")
@@ -165,6 +167,32 @@ fun SettingsScreen(
                     },
                     supportingContent = {
                         TextButton(onClick = { vm.dismissPublishFailure() }) { Text("知道了") }
+                    },
+                )
+                HorizontalDivider()
+            }
+
+            // P0.1-1 首启权限流：自动申请被拒后的显式重试入口（判定在
+            // OnboardingPermissionPolicy，「拒绝→可重试」JVM 可测）。
+            var permissionRefreshTick by remember { mutableStateOf(0) }
+            val runtimePermissionRetryLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestMultiplePermissions(),
+            ) { permissionRefreshTick++ }
+            val missingRuntime = remember(permissionRefreshTick) { missingRuntimePermissions(context) }
+            if (OnboardingPermissionPolicy.canRetryFromSettings(missingRuntime)) {
+                ListItem(
+                    headlineContent = {
+                        Text("运行时权限缺失", color = MaterialTheme.colorScheme.error)
+                    },
+                    supportingContent = {
+                        Text("定位 / 通知权限被拒时，System Mock 与运行状态展示无法工作；可在此重新申请。")
+                    },
+                    trailingContent = {
+                        TextButton(
+                            onClick = {
+                                runtimePermissionRetryLauncher.launch(missingRuntime.toTypedArray())
+                            },
+                        ) { Text("重新申请权限") }
                     },
                 )
                 HorizontalDivider()

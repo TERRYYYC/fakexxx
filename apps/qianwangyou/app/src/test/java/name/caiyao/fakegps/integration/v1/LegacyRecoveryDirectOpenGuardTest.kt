@@ -21,7 +21,12 @@ class LegacyRecoveryDirectOpenGuardTest {
             .map { it.range.first }
             .toList()
 
-        assertEquals("schedule initialization and coordinate lookup are the only direct opens", 2, opens.size)
+        assertEquals(
+            "schedule initialization, coordinate lookup and the discover profileRefs " +
+                "projection are the only direct opens",
+            3,
+            opens.size,
+        )
         assertEquals("each direct-open path must attempt recovery", opens.size, recoveryCalls.size)
         assertTrue(recoveryCalls.zip(opens).all { (recovery, open) -> recovery < open })
     }

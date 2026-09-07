@@ -49,6 +49,13 @@ interface QwyEnvironment {
      */
     fun achievableVerificationLevelWire(): Int
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
+
+    /**
+     * P0.1-5「一处导入、两侧生效」：provider 收藏档案集合的投影（元素 = "profile-{dbId}"，
+     * 与 schedule item 同一命名约定）。discover() 把它放进 CapabilitySnapshotV1.profileRefs，
+     * Auto 据此做「计划行数 == 档案数」一致性校验。默认空集合 = 无法得知（旧实现/测试桩）。
+     */
+    fun profileRefs(): List<String> = emptyList()
 }
 
 data class ScheduleSnapshot(
@@ -372,6 +379,29 @@ class QwyEnvironmentController(
             ScheduleDecisionV1.ALLOWED_NOW.wire
         else
             ScheduleDecisionV1.DENIED.wire
+    }
+
+    override fun profileRefs(): List<String> {
+        // P0.1-5: discover 的档案数事实来源 —— 与 initScheduleFromDb 相同的只读 SQLite
+        // 读法（id ASC）。读失败返回空集合（Auto 侧取不到即静默跳过校验）。
+        return try {
+            AppDatabase.ensureLegacyDatabaseRecovered(appContext)
+            val dbFile = appContext.getDatabasePath("fakegps.db")
+            if (!dbFile.exists()) return emptyList()
+            SQLiteDatabase.openDatabase(
+                dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
+            ).use { db ->
+                val ids = mutableListOf<String>()
+                db.rawQuery("SELECT id FROM temp ORDER BY id ASC", null).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        ids.add("profile-${cursor.getLong(0)}")
+                    }
+                }
+                ids
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
     override fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit) {

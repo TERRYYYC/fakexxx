@@ -110,7 +110,9 @@ class EnvironmentControlHandler(
             ),
             continuityCoverageWire = snap.coverageWire,
             environmentRevision = snap.revision,
-            profileRefs = emptyList(),
+            // P0.1-5: the provider's profile collection is the source of truth Auto's
+            // plan↔profile consistency check reads over the existing discover channel.
+            profileRefs = environment.profileRefs(),
             scheduleRefs = if (schedule != null) listOf(schedule.scheduleId) else emptyList(),
             // v1.55 schedule projection group: all four null together when no
             // active schedule, all four non-null together otherwise.

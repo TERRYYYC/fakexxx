@@ -158,6 +158,10 @@ dependencies {
 
     // Unit testing — config channel contract (Phase A, JVM-only, no device needed)
     testImplementation 'junit:junit:4.13.2'
+    // P0.1 onboarding: Robolectric lane for ViewModel-level behavior (import→anchor→publish chain)
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'androidx.test:core:1.6.1'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0'
     // G2 §5A 10-address fixture seed: the seeder parses the frozen fixture JSON
     // (a-plus-10a-fixture.json) on-device via org.json; this brings the SAME
     // parser onto the JVM lane so payload parsing + explicit-id derivation are
