@@ -154,6 +154,10 @@ class PlanRepository(private val db: AppDatabase) {
     fun observeAttemptCounts(planId: Long): Flow<List<TaskAttemptCount>> =
         db.testAttemptDao().observeAttemptCountsForPlan(planId)
 
+    // #12：观察某计划 RECOVERY_REQUIRED 死尝试数（Plan 页重置入口可见性投影）
+    fun observeRecoveryRequiredCount(planId: Long): Flow<Int> =
+        db.testAttemptDao().observeRecoveryRequiredForPlan(planId)
+
     // ---- History / export (AC-C3, INV-8) ----
 
     /**
@@ -586,6 +590,100 @@ class PlanRepository(private val db: AppDatabase) {
         }
         SupersedingImportResult.Imported(successorId)
     }
+
+    // ---- #12 plan-reset (re-run a finished/dead plan) ----
+
+    /** Outcome of [resetPlanAsFreshGeneration]. */
+    sealed interface PlanResetOutcome {
+        /** Reset done: the old plan's rows were copied into a NEW generation. */
+        data class Reset(val oldPlanId: Long, val newPlanId: Long, val rows: Int) : PlanResetOutcome
+
+        /** No plan exists — nothing to reset. */
+        data object NoPlan : PlanResetOutcome
+
+        /** Guard refused the reset (plan unfinished, nothing RECOVERY_REQUIRED). */
+        data class Refused(val reason: String) : PlanResetOutcome
+    }
+
+    /**
+     * #12: re-activate the latest plan as a FRESH GENERATION — insert a new
+     * plan row and copy its task rows verbatim (csvRow/coordinates/priority/
+     * quota), all pending, in ONE transaction, then append a typed PLAN_RESET
+     * audit row binding old→new plan ids.
+     *
+     * WHY COPY-ROWS instead of re-running the CSV import pipeline: the SAF Uri
+     * grant from the original import is long gone and the app does not retain
+     * the file bytes; the plan's own task rows ARE the validated worklist
+     * (import validated them atomically). "Reset" means the SAME worklist,
+     * fresh generation — wanting DIFFERENT rows is a normal CSV import, which
+     * stays available. Trade-off: a corrupted/drifted task table would be
+     * copied as-is; acceptable because those rows are the execution truth the
+     * previous generation ran on.
+     *
+     * GUARD (importCsv parity, enforced INSIDE the transaction — not only in
+     * hidden UI): reset is allowed only when the plan is complete OR at least
+     * one attempt is terminally stuck RECOVERY_REQUIRED (the dead-lane escape
+     * hatch). Old attempts/sessions/ledger rows are NEVER deleted — they are
+     * the append-only audit trail (History/export keep them); only the new
+     * plan's projection starts clean.
+     */
+    suspend fun resetPlanAsFreshGeneration(nowMs: Long = System.currentTimeMillis()): PlanResetOutcome =
+        db.withTransaction {
+            val plan = db.planDao().getLatestPlan() ?: return@withTransaction PlanResetOutcome.NoPlan
+            val tasks = db.locationTaskDao().getTasksForPlan(plan.id)
+            if (tasks.isEmpty()) {
+                return@withTransaction PlanResetOutcome.Refused("plan has no tasks")
+            }
+            val complete = tasks.all { it.status == "completed" }
+            val recoveryRequired = db.testAttemptDao().countRecoveryRequiredForPlan(plan.id) > 0
+            if (!complete && !recoveryRequired) {
+                return@withTransaction PlanResetOutcome.Refused(
+                    "Current plan unfinished (${tasks.count { it.status == "completed" }}/${tasks.size} tasks) " +
+                        "and no attempt is stuck RECOVERY_REQUIRED — resume it instead"
+                )
+            }
+
+            // importedAt must strictly exceed the old plan's or the
+            // `ORDER BY importedAt DESC LIMIT 1` latest-plan projection could
+            // pick either generation when timestamps collide.
+            val importedAt = maxOf(nowMs, plan.importedAt + 1)
+            val newPlanId = db.planDao().insertPlanWithTasks(
+                LocationPlan(
+                    sourceFileName = plan.sourceFileName,
+                    importedAt = importedAt,
+                    globalBufferSeconds = plan.globalBufferSeconds,
+                    totalRows = tasks.size,
+                    totalRequiredSuccesses = tasks.sumOf { it.requiredSuccesses }
+                ),
+                tasks.map {
+                    LocationTask(
+                        planId = 0, // # 由 insertPlanWithTasks 回填
+                        csvRow = it.csvRow,
+                        longitude = it.longitude,
+                        latitude = it.latitude,
+                        priority = it.priority,
+                        requiredSuccesses = it.requiredSuccesses
+                        // # completedSuccesses/status 故意不复制：新代际从零开始
+                    )
+                }
+            )
+
+            // Typed audit row (§7.1 stream is append-only, never a state owner):
+            // seq follows the same single-writer monotonic convention as
+            // APlusAttemptDriver (stream length + 1).
+            db.auditEventDao().insert(
+                com.example.cellrebelauto.model.audit.AutoAuditEvent(
+                    seq = db.auditEventDao().count().toLong() + 1,
+                    attemptId = null, // plan-level event
+                    correlationRef = "plan:${plan.id}->$newPlanId",
+                    eventType = "PLAN_RESET",
+                    payloadDigest = "src=${plan.sourceFileName}:rows=${tasks.size}:" +
+                        "buffer=${plan.globalBufferSeconds}:recoveryRequired=$recoveryRequired",
+                    recordedAt = importedAt
+                )
+            )
+            PlanResetOutcome.Reset(oldPlanId = plan.id, newPlanId = newPlanId, rows = tasks.size)
+        }
 
     // ---- Recovery (INV-9 / O4) ----
 

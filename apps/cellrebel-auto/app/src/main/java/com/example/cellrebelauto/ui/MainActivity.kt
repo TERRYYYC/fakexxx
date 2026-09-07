@@ -87,7 +87,11 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                 onStop = { vm.stopAutomation() },
                 onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
                 onOpenRun = { vm.navigateTo(Screen.RUN) },
-                onOpenHistory = { vm.navigateTo(Screen.HISTORY) }
+                onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
+                // #12：计划重置入口（provider 侧命令文本供确认框复制）
+                onResetPlan = { vm.resetPlan() },
+                providerScheduleResetCommand = vm.providerScheduleResetCommand,
+                providerPairingApprovalCommand = vm.providerPairingApprovalCommand
             )
         }
 

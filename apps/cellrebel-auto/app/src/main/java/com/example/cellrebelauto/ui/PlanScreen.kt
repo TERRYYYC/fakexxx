@@ -19,6 +19,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -29,6 +31,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -52,8 +56,12 @@ import com.example.cellrebelauto.model.plan.RowError
  * Plan screen (F001 home, wireframe v2.1 §1.1): CSV import card with atomic
  * error panel, first-run-required global buffer field, collapsible Advanced
  * timing, execution-order task cards, and state-driven Start/Resume/Stop.
+ * #12 adds the plan-reset entry (visible only once the plan is complete or an
+ * attempt is stuck RECOVERY_REQUIRED) with a confirm dialog that spells out
+ * the provider-side half of the sequence.
  * # 计划页（F001 首页）：导入卡片 + 原子错误面板、首次必填的全局缓冲、
- * # 折叠的高级参数、执行顺序任务卡片、按状态切换的 Start/Resume/Stop
+ * # 折叠的高级参数、执行顺序任务卡片、按状态切换的 Start/Resume/Stop；
+ * # #12 增加计划重置入口（仅计划完成或存在 RECOVERY_REQUIRED 死尝试时可见）
  */
 @Composable
 fun PlanScreen(
@@ -82,7 +90,11 @@ fun PlanScreen(
     onOpenRun: () -> Unit,
     onOpenHistory: () -> Unit,
     // R44 (Sol GREEN-review-3 F5): entry into provider management (§6.5.3 approval surface).
-    onOpenProviders: () -> Unit = {}
+    onOpenProviders: () -> Unit = {},
+    // #12: plan-reset entry (confirm dialog lives in this screen).
+    onResetPlan: () -> Unit = {},
+    providerScheduleResetCommand: String = "",
+    providerPairingApprovalCommand: String = ""
 ) {
     // # SAF 文件选择器（无需新增权限）
     val importLauncher = rememberLauncherForActivityResult(
@@ -118,6 +130,9 @@ fun PlanScreen(
             }
         )
     }
+
+    // #12：重置确认对话框开关
+    var showResetDialog by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = Modifier
@@ -355,10 +370,35 @@ fun PlanScreen(
                 // # 计划已全部完成
                 planState.isComplete -> {
                     Text(
-                        "Plan completed ✔ — import a new CSV to continue",
+                        "Plan completed ✔ — import a new CSV or reset to re-run",
                         color = Color(0xFF4CAF50),
                         fontWeight = FontWeight.Medium
                     )
+                }
+            }
+        }
+
+        // #12：重置入口——仅计划完成或存在 RECOVERY_REQUIRED 死尝试时可见，且不在运行中
+        if (planState.canResetPlan && !isRunning) {
+            item {
+                Column {
+                    if (planState.hasRecoveryRequired && !planState.isComplete) {
+                        Text(
+                            "An attempt is stuck RECOVERY_REQUIRED — the lane has no forward path.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    OutlinedButton(
+                        onClick = { showResetDialog = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("⟲ Reset plan & re-run", modifier = Modifier.padding(vertical = 8.dp))
+                    }
                 }
             }
         }
@@ -380,6 +420,52 @@ fun PlanScreen(
                 }
             }
         }
+    }
+
+    // #12：重置确认框——说清三件事：同清单重建、provider 侧需另跑 schedule_reset（给出命令）、
+    // # 重置会清 provider 配对 → 需要重新批准。确认后才执行。
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("Reset plan & re-run?") },
+            text = {
+                Column {
+                    Text(
+                        "This re-imports the SAME worklist (${planState.plan?.sourceFileName ?: "—"}) " +
+                            "as a NEW plan: every task restarts pending, with zero attempts and quota. " +
+                            "Previous attempts stay in History as the audit trail.",
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "The provider side must be reset separately — run, then re-approve pairing " +
+                            "(the reset wipes provider pairing):",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    SelectionContainer {
+                        Text(
+                            "1. $providerScheduleResetCommand\n" +
+                                "2. re-pair: $providerPairingApprovalCommand\n" +
+                                "   (then approve BOTH applicationId + signer digest)\n" +
+                                "3. Start Plan",
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showResetDialog = false
+                    onResetPlan()
+                }) { Text("Reset") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 }
 
