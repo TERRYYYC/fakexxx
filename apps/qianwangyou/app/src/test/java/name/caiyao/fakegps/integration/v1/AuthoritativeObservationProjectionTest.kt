@@ -2,6 +2,7 @@ package name.caiyao.fakegps.integration.v1
 
 import io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.PreflightRequestV1
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -123,6 +124,31 @@ class AuthoritativeObservationProjectionTest {
         evidenceSeqs.forEach { evidenceSeq ->
             assertEquals(cursor, store.recordForEvidence(evidenceSeq)?.cursor)
         }
+    }
+
+    @Test
+    fun `authoritative observe timing never leaks sticky FULL through discover or preflight after source loss`() {
+        val h = ProviderHarness.create()
+        h.pair()
+        val receipt = h.apply(key = "authoritative-public-coverage")
+        val lease = checkNotNull(h.leases.get(receipt.leaseId))
+        val digest = QwyObservedSemanticDigest.compute(h.tracker.generation, h.env.observeEffective(), h.env.scheduleSnapshot())
+        val reads = ArrayDeque<AuthoritativeContinuitySnapshot?>().apply {
+            add(snapshot(digest, 8L)); add(snapshot(digest, 8L)); add(null); add(null)
+        }
+        val observer = EnvironmentObserver(h.tracker, h.env, h.clock, h.audit,
+            AuthoritativeContinuitySource { reads.removeFirst() }, "name.caiyao.fakegps", 10_321,
+            AuthoritativeObservationCommitStore(h.kv))
+        val request = ObserveRequestV1(receipt.leaseId, receipt.operationId, receipt.acceptedIntentHash)
+        val full = h.kv.transaction { observer.observe(lease, request) }
+        val none = h.kv.transaction { observer.observe(lease, request) }
+
+        assertEquals(ContinuityCoverageV1.FULL.wire, full.continuityCoverageWire)
+        assertEquals(ContinuityCoverageV1.NONE.wire, none.continuityCoverageWire)
+        assertNotEquals(ContinuityCoverageV1.FULL.wire, h.handler.discover(ProviderHarness.AUTO_UID).continuityCoverageWire)
+        assertNotEquals(ContinuityCoverageV1.FULL.wire, h.handler.preflight(
+            ProviderHarness.AUTO_UID, PreflightRequestV1(h.intent(), "authoritative-public-preflight", 1),
+        ).continuityCoverageWire)
     }
 
     @Test
