@@ -371,7 +371,10 @@ class EnvironmentControlHandler(
             }
         }
 
-        observer.observe(lease, request)
+        // The source cursor acknowledgement and the returned audit reference
+        // have one crash boundary. Nested store transactions join this owner
+        // transaction on every DurableKv implementation.
+        storage.transaction { observer.observe(lease, request) }
     }
 
     fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {

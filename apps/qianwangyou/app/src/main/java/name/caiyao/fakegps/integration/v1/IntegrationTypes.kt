@@ -161,6 +161,7 @@ enum class RevisionBumpReason {
     PERMISSION_OR_OWNER_CHANGED,
     GENERATION_DISCONTINUITY,
     OBSERVER_GAP,
+    AUTHORITATIVE_CURSOR_CHANGED,
 }
 
 /** Continuity snapshot produced by the revision owner (§6.6, INV-25). */

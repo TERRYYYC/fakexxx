@@ -230,6 +230,7 @@ object ProviderRuntime {
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
+        val authoritativeCommitStore = AuthoritativeObservationCommitStore(kv)
         val observer = EnvironmentObserver(
             tracker,
             environment,
@@ -238,6 +239,7 @@ object ProviderRuntime {
             authoritativeSource,
             expectedOracleOwnerPackage,
             expectedOracleOwnerUid,
+            authoritativeCommitStore,
         )
 
         val handler = EnvironmentControlHandler(

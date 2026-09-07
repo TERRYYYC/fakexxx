@@ -26,6 +26,7 @@ class EnvironmentObserver(
     private val authoritativeSource: AuthoritativeContinuitySource? = null,
     private val expectedOracleOwnerPackage: String? = null,
     private val expectedOracleOwnerUid: Int? = null,
+    private val authoritativeCommitStore: AuthoritativeObservationCommitStore? = null,
 ) {
     /**
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
@@ -45,7 +46,7 @@ class EnvironmentObserver(
         // only for legacy JVM harnesses; ProviderRuntime always supplies it.
         val pre = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
         val windowStartElapsedRealtimeMs = clock.elapsedRealtimeMs()
-        val snap = tracker.snapshot()
+        var snap = tracker.snapshot()
         val effective = environment.observeEffective()
         val schedule = environment.scheduleSnapshot()
         val post = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
@@ -54,7 +55,7 @@ class EnvironmentObserver(
             effective = effective,
             schedule = schedule,
         )
-        val authoritativeWindowIsValid = when {
+        var authoritativeWindowIsValid = when {
             authoritativeSource == null -> false
             expectedOracleOwnerPackage == null || expectedOracleOwnerUid == null -> false
             classifyAuthoritativeWindow(
@@ -66,6 +67,54 @@ class EnvironmentObserver(
             pre?.qwySemanticDigest != expectedDigest -> false
             post?.qwySemanticDigest != expectedDigest -> false
             else -> true
+        }
+        var authoritativeCursor = if (authoritativeWindowIsValid) {
+            val stablePre = checkNotNull(pre)
+            AuthoritativeObservationCursor(
+                bootId = stablePre.bootId,
+                oracleInstanceId = stablePre.oracleInstanceId,
+                sequence = stablePre.sequence,
+                qwySemanticDigest = checkNotNull(stablePre.qwySemanticDigest),
+            )
+        } else {
+            null
+        }
+        // PRE/POST alone establishes interval consistency, but cannot detect a
+        // stale replay from an earlier completed interval. Once this owner has
+        // acknowledged sequence N for an epoch, a later observation of N-2 is
+        // fail-closed even when its own endpoints match.
+        authoritativeCursor?.let { cursor ->
+            val highest = authoritativeCommitStore?.highestAcknowledgedSequenceForSourceEpoch(cursor)
+            if (highest != null && cursor.sequence < highest) {
+                authoritativeWindowIsValid = false
+                authoritativeCursor = null
+            }
+        }
+        authoritativeCursor?.let { cursor ->
+            if (authoritativeCommitStore?.hasAcknowledgementForDifferentSourceEpoch(snap.generation, cursor) == true) {
+                // Do not silently treat a producer reboot or replacement as a
+                // continuous local history. This owner emits NONE; the next
+                // owner generation must obtain a fresh window before it can
+                // establish a new local epoch.
+                authoritativeWindowIsValid = false
+                authoritativeCursor = null
+            }
+        }
+        // A new stable cursor in the same authoritative epoch reports a
+        // producer-observed semantic change which local callbacks may not have
+        // delivered. The revision owner, not the replay store, conservatively
+        // advances the local revision once before the observation is bound.
+        // The first cursor of an epoch is only acknowledged; repeating it never
+        // bumps revision. All calls are enclosed by the handler's outer
+        // DurableKv transaction in production.
+        authoritativeCursor?.let { cursor ->
+            if (authoritativeCommitStore != null &&
+                authoritativeCommitStore.acknowledgement(cursor) == null &&
+                authoritativeCommitStore.hasAcknowledgementForSourceEpoch(cursor)
+            ) {
+                tracker.bump(RevisionBumpReason.AUTHORITATIVE_CURSOR_CHANGED)
+                snap = tracker.snapshot()
+            }
         }
         val coverageWire = when {
             authoritativeSource == null -> snap.coverageWire
@@ -107,13 +156,23 @@ class EnvironmentObserver(
         // The reference crosses Binder only after its backing row is durable.
         // A write failure therefore fails the whole observe call closed; it can
         // never return a structurally valid but unresolvable evidence ref.
+        val evidenceDigest = QwyObservationEvidenceDigest.compute(observation)
         val evidence = audit.append(
             event = "observe",
             callerApplicationId = lease.callerApplicationId,
             leaseId = lease.leaseId,
             operationId = request.operationId,
-            payloadDigest = QwyObservationEvidenceDigest.compute(observation),
+            payloadDigest = evidenceDigest,
         )
+        authoritativeCursor?.let { cursor ->
+            authoritativeCommitStore?.record(
+                cursor = cursor,
+                localGeneration = snap.generation,
+                localRevision = snap.revision,
+                evidence = evidence,
+                evidenceDigest = evidenceDigest,
+            )
+        }
         return observation.copy(evidenceRefs = listOf("qwy:audit:${evidence.seq}"))
     }
 }
