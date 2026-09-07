@@ -169,7 +169,10 @@ dependencies {
     // Robolectric — publish→readback transport tests run the REAL ConfigPrefsSync write path
     // (world-readable prefs + provider + Room) on the JVM, and read it back with
     // XSharedPreferences-equivalent file semantics. JVM-only; no device needed.
+    // P0.1 onboarding adds the ViewModel lane (import→anchor→publish chain).
     testImplementation 'org.robolectric:robolectric:4.14.1'
+    testImplementation 'androidx.test:core:1.6.1'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0'
     // G2 §5A 10-address fixture seed: the seeder parses the frozen fixture JSON
     // (a-plus-10a-fixture.json) on-device via org.json; this brings the SAME
     // parser onto the JVM lane so payload parsing + explicit-id derivation are
