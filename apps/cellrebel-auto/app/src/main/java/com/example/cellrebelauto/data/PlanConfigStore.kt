@@ -2,13 +2,22 @@ package com.example.cellrebelauto.data
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.cellrebelauto.cutover.CutoverArchiveV2
+import com.example.cellrebelauto.cutover.CutoverGenerationState
+import com.example.cellrebelauto.cutover.CutoverPlanConfigSchema
+import com.example.cellrebelauto.cutover.CutoverPreferenceEntry
+import com.example.cellrebelauto.cutover.CutoverPreferenceGenerationPort
+import com.example.cellrebelauto.cutover.CutoverPreferenceSnapshotPort
+import com.example.cellrebelauto.cutover.CutoverPreferenceType
 import com.example.cellrebelauto.model.plan.PlanConfig
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 // # 应用级 DataStore 委托（测试用 PreferenceDataStoreFactory 注入独立文件）
@@ -24,7 +33,7 @@ private val Context.planConfigDataStore: DataStore<Preferences> by preferencesDa
  */
 class PlanConfigStore(
     private val dataStore: DataStore<Preferences>
-) {
+) : CutoverPreferenceGenerationPort, CutoverPreferenceSnapshotPort {
     constructor(context: Context) : this(context.planConfigDataStore)
 
     private object Keys {
@@ -67,4 +76,130 @@ class PlanConfigStore(
     suspend fun setTestStageEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.TEST_STAGE_ENABLED] = enabled }
     }
+
+    /** Raw five-key projection for cutover. Mapped runtime defaults are deliberately not read here. */
+    override suspend fun captureCutoverPreferences(): List<CutoverPreferenceEntry> {
+        val preferences = dataStore.data.first()
+        return listOf(
+            intEntry("global_buffer_seconds", preferences[Keys.GLOBAL_BUFFER_SECONDS]),
+            intEntry("test_timeout_seconds", preferences[Keys.TEST_TIMEOUT_SECONDS]),
+            intEntry("gps_settle_seconds", preferences[Keys.GPS_SETTLE_SECONDS]),
+            booleanEntry("location_stage_enabled", preferences[Keys.LOCATION_STAGE_ENABLED]),
+            booleanEntry("test_stage_enabled", preferences[Keys.TEST_STAGE_ENABLED])
+        ).sortedBy { it.key }
+    }
+
+    override suspend fun classify(archive: CutoverArchiveV2): CutoverGenerationState {
+        val expected = validateCutoverPreferences(archive.preferences)
+        val current = captureCutoverPreferences()
+        return when {
+            current.none { it.present } -> CutoverGenerationState.EMPTY
+            current == expected -> CutoverGenerationState.EXACT
+            else -> CutoverGenerationState.MISMATCH
+        }
+    }
+
+    override suspend fun restore(archive: CutoverArchiveV2) {
+        val entries = validateCutoverPreferences(archive.preferences)
+        dataStore.edit { preferences ->
+            check(
+                !preferences.contains(Keys.GLOBAL_BUFFER_SECONDS) &&
+                    !preferences.contains(Keys.TEST_TIMEOUT_SECONDS) &&
+                    !preferences.contains(Keys.GPS_SETTLE_SECONDS) &&
+                    !preferences.contains(Keys.LOCATION_STAGE_ENABLED) &&
+                    !preferences.contains(Keys.TEST_STAGE_ENABLED)
+            ) { "target PlanConfig is not empty" }
+            replaceCutoverPreferences(preferences, entries)
+        }
+    }
+
+    override suspend fun clear() {
+        dataStore.edit { preferences ->
+            preferences.remove(Keys.GLOBAL_BUFFER_SECONDS)
+            preferences.remove(Keys.TEST_TIMEOUT_SECONDS)
+            preferences.remove(Keys.GPS_SETTLE_SECONDS)
+            preferences.remove(Keys.LOCATION_STAGE_ENABLED)
+            preferences.remove(Keys.TEST_STAGE_ENABLED)
+        }
+    }
+
+    private fun replaceCutoverPreferences(
+        preferences: MutablePreferences,
+        entries: List<CutoverPreferenceEntry>
+    ) {
+        val byKey = entries.associateBy { it.key }
+        byKey.getValue("global_buffer_seconds").presentInt()?.let {
+            preferences[Keys.GLOBAL_BUFFER_SECONDS] = it
+        }
+        byKey.getValue("test_timeout_seconds").presentInt()?.let {
+            preferences[Keys.TEST_TIMEOUT_SECONDS] = it
+        }
+        byKey.getValue("gps_settle_seconds").presentInt()?.let {
+            preferences[Keys.GPS_SETTLE_SECONDS] = it
+        }
+        byKey.getValue("location_stage_enabled").presentBoolean()?.let {
+            preferences[Keys.LOCATION_STAGE_ENABLED] = it
+        }
+        byKey.getValue("test_stage_enabled").presentBoolean()?.let {
+            preferences[Keys.TEST_STAGE_ENABLED] = it
+        }
+    }
+
+    private fun validateCutoverPreferences(
+        entries: List<CutoverPreferenceEntry>
+    ): List<CutoverPreferenceEntry> {
+        require(entries.size == CutoverPlanConfigSchema.preferenceTypes.size) {
+            "cutover PlanConfig must contain exactly five keys"
+        }
+        val byKey = entries.associateBy { it.key }
+        require(byKey.size == entries.size && byKey.keys == CutoverPlanConfigSchema.preferenceTypes.keys) {
+            "cutover PlanConfig key census mismatch"
+        }
+        entries.forEach { entry ->
+            require(entry.type == CutoverPlanConfigSchema.preferenceTypes.getValue(entry.key)) {
+                "cutover PlanConfig type mismatch for ${entry.key}"
+            }
+            if (entry.present) {
+                when (entry.type) {
+                    CutoverPreferenceType.INT -> entry.presentInt()
+                    CutoverPreferenceType.BOOLEAN -> entry.presentBoolean()
+                }
+            } else {
+                require(entry.value == null) { "absent cutover PlanConfig value must be null" }
+            }
+        }
+        return entries.sortedBy { it.key }
+    }
+
+    private fun intEntry(key: String, value: Int?): CutoverPreferenceEntry = CutoverPreferenceEntry(
+        key = key,
+        type = CutoverPreferenceType.INT,
+        present = value != null,
+        value = value?.toString()
+    )
+
+    private fun booleanEntry(key: String, value: Boolean?): CutoverPreferenceEntry = CutoverPreferenceEntry(
+        key = key,
+        type = CutoverPreferenceType.BOOLEAN,
+        present = value != null,
+        value = value?.toString()
+    )
+
+    private fun CutoverPreferenceEntry.presentInt(): Int? {
+        if (!present) return null
+        val raw = requireNotNull(value) { "present cutover PlanConfig integer is missing" }
+        val parsed = raw.toIntOrNull()
+        require(parsed != null && parsed.toString() == raw) { "non-canonical cutover PlanConfig integer" }
+        return parsed
+    }
+
+    private fun CutoverPreferenceEntry.presentBoolean(): Boolean? {
+        if (!present) return null
+        return when (val raw = requireNotNull(value) { "present cutover PlanConfig boolean is missing" }) {
+            "true" -> true
+            "false" -> false
+            else -> throw IllegalArgumentException("non-canonical cutover PlanConfig boolean: $raw")
+        }
+    }
+
 }

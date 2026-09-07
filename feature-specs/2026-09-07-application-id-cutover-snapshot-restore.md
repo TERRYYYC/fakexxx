@@ -225,7 +225,7 @@ The Room owner truth is
 `apps/cellrebel-auto/app/schemas/com.example.cellrebelauto.db.AppDatabase/9.json` at merged
 implementation `fb6284a7793e07333634d6fdf05a4688a6b8396c` and integration commit
 `b53dfc3cba8d7eb91b53964410d1f871f7b69f89`. Capture and restore require exactly these 18 user
-tables; `room_master_table`, `sqlite_sequence`, temp objects, views, and any later/unknown table are
+tables; `room_master_table`, `android_metadata`, `sqlite_sequence`, temp objects, views, and any later/unknown table are
 not silently included:
 
 | Dependency tier | Tables | Restore rule |
@@ -241,8 +241,9 @@ the checked schema-9 census before reading or writing rows. Row payloads are a v
 sequence in schema column order: column count, then a one-byte `NULL` / `INTEGER` / `REAL` / `TEXT` /
 `BLOB` tag and a checked length-delimited value. Integers use signed 64-bit big endian, reals use raw
 IEEE-754 bits, text uses reporting UTF-8, and blobs remain opaque. The row order key is the same
-framing over declared primary-key columns; capture sorts by unsigned key bytes and rejects empty or
-duplicate keys. Restore decodes exact column count/type, uses bound statements, inserts in dependency
+framing over declared primary-key columns; capture sorts by its canonical unpadded Base64URL spelling
+and rejects empty or duplicate keys. Restore decodes exact column count/type, proves the order key
+describes those primary-key cells, uses bound statements, and inserts in dependency
 order inside one Room transaction, and never disables foreign keys.
 
 `provider_pairing_records` is projected before hashing: a source row with `revokedAt == null` is
