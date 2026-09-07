@@ -56,6 +56,33 @@ class ObservationEvidenceRefTest {
     }
 
     @Test
+    fun observe_sharedApplyOperationId_supportsPreThenPostWithDistinctDurableEvidence() {
+        val harness = ProviderHarness.create()
+        harness.pair()
+        val receipt = harness.apply(key = "observe-pre-post-apply")
+        // Current Auto's live PRE and POST calls both forward this apply receipt
+        // operationId. Phase is Auto-local durable state, not an observe wire field.
+        val request = ObserveRequestV1(
+            leaseId = receipt.leaseId,
+            operationId = receipt.operationId,
+            expectedIntentHash = receipt.acceptedIntentHash,
+        )
+
+        val pre = harness.handler.observe(AUTO_UID, request)
+        harness.clock.advance(30_000L)
+        val post = harness.handler.observe(AUTO_UID, request)
+
+        assertNotEquals("PRE and POST require separate durable evidence", pre.evidenceRefs.single(), post.evidenceRefs.single())
+        val audit = DurableIntegrationAuditStore(harness.kv, harness.clock).all().filter { it.event == "observe" }
+        assertEquals(2, audit.size)
+        assertEquals(listOf(receipt.operationId, receipt.operationId), audit.map { it.operationId })
+        val referenced = (pre.evidenceRefs + post.evidenceRefs).map {
+            it.removePrefix("qwy:audit:").toLong()
+        }.toSet()
+        assertEquals(referenced, audit.map { it.seq }.toSet())
+    }
+
+    @Test
     fun observe_auditWriteFails_returnsNoUnbackedObservation() {
         val harness = ProviderHarness.create()
         harness.pair()
