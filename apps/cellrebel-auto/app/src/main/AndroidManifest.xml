@@ -22,6 +22,13 @@
         <package android:name="name.caiyao.fakegps.glmbench" />
     </queries>
 
+    <!-- # T3 (P1.2)：签名级远程控制权限。仅同签名应用（+ uid 0/root adb，框架组件权限
+         # 检查对 root 豁免）可以驱动引擎；名字按 applicationId 命名空间隔离，
+         # 多 lane 共存安装时互不可控。 -->
+    <permission
+        android:name="${applicationId}.permission.REMOTE_CONTROL"
+        android:protectionLevel="signature" />
+
     <application
         android:name=".CellRebelAutoApp"
         android:allowBackup="true"
@@ -52,6 +59,22 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- # T3 (P1.2)：无人值守运维的 exported broadcast 入口（详见 docs/remote-control.md）。
+             # android:permission 让系统在分发前拒绝未持权限的发送方（root 豁免）；
+             # receiver 内部还有一道防御性检查 + Log.w（含 caller 标识）。 -->
+        <receiver
+            android:name=".remote.RemoteControlReceiver"
+            android:exported="true"
+            android:permission="${applicationId}.permission.REMOTE_CONTROL">
+            <intent-filter>
+                <action android:name="${applicationId}.remote.control.START_PLAN" />
+                <action android:name="${applicationId}.remote.control.STOP" />
+                <action android:name="${applicationId}.remote.control.RESUME" />
+                <action android:name="${applicationId}.remote.control.RESET_PLAN" />
+                <action android:name="${applicationId}.remote.control.STATUS" />
+            </intent-filter>
+        </receiver>
 
     </application>
 
