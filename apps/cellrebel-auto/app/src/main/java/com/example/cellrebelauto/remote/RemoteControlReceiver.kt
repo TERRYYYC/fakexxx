@@ -1,5 +1,6 @@
 package com.example.cellrebelauto.remote
 
+import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,8 @@ import android.os.Process
 import android.util.Log
 import com.example.cellrebelauto.automation.AutomationService
 import com.example.cellrebelauto.automation.AutomationStartStatus
+import com.example.cellrebelauto.CellRebelAutoApp
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.audit.AutoAuditEvent
@@ -92,10 +95,32 @@ class RemoteControlReceiver : BroadcastReceiver() {
 
         /**
          * DB seam (R44 MainViewModel.injectedDb precedent): production resolves
-         * the Room singleton; Robolectric oracles inject an in-memory instance.
+         * the Room singleton via the CellRebelAutoApp factory (the census keeps
+         * AppDatabase.getInstance called only from CellRebelAutoApp.kt);
+         * Robolectric oracles inject an in-memory instance.
+         * Rebase note: #103/#108 thread the CutoverAccessGate through every
+         * DB/repository constructor — resolve it from the app singleton here
+         * (fail-closed recoveryRequired for non-app host instances).
          */
         @Volatile
-        internal var dbProvider: (Context) -> AppDatabase = { AppDatabase.getInstance(it) }
+        internal var dbProvider: (Context) -> AppDatabase = {
+            CellRebelAutoApp.databaseFor(it.applicationContext as Application, accessGateOf(it))
+        }
+
+        /**
+         * Gate seam (same R44 precedent as [dbProvider]): production resolves
+         * the app singleton's cutover gate; Robolectric oracles inject an open
+         * gate so the gated projections read consistently with the injected
+         * in-memory DB. Rebase note: #103/#108 made PlanRepository gate-aware,
+         * and a recovery-closed gate never emits on gated flows — without this
+         * seam the STATUS read would block forever under a test host.
+         */
+        @Volatile
+        internal var accessGateProvider: (Context) -> CutoverAccessGate = { accessGateOf(it) }
+
+        /** Rebase note: broadcast contexts resolve the gate via the Application singleton. */
+        internal fun accessGateOf(context: Context): CutoverAccessGate =
+            CellRebelAutoApp.accessGateFor(context.applicationContext as Application)
 
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
@@ -123,7 +148,7 @@ class RemoteControlReceiver : BroadcastReceiver() {
         if (!isCallerAllowed(context, action)) return
 
         val db = dbProvider(context)
-        val repository = PlanRepository(db)
+        val repository = PlanRepository(db, accessGateProvider(context))
 
         when (action) {
             RemoteControlContract.actionStartPlan(context.packageName) ->

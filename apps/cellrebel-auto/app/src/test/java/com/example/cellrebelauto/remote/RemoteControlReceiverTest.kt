@@ -84,6 +84,13 @@ class RemoteControlReceiverTest {
             .allowMainThreadQueries()
             .build()
         RemoteControlReceiver.dbProvider = { db }
+        // Rebase note: #103/#108 make PlanRepository gate-aware and a
+        // recovery-closed gate never emits on gated flows — inject an open gate
+        // so STATUS reads the same in-memory DB the harness seeds (the
+        // production default resolves the app-singleton gate instead).
+        RemoteControlReceiver.accessGateProvider = {
+            com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        }
         receiver = RemoteControlReceiver()
         resetServiceCompanion()
         ShadowLog.clear()
@@ -92,8 +99,18 @@ class RemoteControlReceiverTest {
     @After
     fun tearDown() {
         db.close()
-        // Restore the production singleton resolver — the seam is static.
-        RemoteControlReceiver.dbProvider = { ctx -> AppDatabase.getInstance(ctx) }
+        // Restore the production singleton resolvers — the seams are static.
+        // Rebase note: the DB default resolves through the CellRebelAutoApp
+        // factory with the app-singleton gate (#103).
+        RemoteControlReceiver.dbProvider = { ctx ->
+            com.example.cellrebelauto.CellRebelAutoApp.databaseFor(
+                ctx.applicationContext as android.app.Application,
+                RemoteControlReceiver.accessGateOf(ctx),
+            )
+        }
+        RemoteControlReceiver.accessGateProvider = { ctx ->
+            RemoteControlReceiver.accessGateOf(ctx)
+        }
     }
 
     // ---- helpers -------------------------------------------------------------
@@ -406,7 +423,17 @@ class RemoteControlReceiverTest {
      */
 
     private suspend fun statusPayload(): RemoteControlReceiver.StatusResult =
-        receiver.buildStatusResult(db, com.example.cellrebelauto.repository.PlanRepository(db))
+        receiver.buildStatusResult(
+            db,
+            // Rebase note: #103 threads the gate through PlanRepository; the STATUS
+            // payload assembly reads gateFlow'd queries, so the harness uses an open
+            // gate (same pattern as MainViewModelCutoverProjectionTest) — the
+            // production receiver resolves the app-singleton gate instead.
+            com.example.cellrebelauto.repository.PlanRepository(
+                db,
+                com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
+            ),
+        )
 
     @Test
     fun `STATUS encodes the engine state in resultCode and carries a human summary`() = runBlocking {

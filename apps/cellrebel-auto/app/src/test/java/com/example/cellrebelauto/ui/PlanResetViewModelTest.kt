@@ -1,8 +1,11 @@
 package com.example.cellrebelauto.ui
 
 import android.app.Application
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.cellrebelauto.cutover.CutoverAccessGate
+import com.example.cellrebelauto.cutover.CutoverDataState
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.plan.LocationPlan
@@ -10,6 +13,7 @@ import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.TestAttempt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -56,6 +60,14 @@ class PlanResetViewModelTest {
 
     private lateinit var db: AppDatabase
 
+    // Rebase note: with an injected open gate the VMs run live Eagerly
+    // stateIn chains whose Room resumptions race the next test's
+    // setMain/resetMain ("Dispatchers.Main is used concurrently with setting
+    // it" under the ProductId variant's ordering). Cancel every created VM
+    // BEFORE resetMain — the same drain pattern MainViewModelCutoverProjection
+    // Test uses in its finally.
+    private val createdVms = mutableListOf<MainViewModel>()
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -67,6 +79,8 @@ class PlanResetViewModelTest {
 
     @After
     fun tearDown() {
+        createdVms.forEach { it.viewModelScope.cancel() }
+        createdVms.clear()
         db.close()
         Dispatchers.resetMain()
     }
@@ -139,8 +153,21 @@ class PlanResetViewModelTest {
         }
     }
 
+    // Rebase note: #103 wraps every projection in CutoverDataState behind the
+    // cutover gate. Without an injected open gate the VM builds
+    // recoveryRequired() (Robolectric has no cutover journal) and planUiState
+    // never reaches Ready — so the visibility projection stays unreadable and
+    // reset's observability depends on the gate, not the code under test.
     private fun vm(): MainViewModel =
-        MainViewModel(ApplicationProvider.getApplicationContext(), injectedDb = db)
+        MainViewModel(
+            ApplicationProvider.getApplicationContext(),
+            injectedDb = db,
+            injectedAccessGate = CutoverAccessGate.open(),
+        ).also { createdVms += it }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readyPlanUi(vm: MainViewModel): PlanUiState? =
+        (vm.planUiState.value as? CutoverDataState.Ready<PlanUiState>)?.value
 
     // ---- 1: the reset itself ---------------------------------------------------
 
@@ -236,9 +263,9 @@ class PlanResetViewModelTest {
         backgroundScope.launch(
             kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)
         ) { viewModel.planUiState.collect {} }
-        awaitUntil { viewModel.planUiState.value.plan?.id == planId }
-        awaitUntil { viewModel.planUiState.value.canResetPlan }
-        assertTrue("complete plan: reset entry visible", viewModel.planUiState.value.canResetPlan)
+        awaitUntil { readyPlanUi(viewModel)?.plan?.id == planId }
+        awaitUntil { readyPlanUi(viewModel)?.canResetPlan == true }
+        assertTrue("complete plan: reset entry visible", readyPlanUi(viewModel)?.canResetPlan == true)
 
         // (b) unfinished + clean → hidden.
         db = Room.inMemoryDatabaseBuilder(
@@ -250,13 +277,13 @@ class PlanResetViewModelTest {
         backgroundScope.launch(
             kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)
         ) { viewModel.planUiState.collect {} }
-        awaitUntil { viewModel.planUiState.value.plan?.id == planId }
+        awaitUntil { readyPlanUi(viewModel)?.plan?.id == planId }
         Thread.sleep(300) // let any (wrong) recovery-required projection settle
-        assertEquals("unfinished clean plan: reset entry hidden", false, viewModel.planUiState.value.canResetPlan)
+        assertEquals("unfinished clean plan: reset entry hidden", false, readyPlanUi(viewModel)?.canResetPlan == true)
 
         // (c) unfinished + RECOVERY_REQUIRED → visible.
         seedAttempt(planId, taskIndex = 1, aplusState = "RECOVERY_REQUIRED", status = "starting")
-        awaitUntil { viewModel.planUiState.value.canResetPlan }
-        assertTrue("RECOVERY_REQUIRED: reset entry visible", viewModel.planUiState.value.canResetPlan)
+        awaitUntil { readyPlanUi(viewModel)?.canResetPlan == true }
+        assertTrue("RECOVERY_REQUIRED: reset entry visible", readyPlanUi(viewModel)?.canResetPlan == true)
     }
 }

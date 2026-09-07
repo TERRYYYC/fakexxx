@@ -38,6 +38,12 @@ class CutoverProductionConsumerCensusTest {
             listOf(
                 "automation/APlusComposition.kt",
                 "automation/AutomationService.kt",
+                // Rebase note: T3's remote-control receiver is a declared direct
+                // Room consumer (adb STATUS plan read + audit append). It
+                // resolves the DB and gate through the app-singleton-derived
+                // seams (CellRebelAutoApp.databaseFor / accessGateFor), so the
+                // CUT-A26 ownership stays closed and gated.
+                "remote/RemoteControlReceiver.kt",
                 "repository/PlanRepository.kt",
                 "ui/MainViewModel.kt"
             ),
@@ -61,7 +67,14 @@ class CutoverProductionConsumerCensusTest {
             callersOf(sources, "PlanConfigStore(").filterNot { it == "data/PlanConfigStore.kt" }
         )
         assertEquals(
-            listOf("automation/AutomationService.kt", "ui/MainViewModel.kt"),
+            listOf(
+                "automation/AutomationService.kt",
+                // Rebase note: T3's remote-control receiver builds a gated
+                // PlanRepository for STATUS/RESET_PLAN (declared direct Room
+                // consumer above).
+                "remote/RemoteControlReceiver.kt",
+                "ui/MainViewModel.kt"
+            ),
             callersOf(sources, "PlanRepository(").filterNot { it == "repository/PlanRepository.kt" }
         )
         callersOf(sources, "ProviderTrustStore(")
