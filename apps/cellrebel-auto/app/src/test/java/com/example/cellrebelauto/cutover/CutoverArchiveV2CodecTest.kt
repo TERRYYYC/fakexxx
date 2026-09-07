@@ -36,13 +36,79 @@ class CutoverArchiveV2CodecTest {
             archive(),
             archive().copy(captureId = "capture-捕获-📦")
         ).forEach { candidate ->
-            val encoded = codec.encode(candidate)
-            val decoded = codec.decode(encoded.serialized)
-            val reencoded = codec.encode(decoded.archive)
-
-            assertEquals(encoded.serialized, reencoded.serialized)
-            assertEquals(decoded.archiveDigest, reencoded.archiveDigest)
+            assertCanonicalRoundTrip(codec, candidate)
         }
+    }
+
+    @Test
+    fun `small legal policy round trips an empty table longer than the row grammar bound`() {
+        val fieldLimit = 40
+        val smallPolicy = CutoverArchivePolicy(
+            schemaVersion = 9,
+            requiredTableSchemaDigests = mapOf("provider_pairing_records" to "sha256:pairing"),
+            historicalOnlyTables = setOf("provider_pairing_records"),
+            limits = CutoverArchiveLimits(
+                maxArchiveBytes = 10_000,
+                maxEncodedFieldChars = fieldLimit
+            )
+        )
+        val smallCodec = CutoverArchiveV2Codec(smallPolicy)
+        val candidate = CutoverArchiveV2(
+            sourcePackage = "com.example.cellrebelauto",
+            captureId = "capture-捕获-📦",
+            schemaVersion = 9,
+            tables = listOf(
+                CutoverTableSection(
+                    name = "provider_pairing_records",
+                    schemaDigest = "sha256:pairing",
+                    restorationMode = CutoverRestorationMode.HISTORICAL_ONLY,
+                    rows = emptyList()
+                )
+            ),
+            preferences = preferences()
+        )
+        val encoded = smallCodec.encode(candidate)
+        val tableLine = encoded.serialized.lines().single { it.startsWith("table=") }
+
+        assertTrue(tableLine.length > 2 * fieldLimit + "row=|".length)
+        assertCanonicalRoundTrip(smallCodec, candidate)
+    }
+
+    @Test
+    fun `maximum legal table metadata round trips with five preference states`() {
+        val fieldLimit = 40
+        val maximumName = "t".repeat(30)
+        val maximumSchema = "s".repeat(30)
+        assertEquals(fieldLimit, b64(maximumName).length)
+        assertEquals(fieldLimit, b64(maximumSchema).length)
+        val maximumPolicy = CutoverArchivePolicy(
+            schemaVersion = 9,
+            requiredTableSchemaDigests = mapOf(
+                maximumName to maximumSchema,
+                "provider_pairing_records" to "sha256:pairing"
+            ),
+            historicalOnlyTables = setOf(maximumName, "provider_pairing_records"),
+            limits = CutoverArchiveLimits(
+                maxArchiveBytes = 10_000,
+                maxEncodedFieldChars = fieldLimit
+            )
+        )
+        val candidate = archive().copy(
+            captureId = "capture-捕获-📦",
+            tables = archive().tables.mapNotNull { table ->
+                if (table.name == "alpha") null else table.copy(rows = emptyList())
+            } + CutoverTableSection(
+                name = maximumName,
+                schemaDigest = maximumSchema,
+                restorationMode = CutoverRestorationMode.HISTORICAL_ONLY,
+                rows = emptyList()
+            )
+        )
+
+        assertTrue(candidate.preferences.any { !it.present })
+        assertTrue(candidate.preferences.any { it.present && it.type == CutoverPreferenceType.INT })
+        assertTrue(candidate.preferences.any { it.present && it.type == CutoverPreferenceType.BOOLEAN })
+        assertCanonicalRoundTrip(CutoverArchiveV2Codec(maximumPolicy), candidate)
     }
 
     @Test
@@ -210,7 +276,10 @@ class CutoverArchiveV2CodecTest {
         val serialized = codec.encode(archive()).serialized
         val malformedCapture = serialized.replace("capture=Y2FwdHVyZS0wMDE", "capture=_w")
 
-        assertDecodeRejected(resign(malformedCapture))
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            codec.decode(resign(malformedCapture))
+        }
+        assertTrue(error.message.orEmpty().contains("invalid UTF-8 in capture"))
     }
 
     @Test
@@ -220,17 +289,16 @@ class CutoverArchiveV2CodecTest {
 
     @Test
     fun `encoder applies the encoded field limit to table metadata`() {
-        val oversizedSchemaDigest = "x".repeat(25)
+        val oversizedSchemaDigest = "x".repeat(31)
         val limits = CutoverArchiveLimits(
             maxArchiveBytes = 10_000,
-            maxEncodedFieldChars = 32
+            maxEncodedFieldChars = 40
         )
-        val boundedPolicy = policy(limits).let { baseline ->
-            baseline.copy(
-                requiredTableSchemaDigests = baseline.requiredTableSchemaDigests +
-                    ("alpha" to oversizedSchemaDigest)
-            )
-        }
+        val baselinePolicy = policy(limits)
+        val boundedPolicy = baselinePolicy.copy(
+            requiredTableSchemaDigests = baselinePolicy.requiredTableSchemaDigests +
+                ("alpha" to oversizedSchemaDigest)
+        )
         val boundedCodec = CutoverArchiveV2Codec(boundedPolicy)
         val candidate = archive().copy(
             tables = archive().tables.map { table ->
@@ -238,7 +306,11 @@ class CutoverArchiveV2CodecTest {
             }
         )
 
-        assertThrows(IllegalArgumentException::class.java) { boundedCodec.encode(candidate) }
+        assertCanonicalRoundTrip(CutoverArchiveV2Codec(baselinePolicy), archive())
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            boundedCodec.encode(candidate)
+        }
+        assertTrue(error.message.orEmpty().contains("schema digest exceeds field limit"))
     }
 
     @Test
@@ -246,7 +318,10 @@ class CutoverArchiveV2CodecTest {
         val serialized = codec.encode(archive()).serialized
         val withBlankLine = serialized.replace("\narchiveDigest=", "\n\narchiveDigest=")
 
-        assertDecodeRejected(resign(withBlankLine))
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            codec.decode(resign(withBlankLine))
+        }
+        assertTrue(error.message.orEmpty().contains("blank lines"))
     }
 
     @Test
@@ -335,6 +410,19 @@ class CutoverArchiveV2CodecTest {
 
     private fun assertDecodeRejected(serialized: String) {
         assertThrows(IllegalArgumentException::class.java) { codec.decode(serialized) }
+    }
+
+    private fun assertCanonicalRoundTrip(
+        targetCodec: CutoverArchiveV2Codec,
+        candidate: CutoverArchiveV2
+    ) {
+        val encoded = targetCodec.encode(candidate)
+        val decoded = targetCodec.decode(encoded.serialized)
+        val reencoded = targetCodec.encode(decoded.archive)
+
+        assertEquals(encoded.serialized, reencoded.serialized)
+        assertEquals(encoded.archiveDigest, decoded.archiveDigest)
+        assertEquals(decoded.archiveDigest, reencoded.archiveDigest)
     }
 
     private fun archive() = CutoverArchiveV2(

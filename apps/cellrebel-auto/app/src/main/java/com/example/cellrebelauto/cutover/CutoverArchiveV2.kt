@@ -136,18 +136,26 @@ class CutoverArchiveV2Codec(
         }
 
         appendLine(FORMAT)
-        appendLine("source=${encodeUtf8(archive.sourcePackage)}")
-        appendLine("capture=${encodeUtf8(archive.captureId)}")
+        appendLine("source=${encodeUtf8(archive.sourcePackage, "source package")}")
+        appendLine("capture=${encodeUtf8(archive.captureId, "capture id")}")
         appendLine("schemaVersion=${archive.schemaVersion}")
         archive.preferences.sortedBy { it.key }.forEach { preference ->
             val presence = if (preference.present) PRESENT else ABSENT
-            val value = if (preference.present) encodeUtf8(requireNotNull(preference.value)) else "-"
-            appendLine("preference=${encodeUtf8(preference.key)}|${preference.type.name}|$presence|$value")
+            val value = if (preference.present) {
+                encodeUtf8(requireNotNull(preference.value), "preference value")
+            } else {
+                "-"
+            }
+            appendLine(
+                "preference=${encodeUtf8(preference.key, "preference key")}|" +
+                    "${preference.type.name}|$presence|$value"
+            )
         }
         archive.tables.sortedBy { it.name }.forEach { table ->
             val rows = table.rows.sortedBy { it.orderKeyBase64Url }
             appendLine(
-                "table=${encodeUtf8(table.name)}|${encodeUtf8(table.schemaDigest)}|" +
+                "table=${encodeUtf8(table.name, "table name")}|" +
+                    "${encodeUtf8(table.schemaDigest, "schema digest")}|" +
                     "${table.restorationMode.name}|${rows.size}|${rowDigest(rows)}"
             )
             rows.forEach { row ->
@@ -180,13 +188,19 @@ class CutoverArchiveV2Codec(
 
         val reader = BoundedLineReader(
             source = serialized,
-            endExclusive = digestSeparator,
-            maxLineChars = maxLineChars()
+            endExclusive = digestSeparator
         )
-        require(reader.nextLine() == FORMAT) { "unsupported cutover archive format" }
-        val sourcePackage = decodeNamedUtf8(reader.nextLine(), "source")
-        val captureId = decodeNamedUtf8(reader.nextLine(), "capture")
-        val schemaVersionValue = decodeNamed(reader.nextLine(), "schemaVersion")
+        require(reader.nextLine(lineLimit(FORMAT.length.toLong())) == FORMAT) {
+            "unsupported cutover archive format"
+        }
+        val sourcePackage = decodeNamedUtf8(reader.nextLine(namedTextLineLimit("source")), "source")
+        val captureId = decodeNamedUtf8(reader.nextLine(namedTextLineLimit("capture")), "capture")
+        val schemaVersionValue = decodeNamed(
+            reader.nextLine(
+                lineLimit("schemaVersion=".length.toLong() + policy.schemaVersion.toString().length)
+            ),
+            "schemaVersion"
+        )
         val schemaVersion = schemaVersionValue.toIntOrNull()
             ?: throw IllegalArgumentException("invalid schema version")
         require(schemaVersionValue == schemaVersion.toString()) { "schema version is not canonical" }
@@ -194,7 +208,7 @@ class CutoverArchiveV2Codec(
         val tables = mutableListOf<CutoverTableSection>()
 
         repeat(policy.preferenceTypes.size) {
-            val line = reader.nextLine()
+            val line = reader.nextLine(preferenceLineLimit())
             require(line.startsWith(PREFERENCE_PREFIX)) { "expected preference entry" }
             preferences += decodePreference(line)
         }
@@ -204,7 +218,7 @@ class CutoverArchiveV2Codec(
 
         var totalRows = 0L
         repeat(policy.requiredTableSchemaDigests.size) {
-            val line = reader.nextLine()
+            val line = reader.nextLine(tableLineLimit())
             require(line.startsWith(TABLE_PREFIX)) { "expected table section" }
             val fields = splitExact(line, TABLE_PREFIX, expectedFields = 5, field = "table section")
             val tableName = decodeUtf8(fields[0], "table name", allowEmpty = false)
@@ -222,7 +236,7 @@ class CutoverArchiveV2Codec(
             val rows = ArrayList<CutoverRowPayload>(rowCount)
             var previousOrderKey: String? = null
             repeat(rowCount) {
-                val rowLine = reader.nextLine()
+                val rowLine = reader.nextLine(rowLineLimit())
                 require(rowLine.startsWith(ROW_PREFIX)) { "truncated table rows" }
                 val rowFields = splitExact(rowLine, ROW_PREFIX, expectedFields = 2, field = "row payload")
                 requireCanonicalBase64Url(rowFields[0], "row order key", allowEmpty = false)
@@ -318,9 +332,7 @@ class CutoverArchiveV2Codec(
     }
 
     private fun requireEncodedTextWithinLimit(value: String, field: String) {
-        require(encodeUtf8(value).length <= policy.limits.maxEncodedFieldChars) {
-            "$field exceeds field limit"
-        }
+        encodeUtf8(value, field)
     }
 
     private fun decodePreference(line: String): CutoverPreferenceEntry {
@@ -404,18 +416,29 @@ class CutoverArchiveV2Codec(
         return fields
     }
 
-    private fun encodeUtf8(value: String): String {
-        val encoded = try {
-            Charsets.UTF_8.newEncoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .encode(CharBuffer.wrap(value))
+    private fun encodeUtf8(value: String, field: String): String {
+        val encodedLimit = minOf(policy.limits.maxEncodedFieldChars, policy.limits.maxArchiveBytes)
+        require(value.length <= encodedLimit) { "$field exceeds field limit" }
+        val encodedBytes = ByteBuffer.allocate(maxDecodedBytes(encodedLimit))
+        val encoder = Charsets.UTF_8.newEncoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+        try {
+            val result = encoder.encode(CharBuffer.wrap(value), encodedBytes, true)
+            if (result.isError) result.throwException()
+            require(!result.isOverflow) { "$field exceeds field limit" }
+            val flushResult = encoder.flush(encodedBytes)
+            if (flushResult.isError) flushResult.throwException()
+            require(!flushResult.isOverflow) { "$field exceeds field limit" }
         } catch (_: CharacterCodingException) {
-            throw IllegalArgumentException("text cannot be encoded as UTF-8")
+            throw IllegalArgumentException("$field cannot be encoded as UTF-8")
         }
-        val bytes = ByteArray(encoded.remaining())
-        encoded.get(bytes)
-        return ENCODER.encodeToString(bytes)
+        encodedBytes.flip()
+        val bytes = ByteArray(encodedBytes.remaining())
+        encodedBytes.get(bytes)
+        val canonical = ENCODER.encodeToString(bytes)
+        require(canonical.length <= policy.limits.maxEncodedFieldChars) { "$field exceeds field limit" }
+        return canonical
     }
 
     private fun decodeUtf8(value: String, field: String, allowEmpty: Boolean): String {
@@ -469,12 +492,48 @@ class CutoverArchiveV2Codec(
         }
     }
 
-    private fun maxLineChars(): Int = minOf(
-        policy.limits.maxArchiveBytes,
-        (policy.limits.maxEncodedFieldChars.toLong() * 2L + ROW_PREFIX.length + 1L)
-            .coerceAtMost(Int.MAX_VALUE.toLong())
-            .toInt()
+    private fun namedTextLineLimit(name: String): Int = lineLimit(
+        name.length.toLong() + 1L + policy.limits.maxEncodedFieldChars
     )
+
+    private fun preferenceLineLimit(): Int = lineLimit(
+        PREFERENCE_PREFIX.length.toLong() +
+            policy.limits.maxEncodedFieldChars.toLong() * 2L +
+            FIELD_SEPARATOR_COUNT_PREFERENCE +
+            CutoverPreferenceType.entries.maxOf { it.name.length } +
+            maxOf(PRESENT.length, ABSENT.length)
+    )
+
+    private fun tableLineLimit(): Int = lineLimit(
+        TABLE_PREFIX.length.toLong() +
+            policy.limits.maxEncodedFieldChars.toLong() * 2L +
+            FIELD_SEPARATOR_COUNT_TABLE +
+            CutoverRestorationMode.entries.maxOf { it.name.length } +
+            policy.limits.maxRowsPerTable.toString().length +
+            DIGEST_LENGTH
+    )
+
+    private fun rowLineLimit(): Int = lineLimit(
+        ROW_PREFIX.length.toLong() +
+            policy.limits.maxEncodedFieldChars.toLong() * 2L +
+            FIELD_SEPARATOR_COUNT_ROW
+    )
+
+    private fun lineLimit(grammarLimit: Long): Int = minOf(
+        grammarLimit,
+        policy.limits.maxArchiveBytes.toLong(),
+        Int.MAX_VALUE.toLong()
+    ).toInt()
+
+    private fun maxDecodedBytes(encodedLimit: Int): Int {
+        val completeBlocks = encodedLimit / 4
+        val partialBytes = when (encodedLimit % 4) {
+            2 -> 1
+            3 -> 2
+            else -> 0
+        }
+        return completeBlocks * 3 + partialBytes
+    }
 
     private fun sha256Ascii(value: CharSequence, endExclusive: Int = value.length): String {
         val digest = MessageDigest.getInstance("SHA-256")
@@ -507,6 +566,9 @@ class CutoverArchiveV2Codec(
         const val ABSENT = "ABSENT"
         const val HEADER_LINE_COUNT = 4L
         const val ARCHIVE_DIGEST_LINE_COUNT = 1L
+        const val FIELD_SEPARATOR_COUNT_PREFERENCE = 3L
+        const val FIELD_SEPARATOR_COUNT_TABLE = 4L
+        const val FIELD_SEPARATOR_COUNT_ROW = 1L
         const val DIGEST_LENGTH = 71
         const val DIGEST_BUFFER_BYTES = 8 * 1024
         const val ASCII_MAX = 0x7f
@@ -520,12 +582,11 @@ class CutoverArchiveV2Codec(
 
 private class BoundedLineReader(
     private val source: String,
-    private val endExclusive: Int,
-    private val maxLineChars: Int
+    private val endExclusive: Int
 ) {
     private var cursor = 0
 
-    fun nextLine(): String {
+    fun nextLine(maxLineChars: Int): String {
         require(hasNext()) { "truncated cutover archive" }
         val separator = source.indexOf('\n', cursor).let { found ->
             if (found == -1 || found >= endExclusive) endExclusive else found
