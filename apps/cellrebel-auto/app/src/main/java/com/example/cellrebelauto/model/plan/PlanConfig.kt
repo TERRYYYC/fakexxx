@@ -1,9 +1,12 @@
 package com.example.cellrebelauto.model.plan
 
 /**
- * Plan-level configuration (O6). Buffer is nullable: null = not yet set, so the
- * Plan screen must require it on first run (design gate §1.1).
- * # 计划级配置。缓冲可空：null 表示尚未设置，计划页首启时必填
+ * Plan-level configuration (O6). Buffer is nullable in type (the plan snapshot's
+ * NOT NULL column is upstream), but the STORE supplies [DEFAULT_GLOBAL_BUFFER_SECONDS]
+ * when the key has never been set — a fresh device shows an editable 10 instead of a
+ * null that blocked every import ("Set global buffer first" + guessing the historical
+ * value on a new phone, P0.1-4).
+ * # 计划级配置。buffer 键从未写入时由存储层供给默认值 10（可改），不再空值卡死导入
  */
 data class PlanConfig(
     // # 全局缓冲秒数（相邻两次尝试之间）
@@ -16,7 +19,12 @@ data class PlanConfig(
     val locationStageEnabled: Boolean = true,
     // # F003：CellRebel 测试阶段开关，默认开
     val testStageEnabled: Boolean = true
-)
+) {
+    companion object {
+        /** P0.1-4: the seeded default when the operator has never set a buffer. */
+        const val DEFAULT_GLOBAL_BUFFER_SECONDS = 10
+    }
+}
 
 /**
  * Engine-side snapshot of the F003 stage toggles, re-read per attempt so a

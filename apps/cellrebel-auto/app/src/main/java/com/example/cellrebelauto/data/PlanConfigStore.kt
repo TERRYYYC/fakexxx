@@ -28,9 +28,11 @@ private val Context.planConfigDataStore: DataStore<Preferences> by preferencesDa
 
 /**
  * DataStore-backed persistence for PlanConfig (O6). Each field is writable
- * independently; the buffer key stays absent until first set (null default).
+ * independently; the buffer key stays absent until first set, and the read side
+ * supplies [PlanConfig.DEFAULT_GLOBAL_BUFFER_SECONDS] (10) so the Plan screen
+ * shows an editable default instead of a null that blocks import (P0.1-4).
  * # PlanConfig 的 DataStore 持久化。各字段可独立写入；
- * # 缓冲键在首次设置前保持缺省（默认 null）
+ * # buffer 键首次设置前由读取侧供给默认 10，UI 不再空值卡死导入
  */
 class PlanConfigStore(
     private val dataStore: DataStore<Preferences>,
@@ -53,7 +55,9 @@ class PlanConfigStore(
     val config: Flow<PlanConfig> = accessGate.gateFlow(
         dataStore.data.map { prefs ->
             PlanConfig(
-                globalBufferSeconds = prefs[Keys.GLOBAL_BUFFER_SECONDS],
+                // P0.1: missing buffer key reads as the default 10 (was: null -> UI dead end).
+                globalBufferSeconds =
+                    prefs[Keys.GLOBAL_BUFFER_SECONDS] ?: PlanConfig.DEFAULT_GLOBAL_BUFFER_SECONDS,
                 testTimeoutSeconds = prefs[Keys.TEST_TIMEOUT_SECONDS] ?: 90,
                 gpsSettleSeconds = prefs[Keys.GPS_SETTLE_SECONDS] ?: 60,
                 locationStageEnabled = prefs[Keys.LOCATION_STAGE_ENABLED] ?: true,

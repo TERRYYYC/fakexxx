@@ -12,6 +12,7 @@ import com.example.cellrebelauto.cutover.CutoverRestoreIdentity
 import com.example.cellrebelauto.cutover.CutoverRestoreJournal
 import com.example.cellrebelauto.cutover.CutoverRestorePhase
 import com.example.cellrebelauto.cutover.CutoverUnavailableReason
+import com.example.cellrebelauto.model.plan.PlanConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -65,15 +66,16 @@ class PlanConfigStoreTest {
     )
 
     @Test
-    fun `default buffer is null until first set`() = runTest {
+    fun `default buffer reads as the seeded 10 until first set`() = runTest {
+        // P0.1-4: 空值不再卡死 Import —— 缺省即默认 10（详见 PlanConfigBufferDefaultTest）。
         val store = newStore(backgroundScope)
-        assertNull(store.config.first().globalBufferSeconds)
+        assertEquals(PlanConfig.DEFAULT_GLOBAL_BUFFER_SECONDS, store.config.first().globalBufferSeconds)
     }
 
     @Test
     fun `timeout and settle have defaults 90 and 60`() = runTest {
         val config = newStore(backgroundScope).config.first()
-        assertNull(config.globalBufferSeconds)
+        assertEquals(PlanConfig.DEFAULT_GLOBAL_BUFFER_SECONDS, config.globalBufferSeconds)
         assertEquals(90, config.testTimeoutSeconds)
         assertEquals(60, config.gpsSettleSeconds)
     }
