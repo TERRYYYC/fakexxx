@@ -20,6 +20,9 @@
         <package android:name="name.caiyao.fakegps" />
         <package android:name="name.caiyao.fakegps.bench" />
         <package android:name="name.caiyao.fakegps.glmbench" />
+        <!-- fakexxx lane provider (Wave-1 integrated rename build) — same visibility
+             requirement: without this the lane build cannot see its own provider. -->
+        <package android:name="name.caiyao.fakegps.fakexxx" />
     </queries>
 
     <!-- # T3 (P1.2)：签名级远程控制权限。仅同签名应用（+ uid 0/root adb，框架组件权限
