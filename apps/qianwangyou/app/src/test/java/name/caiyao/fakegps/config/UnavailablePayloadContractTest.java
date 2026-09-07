@@ -46,7 +46,18 @@ public class UnavailablePayloadContractTest {
     public void unknownAndUnsupportedFieldsAreRejected() {
         assertInvalid(Collections.emptySet(), Collections.singletonList("tacc"), "unknown");
         assertInvalid(Collections.emptySet(), Collections.singletonList("is_roaming"), "unsupported");
-        assertInvalid(Collections.emptySet(), Collections.singletonList("wifi_rssi"), "unsupported");
+        // wifi_rssi was verified and cleared (T6); wifi_channel remains rejected (no hooked surface).
+        assertInvalid(Collections.emptySet(), Collections.singletonList("wifi_channel"), "unsupported");
+    }
+
+    @Test
+    public void verifiedWifiAndNeighborFieldsAreAccepted() {
+        UnavailablePayloadContract.Validated v = UnavailablePayloadContract.validate(
+                Collections.emptySet(),
+                Arrays.asList("wifi_rssi", "wifi_frequency", "wifi_link_speed",
+                        "wifi_tx_link_speed", "wifi_rx_link_speed", "wifi_standard",
+                        "wifi_ssid", "wifi_bssid", "neighbor_cells_json"));
+        assertEquals(9, v.asSet().size());
     }
 
     @Test

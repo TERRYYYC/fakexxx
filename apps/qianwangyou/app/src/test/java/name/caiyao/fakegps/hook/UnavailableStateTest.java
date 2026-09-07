@@ -70,13 +70,31 @@ public class UnavailableStateTest {
         assertTrue(UnavailableSpec.supportsUnavailable("operator_name"));
     }
 
-    /** Non-cellular groups stay unavailable-incapable rather than guessing a sentinel. */
+    /**
+     * The Wi-Fi group and the neighbour-list decision are verified against AOSP and cleared:
+     * RSSI -127, link speed/frequency -1, standard 0, SSID "&lt;unknown ssid&gt;", BSSID null,
+     * neighbours = drop-neighbours/keep-serving.
+     */
     @Test
-    public void unverifiedGroups_failClosed() {
-        assertFalse("Wi-Fi RSSI unknown is -127, not MAX_VALUE",
-                UnavailableSpec.supportsUnavailable("wifi_rssi"));
-        assertFalse("SSID unknown is \"<unknown ssid>\", not \"\"",
-                UnavailableSpec.supportsUnavailable("wifi_ssid"));
+    public void verifiedWifiAndNeighborFields_supportUnavailable() {
+        for (String col : new String[] {
+                "wifi_rssi", "wifi_frequency", "wifi_link_speed", "wifi_tx_link_speed",
+                "wifi_rx_link_speed", "wifi_standard", "wifi_ssid", "wifi_bssid",
+                "neighbor_cells_json"}) {
+            assertTrue(col + " has a verified AOSP unknown", UnavailableSpec.supportsUnavailable(col));
+        }
+    }
+
+    /** Each IP/connection text field stays rejected with the missing surface evidence named. */
+    @Test
+    public void ipConnectivityTextGroup_failsClosed() {
+        for (String col : new String[] {
+                "local_ipv4", "local_ipv6", "dns_primary", "dns_secondary", "gateway",
+                "subnet_mask", "connection_type", "interface_name"}) {
+            assertFalse(col + " must not offer --", UnavailableSpec.supportsUnavailable(col));
+            assertFalse("reason must name the missing evidence",
+                    UnavailableSpec.reasonFor(col).isEmpty());
+        }
     }
 
     // --- 2. Fluctuation must not corrupt a sentinel ---
@@ -130,6 +148,56 @@ public class UnavailableStateTest {
 
         selected.clear();
         assertTrue("snapshot must defensively copy the decision set", s.isUnavailable("lac"));
+    }
+
+    /**
+     * The Wi-Fi decision materializes the exact per-surface unknowns a target app reads:
+     * WifiInfo.INVALID_RSSI, LINK_SPEED_UNKNOWN / UNKNOWN_FREQUENCY, ScanResult.WIFI_STANDARD_UNKNOWN,
+     * WifiManager.UNKNOWN_SSID (double quotes are part of the value) and getBSSID()'s null.
+     */
+    @Test
+    public void wifiSnapshotMaterializesWifiSurfaceUnknowns() {
+        Snapshot s = Snapshot.from(new EmptySource(), new LinkedHashSet<>(Arrays.asList(
+                "wifi_rssi", "wifi_frequency", "wifi_link_speed", "wifi_tx_link_speed",
+                "wifi_rx_link_speed", "wifi_standard", "wifi_ssid", "wifi_bssid")));
+
+        assertEquals(Integer.valueOf(-127), s.wifiRssi);
+        assertEquals(Integer.valueOf(-1), s.wifiFrequency);
+        assertEquals(Integer.valueOf(-1), s.wifiLinkSpeed);
+        assertEquals(Integer.valueOf(-1), s.wifiTxLinkSpeed);
+        assertEquals(Integer.valueOf(-1), s.wifiRxLinkSpeed);
+        assertEquals(Integer.valueOf(0), s.wifiStandard);
+        assertEquals("\"<unknown ssid>\"", s.wifiSsid);
+        assertNull("getBSSID() unknown is null", s.wifiBssid);
+    }
+
+    // --- 3. neighbour_cells_json "--" = drop real neighbours, keep registered serving cells ---
+
+    /**
+     * The drop/keep decision is a pure function so the List&lt;CellInfo&gt; wiring cannot drift:
+     * a configured neighbour JSON or an unavailable decision replaces the real neighbour set,
+     * an empty profile preserves it.
+     */
+    @Test
+    public void neighborDecision_replacesRealNeighborSet() {
+        assertFalse(Snapshot.replacesRealNeighbors(null, false));
+        assertTrue("configured neighbour JSON replaces the real neighbour set",
+                Snapshot.replacesRealNeighbors("[{\"type\":\"gsm\",\"cid\":1}]", false));
+        assertTrue("-- means delete neighbours while keeping serving cells",
+                Snapshot.replacesRealNeighbors(null, true));
+    }
+
+    @Test
+    public void neighborUnavailableOnly_activatesCellListMutationButNoReconstruction() {
+        Snapshot s = Snapshot.from(new EmptySource(),
+                new LinkedHashSet<>(java.util.Collections.singletonList("neighbor_cells_json")));
+
+        assertTrue("-- must reach the List<CellInfo> surfaces", s.hasCellListMutationDecision());
+        assertFalse("dropping neighbours must not fabricate a serving RAT",
+                s.hasCellReconstructionDecision());
+        assertFalse("dropping neighbours must not fabricate a CellLocation",
+                s.hasGsmCellLocationDecision());
+        assertEquals("canonical replacement is the empty neighbour set", "", s.neighborCellsJson);
     }
 
     @Test

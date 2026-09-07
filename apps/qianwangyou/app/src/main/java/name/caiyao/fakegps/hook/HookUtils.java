@@ -317,14 +317,17 @@ class HookUtils {
                     }));
         }
 
-        // TelephonyManager.getNeighboringCellInfo() — deprecated but still queried
+        // TelephonyManager.getNeighboringCellInfo() — deprecated but still queried. Every entry
+        // is neighbour data, so the surface's no-data form is an empty list; "--" on
+        // neighbor_cells_json (delete neighbours / keep serving) therefore empties it too.
         tryHook(() -> XposedHelpers.findAndHookMethod(
                 "android.telephony.TelephonyManager", cl,
                 "getNeighboringCellInfo", new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         Snapshot s = currentSnapshot();
-                        if (!s.hasGsmRatConstruction()) return;
+                        if (!s.hasGsmRatConstruction()
+                                && !s.isUnavailable("neighbor_cells_json")) return;
                         param.setResult(new ArrayList<>());
                     }
                 }));
@@ -636,27 +639,42 @@ class HookUtils {
                     }
                 }));
 
-        // WifiInfo getters
+        // WifiInfo getters. Fields cleared for "--" resolve per surface (UnavailableValueResolver):
+        // the app reads the platform unknown, e.g. getRssi() == WifiInfo.INVALID_RSSI (-127),
+        // getLinkSpeed() == LINK_SPEED_UNKNOWN (-1), getWifiStandard() == WIFI_STANDARD_UNKNOWN (0),
+        // getSSID() == "<unknown ssid>" (with quotes), getBSSID() == null.
+        // wifi_mac / wifi_security_type stay passthrough-capable only (not verified for "--").
         hookGetter(cl, "android.net.wifi.WifiInfo", "getMacAddress", s -> s.wifiMac);
-        hookGetter(cl, "android.net.wifi.WifiInfo", "getSSID",
+        hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getSSID", "wifi_ssid",
+                UnavailableValueResolver.Surface.WIFI_INFO_TEXT,
                 s -> s.wifiSsid != null ? "\"" + s.wifiSsid + "\"" : null);
-        hookGetter(cl, "android.net.wifi.WifiInfo", "getBSSID", s -> s.wifiBssid);
-        hookGetter(cl, "android.net.wifi.WifiInfo", "getRssi", s -> s.wifiRssi);
-        hookGetter(cl, "android.net.wifi.WifiInfo", "getFrequency", s -> s.wifiFrequency);
-        hookGetter(cl, "android.net.wifi.WifiInfo", "getLinkSpeed", s -> s.wifiLinkSpeed);
+        hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getBSSID", "wifi_bssid",
+                UnavailableValueResolver.Surface.WIFI_INFO_TEXT, s -> s.wifiBssid);
+        hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getRssi", "wifi_rssi",
+                UnavailableValueResolver.Surface.WIFI_RSSI, s -> s.wifiRssi);
+        hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getFrequency", "wifi_frequency",
+                UnavailableValueResolver.Surface.WIFI_INFO_INT, s -> s.wifiFrequency);
+        hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getLinkSpeed", "wifi_link_speed",
+                UnavailableValueResolver.Surface.WIFI_INFO_INT, s -> s.wifiLinkSpeed);
 
         // API 29+
         if (Build.VERSION.SDK_INT >= 29) {
-            hookGetter(cl, "android.net.wifi.WifiInfo", "getTxLinkSpeedMbps", s -> s.wifiTxLinkSpeed);
-            hookGetter(cl, "android.net.wifi.WifiInfo", "getRxLinkSpeedMbps", s -> s.wifiRxLinkSpeed);
+            hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getTxLinkSpeedMbps",
+                    "wifi_tx_link_speed",
+                    UnavailableValueResolver.Surface.WIFI_INFO_INT, s -> s.wifiTxLinkSpeed);
+            hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getRxLinkSpeedMbps",
+                    "wifi_rx_link_speed",
+                    UnavailableValueResolver.Surface.WIFI_INFO_INT, s -> s.wifiRxLinkSpeed);
         }
         // API 30+
         if (Build.VERSION.SDK_INT >= 30) {
-            hookGetter(cl, "android.net.wifi.WifiInfo", "getWifiStandard", s -> s.wifiStandard);
+            hookSurfaceGetter(cl, "android.net.wifi.WifiInfo", "getWifiStandard", "wifi_standard",
+                    UnavailableValueResolver.Surface.WIFI_STANDARD, s -> s.wifiStandard);
         }
         // API 31+
         if (Build.VERSION.SDK_INT >= 31) {
-            hookGetter(cl, "android.net.wifi.WifiInfo", "getCurrentSecurityType", s -> s.wifiSecurityType);
+            hookGetter(cl, "android.net.wifi.WifiInfo", "getCurrentSecurityType",
+                    s -> s.wifiSecurityType);
         }
 
         // WifiInfo.getIpAddress() — convert dotted string to int if configured
@@ -2420,10 +2438,15 @@ class HookUtils {
         return Snapshot.acceptBuiltCellListOrPassthrough(built);
     }
 
-    /** NULL neighbor JSON means passthrough, so retain real neighbours and untouched RATs. */
+    /**
+     * NULL neighbour JSON means passthrough, so retain real neighbours and untouched RATs.
+     * "--" (unavailable) selects the DELETE-NEIGHBOURS / KEEP-SERVING decision: the real
+     * non-registered entries are dropped and registered serving cells are retained.
+     */
     private static void preserveUnconfiguredRealCells(
             Snapshot s, CellBaseline base, ArrayList built) {
-        boolean configuredNeighbors = s.neighborCellsJson != null;
+        boolean configuredNeighbors = Snapshot.replacesRealNeighbors(
+                s.neighborCellsJson, s.isUnavailable("neighbor_cells_json"));
         for (CellBaseline.RealCell real : base.realCells) {
             boolean replacingRat =
                     (real.value instanceof CellInfoLte && s.hasLteRatConstruction())
@@ -2838,6 +2861,40 @@ class HookUtils {
                         }
                         Object value = getter.get(s);
                         if (value != null) param.setResult(value);
+                    }
+                }));
+    }
+
+    /**
+     * Generic getter hook for fields that may carry an unavailable decision.
+     *
+     * <p>The unavailable branch wins BEFORE the configured/spoof getter is consulted, and the
+     * surface resolver's value is applied even when it is {@code null} (e.g. BSSID) — the same
+     * explicit-null pattern as {@link #hookPlmnStringGetter}. Only a HANDLED resolution rewrites
+     * the result; anything else falls through to the configured value / real passthrough
+     * (fail-closed).
+     */
+    private static void hookSurfaceGetter(ClassLoader cl, String className, String methodName,
+                                          String field,
+                                          UnavailableValueResolver.Surface surface,
+                                          FieldGetter getter) {
+        tryHook(() -> XposedHelpers.findAndHookMethod(className, cl, methodName,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        if (BaselineExtractionGuard.isActive()) return;
+                        if (NEIGHBOR_BYPASS.contains(param.thisObject)) return;
+                        Snapshot s = currentSnapshot();
+                        if (s.isUnavailable(field)) {
+                            UnavailableValueResolver.Resolution r =
+                                    UnavailableValueResolver.resolve(field, surface);
+                            if (r.handled()) {
+                                param.setResult(r.value());
+                                return;
+                            }
+                        }
+                        Object val = getter.get(s);
+                        if (val != null) param.setResult(val);
                     }
                 }));
     }

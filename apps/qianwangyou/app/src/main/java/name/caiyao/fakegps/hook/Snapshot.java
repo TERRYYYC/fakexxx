@@ -60,6 +60,19 @@ class Snapshot {
         return registered ? !replacingRat : !configuredNeighborList;
     }
 
+    /**
+     * Whether the real neighbour set must be replaced on the {@code List<CellInfo>} surfaces.
+     *
+     * <p>A configured neighbour JSON does so implicitly. "--" (unavailable) implements the
+     * DELETE-NEIGHBOURS / KEEP-SERVING decision: real non-registered entries are dropped while
+     * registered serving cells are retained — the list-level form of "no neighbour data", decided
+     * by {@code CellInfo#isRegistered()}. Return is true (not passthrough) because the user asked
+     * for the neighbour data to be gone, not for the real list to pass through.
+     */
+    static boolean replacesRealNeighbors(String neighborCellsJson, boolean neighborUnavailable) {
+        return neighborCellsJson != null || neighborUnavailable;
+    }
+
     /** A preserved serving cell stays serving only when no explicit serving RAT is rebuilt. */
     static boolean shouldBypassPreservedRealCell(
             boolean registered, boolean rebuildingServingRat) {
@@ -360,7 +373,8 @@ class Snapshot {
                 || hasLteRatConstruction() || hasNrRatConstruction();
     }
     boolean hasCellListMutationDecision() {
-        return hasCellReconstructionDecision() || neighborCellsJson != null;
+        return hasCellReconstructionDecision()
+                || replacesRealNeighbors(neighborCellsJson, isUnavailable("neighbor_cells_json"));
     }
     boolean hasWifi() { return wifiSsid != null || wifiBssid != null; }
     boolean hasPhysicalChannelConfig() {

@@ -349,17 +349,19 @@ class DeviceObserver(
         run {
             out.putStr("wifi_ssid", info.ssid?.let(::stripQuotes))
             out.putStr("wifi_bssid", info.bssid)
-            out["wifi_rssi"] = info.rssi.toString()
-            out["wifi_frequency"] = info.frequency.toString()
-            out["wifi_link_speed"] = info.linkSpeed.toString()
+            // Route the integers through putInt so an unavailable ("--") decision observed at its
+            // platform unknown (e.g. INVALID_RSSI -127) is reported as "--", not as a MISMATCH.
+            out.putInt("wifi_rssi", info.rssi)
+            out.putInt("wifi_frequency", info.frequency)
+            out.putInt("wifi_link_speed", info.linkSpeed)
             // getMacAddress has returned a constant placeholder for every app since Android 6, so
             // reporting it as "this device's real MAC" would be a fabrication.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                out["wifi_standard"] = info.wifiStandard.toString()          // API 30
+                out.putInt("wifi_standard", info.wifiStandard)               // API 30
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                out["wifi_tx_link_speed"] = info.txLinkSpeedMbps.toString()  // API 29
-                out["wifi_rx_link_speed"] = info.rxLinkSpeedMbps.toString()  // API 29
+                out.putInt("wifi_tx_link_speed", info.txLinkSpeedMbps)       // API 29
+                out.putInt("wifi_rx_link_speed", info.rxLinkSpeedMbps)       // API 29
             }
         }
     }

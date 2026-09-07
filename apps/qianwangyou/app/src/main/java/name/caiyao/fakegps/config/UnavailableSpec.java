@@ -3,7 +3,9 @@ package name.caiyao.fakegps.config;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -62,11 +64,34 @@ public final class UnavailableSpec {
     /**
      * Fields cleared for "--": their unknown representation is verified on every surface they
      * reach. Cellular identity/signal integers ({@code CellInfo.UNAVAILABLE}), {@code nci}
-     * ({@code UNAVAILABLE_LONG}) and the operator/SIM text group (empty string).
+     * ({@code UNAVAILABLE_LONG}), the operator/SIM text group (empty string), the Wi-Fi group
+     * (per-surface WifiInfo/ScanResult unknowns, see below) and the neighbour list (filter
+     * semantics, not an empty value).
      *
-     * <p>Layer 2 now resolves dual-surface and non-CellInfo unknowns at their call sites, so the
-     * cellular network/state/physical-channel fields can also be selected here without folding
-     * them into one unsafe sentinel.
+     * <p>Layer 2 resolves dual-surface and non-CellInfo unknowns at their call sites, so fields
+     * whose surfaces disagree (lac/cid, the Wi-Fi group) are selected here without folding them
+     * into one unsafe sentinel.
+     *
+     * <p>Wi-Fi group AOSP evidence (verified against AOSP source, per hooked surface):
+     * <ul>
+     *   <li>{@code wifi_rssi} — {@code WifiInfo.INVALID_RSSI = -127}; WifiInfo's clear()/reset()
+     *       leave RSSI at INVALID_RSSI when unknown.</li>
+     *   <li>{@code wifi_frequency} — {@code WifiInfo.UNKNOWN_FREQUENCY = -1} (mFrequency default);
+     *       {@code wifi_link_speed}/{@code wifi_tx_link_speed}/{@code wifi_rx_link_speed} —
+     *       {@code WifiInfo.LINK_SPEED_UNKNOWN = -1} (reset() sets all three).</li>
+     *   <li>{@code wifi_standard} — {@code ScanResult.WIFI_STANDARD_UNKNOWN = 0} (public constant,
+     *       identical Android 11 through 15); {@code WifiInfo.mWifiStandard} has no initializer,
+     *       i.e. an unset WifiInfo already reports 0.</li>
+     *   <li>{@code wifi_ssid} — {@code WifiInfo.getSSID()} returns
+     *       {@code WifiManager.UNKNOWN_SSID = "<unknown ssid>"} when unknown (the double quotes
+     *       are part of the platform value).</li>
+     *   <li>{@code wifi_bssid} — {@code WifiInfo.getBSSID()} returns {@code null} when unknown
+     *       (mBSSID is null in clear()/reset()); the explicit-null override happens at the call
+     *       site, like the PLMN string surfaces.</li>
+     *   <li>{@code neighbor_cells_json} — the {@code List<CellInfo>} surfaces have a real
+     *       list-level "no neighbour data" state: drop the non-registered entries and retain the
+     *       registered serving cells (see {@code Snapshot#replacesRealNeighbors}).</li>
+     * </ul>
      */
     private static final Set<String> SUPPORTED = setOf(
             // cellular identity — single surface (CellIdentity*)
@@ -86,7 +111,12 @@ public final class UnavailableSpec {
             "network_type", "data_network_type", "voice_network_type", "phone_type",
             "data_state", "data_activity", "override_network_type",
             // physical channel
-            "band", "channel_bandwidth", "cell_bandwidth_downlink", "physical_cell_id");
+            "band", "channel_bandwidth", "cell_bandwidth_downlink", "physical_cell_id",
+            // Wi-Fi — unknown verified per surface on the exact hooked getters (WifiInfo)
+            "wifi_rssi", "wifi_frequency", "wifi_link_speed", "wifi_tx_link_speed",
+            "wifi_rx_link_speed", "wifi_standard", "wifi_ssid", "wifi_bssid",
+            // neighbour list — "--" = drop real neighbours, keep registered serving cells
+            "neighbor_cells_json");
 
     /**
      * Fields explicitly decided NOT to support "--", with the reason. Keeping these enumerated
@@ -101,21 +131,78 @@ public final class UnavailableSpec {
 
     private static final Set<String> UNSUPPORTED_NO_EMPTY_STATE = setOf("service_state");
 
-    private static final Set<String> UNSUPPORTED_UNVERIFIED = setOf(
-            // Wi-Fi integers: RSSI unknown is -127; frequency / link speed are -1
-            "wifi_rssi", "wifi_frequency", "wifi_link_speed", "wifi_tx_link_speed",
-            "wifi_rx_link_speed", "wifi_channel", "wifi_standard", "wifi_security_type",
-            // Wi-Fi identity text: SSID unknown is "<unknown ssid>", BSSID is null
-            "wifi_ssid", "wifi_bssid", "wifi_mac", "wifi_ip",
-            // IP / DNS / routing text: each needs its own empty behaviour
-            "local_ipv4", "local_ipv6", "dns_primary", "dns_secondary", "gateway",
-            "subnet_mask", "connection_type", "interface_name",
-            // The public API is a mixed serving+neighbor List<CellInfo>.  An empty JSON string
-            // cannot express "remove neighbors but retain serving cells" without filtering the
-            // real list, which is not implemented yet.  Offering -- would silently leak them.
-            "neighbor_cells_json",
-            // module-internal knob, not a device field
-            "signal_fluctuation_range_db");
+    /**
+     * Rejected text/integer fields whose "no data" form is NOT verified on EVERY surface they
+     * reach, each entry carrying the specific missing evidence (fail-closed: 宁缺毋滥).
+     *
+     * <p>The recurring pattern for the IP/connection group: the LinkProperties surface alone has
+     * an honourable empty state, but its paired {@code DhcpInfo} int fields (or
+     * {@code NetworkInterface#getName}) have NO documented unknown — honouring "--" only on the
+     * verifiable surface would leak the real value through the other one.
+     */
+    private static final Map<String, String> UNSUPPORTED_WITH_EVIDENCE = withReasons()
+            .put("wifi_channel",
+                    "no hooked platform surface: WifiInfo/ScanResult expose frequency, not "
+                            + "channel — a -- would silently do nothing")
+            .put("wifi_security_type",
+                    "WifiInfo.getCurrentSecurityType() unknown sentinel not verified against AOSP")
+            .put("wifi_mac",
+                    "WifiInfo.getMacAddress() empty state not verified (permission-dependent "
+                            + "DEFAULT_MAC_ADDRESS redaction)")
+            .put("wifi_ip",
+                    "WifiInfo.getIpAddress() returns the packed int 0 when unknown, but 0 is not "
+                            + "a documented platform unknown")
+            .put("local_ipv4",
+                    "read surfaces are collections (LinkProperties#getLinkAddresses, "
+                            + "NetworkInterface#getInetAddresses) plus DhcpInfo#ipAddress whose "
+                            + "fields have no documented unknown — honouring -- would leak the "
+                            + "real address via getDhcpInfo()")
+            .put("local_ipv6",
+                    "read surfaces are collections (LinkProperties#getLinkAddresses, "
+                            + "NetworkInterface#getInetAddresses) with no per-field unknown — "
+                            + "honouring -- would require filtering the real address list")
+            .put("dns_primary",
+                    "LinkProperties#getDnsServers has a true empty state, but DhcpInfo#dns1 has "
+                            + "no documented unknown — the real DNS would leak via getDhcpInfo()")
+            .put("dns_secondary",
+                    "LinkProperties#getDnsServers has a true empty state, but DhcpInfo#dns2 has "
+                            + "no documented unknown — the real DNS would leak via getDhcpInfo()")
+            .put("gateway",
+                    "RouteInfo#getGateway null (directly-connected route) is a real state, but "
+                            + "DhcpInfo#gateway has no documented unknown — the real gateway "
+                            + "would leak via getDhcpInfo()")
+            .put("subnet_mask",
+                    "only read surface is DhcpInfo#netmask, whose fields have no documented "
+                            + "unknown (no 0-means-unset contract)")
+            .put("connection_type",
+                    "NetworkInfo#getTypeName has no platform unknown (constructor-supplied "
+                            + "\"WIFI\"/\"MOBILE\", never a no-data value)")
+            .put("interface_name",
+                    "LinkProperties#getInterfaceName is @Nullable, but "
+                            + "java.net.NetworkInterface#getName has no unknown for an existing "
+                            + "interface — the real name would leak on that surface")
+            .put("signal_fluctuation_range_db",
+                    "module-internal knob, not a device field — there is nothing to make "
+                            + "unavailable")
+            .build();
+
+    /** Minimal insertion-ordered builder (no java.util.Map.of — min API 24 compatibility). */
+    private static ReasonBuilder withReasons() {
+        return new ReasonBuilder();
+    }
+
+    private static final class ReasonBuilder {
+        private final Map<String, String> map = new LinkedHashMap<>();
+
+        ReasonBuilder put(String field, String reason) {
+            map.put(field, reason);
+            return this;
+        }
+
+        Map<String, String> build() {
+            return Collections.unmodifiableMap(map);
+        }
+    }
 
     /** Every field that has an explicit decision. Must equal the editable field set. */
     public static Set<String> decidedColumns() {
@@ -123,7 +210,7 @@ public final class UnavailableSpec {
         all.addAll(UNSUPPORTED_LOCATION);
         all.addAll(UNSUPPORTED_BOOLEAN);
         all.addAll(UNSUPPORTED_NO_EMPTY_STATE);
-        all.addAll(UNSUPPORTED_UNVERIFIED);
+        all.addAll(UNSUPPORTED_WITH_EVIDENCE.keySet());
         return Collections.unmodifiableSet(all);
     }
 
@@ -157,8 +244,9 @@ public final class UnavailableSpec {
         if (UNSUPPORTED_NO_EMPTY_STATE.contains(column)) {
             return "ServiceState has no UNKNOWN/empty constant; OUT_OF_SERVICE is a real state";
         }
-        if (UNSUPPORTED_UNVERIFIED.contains(column)) {
-            return "platform unknown not yet verified against AOSP for this surface";
+        String evidence = UNSUPPORTED_WITH_EVIDENCE.get(column);
+        if (evidence != null) {
+            return "platform unknown not verified on every read surface: " + evidence;
         }
         return "no explicit decision recorded for this field";
     }
