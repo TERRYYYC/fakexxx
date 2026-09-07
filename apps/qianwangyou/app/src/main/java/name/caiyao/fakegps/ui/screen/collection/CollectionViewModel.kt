@@ -30,7 +30,12 @@ import name.caiyao.fakegps.data.importer.ProfileImportIssue
 import name.caiyao.fakegps.data.importer.ProfileImportTemplate
 import name.caiyao.fakegps.data.repository.ProfileRepository
 
-class CollectionViewModel(
+// @JvmOverloads is load-bearing: ViewModelProvider's AndroidViewModelFactory reflectively calls
+// the single-(Application) constructor. Without it the repoOverride default param hides that
+// ctor and tapping 收藏档案 crashes with NoSuchMethodException — found on device by BOTH the
+// emulator and mi14 verification threads (2026-09-07); JVM tests construct directly and never
+// exercise the reflective path.
+class CollectionViewModel @JvmOverloads constructor(
     app: Application,
     // Robolectric oracle seam: tests inject a repository over an in-memory DB with a recording
     // publisher; production keeps the singleton DB + real ConfigPrefsSync publish chain.
