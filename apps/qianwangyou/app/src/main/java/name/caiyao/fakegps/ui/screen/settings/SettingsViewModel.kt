@@ -84,6 +84,12 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     val activeHourStart: StateFlow<Int> = settings.activeHourStart
     val activeHourEnd: StateFlow<Int> = settings.activeHourEnd
     val locationDeliveryMode: StateFlow<LocationDeliveryMode> = settings.locationDeliveryMode
+
+    /**
+     * Per-module hook switches (transport schema v5): wire name → enabled, exactly the canonical
+     * [SpoofModules.ALL] vocabulary. Rendered by [ModulesSection].
+     */
+    val moduleSwitches: StateFlow<Map<String, Boolean>> = settings.modulesEnabled
     val mockProviderState = MockProviderStatusStore.state
 
     private val _publishedConfig = MutableStateFlow(readPublishedConfig())
@@ -114,6 +120,25 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun setActiveHourEnd(hour: Int) {
         settings.setActiveHourEnd(hour)
         publish()
+    }
+
+    /**
+     * Toggle one module's hook registration switch. Like every setting mutation this MUST
+     * re-publish: the switch only exists in the v5 payload the hook reads, so persisting alone
+     * would change nothing in the target process. Registration happens once per target process,
+     * so the toggle fully applies on the target app's next start.
+     */
+    fun setModuleEnabled(module: String, enabled: Boolean) {
+        // Same seam the JVM test pins: persist first, then publish, never drop the outcome.
+        val result = ModuleToggleUpdate.apply(
+            module = module,
+            enabled = enabled,
+            persist = settings::setModuleEnabled,
+            publish = { ConfigPrefsSync.sync(getApplication()) },
+        )
+        _publishFailure.value =
+            if (result.published) null
+            else "模块开关已保存，但未发布给 Hook —— 目标 App 仍在使用上一份配置"
     }
 
     /**

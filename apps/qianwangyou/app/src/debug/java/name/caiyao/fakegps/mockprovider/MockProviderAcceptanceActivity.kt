@@ -367,6 +367,7 @@ class MockProviderAcceptanceActivity : ComponentActivity() {
             spoofMode = settings.getRawMode(),
             activeHourStart = settings.getRawHourStart(),
             activeHourEnd = settings.getRawHourEnd(),
+            spoofModules = settings.readModulesEnabled(),
         )
         val expected = APlus10AFixtureSeed.expectedTransportEnvelope(want1, snapshot)
         when (val read = ConfigPrefsSync.readPublished(applicationContext)) {

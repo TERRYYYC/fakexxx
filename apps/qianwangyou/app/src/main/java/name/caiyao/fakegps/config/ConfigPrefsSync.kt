@@ -65,12 +65,17 @@ object ConfigPrefsSync {
      * Transport payload version. Bumped from SpoofConfig's v1 typed schema to the flat field map.
      * The hook rejects a payload it cannot interpret rather than silently mis-reading it, and keeps
      * its last-known-good config instead of reverting to real device data mid-test.
+     *
+     * v5 adds the `modules` object (per-module hook registration switches); absent/empty modules
+     * mean all-enabled, so a v4 reader tolerance is preserved on the hook side.
      */
-    const val SCHEMA_VERSION = 4
+    const val SCHEMA_VERSION = 5
+    /** Losslessly readable predecessor: v4, the same flat shape without the `modules` object. */
+    const val PREVIOUS_SCHEMA_VERSION = 4
     /** Losslessly readable predecessor: same flat fields/unavailable shape, without delivery mode. */
-    const val PREVIOUS_SCHEMA_VERSION = 3
-    /** Losslessly readable predecessor: it has the same flat `fields` map and no unavailable set. */
-    const val LEGACY_SCHEMA_VERSION = 2
+    const val LEGACY_SCHEMA_VERSION = 3
+    /** Oldest still-readable generation: the same flat `fields` map with no unavailable set. */
+    const val OLDEST_READABLE_SCHEMA_VERSION = 2
 
 
     private val APP_URI: Uri = Uri.parse("content://${ProviderAuthority.AUTHORITY}/app")
@@ -209,6 +214,17 @@ object ConfigPrefsSync {
             "locationDeliveryMode",
             SpoofSettings.getInstance(context).readLocationDeliveryMode().wireValue,
         )
+
+        // v5 per-module hook switches. ALWAYS written in full: every canonical module gets an
+        // explicit boolean, so the payload states the whole module set rather than a delta and the
+        // hook's fail-closed validation sees only complete decisions. A never-touched switch reads
+        // as true (= v4 behaviour: all groups registered).
+        val modules = JSONObject()
+        val moduleStates = SpoofSettings.getInstance(context).readModulesEnabled()
+        for (moduleName in SpoofModules.ALL) {
+            modules.put(moduleName, moduleStates[moduleName] ?: true)
+        }
+        root.put("modules", modules)
 
         // settings (mode / active hours) — small, fixed shape
         var mode = "always_on"

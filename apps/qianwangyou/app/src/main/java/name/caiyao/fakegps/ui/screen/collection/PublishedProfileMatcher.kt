@@ -14,11 +14,13 @@ internal object PublishedProfileMatcher {
         val raw = (read as? PayloadRead.Raw)?.text ?: return null
         val published = PublishedConfig.parse(raw) ?: return null
         if (published.schemaVersion !in setOf(
+                ConfigPrefsSync.OLDEST_READABLE_SCHEMA_VERSION,
                 ConfigPrefsSync.LEGACY_SCHEMA_VERSION,
                 ConfigPrefsSync.PREVIOUS_SCHEMA_VERSION,
                 ConfigPrefsSync.SCHEMA_VERSION,
             ) || !published.fieldsPresent ||
-            (published.schemaVersion != ConfigPrefsSync.LEGACY_SCHEMA_VERSION &&
+            // v2 predates the `unavailable` array; later generations must carry it.
+            (published.schemaVersion != ConfigPrefsSync.OLDEST_READABLE_SCHEMA_VERSION &&
                 !published.unavailablePresent)
         ) {
             return null

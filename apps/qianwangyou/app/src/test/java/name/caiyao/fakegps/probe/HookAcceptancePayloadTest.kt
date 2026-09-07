@@ -21,7 +21,7 @@ class HookAcceptancePayloadTest {
     fun acceptsCanonicalCurrentSchemaEnvelopeWithoutLosingLongValues() {
         val raw = """
             {
-              "schemaVersion": 4,
+              "schemaVersion": 5,
               "acceptanceSessionId": "acceptance-123",
               "mode": "always_on",
               "fields": {
@@ -45,7 +45,7 @@ class HookAcceptancePayloadTest {
             "acceptance-123",
             root.getValue("acceptanceSessionId").jsonPrimitive.content,
         )
-        assertEquals(4, root.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals(5, root.getValue("schemaVersion").jsonPrimitive.content.toInt())
         assertEquals("always_on", root.getValue("mode").jsonPrimitive.content)
         assertEquals(68_719_400_000L, fields.getValue("nci").jsonPrimitive.content.toLong())
         assertEquals(
@@ -64,7 +64,7 @@ class HookAcceptancePayloadTest {
                 "acceptance-123",
                 """
                     {
-                      "schemaVersion": 4,
+                      "schemaVersion": 5,
                       "acceptanceSessionId": "acceptance-old",
                       "mode": "always_on",
                       "fields": {"operator_name": "HOOK-SESSION:acceptance-old", "tac": 4095}
@@ -82,7 +82,7 @@ class HookAcceptancePayloadTest {
                 "acceptance-123",
                 """
                     {
-                      "schemaVersion": 4,
+                      "schemaVersion": 5,
                       "acceptanceSessionId": "acceptance-123",
                       "mode": "always_on",
                       "fields": {"operator_name": "HOOK-LAB", "tac": 4095}
@@ -105,12 +105,12 @@ class HookAcceptancePayloadTest {
             )
         }
 
-        assertEquals("schemaVersion must be 4", failure.message)
+        assertEquals("schemaVersion must be 5", failure.message)
     }
 
     @Test
     fun rejectsBlankOrUnsafeSessionIds() {
-        val raw = """{"schemaVersion":4,"mode":"always_on","fields":{"tac":4095}}"""
+        val raw = """{"schemaVersion":5,"mode":"always_on","fields":{"tac":4095}}"""
 
         assertThrows(IllegalArgumentException::class.java) {
             HookAcceptancePayload.validate("", raw)
@@ -125,13 +125,13 @@ class HookAcceptancePayloadTest {
         assertThrows(IllegalArgumentException::class.java) {
             HookAcceptancePayload.validate(
                 "acceptance-123",
-                """{"schemaVersion":4,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":[]}""",
+                """{"schemaVersion":5,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":[]}""",
             )
         }
         assertThrows(IllegalArgumentException::class.java) {
             HookAcceptancePayload.validate(
                 "acceptance-123",
-                """{"schemaVersion":4,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","tac":{"value":4095}}}""",
+                """{"schemaVersion":5,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","tac":{"value":4095}}}""",
             )
         }
     }
@@ -141,7 +141,7 @@ class HookAcceptancePayloadTest {
         val failure = assertThrows(IllegalArgumentException::class.java) {
             HookAcceptancePayload.validate(
                 "acceptance-123",
-                """{"schemaVersion":4,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","wifi_ssid":"not-cellular"}}""",
+                """{"schemaVersion":5,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","wifi_ssid":"not-cellular"}}""",
             )
         }
 
@@ -154,7 +154,7 @@ class HookAcceptancePayloadTest {
             "acceptance-neighbors",
             """
                 {
-                  "schemaVersion": 4,
+                  "schemaVersion": 5,
                   "acceptanceSessionId": "acceptance-neighbors",
                   "mode": "always_on",
                   "fields": {
@@ -169,7 +169,7 @@ class HookAcceptancePayloadTest {
         )
 
         assertEquals(
-            """{"schemaVersion":4,"acceptanceSessionId":"acceptance-neighbors","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-neighbors","signal_fluctuation_enabled":0,"signal_fluctuation_range_db":6,"neighbor_cells_json":"[{\"type\":\"gsm\",\"cid\":2222}]"},"unavailable":[]}""",
+            """{"schemaVersion":5,"acceptanceSessionId":"acceptance-neighbors","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-neighbors","signal_fluctuation_enabled":0,"signal_fluctuation_range_db":6,"neighbor_cells_json":"[{\"type\":\"gsm\",\"cid\":2222}]"},"unavailable":[]}""",
             validated.json,
         )
     }
@@ -180,7 +180,7 @@ class HookAcceptancePayloadTest {
             "acceptance-unavailable",
             """
                 {
-                  "schemaVersion": 4,
+                  "schemaVersion": 5,
                   "acceptanceSessionId": "acceptance-unavailable",
                   "mode": "always_on",
                   "fields": {
@@ -206,7 +206,7 @@ class HookAcceptancePayloadTest {
                 "acceptance-unavailable",
                 """
                     {
-                      "schemaVersion": 4,
+                      "schemaVersion": 5,
                       "acceptanceSessionId": "acceptance-unavailable",
                       "mode": "always_on",
                       "fields": {

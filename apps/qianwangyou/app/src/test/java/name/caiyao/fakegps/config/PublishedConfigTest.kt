@@ -220,4 +220,59 @@ class PublishedConfigTest {
         )!!
         assertEquals(setOf("tac"), p.fields.keys)
     }
+
+    // --- transport schema v5: modules -------------------------------------------------------
+
+    @Test
+    fun `v5 payload parses the modules object`() {
+        val p = PublishedConfig.parse(
+            """{"schemaVersion":5,"fields":{"tac":7},"unavailable":[],"modules":{"location":true,"cellular":true,"wifi":false,"networkIp":true,"phoneState":true,"fused":true}}""",
+        )!!
+
+        assertTrue(p.modulesPresent)
+        assertEquals(false, p.modules.getValue("wifi"))
+        assertEquals(true, p.modules.getValue("cellular"))
+        assertEquals(6, p.modules.size)
+    }
+
+    @Test
+    fun `v4 payload without modules reports modules absent`() {
+        val p = PublishedConfig.parse(
+            """{"schemaVersion":4,"fields":{},"unavailable":[]}""",
+        )!!
+
+        assertEquals(false, p.modulesPresent)
+        assertEquals(emptyMap<String, Boolean>(), p.modules)
+    }
+
+    @Test
+    fun `unknown module name makes the payload malformed like the hook does`() {
+        assertNull(
+            PublishedConfig.parse(
+                """{"schemaVersion":5,"fields":{},"unavailable":[],"modules":{"celluler":true}}""",
+            ),
+        )
+    }
+
+    @Test
+    fun `non-boolean module value makes the payload malformed like the hook does`() {
+        // The hook rejects the whole payload unless every value is a strict JSON boolean;
+        // the read-back parser must agree or the UI would present a payload the hook refused.
+        val template = """{"schemaVersion":5,"fields":{},"unavailable":[],"modules":{"wifi":%s}}"""
+        for (hostile in listOf("\"true\"", "1", "0", "null")) {
+            assertNull(PublishedConfig.parse(template.replace("%s", hostile)))
+        }
+    }
+
+    @Test
+    fun `toggling a module changes the payload fingerprint`() {
+        val allOn = """{"schemaVersion":5,"fields":{},"unavailable":[],"modules":{"location":true,"cellular":true,"wifi":true,"networkIp":true,"phoneState":true,"fused":true}}"""
+        val wifiOff = """{"schemaVersion":5,"fields":{},"unavailable":[],"modules":{"location":true,"cellular":true,"wifi":false,"networkIp":true,"phoneState":true,"fused":true}}"""
+
+        // The fingerprint is the hook's reload decision input: if flipping a module switch did
+        // not change it, the hook would keep serving the previous module set.
+        assertTrue(PublishedConfig.fingerprint(wifiOff) != PublishedConfig.fingerprint(allOn))
+        // Fingerprint must stay stable for identical bytes (provenance across UI/log/probe).
+        assertEquals(PublishedConfig.fingerprint(allOn), PublishedConfig.fingerprint(allOn))
+    }
 }

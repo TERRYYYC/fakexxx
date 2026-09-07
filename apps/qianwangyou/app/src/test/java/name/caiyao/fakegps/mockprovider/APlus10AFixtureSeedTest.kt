@@ -353,12 +353,14 @@ class APlus10AFixtureSeedTest {
         schemaVersion: Int = ConfigPrefsSync.SCHEMA_VERSION,
         mode: String = "always_on",
         delivery: String = "hook",
+        modules: String =
+            """{"location":true,"cellular":true,"wifi":true,"networkIp":true,"phoneState":true,"fused":true}""",
         activeHours: String = """"activeHours":{"start":7,"end":22},""",
         fields: String = canonicalFields(),
         unavailable: String = "[]",
     ): String =
         """{"schemaVersion":$schemaVersion,"refreshIntervalSec":30,"locationDeliveryMode":"$delivery",""" +
-            """$activeHours"mode":"$mode","fields":{$fields},"unavailable":$unavailable}"""
+            """"modules":$modules,$activeHours"mode":"$mode","fields":{$fields},"unavailable":$unavailable}"""
 
     private fun mismatch(published: String, row: ProfileEntity = seededRow): String? =
         APlus10AFixtureSeed.transportEnvelopeMismatch(

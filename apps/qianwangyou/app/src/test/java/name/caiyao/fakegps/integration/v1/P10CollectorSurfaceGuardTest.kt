@@ -479,10 +479,11 @@ class P10CollectorSurfaceGuardTest {
             .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
             .lineSequence().map { it.substringBefore("//") }.joinToString("\n")
         listOf(
-            "const val SCHEMA_VERSION = 4",
+            "const val SCHEMA_VERSION = 5",
             "root.put(\"schemaVersion\", SCHEMA_VERSION)",
             "\"refreshIntervalSec\"",
             "\"locationDeliveryMode\"",
+            "root.put(\"modules\", modules)",
             "root.put(\"mode\", mode)",
             "root.put(\"activeHours\", JSONObject().put(\"start\", s).put(\"end\", e))",
             "root.put(\"fields\", fields)",
@@ -508,6 +509,10 @@ class P10CollectorSurfaceGuardTest {
         val mirror = File(moduleRoot, "src/debug/java/name/caiyao/fakegps/mockprovider/APlus10AFixtureSeed.kt").readText()
         assertTrue("the mirror must key the ssid by the canonical column", mirror.contains("\"wifi_ssid\""))
         assertEquals("the mirror must never use the property name as a JSON key", false, mirror.contains("put(\"wifiSsid\""))
+        assertTrue(
+            "the mirror must mirror the v5 modules object (exact root key-set comparison)",
+            mirror.contains("\"modules\""),
+        )
         assertTrue(
             "the mirror must reference the writer's schema constant, not a literal 4",
             mirror.contains("ConfigPrefsSync.SCHEMA_VERSION"),
