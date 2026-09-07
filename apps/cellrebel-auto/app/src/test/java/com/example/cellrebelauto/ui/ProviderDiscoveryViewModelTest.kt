@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.cutover.CutoverDataState
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -79,15 +80,19 @@ class ProviderDiscoveryViewModelTest {
             )
         )
 
-        val vm = MainViewModel(app, injectedDb = db)
+        val vm = MainViewModel(
+            app,
+            injectedDb = db,
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        )
         vm.refreshProviders()
         // The refresh launches on viewModelScope; Room suspend calls hop to Room's own executor,
         // which is OUTSIDE runTest's scheduler — await the StateFlow value with a bounded spin.
-        var entries = vm.providerEntries.value
+        var entries = vm.providerEntries.value.readyValueOrEmpty()
         val deadline = System.currentTimeMillis() + 5_000
         while (entries.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(20)
-            entries = vm.providerEntries.value
+            entries = vm.providerEntries.value.readyValueOrEmpty()
         }
 
         // Killing mutation (revoked→pending): a pending entry with signerDigest "sha256:old-revoked"
@@ -116,13 +121,17 @@ class ProviderDiscoveryViewModelTest {
                 approvedAt = 1000L, revokedAt = null, approvedVersionCode = 3
             )
         )
-        val vm = MainViewModel(app, injectedDb = db)
+        val vm = MainViewModel(
+            app,
+            injectedDb = db,
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        )
         vm.refreshProviders()
-        var entries = vm.providerEntries.value
+        var entries = vm.providerEntries.value.readyValueOrEmpty()
         val deadline = System.currentTimeMillis() + 5_000
         while (entries.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(20)
-            entries = vm.providerEntries.value
+            entries = vm.providerEntries.value.readyValueOrEmpty()
         }
         val approved = entries.filter { it.isApproved }
         assertEquals("the approved principal is listed", 1, approved.size)
@@ -134,4 +143,11 @@ class ProviderDiscoveryViewModelTest {
             0, entries.filter { !it.isApproved && it.applicationId == providerPkg }.size
         )
     }
+
+    private fun CutoverDataState<List<ProviderEntry>>.readyValueOrEmpty(): List<ProviderEntry> =
+        when (this) {
+            is CutoverDataState.Ready -> value
+            CutoverDataState.Loading,
+            is CutoverDataState.Unavailable -> emptyList()
+        }
 }

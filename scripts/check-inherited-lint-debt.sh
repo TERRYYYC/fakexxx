@@ -86,24 +86,33 @@ while IFS='|' read -r app budget; do
   CHECKED=$((CHECKED + 1))
 
   dir="apps/$app"
-  report="$dir/app/build/reports/lint-results-debug.xml"
-
   printf '\n== %s ==\n' "$app"
-
-  if [ "$REPORT_ONLY" -eq 0 ]; then
-    # lintDebug aborts the build when errors exist but still writes the XML
-    # report, which is exactly what this gate consumes. The non-zero exit is
-    # expected here and is not the verdict — the inventory comparison is.
-    ( cd "$dir" && ./gradlew --no-daemon lintDebug ) >/dev/null 2>&1
+  # #13: Auto now has two application-id flavors. Both must be linted: checking
+  # only legacyId would let productId-only manifest/source-set regressions pass.
+  if [ "$app" = "cellrebel-auto" ]; then
+    lint_specs="lintLegacyIdDebug:lint-results-legacyIdDebug.xml lintProductIdDebug:lint-results-productIdDebug.xml"
+  else
+    lint_specs="lintDebug:lint-results-debug.xml"
   fi
 
-  if [ ! -f "$report" ]; then
-    printf '  FAIL  lint report not produced at %s\n' "$report"
-    FAILURES=$((FAILURES + 1))
-    continue
-  fi
+  for lint_spec in $lint_specs; do
+    lint_task="${lint_spec%%:*}"
+    report="$dir/app/build/reports/${lint_spec#*:}"
+    printf '  variant task: %s\n' "$lint_task"
 
-  if ! BUDGET="$budget" APP="$app" python3 - "$report" <<'PY'
+    if [ "$REPORT_ONLY" -eq 0 ]; then
+      # Lint can abort after writing the XML. The inventory comparison below,
+      # rather than Gradle's exit status, is the debt-ratchet verdict.
+      ( cd "$dir" && ./gradlew --no-daemon "$lint_task" ) >/dev/null 2>&1
+    fi
+
+    if [ ! -f "$report" ]; then
+      printf '  FAIL  lint report not produced at %s\n' "$report"
+      FAILURES=$((FAILURES + 1))
+      continue
+    fi
+
+    if ! BUDGET="$budget" APP="$app/$lint_task" python3 - "$report" <<'PY'
 import collections, os, sys, xml.etree.ElementTree as ET
 
 report = sys.argv[1]
@@ -142,8 +151,9 @@ if not ok:
 sys.exit(0 if ok else 1)
 PY
   then
-    FAILURES=$((FAILURES + 1))
-  fi
+      FAILURES=$((FAILURES + 1))
+    fi
+  done
 done <<EOF
 $(printf '%s\n' "$BUDGETS")
 EOF

@@ -29,7 +29,7 @@ class RunStartCoordinatorTest {
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java
         ).allowMainThreadQueries().build()
-        val repository = PlanRepository(db)
+        val repository = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         coordinator = RunStartCoordinator(repository)
         planId = db.planDao().insertPlanWithTasks(
             LocationPlan(

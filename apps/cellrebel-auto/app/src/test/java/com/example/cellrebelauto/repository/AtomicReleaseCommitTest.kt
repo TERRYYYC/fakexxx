@@ -41,9 +41,9 @@ class AtomicReleaseCommitTest {
     @Before fun setUp() {
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext(), AppDatabase::class.java)
             .allowMainThreadQueries().build()
-        repo = PlanRepository(db)
+        repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         coordinator = RecoveryCoordinator(executor,
-            RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()))
+            RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open()))
     }
 
     @After fun tearDown() = db.close()
@@ -204,7 +204,7 @@ class AtomicReleaseCommitTest {
     @Test fun `release incomplete yields no handoff and leaves the owner recoverable`() = runTest {
         seed()
         val incomplete = RecoveryCoordinator(RecordingExternalApplyExecutor(outcome = "INCOMPLETE"),
-            RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()))
+            RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open()))
         assertNull(incomplete.prepareReleaseLease(attemptId, key, lease, digest, 3))
         assertNull(db.releaseReceiptDao().byKey(key))
         assertNull(repo.getAdvanceReplayRequest(attemptId))

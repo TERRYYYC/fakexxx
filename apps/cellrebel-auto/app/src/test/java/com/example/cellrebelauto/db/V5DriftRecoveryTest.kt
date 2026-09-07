@@ -158,7 +158,10 @@ class V5DriftRecoveryTest {
             createDeviceReplicaDriftedV5(prodDbFile)
 
             // Production entry point — the same call MainActivity's stack performs.
-            val db = AppDatabase.getInstance(context)
+            val db = AppDatabase.getInstance(
+                context,
+                com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+            )
             try {
                 // First real DB touch: pre-fix this is the crash site.
                 val latest = db.runSessionDao().getLatest()
@@ -170,7 +173,7 @@ class V5DriftRecoveryTest {
                 assertEquals(0, db.trustedQuotaDao().countAll())
 
                 val version = db.openHelper.readableDatabase.version
-                assertEquals("rebuilt database must be at the current schema version", 8, version)
+                assertEquals("rebuilt database must be at the current schema version", 9, version)
 
                 // And the drifted master row is gone for good.
                 val hash = db.openHelper.readableDatabase

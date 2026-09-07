@@ -8,6 +8,7 @@ import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptTransitions
 import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.PlanScheduler
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
 import com.example.cellrebelauto.environment.CompletionTrustContext
@@ -54,7 +55,10 @@ sealed interface LegacyReleaseValidation {
  * # 计划级仓库：封装计划/任务/尝试/会话 DAO，
  * # 并承载成功收尾事务（INV-3）：尝试行 + 守卫式任务自增原子完成，幂等
  */
-class PlanRepository(private val db: AppDatabase) {
+class PlanRepository(
+    private val db: AppDatabase,
+    private val accessGate: CutoverAccessGate
+) {
 
     /**
      * A derived, one-shot #97 proof. Durable session/attempt/receipt rows remain the truth owners;
@@ -108,7 +112,12 @@ class PlanRepository(private val db: AppDatabase) {
      * The trusted count is read from the REAL projection ([TrustedQuotaDao.trustedCountForTask]) —
      * never a test-supplied map — so a bad impl cannot green it by painting an isolated helper.
      */
-    suspend fun selectNextTrustedTask(planId: Long, attemptedTaskIds: Set<Long> = emptySet()): LocationTask? {
+    suspend fun selectNextTrustedTask(
+        planId: Long,
+        attemptedTaskIds: Set<Long> = emptySet(),
+        activeScheduleItemId: String? = null
+    ): LocationTask? {
+        val plan = db.planDao().getPlanById(planId) ?: return null
         val tasks = db.locationTaskDao().getTasksForPlan(planId)
         // 1. Normalize trusted-complete statuses (idempotent projection flip).
         for (t in tasks) {
@@ -119,6 +128,15 @@ class PlanRepository(private val db: AppDatabase) {
             }
         }
         val refreshed = db.locationTaskDao().getTasksForPlan(planId)
+        if (plan.boundScheduleId != null) {
+            val bound = activeScheduleItemId?.let { itemId ->
+                refreshed.singleOrNull { it.scheduleItemId == itemId }
+            } ?: return null
+            return bound.takeIf {
+                it.status != "completed" &&
+                    db.trustedQuotaDao().trustedCountForTask(it.id) < it.requiredSuccesses
+            }
+        }
         val ordered = PlanScheduler.executionOrder(refreshed)
         // 2. Active + trusted-incomplete, reconciled with legacy retry semantics.
         val active = ordered.firstOrNull { task ->
@@ -140,19 +158,19 @@ class PlanRepository(private val db: AppDatabase) {
     // ---- Plan screen reads (observable) ----
 
     // # 观察最近导入的计划
-    fun observeLatestPlan(): Flow<LocationPlan?> = db.planDao().observeLatestPlan()
+    fun observeLatestPlan(): Flow<LocationPlan?> = accessGate.gateFlow(db.planDao().observeLatestPlan())
 
     // # 观察某计划的任务列表（DAO 已按执行顺序排序，INV-1）
     fun observeTasks(planId: Long): Flow<List<LocationTask>> =
-        db.locationTaskDao().observeTasksForPlan(planId)
+        accessGate.gateFlow(db.locationTaskDao().observeTasksForPlan(planId))
 
     // # 观察任务 + 每任务可信成功计数（§7.3 进度 UI 投影）
     fun observeTasksWithTrustedCounts(planId: Long): Flow<List<com.example.cellrebelauto.db.TaskWithTrustedCount>> =
-        db.locationTaskDao().observeTasksForPlanWithTrustedCounts(planId)
+        accessGate.gateFlow(db.locationTaskDao().observeTasksForPlanWithTrustedCounts(planId))
 
     // # 观察某计划每个任务的尝试总数
     fun observeAttemptCounts(planId: Long): Flow<List<TaskAttemptCount>> =
-        db.testAttemptDao().observeAttemptCountsForPlan(planId)
+        accessGate.gateFlow(db.testAttemptDao().observeAttemptCountsForPlan(planId))
 
     // ---- History / export (AC-C3, INV-8) ----
 
@@ -166,7 +184,7 @@ class PlanRepository(private val db: AppDatabase) {
 
     // # v2 遗留行（History 页分区展示，C1）
     fun observeLegacyResults(): Flow<List<com.example.cellrebelauto.model.TestResult>> =
-        db.testResultDao().getAllResults()
+        accessGate.gateFlow(db.testResultDao().getAllResults())
 
     /**
      * All attempts joined with task plan context, chronological (export).
@@ -183,12 +201,14 @@ class PlanRepository(private val db: AppDatabase) {
      * # 可观察的尝试联接（History 页，最新在前）
      */
     fun observeAttemptsWithTasks(): Flow<List<AttemptWithTask>> =
-        combine(
-            db.testAttemptDao().observeAllAttempts(),
-            db.locationTaskDao().observeAllTasks()
-        ) { attempts, tasks ->
-            joinAttemptsWithTasks(attempts, tasks)
-        }
+        accessGate.gateFlow(
+            combine(
+                db.testAttemptDao().observeAllAttempts(),
+                db.locationTaskDao().observeAllTasks()
+            ) { attempts, tasks ->
+                joinAttemptsWithTasks(attempts, tasks)
+            }
+        )
 
     // # plan_row = 任务在其计划执行顺序中的 1 起始序号（INV-1 投影）
     private fun joinAttemptsWithTasks(
@@ -243,25 +263,46 @@ class PlanRepository(private val db: AppDatabase) {
         globalBufferSeconds: Int,
         rows: List<WorklistRow>,
         importedAt: Long
-    ): Long = db.planDao().insertPlanWithTasks(
-        LocationPlan(
-            sourceFileName = sourceFileName,
-            importedAt = importedAt,
-            globalBufferSeconds = globalBufferSeconds,
-            totalRows = rows.size,
-            totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses }
-        ),
-        rows.map {
-            LocationTask(
-                planId = 0, // # 由 insertPlanWithTasks 回填
-                csvRow = it.csvRow,
-                longitude = it.longitude,
-                latitude = it.latitude,
-                priority = it.priority,
-                requiredSuccesses = it.requiredSuccesses
-            )
+    ): Long {
+        val boundScheduleId = requireValidWorklistBinding(rows)
+        return db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = sourceFileName,
+                importedAt = importedAt,
+                globalBufferSeconds = globalBufferSeconds,
+                totalRows = rows.size,
+                totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses },
+                boundScheduleId = boundScheduleId
+            ),
+            rows.map {
+                LocationTask(
+                    planId = 0, // # 由 insertPlanWithTasks 回填
+                    csvRow = it.csvRow,
+                    longitude = it.longitude,
+                    latitude = it.latitude,
+                    priority = it.priority,
+                    requiredSuccesses = it.requiredSuccesses,
+                    scheduleItemId = it.scheduleItemId
+                )
+            }
+        )
+    }
+
+    /** Defense in depth: repository callers cannot bypass the parser into a partially bound plan. */
+    private fun requireValidWorklistBinding(rows: List<WorklistRow>): String? {
+        val bindingFields = rows.flatMap { listOf(it.scheduleId, it.scheduleItemId) }
+        if (bindingFields.all { it == null }) return null
+        require(rows.all { !it.scheduleId.isNullOrBlank() && !it.scheduleItemId.isNullOrBlank() }) {
+            "bound worklist requires non-blank schedule_id and schedule_item_id on every row"
         }
-    )
+        val scheduleIds = rows.map { requireNotNull(it.scheduleId) }.toSet()
+        require(scheduleIds.size == 1) { "bound worklist must name exactly one schedule_id" }
+        val itemIds = rows.map { requireNotNull(it.scheduleItemId) }
+        require(itemIds.distinct().size == itemIds.size) {
+            "bound worklist schedule_item_id values must be unique"
+        }
+        return scheduleIds.single()
+    }
 
     /** The only durable path that replaces an unfinished plan after explicit UI confirmation. */
     sealed interface SupersedingImportResult {
@@ -537,6 +578,7 @@ class PlanRepository(private val db: AppDatabase) {
         supersededAt: Long,
         stopProof: SupersessionStopProof? = null
     ): SupersedingImportResult = db.withTransaction {
+        val boundScheduleId = requireValidWorklistBinding(rows)
         val activePlan = db.planDao().getLatestPlan()
             ?: return@withTransaction SupersedingImportResult.StalePlan
         if (activePlan.id != expectedOldPlanId || activePlan.supersededAt != null) {
@@ -568,7 +610,8 @@ class PlanRepository(private val db: AppDatabase) {
                 importedAt = importedAt,
                 globalBufferSeconds = globalBufferSeconds,
                 totalRows = rows.size,
-                totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses }
+                totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses },
+                boundScheduleId = boundScheduleId
             ),
             rows.map {
                 LocationTask(
@@ -577,7 +620,8 @@ class PlanRepository(private val db: AppDatabase) {
                     longitude = it.longitude,
                     latitude = it.latitude,
                     priority = it.priority,
-                    requiredSuccesses = it.requiredSuccesses
+                    requiredSuccesses = it.requiredSuccesses,
+                    scheduleItemId = it.scheduleItemId
                 )
             }
         )
@@ -647,7 +691,9 @@ class PlanRepository(private val db: AppDatabase) {
         val previous = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
             "cannot mark missing attempt $attemptId recovery-required"
         }
-        db.testAttemptDao().markRecoveryRequired(attemptId, reason)
+        check(db.testAttemptDao().markRecoveryRequired(attemptId, reason) == 1) {
+            "recovery owner mutation failed for attempt $attemptId"
+        }
         db.auditEventDao().insert(
             AutoAuditEvent(
                 seq = db.auditEventDao().count().toLong() + 1,
@@ -658,6 +704,39 @@ class PlanRepository(private val db: AppDatabase) {
                 recordedAt = nowMs
             )
         )
+    }
+
+    /**
+     * Persist a named reducer failure as one durable fact. The current phase is re-read inside the
+     * transaction, the exact event must own that edge, and the owner CAS plus audit either both
+     * commit or both roll back.
+     */
+    suspend fun transitionToRecoveryRequired(
+        attemptId: Long,
+        event: AttemptEvent,
+        reason: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): AttemptState = db.withTransaction {
+        val owner = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+            "cannot transition missing attempt $attemptId to recovery-required"
+        }
+        val current = owner.aplusState?.let {
+            runCatching { AttemptState.valueOf(it) }.getOrNull()
+        } ?: error("attempt $attemptId has no recognized A+ phase: ${owner.aplusState}")
+        val next = APlusAttemptDriver(db.auditEventDao()) { nowMs }.driveRecoveryTransition(
+            attemptId = attemptId,
+            current = current,
+            event = event,
+            reason = reason
+        )
+        check(
+            db.testAttemptDao().compareAndSetRecoveryRequired(
+                attemptId = attemptId,
+                expected = current.name,
+                reason = reason
+            ) == 1
+        ) { "stale recovery owner for attempt $attemptId at ${current.name}" }
+        next
     }
 
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
@@ -721,7 +800,9 @@ class PlanRepository(private val db: AppDatabase) {
                 continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
                 continuitySinceEpochMs = null,
                 evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
-                evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+                evidenceRefs = snapshot.evidenceRefs.joinToString(";"),
+                scheduleItemId = snapshot.scheduleItemId,
+                scheduleVersion = snapshot.scheduleVersion
             )
         )
     }
@@ -758,7 +839,9 @@ class PlanRepository(private val db: AppDatabase) {
             observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
             observedAtEpochMs = r.observedAtEpochMs,
             continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
-            evidenceRefs = refs
+            evidenceRefs = refs,
+            scheduleItemId = r.scheduleItemId,
+            scheduleVersion = r.scheduleVersion
         )
     }
 
@@ -1271,7 +1354,8 @@ class PlanRepository(private val db: AppDatabase) {
         activateTask: Boolean,
         scheduleId: String,
         itemId: String,
-        version: Long
+        version: Long,
+        intentProfileRef: String? = null
     ): Long = db.withTransaction {
         check(attempt.id > 0L) { "admitted A+ attempt requires a reserved id" }
         check(
@@ -1283,7 +1367,8 @@ class PlanRepository(private val db: AppDatabase) {
                 attempt.currentExecutionId == null &&
                 attempt.aplusAnchorScheduleId == null &&
                 attempt.aplusAnchorItemId == null &&
-                attempt.aplusAnchorVersion == null
+                attempt.aplusAnchorVersion == null &&
+                attempt.aplusIntentProfileRef == null
         ) { "admitted A+ attempt must start from a pristine reservation template" }
         if (activateTask) {
             db.locationTaskDao().updateTaskStatus(attempt.taskId, "active")
@@ -1293,7 +1378,8 @@ class PlanRepository(private val db: AppDatabase) {
                 aplusState = "CREATED",
                 aplusAnchorScheduleId = scheduleId,
                 aplusAnchorItemId = itemId,
-                aplusAnchorVersion = version
+                aplusAnchorVersion = version,
+                aplusIntentProfileRef = intentProfileRef
             )
         )
         check(insertedId == attempt.id) { "reserved attempt id changed during admission" }
@@ -1395,12 +1481,46 @@ class PlanRepository(private val db: AppDatabase) {
         // row; re-persisting it must be a no-op, never a UNIQUE rollback that unwinds the mint.
         db.attemptExecutionDao().insertIfAbsent(ctx.execution)
         // (2) Evaluate the §6.4 predicate.
-        val decision = TrustPolicy().evaluate(ctx)
+        val policyDecision = TrustPolicy().evaluate(ctx)
         // Attribution: resolve attemptId → taskId by REAL DB lookup (never a constant, R5-F1).
         // An UNRESOLVABLE attempt cannot be attributed to any task — fail-closed: NO mint, NO
         // unverified record (neither can be bound to a nonexistent attempt); the persisted
         // execution row itself is the audit trail. Decision stays FAIL in that case.
         val attempt = db.testAttemptDao().getAttemptById(ctx.execution.attemptId)
+        val task = attempt?.let { db.locationTaskDao().getTaskById(it.taskId) }
+        val plan = task?.let { db.planDao().getPlanById(it.planId) }
+        val hasAnyBinding = plan?.boundScheduleId != null || task?.scheduleItemId != null ||
+            attempt?.aplusIntentProfileRef != null
+        val bindingDecision = if (!hasAnyBinding) {
+            true
+        } else if (task == null || plan == null) {
+            false
+        } else {
+            val scheduleId = plan.boundScheduleId
+            val itemId = task.scheduleItemId
+            val version = attempt.aplusAnchorVersion
+            scheduleId != null && itemId != null && version != null &&
+                attempt.aplusAnchorScheduleId == scheduleId &&
+                attempt.aplusAnchorItemId == itemId &&
+                attempt.aplusIntentProfileRef == itemId &&
+                ctx.preObservation.scheduleItemId == itemId &&
+                ctx.postObservation.scheduleItemId == itemId &&
+                ctx.preObservation.scheduleVersion == version &&
+                ctx.postObservation.scheduleVersion == version &&
+                db.trustedQuotaDao().entriesForTask(task.id).all { entry ->
+                    db.testAttemptDao().getAttemptById(entry.attemptId)?.let { prior ->
+                        prior.aplusAnchorScheduleId == scheduleId &&
+                            prior.aplusAnchorItemId == itemId &&
+                            prior.aplusAnchorVersion == version &&
+                            prior.aplusIntentProfileRef == itemId
+                    } == true
+                }
+        }
+        val decision = if (policyDecision == TrustDecision.PASS && bindingDecision) {
+            TrustDecision.PASS
+        } else {
+            TrustDecision.FAIL
+        }
         if (decision == TrustDecision.PASS && attempt != null) {
             // Recovery-safe (P1-2 Sol Issue #19/#20): the DECIDING crash window (ledger committed
             // but phase string not yet persisted as QUOTA_COMMITTED) causes redecideDecidingAttempt

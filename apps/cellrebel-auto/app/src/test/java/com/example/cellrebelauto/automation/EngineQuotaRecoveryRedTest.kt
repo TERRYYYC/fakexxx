@@ -140,7 +140,7 @@ class EngineQuotaRecoveryRedTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -209,7 +209,7 @@ class EngineQuotaRecoveryRedTest {
 
     private fun buildEngine(planId: Long, clock: VClock): AutomationEngine {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()),
+            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open()),
             // Wire acquirers to pass the schedule-advance gate after recovery
             observe = com.example.cellrebelauto.recovery.ObserveIntentAcquirer { true },
             receiptRevision = com.example.cellrebelauto.recovery.ReceiptRevisionAcquirer { _, _ -> true },

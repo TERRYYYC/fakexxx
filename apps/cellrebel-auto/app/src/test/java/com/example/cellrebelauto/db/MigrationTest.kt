@@ -93,13 +93,13 @@ class MigrationTest {
         helper.close()
     }
 
-    // # 迁移链必须完整到当前 DB 版本(v6)：v2/v3 文件经 2→3→4→5→6 全链打开 + schema 校验。
+    // # 迁移链必须完整到当前 DB 版本(v9)：v2/v3 文件经全链打开 + schema 校验。
     // # （F-19：5→6 为 no-op bump；无 fallback——阶梯断链在这里会直接抛异常，而不是静默重建）
     private fun openRoomDb(): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
             .addMigrations(
                 AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
-                MIGRATION_6_7, MIGRATION_7_8
+                MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9
             )
             .build()
 
@@ -279,7 +279,7 @@ class MigrationTest {
                 latitude = 39.9, longitude = 116.4
             )
         )
-        com.example.cellrebelauto.repository.PlanRepository(db).finalizeAttemptSuccess(
+        com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open()).finalizeAttemptSuccess(
             attemptId = attemptId, taskId = taskId, expectedCompletedSuccesses = 0,
             runningObservedAt = 3250L, endedAt = 3300L, webScore = 8.0, videoScore = 7.0
         )

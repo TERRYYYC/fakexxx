@@ -57,8 +57,12 @@ head 上通过。不要把候选树的本地结果表述成 main 上重新运行
 
 ```sh
 ./apps/qianwangyou/gradlew -p apps/qianwangyou clean assembleRelease
-./apps/cellrebel-auto/gradlew -p apps/cellrebel-auto clean assembleRelease
+./apps/cellrebel-auto/gradlew -p apps/cellrebel-auto clean assembleLegacyIdRelease
 ```
+
+切换资格门禁和 SAF 导入尚未交付时，Auto 只能从 `legacyId` 产物构建、安装和发布，
+其 applicationId 为 `com.example.cellrebelauto`。`productId`
+（`come.xx.fakeaauto`）是待切换身份：本阶段只验证其构建产物契约，禁止安装或发布。
 
 从 APK 本身核对包名、版本名和 versionCode，记录 APK 与签名证书 SHA-256，然后运行：
 

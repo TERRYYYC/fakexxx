@@ -76,7 +76,7 @@ class EngineTrustedPathRedTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = PlanRepository(db)
+        repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -397,6 +397,75 @@ class EngineTrustedPathRedTest {
     private fun releaseKey(attemptId: Long): String = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
     private fun releaseDigest(leaseId: String): String = APlusOperationIdentity.releaseDigest(leaseId)
 
+    private suspend fun assertNormalAdvanceFailure(
+        failure: com.example.cellrebelauto.recovery.AdvanceFailure,
+        expectedReason: String
+    ) {
+        val taskId = 42L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        val delegate = RecordingExternalApplyExecutor()
+        val executor = object : ExternalApplyExecutor by delegate {
+            override fun completeAndAdvanceOutcome(
+                request: io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1,
+                expectedIntentHash: String
+            ) = com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Failure(failure)
+        }
+        val backend = FakeBackend(
+            executor,
+            FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()),
+            SeededRevision(emptyMap()),
+            SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true)
+        )
+        val clock = VirtualClock()
+
+        buildEngine(
+            planId,
+            runningSuccessRunner(clock),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            clock,
+            driver = APlusAttemptDriver(auditDao),
+            backend = backend
+        ).run()
+
+        val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
+        val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
+        assertEquals(AttemptState.RECOVERY_REQUIRED.name, attempt.aplusState)
+        assertEquals("ADVANCE_NOT_PROVEN:$expectedReason", attempt.failureReason)
+        assertEquals(
+            "ADVANCE_PENDING->RECOVERY_REQUIRED[ADVANCE_NOT_PROVEN:$expectedReason]",
+            auditDao.forAttempt(attemptId)
+                .single { it.eventType == AttemptEvent.ADVANCE_NOT_PROVEN.name }.payloadDigest
+        )
+        assertEquals(0, auditDao.forAttempt(attemptId).count { it.eventType == "RECOVERY_REQUIRED" })
+    }
+
+    @Test
+    fun `normal advance provider error 16 records an exact atomic failure event`() = runTest {
+        assertNormalAdvanceFailure(
+            com.example.cellrebelauto.recovery.AdvanceFailure.ProviderError(16),
+            "PROVIDER_ERROR_16"
+        )
+    }
+
+    @Test
+    fun `normal advance transport failure records an exact atomic failure event`() = runTest {
+        assertNormalAdvanceFailure(
+            com.example.cellrebelauto.recovery.AdvanceFailure.TransportFailure,
+            "PROVIDER_TRANSPORT_FAILURE"
+        )
+    }
+
+    @Test
+    fun `normal advance invalid response records an exact atomic failure event`() = runTest {
+        assertNormalAdvanceFailure(
+            com.example.cellrebelauto.recovery.AdvanceFailure.InvalidResponse("PROVIDER_ADVANCE_WITHOUT_RECEIPT"),
+            "PROVIDER_ADVANCE_WITHOUT_RECEIPT"
+        )
+    }
+
     // ---- R10-F1 positive: provider-driven apply→lease + decision RED + terminal-success ----
 
     @Test
@@ -604,8 +673,9 @@ class EngineTrustedPathRedTest {
         assertEquals(FailureReason.UNTRUSTED.name, attempt.failureReason)
         assertEquals(
             "CELLREBEL_RUNNING->RECOVERY_REQUIRED[MISSING_START_INTERACTION_EVIDENCE]",
-            auditDao.forAttempt(attempt.id).single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+            auditDao.forAttempt(attempt.id).single { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }.payloadDigest
         )
+        assertEquals(0, auditDao.forAttempt(attempt.id).count { it.eventType == "RECOVERY_REQUIRED" })
         assertEquals("paused", db.runSessionDao().getLatest()!!.status)
     }
 
@@ -643,7 +713,7 @@ class EngineTrustedPathRedTest {
         val trail = auditDao.forAttempt(attempt.id)
         assertEquals(
             "CELLREBEL_START_PENDING->RECOVERY_REQUIRED[MISSING_START_INTERACTION_EVIDENCE]",
-            trail.single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
+            trail.single { it.eventType == AttemptEvent.START_FAILED_BEFORE_RUNNING.name }.payloadDigest
         )
         assertEquals(
             "undefined START_PENDING timeout must not be invented",
@@ -653,8 +723,9 @@ class EngineTrustedPathRedTest {
         assertEquals(
             "direct recovery prevents a later illegal-release overwrite",
             1,
-            trail.count { it.eventType == "RECOVERY_REQUIRED" }
+            trail.count { it.eventType == AttemptEvent.START_FAILED_BEFORE_RUNNING.name }
         )
+        assertEquals(0, trail.count { it.eventType == "RECOVERY_REQUIRED" })
     }
 
     // ---- R10-F1 negative: §6.4-failing → unverified record (exact fields) + legacy-zero ----
@@ -758,6 +829,11 @@ class EngineTrustedPathRedTest {
         val trail = auditDao.forAttempt(attemptId)
         assertEquals(0, trail.count { it.eventType == AttemptEvent.OBSERVATION_UNTRUSTED.name })
         assertEquals(
+            "POST_OBSERVE_PENDING->RECOVERY_REQUIRED[POST_OBSERVATION_UNAVAILABLE]",
+            trail.single { it.eventType == AttemptEvent.POST_OBSERVATION_MISSING.name }.payloadDigest
+        )
+        assertEquals(0, trail.count { it.eventType == "RECOVERY_REQUIRED" })
+        assertEquals(
             "RECOVERY_REQUIRED->RELEASE_PENDING",
             trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
         )
@@ -797,6 +873,11 @@ class EngineTrustedPathRedTest {
         val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
         val trail = auditDao.forAttempt(attemptId)
         assertEquals(0, trail.count { it.eventType == AttemptEvent.OBSERVATION_UNTRUSTED.name })
+        assertEquals(
+            "DECIDING->RECOVERY_REQUIRED[COMPLETION_EVIDENCE_UNAVAILABLE]",
+            trail.single { it.eventType == AttemptEvent.COMPLETION_EVIDENCE_MISSING.name }.payloadDigest
+        )
+        assertEquals(0, trail.count { it.eventType == "RECOVERY_REQUIRED" })
         assertEquals(
             "RECOVERY_REQUIRED->RELEASE_PENDING",
             trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
@@ -844,6 +925,11 @@ class EngineTrustedPathRedTest {
         val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
         val trail = auditDao.forAttempt(attemptId)
         assertEquals(0, trail.count { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name })
+        assertEquals(
+            "CELLREBEL_START_PENDING->RECOVERY_REQUIRED[CELLREBEL_FAILURE_BEFORE_RUNNING:NO_RUNNING_EVIDENCE]",
+            trail.single { it.eventType == AttemptEvent.START_FAILED_BEFORE_RUNNING.name }.payloadDigest
+        )
+        assertEquals(0, trail.count { it.eventType == "RECOVERY_REQUIRED" })
         assertEquals(
             "RECOVERY_REQUIRED->RELEASE_PENDING",
             trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
@@ -895,13 +981,10 @@ class EngineTrustedPathRedTest {
             trail.single { it.eventType == AttemptEvent.PRE_EXISTING_RUN.name }.payloadDigest
         )
         assertEquals(
-            "CELLREBEL_RUNNING->RECOVERY_REQUIRED",
+            "CELLREBEL_RUNNING->RECOVERY_REQUIRED[CELLREBEL_TIMEOUT_INTERRUPTED:PRE_EXISTING_RUN]",
             trail.single { it.eventType == AttemptEvent.TIMEOUT_INTERRUPTED.name }.payloadDigest
         )
-        assertEquals(
-            "CELLREBEL_RUNNING->RECOVERY_REQUIRED[CELLREBEL_TIMEOUT_INTERRUPTED:PRE_EXISTING_RUN]",
-            trail.single { it.eventType == "RECOVERY_REQUIRED" }.payloadDigest
-        )
+        assertEquals(0, trail.count { it.eventType == "RECOVERY_REQUIRED" })
         assertEquals(
             "RECOVERY_REQUIRED->RELEASE_PENDING",
             trail.single { it.eventType == AttemptEvent.RECONCILE.name }.payloadDigest
@@ -1207,6 +1290,7 @@ class EngineTrustedPathRedTest {
         val planId = seedPlan(taskId = taskId, quota = 1)
         val backend = APlusComposition.productionBackend(
             androidx.test.core.app.ApplicationProvider.getApplicationContext(), db,
+            accessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
             attemptValidityTimeoutMs = 90_000L
         )
         val clock = VirtualClock()
@@ -1376,7 +1460,16 @@ class EngineTrustedPathRedTest {
         buildEngine(planId, runner, gps, clock, backend = crashBackend(executor, log)).run()
 
         val recovered = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == 77L }
-        assertEquals("a foreign unverified record must NOT project 77 to failed (no own carrier → interrupted)", "interrupted", recovered.status)
+        assertEquals(
+            "the actual missing-evidence recovery owns a new bound negative; the foreign row is never authority",
+            "failed",
+            recovered.status
+        )
+        assertEquals(
+            "RECOVERY_EVIDENCE_UNAVAILABLE:DECIDING",
+            db.unverifiedAttemptRecordDao().getByAttempt(77L)?.reason
+        )
+        assertEquals("UNTRUSTED", db.unverifiedAttemptRecordDao().getByAttempt(99L)?.reason)
     }
 
     @Test

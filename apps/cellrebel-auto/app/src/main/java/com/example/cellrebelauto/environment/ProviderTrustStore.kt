@@ -1,5 +1,6 @@
 package com.example.cellrebelauto.environment
 
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.ProviderPairingDao
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 
@@ -22,11 +23,16 @@ import com.example.cellrebelauto.model.plan.ProviderPairingRecord
  *
  * # Provider 信任 store（GREEN）：principal=(applicationId, signerDigest)；批准=插入 active 记录；撤销=置 revokedAt
  */
-class ProviderTrustStore(private val dao: ProviderPairingDao) {
+class ProviderTrustStore(
+    private val dao: ProviderPairingDao,
+    private val accessGate: CutoverAccessGate
+) {
 
     /** Active = the exact (applicationId, currentSignerDigest) principal with revokedAt IS NULL. */
     suspend fun findActive(applicationId: String, signerDigest: String): ProviderPairingRecord? =
-        dao.activeFor(applicationId, signerDigest)
+        accessGate.withNormalAccessOrThrow { dao.activeFor(applicationId, signerDigest) }
+
+    suspend fun all(): List<ProviderPairingRecord> = accessGate.withNormalAccessOrThrow { dao.all() }
 
     /**
      * Operator-approved pairing: insert a fresh active record for the principal and return it.
@@ -39,28 +45,21 @@ class ProviderTrustStore(private val dao: ProviderPairingDao) {
         signerDigest: String,
         versionCode: Int,
         approvedAt: Long
-    ): ProviderPairingRecord {
-        dao.activeFor(applicationId, signerDigest)?.let { return it }
-        val id = dao.insert(
-            ProviderPairingRecord(
+    ): ProviderPairingRecord = accessGate.withNormalAccessOrThrow {
+        dao.activeFor(applicationId, signerDigest)?.let { return@withNormalAccessOrThrow it }
+        val record = ProviderPairingRecord(
                 applicationId = applicationId,
                 currentSignerDigest = signerDigest,
                 approvedAt = approvedAt,
                 revokedAt = null,
                 approvedVersionCode = versionCode
-            )
         )
-        return ProviderPairingRecord(
-            id = id,
-            applicationId = applicationId,
-            currentSignerDigest = signerDigest,
-            approvedAt = approvedAt,
-            revokedAt = null,
-            approvedVersionCode = versionCode
-        )
+        record.copy(id = dao.insert(record))
     }
 
     /** Revoke (state transition): set revokedAt on the ACTIVE record of the exact principal. */
     suspend fun revoke(applicationId: String, signerDigest: String, revokedAt: Long): Boolean =
-        dao.revoke(applicationId, signerDigest, revokedAt) > 0
+        accessGate.withNormalAccessOrThrow {
+            dao.revoke(applicationId, signerDigest, revokedAt) > 0
+        }
 }

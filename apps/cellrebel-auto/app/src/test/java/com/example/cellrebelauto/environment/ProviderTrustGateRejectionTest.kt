@@ -50,7 +50,7 @@ class ProviderTrustGateRejectionTest {
 
     @Test
     fun `a rotated-away signer is rejected AND recorded with the typed principal cause`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         store.approve("name.caiyao.fakegps.bench", "sha256:approved", versionCode = 1, approvedAt = 1000L)
         val gate = ProviderTrustGate(store) { "sha256:rotated" }
 
@@ -68,7 +68,7 @@ class ProviderTrustGateRejectionTest {
 
     @Test
     fun `an unresolvable signer is rejected AND recorded as unresolvable`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val gate = ProviderTrustGate(store) { null }
 
         assertFalse(gate.isCurrentSignerTrusted("name.caiyao.fakegps.bench"))
@@ -82,7 +82,7 @@ class ProviderTrustGateRejectionTest {
 
     @Test
     fun `a trusted check records nothing`() = runTest {
-        val store = ProviderTrustStore(db.providerPairingDao())
+        val store = ProviderTrustStore(db.providerPairingDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         store.approve("name.caiyao.fakegps.bench", "sha256:approved", versionCode = 1, approvedAt = 1000L)
         val gate = ProviderTrustGate(store) { "sha256:approved" }
 

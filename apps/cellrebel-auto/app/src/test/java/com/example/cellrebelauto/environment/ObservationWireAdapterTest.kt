@@ -60,6 +60,8 @@ class ObservationWireAdapterTest {
         assertEquals(listOf("qwy:store:abc"), snapshot.evidenceRefs)
         assertEquals(7L, snapshot.environmentRevision)
         assertEquals(500L, snapshot.continuitySinceElapsedRealtimeMs)
+        assertEquals("item-1", snapshot.scheduleItemId)
+        assertEquals(1L, snapshot.scheduleVersion)
     }
 
     @Test

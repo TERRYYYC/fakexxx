@@ -54,11 +54,13 @@ object APlusOperationIdentity {
         planId: Long,
         scheduleRef: String,
         notBeforeEpochMs: Long,
-        deadlineEpochMs: Long
+        deadlineEpochMs: Long,
+        profileRef: String? = null
     ): EnvironmentIntentV1 = EnvironmentIntentV1(
         runId = "auto-run-$runSessionId",
         attemptId = attemptId.toString(),
-        profileRef = "plan-$planId",   // the plan IS the batch profile (stable, plan-bound)
+        // Null is a compatibility discriminator: historical rows recompute the exact old literal.
+        profileRef = profileRef ?: "plan-$planId",
         scheduleRef = scheduleRef,     // F12: provider's durable schedule anchor, NOT "task-$taskId"
         requiredVerificationWire = io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
             .SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,

@@ -63,6 +63,7 @@ class EngineAdvanceRecoveryOracleTest {
     private var advanceEffectCount = 0
     private var observeCalls = 0
     private var discoverCalls = 0
+    private var advanceFailure: com.example.cellrebelauto.recovery.AdvanceFailure? = null
     private var advanceAnswer: AdvanceReceiptV1? = AdvanceReceiptV1(
         outcomeWire = 1, advancedFromItemId = "item-recovery-3b", advancedToItemId = "item-after-9z",
         scheduleVersionAfter = 13L, effectiveIntentHash = "eff-recovery",
@@ -128,6 +129,14 @@ class EngineAdvanceRecoveryOracleTest {
             advanceEffectCount++
             return receipt
         }
+        override fun completeAndAdvanceOutcome(
+            request: CompleteAndAdvanceRequestV1,
+            expectedIntentHash: String
+        ): com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome =
+            advanceFailure?.let { com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.Failure(it) }
+                ?: com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
     }
 
     private fun expectedAdvanceRequest(): CompleteAndAdvanceRequestV1 {
@@ -179,7 +188,7 @@ class EngineAdvanceRecoveryOracleTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -249,7 +258,7 @@ class EngineAdvanceRecoveryOracleTest {
 
     private fun buildEngine(planId: Long, clock: VClock): AutomationEngine {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         return AutomationEngine(
             planId = planId, planRepository = repo,
@@ -369,6 +378,50 @@ class EngineAdvanceRecoveryOracleTest {
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
         assertEquals("ADVANCE_REPLAY_CARRIER_MISSING", attempt.failureReason)
+    }
+
+    private suspend fun assertRecoveryAdvanceFailure(
+        failure: com.example.cellrebelauto.recovery.AdvanceFailure,
+        expectedReason: String
+    ) {
+        advanceFailure = failure
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+
+        buildEngine(planId, VClock()).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
+        assertEquals("ADVANCE_NOT_PROVEN:$expectedReason", attempt.failureReason)
+        assertEquals(
+            "ADVANCE_PENDING->RECOVERY_REQUIRED[ADVANCE_NOT_PROVEN:$expectedReason]",
+            db.auditEventDao().forAttempt(31L)
+                .single { it.eventType == AttemptEvent.ADVANCE_NOT_PROVEN.name }.payloadDigest
+        )
+        assertEquals(0, db.auditEventDao().forAttempt(31L).count { it.eventType == "RECOVERY_REQUIRED" })
+    }
+
+    @Test
+    fun `ADVANCE_PENDING recovery preserves provider error 16`() = runTest {
+        assertRecoveryAdvanceFailure(
+            com.example.cellrebelauto.recovery.AdvanceFailure.ProviderError(16),
+            "PROVIDER_ERROR_16"
+        )
+    }
+
+    @Test
+    fun `ADVANCE_PENDING recovery preserves provider transport failure`() = runTest {
+        assertRecoveryAdvanceFailure(
+            com.example.cellrebelauto.recovery.AdvanceFailure.TransportFailure,
+            "PROVIDER_TRANSPORT_FAILURE"
+        )
+    }
+
+    @Test
+    fun `ADVANCE_PENDING recovery preserves invalid provider response`() = runTest {
+        assertRecoveryAdvanceFailure(
+            com.example.cellrebelauto.recovery.AdvanceFailure.InvalidResponse("PROVIDER_ADVANCE_WITHOUT_RECEIPT"),
+            "PROVIDER_ADVANCE_WITHOUT_RECEIPT"
+        )
     }
 
     @Test
@@ -491,7 +544,7 @@ class EngineAdvanceRecoveryOracleTest {
         val clock = VClock()
         // Wire the forged executor through a fresh coordinator.
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            forgedExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            forgedExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         val engine = AutomationEngine(
             planId = planId, planRepository = repo,
@@ -552,7 +605,7 @@ class EngineAdvanceRecoveryOracleTest {
     /** Builds an engine with a custom executor (for tamper tests). */
     private fun buildEngineWith(planId: Long, clock: VClock, executor: ExternalApplyExecutor): AutomationEngine {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            executor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            executor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         return AutomationEngine(
             planId = planId, planRepository = repo,

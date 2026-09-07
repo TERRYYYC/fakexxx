@@ -57,12 +57,12 @@ class Migration7to8Test {
     @Test fun `v7 history remains and v8 starts with empty advance carriers`() = runTest {
         createCommittedV7()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_7_8).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_7_8, MIGRATION_8_9).allowMainThreadQueries().build()
         try {
             assertEquals("old.csv", db.planDao().getPlanById(1L)!!.sourceFileName)
             assertEquals(0, db.advanceReplayCarrierDao().byAttempt(1L)?.let { 1 } ?: 0)
             assertEquals(0, db.advanceReceiptDao().byAttempt(1L)?.let { 1 } ?: 0)
-            assertEquals(8, db.openHelper.readableDatabase.version)
+            assertEquals(9, db.openHelper.readableDatabase.version)
         } finally { db.close() }
     }
 }

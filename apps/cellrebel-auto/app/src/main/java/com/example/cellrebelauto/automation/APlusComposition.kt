@@ -82,6 +82,7 @@ object APlusComposition {
     fun productionBackend(
         context: android.content.Context,
         db: com.example.cellrebelauto.db.AppDatabase,
+        accessGate: com.example.cellrebelauto.cutover.CutoverAccessGate,
         // R44 F1: resolves the provider's CURRENT signer for the §6.5.3 gate. The default is the
         // PackageManager resolver; tests inject a fake.
         providerSignerDigest: (applicationId: String) -> String? = {
@@ -127,7 +128,10 @@ object APlusComposition {
         // same way the underlying executor does (null / no-lease ApplyOutcome) when the current
         // signer is not an operator-approved active principal.
         val trustGate = com.example.cellrebelauto.environment.ProviderTrustGate(
-            com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()),
+            com.example.cellrebelauto.environment.ProviderTrustStore(
+                db.providerPairingDao(),
+                accessGate
+            ),
             providerSignerDigest
         )
         val binderExecutor: ExternalApplyExecutor = object : ExternalApplyExecutor {
@@ -175,7 +179,10 @@ object APlusComposition {
                 )
         }
         val roomLog = com.example.cellrebelauto.recovery.RoomDurableRecoveryLog(
-            db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
+            db.operationReceiptDao(),
+            db.recoveryCheckpointRoomDao(),
+            db.releaseReceiptDao(),
+            accessGate
         )
         return object : APlusBackend {
             override val executor: ExternalApplyExecutor = binderExecutor
@@ -208,7 +215,10 @@ object APlusComposition {
                 // returned (crash = re-read durability). The §6.5.3 reverse-authorization gate runs
                 // FIRST: an untrusted provider's artifacts never enter the trust path.
                 val trustGate = com.example.cellrebelauto.environment.ProviderTrustGate(
-                    com.example.cellrebelauto.environment.ProviderTrustStore(db.providerPairingDao()),
+                    com.example.cellrebelauto.environment.ProviderTrustStore(
+                        db.providerPairingDao(),
+                        accessGate
+                    ),
                     providerSignerDigest
                 )
 
@@ -224,7 +234,9 @@ object APlusComposition {
                         observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
                         observedAtEpochMs = r.observedAtEpochMs,
                         continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
-                        evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
+                        evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";"),
+                        scheduleItemId = r.scheduleItemId,
+                        scheduleVersion = r.scheduleVersion
                     )
 
                 suspend fun observeLive(phase: String, attemptId: Long, runSessionId: Long):
@@ -256,7 +268,8 @@ object APlusComposition {
                             com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
                                 runSessionId, attemptId, plan.id, anchorScheduleRef,
                                 notBeforeEpochMs = attempt.startedAt,
-                                deadlineEpochMs = attempt.startedAt + attemptValidityTimeoutMs
+                                deadlineEpochMs = attempt.startedAt + attemptValidityTimeoutMs,
+                                profileRef = attempt.aplusIntentProfileRef
                             )
                         )
                     val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null
@@ -277,7 +290,9 @@ object APlusComposition {
                             continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
                             continuitySinceEpochMs = null,
                             evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
-                            evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+                            evidenceRefs = snapshot.evidenceRefs.joinToString(";"),
+                            scheduleItemId = snapshot.scheduleItemId,
+                            scheduleVersion = snapshot.scheduleVersion
                         )
                     )
                     return snapshot

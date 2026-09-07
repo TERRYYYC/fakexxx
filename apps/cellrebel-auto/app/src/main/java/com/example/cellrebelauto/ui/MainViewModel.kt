@@ -6,13 +6,16 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.cellrebelauto.CellRebelAutoApp
 import com.example.cellrebelauto.automation.AutomationService
 import com.example.cellrebelauto.automation.CooldownInfo
 import com.example.cellrebelauto.automation.EngineTaskSnapshot
 import com.example.cellrebelauto.automation.LastFailureInfo
 import com.example.cellrebelauto.automation.SupersessionStopStatus
 import com.example.cellrebelauto.automation.plan.PlanScheduler
-import com.example.cellrebelauto.data.PlanConfigStore
+import com.example.cellrebelauto.cutover.CutoverAccessGate
+import com.example.cellrebelauto.cutover.CutoverAccessResult
+import com.example.cellrebelauto.cutover.CutoverDataState
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.AttemptWithTask
@@ -34,6 +37,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -103,31 +107,43 @@ class MainViewModel @JvmOverloads constructor(
     // R44 (DSF review P2-1): test-injectable DB — production keeps the singleton; oracles seed an
     // in-memory instance. The discovery/approval/revoke chain is thereby drivable end-to-end.
     private val injectedDb: AppDatabase? = null,
-    private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient
+    private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient,
+    private val injectedAccessGate: CutoverAccessGate? = null
 ) : AndroidViewModel(application) {
 
-    private val db = injectedDb ?: AppDatabase.getInstance(application)
-    private val planRepository = PlanRepository(db)
-    private val planConfigStore = PlanConfigStore(application)
+    private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
+    private val db = injectedDb ?: CellRebelAutoApp.databaseFor(application, accessGate)
+    private val planRepository = PlanRepository(db, accessGate)
+    private val planConfigStore = CellRebelAutoApp.planConfigStoreFor(application, accessGate)
 
     // R43 (spec Task 6 / Sol GREEN-review-2 F5): the ProviderTrustStore PRODUCTION callers —
     // the operator approval/revocation surface (§6.5.3). No silent TOFU: approval is explicit.
     private val trustStore = com.example.cellrebelauto.environment.ProviderTrustStore(
-        db.providerPairingDao()
+        db.providerPairingDao(),
+        accessGate
     )
-    private val _providerEntries = MutableStateFlow<List<ProviderEntry>>(emptyList())
-    val providerEntries: StateFlow<List<ProviderEntry>> = _providerEntries
+    private val _providerRefreshVersion = MutableStateFlow(0L)
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val providerEntriesSource = _providerRefreshVersion.transformLatest {
+        when (val access = accessGate.withNormalAccess { loadProviderEntriesUnderLease() }) {
+            is CutoverAccessResult.Granted -> emit(access.value)
+            is CutoverAccessResult.Unavailable -> Unit
+        }
+    }
+    val providerEntries: StateFlow<CutoverDataState<List<ProviderEntry>>> =
+        accessGate.dataFlow(providerEntriesSource)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, accessGate.initialDataState())
 
     // R44 (Sol GREEN-review-3 F5): the SEVEN-state production projection — derived from DURABLE
     // owner state only (pairing records + the crashed attempt's §8.1 phase + unverified records),
     // combined with the attempts flow the History projection already observes. This is the state
     // the run surface's PairingStatusCard renders; the UI never decides it.
-    private val dbInstance = db
-    val pairingUiState: kotlinx.coroutines.flow.StateFlow<PairingUiState> =
-        kotlinx.coroutines.flow.combine(
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val pairingUiState: StateFlow<CutoverDataState<PairingUiState>> =
+        accessGate.dataFlow(combine(
             planRepository.observeAttemptsWithTasks(),
-            _providerEntries
-        ) { attempts, entries ->
+            providerEntriesSource
+        ) { attempts, entries -> attempts to entries }.transformLatest { (attempts, entries) ->
             // R46 (Sol R46 P2): the Run surface's providerActive binds the CURRENT measured
             // principal — an approved DB row PLUS a discovered pending candidate for the same
             // appId means the signer rotated and the current signer is NOT approved (§6.5.4:
@@ -140,27 +156,33 @@ class MainViewModel @JvmOverloads constructor(
             val crashed = attempts.firstOrNull {
                 it.attempt.status in setOf("starting", "running") && it.attempt.aplusState != null
             }?.attempt
-            val hasUnverified = kotlinx.coroutines.runBlocking {
-                dbInstance.unverifiedAttemptRecordDao().getByAttempt(
+            when (val access = accessGate.withNormalAccess {
+                planRepository.getUnverifiedRecord(
                     attempts.firstOrNull()?.attempt?.id ?: -1L
                 ) != null
+            }) {
+                is CutoverAccessResult.Granted -> emit(
+                    PairingUiState.project(
+                        hasProviderRecord = entries.isNotEmpty(),
+                        providerActive = hasActiveProvider,
+                        crashedAplusState = crashed?.aplusState,
+                        hasUnverifiedRecord = access.value
+                    )
+                )
+                is CutoverAccessResult.Unavailable -> Unit
             }
-            PairingUiState.project(
-                hasProviderRecord = entries.isNotEmpty(),
-                providerActive = hasActiveProvider,
-                crashedAplusState = crashed?.aplusState,
-                hasUnverifiedRecord = hasUnverified
-            )
-        }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Lazily, PairingUiState.Trusted)
+        }).stateIn(viewModelScope, SharingStarted.Eagerly, accessGate.initialDataState())
 
     fun refreshProviders() {
-        viewModelScope.launch {
-            val app = getApplication<Application>()
-            val rows = db.providerPairingDao().all()
-            _providerEntries.value = computeProviderEntries(rows) { appId ->
-                com.example.cellrebelauto.environment.ProviderTrustGate
-                    .packageManagerSignerDigest(app.packageManager, appId)
-            }
+        _providerRefreshVersion.value += 1L
+    }
+
+    private suspend fun loadProviderEntriesUnderLease(): List<ProviderEntry> {
+        val app = getApplication<Application>()
+        val rows = trustStore.all()
+        return computeProviderEntries(rows) { appId ->
+            com.example.cellrebelauto.environment.ProviderTrustGate
+                .packageManagerSignerDigest(app.packageManager, appId)
         }
     }
 
@@ -216,7 +238,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun approveProvider(entry: ProviderEntry) {
-        viewModelScope.launch {
+        launchNormalAccess {
             trustStore.approve(
                 entry.applicationId, entry.signerDigest,
                 entry.approvedVersionCode ?: 0, System.currentTimeMillis()
@@ -226,7 +248,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun revokeProvider(entry: ProviderEntry) {
-        viewModelScope.launch {
+        launchNormalAccess {
             trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
             refreshProviders()
         }
@@ -250,14 +272,23 @@ class MainViewModel @JvmOverloads constructor(
     /** Perform the staged revoke and post the impact notice. */
     fun confirmRevoke() {
         val entry = _revokeCandidate.value ?: return
-        _revokeCandidate.value = null
-        viewModelScope.launch {
-            trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
-            refreshProviders()
-            _revokeImpactNotice.value =
-                "已撤销 ${entry.applicationId}（signer ${entry.signerDigest}）：" +
-                    "引擎的信任门将拒绝该 provider 的一切契约调用（discover/preflight/apply/observe/" +
-                    "completeAndAdvance），进行中的 attempt 只走 release/恢复。如需恢复请重新批准。"
+        launchNormalAccess {
+            if (_revokeCandidate.value == entry) {
+                _revokeCandidate.value = null
+            }
+            try {
+                trustStore.revoke(entry.applicationId, entry.signerDigest, System.currentTimeMillis())
+                refreshProviders()
+                _revokeImpactNotice.value =
+                    "已撤销 ${entry.applicationId}（signer ${entry.signerDigest}）：" +
+                        "引擎的信任门将拒绝该 provider 的一切契约调用（discover/preflight/apply/observe/" +
+                        "completeAndAdvance），进行中的 attempt 只走 release/恢复。如需恢复请重新批准。"
+            } catch (failure: Throwable) {
+                if (_revokeCandidate.value == null) {
+                    _revokeCandidate.value = entry
+                }
+                throw failure
+            }
         }
     }
 
@@ -319,14 +350,15 @@ class MainViewModel @JvmOverloads constructor(
     // ---- Plan config (O6, DataStore-persisted) ----
 
     // # 计划配置：buffer 首次必填，timeout/settle 有内部默认
-    val planConfig: StateFlow<PlanConfig> = planConfigStore.config
-        .stateIn(viewModelScope, SharingStarted.Lazily, PlanConfig(globalBufferSeconds = null))
+    val planConfig: StateFlow<CutoverDataState<PlanConfig>> =
+        accessGate.dataFlow(planConfigStore.config)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, accessGate.initialDataState())
 
     // ---- Plan screen state ----
 
     // # 最近计划 + 任务 + 尝试数的组合流（Room 实时刷新）
     @OptIn(ExperimentalCoroutinesApi::class)
-    val planUiState: StateFlow<PlanUiState> = planRepository.observeLatestPlan()
+    private val planUiStateSource = planRepository.observeLatestPlan()
         .flatMapLatest { plan ->
             if (plan == null) {
                 flowOf(PlanUiState())
@@ -344,7 +376,9 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.Lazily, PlanUiState())
+    val planUiState: StateFlow<CutoverDataState<PlanUiState>> =
+        accessGate.dataFlow(planUiStateSource)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, accessGate.initialDataState())
 
     // # 原子导入的行级错误（面板一次列出全部，AC-A2）
     private val _importErrors = MutableStateFlow<List<RowError>>(emptyList())
@@ -408,13 +442,14 @@ class MainViewModel @JvmOverloads constructor(
     // ---- Data from repository ----
 
     // # History 页：尝试行联接任务上下文（最新在前，AC-C3）
-    val attempts: StateFlow<List<AttemptWithTask>> = planRepository.observeAttemptsWithTasks()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val attempts: StateFlow<CutoverDataState<List<AttemptWithTask>>> =
+        accessGate.dataFlow(planRepository.observeAttemptsWithTasks())
+            .stateIn(viewModelScope, SharingStarted.Eagerly, accessGate.initialDataState())
 
     // # History 页 Legacy 分区：v2 遗留结果（C1，迁移故意保留的数据不静默消失）
-    val legacyResults: StateFlow<List<com.example.cellrebelauto.model.TestResult>> =
-        planRepository.observeLegacyResults()
-            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val legacyResults: StateFlow<CutoverDataState<List<com.example.cellrebelauto.model.TestResult>>> =
+        accessGate.dataFlow(planRepository.observeLegacyResults())
+            .stateIn(viewModelScope, SharingStarted.Eagerly, accessGate.initialDataState())
 
     // ---- Actions ----
 
@@ -429,13 +464,16 @@ class MainViewModel @JvmOverloads constructor(
      */
     fun startOrResumePlan() {
         // # F003 AC-F3-4：双关 = 无操作流水线（KD-F3-3 配置错误），明确拒绝
-        val cfg = planConfig.value
+        val cfg = planConfig.value.readyValueOrNull() ?: run {
+            _importNotice.value = "Plan data is unavailable or still loading"
+            return
+        }
         if (!cfg.locationStageEnabled && !cfg.testStageEnabled) {
             _importNotice.value =
                 "Both stages are OFF — nothing would run. Enable Location and/or CellRebel test stage first."
             return
         }
-        val plan = planUiState.value.plan ?: return
+        val plan = planUiState.value.readyValueOrNull()?.plan ?: return
         _startRequested.value = true
         AutomationService.startAutomation(plan.id)
     }
@@ -447,12 +485,17 @@ class MainViewModel @JvmOverloads constructor(
     // ---- Plan config setters (independent fields, AC-B5) ----
 
     fun setGlobalBuffer(seconds: Int) {
-        viewModelScope.launch {
+        launchNormalAccess {
+            val planState = planUiState.value.readyValueOrNull()
+            if (planState == null) {
+                _importNotice.value = "Plan data is unavailable or still loading"
+                return@launchNormalAccess
+            }
             // # DataStore 始终写：作为下次导入的默认值
             planConfigStore.setGlobalBufferSeconds(seconds)
             // # F6：计划未启动时同步 engine 执行的 plan 快照，UI 展示值 == 执行值；
             // # 计划已启动则快照不动（UI 标注 next-plan-only）
-            planUiState.value.plan?.let { plan ->
+            planState.plan?.let { plan ->
                 withContext(Dispatchers.IO) {
                     planRepository.syncBufferIfPlanNotStarted(plan.id, seconds)
                 }
@@ -461,21 +504,21 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun setTestTimeout(seconds: Int) {
-        viewModelScope.launch { planConfigStore.setTestTimeoutSeconds(seconds) }
+        launchNormalAccess { planConfigStore.setTestTimeoutSeconds(seconds) }
     }
 
     fun setGpsSettle(seconds: Int) {
-        viewModelScope.launch { planConfigStore.setGpsSettleSeconds(seconds) }
+        launchNormalAccess { planConfigStore.setGpsSettleSeconds(seconds) }
     }
 
     // # F003：位置阶段开关（运行时偏好，下个 attempt 生效）
     fun setLocationStageEnabled(enabled: Boolean) {
-        viewModelScope.launch { planConfigStore.setLocationStageEnabled(enabled) }
+        launchNormalAccess { planConfigStore.setLocationStageEnabled(enabled) }
     }
 
     // # F003：CellRebel 测试阶段开关（运行时偏好，下个 attempt 生效）
     fun setTestStageEnabled(enabled: Boolean) {
-        viewModelScope.launch { planConfigStore.setTestStageEnabled(enabled) }
+        launchNormalAccess { planConfigStore.setTestStageEnabled(enabled) }
     }
 
     // ---- CSV import (atomic, AC-A2) ----
@@ -489,7 +532,7 @@ class MainViewModel @JvmOverloads constructor(
      * # buffer 未设置时拒绝；当前计划未完成时仅生成待确认的内存提案
      */
     fun importCsv(uri: Uri) {
-        viewModelScope.launch {
+        launchNormalAccess {
             _importErrors.value = emptyList()
             _importNotice.value = null
 
@@ -503,7 +546,7 @@ class MainViewModel @JvmOverloads constructor(
             }
             if (text == null) {
                 _importNotice.value = "Cannot read the selected file"
-                return@launch
+                return@launchNormalAccess
             }
 
             when (val result = WorklistParser.parse(text)) {
@@ -514,12 +557,21 @@ class MainViewModel @JvmOverloads constructor(
                 }
                 is ParseResult.Success -> {
                     // # buffer 取自当前 PlanConfig；首次必填（设计稿 v2.1 §1.1）
-                    val buffer = planConfig.value.globalBufferSeconds
+                    val config = planConfig.value.readyValueOrNull()
+                    if (config == null) {
+                        _importNotice.value = "Plan configuration is unavailable or still loading"
+                        return@launchNormalAccess
+                    }
+                    val buffer = config.globalBufferSeconds
                     if (buffer == null) {
                         _importNotice.value = "Set global buffer first"
-                        return@launch
+                        return@launchNormalAccess
                     }
-                    val state = planUiState.value
+                    val state = planUiState.value.readyValueOrNull()
+                    if (state == null) {
+                        _importNotice.value = "Plan data is unavailable or still loading"
+                        return@launchNormalAccess
+                    }
                     val plan = state.plan
                     val fileName = withContext(Dispatchers.IO) { queryDisplayName(uri) }
                         ?: "worklist.csv"
@@ -532,7 +584,7 @@ class MainViewModel @JvmOverloads constructor(
                             rows = result.rows
                         )
                         _importNotice.value = "Review replacement before importing ${fileName}"
-                        return@launch
+                        return@launchNormalAccess
                     }
                     withContext(Dispatchers.IO) {
                         planRepository.importPlan(
@@ -558,37 +610,43 @@ class MainViewModel @JvmOverloads constructor(
         _isImportReplacementStopping.value = true
         viewModelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    planRepository.confirmSupersedingImport(
-                        expectedOldPlanId = proposal.expectedOldPlanId,
-                        sourceFileName = proposal.sourceFileName,
-                        globalBufferSeconds = proposal.globalBufferSeconds,
-                        rows = proposal.rows,
-                        importedAt = System.currentTimeMillis(),
-                        supersededAt = System.currentTimeMillis()
-                    )
+                val access = accessGate.withNormalAccess {
+                    val result = withContext(Dispatchers.IO) {
+                        planRepository.confirmSupersedingImport(
+                            expectedOldPlanId = proposal.expectedOldPlanId,
+                            sourceFileName = proposal.sourceFileName,
+                            globalBufferSeconds = proposal.globalBufferSeconds,
+                            rows = proposal.rows,
+                            importedAt = System.currentTimeMillis(),
+                            supersededAt = System.currentTimeMillis()
+                        )
+                    }
+                    if (activeReplacementConfirmationId != confirmationId) return@withNormalAccess
+                    when (result) {
+                        is PlanRepository.SupersedingImportResult.Imported -> {
+                            _importProposal.value = null
+                            _importNotice.value =
+                                "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
+                        }
+                        is PlanRepository.SupersedingImportResult.ActiveSession -> {
+                            requestSupersessionStop(proposal, result.sessionId)
+                        }
+                        is PlanRepository.SupersedingImportResult.StopVerificationRequired -> {
+                            requestSupersessionStop(proposal, result.sessionId)
+                        }
+                        PlanRepository.SupersedingImportResult.StaleStopProof -> {
+                            _importNotice.value =
+                                "The stopped plan changed; verify it again before replacing it"
+                        }
+                        PlanRepository.SupersedingImportResult.StalePlan -> {
+                            _importProposal.value = null
+                            _importNotice.value = "Current plan changed; review the CSV again before replacing it"
+                        }
+                    }
                 }
-                if (activeReplacementConfirmationId != confirmationId) return@launch
-                when (result) {
-                    is PlanRepository.SupersedingImportResult.Imported -> {
-                        _importProposal.value = null
-                        _importNotice.value =
-                            "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
-                    }
-                    is PlanRepository.SupersedingImportResult.ActiveSession -> {
-                        requestSupersessionStop(proposal, result.sessionId)
-                    }
-                    is PlanRepository.SupersedingImportResult.StopVerificationRequired -> {
-                        requestSupersessionStop(proposal, result.sessionId)
-                    }
-                    PlanRepository.SupersedingImportResult.StaleStopProof -> {
-                        _importNotice.value =
-                            "The stopped plan changed; verify it again before replacing it"
-                    }
-                    PlanRepository.SupersedingImportResult.StalePlan -> {
-                        _importProposal.value = null
-                        _importNotice.value = "Current plan changed; review the CSV again before replacing it"
-                    }
+                if (access is CutoverAccessResult.Unavailable) {
+                    _importNotice.value =
+                        "Replacement paused while data is unavailable (${access.reason})"
                 }
             } finally {
                 if (activeReplacementConfirmationId == confirmationId) {
@@ -610,6 +668,22 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     private suspend fun commitVerifiedReplacement(proof: PlanRepository.SupersessionStopProof) {
+        try {
+            val access = accessGate.withNormalAccess {
+                commitVerifiedReplacementUnderLease(proof)
+            }
+            if (access is CutoverAccessResult.Unavailable) {
+                _importNotice.value = "Replacement paused while data is unavailable (${access.reason})"
+            }
+        } finally {
+            if (activeReplacementStopRequestId == proof.requestId) {
+                activeReplacementStopRequestId = null
+                _isImportReplacementStopping.value = false
+            }
+        }
+    }
+
+    private suspend fun commitVerifiedReplacementUnderLease(proof: PlanRepository.SupersessionStopProof) {
         val proposal = _importProposal.value
         if (proposal == null || proof.requestId != activeReplacementStopRequestId ||
             proof.planId != proposal.expectedOldPlanId
@@ -674,7 +748,7 @@ class MainViewModel @JvmOverloads constructor(
      * # 导出全部尝试为 16 列审计 CSV（时间升序）
      */
     fun exportCsv() {
-        viewModelScope.launch {
+        launchNormalAccess {
             try {
                 val allAttempts = withContext(Dispatchers.IO) {
                     planRepository.getAllAttemptsWithTasks()
@@ -685,7 +759,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
                 if (allAttempts.isEmpty() && legacy.isEmpty()) {
                     showToast("No attempts to export")
-                    return@launch
+                    return@launchNormalAccess
                 }
                 val exporter = CsvExporter(getApplication())
                 val fileName = withContext(Dispatchers.IO) {
@@ -753,6 +827,21 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun showToast(message: String) {
         Toast.makeText(getApplication(), message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun launchNormalAccess(block: suspend () -> Unit) {
+        viewModelScope.launch {
+            val access = accessGate.withNormalAccess(block)
+            if (access is CutoverAccessResult.Unavailable) {
+                _importNotice.value = "Data temporarily unavailable (${access.reason})"
+            }
+        }
+    }
+
+    private fun <T> CutoverDataState<T>.readyValueOrNull(): T? = when (this) {
+        is CutoverDataState.Ready -> value
+        CutoverDataState.Loading,
+        is CutoverDataState.Unavailable -> null
     }
 }
 

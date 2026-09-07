@@ -557,7 +557,7 @@ class TrustedLedgerRedTest {
 
     @Test
     fun `recordTrustedCompletion persists the full section 7_1 evidence detail through the production entrypoint`() = runTest {
-        val repo = PlanRepository(db)
+        val repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         repo.recordTrustedCompletion(fullContext())
 
         val row = db.attemptExecutionDao().byExecutionId("exec-$WIRE_VERIFIED")
@@ -593,7 +593,7 @@ class TrustedLedgerRedTest {
         // genuine LocationTask (id ≠ 1L) + TestAttempt, drives the production entrypoint, then READS
         // BACK the minted entry and asserts every identity field binds the seeded aggregate. A
         // constant-taskId / constant-attemptId / constant-digest / constant-clock impl fails ≥ 1.
-        val repo = PlanRepository(db)
+        val repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val aggregate = seedR5F1Aggregate()
         val ctx = fullContext().copy(
             execution = fullEvidenceExecution(WIRE_VERIFIED).copy(
@@ -641,7 +641,7 @@ class TrustedLedgerRedTest {
 
     @Test
     fun `recordTrustedCompletion mints nothing and reports FAIL when the section 6_4 predicate fails`() = runTest {
-        val repo = PlanRepository(db)
+        val repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         // §6.4.1 contradiction: HOOK deliveryMode masquerading as independently verified ⇒ FAIL (INV-06).
         val negative = fullContext().copy(preObservation = validPre().copy(deliveryMode = "HOOK"))
         val decision = repo.recordTrustedCompletion(negative)
@@ -661,7 +661,7 @@ class TrustedLedgerRedTest {
         // the skeleton (which never mints) AND under a correct GREEN (mint is gated on PASS); it goes
         // RED only under a "mint regardless of decision" bad impl, closing that attack surface for the
         // round-5 self-gate's combined-attack run.
-        val repo = PlanRepository(db)
+        val repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val intentMismatch = fullContext().copy(applyReceiptIntentHash = "mismatched-receipt-intent")
         val decision = repo.recordTrustedCompletion(intentMismatch)
 

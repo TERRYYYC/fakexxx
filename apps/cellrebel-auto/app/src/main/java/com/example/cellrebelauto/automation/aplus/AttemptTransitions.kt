@@ -15,9 +15,15 @@ enum class AttemptEvent {
     NEW_RUN_OBSERVED,
     /** Start interaction found the screen already RUNNING — belongs to a prior run (§8.6.2 wire 2). */
     PRE_EXISTING_RUN,
+    /** The attempt failed before RUNNING was ever proven; this is not a RUNNING timeout. */
+    START_FAILED_BEFORE_RUNNING,
     COMPLETION_OBSERVED,
     TIMEOUT_INTERRUPTED,
     POST_OBSERVATION_OK,
+    /** No POST observation exists, so OBSERVATION_UNTRUSTED would be a fabricated observation. */
+    POST_OBSERVATION_MISSING,
+    /** The DECIDING owner lacks its completion-evidence carrier. */
+    COMPLETION_EVIDENCE_MISSING,
     TRUST_POLICY_PASS,
     TRUST_POLICY_FAIL,
     BEGIN_RELEASE,
@@ -26,6 +32,8 @@ enum class AttemptEvent {
     /** Release did not fully clear the lease — recovery required, do NOT advance (§8.1). */
     RELEASE_INCOMPLETE,
     ADVANCE_RECEIPT_VERIFIED,
+    /** The provider supplied no valid advance receipt; distinct from a receipt digest mismatch. */
+    ADVANCE_NOT_PROVEN,
     ADVANCE_DIGEST_MISMATCH,
     ADVANCE_EXHAUSTED_VERIFIED,
     EXHAUSTED_STATE_CONFIRMED,
@@ -102,6 +110,7 @@ object AttemptTransitions {
             AttemptState.CELLREBEL_START_PENDING -> when (event) {
                 AttemptEvent.NEW_RUN_OBSERVED -> AttemptState.CELLREBEL_RUNNING
                 AttemptEvent.PRE_EXISTING_RUN -> AttemptState.CELLREBEL_RUNNING // §8.6.2 wire 2: classified, old result NOT counted
+                AttemptEvent.START_FAILED_BEFORE_RUNNING -> AttemptState.RECOVERY_REQUIRED
                 else -> current
             }
             AttemptState.CELLREBEL_RUNNING -> when (event) {
@@ -111,11 +120,13 @@ object AttemptTransitions {
             }
             AttemptState.POST_OBSERVE_PENDING -> when (event) {
                 AttemptEvent.POST_OBSERVATION_OK -> AttemptState.DECIDING
+                AttemptEvent.POST_OBSERVATION_MISSING -> AttemptState.RECOVERY_REQUIRED
                 else -> current
             }
             AttemptState.DECIDING -> when (event) {
                 AttemptEvent.TRUST_POLICY_PASS -> AttemptState.QUOTA_COMMITTED
                 AttemptEvent.TRUST_POLICY_FAIL -> AttemptState.UNVERIFIED_RECORDED
+                AttemptEvent.COMPLETION_EVIDENCE_MISSING -> AttemptState.RECOVERY_REQUIRED
                 else -> current
             }
             AttemptState.QUOTA_COMMITTED -> when (event) {
@@ -141,17 +152,20 @@ object AttemptTransitions {
                 AttemptEvent.CRASH_RECOVER -> AttemptState.ADVANCE_PENDING
                 AttemptEvent.ADVANCE_RECEIPT_VERIFIED -> AttemptState.ADVANCE_OBSERVING
                 AttemptEvent.ADVANCE_EXHAUSTED_VERIFIED -> AttemptState.ADVANCE_STATE_READBACK
+                AttemptEvent.ADVANCE_NOT_PROVEN -> AttemptState.RECOVERY_REQUIRED
                 AttemptEvent.ADVANCE_DIGEST_MISMATCH -> AttemptState.RECOVERY_REQUIRED
                 else -> current
             }
             AttemptState.ADVANCE_OBSERVING -> when (event) {
                 AttemptEvent.OBSERVED_TUPLE_MATCHES -> AttemptState.CLOSED
+                AttemptEvent.ADVANCE_NOT_PROVEN,
                 AttemptEvent.OBSERVED_TUPLE_MISMATCH,
                 AttemptEvent.ADVANCE_DIGEST_MISMATCH -> AttemptState.RECOVERY_REQUIRED
                 else -> current
             }
             AttemptState.ADVANCE_STATE_READBACK -> when (event) {
                 AttemptEvent.EXHAUSTED_STATE_CONFIRMED -> AttemptState.CLOSED
+                AttemptEvent.ADVANCE_NOT_PROVEN,
                 AttemptEvent.EXHAUSTED_STATE_MISMATCH,
                 AttemptEvent.ADVANCE_DIGEST_MISMATCH -> AttemptState.RECOVERY_REQUIRED
                 else -> current
