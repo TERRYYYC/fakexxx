@@ -15,6 +15,11 @@
 #                       debug-only exact and behavioral current-schema (v4) payloads,
 #                       verifies every supported cellular field, and restores the
 #                       database-backed payload.
+#   --wifi-matrix       Strict, isolated acceptance transaction. Publishes
+#                       debug-only exact WiFi payloads traversing the legal
+#                       values and boundaries of every hook-consumed wifi_* field,
+#                       verifies each field's public observation, and restores the
+#                       database-backed payload.
 #   --runtime-verify    Read-only validation of release probe/scheduler evidence already present
 #                       in logcat. Never installs, clears logs, or changes the profile.
 set -u
@@ -42,14 +47,22 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 APK="$REPO_ROOT/app/build/outputs/apk/debug/app-debug.apk"
 MATRIX_TOOL="$SCRIPT_DIR/cellular_acceptance_matrix.py"
+WIFI_MATRIX_TOOL="$SCRIPT_DIR/wifi_acceptance_matrix.py"
 VERDICT_TOOL="$SCRIPT_DIR/hook_verdict.py"
 RUNTIME_VERIFY_TOOL="$SCRIPT_DIR/test_runtime_verify_flow.py"
+# The strict transaction's scenario runner is shared by both matrix modes; each
+# mode pins the tool it drives (cellular stays the default so legacy callers of
+# run_scenario keep their behavior).
+ACTIVE_MATRIX_TOOL="$MATRIX_TOOL"
+# Acceptance-family label used by cleanup_transaction's final pass marker so
+# each matrix mode reports what it actually verified.
+ACCEPTANCE_FAMILY="exact, fluctuation, and unavailable cellular"
 
 MODE=${1:---current-profile}
 case "$MODE" in
-    --current-profile|--acceptance-readiness|--cellular-matrix|--runtime-verify) ;;
+    --current-profile|--acceptance-readiness|--cellular-matrix|--wifi-matrix|--runtime-verify) ;;
     *)
-        echo "usage: $0 [--current-profile|--acceptance-readiness|--cellular-matrix|--runtime-verify]" >&2
+        echo "usage: $0 [--current-profile|--acceptance-readiness|--cellular-matrix|--wifi-matrix|--runtime-verify]" >&2
         exit 2
         ;;
 esac
@@ -525,7 +538,9 @@ cleanup_transaction() {
         rc=1
     fi
     if [ "$rc" -eq 0 ] && [ "$RESTORE_FAILED" -eq 0 ] && [ "$TRANSACTION_ACTIVE" -eq 1 ]; then
-        echo "ACCEPTANCE_PASS exact, fluctuation, and unavailable cellular scenarios verified; database and transport restored"
+        # :- default keeps extracted-function device-free drivers (which source
+        # this function without the module globals) bound under set -u.
+        echo "ACCEPTANCE_PASS ${ACCEPTANCE_FAMILY:-exact, fluctuation, and unavailable cellular} scenarios verified; database and transport restored"
     fi
     exit "$rc"
 }
@@ -957,10 +972,10 @@ run_scenario() {
     scenario=$1
     session="acceptance-$(date +%s)-$$-$scenario"
     payload=$(
-        "$PY" "$MATRIX_TOOL" "$scenario" --output payload --session-id "$session"
+        "$PY" "$ACTIVE_MATRIX_TOOL" "$scenario" --output payload --session-id "$session"
     ) || return 2
     expected=$(
-        "$PY" "$MATRIX_TOOL" "$scenario" --output expected --session-id "$session"
+        "$PY" "$ACTIVE_MATRIX_TOOL" "$scenario" --output expected --session-id "$session"
     ) || return 2
     encoded=$(PAYLOAD="$payload" "$PY" -c \
         'import base64,os; print(base64.urlsafe_b64encode(os.environ["PAYLOAD"].encode()).decode().rstrip("="))')
@@ -1183,6 +1198,55 @@ run_cellular_matrix() {
     run_scenario unavailable || return $?
 }
 
+# --wifi-matrix: the SAME strict isolated acceptance transaction as
+# --cellular-matrix, driving wifi_acceptance_matrix.py. Publishes debug-only
+# exact wifi payloads (every hook-consumed wifi_* field at legal values and at
+# the documented domain boundaries), lets the self-hooked hook apply them, and
+# verifies each field's public observation (wifi.* probe paths) per field via
+# the shared verdict tool before the cleanup restores the database-backed
+# payload. The durable-recovery drill stays cellular-only: its payload, marker
+# and fingerprint plumbing are built around the cellular full-rscp scenario.
+# Guarded device-free by scripts/selftest-test-hook-wifi-matrix.sh.
+run_wifi_matrix() {
+    preflight_device || return $?
+    preflight_matrix || return $?
+
+    ACTIVE_MATRIX_TOOL="$WIFI_MATRIX_TOOL"
+    ACCEPTANCE_FAMILY="exact, boundary, disabled, and hidden wifi"
+
+    DB_BEFORE=$(snapshot_db)
+    [ -n "$DB_BEFORE" ] ||
+        { echo "HARNESS_ERROR no saved profile to protect" >&2; return 2; }
+    PREFS_BEFORE=$(snapshot_prefs) || {
+        echo "HARNESS_ERROR live Vector transport source unavailable" >&2
+        return 2
+    }
+    [ -n "$PREFS_BEFORE" ] ||
+        { echo "HARNESS_ERROR schema-v4 safe-zone prefs not found" >&2; return 2; }
+    PREFS_BEFORE_FINGERPRINT=$(prefs_payload_fingerprint "$PREFS_BEFORE") ||
+        { echo "HARNESS_ERROR could not fingerprint protected transport payload" >&2; return 2; }
+
+    TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fakegps-acceptance.XXXXXX") ||
+        { echo "HARNESS_ERROR could not create temporary directory" >&2; return 2; }
+    # Same §5.G evidence carrier contract as --cellular-matrix: the preserved
+    # directory outlives this run and only TEMP_ROOT is cleaned up.
+    EVIDENCE_DIR="${HOOK_EVIDENCE_DIR:-$REPO_ROOT/c5-evidence/hook-acceptance-$(date -u +%Y%m%dT%H%M%SZ)}"
+    mkdir -p -- "$EVIDENCE_DIR" 2>/dev/null && [ -w "$EVIDENCE_DIR" ] || {
+        echo "HARNESS_ERROR could not create writable evidence directory: $EVIDENCE_DIR" >&2
+        return 2
+    }
+    echo "[evidence] preserved directory: $EVIDENCE_DIR (never deleted by this script)"
+    TRANSACTION_ACTIVE=1
+    trap cleanup_transaction EXIT
+    trap 'signal_exit INT' INT
+    trap 'signal_exit TERM' TERM
+
+    run_scenario wifi-boundary-low || return $?
+    run_scenario wifi-full || return $?
+    run_scenario wifi-boundary-high || return $?
+    run_scenario wifi-disabled-hidden || return $?
+}
+
 run_runtime_verify() {
     count=$(device_count)
     [ "$count" -eq 1 ] || {
@@ -1225,5 +1289,6 @@ case "$MODE" in
     --current-profile) run_current_profile ;;
     --acceptance-readiness) run_acceptance_readiness ;;
     --cellular-matrix) run_cellular_matrix ;;
+    --wifi-matrix) run_wifi_matrix ;;
     --runtime-verify) run_runtime_verify ;;
 esac

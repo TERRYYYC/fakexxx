@@ -347,7 +347,7 @@ grep -Eq 'start2\| Starting: Intent' <<<"$OUT" &&
 # S (static): mode wired into usage/case/dispatch; body does not reuse the
 # /data/misc-scanning helpers.
 # ---------------------------------------------------------------------------
-grep -qF '[--current-profile|--acceptance-readiness|--cellular-matrix|--runtime-verify]' "$TEST_HOOK" &&
+grep -qF '[--current-profile|--acceptance-readiness|--cellular-matrix|--wifi-matrix|--runtime-verify]' "$TEST_HOOK" &&
     report ok "S usage lists the mode" ||
     report fail "S usage lists the mode" "usage line missing --acceptance-readiness"
 grep -q -- '--acceptance-readiness) run_acceptance_readiness ;;' "$TEST_HOOK" &&
