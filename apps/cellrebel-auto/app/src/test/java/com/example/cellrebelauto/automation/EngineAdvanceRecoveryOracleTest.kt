@@ -188,7 +188,7 @@ class EngineAdvanceRecoveryOracleTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -258,7 +258,7 @@ class EngineAdvanceRecoveryOracleTest {
 
     private fun buildEngine(planId: Long, clock: VClock): AutomationEngine {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         return AutomationEngine(
             planId = planId, planRepository = repo,
@@ -544,7 +544,7 @@ class EngineAdvanceRecoveryOracleTest {
         val clock = VClock()
         // Wire the forged executor through a fresh coordinator.
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            forgedExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            forgedExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         val engine = AutomationEngine(
             planId = planId, planRepository = repo,
@@ -605,7 +605,7 @@ class EngineAdvanceRecoveryOracleTest {
     /** Builds an engine with a custom executor (for tamper tests). */
     private fun buildEngineWith(planId: Long, clock: VClock, executor: ExternalApplyExecutor): AutomationEngine {
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            executor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            executor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         return AutomationEngine(
             planId = planId, planRepository = repo,

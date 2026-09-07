@@ -7,6 +7,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 
 /**
  * R43 (Sol GREEN-review P1-1): Room-backed durable operation receipts + checkpoints — the
@@ -163,11 +164,12 @@ interface AdvanceReceiptDao {
 class RoomDurableRecoveryLog(
     private val receipts: OperationReceiptDao,
     private val checkpoints: RecoveryCheckpointRoomDao,
-    private val releases: ReleaseReceiptDao
+    private val releases: ReleaseReceiptDao,
+    private val accessGate: CutoverAccessGate
 ) : DurableRecoveryLog {
 
     override fun receiptFor(idempotencyKey: String): RecordedReceipt? =
-        kotlinx.coroutines.runBlocking {
+        gated {
             receipts.byKey(idempotencyKey)?.let {
                 // R44 (Sol GREEN-review-3 F3): the readback carries the VERBATIM ApplyReceiptV1 proof
                 // fields — a receipt that loses them on read is not the §7.1 OperationReceipt.
@@ -190,10 +192,10 @@ class RoomDurableRecoveryLog(
         appliedAtEpochMs: Long?,
         environmentRevision: Long?,
         verificationLevelWire: Int?
-    ): RecordedReceipt? = kotlinx.coroutines.runBlocking {
+    ): RecordedReceipt? = gated {
         val existing = receipts.byKey(idempotencyKey)
         if (existing != null) {
-            return@runBlocking if (existing.requestDigest == requestDigest) {
+            return@gated if (existing.requestDigest == requestDigest) {
                 // R44 (Sol GREEN-review-3 F3): replay readback carries the stored verbatim proof fields.
                 RecordedReceipt(
                     existing.idempotencyKey, existing.requestDigest, existing.resultOutcome, existing.createdAt,
@@ -207,10 +209,10 @@ class RoomDurableRecoveryLog(
         // is the WINNER's — re-validate the digest. Two different digests racing on one key must
         // surface INV-13 conflict for the loser, never the winner's receipt misread as a replay.
         val row = receipts.byKey(idempotencyKey)
-            ?: return@runBlocking null // storage failed ⇒ not durable ⇒ fail closed
-        if (row.requestDigest != requestDigest) return@runBlocking null // INV-13 conflict, winner preserved
+            ?: return@gated null // storage failed ⇒ not durable ⇒ fail closed
+        if (row.requestDigest != requestDigest) return@gated null // INV-13 conflict, winner preserved
         // R44 (Sol GREEN-review-3 F3): the post-insert readback carries the verbatim proof fields.
-        return@runBlocking RecordedReceipt(
+        return@gated RecordedReceipt(
             row.idempotencyKey, row.requestDigest, row.resultOutcome, row.createdAt, row.leaseId,
             row.operationId, row.acceptedIntentHash, row.appliedAtEpochMs, row.environmentRevision,
             row.verificationLevelWire
@@ -218,27 +220,27 @@ class RoomDurableRecoveryLog(
     }
 
     override fun checkpointFor(attemptId: Long): RecoveryCheckpoint? =
-        kotlinx.coroutines.runBlocking {
+        gated {
             checkpoints.byAttempt(attemptId)?.let {
                 RecoveryCheckpoint(it.attemptId, it.lastDurableStage, it.receiptKey, it.recordedAt)
             }
         }
 
     override fun recordCheckpoint(attemptId: Long, lastDurableStage: String, receiptKey: String?, now: Long) {
-        kotlinx.coroutines.runBlocking {
+        gated {
             checkpoints.upsert(RecoveryCheckpointRow(attemptId, lastDurableStage, receiptKey, now))
         }
     }
 
     override fun releaseReceiptFor(leaseId: String): RecordedReleaseReceipt? =
-        kotlinx.coroutines.runBlocking {
+        gated {
             releases.byLease(leaseId)?.let {
                 RecordedReleaseReceipt(it.idempotencyKey, it.leaseId, it.releaseDigest, it.resultOutcome, it.createdAt)
             }
         }
 
     override fun releaseReceiptForKey(idempotencyKey: String): RecordedReleaseReceipt? =
-        kotlinx.coroutines.runBlocking {
+        gated {
             releases.byKey(idempotencyKey)?.let {
                 RecordedReleaseReceipt(it.idempotencyKey, it.leaseId, it.releaseDigest, it.resultOutcome, it.createdAt)
             }
@@ -250,10 +252,10 @@ class RoomDurableRecoveryLog(
         releaseDigest: String,
         outcome: String,
         now: Long
-    ): RecordedReleaseReceipt? = kotlinx.coroutines.runBlocking {
+    ): RecordedReleaseReceipt? = gated {
         val existing = releases.byKey(idempotencyKey)
         if (existing != null) {
-            return@runBlocking if (existing.leaseId == leaseId && existing.releaseDigest == releaseDigest) {
+            return@gated if (existing.leaseId == leaseId && existing.releaseDigest == releaseDigest) {
                 RecordedReleaseReceipt(existing.idempotencyKey, existing.leaseId, existing.releaseDigest, existing.resultOutcome, existing.createdAt)
             } else null // conflict, prior preserved
         }
@@ -261,8 +263,13 @@ class RoomDurableRecoveryLog(
         // R43 (Sol GREEN-review-2 F4): race-loss re-validation — the read-back row may be the
         // winner's; a differing (lease, digest) tuple is a conflict, never a successful replay.
         val row = releases.byKey(idempotencyKey)
-            ?: return@runBlocking null
-        if (row.leaseId != leaseId || row.releaseDigest != releaseDigest) return@runBlocking null
+            ?: return@gated null
+        if (row.leaseId != leaseId || row.releaseDigest != releaseDigest) return@gated null
         RecordedReleaseReceipt(row.idempotencyKey, row.leaseId, row.releaseDigest, row.resultOutcome, row.createdAt)
     }
+
+    private fun <T> gated(block: suspend () -> T): T =
+        accessGate.withNormalAccessBlockingOrThrow {
+            kotlinx.coroutines.runBlocking { block() }
+        }
 }

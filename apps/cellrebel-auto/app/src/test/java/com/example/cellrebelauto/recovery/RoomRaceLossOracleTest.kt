@@ -45,7 +45,10 @@ class RoomRaceLossOracleTest {
             AppDatabase::class.java
         ).build()
         log = RoomDurableRecoveryLog(
-            db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
+            db.operationReceiptDao(),
+            db.recoveryCheckpointRoomDao(),
+            db.releaseReceiptDao(),
+            com.example.cellrebelauto.cutover.CutoverAccessGate.open()
         )
     }
 

@@ -279,7 +279,7 @@ class MigrationTest {
                 latitude = 39.9, longitude = 116.4
             )
         )
-        com.example.cellrebelauto.repository.PlanRepository(db).finalizeAttemptSuccess(
+        com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open()).finalizeAttemptSuccess(
             attemptId = attemptId, taskId = taskId, expectedCompletedSuccesses = 0,
             runningObservedAt = 3250L, endedAt = 3300L, webScore = 8.0, videoScore = 7.0
         )

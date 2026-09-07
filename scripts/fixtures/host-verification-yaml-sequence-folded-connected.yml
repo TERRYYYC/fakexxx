@@ -1,0 +1,15 @@
+name: host-verification-fixture
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: >-
+          ./gradlew
+          :tools:app:connectedDebugAndroidTest
+        name: connected device guard
+        env:
+          CHECK_LABEL: install checks
+      - name: next host check
+        run: >-
+          ./gradlew
+          testLegacyIdDebugUnitTest

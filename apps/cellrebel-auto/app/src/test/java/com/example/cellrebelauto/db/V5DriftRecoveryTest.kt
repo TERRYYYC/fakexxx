@@ -158,7 +158,10 @@ class V5DriftRecoveryTest {
             createDeviceReplicaDriftedV5(prodDbFile)
 
             // Production entry point — the same call MainActivity's stack performs.
-            val db = AppDatabase.getInstance(context)
+            val db = AppDatabase.getInstance(
+                context,
+                com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+            )
             try {
                 // First real DB touch: pre-fix this is the crash site.
                 val latest = db.runSessionDao().getLatest()

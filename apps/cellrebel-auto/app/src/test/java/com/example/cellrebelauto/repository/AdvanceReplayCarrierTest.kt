@@ -36,7 +36,7 @@ class AdvanceReplayCarrierTest {
     @Before fun setUp() = runTest {
         db = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext<Context>(), AppDatabase::class.java)
             .allowMainThreadQueries().build()
-        repository = PlanRepository(db)
+        repository = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(sourceFileName = "advance.csv", importedAt = 1, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = 1),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 1.0, latitude = 1.0, priority = 1, requiredSuccesses = 1))

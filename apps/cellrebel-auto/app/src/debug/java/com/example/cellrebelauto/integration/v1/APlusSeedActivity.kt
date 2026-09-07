@@ -8,6 +8,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.widget.ScrollView
 import android.widget.TextView
+import com.example.cellrebelauto.CellRebelAutoApp
 import com.example.cellrebelauto.automation.AutomationService
 import com.example.cellrebelauto.db.AppDatabase
 import java.security.MessageDigest
@@ -79,7 +80,10 @@ class APlusSeedActivity : Activity() {
         view.text = "A+ §5A seed/run — working…"
         val cmd = intent?.getStringExtra(EXTRA_CMD)?.trim()
         thread(name = "ec-aplus-seed") {
-            val report = runCatching { dispatch(cmd, intent) }
+            val app = application as CellRebelAutoApp
+            val report = runCatching {
+                app.cutoverAccessGate.withNormalAccessBlockingOrThrow { dispatch(cmd, intent) }
+            }
                 .getOrElse { "FAILED: ${it::class.java.name}: ${it.message}" }
             Log.i(TAG, report)
             runOnUiThread { view.text = report }
@@ -128,7 +132,7 @@ class APlusSeedActivity : Activity() {
         val tasks = APlus10APlanSeed.toTasks(items)
 
         val (planId, taskIds) = runBlocking {
-            val db = AppDatabase.getInstance(applicationContext)
+            val db = (application as CellRebelAutoApp).database
             val pid = db.planDao().insertPlanWithTasks(plan, tasks)
             // getTasksForPlan is ordered `priority ASC, csvRow ASC` — the same
             // fixture order the seed built, so taskIds[i] pairs with items[i].
@@ -175,7 +179,7 @@ class APlusSeedActivity : Activity() {
         // planId. A run started against a foreign plan (a leftover CSV import,
         // a wrong id) would execute the wrong journeys and mis-attribute.
         val topologyMismatch = runBlocking {
-            val db = AppDatabase.getInstance(applicationContext)
+            val db = (application as CellRebelAutoApp).database
             val plan = db.planDao().getPlanById(planId)
                 ?: return@runBlocking "plan $planId not found — seed it first with cmd=seed_plan"
             val tasks = db.locationTaskDao().getTasksForPlan(planId)
@@ -249,7 +253,7 @@ class APlusSeedActivity : Activity() {
                     "time; stop it first. A pre-existing run NEVER satisfies this request.")
                 return
             }
-            val db = AppDatabase.getInstance(applicationContext)
+            val db = (application as CellRebelAutoApp).database
             val preMaxSessionId = db.query("SELECT COALESCE(MAX(id), 0) FROM run_sessions", null).use { c ->
                 c.moveToFirst(); c.getLong(0)
             }

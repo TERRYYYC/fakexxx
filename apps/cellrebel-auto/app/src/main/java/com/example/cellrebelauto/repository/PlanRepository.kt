@@ -8,6 +8,7 @@ import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptTransitions
 import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.PlanScheduler
+import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
 import com.example.cellrebelauto.environment.CompletionTrustContext
@@ -54,7 +55,10 @@ sealed interface LegacyReleaseValidation {
  * # 计划级仓库：封装计划/任务/尝试/会话 DAO，
  * # 并承载成功收尾事务（INV-3）：尝试行 + 守卫式任务自增原子完成，幂等
  */
-class PlanRepository(private val db: AppDatabase) {
+class PlanRepository(
+    private val db: AppDatabase,
+    private val accessGate: CutoverAccessGate
+) {
 
     /**
      * A derived, one-shot #97 proof. Durable session/attempt/receipt rows remain the truth owners;
@@ -154,19 +158,19 @@ class PlanRepository(private val db: AppDatabase) {
     // ---- Plan screen reads (observable) ----
 
     // # 观察最近导入的计划
-    fun observeLatestPlan(): Flow<LocationPlan?> = db.planDao().observeLatestPlan()
+    fun observeLatestPlan(): Flow<LocationPlan?> = accessGate.gateFlow(db.planDao().observeLatestPlan())
 
     // # 观察某计划的任务列表（DAO 已按执行顺序排序，INV-1）
     fun observeTasks(planId: Long): Flow<List<LocationTask>> =
-        db.locationTaskDao().observeTasksForPlan(planId)
+        accessGate.gateFlow(db.locationTaskDao().observeTasksForPlan(planId))
 
     // # 观察任务 + 每任务可信成功计数（§7.3 进度 UI 投影）
     fun observeTasksWithTrustedCounts(planId: Long): Flow<List<com.example.cellrebelauto.db.TaskWithTrustedCount>> =
-        db.locationTaskDao().observeTasksForPlanWithTrustedCounts(planId)
+        accessGate.gateFlow(db.locationTaskDao().observeTasksForPlanWithTrustedCounts(planId))
 
     // # 观察某计划每个任务的尝试总数
     fun observeAttemptCounts(planId: Long): Flow<List<TaskAttemptCount>> =
-        db.testAttemptDao().observeAttemptCountsForPlan(planId)
+        accessGate.gateFlow(db.testAttemptDao().observeAttemptCountsForPlan(planId))
 
     // ---- History / export (AC-C3, INV-8) ----
 
@@ -180,7 +184,7 @@ class PlanRepository(private val db: AppDatabase) {
 
     // # v2 遗留行（History 页分区展示，C1）
     fun observeLegacyResults(): Flow<List<com.example.cellrebelauto.model.TestResult>> =
-        db.testResultDao().getAllResults()
+        accessGate.gateFlow(db.testResultDao().getAllResults())
 
     /**
      * All attempts joined with task plan context, chronological (export).
@@ -197,12 +201,14 @@ class PlanRepository(private val db: AppDatabase) {
      * # 可观察的尝试联接（History 页，最新在前）
      */
     fun observeAttemptsWithTasks(): Flow<List<AttemptWithTask>> =
-        combine(
-            db.testAttemptDao().observeAllAttempts(),
-            db.locationTaskDao().observeAllTasks()
-        ) { attempts, tasks ->
-            joinAttemptsWithTasks(attempts, tasks)
-        }
+        accessGate.gateFlow(
+            combine(
+                db.testAttemptDao().observeAllAttempts(),
+                db.locationTaskDao().observeAllTasks()
+            ) { attempts, tasks ->
+                joinAttemptsWithTasks(attempts, tasks)
+            }
+        )
 
     // # plan_row = 任务在其计划执行顺序中的 1 起始序号（INV-1 投影）
     private fun joinAttemptsWithTasks(

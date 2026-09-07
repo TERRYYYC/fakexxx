@@ -64,7 +64,32 @@ android {
         }
     }
 
+    // #13: applicationId is an install-identity boundary, not a suffix. Keep the legacy
+    // sandbox buildable only for operator-export, and make the product package a distinct APK.
+    // SAF screens/codecs land in these source sets once the Auto-owned snapshot interface freezes.
+    flavorDimensions += "cutoverIdentity"
+    productFlavors {
+        create("legacyId") {
+            dimension = "cutoverIdentity"
+            applicationId = "com.example.cellrebelauto"
+            buildConfigField("String", "CUTOVER_IDENTITY", "\"legacyId\"")
+        }
+        create("productId") {
+            dimension = "cutoverIdentity"
+            applicationId = "come.xx.fakeaauto"
+            buildConfigField("String", "CUTOVER_IDENTITY", "\"productId\"")
+        }
+    }
+
     sourceSets {
+        // These manifests are intentionally flavor-only: they identify the carrier direction in
+        // the built APK without putting a legacy-export or product-import capability in main/.
+        getByName("legacyId") {
+            manifest.srcFile("src/legacyId/AndroidManifest.xml")
+        }
+        getByName("productId") {
+            manifest.srcFile("src/productId/AndroidManifest.xml")
+        }
         // The glmbench build type compiles the debug lane's sources (probe surfaces +
         // debug ProviderPrincipalBuild); its own srcDir stays available for lane-only
         // additions. Manifest merge pulls the debug-only exported probe activities.

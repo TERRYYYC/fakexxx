@@ -76,7 +76,7 @@ class EngineTrustedPathRedTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = PlanRepository(db)
+        repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -1290,6 +1290,7 @@ class EngineTrustedPathRedTest {
         val planId = seedPlan(taskId = taskId, quota = 1)
         val backend = APlusComposition.productionBackend(
             androidx.test.core.app.ApplicationProvider.getApplicationContext(), db,
+            accessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
             attemptValidityTimeoutMs = 90_000L
         )
         val clock = VirtualClock()

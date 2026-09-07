@@ -1,0 +1,17 @@
+name: host-verification-positive-fixture
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: >-
+          ./gradlew
+          testLegacyIdDebugUnitTest
+
+        # Sibling metadata is not part of the folded command.
+        name: install checks
+        env:
+          CHECK_LABEL: connected checks
+      - name: next install check
+        run: >-
+          ./gradlew
+          testProductIdDebugUnitTest

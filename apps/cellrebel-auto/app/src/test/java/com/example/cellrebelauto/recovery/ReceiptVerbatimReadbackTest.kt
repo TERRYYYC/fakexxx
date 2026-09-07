@@ -44,7 +44,7 @@ class ReceiptVerbatimReadbackTest {
     }
 
     private fun roomLog(): RoomDurableRecoveryLog =
-        RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+        RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
 
     private fun assertVerbatim(receipt: RecordedReceipt) {
         assertEquals("op-1", receipt.operationId)

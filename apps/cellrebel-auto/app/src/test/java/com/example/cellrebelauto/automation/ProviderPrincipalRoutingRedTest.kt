@@ -96,6 +96,7 @@ class ProviderPrincipalRoutingRedTest {
             APlusComposition.productionBackend(
                 app,
                 db,
+                accessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
                 providerApplicationId = ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION,
                 attemptValidityTimeoutMs = 90_000L,
                 serviceLifecycleExecutor = forked

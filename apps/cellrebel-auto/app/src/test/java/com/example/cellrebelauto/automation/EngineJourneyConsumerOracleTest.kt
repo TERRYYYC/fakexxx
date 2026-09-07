@@ -267,7 +267,7 @@ class EngineJourneyConsumerOracleTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = com.example.cellrebelauto.repository.PlanRepository(db)
+        repo = com.example.cellrebelauto.repository.PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -393,7 +393,7 @@ class EngineJourneyConsumerOracleTest {
         // R45: the Room durable log — the apply receipt (with the verbatim operationId) must be
         // durable for the post-advance observe tuple, exactly as in production.
         val coordinator = com.example.cellrebelauto.recovery.RecoveryCoordinator(
-            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao())
+            journeyExecutor, RoomDurableRecoveryLog(db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(), com.example.cellrebelauto.cutover.CutoverAccessGate.open())
         )
         return AutomationEngine(
             planId = planId, planRepository = repo,

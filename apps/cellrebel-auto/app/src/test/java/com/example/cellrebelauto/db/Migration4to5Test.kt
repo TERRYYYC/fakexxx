@@ -235,7 +235,11 @@ class Migration4to5Test {
     fun `production config migrates v4 ladder end to end without data loss`() = runTest {
         createV4Database()
 
-        val db = AppDatabase.buildProductionDatabase(context, dbName)
+        val db = AppDatabase.buildProductionDatabase(
+            context,
+            dbName,
+            com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        )
         try {
             // Legacy rows survive the full 4→…→9 ladder under the production builder.
             val task = db.locationTaskDao().getTaskById(1L)

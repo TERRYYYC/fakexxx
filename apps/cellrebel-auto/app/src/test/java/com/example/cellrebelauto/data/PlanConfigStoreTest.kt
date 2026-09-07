@@ -1,14 +1,30 @@
 package com.example.cellrebelauto.data
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import com.example.cellrebelauto.cutover.CutoverAccessGate
+import com.example.cellrebelauto.cutover.CutoverAccessUnavailableException
+import com.example.cellrebelauto.cutover.CutoverArchiveV2
+import com.example.cellrebelauto.cutover.CutoverExclusiveAdmission
+import com.example.cellrebelauto.cutover.CutoverExclusiveRelease
+import com.example.cellrebelauto.cutover.CutoverPlanConfigSchema
+import com.example.cellrebelauto.cutover.CutoverPreferenceEntry
+import com.example.cellrebelauto.cutover.CutoverRestoreIdentity
+import com.example.cellrebelauto.cutover.CutoverRestoreJournal
+import com.example.cellrebelauto.cutover.CutoverRestorePhase
+import com.example.cellrebelauto.cutover.CutoverUnavailableReason
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,6 +38,7 @@ import java.util.UUID
  * # 计划配置持久化测试：缓冲首启必填；每个测试使用独立的真实 DataStore 文件
  */
 @RunWith(RobolectricTestRunner::class)
+@OptIn(ExperimentalCoroutinesApi::class)
 class PlanConfigStoreTest {
 
     private lateinit var file: File
@@ -39,8 +56,12 @@ class PlanConfigStoreTest {
         file.delete()
     }
 
-    private fun newStore(scope: CoroutineScope) = PlanConfigStore(
-        PreferenceDataStoreFactory.create(scope = scope, produceFile = { file })
+    private fun newStore(
+        scope: CoroutineScope,
+        gate: CutoverAccessGate = CutoverAccessGate.open()
+    ) = PlanConfigStore(
+        PreferenceDataStoreFactory.create(scope = scope, produceFile = { file }),
+        gate
     )
 
     @Test
@@ -137,4 +158,56 @@ class PlanConfigStoreTest {
         assertEquals(true, persisted.locationStageEnabled)
         assertEquals(false, persisted.testStageEnabled)
     }
+
+    @Test
+    fun `normal writer is rejected before DataStore side effects while cutover owns admission`() = runTest {
+        val gate = CutoverAccessGate.open()
+        val store = newStore(backgroundScope, gate)
+        val lease = (gate.acquireExclusive(identity) as CutoverExclusiveAdmission.Granted).lease
+
+        val failure = runCatching { store.setGlobalBufferSeconds(120) }.exceptionOrNull()
+
+        assertTrue(failure is CutoverAccessUnavailableException)
+        assertEquals(CutoverUnavailableReason.CUTOVER_IN_PROGRESS, (failure as CutoverAccessUnavailableException).reason)
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+        assertNull(store.config.first().globalBufferSeconds)
+    }
+
+    @Test
+    fun `config flow waits while recovery is closed then reads the restored generation`() = runTest {
+        val journal = CutoverRestoreJournal(identity, CutoverRestorePhase.STAGED)
+        val gate = CutoverAccessGate.fromJournal(journal)
+        val store = newStore(backgroundScope, gate)
+        val pending = async { store.config.first() }
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        val lease = (gate.acquireExclusive(identity) as CutoverExclusiveAdmission.Granted).lease
+
+        store.restore(archive(globalBufferSeconds = 77))
+        runCurrent()
+        assertFalse(pending.isCompleted)
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+
+        assertEquals(77, pending.await().globalBufferSeconds)
+    }
+
+    private val identity = CutoverRestoreIdentity(
+        archiveDigest = "sha256:${"d".repeat(64)}",
+        captureId = "plan-config-gate"
+    )
+
+    private fun archive(globalBufferSeconds: Int): CutoverArchiveV2 = CutoverArchiveV2(
+        sourcePackage = "com.example.cellrebelauto",
+        captureId = identity.captureId,
+        schemaVersion = 9,
+        tables = emptyList(),
+        preferences = CutoverPlanConfigSchema.preferenceTypes.map { (key, type) ->
+            CutoverPreferenceEntry(
+                key = key,
+                type = type,
+                present = key == "global_buffer_seconds",
+                value = if (key == "global_buffer_seconds") globalBufferSeconds.toString() else null
+            )
+        }
+    )
 }
