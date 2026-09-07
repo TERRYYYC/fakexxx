@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.SystemClock
 import java.io.File
 import java.security.MessageDigest
+import name.caiyao.fakegps.data.db.AppDatabase
 
 /**
  * Production wiring for the v1 provider: the Android-backed implementations of
@@ -181,11 +182,19 @@ object ProviderRuntime {
         // commits each write on its own. See FileDurableKv's header.
         val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
         kvRef = kv
+        // Recovery is an owner-start lifecycle action. A snapshot read must
+        // never retry it because recovery can stage/copy/rename the profile DB.
+        val profileDatabaseAvailable = try {
+            AppDatabase.ensureLegacyDatabaseRecovered(appContext)
+            true
+        } catch (_: Exception) {
+            false
+        }
         return compose(
             kv = kv,
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
-            environment = QwyEnvironmentController(appContext),
+            environment = QwyEnvironmentController(appContext, profileDatabaseAvailable),
             authoritativeSource = BinderAuthoritativeContinuitySource(),
             expectedOracleOwnerPackage = appContext.packageName,
             expectedOracleOwnerUid = appContext.applicationInfo.uid,

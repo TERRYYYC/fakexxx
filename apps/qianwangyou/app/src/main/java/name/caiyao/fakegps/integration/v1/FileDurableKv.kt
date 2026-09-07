@@ -71,12 +71,21 @@ open class FileDurableKv(val directory: File) : DurableKv {
     /** Byte boundary after the last complete journal record, if recovery saw a torn suffix. */
     private var incompleteJournalOffset: Long? = null
 
+    /**
+     * A journal append can fail after the filesystem accepted bytes. This owner
+     * cannot know whether those bytes will survive, so it must never allocate
+     * another sequence from its stale in-memory view. A new owner replays disk
+     * and becomes the only safe recovery authority.
+     */
+    private var ownerFailure: Throwable? = null
+
     init {
         if (!directory.exists()) directory.mkdirs()
         load()
     }
 
     override fun read(namespace: String, key: String): String? = synchronized(lock) {
+        requireHealthyOwner()
         // A transaction must observe its own writes or read-modify-write breaks.
         txBuffer?.let { buffer ->
             if (buffer.containsKey(namespace to key)) return buffer[namespace to key]
@@ -86,6 +95,7 @@ open class FileDurableKv(val directory: File) : DurableKv {
 
     override fun write(namespace: String, key: String, value: String) {
         synchronized(lock) {
+            requireHealthyOwner()
             val buffer = txBuffer
             if (buffer != null) {
                 buffer[namespace to key] = value
@@ -99,6 +109,7 @@ open class FileDurableKv(val directory: File) : DurableKv {
     }
 
     override fun keys(namespace: String): Set<String> = synchronized(lock) {
+        requireHealthyOwner()
         val committed = data[namespace]?.keys?.toSet() ?: emptySet()
         val buffered = txBuffer?.keys?.filter { it.first == namespace }?.map { it.second }.orEmpty()
         committed + buffered
@@ -114,6 +125,7 @@ open class FileDurableKv(val directory: File) : DurableKv {
      * atomic step" true even when helpers wrap their own transaction.
      */
     override fun <T> transaction(block: () -> T): T = synchronized(lock) {
+        requireHealthyOwner()
         if (txBuffer != null) return@synchronized block()
 
         val buffer = HashMap<Pair<String, String>, String>()
@@ -139,14 +151,21 @@ open class FileDurableKv(val directory: File) : DurableKv {
      * on restart, which is worse than the crash it was trying to survive:
      * a rollback that only happens later, invisibly.
      *
-     * So the candidate state is built off to the side, persisted, and only
-     * adopted once the bytes are down. A failed commit leaves both memory and
-     * disk on the previous state — same state, one truth.
+     * So the candidate state is built off to the side and only adopted once the
+     * bytes are down. A staging failure leaves the prior state usable. A failure
+     * once journal I/O starts is different: disk may contain a complete record,
+     * so this owner fail-stops and requires a fresh replay owner.
      */
     private fun commit(buffer: Map<Pair<String, String>, String>) {
         if (buffer.isEmpty()) return
         persist(buffer)
         apply(buffer)
+    }
+
+    private fun requireHealthyOwner() {
+        check(ownerFailure == null) {
+            "durable store owner is stopped after an uncertain journal commit; reopen before reuse"
+        }
     }
 
     /**
@@ -275,12 +294,26 @@ open class FileDurableKv(val directory: File) : DurableKv {
         if (!staged.contentEquals(record)) {
             throw IllegalStateException("staged durable journal record is corrupt; previous state is intact")
         }
-        discardIncompleteSuffixBeforeAppend()
-        FileOutputStream(journalFile, true).use { out ->
-            out.write(staged)
-            out.fd.sync()
+        try {
+            discardIncompleteSuffixBeforeAppend()
+            appendJournalRecord(journalFile, staged)
+        } catch (failure: Throwable) {
+            ownerFailure = failure
+            throw failure
         }
         syncDirectory()
+    }
+
+    /**
+     * Journal-I/O seam for fault injection. Unlike [writeTempFile], a failure
+     * here may follow a partial or complete write to the live journal and must
+     * stop this owner.
+     */
+    internal open fun appendJournalRecord(target: File, bytes: ByteArray) {
+        FileOutputStream(target, true).use { out ->
+            out.write(bytes)
+            out.fd.sync()
+        }
     }
 
     private fun discardIncompleteSuffixBeforeAppend() {

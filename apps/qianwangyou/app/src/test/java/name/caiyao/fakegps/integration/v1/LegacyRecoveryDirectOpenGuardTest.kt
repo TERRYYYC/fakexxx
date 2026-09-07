@@ -9,20 +9,25 @@ class LegacyRecoveryDirectOpenGuardTest {
 
     @Test
     fun `every QWY direct profile database open is preceded by legacy recovery`() {
-        val source = File(
+        val controllerSource = File(
             "src/main/java/name/caiyao/fakegps/integration/v1/QwyEnvironmentController.kt",
         ).readText()
-        val recoveryCalls = Regex("AppDatabase\\.ensureLegacyDatabaseRecovered\\(appContext\\)")
-            .findAll(source)
-            .map { it.range.first }
-            .toList()
+        val runtimeSource = File(
+            "src/main/java/name/caiyao/fakegps/integration/v1/ProviderRuntime.kt",
+        ).readText()
         val opens = Regex("SQLiteDatabase\\.openDatabase")
-            .findAll(source)
+            .findAll(controllerSource)
             .map { it.range.first }
             .toList()
 
         assertEquals("schedule initialization and coordinate lookup are the only direct opens", 2, opens.size)
-        assertEquals("each direct-open path must attempt recovery", opens.size, recoveryCalls.size)
-        assertTrue(recoveryCalls.zip(opens).all { (recovery, open) -> recovery < open })
+        assertEquals(
+            "the read-only controller must not start recovery from a profile projection or coordinate lookup",
+            0,
+            Regex("AppDatabase\\.ensureLegacyDatabaseRecovered").findAll(controllerSource).count(),
+        )
+        val recovery = runtimeSource.indexOf("AppDatabase.ensureLegacyDatabaseRecovered(appContext)")
+        val controller = runtimeSource.indexOf("QwyEnvironmentController(appContext")
+        assertTrue("owner-start recovery must precede controller construction", recovery >= 0 && recovery < controller)
     }
 }
