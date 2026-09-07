@@ -120,7 +120,7 @@ class EnvironmentObserver(
         }
         if (authoritativeCommitStore != null) {
             if (authoritativeWindowIsValid && snap.continuitySinceElapsedRealtimeMs == null) {
-                tracker.markContinuityEstablished()
+                tracker.recordAuthoritativeObservationStart()
                 snap = tracker.snapshot()
             } else if (!authoritativeWindowIsValid && authoritativeSource != null) {
                 tracker.reportObserverGap()
