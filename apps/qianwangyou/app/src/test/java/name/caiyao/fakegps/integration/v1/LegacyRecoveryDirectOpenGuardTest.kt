@@ -29,5 +29,7 @@ class LegacyRecoveryDirectOpenGuardTest {
         val recovery = runtimeSource.indexOf("AppDatabase.ensureLegacyDatabaseRecovered(appContext)")
         val controller = runtimeSource.indexOf("QwyEnvironmentController(appContext")
         assertTrue("owner-start recovery must precede controller construction", recovery >= 0 && recovery < controller)
+// Rebase note: T2's third direct-open came from its (dropped) parallel profileRefs();
+// #105's merged profileRefsSnapshot() keeps the count at 2.
     }
 }
