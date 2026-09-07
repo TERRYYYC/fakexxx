@@ -69,13 +69,13 @@ The transaction re-reads the durable owner, runs `APlusAttemptDriver`/`AttemptTr
 
 The QWY owner froze the cross-app contract on 2026-09-07. Binding-capable discovery is advertised only by exact `serviceVersion = "1.1.0"`; merged `1.0.0` is permanently non-binding-capable. QWY may emit `1.1.0` only after its four-field schedule projection and identity/version invariants are implemented and host-tested. Auto uses an exact allowlist, never lexical version comparison or feature inference from non-empty catalogs.
 
-Proposed CSV v2 header:
+Frozen CSV v2 header:
 
 ```text
 longitude,latitude,priority,required_successes,schedule_id,schedule_item_id
 ```
 
-The v1 four-column header remains byte-for-byte accepted as legacy input. Proposed Auto Room v9 additions are nullable for migration safety:
+The v1 four-column header remains byte-for-byte accepted as legacy input. Frozen Auto Room v9 additions are nullable for migration safety:
 
 ```kotlin
 LocationPlan.boundScheduleId: String?

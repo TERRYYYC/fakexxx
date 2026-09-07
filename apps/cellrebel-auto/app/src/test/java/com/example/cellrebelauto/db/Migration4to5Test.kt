@@ -142,7 +142,7 @@ class Migration4to5Test {
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
             // This test focuses on 4→5 semantics; the current schema continues through the
             // no-op 5→6 step and additive history-preserving 6→7 / 7→8 steps.
-            .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
             .allowMainThreadQueries()
             .build()
 
@@ -226,7 +226,7 @@ class Migration4to5Test {
     /**
      * F-19 regression guard for the dispatch requirement「真有 v2–v4 设备时仍走迁移，不是无脑重建」:
      * the PRODUCTION configuration (quarantine + full ladder + fallbackToDestructiveMigration)
-     * must migrate a genuine v4 file 4→5→6→7 with ALL data preserved. The destructive fallback only
+     * must migrate a genuine v4 file through v9 with ALL data preserved. The destructive fallback only
      * fires when NO migration path exists — a complete ladder means it stays dormant, and the
      * v5-drift quarantine must ignore non-v5 files entirely.
      * # 生产配置（含 destructive fallback + 隔离区）打开 v4 库：走阶梯保数据，fallback 不误触发
@@ -237,7 +237,7 @@ class Migration4to5Test {
 
         val db = AppDatabase.buildProductionDatabase(context, dbName)
         try {
-            // Legacy rows survive the full 4→5→6→7 ladder under the production builder.
+            // Legacy rows survive the full 4→…→9 ladder under the production builder.
             val task = db.locationTaskDao().getTaskById(1L)
             assertNotNull("v4 data must survive the production open path", task)
             assertEquals(2, task!!.completedSuccesses)
@@ -246,7 +246,7 @@ class Migration4to5Test {
             assertEquals(1, db.testAttemptDao().getAttemptsForTask(1L).size)
 
             // And the file really is at the current schema version.
-            assertEquals(8, db.openHelper.readableDatabase.version)
+            assertEquals(9, db.openHelper.readableDatabase.version)
         } finally {
             db.close()
         }

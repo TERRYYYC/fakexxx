@@ -368,3 +368,24 @@ val MIGRATION_7_8 = object : Migration(7, 8) {
         )
     }
 }
+
+/**
+ * v8 → v9 (#79): add-only schedule binding and observation-attribution columns. Every column is
+ * nullable so historical v8 plans/attempts/observations remain byte-semantically legacy. SQLite's
+ * UNIQUE(planId, scheduleItemId) permits multiple null legacy rows while rejecting duplicate
+ * non-null item identities inside one bound plan.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN boundScheduleId TEXT")
+        db.execSQL("ALTER TABLE location_tasks ADD COLUMN scheduleItemId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusIntentProfileRef TEXT")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN scheduleItemId TEXT")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN scheduleVersion INTEGER")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                "`index_location_tasks_planId_scheduleItemId` ON " +
+                "`location_tasks` (`planId`, `scheduleItemId`)"
+        )
+    }
+}

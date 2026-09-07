@@ -224,7 +224,9 @@ object APlusComposition {
                         observedAtElapsedRealtimeMs = r.observedAtElapsedRealtimeMs,
                         observedAtEpochMs = r.observedAtEpochMs,
                         continuitySinceElapsedRealtimeMs = r.continuitySinceElapsedRealtimeMs,
-                        evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";")
+                        evidenceRefs = if (r.evidenceRefs.isBlank()) emptyList() else r.evidenceRefs.split(";"),
+                        scheduleItemId = r.scheduleItemId,
+                        scheduleVersion = r.scheduleVersion
                     )
 
                 suspend fun observeLive(phase: String, attemptId: Long, runSessionId: Long):
@@ -256,7 +258,8 @@ object APlusComposition {
                             com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
                                 runSessionId, attemptId, plan.id, anchorScheduleRef,
                                 notBeforeEpochMs = attempt.startedAt,
-                                deadlineEpochMs = attempt.startedAt + attemptValidityTimeoutMs
+                                deadlineEpochMs = attempt.startedAt + attemptValidityTimeoutMs,
+                                profileRef = attempt.aplusIntentProfileRef
                             )
                         )
                     val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null
@@ -277,7 +280,9 @@ object APlusComposition {
                             continuitySinceElapsedRealtimeMs = snapshot.continuitySinceElapsedRealtimeMs,
                             continuitySinceEpochMs = null,
                             evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
-                            evidenceRefs = snapshot.evidenceRefs.joinToString(";")
+                            evidenceRefs = snapshot.evidenceRefs.joinToString(";"),
+                            scheduleItemId = snapshot.scheduleItemId,
+                            scheduleVersion = snapshot.scheduleVersion
                         )
                     )
                     return snapshot

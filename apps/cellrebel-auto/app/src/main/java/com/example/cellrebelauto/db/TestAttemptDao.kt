@@ -35,7 +35,8 @@ interface TestAttemptDao {
             "runSessionId = :runSessionId AND status = 'starting' AND runningObservedAt IS NULL AND " +
             "endedAt IS NULL AND aplusState IS NULL AND aplusLeaseId IS NULL AND " +
             "currentExecutionId IS NULL AND aplusAnchorScheduleId IS NULL AND " +
-            "aplusAnchorItemId IS NULL AND aplusAnchorVersion IS NULL"
+            "aplusAnchorItemId IS NULL AND aplusAnchorVersion IS NULL AND " +
+            "aplusIntentProfileRef IS NULL"
     )
     suspend fun deletePristineIdReservation(attemptId: Long, taskId: Long, runSessionId: Long): Int
 

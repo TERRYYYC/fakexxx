@@ -44,5 +44,8 @@ data class DurableObservationRecord(
     /** JSON array of evidence ref strings (round-trippable, no lossy joinToString). */
     val evidenceRefsJson: String,
     /** Legacy evidenceRefs column kept for migration compatibility (semicolon-joined). */
-    val evidenceRefs: String
+    val evidenceRefs: String,
+    /** #79 identity legs from the provider observation; nullable only for migrated v8 history. */
+    val scheduleItemId: String? = null,
+    val scheduleVersion: Long? = null
 )
