@@ -1,10 +1,14 @@
 package com.example.cellrebelauto.cutover
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.sync.Mutex
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -178,6 +182,97 @@ class CutoverAccessGateTest {
         assertFalse(lease.release(CutoverExclusiveRelease.OPEN))
         assertEquals(CutoverGatePhase.EXCLUSIVE, gate.snapshot().phase)
         assertTrue(resumed.release(CutoverExclusiveRelease.OPEN))
+    }
+
+    @Test
+    fun cancellingExclusiveWhileWaitingForDrainReopensAdmission() = runTest {
+        val gate = CutoverAccessGate.open()
+        val normalStarted = CompletableDeferred<Unit>()
+        val finishNormal = CompletableDeferred<Unit>()
+        val normal = async {
+            gate.withNormalAccess {
+                normalStarted.complete(Unit)
+                finishNormal.await()
+            }
+        }
+        normalStarted.await()
+        val exclusive = async { gate.acquireExclusive(identity) }
+        runCurrent()
+
+        exclusive.cancelAndJoin()
+
+        assertEquals(CutoverGatePhase.OPEN, gate.snapshot().phase)
+        finishNormal.complete(Unit)
+        normal.await()
+        assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+    }
+
+    @Test
+    fun cancelledNormalCleanupCannotLeakAnActiveAdmission() = runTest {
+        val gate = CutoverAccessGate.open()
+        val normalStarted = CompletableDeferred<Unit>()
+        val normal = async {
+            gate.withNormalAccess {
+                normalStarted.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        normalStarted.await()
+        val mutex = mutexOf(gate)
+        mutex.lock()
+
+        normal.cancel(CancellationException("cancel normal while cleanup lock is contended"))
+        runCurrent()
+        mutex.unlock()
+        normal.join()
+
+        assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+    }
+
+    @Test
+    fun cancelledExclusiveReleaseCompletesBeforeConsumingTheLease() = runTest {
+        val gate = CutoverAccessGate.open()
+        val lease = requireType<CutoverExclusiveAdmission.Granted>(gate.acquireExclusive(identity)).lease
+        val mutex = mutexOf(gate)
+        mutex.lock()
+        val release = async { lease.release(CutoverExclusiveRelease.OPEN) }
+        runCurrent()
+
+        release.cancel()
+        mutex.unlock()
+        release.join()
+
+        assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+    }
+
+    @Test
+    fun rejectionDetailsStayTypedWhenExclusiveReleaseWinsTheNextLock() = runTest {
+        val gate = CutoverAccessGate.open()
+        val lease = requireType<CutoverExclusiveAdmission.Granted>(gate.acquireExclusive(identity)).lease
+        val mutex = mutexOf(gate)
+        mutex.lock()
+        val blocked = async {
+            runCatching { gate.withNormalAccess { "must not run" } }
+        }
+        runCurrent()
+        val release = async { lease.release(CutoverExclusiveRelease.OPEN) }
+        runCurrent()
+
+        mutex.unlock()
+        val blockedResult = blocked.await()
+        release.await()
+
+        assertEquals(
+            CutoverAccessResult.Unavailable(CutoverUnavailableReason.CUTOVER_IN_PROGRESS, identity),
+            blockedResult.getOrThrow()
+        )
+        assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+    }
+
+    private fun mutexOf(gate: CutoverAccessGate): Mutex {
+        val field = CutoverAccessGate::class.java.getDeclaredField("mutex")
+        field.isAccessible = true
+        return field.get(gate) as Mutex
     }
 
     private inline fun <reified T> requireType(value: Any?): T {

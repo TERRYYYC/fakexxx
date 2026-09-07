@@ -285,8 +285,10 @@ are constructed. Admission tokens are capabilities, not booleans callers may for
 | `OPEN` | normal reader/writer enters | `OPEN(n+1)` | token must close exactly once; new work is admitted only while open |
 | `OPEN(n)` | exclusive cutover requested | `DRAINING(n)` | close new normal admission before requesting run cancellation/convergence |
 | `DRAINING(n>0)` | normal token closes | `DRAINING(n-1)` | wait without holding a Room transaction or DataStore edit |
+| `DRAINING(n)` | exclusive requester is cancelled or quiescence fails | `OPEN(n)` | cancellation-safe cleanup reopens admission without losing already-admitted token accounting |
 | `DRAINING(0)` | exclusive owner identity bound | `EXCLUSIVE(owner)` | exactly one capture/restore owner; second owner gets typed busy/conflict |
 | `EXCLUSIVE(owner)` | successful source export or target reaches `READY` / `ROLLED_BACK` | `OPEN` | release once; stale owner cannot reopen a newer generation |
+| `EXCLUSIVE(owner)` | release begins under cancellation | terminal release state | release completes non-cancellably before the capability is consumed |
 | any | process restart | derived from durable journal | absent/`READY`/`ROLLED_BACK` opens; active non-ready phase starts closed and may only resume/rollback |
 
 Normal readers never return an empty/default substitute for blocked restored data: one-shot calls
@@ -304,6 +306,7 @@ projection and is never stored separately.
 
 | Current | Event / proof | Next | Side-effect authority |
 | --- | --- | --- | --- |
+| any | exclusive lease acquired | durable phase re-read | no caller may act on a journal snapshot obtained before exclusive ownership |
 | absent | canonical archive + fresh `ELIGIBLE` + target Room empty + all five target raw preferences absent | `STAGED` | persist digest/capture before target write; non-empty target fails closed |
 | `STAGED` | target still empty | `ROOM_WRITTEN` | insert all 18 tables in one Room transaction, read back and prove exact table digests |
 | `STAGED` after restart | target Room already equals archive Room projection | `ROOM_WRITTEN` | recognize the prior atomic commit; never insert a duplicate generation |
@@ -317,11 +320,16 @@ projection and is never stored separately.
 | `ROLLBACK_REQUIRED` | all 18 target tables cleared in reverse dependency order and all five raw preferences absent | `ROLLED_BACK` | rollback adapter; valid because staging proved the target was empty; legacy untouched |
 | same phase | retry with same archive digest/capture | same or next proven phase | idempotent replay |
 | any active phase | different archive or second importer | reject | no overwrite/interleaving |
+| any journal write | write returns normally | returned phase is confirmed | a write that throws or is cancelled is outcome-unknown; the gate remains recovery-closed until a later exclusive owner re-reads durable state |
 
 Crash recovery never guesses which write ran. Room transaction and the single DataStore `edit` are
 each atomic; exact readback distinguishes `not written`, `fully written`, and `mismatch`. The target
 empty precondition is evaluated before `STAGED`, so rollback has one honest baseline instead of a
 second hidden backup generation.
+
+Generation classification carries two independent proofs: `isEmpty` and `matchesArchive`. An empty
+Room or all-absent preference archive can make both true; staging consumes `isEmpty`, while replay and
+readback consume `matchesArchive`. Neither proof is inferred as the negation of the other.
 
 ### 4. Eligibility observation
 
@@ -329,7 +337,7 @@ Lifecycle owner: `CutoverEligibilityPort`; observations are not durable authoriz
 
 ### 5. Pairing history
 
-Lifecycle owner after restore remains the existing `ProviderTrustStore`. Imported rows are history only; active approval can only be minted later through the existing operator approval path. A generic restore adapter is forbidden from exact-restoring an active pairing.
+Lifecycle owner after restore remains the existing `ProviderTrustStore`. Imported rows are history only; active approval can only be minted later through the existing operator approval path. A generic restore adapter is forbidden from exact-restoring an active pairing. Source capture may project active rows to historical rows, but target classification and readback always inspect the raw stored `revokedAt`; the source projection is never reused to hide active target trust.
 
 ## Invariants
 
@@ -368,6 +376,18 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
   query can observe imported active trust even after `READY`.
 - `CUT-INV-25`: blocked reads surface typed unavailability or wait; they never masquerade as an
   empty database or defaulted PlanConfig, and blocked writes have zero side effects.
+- `CUT-INV-26`: durable restore phase is read only after exclusive ownership; a stale pre-lock read
+  cannot roll back or overwrite a newer terminal generation.
+- `CUT-INV-27`: an unconfirmed journal write or unreadable durable journal keeps admission recovery-
+  closed, including when the attempted phase was terminal.
+- `CUT-INV-28`: target pairing verification uses raw stored cells; source-only historical projection
+  cannot make a target row with `revokedAt == null` classify exact.
+- `CUT-INV-29`: target emptiness and archive equality are independent proofs and may both hold for an
+  empty archive.
+- `CUT-INV-30`: cancellation at drain wait, normal-token cleanup, or exclusive release cannot strand
+  the gate in `DRAINING`/`EXCLUSIVE` or leak an active normal token.
+- `CUT-INV-31`: normal rejection reason and identity are captured in the same lock acquisition that
+  rejects admission; a concurrent exclusive release cannot turn the typed result into an exception.
 
 ## Adversarial matrix
 
@@ -399,6 +419,12 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 | `CUT-A24` | process restarts in each non-ready journal phase | gate initializes closed before repository/service construction; resume/rollback is the only access |
 | `CUT-A25` | active source pairing is captured and target reaches ready | source stays active; target row is historical with non-null `revokedAt`; active lookup returns none |
 | `CUT-A26` | a production caller obtains a DAO/DataStore without the gate | static consumer census test fails |
+| `CUT-A27` | caller A reads `STAGED`, caller B reaches `READY`, then A obtains exclusive ownership | A re-reads `READY`; no rollback or target clear occurs |
+| `CUT-A28` | journal write commits then throws/cancels before confirmation | gate remains recovery-closed; a later exclusive retry re-reads durable state |
+| `CUT-A29` | restored pairing row is mutated to raw `revokedAt == null` | target classification is non-exact and active lookup proves the trust violation |
+| `CUT-A30` | archive Room is empty and all five preferences are absent | classification proves both empty and exact; coordinator completes without manufacturing rows/defaults |
+| `CUT-A31` | cancellation while waiting for drain, cleaning a normal token, or releasing an exclusive lease | cleanup completes or reopens safely; no permanent gate/token leak |
+| `CUT-A32` | blocked normal call races the exclusive owner's release | caller receives the typed rejection captured at admission; no state-change exception |
 
 ## Implementation tasks
 

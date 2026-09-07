@@ -151,6 +151,39 @@ class RoomV9CutoverStoreTest {
         assertTrue(EXPECTED_TABLES.all { count(target, it) == 0L })
     }
 
+    @Test
+    fun targetReadbackCannotHistoricalizeAnActivePairingBeforeComparison() = runTest {
+        val source = database()
+        val target = database()
+        seedSource(source)
+        val archive = archive(RoomV9CutoverStore(source).captureTables())
+        val targetStore = RoomV9CutoverStore(target)
+        targetStore.restore(archive)
+        target.openHelper.writableDatabase.execSQL(
+            "UPDATE provider_pairing_records SET revokedAt = NULL"
+        )
+
+        assertTrue(
+            target.providerPairingDao().activeFor("name.caiyao.fakegps", "signer-a") != null
+        )
+        assertEquals(CutoverGenerationState.MISMATCH, targetStore.classify(archive))
+    }
+
+    @Test
+    fun emptyRoomArchiveIsBothAnEmptyTargetAndAnExactGeneration() = runTest {
+        val sourceStore = RoomV9CutoverStore(database())
+        val targetStore = RoomV9CutoverStore(database())
+        val archive = archive(sourceStore.captureTables())
+
+        val before = targetStore.classify(archive)
+        assertTrue(before.isEmpty)
+        assertTrue(before.matchesArchive)
+        targetStore.restore(archive)
+        val after = targetStore.classify(archive)
+        assertTrue(after.isEmpty)
+        assertTrue(after.matchesArchive)
+    }
+
     private fun database(): AppDatabase {
         val context = ApplicationProvider.getApplicationContext<Context>()
         return Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)

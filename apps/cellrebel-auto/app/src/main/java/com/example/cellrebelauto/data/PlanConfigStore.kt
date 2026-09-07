@@ -92,11 +92,10 @@ class PlanConfigStore(
     override suspend fun classify(archive: CutoverArchiveV2): CutoverGenerationState {
         val expected = validateCutoverPreferences(archive.preferences)
         val current = captureCutoverPreferences()
-        return when {
-            current.none { it.present } -> CutoverGenerationState.EMPTY
-            current == expected -> CutoverGenerationState.EXACT
-            else -> CutoverGenerationState.MISMATCH
-        }
+        return CutoverGenerationState(
+            isEmpty = current.none { it.present },
+            matchesArchive = current == expected
+        )
     }
 
     override suspend fun restore(archive: CutoverArchiveV2) {

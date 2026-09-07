@@ -98,6 +98,21 @@ class PlanConfigCutoverStoreTest {
         assertEquals(44, store.config.first().testTimeoutSeconds)
     }
 
+    @Test
+    fun allAbsentArchiveIsBothAnEmptyTargetAndAnExactGeneration() = runTest {
+        val store = newStore(backgroundScope)
+        val archive = archive(allAbsent())
+
+        val before = store.classify(archive)
+        assertTrue(before.isEmpty)
+        assertTrue(before.matchesArchive)
+        store.restore(archive)
+        val after = store.classify(archive)
+        assertTrue(after.isEmpty)
+        assertTrue(after.matchesArchive)
+        assertTrue(store.captureCutoverPreferences().none { it.present })
+    }
+
     private fun newStore(scope: CoroutineScope): PlanConfigStore {
         val file = File(
             System.getProperty("java.io.tmpdir"),

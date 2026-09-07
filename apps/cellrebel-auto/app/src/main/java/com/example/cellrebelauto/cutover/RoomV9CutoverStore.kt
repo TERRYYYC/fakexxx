@@ -30,7 +30,7 @@ class RoomV9CutoverStore(
     override suspend fun captureTables(): List<CutoverTableSection> = database.withTransaction {
         val sql = database.openHelper.writableDatabase
         val schema = inspectAndVerifySchema(sql)
-        captureTables(sql, schema)
+        captureTables(sql, schema, historicalizePairing = true)
     }
 
     override suspend fun classify(archive: CutoverArchiveV2): CutoverGenerationState =
@@ -38,16 +38,12 @@ class RoomV9CutoverStore(
             val sql = database.openHelper.writableDatabase
             val schema = inspectAndVerifySchema(sql)
             validateArchiveTables(archive, schema)
-            if (RESTORE_ORDER.all { rowCount(sql, it) == 0L }) {
-                CutoverGenerationState.EMPTY
-            } else {
-                val captured = captureTables(sql, schema)
-                if (captured == archive.tables.sortedBy { it.name }) {
-                    CutoverGenerationState.EXACT
-                } else {
-                    CutoverGenerationState.MISMATCH
-                }
-            }
+            val empty = RESTORE_ORDER.all { rowCount(sql, it) == 0L }
+            val captured = captureTables(sql, schema, historicalizePairing = false)
+            CutoverGenerationState(
+                isEmpty = empty,
+                matchesArchive = captured == archive.tables.sortedBy { it.name }
+            )
         }
 
     override suspend fun restore(archive: CutoverArchiveV2) {
@@ -175,7 +171,11 @@ class RoomV9CutoverStore(
         return TableMeta(tableName, columns.sortedBy { it.cid }, descriptor.toString())
     }
 
-    private fun captureTables(sql: SupportSQLiteDatabase, schema: RoomSchema): List<CutoverTableSection> =
+    private fun captureTables(
+        sql: SupportSQLiteDatabase,
+        schema: RoomSchema,
+        historicalizePairing: Boolean
+    ): List<CutoverTableSection> =
         EXPECTED_TABLES.map { tableName ->
             val meta = schema.tables.getValue(tableName)
             val rows = mutableListOf<CutoverRowPayload>()
@@ -187,7 +187,12 @@ class RoomV9CutoverStore(
                     .map { it.index }
                 while (cursor.moveToNext()) {
                     val values = cursorIndices.mapIndexed { index, cursorIndex ->
-                        readCell(cursor, cursorIndex, historicalPairingOverride(tableName, meta, cursor, index))
+                        val override = if (historicalizePairing) {
+                            historicalPairingOverride(tableName, meta, cursor, index)
+                        } else {
+                            null
+                        }
+                        readCell(cursor, cursorIndex, override)
                     }
                     val rowBytes = encodeCells(values)
                     val keyBytes = encodeCells(primaryIndices.map(values::get))

@@ -4,10 +4,16 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
-enum class CutoverGenerationState {
-    EMPTY,
-    EXACT,
-    MISMATCH
+data class CutoverGenerationState(
+    val isEmpty: Boolean,
+    val matchesArchive: Boolean
+) {
+    companion object {
+        val EMPTY = CutoverGenerationState(isEmpty = true, matchesArchive = false)
+        val EMPTY_EXACT = CutoverGenerationState(isEmpty = true, matchesArchive = true)
+        val EXACT = CutoverGenerationState(isEmpty = false, matchesArchive = true)
+        val MISMATCH = CutoverGenerationState(isEmpty = false, matchesArchive = false)
+    }
 }
 
 interface CutoverRestoreJournalPort {
@@ -80,13 +86,9 @@ class AutoCutoverRestoreCoordinator(
 ) {
     suspend fun restore(decoded: DecodedCutoverArchiveV2): AutoCutoverRestoreResult {
         val identity = CutoverRestoreIdentity(decoded.archiveDigest, decoded.archive.captureId)
-        var current = journalPort.read()
-        if (current != null && current.phase != CutoverRestorePhase.ROLLED_BACK && current.identity != identity) {
-            return AutoCutoverRestoreResult.Rejected(
-                CutoverCoordinatorRejection.ARCHIVE_CONFLICT,
-                current
-            )
-        }
+        var current: CutoverRestoreJournal? = null
+        var durableReadConfirmed = false
+        var journalWriteConfirmed = true
 
         val admission = accessGate.acquireExclusive(identity) { quiescencePort.quiesce() }
         when (admission) {
@@ -101,11 +103,51 @@ class AutoCutoverRestoreCoordinator(
         }
         val lease = (admission as CutoverExclusiveAdmission.Granted).lease
         var terminal: AutoCutoverRestoreResult? = null
+
+        suspend fun readCurrent(): CutoverRestoreJournal? {
+            durableReadConfirmed = false
+            val durable = journalPort.read()
+            current = durable
+            durableReadConfirmed = true
+            return durable
+        }
+
+        suspend fun writeCurrent(journal: CutoverRestoreJournal) {
+            current = journal
+            journalWriteConfirmed = false
+            journalPort.write(journal)
+            journalWriteConfirmed = true
+        }
+
+        suspend fun persistTracked(transition: CutoverRestoreTransition): CutoverRestoreJournal? =
+            when (transition) {
+                is CutoverRestoreTransition.Advanced -> transition.journal.also { writeCurrent(it) }
+                is CutoverRestoreTransition.Idempotent -> transition.journal
+                is CutoverRestoreTransition.Rejected -> null
+            }
+
+        suspend fun persistFailureTracked(
+            journal: CutoverRestoreJournal,
+            reason: CutoverRestoreFailureReason
+        ): CutoverRestoreJournal = requireNotNull(
+            persistTracked(reducer.reduce(journal, CutoverRestoreEvent.Failed(journal.identity, reason)))
+        )
+
         try {
-            if (current == null || current.phase == CutoverRestorePhase.ROLLED_BACK) {
-                if (roomPort.classify(decoded.archive) != CutoverGenerationState.EMPTY ||
-                    preferencePort.classify(decoded.archive) != CutoverGenerationState.EMPTY
-                ) {
+            current = readCurrent()
+            if (current != null &&
+                current?.phase != CutoverRestorePhase.ROLLED_BACK &&
+                current?.identity != identity
+            ) {
+                return AutoCutoverRestoreResult.Rejected(
+                    CutoverCoordinatorRejection.ARCHIVE_CONFLICT,
+                    current
+                ).also { terminal = it }
+            }
+            if (current == null || current?.phase == CutoverRestorePhase.ROLLED_BACK) {
+                val roomState = roomPort.classify(decoded.archive)
+                val preferenceState = preferencePort.classify(decoded.archive)
+                if (!roomState.isEmpty || !preferenceState.isEmpty) {
                     return AutoCutoverRestoreResult.Rejected(
                         CutoverCoordinatorRejection.TARGET_NOT_EMPTY,
                         current
@@ -116,8 +158,7 @@ class AutoCutoverRestoreCoordinator(
                     CutoverRestoreEvent.Begin(identity, eligibilityPort.observe())
                 )) {
                     is CutoverRestoreTransition.Advanced -> {
-                        journalPort.write(begun.journal)
-                        current = begun.journal
+                        writeCurrent(begun.journal)
                     }
                     is CutoverRestoreTransition.Idempotent -> current = begun.journal
                     is CutoverRestoreTransition.Rejected -> {
@@ -135,57 +176,71 @@ class AutoCutoverRestoreCoordinator(
                     CutoverRestorePhase.STAGED -> {
                         val eligibility = eligibilityPort.observe()
                         if (eligibility != CutoverEligibility.ELIGIBLE) {
-                            current = persist(
+                            current = persistTracked(
                                 reducer.reduce(journal, CutoverRestoreEvent.Begin(identity, eligibility))
                             ) ?: return invalidTransition(journal).also { terminal = it }
                             continue
                         }
-                        when (roomPort.classify(decoded.archive)) {
-                            CutoverGenerationState.EMPTY -> roomPort.restore(decoded.archive)
-                            CutoverGenerationState.EXACT -> Unit
-                            CutoverGenerationState.MISMATCH -> {
-                                current = persistFailure(journal, CutoverRestoreFailureReason.ROOM_WRITE_FAILED)
+                        val roomState = roomPort.classify(decoded.archive)
+                        when {
+                            roomState.matchesArchive -> Unit
+                            roomState.isEmpty -> roomPort.restore(decoded.archive)
+                            else -> {
+                                current = persistFailureTracked(
+                                    journal,
+                                    CutoverRestoreFailureReason.ROOM_WRITE_FAILED
+                                )
                                 continue
                             }
                         }
-                        if (roomPort.classify(decoded.archive) != CutoverGenerationState.EXACT) {
-                            current = persistFailure(journal, CutoverRestoreFailureReason.ROOM_WRITE_FAILED)
+                        if (!roomPort.classify(decoded.archive).matchesArchive) {
+                            current = persistFailureTracked(
+                                journal,
+                                CutoverRestoreFailureReason.ROOM_WRITE_FAILED
+                            )
                             continue
                         }
-                        current = persist(
+                        current = persistTracked(
                             reducer.reduce(journal, CutoverRestoreEvent.RoomWritten(identity))
                         ) ?: return invalidTransition(journal).also { terminal = it }
                     }
 
                     CutoverRestorePhase.ROOM_WRITTEN -> {
-                        when (preferencePort.classify(decoded.archive)) {
-                            CutoverGenerationState.EMPTY -> preferencePort.restore(decoded.archive)
-                            CutoverGenerationState.EXACT -> Unit
-                            CutoverGenerationState.MISMATCH -> {
-                                current = persistFailure(journal, CutoverRestoreFailureReason.DATASTORE_WRITE_FAILED)
+                        val preferenceState = preferencePort.classify(decoded.archive)
+                        when {
+                            preferenceState.matchesArchive -> Unit
+                            preferenceState.isEmpty -> preferencePort.restore(decoded.archive)
+                            else -> {
+                                current = persistFailureTracked(
+                                    journal,
+                                    CutoverRestoreFailureReason.DATASTORE_WRITE_FAILED
+                                )
                                 continue
                             }
                         }
-                        if (preferencePort.classify(decoded.archive) != CutoverGenerationState.EXACT) {
-                            current = persistFailure(journal, CutoverRestoreFailureReason.DATASTORE_WRITE_FAILED)
+                        if (!preferencePort.classify(decoded.archive).matchesArchive) {
+                            current = persistFailureTracked(
+                                journal,
+                                CutoverRestoreFailureReason.DATASTORE_WRITE_FAILED
+                            )
                             continue
                         }
-                        current = persist(
+                        current = persistTracked(
                             reducer.reduce(journal, CutoverRestoreEvent.DataStoreWritten(identity))
                         ) ?: return invalidTransition(journal).also { terminal = it }
                     }
 
                     CutoverRestorePhase.DATASTORE_WRITTEN -> {
-                        val exact = roomPort.classify(decoded.archive) == CutoverGenerationState.EXACT &&
-                            preferencePort.classify(decoded.archive) == CutoverGenerationState.EXACT
+                        val exact = roomPort.classify(decoded.archive).matchesArchive &&
+                            preferencePort.classify(decoded.archive).matchesArchive
                         val readbackDigest = if (exact) identity.archiveDigest else "sha256:${"0".repeat(64)}"
-                        current = persist(
+                        current = persistTracked(
                             reducer.reduce(journal, CutoverRestoreEvent.Verified(identity, readbackDigest))
                         ) ?: return invalidTransition(journal).also { terminal = it }
                     }
 
                     CutoverRestorePhase.VERIFIED -> {
-                        current = persist(
+                        current = persistTracked(
                             reducer.reduce(
                                 journal,
                                 CutoverRestoreEvent.PublishReady(identity, eligibilityPort.observe())
@@ -196,12 +251,12 @@ class AutoCutoverRestoreCoordinator(
                     CutoverRestorePhase.ROLLBACK_REQUIRED -> {
                         preferencePort.clear()
                         roomPort.clear()
-                        val empty = roomPort.classify(decoded.archive) == CutoverGenerationState.EMPTY &&
-                            preferencePort.classify(decoded.archive) == CutoverGenerationState.EMPTY
+                        val empty = roomPort.classify(decoded.archive).isEmpty &&
+                            preferencePort.classify(decoded.archive).isEmpty
                         if (!empty) {
                             return AutoCutoverRestoreResult.RecoveryRequired(journal).also { terminal = it }
                         }
-                        current = persist(
+                        current = persistTracked(
                             reducer.reduce(journal, CutoverRestoreEvent.RollbackCompleted(identity))
                         ) ?: return invalidTransition(journal).also { terminal = it }
                     }
@@ -216,41 +271,31 @@ class AutoCutoverRestoreCoordinator(
             val journal = current
             if (journal != null && journal.phase !in TERMINAL_PHASES) {
                 current = withContext(NonCancellable) {
-                    persistFailure(journal, CutoverRestoreFailureReason.INTERRUPTED)
+                    persistFailureTracked(journal, CutoverRestoreFailureReason.INTERRUPTED)
                 }
             }
             throw cancelled
         } catch (failure: Exception) {
             val journal = current
             if (journal != null && journal.phase !in TERMINAL_PHASES) {
-                current = persistFailure(journal, failureReasonFor(journal.phase))
+                current = persistFailureTracked(journal, failureReasonFor(journal.phase))
                 return AutoCutoverRestoreResult.RecoveryRequired(requireNotNull(current)).also { terminal = it }
             }
             throw failure
         } finally {
             val journal = terminal?.journal ?: current
-            val release = if (journal == null || journal.phase in TERMINAL_PHASES) {
+            val release = if (durableReadConfirmed && journalWriteConfirmed &&
+                (journal == null || journal.phase in TERMINAL_PHASES)
+            ) {
                 CutoverExclusiveRelease.OPEN
             } else {
-                CutoverExclusiveRelease.RECOVERY_REQUIRED
+                CutoverExclusiveRelease.RecoveryRequiredFor(
+                    if (durableReadConfirmed) journal?.identity else null
+                )
             }
             lease.release(release)
         }
     }
-
-    private suspend fun persist(transition: CutoverRestoreTransition): CutoverRestoreJournal? =
-        when (transition) {
-            is CutoverRestoreTransition.Advanced -> transition.journal.also { journalPort.write(it) }
-            is CutoverRestoreTransition.Idempotent -> transition.journal
-            is CutoverRestoreTransition.Rejected -> null
-        }
-
-    private suspend fun persistFailure(
-        journal: CutoverRestoreJournal,
-        reason: CutoverRestoreFailureReason
-    ): CutoverRestoreJournal = requireNotNull(
-        persist(reducer.reduce(journal, CutoverRestoreEvent.Failed(journal.identity, reason)))
-    )
 
     private fun invalidTransition(journal: CutoverRestoreJournal) = AutoCutoverRestoreResult.Rejected(
         CutoverCoordinatorRejection.INVALID_PHASE,

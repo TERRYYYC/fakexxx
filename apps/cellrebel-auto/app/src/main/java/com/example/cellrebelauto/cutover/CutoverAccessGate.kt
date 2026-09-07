@@ -1,9 +1,10 @@
 package com.example.cellrebelauto.cutover
 
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 enum class CutoverGatePhase {
     OPEN,
@@ -46,9 +47,12 @@ sealed interface CutoverExclusiveAdmission {
     data object QuiescenceFailed : CutoverExclusiveAdmission
 }
 
-enum class CutoverExclusiveRelease {
-    OPEN,
-    RECOVERY_REQUIRED
+sealed interface CutoverExclusiveRelease {
+    data object OPEN : CutoverExclusiveRelease
+    data object RECOVERY_REQUIRED : CutoverExclusiveRelease
+    data class RecoveryRequiredFor(
+        val identity: CutoverRestoreIdentity?
+    ) : CutoverExclusiveRelease
 }
 
 /**
@@ -65,41 +69,32 @@ class CutoverAccessGate private constructor(initial: GateState) {
     private var nextLeaseId = 1L
 
     suspend fun <T> withNormalAccess(block: suspend () -> T): CutoverAccessResult<T> {
-        val admitted = mutex.withLock {
+        val unavailable: CutoverAccessResult.Unavailable? = mutex.withLock {
             when (val current = state) {
                 is GateState.Open -> {
                     state = current.copy(activeNormalAccesses = current.activeNormalAccesses + 1)
-                    true
+                    null
                 }
-                is GateState.Draining,
-                is GateState.Exclusive,
-                is GateState.RecoveryRequired -> false
+                is GateState.Draining -> CutoverAccessResult.Unavailable(
+                    CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+                    current.owner.restoreIdentity
+                )
+                is GateState.Exclusive -> CutoverAccessResult.Unavailable(
+                    CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+                    current.owner.restoreIdentity
+                )
+                is GateState.RecoveryRequired -> CutoverAccessResult.Unavailable(
+                    CutoverUnavailableReason.RECOVERY_REQUIRED,
+                    current.identity
+                )
             }
         }
-        if (!admitted) {
-            return mutex.withLock {
-                when (val current = state) {
-                    is GateState.RecoveryRequired -> CutoverAccessResult.Unavailable(
-                        CutoverUnavailableReason.RECOVERY_REQUIRED,
-                        current.owner.restoreIdentity
-                    )
-                    is GateState.Draining -> CutoverAccessResult.Unavailable(
-                        CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
-                        current.owner.restoreIdentity
-                    )
-                    is GateState.Exclusive -> CutoverAccessResult.Unavailable(
-                        CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
-                        current.owner.restoreIdentity
-                    )
-                    is GateState.Open -> error("normal admission changed without a gate event")
-                }
-            }
-        }
+        if (unavailable != null) return unavailable
 
         return try {
             CutoverAccessResult.Granted(block())
         } finally {
-            releaseNormalAccess()
+            withContext(NonCancellable) { releaseNormalAccess() }
         }
     }
 
@@ -130,7 +125,11 @@ class CutoverAccessGate private constructor(initial: GateState) {
                     DrainRequest(drained, requestId)
                 }
                 is GateState.RecoveryRequired -> {
-                    if (current.owner != owner) return CutoverExclusiveAdmission.Busy(current.owner.restoreIdentity)
+                    if (owner !is GateOwner.Restore ||
+                        current.identity != null && current.identity != owner.identity
+                    ) {
+                        return CutoverExclusiveAdmission.Busy(current.identity)
+                    }
                     state = GateState.Exclusive(owner, nextLeaseId++)
                     return CutoverExclusiveAdmission.Granted(newExclusiveLease(owner, state.leaseId()))
                 }
@@ -141,26 +140,30 @@ class CutoverAccessGate private constructor(initial: GateState) {
         val quiesced = try {
             quiesce()
         } catch (failure: Throwable) {
-            reopenFailedDrain(owner, waitForDrain.requestId)
+            withContext(NonCancellable) { reopenFailedDrain(owner, waitForDrain.requestId) }
             throw failure
         }
         if (!quiesced) {
             reopenFailedDrain(owner, waitForDrain.requestId)
             return CutoverExclusiveAdmission.QuiescenceFailed
         }
-        waitForDrain.drained.await()
-
-        return mutex.withLock {
-            val current = state
-            check(current is GateState.Draining && current.owner == owner &&
-                current.requestId == waitForDrain.requestId
-            ) {
-                "cutover drain ownership changed"
+        return try {
+            waitForDrain.drained.await()
+            mutex.withLock {
+                val current = state
+                check(current is GateState.Draining && current.owner == owner &&
+                    current.requestId == waitForDrain.requestId
+                ) {
+                    "cutover drain ownership changed"
+                }
+                check(current.activeNormalAccesses == 0) { "cutover drain completed with active access" }
+                val leaseId = nextLeaseId++
+                state = GateState.Exclusive(owner, leaseId)
+                CutoverExclusiveAdmission.Granted(newExclusiveLease(owner, leaseId))
             }
-            check(current.activeNormalAccesses == 0) { "cutover drain completed with active access" }
-            val leaseId = nextLeaseId++
-            state = GateState.Exclusive(owner, leaseId)
-            CutoverExclusiveAdmission.Granted(newExclusiveLease(owner, leaseId))
+        } catch (failure: Throwable) {
+            withContext(NonCancellable) { reopenFailedDrain(owner, waitForDrain.requestId) }
+            throw failure
         }
     }
 
@@ -184,7 +187,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
             is GateState.RecoveryRequired -> CutoverGateSnapshot(
                 CutoverGatePhase.RECOVERY_REQUIRED,
                 0,
-                current.owner.restoreIdentity
+                current.identity
             )
         }
     }
@@ -235,7 +238,8 @@ class CutoverAccessGate private constructor(initial: GateState) {
         }
         state = when (release) {
             CutoverExclusiveRelease.OPEN -> GateState.Open(activeNormalAccesses = 0)
-            CutoverExclusiveRelease.RECOVERY_REQUIRED -> GateState.RecoveryRequired(owner)
+            CutoverExclusiveRelease.RECOVERY_REQUIRED -> GateState.RecoveryRequired(owner.restoreIdentity)
+            is CutoverExclusiveRelease.RecoveryRequiredFor -> GateState.RecoveryRequired(release.identity)
         }
         true
     }
@@ -249,7 +253,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
             return if (open) {
                 open()
             } else {
-                CutoverAccessGate(GateState.RecoveryRequired(GateOwner.Restore(journal.identity)))
+                CutoverAccessGate(GateState.RecoveryRequired(journal.identity))
             }
         }
     }
@@ -258,11 +262,16 @@ class CutoverAccessGate private constructor(initial: GateState) {
 class CutoverExclusiveLease internal constructor(
     private val releaseAction: suspend (CutoverExclusiveRelease) -> Boolean
 ) {
-    private val released = AtomicBoolean(false)
+    private val mutex = Mutex()
+    private var released = false
 
-    suspend fun release(release: CutoverExclusiveRelease): Boolean {
-        if (!released.compareAndSet(false, true)) return false
-        return releaseAction(release)
+    suspend fun release(release: CutoverExclusiveRelease): Boolean = withContext(NonCancellable) {
+        mutex.withLock {
+            if (released) return@withLock false
+            val result = releaseAction(release)
+            released = true
+            result
+        }
     }
 }
 
@@ -281,7 +290,7 @@ private sealed interface GateState {
         val leaseId: Long
     ) : GateState
 
-    data class RecoveryRequired(val owner: GateOwner) : GateState
+    data class RecoveryRequired(val identity: CutoverRestoreIdentity?) : GateState
 }
 
 private sealed interface GateOwner {
