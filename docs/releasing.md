@@ -90,6 +90,11 @@ head 上通过。不要把候选树的本地结果表述成 main 上重新运行
 schema 健康和档案内容，再继续功能验收。任何 fallback destructive migration 都是
 数据丢失风险，不是兼容性证据。
 
+对已知的千网游 pre-Room `user_version=0` 旧库，最终候选必须先在隔离模拟器运行
+`AppDatabaseMigrationTest` 的真实形态 fixture：所有档案行和字段保留、Room v2 可打开，且旧库
+保留为恢复备份。这个回归只证明已存证的 bench 形态；production 包是否持有同款历史库仍须在
+发布资料中标为未知，除非另有合规的设备取证。
+
 ### 5. 真机验收
 
 按 `docs/acceptance/a-plus-device-matrix.md` 留存至少以下证据：

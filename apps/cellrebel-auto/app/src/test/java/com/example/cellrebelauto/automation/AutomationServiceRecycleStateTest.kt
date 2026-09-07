@@ -171,4 +171,39 @@ class AutomationServiceRecycleStateTest {
         assertFalse("isRunning must be false after destroy", SvcCompanion.isRunning.value)
         assertEquals(false, SvcCompanion.isServiceConnected.value)
     }
+
+    @Test
+    fun `service recycle invalidates an in-flight supersession request instead of manufacturing proof`() {
+        val service = newConnectedService()
+        val activeRequest = AutomationService::class.java
+            .getDeclaredField("activeSupersessionStopRequestId")
+            .apply { isAccessible = true }
+        activeRequest.set(service, "replace-recycled")
+        companionFlow("_supersessionStopStatus").value =
+            SupersessionStopStatus.Stopping("replace-recycled", 1L, 2L)
+
+        val destroy = AutomationService::class.java.getDeclaredMethod("onDestroy")
+        destroy.isAccessible = true
+        destroy.invoke(service)
+
+        assertEquals(
+            SupersessionStopStatus.Blocked("replace-recycled", "SERVICE_RECYCLED"),
+            SvcCompanion.supersessionStopStatus.value
+        )
+    }
+
+    @Test
+    fun `missing accessibility service fails a supersession request closed`() {
+        val service = newConnectedService()
+        val destroy = AutomationService::class.java.getDeclaredMethod("onDestroy")
+        destroy.isAccessible = true
+        destroy.invoke(service)
+
+        SvcCompanion.stopAndVerifyForSupersession(1L, 2L, "replace-no-service")
+
+        assertEquals(
+            SupersessionStopStatus.Blocked("replace-no-service", "SERVICE_NOT_CONNECTED"),
+            SvcCompanion.supersessionStopStatus.value
+        )
+    }
 }

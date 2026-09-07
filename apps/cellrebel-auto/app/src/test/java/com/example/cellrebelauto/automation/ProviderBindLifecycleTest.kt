@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor
+import com.example.cellrebelauto.recovery.AdvanceFailure
+import com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome
 import com.example.cellrebelauto.recovery.testApplyIntent
+import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
+import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractV1
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -28,6 +32,16 @@ import org.robolectric.shadows.ShadowApplication
  */
 @RunWith(RobolectricTestRunner::class)
 class ProviderBindLifecycleTest {
+
+    @Test
+    fun `advance failure classifier keeps provider error transport and invalid response distinct`() {
+        assertEquals(AdvanceFailure.ProviderError(16), AdvanceFailure.fromProviderOutcome("PROVIDER_ERROR_16"))
+        assertEquals(AdvanceFailure.TransportFailure, AdvanceFailure.fromProviderOutcome("PROVIDER_TRANSPORT_FAILURE"))
+        assertEquals(
+            AdvanceFailure.InvalidResponse("PROVIDER_ADVANCE_WITHOUT_RECEIPT"),
+            AdvanceFailure.fromProviderOutcome("PROVIDER_ADVANCE_WITHOUT_RECEIPT")
+        )
+    }
 
     @Test
     fun `bind issues a bindService intent against the frozen contract component`() {
@@ -58,6 +72,33 @@ class ProviderBindLifecycleTest {
         assertEquals("never a lease from an unbound provider", null, outcome.leaseId)
         val release = executor.release(1L, "r-1", "lease-x", "rd", 1000L)
         assertEquals("release fail-closes identically", "PROVIDER_NOT_BOUND", release.outcome)
+    }
+
+    @Test
+    fun `unbound complete-and-advance retains its typed failure reason`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val executor = BinderExternalApplyExecutor(app, providerApplicationId = "no.such.provider")
+        val request = CompleteAndAdvanceRequestV1(
+            leaseId = "lease-1",
+            idempotencyKey = "apply-1",
+            requestDigest = "advance-digest",
+            expectedScheduleId = "schedule-1",
+            expectedScheduleVersion = 1L,
+            expectedCurrentItemId = "item-1",
+            completionProof = CompletionProofV1(
+                scheduleItemId = "item-1",
+                trustedSuccessCount = 1,
+                quotaRequired = 1,
+                ledgerRef = "ledger-1",
+                verifiedAtElapsedRealtimeMs = 1L
+            ),
+            callerProtocolVersion = ContractV1.PROTOCOL_VERSION
+        )
+
+        assertEquals(
+            CompleteAndAdvanceOutcome.Failure("PROVIDER_NOT_BOUND"),
+            executor.completeAndAdvanceOutcome(request, "intent-digest")
+        )
     }
 
     @Test

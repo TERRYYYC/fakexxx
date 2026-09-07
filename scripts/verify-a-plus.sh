@@ -87,6 +87,8 @@ GATES="
 3|release-debt|PR-2|scripts/check-release-debt.sh|./scripts/check-release-debt.sh
 3|hook-matrix-contract|PR-62|apps/qianwangyou/scripts/test_cellular_acceptance_matrix.py|cd apps/qianwangyou && python3 -m unittest scripts.test_cellular_acceptance_matrix scripts.test_hook_verdict
 3|seed-10a-gate-selftest|PR-62|scripts/selftest-seed-10a-gate.sh|./scripts/selftest-seed-10a-gate.sh
+3|test-hook-vector-prefs-selftest|PR-90|scripts/selftest-test-hook-vector-prefs.sh|./scripts/selftest-test-hook-vector-prefs.sh
+3|host-evidence-surface-guard-selftest|PR-90|scripts/selftest-host-evidence-surface-guard.sh|./scripts/selftest-host-evidence-surface-guard.sh
 3|evidence-carrier-selftest|PR-62|scripts/selftest-test-hook-evidence-carrier.sh|./scripts/selftest-test-hook-evidence-carrier.sh
 "
 

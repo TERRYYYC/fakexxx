@@ -49,6 +49,8 @@ object ObservationWireAdapter {
         observedAtElapsedRealtimeMs = wire.observedAtElapsedRealtimeMs,
         observedAtEpochMs = wire.observedAtEpochMs,
         continuitySinceElapsedRealtimeMs = wire.continuitySinceElapsedRealtimeMs,
-        evidenceRefs = wire.evidenceRefs
+        evidenceRefs = wire.evidenceRefs,
+        scheduleItemId = wire.scheduleItemId,
+        scheduleVersion = wire.scheduleVersion
     )
 }

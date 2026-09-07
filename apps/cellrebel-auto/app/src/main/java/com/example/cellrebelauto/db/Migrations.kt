@@ -302,3 +302,90 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
         // Intentionally empty — see the chronicle above.
     }
 }
+
+/**
+ * v6 → v7 (#97): add-only replacement provenance. Existing plans remain active/selectable and
+ * untouched; a future confirmed replacement fills both nullable columns in its own transaction.
+ */
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN supersededAt INTEGER")
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN supersededByPlanId INTEGER")
+    }
+}
+
+/**
+ * v7 → v8 (#85): add-only exact advance request/receipt carriers. Historical rows are untouched;
+ * an in-flight v7 ADVANCE_* owner without a pre-dispatch carrier is deliberately not replayable.
+ */
+val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `advance_replay_carriers` (
+                `attemptId` INTEGER NOT NULL,
+                `releaseIdempotencyKey` TEXT NOT NULL,
+                `releaseLeaseId` TEXT NOT NULL,
+                `releaseDigest` TEXT NOT NULL,
+                `leaseId` TEXT NOT NULL,
+                `idempotencyKey` TEXT NOT NULL,
+                `requestDigest` TEXT NOT NULL,
+                `expectedScheduleId` TEXT NOT NULL,
+                `expectedScheduleVersion` INTEGER NOT NULL,
+                `expectedCurrentItemId` TEXT NOT NULL,
+                `proofScheduleItemId` TEXT NOT NULL,
+                `proofTrustedSuccessCount` INTEGER NOT NULL,
+                `proofQuotaRequired` INTEGER NOT NULL,
+                `proofLedgerRef` TEXT NOT NULL,
+                `proofVerifiedAtElapsedRealtimeMs` INTEGER NOT NULL,
+                `callerProtocolVersion` INTEGER NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`attemptId`)
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_advance_replay_carriers_idempotencyKey` " +
+                "ON `advance_replay_carriers` (`idempotencyKey`)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `advance_receipts` (
+                `attemptId` INTEGER NOT NULL,
+                `idempotencyKey` TEXT NOT NULL,
+                `requestDigest` TEXT NOT NULL,
+                `outcomeWire` INTEGER NOT NULL,
+                `advancedFromItemId` TEXT NOT NULL,
+                `advancedToItemId` TEXT,
+                `scheduleVersionAfter` INTEGER NOT NULL,
+                `effectiveIntentHash` TEXT NOT NULL,
+                `effectiveEnvironmentRevision` INTEGER NOT NULL,
+                `receiptDigest` TEXT NOT NULL,
+                `recordedAt` INTEGER NOT NULL,
+                PRIMARY KEY(`attemptId`)
+            )
+            """.trimIndent()
+        )
+    }
+}
+
+/**
+ * v8 → v9 (#79): add-only schedule binding and observation-attribution columns. Every column is
+ * nullable so historical v8 plans/attempts/observations remain byte-semantically legacy. SQLite's
+ * UNIQUE(planId, scheduleItemId) permits multiple null legacy rows while rejecting duplicate
+ * non-null item identities inside one bound plan.
+ */
+val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE location_plans ADD COLUMN boundScheduleId TEXT")
+        db.execSQL("ALTER TABLE location_tasks ADD COLUMN scheduleItemId TEXT")
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusIntentProfileRef TEXT")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN scheduleItemId TEXT")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN scheduleVersion INTEGER")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                "`index_location_tasks_planId_scheduleItemId` ON " +
+                "`location_tasks` (`planId`, `scheduleItemId`)"
+        )
+    }
+}

@@ -92,12 +92,12 @@ class Migration5to6Test {
      * Healthy committed v5 + marker row → production open path (quarantine + ladder + destructive
      * fallback): the quarantine must recognize the healthy hash and stand down; MIGRATION_5_6
      * runs as a no-op; Room validates the resulting schema against v6; the data survives; the
-     * file lands on version 6. This is the dispatch requirement that plan B's destructive parts
+     * file lands on the current version. This is the dispatch requirement that plan B's destructive parts
      * must not eat healthy databases.
-     * # 健康 v5 走生产路径：隔离区放行、no-op 迁移过校验、数据存活、落 v6
+     * # 健康 v5 走生产路径：隔离区放行、完整迁移过校验、数据存活、落当前版本
      */
     @Test
-    fun `healthy committed v5 through production path keeps data and lands on v6`() {
+    fun `healthy committed v5 through production path keeps data and lands on current version`() {
         createHealthyCommittedV5(dbFile)
         SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READWRITE).use {
             it.execSQL(
@@ -113,14 +113,17 @@ class Migration5to6Test {
                     generateSequence { if (c.moveToNext()) c.getString(0) else null }.toList()
                 }
             assertEquals(listOf("healthy-v5-marker"), sessions)
-            assertEquals(6, db.openHelper.readableDatabase.version)
+            assertEquals(9, db.openHelper.readableDatabase.version)
 
-            // The identity hash after the bump is the (unchanged) committed hash — v6 is
-            // table-for-table v5, executable proof that the bump carried no schema change.
+            // The identity hash after the full production ladder is the committed v9 hash;
+            // v5→v6 itself remains table-for-table unchanged (asserted below).
             val hash = db.openHelper.readableDatabase
                 .query("SELECT identity_hash FROM room_master_table LIMIT 1")
                 .use { c -> if (c.moveToFirst()) c.getString(0) else null }
-            assertEquals(AppDatabase.V5_HEALTHY_IDENTITY_HASH, hash)
+            assertEquals(
+                JSONObject(committedSchemaJson(9).readText()).getJSONObject("database").getString("identityHash"),
+                hash
+            )
         } finally {
             db.close()
         }

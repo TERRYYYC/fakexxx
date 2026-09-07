@@ -68,6 +68,7 @@ Binder 配对只证明两只已安装 App 可以通信，不证明 APK 的发布
 - [版本与发布操作规范](docs/releasing.md)
 - [版本变更记录](CHANGELOG.md)
 - [v0.1.0 版本说明](docs/releases/v0.1.0.md)
+- [发布与升级清理台账](docs/releases/2026-09-06-release-upgrade-cleanup.md)
 - [真机验收矩阵](docs/acceptance/a-plus-device-matrix.md)
 
 ## 签名与分发边界

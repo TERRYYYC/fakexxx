@@ -26,10 +26,9 @@ import org.junit.Test
  *    contiguous order, profile-N alignment, schedule id, quota sum 17 —
  *    positive against the committed fixture (registered sha256 pinned here),
  *    negative against tampered/truncated/reordered payloads.
- * 3. Attribution: LocationTask has no journeyCaseId — the seed report's
- *    fixtureIndex ↔ taskId map is the only link from a run outcome back to a
- *    fixture journey, and ordering (csvRow/priority = fixtureIndex) is what
- *    keeps Auto task[i] aligned with provider item profile-(i+1).
+ * 3. Attribution: scheduleItemId is the durable provider-item binding;
+ *    LocationTask has no journeyCaseId, so the seed report additionally maps
+ *    fixtureIndex ↔ taskId ↔ journeyCaseId for human acceptance attribution.
  */
 class APlus10APlanSeedTest {
 
@@ -110,6 +109,11 @@ class APlus10APlanSeedTest {
     fun kb8_tasksCarryOnlyThePlaceholderCoordinates() {
         val items = APlus10APlanSeed.parsePayload(payload())
         val tasks = APlus10APlanSeed.toTasks(items)
+        assertEquals(APlus10APlanSeed.EXPECTED_SCHEDULE_ID, APlus10APlanSeed.toPlan(items).boundScheduleId)
+        assertEquals(
+            (1..10).map { "profile-$it" },
+            tasks.sortedBy { it.csvRow }.map { it.scheduleItemId }
+        )
         assertEquals(10, tasks.size)
         tasks.forEach { task ->
             assertEquals(
@@ -161,6 +165,23 @@ class APlus10APlanSeedTest {
         val plan = APlus10APlanSeed.toPlan(items)
         val tasks = APlus10APlanSeed.toTasks(items)
         assertNull("the seeded FX-G2-10A plan must verify", APlus10APlanSeed.verifyPlanTopology(plan, tasks))
+    }
+
+    @Test
+    fun `seed topology rejects a dropped or retargeted schedule binding`() {
+        val items = APlus10APlanSeed.parsePayload(payload())
+        val plan = APlus10APlanSeed.toPlan(items)
+        val tasks = APlus10APlanSeed.toTasks(items)
+
+        assertNotNull(APlus10APlanSeed.verifyPlanTopology(plan.copy(boundScheduleId = null), tasks))
+        assertNotNull(
+            APlus10APlanSeed.verifyPlanTopology(
+                plan,
+                tasks.mapIndexed { index, task ->
+                    if (index == 0) task.copy(scheduleItemId = "profile-retargeted") else task
+                }
+            )
+        )
     }
 
     @Test

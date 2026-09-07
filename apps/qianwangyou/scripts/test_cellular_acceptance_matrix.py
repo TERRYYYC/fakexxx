@@ -281,10 +281,21 @@ class CellularAcceptanceMatrixTest(unittest.TestCase):
     def test_transport_snapshot_compares_payload_not_publish_metadata(self):
         script = Path(__file__).with_name("test-hook.sh").read_text(encoding="utf-8")
         snapshot = self._shell_function(script, "snapshot_prefs")
+        parser_match = re.search(
+            r"^parse_vector_prefs_xml\(\) \{[^\n]*\n(.*?)^\}\n",
+            script,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(parser_match)
+        parser = parser_match.group(1)
 
-        self.assertIn('name="json"', snapshot)
-        self.assertNotIn("sha256sum", snapshot)
-        self.assertNotIn("published_at", snapshot)
+        self.assertIn('parse_vector_prefs_xml json "$read_file"', snapshot)
+        self.assertIn('target_name = "json" if mode == "json" else "pending"', parser)
+        self.assertIn('node.tag != "string"', parser)
+        self.assertIn("json.loads(", parser)
+        for payload_reader in (snapshot, parser):
+            self.assertNotIn("sha256sum", payload_reader)
+            self.assertNotIn("published_at", payload_reader)
 
     def test_runtime_verify_forwards_sanitized_payload_refresh_interval(self):
         script = Path(__file__).with_name("test-hook.sh").read_text(encoding="utf-8")

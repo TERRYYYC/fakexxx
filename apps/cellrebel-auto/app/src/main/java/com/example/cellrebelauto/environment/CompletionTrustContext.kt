@@ -49,7 +49,10 @@ data class ObservationSnapshot(
      */
     val continuitySinceElapsedRealtimeMs: Long?,
     /** Structural evidence refs (`qwy:<store>:<id>`); non-empty required (§6.4.1 — empty + VERIFIED ⇒ fail). */
-    val evidenceRefs: List<String>
+    val evidenceRefs: List<String>,
+    /** Provider schedule attribution; null only for legacy/migrated observations. */
+    val scheduleItemId: String? = null,
+    val scheduleVersion: Long? = null
 )
 
 /**

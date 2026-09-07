@@ -12,8 +12,8 @@ import com.example.cellrebelauto.model.RunSession
  */
 
 /**
- * One imported CSV worklist. NO status field — plan status is a pure projection.
- * # 一次导入的 CSV 工作清单。无 status 字段——计划状态是纯投影
+ * One imported CSV worklist. Completion remains a pure task projection; a confirmed replacement
+ * records immutable archival linkage rather than deleting the worklist or its descendants.
  */
 @Entity(tableName = "location_plans")
 data class LocationPlan(
@@ -27,7 +27,13 @@ data class LocationPlan(
     // # CSV 数据行总数
     val totalRows: Int,
     // # 全部位置所需成功总数
-    val totalRequiredSuccesses: Int
+    val totalRequiredSuccesses: Int,
+    /** #97: null while selectable; non-null means history-only after a confirmed replacement. */
+    val supersededAt: Long? = null,
+    /** The successor plan created in the same replacement transaction; never rewrites history. */
+    val supersededByPlanId: Long? = null,
+    /** #79: QWY schedule generation explicitly named by a bound CSV v2 plan; null = legacy. */
+    val boundScheduleId: String? = null
 )
 
 /**
@@ -41,7 +47,10 @@ data class LocationPlan(
         parentColumns = ["id"], childColumns = ["planId"],
         onDelete = ForeignKey.CASCADE
     )],
-    indices = [Index("planId")]
+    indices = [
+        Index("planId"),
+        Index(value = ["planId", "scheduleItemId"], unique = true)
+    ]
 )
 data class LocationTask(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -55,7 +64,9 @@ data class LocationTask(
     val requiredSuccesses: Int,
     // # 已验证的成功次数
     val completedSuccesses: Int = 0,
-    val status: String = "pending"
+    val status: String = "pending",
+    /** #79: immutable QWY item identity from CSV v2; null retains legacy ordering semantics. */
+    val scheduleItemId: String? = null
 )
 
 /**
@@ -117,7 +128,9 @@ data class TestAttempt(
     // # （§6.7.3 v1.72 / M-AD-28）。null = 尚未锚定（未进入 A+ 外部执行）。
     val aplusAnchorScheduleId: String? = null,
     val aplusAnchorItemId: String? = null,
-    val aplusAnchorVersion: Long? = null
+    val aplusAnchorVersion: Long? = null,
+    /** Exact profileRef sent on wire; null means historical `plan-$planId` recomputation. */
+    val aplusIntentProfileRef: String? = null
 )
 
 /**

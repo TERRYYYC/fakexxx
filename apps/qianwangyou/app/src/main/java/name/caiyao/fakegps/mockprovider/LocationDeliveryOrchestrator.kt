@@ -94,7 +94,29 @@ class LocationDeliveryOrchestrator(
         } else {
             controller.start(ready.config, providerMayAlreadyExist = true)
         }
+        maybeRebuildDroppedProvider(ready.config)
         return controller.state
+    }
+
+    /**
+     * Rebuild the system test provider once when a routine tick discovers the framework
+     * dropped it behind our back.
+     *
+     * OEM background-location management clears test providers of apps that have no visible
+     * activity (observed on HyperOS 3 / Android 16: a backgrounded session loses "gps provider
+     * is not a test provider" within a minute of the app leaving the foreground). The failure
+     * used to be terminal: the service stopped itself, the process lost its location-type
+     * foreground service, and the OEM freezer suspended the whole process within ~1.4 s —
+     * after which every provider binder call (discover/apply/completeAndAdvance) black-holes
+     * until the process is killed. One immediate rebuild keeps the session Running and the
+     * foreground service alive; only failures that indicate a real permission loss
+     * ([MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED]) skip the rebuild, because
+     * re-adding the provider cannot succeed without the mock-location app-op.
+     */
+    private fun maybeRebuildDroppedProvider(config: MockLocationConfig) {
+        val failure = controller.state as? MockProviderState.Failed ?: return
+        if (failure.reason == MockProviderFailureReason.MOCK_LOCATION_APP_OP_DENIED) return
+        controller.start(config, providerMayAlreadyExist = true)
     }
 
     /** Best-effort provider cleanup without changing persisted user intent. */

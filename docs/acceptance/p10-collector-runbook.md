@@ -1,6 +1,6 @@
 ---
 feature_ids: [7]
-topics: [acceptance, g2, p10, fault-injection, revoke, collector, runbook]
+topics: [acceptance, g2, p10, fault-injection, revoke, collector, runbook, evidence-provenance, issue-90]
 doc_kind: evidence
 created: 2026-08-27
 status: matrix-frozen
@@ -124,16 +124,50 @@ payload 就是冻结 fixture 文件本身（`docs/acceptance/a-plus-10a-fixture.
 #      设置 UI 会在**不持该锁**下改同一 profile 表+transport。seed-10a-gate.sh 是唯一被认可的
 #      启动器——它取独占锁（原子 mkdir + owner 元数据；只在 owner 进程已死**且**设备无存活包时
 #      回收陈旧锁，否则拒绝）、force-stop、**三态 PID 探测**（alive / absent / probe_failed——远端
-#      `echo __RC=$?` 显式回传 pidof 状态，adb 或探测失败一律 abort，绝不当成"进程已退出"）、
+#      `echo __RC=$?` 显式回传 pidof 状态，本地 adb transport rc 必须同时为 0；即使失败输出里夹带
+#      形式正确的 `__RC=1` 也只能是 probe_failed。adb 或探测失败一律 abort，绝不当成"进程已退出"）、
 #      再以**唯一 launch token**（`--es seed_token`）发这唯一一条 seed，只接受回显该 token 且恰好
 #      一组自洽的终态标记（SEED_LOCAL_VERIFIED + SEED_CONTRACT_INCOMPLETE，digest 回显须等于启动
 #      digest；同 token 同时出现 FAILED 与 VERIFIED、或重复标记 → FAIL；旧 launch 的陈旧成功/失败
-#      一律忽略），最后再次 force-stop 并断言静默完成交接，才打 SEED_GATE_PASS token=… digest=…。
-#      可选 --evidence-dir <dir>：PASS 后 run-as dump 设备上真实发布的 transport（spoof_config.xml
-#      + 提取出的 canonical JSON）留证。device-free 由 scripts/selftest-seed-10a-gate.sh 逐条 pin
+#      一律忽略）。logcat producer 及每一段解析的状态都必须为 0；非零输出中即使夹带完整终态文本也不得
+#      承重 verdict。最后再次 force-stop 并断言静默完成交接；若要求留证，则只在该静止态成立后采集，
+#      采集与发布也成功后才打 SEED_GATE_PASS token=… digest=…。任一 post-launch 失败路径都会再尝试
+#      force-stop；证据失败不会把已 seed 的包留成存活 writer。成功路径的顺序固定为：最后一次设备
+#      访问与静止证明完成 → 只在 hidden staging 中完整采集、验证并冻结（尚无 final 目录/成功标记）→
+#      成功释放并回读确认 seed 主锁已消失 → atomic no-replace 发布 → VE_OK / EVIDENCE / PASS。
+#      主锁清理失败时不得出现 final 目录或成功标记；只能保留命名为不可消费的 staging/诊断。
+#      可选 --evidence-dir <fresh-dir>：按 #90 Vector-aware 语义 dump 设备上真实发布的 transport 留证。
+#      目标（包括悬空 symlink）必须不存在；完整 artifact 集先在同一 parent 的私有目录 staging，全部校验后
+#      通过 macOS `renamex_np(RENAME_EXCL)` / Linux `renameat2(RENAME_NOREPLACE)` 原子 create-only 发布；
+#      Python 3、对应原生 API 或文件系统语义不可用即 fail-closed，绝不回退普通 `mv`。创建、读取、解析、
+#      hash、provenance、临时 `.raw`/内锁清理、exact staged-inventory 校验或 publish 任一失败均
+#      SEED_GATE_FAIL，不覆盖/复用历史目录，也不留下可被误判为本轮结果的 canonical 文件。
+#      canonical = 恰一条 live Vector 源（`su ls -d /data/misc/*/prefs/<exact-package>/spoof_config.xml`
+#      恰一命中；0/多命中、读取失败、su 不可用一律 fail-closed —— 显式要求的证据拿不到可信来源即
+#      SEED_GATE_FAIL，绝不回退 app-private shared_prefs 当 canonical —— 那是 Vector 重定向下格式完好
+#      但陈旧的 pre-Vector mirror，第三圈判定人曾据此产出错误 P1）。每个实际 artifact 都有独立
+#      `.provenance`，至少记录 package / file / sourceZone / 精确 remotePath / cardinality / sha256 /
+#      canonical；derived copy 另记 derivedFromSha256。canonical sidecar 始终记录 mirrorAttemptedPath、
+#      mirrorProbeRc、mirrorReadRc 与 mirror 状态：absent / unavailable / read-failed / empty / identical /
+#      divergent；只有显式存在性探测成功且确认不存在才可写 absent，读取错误不能伪装成 absence。
+#      落盘结构：`vector-prefs/`（唯一 canonical live）+ `app-private-mirror/`（可选 historical、
+#      canonical=false）+ `seed-published-transport.xml`（已验 hash 的 live byte-copy）+
+#      `seed-published-payload.json`。payload 必须来自结构化 XML 解析所得的恰一个 direct
+#      `<string name="json">`；XML 必须是无 BOM、无 NUL 的严格 UTF-8，声明编码若存在只能是 UTF-8，解码后的
+#      DTD/entity 声明一律拒绝。合法 XML entity 只解码一次，并以严格 JSON object 解析成功；0/多 key、坏 XML、
+#      坏 JSON、重复 JSON key 或非有限数一律失败。同名 live/mirror 不同则打 VE_DIVERGENCE 双哈希。
+#      `test-hook.sh` 的 snapshot_prefs()/recovery read 同语义（exact-package
+#      恰一条，多包不再 collapse，实际 cat failure 保留为错误）。**读任何
+#      app 私有状态前先确定该进程的存储重定向（Vector/沙箱/多用户）；同名多副本必须都取都比；下
+#      prefs 结论必须逐项引用 package / sourceZone / remotePath / cardinality；下全称结论（不存在/唯一/
+#      从未）前说出样本面并证明其完整（#90，lessons F3'）。device-free 由
+#      scripts/selftest-seed-10a-gate.sh 逐条 pin；其中明确包含 production + bench 共存且 payload 相同/
+#      不同的 `--evidence-dir` 两例，只允许解析/读取请求的 exact bench 路径
 #      （存活 PID / 持锁 / SEED_FAILED / 无判定 / 裸 local-verified / 陈旧成功+新超时 / 陈旧成功+
 #      新失败 / 陈旧失败+新成功 / pidof 错误 / adb 传输失败 / 不自洽终态 / digest 不符 / 近似 token /
-#      死 owner 回收 / 死 owner 但设备存活拒回收 / 无 owner 记录拒回收 / 交接未静默）。
+#      死 owner 回收 / 死 owner 但设备存活拒回收 / 无 owner 记录拒回收 / 交接未静默 / plausible
+#      远端状态+非零 transport / plausible log+非零 producer-parser / UTF-16/32 DTD/entity / mirror ADB argv
+#      join+远端重解析 / inner-lock 与 mirror `.raw` 清理失败 / 未知 staged entry / seed-lock 清理失败）。
 apps/qianwangyou/scripts/seed-10a-gate.sh \
   --fixture <base64(a-plus-10a-fixture.json)> \
   --digest cab16da8f7776b208a2bcf25acbd22ef9ca8e8ec9a08169d5f5f3ce3e8027852
@@ -228,6 +262,53 @@ adb shell am start -n com.example.cellrebelauto/com.example.cellrebelauto.integr
 #   cmd=state 现为单事务快照，running 行带 attemptStatus + aplusState + runSessionId +
 #   sessionStatus + taskPlanId + sessionPlanId，两 plan 腿不一致打 PLAN_BINDING_MISMATCH。
 ```
+
+### #90 host-only 结论守卫（UI 与 negative code search）
+
+`scripts/host-evidence-surface-guard.py` **只消费 host 上已经存在的文件**，不负责抓屏、
+不启动 app，也没有 device transport。成功 manifest 是 create-only：目标必须尚不存在，
+完整 JSON 先写同目录临时文件，再以原子 no-replace 方式发布。
+
+UI dump 只有同时满足以下条件，才可支持“目标页面存在/缺失”等结论：恰好一个 direct root
+属于期望 package；root bounds 为正且导出的横竖屏与声明一致；目标页面 selector 在该 package
+root 内恰好命中一次，且 target bounds 完全位于 root 内。示例：
+
+```sh
+python3 scripts/host-evidence-surface-guard.py ui \
+  --xml <existing-uiautomator.xml> \
+  --expected-package name.caiyao.fakegps.bench \
+  --expected-orientation portrait \
+  --target-selector 'resource-id=name.caiyao.fakegps.bench:id/<stable-screen-anchor>' \
+  --output-manifest <fresh-ui-manifest.json>
+```
+
+negative code-search 结论至少提供两条**语义正交**路线。允许的 route kind 是：`definition`
+（定义）、`call-site`（调用/使用）、`storage-key`（持久化 schema/preference/database/file key）、
+`write-api`（状态写入）、`read-api`（状态读取）、`registration`（manifest/registry/DI/component wiring）和
+`transport-path`（wire/provider/IPC/filesystem zone/endpoint）。必须选不同证据面，不能把同一正则改名、
+拆词或只换大小写冒充第二路线。
+
+scope 必须是 repo 内显式、非空、无 symlink、全为 UTF-8 文本的文件/目录；不能把含 PNG/JPEG/XLSX
+的整个 `app/src` 当搜索面。按结论重复 `--scope` 列出每个相关 text-only root/file，并在结论旁明确写出
+未覆盖的 source root。manifest 冻结 scope、每条 pattern/count/sample 与整个 source snapshot 的 SHA-256。
+任一路线命中时仍留下 `status=failed` 的可审计 manifest，但非零退出且
+`absenceSupported=false`。以下是 template；前两行的 required assignment 使未替换 pattern 时直接停止，
+不会用 placeholder 铸出假 absence：
+
+```sh
+: "${ABSENCE_CALL_PATTERN:?replace with the real independent call/use-site regex}"
+: "${ABSENCE_STORAGE_PATTERN:?replace with the real independent durable-key regex}"
+python3 scripts/host-evidence-surface-guard.py code-search \
+  --repo-root . \
+  --scope apps/qianwangyou/app/src/main/java \
+  --route "call-site::$ABSENCE_CALL_PATTERN" \
+  --route "storage-key::$ABSENCE_STORAGE_PATTERN" \
+  --output-manifest <fresh-code-search-manifest.json>
+```
+
+这两类 guard 的 host-only 负矩阵由
+`scripts/selftest-host-evidence-surface-guard.sh` 固定；测试把 `adb` 替换为 poison sentinel，
+任何意外 device transport 调用都会直接令 suite 失败。
 
 **跨侧序对齐（承重不变式，实现已保证，执行者须知）**：Auto task[i] 与 provider
 schedule item `profile-(i+1)` 必须同序——二者都按 fixture items[] 数组序 seed（qwy 显式
