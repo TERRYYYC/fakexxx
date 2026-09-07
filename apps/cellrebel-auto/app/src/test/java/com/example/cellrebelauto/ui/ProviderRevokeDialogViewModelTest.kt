@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.cutover.CutoverExclusiveAdmission
+import com.example.cellrebelauto.cutover.CutoverExclusiveRelease
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -93,7 +95,8 @@ class ProviderRevokeDialogViewModelTest {
         // The revoke runs on viewModelScope + Room's executor — await with a bounded spin.
         val deadline = System.currentTimeMillis() + 5_000
         while (
-            db.providerPairingDao().activeFor("name.caiyao.fakegps.bench", "sha256:approved") != null &&
+            (db.providerPairingDao().activeFor("name.caiyao.fakegps.bench", "sha256:approved") != null ||
+                vm.revokeCandidate.value != null || vm.revokeImpactNotice.value == null) &&
             System.currentTimeMillis() < deadline
         ) {
             Thread.sleep(20)
@@ -145,6 +148,39 @@ class ProviderRevokeDialogViewModelTest {
 
         vm.dismissRevokeNotice()
         assertNull(vm.revokeImpactNotice.value)
+    }
+
+    @Test
+    fun `closed gate rejection preserves the staged revoke for retry`() = runTest {
+        val entry = seedApproved()
+        val gate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        val lease = (gate.acquireCaptureExclusive("revoke-rejected") { true } as
+            CutoverExclusiveAdmission.Granted).lease
+        val vm = MainViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            injectedDb = db,
+            injectedAccessGate = gate
+        )
+        vm.requestRevoke(entry)
+
+        vm.confirmRevoke()
+
+        assertEquals("rejected confirmation remains staged", entry, vm.revokeCandidate.value)
+        assertNotNull(
+            "closed-gate rejection has no trust side effect",
+            db.providerPairingDao().activeFor("name.caiyao.fakegps.bench", "sha256:approved")
+        )
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+
+        vm.confirmRevoke()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (vm.revokeCandidate.value != null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+        assertNull("reopen permits the staged confirmation", vm.revokeCandidate.value)
+        assertNull(
+            db.providerPairingDao().activeFor("name.caiyao.fakegps.bench", "sha256:approved")
+        )
     }
 
     private fun viewModel() = MainViewModel(

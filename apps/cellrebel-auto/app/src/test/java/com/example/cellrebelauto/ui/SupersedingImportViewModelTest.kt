@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.automation.SupersessionStopStatus
+import com.example.cellrebelauto.cutover.CutoverExclusiveAdmission
+import com.example.cellrebelauto.cutover.CutoverExclusiveRelease
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.RunSession
 import com.example.cellrebelauto.model.plan.LocationPlan
@@ -130,5 +132,106 @@ class SupersedingImportViewModelTest {
         assertEquals("new.csv", db.planDao().getLatestPlan()?.sourceFileName)
         assertEquals(300L, db.runSessionDao().getById(sessionId)!!.endedAt)
         assertEquals("stopped", db.runSessionDao().getById(sessionId)!!.status)
+    }
+
+    @Test
+    fun `confirmation rejected by a closed gate retires busy state and remains retryable`() = runTest {
+        val oldPlanId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "old.csv",
+                importedAt = 100L,
+                globalBufferSeconds = 5,
+                totalRows = 1,
+                totalRequiredSuccesses = 1
+            ),
+            listOf(LocationTask(planId = 0L, csvRow = 1, longitude = 30.5, latitude = 50.4,
+                priority = 1, requiredSuccesses = 1))
+        )
+        val gate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        val lease = (gate.acquireCaptureExclusive("confirm-rejected") { true } as
+            CutoverExclusiveAdmission.Granted).lease
+        val vm = MainViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            injectedDb = db,
+            supersessionStopClient = FakeStopClient(),
+            injectedAccessGate = gate
+        )
+        stageProposal(
+            vm,
+            ImportProposal(oldPlanId, "old.csv", "new.csv", 5,
+                listOf(WorklistRow(31.5, 51.4, 1, 1, 1)))
+        )
+
+        vm.confirmImportReplacement()
+
+        await("closed-gate rejection retires the stopping owner") {
+            !vm.isImportReplacementStopping.value
+        }
+        assertNotNull("the proposal remains available for retry", vm.importProposal.value)
+        assertTrue(vm.importNotice.value.orEmpty().contains("unavailable", ignoreCase = true))
+
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+        vm.confirmImportReplacement()
+        await("reopen permits the same proposal to be confirmed") { vm.importProposal.value == null }
+        assertEquals("new.csv", db.planDao().getLatestPlan()?.sourceFileName)
+    }
+
+    @Test
+    fun `verified stop rejected by a closed gate retires its request and preserves proposal`() = runTest {
+        val oldPlanId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "old.csv",
+                importedAt = 100L,
+                globalBufferSeconds = 5,
+                totalRows = 1,
+                totalRequiredSuccesses = 1
+            ),
+            listOf(LocationTask(planId = 0L, csvRow = 1, longitude = 30.5, latitude = 50.4,
+                priority = 1, requiredSuccesses = 1))
+        )
+        val sessionId = db.runSessionDao().insert(
+            RunSession(startedAt = 200L, status = "paused", planId = oldPlanId)
+        )
+        val gate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+        val client = FakeStopClient()
+        val vm = MainViewModel(
+            ApplicationProvider.getApplicationContext<Application>(),
+            injectedDb = db,
+            supersessionStopClient = client,
+            injectedAccessGate = gate
+        )
+        stageProposal(
+            vm,
+            ImportProposal(oldPlanId, "old.csv", "new.csv", 5,
+                listOf(WorklistRow(31.5, 51.4, 1, 1, 1)))
+        )
+        vm.confirmImportReplacement()
+        await("confirmation requests stop verification") { client.requests.size == 1 }
+        val requestId = client.requests.single().third
+        val proof = (PlanRepository(db, gate).verifyAndStopForSupersession(
+            requestId, oldPlanId, sessionId, 300L
+        ) as PlanRepository.SupersessionStopVerification.Verified).proof
+        val lease = (gate.acquireCaptureExclusive("proof-rejected") { true } as
+            CutoverExclusiveAdmission.Granted).lease
+
+        client.mutableStatus.value = SupersessionStopStatus.Verified(requestId, proof)
+
+        await("closed-gate proof rejection retires the stopping owner") {
+            !vm.isImportReplacementStopping.value
+        }
+        assertNotNull("the proposal remains available for a fresh confirmation", vm.importProposal.value)
+        assertTrue(vm.importNotice.value.orEmpty().contains("unavailable", ignoreCase = true))
+        assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+
+        vm.confirmImportReplacement()
+        await("a fresh confirmation can request a new proof after reopen") { client.requests.size == 2 }
+        val retryRequest = client.requests.last()
+        assertNotEquals(requestId, retryRequest.third)
+        val retryProof = (PlanRepository(db, gate).verifyAndStopForSupersession(
+            retryRequest.third, oldPlanId, sessionId, 400L
+        ) as PlanRepository.SupersessionStopVerification.Verified).proof
+        client.mutableStatus.value = SupersessionStopStatus.Verified(retryRequest.third, retryProof)
+        await("the fresh proof can finish after reopen") { vm.importProposal.value == null }
+        assertEquals("new.csv", db.planDao().getLatestPlan()?.sourceFileName)
     }
 }

@@ -59,7 +59,7 @@ class RoomV9CutoverStoreTest {
         assertEquals(1L, count(target, "provider_pairing_records"))
         assertEquals(
             null,
-            target.providerPairingDao().activeFor("name.caiyao.fakegps", "signer-a")
+            target.providerPairingDao().activeFor("fixture.provider.app", "signer-a")
         )
         val pairing = target.providerPairingDao().all().single()
         assertEquals(pairing.approvedAt, pairing.revokedAt)
@@ -168,7 +168,7 @@ class RoomV9CutoverStoreTest {
         )
 
         assertTrue(
-            target.providerPairingDao().activeFor("name.caiyao.fakegps", "signer-a") != null
+            target.providerPairingDao().activeFor("fixture.provider.app", "signer-a") != null
         )
         assertEquals(CutoverGenerationState.MISMATCH, targetStore.classify(archive))
     }
@@ -255,7 +255,7 @@ class RoomV9CutoverStoreTest {
         sql.execSQL(
             "INSERT INTO provider_pairing_records " +
                 "(id, applicationId, currentSignerDigest, approvedAt, revokedAt, approvedVersionCode) " +
-                "VALUES (5, 'name.caiyao.fakegps', 'signer-a', 13, NULL, 1)"
+                "VALUES (5, 'fixture.provider.app', 'signer-a', 13, NULL, 1)"
         )
     }
 

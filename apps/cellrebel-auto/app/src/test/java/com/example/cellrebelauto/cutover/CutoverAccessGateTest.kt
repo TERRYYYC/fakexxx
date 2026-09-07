@@ -324,6 +324,30 @@ class CutoverAccessGateTest {
         assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
     }
 
+    @Test
+    fun exclusiveReleaseWaitsForExecutorChildrenThatTailTheCallerContinuation() = runTest {
+        val gate = CutoverAccessGate.open()
+        val lease = requireType<CutoverExclusiveAdmission.Granted>(gate.acquireExclusive(identity)).lease
+        var queued: Runnable? = null
+        val queuedExecutor = Executor { command -> queued = command }
+        var childRan = false
+
+        lease.withExclusiveAccess {
+            gate.guardExecutor(queuedExecutor).execute { childRan = true }
+        }
+
+        val release = async { lease.release(CutoverExclusiveRelease.OPEN) }
+        runCurrent()
+        assertFalse("release waits instead of treating a legal executor tail as caller error", release.isCompleted)
+        assertEquals(CutoverGatePhase.EXCLUSIVE, gate.snapshot().phase)
+
+        requireNotNull(queued).run()
+
+        assertTrue(release.await())
+        assertTrue(childRan)
+        assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+    }
+
     private fun mutexOf(gate: CutoverAccessGate): Mutex {
         val field = CutoverAccessGate::class.java.getDeclaredField("mutex")
         field.isAccessible = true

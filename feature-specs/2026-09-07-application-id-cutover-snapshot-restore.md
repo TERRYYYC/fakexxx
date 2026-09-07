@@ -295,6 +295,30 @@ Normal readers never return an empty/default substitute for blocked restored dat
 return a typed unavailable result and flows wait until the journal permits visibility. Normal writers
 fail before side effects. This makes absence distinguishable from cutover unavailability.
 
+### 2d. MainViewModel observable and request owners
+
+Every public projection of restored Room/DataStore state is a `CutoverDataState<T>`. `Loading` means
+the gate is open but the newly subscribed owner has not produced a value; `Ready(value)` is the only
+state in which an empty list, absent plan, defaulted preference, or trusted pairing is normal data;
+`Unavailable(reason, identity)` means the gate is closed. Reopening cancels no owner permanently: it
+creates a fresh upstream subscription before another `Ready` can be published.
+
+| Public observable | Durable/source owner | Secondary reads | Closed/reopen rule |
+| --- | --- | --- | --- |
+| `providerEntries` | `ProviderTrustStore` plus current package signer discovery | none | refresh changes only a version trigger; the gated query/result is cancelled or suppressed while closed, then the current version is queried afresh after reopen |
+| `pairingUiState` | pairing rows, attempts, unverified-attempt record | request-bound unverified-record lookup | the entire combine and secondary lookup are cancelled/suppressed on close; normal rejection is an expected no-emission edge, and reopen recomputes from all current inputs |
+| `planConfig` | five mapped `PlanConfigStore` keys | none | mapped defaults exist only inside `Ready`; recovery-closed startup is `Unavailable`, never a default `PlanConfig` |
+| `planUiState` | latest plan, ordered tasks, attempt/trusted counts | plan-id-dependent task/count flows | `Loading` replaces the old empty initial value; plan-id child flows are recreated after reopen |
+| `attempts` | attempt/task join | task context join | an empty history list is visible only inside `Ready` |
+| `legacyResults` | legacy result rows | none | an empty legacy list is visible only inside `Ready` |
+
+The replacement-confirmation owner is the request id stored in
+`activeReplacementConfirmationId` or `activeReplacementStopRequestId`. Any terminal exit before or
+after admission—including typed gate rejection or coroutine cancellation—retires the matching id and
+busy flag in `finally`. A gate rejection preserves the in-memory proposal so reopen can start a fresh
+request. The revoke-confirmation owner remains the staged `ProviderEntry` until normal admission;
+rejection leaves the dialog retryable and admitted persistence failure restores it.
+
 ### 3. Restore journal / visibility
 
 Lifecycle owner: `AutoCutoverRestoreCoordinator`. The journal lives in a separate

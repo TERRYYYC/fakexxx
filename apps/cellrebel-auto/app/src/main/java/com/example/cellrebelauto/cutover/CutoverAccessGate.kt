@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -51,6 +54,18 @@ sealed interface CutoverAccessResult<out T> {
     ) : CutoverAccessResult<Nothing>
 }
 
+/** Public restored-data projection: absence/defaults are values only after a gated read succeeds. */
+sealed interface CutoverDataState<out T> {
+    data object Loading : CutoverDataState<Nothing>
+
+    data class Ready<T>(val value: T) : CutoverDataState<T>
+
+    data class Unavailable(
+        val reason: CutoverUnavailableReason,
+        val identity: CutoverRestoreIdentity?
+    ) : CutoverDataState<Nothing>
+}
+
 class CutoverAccessUnavailableException(
     val reason: CutoverUnavailableReason,
     val identity: CutoverRestoreIdentity?
@@ -83,6 +98,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
     private var state: GateState = initial
     private var nextLeaseId = 1L
     private val normalAvailable = MutableStateFlow(initial is GateState.Open)
+    private val dataAvailability = MutableStateFlow(initial.toDataAvailability())
     private val currentAccess = ThreadLocal<GateAccessContext?>()
 
     suspend fun <T> withNormalAccess(block: suspend () -> T): CutoverAccessResult<T> {
@@ -184,6 +200,30 @@ class CutoverAccessGate private constructor(initial: GateState) {
         } else {
             emptyFlow()
         }
+    }
+
+    /**
+     * UI-facing restored-data projection. Closing the gate cancels the complete upstream graph and
+     * emits typed unavailability; reopening creates a fresh subscription and first reports loading.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun <T> dataFlow(upstream: Flow<T>): Flow<CutoverDataState<T>> =
+        dataAvailability.flatMapLatest { availability ->
+            when (availability) {
+                GateDataAvailability.Available -> upstream
+                    .map<T, CutoverDataState<T>> { CutoverDataState.Ready(it) }
+                    .onStart { emit(CutoverDataState.Loading) }
+                is GateDataAvailability.Unavailable -> flowOf(
+                    CutoverDataState.Unavailable(availability.reason, availability.identity)
+                )
+            }
+        }
+
+    /** Exact initial value for StateFlow owners; recovery-closed startup never emits a default. */
+    fun <T> initialDataState(): CutoverDataState<T> = when (val availability = dataAvailability.value) {
+        GateDataAvailability.Available -> CutoverDataState.Loading
+        is GateDataAvailability.Unavailable ->
+            CutoverDataState.Unavailable(availability.reason, availability.identity)
     }
 
     suspend fun acquireExclusive(
@@ -343,6 +383,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
 
     private fun setState(next: GateState) {
         state = next
+        dataAvailability.value = next.toDataAvailability()
         normalAvailable.value = next is GateState.Open
     }
 
@@ -380,7 +421,7 @@ class CutoverExclusiveLease internal constructor(
     suspend fun release(release: CutoverExclusiveRelease): Boolean = withContext(NonCancellable) {
         mutex.withLock {
             if (released) return@withLock false
-            check(access.hasOnlyExclusiveRoot()) { "exclusive cutover work is still running" }
+            access.awaitOnlyExclusiveRoot()
             val result = releaseAction(release)
             released = true
             check(access.releaseExclusiveRoot())
@@ -397,6 +438,7 @@ internal class GateAccessContext(
 ) {
     private val referenceLock = Any()
     private var references: Int = 1
+    private var exclusiveChildrenDrained = completedSignal()
     @Volatile private var active: Boolean = true
 
     fun isActiveFor(expected: CutoverAccessGate): Boolean = active && gate === expected
@@ -407,6 +449,9 @@ internal class GateAccessContext(
 
     fun retainIfActiveFor(expected: CutoverAccessGate): GateAccessContext? = synchronized(referenceLock) {
         if (!active || gate !== expected) return@synchronized null
+        if (kind == GateAccessKind.EXCLUSIVE && references == 1) {
+            exclusiveChildrenDrained = CompletableDeferred()
+        }
         references += 1
         this
     }
@@ -415,6 +460,9 @@ internal class GateAccessContext(
     fun releaseReference(): Boolean = synchronized(referenceLock) {
         check(references > 0) { "cutover access reference underflow" }
         references -= 1
+        if (kind == GateAccessKind.EXCLUSIVE && references == 1) {
+            exclusiveChildrenDrained.complete(Unit)
+        }
         if (references == 0) active = false
         references == 0
     }
@@ -430,6 +478,20 @@ internal class GateAccessContext(
 
     fun hasOnlyExclusiveRoot(): Boolean = synchronized(referenceLock) {
         active && kind == GateAccessKind.EXCLUSIVE && references == 1
+    }
+
+    suspend fun awaitOnlyExclusiveRoot() {
+        val drained = synchronized(referenceLock) {
+            check(active && kind == GateAccessKind.EXCLUSIVE) { "exclusive cutover lease is not active" }
+            exclusiveChildrenDrained
+        }
+        drained.await()
+        check(hasOnlyExclusiveRoot()) { "exclusive cutover work did not drain" }
+    }
+
+    private companion object {
+        fun completedSignal(): CompletableDeferred<Unit> =
+            CompletableDeferred<Unit>().also { it.complete(Unit) }
     }
 }
 
@@ -470,5 +532,29 @@ private data class DrainRequest(
     val drained: CompletableDeferred<Unit>,
     val requestId: Long
 )
+
+private sealed interface GateDataAvailability {
+    data object Available : GateDataAvailability
+    data class Unavailable(
+        val reason: CutoverUnavailableReason,
+        val identity: CutoverRestoreIdentity?
+    ) : GateDataAvailability
+}
+
+private fun GateState.toDataAvailability(): GateDataAvailability = when (this) {
+    is GateState.Open -> GateDataAvailability.Available
+    is GateState.Draining -> GateDataAvailability.Unavailable(
+        CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+        owner.restoreIdentity
+    )
+    is GateState.Exclusive -> GateDataAvailability.Unavailable(
+        CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+        owner.restoreIdentity
+    )
+    is GateState.RecoveryRequired -> GateDataAvailability.Unavailable(
+        CutoverUnavailableReason.RECOVERY_REQUIRED,
+        identity
+    )
+}
 
 private fun GateState.leaseId(): Long = (this as GateState.Exclusive).leaseId

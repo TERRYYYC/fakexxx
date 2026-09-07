@@ -6,11 +6,15 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.cellrebelauto.cutover.CutoverDataState
+import com.example.cellrebelauto.cutover.CutoverUnavailableReason
 import com.example.cellrebelauto.ui.theme.CellRebelAutoTheme
 
 /**
@@ -54,96 +58,135 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     val currentTask by vm.currentTask.collectAsState()
     val cooldown by vm.cooldown.collectAsState()
     val lastFailure by vm.lastFailure.collectAsState()
+    val pairingState by vm.pairingUiState.collectAsState()
 
     // # targetSdk 35 强制 edge-to-edge：统一处理状态栏/导航栏 insets，
     // # 否则标题绘制在状态栏下、右上角服务指示被裁切
     Box(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
         when (currentScreen) {
-        Screen.PLAN -> {
-            // # Issue #9：进入 Plan 页即重探无障碍启用态（从系统设置返回后也会重新进入本页）
-            androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshDeviceReadiness() }
-            PlanScreen(
-                planState = planState,
-                planConfig = planConfig,
-                isRunning = isRunning,
-                isServiceConnected = isServiceConnected,
-                serviceStatusLine = serviceStatusLine,
-                importErrors = importErrors,
-                importNotice = importNotice,
-                importProposal = importProposal,
-                isImportReplacementStopping = isImportReplacementStopping,
-                onImport = { vm.importCsv(it) },
-                onConfirmImportReplacement = { vm.confirmImportReplacement() },
-                onCancelImportReplacement = { vm.cancelImportReplacement() },
-                onSetGlobalBuffer = { vm.setGlobalBuffer(it) },
-                onSetTestTimeout = { vm.setTestTimeout(it) },
-                onSetGpsSettle = { vm.setGpsSettle(it) },
-                onSetLocationStage = { vm.setLocationStageEnabled(it) },
-                onSetTestStage = { vm.setTestStageEnabled(it) },
-                onStartOrResume = { vm.startOrResumePlan() },
-                onStop = { vm.stopAutomation() },
-                onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
-                onOpenRun = { vm.navigateTo(Screen.RUN) },
-                onOpenHistory = { vm.navigateTo(Screen.HISTORY) }
-            )
-        }
+            Screen.PLAN -> {
+                // # Issue #9：进入 Plan 页即重探无障碍启用态（从系统设置返回后也会重新进入本页）
+                androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshDeviceReadiness() }
+                CutoverDataBoundary(planState) { readyPlanState ->
+                    CutoverDataBoundary(planConfig) { readyPlanConfig ->
+                        PlanScreen(
+                            planState = readyPlanState,
+                            planConfig = readyPlanConfig,
+                            isRunning = isRunning,
+                            isServiceConnected = isServiceConnected,
+                            serviceStatusLine = serviceStatusLine,
+                            importErrors = importErrors,
+                            importNotice = importNotice,
+                            importProposal = importProposal,
+                            isImportReplacementStopping = isImportReplacementStopping,
+                            onImport = { vm.importCsv(it) },
+                            onConfirmImportReplacement = { vm.confirmImportReplacement() },
+                            onCancelImportReplacement = { vm.cancelImportReplacement() },
+                            onSetGlobalBuffer = { vm.setGlobalBuffer(it) },
+                            onSetTestTimeout = { vm.setTestTimeout(it) },
+                            onSetGpsSettle = { vm.setGpsSettle(it) },
+                            onSetLocationStage = { vm.setLocationStageEnabled(it) },
+                            onSetTestStage = { vm.setTestStageEnabled(it) },
+                            onStartOrResume = { vm.startOrResumePlan() },
+                            onStop = { vm.stopAutomation() },
+                            onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
+                            onOpenRun = { vm.navigateTo(Screen.RUN) },
+                            onOpenHistory = { vm.navigateTo(Screen.HISTORY) }
+                        )
+                    }
+                }
+            }
 
-        Screen.RUN -> {
-            ControlScreen(
-                isRunning = isRunning,
-                currentState = currentState,
-                cycleCount = cycleCount,
-                currentTask = currentTask,
-                cooldown = cooldown,
-                lastFailure = lastFailure,
-                planCompletedSuccesses = planState.completedSuccesses,
-                planTotalSuccesses = planState.plan?.totalRequiredSuccesses ?: 0,
-                logs = logs,
-                isServiceConnected = isServiceConnected,
-                onStop = { vm.stopAutomation() },
-                onOpenPlan = { vm.navigateTo(Screen.PLAN) },
-                onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
-                // R44 F5: the seven-state incident card + provider-management entry.
-                pairingUiState = vm.pairingUiState.collectAsState().value,
-                onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
-                // # 调试功能
-                onExportLogs = { vm.exportLogs() },
-                onDumpA11yTree = { vm.dumpAccessibilityTree() }
-            )
-        }
+            Screen.RUN -> {
+                CutoverDataBoundary(planState) { readyPlanState ->
+                    CutoverDataBoundary(pairingState) { readyPairingState ->
+                        ControlScreen(
+                            isRunning = isRunning,
+                            currentState = currentState,
+                            cycleCount = cycleCount,
+                            currentTask = currentTask,
+                            cooldown = cooldown,
+                            lastFailure = lastFailure,
+                            planCompletedSuccesses = readyPlanState.completedSuccesses,
+                            planTotalSuccesses = readyPlanState.plan?.totalRequiredSuccesses ?: 0,
+                            logs = logs,
+                            isServiceConnected = isServiceConnected,
+                            onStop = { vm.stopAutomation() },
+                            onOpenPlan = { vm.navigateTo(Screen.PLAN) },
+                            onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
+                            pairingUiState = readyPairingState,
+                            onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
+                            onExportLogs = { vm.exportLogs() },
+                            onDumpA11yTree = { vm.dumpAccessibilityTree() }
+                        )
+                    }
+                }
+            }
 
-        Screen.HISTORY -> {
-            HistoryScreen(
-                attempts = attempts,
-                legacyResults = legacyResults,
-                onExportCsv = { vm.exportCsv() },
-                onBack = { vm.navigateTo(Screen.PLAN) }
-            )
-        }
+            Screen.HISTORY -> {
+                CutoverDataBoundary(attempts) { readyAttempts ->
+                    CutoverDataBoundary(legacyResults) { readyLegacyResults ->
+                        HistoryScreen(
+                            attempts = readyAttempts,
+                            legacyResults = readyLegacyResults,
+                            onExportCsv = { vm.exportCsv() },
+                            onBack = { vm.navigateTo(Screen.PLAN) }
+                        )
+                    }
+                }
+            }
 
-        Screen.PROVIDERS -> {
-            // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
-            androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshProviders() }
-            val entries by vm.providerEntries.collectAsState()
-            // # Issue #10：撤销走 暂存→确认对话框→执行；撤销后横幅说明引擎影响
-            val revokeCandidate by vm.revokeCandidate.collectAsState()
-            val revokeNotice by vm.revokeImpactNotice.collectAsState()
-            ProviderApprovalScreen(
-                pending = entries.filter { !it.isApproved },
-                approved = entries.filter { it.isApproved },
-                onApprove = { vm.approveProvider(it) },
-                onRevoke = { vm.requestRevoke(it) },
-                onBack = { vm.navigateTo(Screen.PLAN) },
-                revokeDialog = revokeCandidate?.let {
-                    ProviderRevokeDialogState(candidate = it)
-                },
-                onRevokeConfirmed = { vm.confirmRevoke() },
-                onRevokeDismissed = { vm.dismissRevokeDialog() },
-                revokeImpactNotice = revokeNotice,
-                onRevokeNoticeDismissed = { vm.dismissRevokeNotice() },
-                modifier = Modifier
-            )
+            Screen.PROVIDERS -> {
+                // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
+                androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshProviders() }
+                val entries by vm.providerEntries.collectAsState()
+                // # Issue #10：撤销走 暂存→确认对话框→执行；撤销后横幅说明引擎影响
+                val revokeCandidate by vm.revokeCandidate.collectAsState()
+                val revokeNotice by vm.revokeImpactNotice.collectAsState()
+                CutoverDataBoundary(entries) { readyEntries ->
+                    ProviderApprovalScreen(
+                        pending = readyEntries.filter { !it.isApproved },
+                        approved = readyEntries.filter { it.isApproved },
+                        onApprove = { vm.approveProvider(it) },
+                        onRevoke = { vm.requestRevoke(it) },
+                        onBack = { vm.navigateTo(Screen.PLAN) },
+                        revokeDialog = revokeCandidate?.let {
+                            ProviderRevokeDialogState(candidate = it)
+                        },
+                        onRevokeConfirmed = { vm.confirmRevoke() },
+                        onRevokeDismissed = { vm.dismissRevokeDialog() },
+                        revokeImpactNotice = revokeNotice,
+                        onRevokeNoticeDismissed = { vm.dismissRevokeNotice() },
+                        modifier = Modifier
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun <T> CutoverDataBoundary(
+    state: CutoverDataState<T>,
+    content: @Composable (T) -> Unit
+) {
+    when (state) {
+        CutoverDataState.Loading -> ProtectedDataStatus("Loading protected data…")
+        is CutoverDataState.Ready -> content(state.value)
+        is CutoverDataState.Unavailable -> ProtectedDataStatus(
+            when (state.reason) {
+                CutoverUnavailableReason.CUTOVER_IN_PROGRESS ->
+                    "Protected data is unavailable while migration is in progress"
+                CutoverUnavailableReason.RECOVERY_REQUIRED ->
+                    "Protected data requires migration recovery"
+            }
+        )
+    }
+}
+
+@Composable
+private fun ProtectedDataStatus(message: String) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(message)
     }
 }
