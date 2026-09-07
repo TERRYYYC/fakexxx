@@ -25,6 +25,7 @@ enum class ProductCutoverImportRejection {
 
 sealed interface ProductCutoverImportResult {
     data class Completed(val archiveDigest: String) : ProductCutoverImportResult
+    data class RolledBack(val archiveDigest: String) : ProductCutoverImportResult
     data class Rejected(val reason: ProductCutoverImportRejection) : ProductCutoverImportResult
     data class RecoveryRequired(val archiveDigest: String) : ProductCutoverImportResult
 }
@@ -88,8 +89,15 @@ class ProductCutoverImporter(
 
         return try {
             when (val result = restore(decoded)) {
-                is AutoCutoverRestoreResult.Completed ->
-                    ProductCutoverImportResult.Completed(decoded.archiveDigest)
+                is AutoCutoverRestoreResult.Completed -> when (result.journal.phase) {
+                    CutoverRestorePhase.READY ->
+                        ProductCutoverImportResult.Completed(decoded.archiveDigest)
+                    CutoverRestorePhase.ROLLED_BACK ->
+                        ProductCutoverImportResult.RolledBack(decoded.archiveDigest)
+                    else -> ProductCutoverImportResult.Rejected(
+                        ProductCutoverImportRejection.INVALID_PHASE
+                    )
+                }
                 is AutoCutoverRestoreResult.RecoveryRequired ->
                     ProductCutoverImportResult.RecoveryRequired(decoded.archiveDigest)
                 is AutoCutoverRestoreResult.Rejected -> ProductCutoverImportResult.Rejected(

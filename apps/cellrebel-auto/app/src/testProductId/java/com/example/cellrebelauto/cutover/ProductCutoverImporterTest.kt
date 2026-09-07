@@ -60,6 +60,51 @@ class ProductCutoverImporterTest {
     }
 
     @Test
+    fun coordinatorCompletionPhaseIsPreservedAtTheImporterBoundary() = runTest {
+        val encoded = CutoverArchiveV2Codec(POLICY).encode(archive())
+        val identity = CutoverRestoreIdentity(encoded.archiveDigest, "capture-1")
+
+        suspend fun resultFor(restoreResult: AutoCutoverRestoreResult): ProductCutoverImportResult =
+            ProductCutoverImporter(
+                contentType = { CutoverSafContract.MEDIA_TYPE },
+                openInputStream = {
+                    ByteArrayInputStream(encoded.serialized.toByteArray(Charsets.UTF_8))
+                },
+                policy = { POLICY },
+                restore = { restoreResult }
+            ).import(Uri.parse("content://operator/archive"))
+
+        assertEquals(
+            ProductCutoverImportResult.Completed(encoded.archiveDigest),
+            resultFor(
+                AutoCutoverRestoreResult.Completed(
+                    CutoverRestoreJournal(identity, CutoverRestorePhase.READY)
+                )
+            )
+        )
+        assertEquals(
+            ProductCutoverImportResult.RolledBack(encoded.archiveDigest),
+            resultFor(
+                AutoCutoverRestoreResult.Completed(
+                    CutoverRestoreJournal(
+                        identity,
+                        CutoverRestorePhase.ROLLED_BACK,
+                        CutoverRestoreFailureReason.ELIGIBILITY_LOST
+                    )
+                )
+            )
+        )
+        assertEquals(
+            ProductCutoverImportResult.Rejected(ProductCutoverImportRejection.INVALID_PHASE),
+            resultFor(
+                AutoCutoverRestoreResult.Completed(
+                    CutoverRestoreJournal(identity, CutoverRestorePhase.VERIFIED)
+                )
+            )
+        )
+    }
+
+    @Test
     fun correctlyLabelledCsvStillFailsCodecWithoutRestore() = runTest {
         var restores = 0
         val importer = ProductCutoverImporter(

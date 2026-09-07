@@ -100,8 +100,10 @@ fun CutoverSafSurface(modifier: Modifier = Modifier) {
     }
 }
 
-private fun importStatus(result: ProductCutoverImportResult): String = when (result) {
+internal fun importStatus(result: ProductCutoverImportResult): String = when (result) {
     is ProductCutoverImportResult.Completed -> "Archive imported (${result.archiveDigest})"
+    is ProductCutoverImportResult.RolledBack ->
+        "Import rolled back; no data was kept. Retry the migration archive (${result.archiveDigest})"
     is ProductCutoverImportResult.RecoveryRequired ->
         "Import requires recovery (${result.archiveDigest})"
     is ProductCutoverImportResult.Rejected -> when (result.reason) {

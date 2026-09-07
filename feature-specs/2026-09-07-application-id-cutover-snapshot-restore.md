@@ -567,8 +567,8 @@ Task 5 local implementation state (review pending):
 | Flavor owner | Entry/result flow | Side-effect boundary |
 | --- | --- | --- |
 | `legacyId` | `CreateDocument` → selected URI → exclusive canonical snapshot → UTF-8 document write → digest-only result | cancellation or capture rejection opens no stream; the exporter accepts no file/path API |
-| `productId` | `OpenDocument` → selected URI → exact media check → bounded strict UTF-8 decode → canonical V2 validation → restore coordinator | cancellation, wrong media, CSV, malformed UTF-8, oversize, invalid archive, and missing stream reach zero restore calls; the importer accepts no file/path API |
-| `productId` eligibility | observe installed legacy and product package state at the coordinator's first-write and publication checks | exact version code plus an intersecting single-signer lineage is required; missing/mismatch is `INELIGIBLE`, unreadable state is `INDETERMINATE` |
+| `productId` | `OpenDocument` → selected URI → exact media check → bounded strict UTF-8 decode → canonical V2 validation → restore coordinator | cancellation, wrong media, CSV, malformed UTF-8, oversize, invalid archive, and missing stream reach zero restore calls; `READY` is success while `ROLLED_BACK` is an explicit no-data-kept retry outcome; the importer accepts no file/path API |
+| `productId` eligibility | observe installed legacy and product package state at the coordinator's first-write and publication checks | exact version code plus an intersecting single-signer lineage is required; API 26/27 accepts exactly one current signer per package, while API 28+ rejects multiple current signers but preserves valid single-signer rotation history; missing/mismatch is `INELIGIBLE`, unreadable state is `INDETERMINATE` |
 
 The Plan surface keeps the flavor entry point outside the normal protected-data projection so an
 interrupted product restore can select the same operator-held archive while ordinary readers remain

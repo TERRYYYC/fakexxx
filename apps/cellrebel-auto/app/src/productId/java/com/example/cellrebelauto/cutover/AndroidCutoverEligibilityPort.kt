@@ -82,7 +82,9 @@ class AndroidCutoverEligibilityPort(
                 if (signingInfo.hasMultipleSigners()) return emptySet()
                 signingInfo.signingCertificateHistory
             } else {
-                packageInfo.signatures
+                val currentSigners = packageInfo.signatures ?: return emptySet()
+                if (currentSigners.size != 1) return emptySet()
+                currentSigners
             } ?: return emptySet()
             return signatures.mapTo(linkedSetOf()) { signature ->
                 val digest = MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
