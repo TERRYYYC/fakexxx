@@ -122,29 +122,27 @@ fun MainApp(vm: MainViewModel = viewModel()) {
             }
 
             Screen.RUN -> {
-                CutoverDataBoundary(planState) { readyPlanState ->
-                    CutoverDataBoundary(pairingState) { readyPairingState ->
-                        ControlScreen(
-                            isRunning = isRunning,
-                            currentState = currentState,
-                            cycleCount = cycleCount,
-                            currentTask = currentTask,
-                            cooldown = cooldown,
-                            lastFailure = lastFailure,
-                            planCompletedSuccesses = readyPlanState.completedSuccesses,
-                            planTotalSuccesses = readyPlanState.plan?.totalRequiredSuccesses ?: 0,
-                            logs = logs,
-                            isServiceConnected = isServiceConnected,
-                            onStop = { vm.stopAutomation() },
-                            onOpenPlan = { vm.navigateTo(Screen.PLAN) },
-                            onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
-                            pairingUiState = readyPairingState,
-                            onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
-                            onExportLogs = { vm.exportLogs() },
-                            onDumpA11yTree = { vm.dumpAccessibilityTree() }
-                        )
-                    }
+                // T7 P1.1: the RUN surface IS the run dashboard — the app's landing
+                // page. Entry refreshes the lamps + the a11y enablement probe.
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    vm.refreshDeviceReadiness()
+                    vm.refreshDashboardHealth()
                 }
+                RunDashboardScreen(
+                    state = vm.dashboardState.collectAsState().value,
+                    logs = logs,
+                    selfHealConfig = vm.selfHealConfig.collectAsState().value,
+                    onResume = { vm.startOrResumePlan() },
+                    onStop = { vm.stopAutomation() },
+                    onOpenPlan = { vm.navigateTo(Screen.PLAN) },
+                    onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
+                    onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
+                    onResetPlan = { vm.resetPlan() },
+                    onExportDiagnostics = { vm.exportDiagnosticBundle() },
+                    onSetAttemptWatchdog = { vm.setAttemptWatchdogEnabled(it) },
+                    onSetCoordinateGuard = { vm.setCoordinateGuardEnabled(it) },
+                    onSetServiceAutoResume = { vm.setServiceReconnectAutoResumeEnabled(it) },
+                )
             }
 
             Screen.HISTORY -> {

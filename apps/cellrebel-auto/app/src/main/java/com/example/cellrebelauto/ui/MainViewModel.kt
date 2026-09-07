@@ -16,6 +16,8 @@ import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.cutover.CutoverAccessResult
 import com.example.cellrebelauto.cutover.CutoverDataState
+import com.example.cellrebelauto.data.SelfHealConfig
+import com.example.cellrebelauto.data.SelfHealSettings
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.AttemptWithTask
@@ -28,6 +30,9 @@ import com.example.cellrebelauto.model.plan.WorklistParser
 import com.example.cellrebelauto.repository.PlanRepository
 import com.example.cellrebelauto.util.CsvExporter
 import com.example.cellrebelauto.util.DebugExporter
+import com.example.cellrebelauto.util.DiagnosticBundleBuilder
+import com.example.cellrebelauto.util.DiagnosticFiles
+import com.example.cellrebelauto.util.RollingLogFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -123,6 +128,47 @@ private class DiscoverProfileCountProbe(private val context: android.content.Con
     }
 }
 
+/**
+ * T7 P1.1: seam over the EXISTING discover channel for the provider health
+ * lamp. Null = the channel yields nothing (unbound/unreachable) — the lamp
+ * greys WITH an explanation, never silently.
+ */
+fun interface ProviderHealthProbe {
+    fun probe(): com.example.cellrebelauto.ui.dashboard.HealthLampsProjection.ProviderHandshake?
+}
+
+/** Production probe: one synchronous handshake on the caller's (IO) thread. */
+private class DiscoverProviderHealthProbe(private val context: android.content.Context) :
+    ProviderHealthProbe {
+    override fun probe(): com.example.cellrebelauto.ui.dashboard.HealthLampsProjection.ProviderHandshake? =
+        try {
+            when (val result =
+                com.example.cellrebelauto.integration.v1.EnvironmentControlClient(context)
+                    .handshake()) {
+                is com.example.cellrebelauto.integration.v1.EnvironmentControlClient.HandshakeResult.Connected ->
+                    com.example.cellrebelauto.ui.dashboard.HealthLampsProjection.ProviderHandshake(
+                        exhausted = result.snapshot.exhausted,
+                        profileCount = result.snapshot.profileRefs.size,
+                    )
+                else -> null
+            }
+        } catch (_: Throwable) {
+            null
+        }
+}
+
+/**
+ * T7 P1.1: seam for the Vector-chain freshness lamp — the QWY-side publish
+ * timestamp (epoch ms) or null when unreadable. The production binding stays
+ * null on purpose: QWY's publish_state prefs are app-private and this app
+ * cannot read them on-device, so the lamp renders its EXPLAINED grey until a
+ * channel exposes the timestamp (T10/#90 surface). The projection and the
+ * lane-tooling probes are fully oracle-driven.
+ */
+fun interface PublishTimestampProbe {
+    fun publishedAtMs(): Long?
+}
+
 private object AutomationServiceSupersessionStopClient : SupersessionStopClient {
     override val status: StateFlow<SupersessionStopStatus> = AutomationService.supersessionStopStatus
     override fun request(planId: Long, sessionId: Long, requestId: String) {
@@ -145,7 +191,13 @@ class MainViewModel @JvmOverloads constructor(
     private val supersessionStopClient: SupersessionStopClient = AutomationServiceSupersessionStopClient,
     private val injectedAccessGate: CutoverAccessGate? = null,
     // P0.1-5: the plan↔profile consistency probe (discover channel); tests inject a fake.
-    private val profileCountProbe: ProfileCountProbe? = null
+    private val profileCountProbe: ProfileCountProbe? = null,
+    // T7 P1.1: the provider health lamp probe (discover channel); tests inject a fake.
+    private val providerHealthProbe: ProviderHealthProbe? = null,
+    // T7 P1.1: the Vector publish timestamp probe (null = unreadable → explained grey).
+    private val publishTimestampProbe: PublishTimestampProbe? = null,
+    // T7: the P1.3 self-heal trio surface; tests inject a file-backed instance.
+    injectedSelfHealSettings: SelfHealSettings? = null
 ) : AndroidViewModel(application) {
 
     private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
@@ -340,8 +392,8 @@ class MainViewModel @JvmOverloads constructor(
 
     // ---- Navigation ----
 
-    // # F001：Plan 页为首页（设计稿 v2.1 §1.1）
-    private val _currentScreen = MutableStateFlow(Screen.PLAN)
+    // # T7 P1.1：运行台是新首页（新入口）；Plan/History/Provider 仍在底栏可达
+    private val _currentScreen = MutableStateFlow(Screen.RUN)
     val currentScreen: StateFlow<Screen> = _currentScreen
 
     // ---- Device readiness (issue #9) ----
@@ -383,6 +435,7 @@ class MainViewModel @JvmOverloads constructor(
     val currentTask: StateFlow<EngineTaskSnapshot?> = AutomationService.currentTask
     val cooldown: StateFlow<CooldownInfo?> = AutomationService.cooldown
     val lastFailure: StateFlow<LastFailureInfo?> = AutomationService.lastFailure
+
 
     // ---- Plan config (O6, DataStore-persisted) ----
 
@@ -944,6 +997,265 @@ class MainViewModel @JvmOverloads constructor(
                 showToast("Dump failed: ${e.message}")
             }
         }
+    }
+
+    // ---- Run dashboard (T7 P1.1 运行台) --------------------------------------
+
+    private val selfHealSettings = injectedSelfHealSettings
+        ?: SelfHealSettings(application)
+
+    /** P1.3 self-heal trio — the dashboard section edits the SAME DataStore the engine reads. */
+    val selfHealConfig: StateFlow<SelfHealConfig> = selfHealSettings.config
+        .stateIn(viewModelScope, SharingStarted.Lazily, SelfHealConfig())
+
+    fun setAttemptWatchdogEnabled(enabled: Boolean) {
+        viewModelScope.launch { selfHealSettings.setAttemptWatchdogEnabled(enabled) }
+    }
+
+    fun setCoordinateGuardEnabled(enabled: Boolean) {
+        viewModelScope.launch { selfHealSettings.setCoordinateGuardEnabled(enabled) }
+    }
+
+    fun setServiceReconnectAutoResumeEnabled(enabled: Boolean) {
+        viewModelScope.launch { selfHealSettings.setServiceReconnectAutoResumeEnabled(enabled) }
+    }
+
+    /** The three lamps; null = not probed yet (the screen renders an unprobed grey). */
+    data class LampTriple(
+        val accessibility: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+        val provider: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+        val vector: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+    )
+
+    private val _lamps = MutableStateFlow(LampTriple())
+    private val _lastContractReadback = MutableStateFlow("no readback yet — press refresh")
+
+    /**
+     * Refreshes the health lamps. A11y comes from the cached enablement probe +
+     * the live connection flow; QWY runs one synchronous discover handshake on
+     * IO; the Vector publish timestamp comes from the (currently grey-by-design)
+     * probe seam. Never throws — a failed probe is a LAMP VALUE, not a crash.
+     */
+    fun refreshDashboardHealth() {
+        val a11y = com.example.cellrebelauto.ui.dashboard.HealthLampsProjection.accessibility(
+            serviceConnected = AutomationService.isServiceConnected.value,
+            enabled = _accessibilityEnabled.value,
+        )
+        viewModelScope.launch {
+            val handshake = withContext(Dispatchers.IO) {
+                runCatching {
+                    (providerHealthProbe ?: DiscoverProviderHealthProbe(getApplication())).probe()
+                }.getOrNull()
+            }
+            val publishedAt = runCatching { publishTimestampProbe?.publishedAtMs() }.getOrNull()
+            _lastContractReadback.value = handshake?.let {
+                "handshake=Connected exhausted=${it.exhausted} profileRefs=${it.profileCount}"
+            } ?: "handshake=UNREACHABLE (discover 通道不可达或探针失败)"
+            _lamps.value = LampTriple(
+                accessibility = a11y,
+                provider = com.example.cellrebelauto.ui.dashboard.HealthLampsProjection
+                    .provider(handshake),
+                vector = com.example.cellrebelauto.ui.dashboard.HealthLampsProjection
+                    .vector(publishedAt, System.currentTimeMillis()),
+            )
+        }
+    }
+
+    /**
+     * The dashboard's aggregated UI state — every number/word here is a pure
+     * projection over trusted data (PlanUiState.trustedCounts, the attempt
+     * rows, the service flows). The Compose screen stays thin.
+     */
+    data class RunDashboardUiState(
+        val engineState: com.example.cellrebelauto.model.AutomationState =
+            com.example.cellrebelauto.model.AutomationState.IDLE,
+        val isRunning: Boolean = false,
+        val serviceConnected: Boolean = false,
+        val explanation: com.example.cellrebelauto.ui.dashboard.PauseExplanation =
+            com.example.cellrebelauto.ui.dashboard.PauseReasonExplainer.explain(
+                com.example.cellrebelauto.model.AutomationState.IDLE
+            ),
+        val progress: com.example.cellrebelauto.ui.dashboard.RunProgressProjection.ProgressSnapshot =
+            com.example.cellrebelauto.ui.dashboard.RunProgressProjection.ProgressSnapshot(),
+        val lampAccessibility: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+        val lampProvider: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+        val lampVector: com.example.cellrebelauto.ui.dashboard.HealthLamp? = null,
+    )
+
+    private data class DashboardEngineView(
+        val state: com.example.cellrebelauto.model.AutomationState,
+        val isRunning: Boolean,
+        val lastFailure: LastFailureInfo?,
+        val latestErrorLog: String?,
+        val planState: PlanUiState,
+    )
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val dashboardState: StateFlow<RunDashboardUiState> =
+        combine(
+            currentState,
+            isRunning,
+            lastFailure,
+            logs,
+            planUiState,
+        ) { state, running, failure, logLines, plan ->
+            DashboardEngineView(
+                state = state,
+                isRunning = running,
+                lastFailure = failure,
+                latestErrorLog = logLines.lastOrNull {
+                    it.contains("ERROR") || it.contains("EXHAUSTED") ||
+                        it.contains("ANCHOR_MISMATCH") || it.contains("trust gate rejected")
+                },
+                planState = plan,
+            )
+        }
+            .combine(attempts) { view, attemptRows ->
+                val plan = view.planState.plan
+                val planId = plan?.id
+                val planAttempts = if (planId == null) {
+                    emptyList()
+                } else {
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            db.testAttemptDao().getAttemptsForPlan(planId)
+                        }.getOrDefault(emptyList())
+                    }
+                }
+                val facts = planAttempts.map {
+                    com.example.cellrebelauto.ui.dashboard.RunProgressProjection.AttemptFact(
+                        succeeded = it.status == "succeeded" || it.status == "ok_gps_only",
+                        failureReason = it.failureReason,
+                        endedAt = it.endedAt,
+                    )
+                }
+                val progress = com.example.cellrebelauto.ui.dashboard.RunProgressProjection.project(
+                    trustedDone = view.planState.completedSuccesses, // trusted 求和，绝不读 legacy 列
+                    trustedTotal = plan?.totalRequiredSuccesses ?: 0,
+                    attempts = facts,
+                    nowMs = System.currentTimeMillis(),
+                )
+                val explanation = com.example.cellrebelauto.ui.dashboard.PauseReasonExplainer.explain(
+                    state = view.state,
+                    lastFailureReason = view.lastFailure?.reason,
+                    latestErrorLog = view.latestErrorLog,
+                )
+                RunDashboardUiState(
+                    engineState = view.state,
+                    isRunning = view.isRunning,
+                    explanation = explanation,
+                    progress = progress,
+                )
+            }
+            // # 三灯与服务连接是独立来源：refreshDashboardHealth 写 _lamps 后必须触发重投影
+            .combine(_lamps) { partial, lamps ->
+                partial.copy(
+                    lampAccessibility = lamps.accessibility,
+                    lampProvider = lamps.provider,
+                    lampVector = lamps.vector,
+                )
+            }
+            .combine(isServiceConnected) { partial, connected ->
+                partial.copy(serviceConnected = connected)
+            }
+            .stateIn(
+                viewModelScope,
+                kotlinx.coroutines.flow.SharingStarted.Lazily,
+                RunDashboardUiState()
+            )
+
+    /**
+     * One-tap diagnostic bundle: rolling log + engine-state JSON + contract
+     * readback + DB snapshot, zipped into Downloads. Completeness is enforced
+     * by the builder (a missing section aborts the export with a toast).
+     */
+    fun exportDiagnosticBundle() {
+        viewModelScope.launch {
+            try {
+                val sections = withContext(Dispatchers.IO) { buildDiagnosticSections() }
+                val zip = DiagnosticBundleBuilder.build(sections)
+                val fileName = withContext(Dispatchers.IO) {
+                    DebugExporter(getApplication()).saveBundle(zip)
+                }
+                showToast("诊断包已导出: $fileName")
+            } catch (e: Exception) {
+                showToast("诊断包导出失败: ${e.message}")
+            }
+        }
+    }
+
+    private suspend fun buildDiagnosticSections(): Map<String, String> {
+        val app = getApplication<Application>()
+        val manifest = DiagnosticBundleBuilder.REQUIRED_ENTRIES.joinToString("\n")
+        val persistedLogs = RollingLogFile(DiagnosticFiles.rollingLogFile(app)).readText()
+        val logSection = if (persistedLogs.isBlank()) {
+            // Fresh install with no persisted ring yet — the in-memory lines
+            // (or a placeholder header) keep the bundle complete.
+            (logs.value.takeIf { it.isNotEmpty() }?.joinToString("\n")
+                ?: "(no log lines yet)")
+        } else {
+            persistedLogs
+        }
+        val view = dashboardState.value
+        val engineJson = DiagnosticBundleBuilder.engineStateJson(
+            DiagnosticBundleBuilder.EngineStateDump(
+                stateName = view.engineState.name,
+                isRunning = view.isRunning,
+                cycleCount = AutomationService.cycleCount.value,
+                currentTaskCsvRow = AutomationService.currentTask.value?.csvRow,
+                lastFailureOrdinal = AutomationService.lastFailure.value?.attemptOrdinal,
+                lastFailureReason = AutomationService.lastFailure.value?.reason,
+                serviceConnected = isServiceConnected.value,
+                trustedDone = view.progress.trustedDone,
+                trustedTotal = view.progress.trustedTotal,
+                startStatus = AutomationService.startStatus.value.toString(),
+                attemptWatchdogEnabled = selfHealConfig.value.attemptWatchdogEnabled,
+                coordinateGuardEnabled = selfHealConfig.value.coordinateGuardEnabled,
+                serviceReconnectAutoResumeEnabled =
+                    selfHealConfig.value.serviceReconnectAutoResumeEnabled,
+                generatedAtMs = System.currentTimeMillis(),
+            )
+        )
+        val dbSection = withContext(Dispatchers.IO) {
+            runCatching { renderDbSnapshot() }.getOrDefault("db snapshot failed")
+        }
+        return mapOf(
+            DiagnosticBundleBuilder.ENTRY_MANIFEST to manifest,
+            DiagnosticBundleBuilder.ENTRY_LOGS to logSection,
+            DiagnosticBundleBuilder.ENTRY_ENGINE to engineJson,
+            DiagnosticBundleBuilder.ENTRY_CONTRACT to
+                (_lastContractReadback.value + "\nstartStatus=" +
+                    AutomationService.startStatus.value + "\n"),
+            DiagnosticBundleBuilder.ENTRY_DB to dbSection,
+        )
+    }
+
+    /** Human-readable CSV-ish snapshot of the plan/task/attempt/session tables. */
+    private suspend fun renderDbSnapshot(): String {
+        val sb = StringBuilder()
+        val plan = db.planDao().getLatestPlan()
+        if (plan == null) {
+            sb.appendLine("plan,(none)")
+            return sb.toString()
+        }
+        sb.appendLine("plan,id=${plan.id},file=${plan.sourceFileName},rows=${plan.totalRows}," +
+            "totalRequired=${plan.totalRequiredSuccesses},buffer=${plan.globalBufferSeconds}")
+        db.locationTaskDao().getTasksForPlan(plan.id).forEach {
+            sb.appendLine("task,id=${it.id},csvRow=${it.csvRow},status=${it.status}," +
+                "legacy=${it.completedSuccesses},required=${it.requiredSuccesses}," +
+                "trusted=${db.trustedQuotaDao().trustedCountForTask(it.id)}," +
+                "lat=${it.latitude},lng=${it.longitude}")
+        }
+        db.testAttemptDao().getAttemptsForPlan(plan.id).forEach {
+            sb.appendLine("attempt,id=${it.id},taskId=${it.taskId},ordinal=${it.attemptOrdinal}," +
+                "status=${it.status},reason=${it.failureReason ?: "-"}," +
+                "startedAt=${it.startedAt},endedAt=${it.endedAt ?: "-"},aplus=${it.aplusState ?: "-"}")
+        }
+        db.runSessionDao().getLatest()?.let {
+            sb.appendLine("session,id=${it.id},planId=${it.planId},status=${it.status}," +
+                "startedAt=${it.startedAt},endedAt=${it.endedAt ?: "-"},cycles=${it.totalCycles}")
+        }
+        return sb.toString()
     }
 
     private fun showToast(message: String) {
