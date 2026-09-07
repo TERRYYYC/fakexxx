@@ -93,6 +93,94 @@ Lifecycle owner: `CutoverArchiveV2Codec`. The archive is a value, not mutable st
 | decode canonical bytes | verified immutable archive | accepting reordered, duplicate, unknown, truncated, oversized, or non-canonical input |
 | decode CSV/other version | typed rejection before restore | best-effort import |
 
+#### Archive record grammar and canonical text boundary
+
+The line grammar is heterogeneous. A row-shaped upper bound must never be reused as a bound for
+header, preference, table, or footer records. Define `F = maxEncodedFieldChars`, `D = 71` for the
+canonical `sha256:` digest, and `digits(n)` as the decimal character count of a non-negative bound.
+
+| Record | Cardinality / order | Exact grammar | Maximum line characters |
+| --- | --- | --- | --- |
+| format | first, exactly once | `cutover-archive-v2` | literal length |
+| source | second, exactly once | `source=<text-b64url>` | `len("source=") + F` |
+| capture | third, exactly once | `capture=<text-b64url>` | `len("capture=") + F` |
+| schema | fourth, exactly once | `schemaVersion=<canonical-positive-int>` | prefix + `digits(policy.schemaVersion)` |
+| preference | exactly five, decoded-key sorted | `preference=<key-text>|<type>|<presence>|<value-text-or-dash>` | prefix + `2F` + three separators + longest type + longest presence |
+| table | exactly the policy census, decoded-name sorted | `table=<name-text>|<schema-text>|<mode>|<row-count>|<row-digest>` | prefix + `2F` + four separators + longest mode + `digits(maxRowsPerTable)` + `D` |
+| row | exactly the preceding table count, encoded-key strictly increasing | `row=<opaque-order-key>|<opaque-row-payload>` | prefix + `2F` + one separator |
+| archive digest | final, exactly once, outside the body digest | `archiveDigest=<archive-digest>` | prefix + `D` |
+
+`<text-b64url>` means: a valid Unicode scalar sequence is encoded by a reporting UTF-8 encoder,
+then by unpadded Base64URL. Decode performs canonical Base64URL re-encoding and a reporting UTF-8
+decode; malformed bytes and isolated UTF-16 surrogates reject rather than becoming replacement
+characters. Row order keys and row payloads are deliberately opaque bytes, not UTF-8 text.
+
+Blank lines, raw non-ASCII syntax bytes, CR/LF variants, padding, extra delimiters, unknown records,
+and a final LF are not alternate spellings. A successful decode must satisfy the test-only composite
+invariant `encode(decoded.archive).serialized == input` and equal archive digests; production decode
+must prove this through the individual grammar checks rather than allocating a second whole archive.
+
+#### Codec policy domain and bidirectional resource limits
+
+A legal policy has a positive schema version; a non-empty table census no larger than `maxTables`;
+`provider_pairing_records` present and `HISTORICAL_ONLY`; no historical-only name outside the census;
+the exact five-key `CutoverPlanConfigSchema`; positive archive/field/line limits; and non-negative
+per-table/total row limits. A restrictive legal policy may reject every candidate, but it must never
+produce bytes that the same policy rejects: **encode success implies exact decode success**.
+
+Encode and decode apply the same limits at different trust boundaries:
+
+| Boundary | Encode requirement | Decode requirement | Pre-allocation rule |
+| --- | --- | --- | --- |
+| archive bytes | check before every ASCII append, including footer | reject total characters before parsing; ASCII makes characters equal bytes | one bounded builder on encode; no whole-input split/copy on decode |
+| archive lines | derive exact header + prefs + tables + rows + footer with `Long` arithmetic | count LF before any line/list allocation | reject overflow or `> maxArchiveLines` |
+| text/opaque field | reject before emitting if unpadded Base64URL would exceed `F` | reject encoded length before Base64 allocation | reporting encoder uses a buffer no larger than the decoded-byte capacity representable by `F` |
+| record line | use the grammar-specific formula above | pass the matching formula to the cursor for each expected record | all formula arithmetic is `Long`, capped by archive bytes and `Int.MAX_VALUE` |
+| table rows | validate each table and total before hashing | validate canonical count, per-table bound, then total before `ArrayList` | never allocate from an unvalidated count |
+| digests | update incrementally from length-framed row bytes and ASCII body | recompute incrementally; claimed lowercase digest is proof input only | no whole-table byte stream and no second canonical archive |
+
+#### Decode cursor lifecycle and error exits
+
+Lifecycle owner: one `CutoverArchiveV2Codec.decode` invocation. `BoundedLineReader` is a private cursor,
+not a generic iterator: callers may not skip, peek past, or reinterpret records.
+
+| Current | Event / proof | Next | Side effect / forbidden bypass |
+| --- | --- | --- | --- |
+| `UNTRUSTED_INPUT` | ASCII, total byte/line limits, terminal digest spelling and body digest verify | `BODY_VERIFIED` | no archive/model allocation before bounds; digest success does not waive grammar checks |
+| `BODY_VERIFIED` | exact format/source/capture/schema records | `PREFERENCES` | each `nextLine` receives that record's own maximum |
+| `PREFERENCES(n)` | next canonical preference, `n < 5` | `PREFERENCES(n+1)` | no missing, duplicate, reordered, unknown, or default-materialized absence |
+| `PREFERENCES(5)` | next canonical table header | `TABLE(rowsRemaining)` | exact policy census/mode/schema only |
+| `TABLE(k)` | next canonical row, `k > 0` | `TABLE(k-1)` | count/total validated before list allocation; row proof updated incrementally |
+| `TABLE(0)` | row digest matches and another policy table remains | `TABLE(next)` | no caller-supplied proof accepted without recomputation |
+| final `TABLE(0)` | cursor is exactly body-exhausted and body did not end with LF | `CANONICAL_ARCHIVE` | no swallowed terminal blank line or unknown record |
+| any nonterminal state | malformed, oversized, non-canonical, proof mismatch, or truncation | `REJECTED` | `IllegalArgumentException`; no archive result and no restore side effect |
+
+The archive and policy are immutable values. Cursor position, line count, row total, previous row key,
+and digest accumulators exist only inside one encode/decode call and are discarded on either terminal
+exit; none is persisted or recoverable as application state.
+
+#### Finding pattern summary and sibling sweep
+
+R1–R3 exposed one pattern: canonicality and allocation safety were described globally while the
+implementation normalized heterogeneous records independently. R1 found unbounded whole-input
+splitting; R2 found lossy UTF-8 and a cursor terminal-empty-line gap; R3 found a row-only line formula
+applied to a longer table record. The governing invariant is now: **every accepted representation has
+one spelling, and every successful encoder output is accepted identically by the same policy without
+an allocation that exceeds that policy's declared bounds**.
+
+Siblings scanned and disposition:
+
+- UTF-8 / UTF-16: reporting encode and decode; valid non-ASCII is preserved; replacement is forbidden.
+- Numeric spellings: schema and row counts must equal their parsed canonical decimal rendering.
+- Base64URL: alphabet, decoder validity, no padding, and re-encode equality are all required.
+- Empty/trailing syntax: blank body records, trailing LF/data, extra separators, and unknown lines reject.
+- Record overhead: format/source/capture/schema/preference/table/row/footer each owns its formula;
+  table mode/count/digest overhead may not borrow the row formula.
+- Counts and overflow: line/table/per-table-row/total-row arithmetic uses checked `Long` bounds before
+  conversion or allocation; negative, wrapped, or out-of-policy values reject.
+- Memory: decode retains the caller's input plus bounded per-line/per-field/model allocations; encode
+  retains one bounded builder plus bounded per-field buffers and incremental digests.
+
 ### 2. Source capture session
 
 Lifecycle owner: future `AutoCutoverSnapshotPort`; normal mutation and capture must share one owner/quiescence seam.
@@ -144,6 +232,14 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 - `CUT-INV-13`: worklist/result CSV is not a cutover archive.
 - `CUT-INV-14`: schema/table census comes from the Auto owner at an immutable #79-aware anchor; the carrier does not freeze a guessed column list.
 - `CUT-INV-15`: legacyId export and productId import are compile/source-set isolated.
+- `CUT-INV-16`: for every legal policy, successful encode followed by decode yields the identical
+  archive bytes and digest; a grammar-specific decoder limit cannot reject encoder output.
+- `CUT-INV-17`: every text field is strict UTF-8 in both directions, while row keys/payloads remain
+  opaque bytes; neither boundary performs replacement-character normalization.
+- `CUT-INV-18`: each record type owns a checked line-length formula including its fixed grammar
+  overhead; no record borrows a shorter sibling's bound.
+- `CUT-INV-19`: archive/line/field/count limits are enforced before proportional allocation and all
+  derived arithmetic is overflow-safe.
 
 ## Adversarial matrix
 
@@ -163,6 +259,10 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 | `CUT-A12` | logger/result attempts to include row bytes | surface guard fails |
 | `CUT-A13` | exporter compiled into productId or importer into legacyId | source-set contract test fails |
 | `CUT-A14` | reader bypasses visibility fence | startup/service/repository guard test fails |
+| `CUT-A15` | legal small policy where an empty table header is longer than a row bound | encode→decode exact round-trip succeeds |
+| `CUT-A16` | valid Base64URL wrapping malformed UTF-8, or isolated UTF-16 surrogate on encode | target text boundary rejects without replacement |
+| `CUT-A17` | one blank line immediately before the digest | cursor rejects instead of treating the body as exhausted |
+| `CUT-A18` | maximum legal table metadata, five preferences spanning absent/present-int/present-boolean, and valid non-ASCII text | exact bytes/digest round-trip; changing one target past its bound rejects for that target |
 
 ## Implementation tasks
 
@@ -184,8 +284,12 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 1. Write failing tests for `CUT-INV-01..06`, `CUT-INV-10`, `CUT-A01..05`, and `CUT-A11`.
 2. Run both flavor unit-test tasks and confirm failure is the missing V2 codec/types, not environment setup.
 3. Implement the minimal length-delimited canonical codec, strict bounds, recomputed digests, five-key presence contract, and historical-only pairing-table rule.
-4. Re-run the exact tests in both flavors; expected result is all new V2 tests passing.
-5. Commit only the codec and its tests.
+4. RED→GREEN the record grammar matrix: small legal policy, empty table, maximum table metadata,
+   five-preference presence/type states, valid non-ASCII, malformed UTF-8, isolated surrogate,
+   digest-preceding blank line, and each grammar-specific line bound. Every negative first proves its
+   unchanged baseline succeeds and then mutates only the named target.
+5. Re-run the exact tests in both flavors; expected result is all new V2 tests passing.
+6. Commit only the codec and its tests.
 
 ### Task 3: Pure restore journal reducer (current phase)
 
@@ -199,7 +303,7 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 4. Re-run exact tests in both flavors; expected result is all reducer tests passing.
 5. Commit only the reducer and tests.
 
-### Task 4: Auto-owned Room/DataStore integration (blocked on owner + #79)
+### Task 4: Auto-owned Room/DataStore integration (independent slice after codec acceptance)
 
 **Files (owner to confirm):**
 - Modify: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/data/PlanConfigStore.kt`
@@ -208,7 +312,16 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 - Create: `apps/cellrebel-auto/app/src/main/java/com/example/cellrebelauto/cutover/AutoCutoverRestoreCoordinator.kt`
 - Test: matching `cutover/**Test.kt` plus reader-bypass guards
 
-Wait for the Auto owner to identify the mutation/quiescence seam and for #79 to freeze its final schema/migration anchor. Then add DAO/DataStore integration with RED tests for exact table census, five raw preferences, historical pairing transformation, readback digest, crash resume, and reader gating. Do not duplicate DAO/schema logic in the carrier.
+Room v9 field/migration bytes are anchored at #79 implementation commit
+`fb6284a7793e07333634d6fdf05a4688a6b8396c` (schema-freeze parent
+`4116276b9435cc8dd269ff02b7ca3e1a1f09b3d7`), but that commit does not provide a cross-store seam.
+#13 owns a new application-scoped coordinator with cutover mutex + durable generation/journal. It
+must invoke AutomationService run cancellation/convergence, then fence every Room/DataStore writer
+during capture and every normal reader during restore. The five raw keys require an absence-preserving
+snapshot/restore API; mapped `PlanConfig` defaults are not a round-trip carrier. Before production
+edits, add source-capture and target-restore state/owner/side-effect tables, a complete writer/reader
+census, and crash/retry/concurrency RED tests. Do not duplicate #79 DAO/schema logic or treat its
+review status as merged.
 
 ### Task 5: Flavor-only SAF surfaces
 
@@ -230,11 +343,11 @@ The repository has two flavor-specific JVM tasks. Use the Android Studio JBR and
 ```bash
 JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' \
 ANDROID_HOME='/Users/terry/Library/Android/sdk' \
-./gradlew :app:testLegacyIdDebugUnitTest --tests '*CutoverArchiveV2CodecTest*' --rerun-tasks --no-daemon --max-workers=2
+./gradlew :app:testLegacyIdDebugUnitTest --tests '*CutoverArchiveV2CodecTest*' --rerun-tasks --no-daemon --max-workers=1
 
 JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' \
 ANDROID_HOME='/Users/terry/Library/Android/sdk' \
-./gradlew :app:testProductIdDebugUnitTest --tests '*CutoverArchiveV2CodecTest*' --rerun-tasks --no-daemon --max-workers=2
+./gradlew :app:testProductIdDebugUnitTest --tests '*CutoverArchiveV2CodecTest*' --rerun-tasks --no-daemon --max-workers=1
 ```
 
 Equivalent commands apply to `CutoverRestoreProtocolTest`. No `connected*`, install, emulator, ADB, applicationId runtime mutation, or #106 regression command is part of this phase.
@@ -243,10 +356,13 @@ Equivalent commands apply to `CutoverRestoreProtocolTest`. No `connected*`, inst
 
 ### Technical
 
-1. Which existing Auto owner lock can make Room plus raw PlanConfig capture a single logical generation?
-2. Which startup/service/repository entry points must consume the persisted restore journal so no reader bypasses the fence?
-3. What immutable commit/schema anchor will contain #79's final `scheduleItemId` binding?
-4. Does productId v1 require the target to be empty, or must rollback preserve pre-existing productId state as a separate generation? Default until owner evidence says otherwise: fail closed unless target is empty.
+1. Does productId v1 require the target to be empty, or must rollback preserve pre-existing productId state as a separate generation? Default until owner evidence says otherwise: fail closed unless target is empty.
+
+Resolved implementation facts: no existing Auto lock spans Room plus raw PlanConfig; #13 owns the
+application-scoped coordinator. The reader/writer census starts with `MainViewModel`,
+`AutomationService`, A+/engine/recovery repository paths, and every direct `AppDatabase` or
+`PlanConfigStore` entry. The immutable #79 field/migration anchor is
+`fb6284a7793e07333634d6fdf05a4688a6b8396c`; its independent approval/merge remains external.
 
 ### Value
 
