@@ -148,22 +148,29 @@ class QwyDurableSnapshotTest {
      * durable bytes would change during evidence collection. Byte-compare.
      */
     @Test
-    fun captureLeavesTheDurableFileByteIdentical() {
+    fun captureLeavesEveryDurableBackingFileByteIdentical() {
         val dir = tempDir()
         val kv = FileDurableKv(dir)
         EnvironmentLeaseStore(kv, TestClock).put(activeLease("lease-1"))
-        val file = File(dir, "environment-control-v1.kv")
-        val before = file.readBytes()
+        val backingNames = listOf("environment-control-v1.kv", "environment-control-v1.journal")
+        val before = backingNames.mapNotNull { name ->
+            File(dir, name).takeIf(File::isFile)?.let { name to it.readBytes() }
+        }.toMap()
 
         QwyDurableSnapshot.capture(dir)
         QwyDurableSnapshot.capture(dir, "com.example.cellrebelauto", "deadbeef")
 
-        val after = file.readBytes()
-        assertTrue(
-            "capture() must not modify the durable store — readback that writes " +
-                "runs §8.4 recovery and destroys the evidence",
-            before.contentEquals(after),
-        )
+        val after = backingNames.mapNotNull { name ->
+            File(dir, name).takeIf(File::isFile)?.let { name to it.readBytes() }
+        }.toMap()
+        assertEquals(before.keys, after.keys)
+        before.forEach { (name, bytes) ->
+            assertTrue(
+                "capture() must not modify durable backing $name — readback that writes " +
+                    "runs §8.4 recovery and destroys the evidence",
+                bytes.contentEquals(after.getValue(name)),
+            )
+        }
     }
 
     @Test

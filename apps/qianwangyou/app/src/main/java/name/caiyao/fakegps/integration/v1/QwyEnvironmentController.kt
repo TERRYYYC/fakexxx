@@ -130,6 +130,11 @@ class QwyEnvironmentController(
         ProfileRefProjection.fromLegacyIds(readProfileIds())
 
     private fun readProfileIds(): List<Long> {
+        try {
+            AppDatabase.ensureLegacyDatabaseRecovered(appContext)
+        } catch (_: Exception) {
+            return emptyList()
+        }
         val dbFile = appContext.getDatabasePath("fakegps.db")
         if (!dbFile.exists()) return emptyList()
         return try {

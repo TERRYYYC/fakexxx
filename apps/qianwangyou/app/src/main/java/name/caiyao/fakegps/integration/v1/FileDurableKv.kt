@@ -1,11 +1,14 @@
 package name.caiyao.fakegps.integration.v1
 
 import java.io.File
+import java.io.FileOutputStream
 import java.io.RandomAccessFile
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 
 /**
- * Durable KV with real transaction atomicity, backed by one file replaced
- * atomically.
+ * Durable KV with real transaction atomicity, backed by a legacy snapshot plus
+ * an append-only transaction journal.
  *
  * WHY NOT SharedPreferences
  * -------------------------
@@ -40,13 +43,13 @@ import java.io.RandomAccessFile
  *
  * ATOMICITY MODEL
  * ---------------
- * All state lives in one file. A commit serializes the whole map to a temp file,
- * fsyncs it, then rename(2)s it over the live file. rename within a directory is
- * atomic on the filesystems Android uses, so a crash leaves either the entire
- * previous state or the entire next one — never a mix. This is the same
- * write-temp-then-rename discipline SharedPreferences uses internally; the
- * difference is that here ONE rename covers every key the transaction touched,
- * which is what makes it a transaction rather than a sequence of writes.
+ * Old installs may have a complete [STORE_FILE] snapshot. New commits leave it
+ * intact and append one self-validating record to [JOURNAL_FILE]. Each record
+ * carries every key changed by its transaction, so replay observes either the
+ * entire transaction or none of it. A crash-truncated final record is ignored;
+ * a complete malformed record is corruption and fails closed. This preserves
+ * composite commits (pointer + receipt + audit) while avoiding a whole-map
+ * rewrite for every audit append.
  *
  * Single-writer per §6.6 L3: one process owns this directory. Multi-process
  * access is not made safe by this class and is banned by the contract, not
@@ -55,14 +58,18 @@ import java.io.RandomAccessFile
 open class FileDurableKv(val directory: File) : DurableKv {
 
     private val file = File(directory, STORE_FILE)
-    private val tempFile = File(directory, "$STORE_FILE.tmp")
+    private val journalFile = File(directory, JOURNAL_FILE)
+    private val tempFile = File(directory, "$JOURNAL_FILE.tmp")
     private val lock = Any()
 
-    /** Committed state. Loaded once; every commit rewrites it wholesale. */
+    /** Committed state reconstructed from the legacy snapshot and journal. */
     private val data = HashMap<String, HashMap<String, String>>()
 
     /** Non-null while a transaction is open; holds writes not yet committed. */
     private var txBuffer: HashMap<Pair<String, String>, String>? = null
+
+    /** Byte boundary after the last complete journal record, if recovery saw a torn suffix. */
+    private var incompleteJournalOffset: Long? = null
 
     init {
         if (!directory.exists()) directory.mkdirs()
@@ -137,16 +144,9 @@ open class FileDurableKv(val directory: File) : DurableKv {
      * disk on the previous state — same state, one truth.
      */
     private fun commit(buffer: Map<Pair<String, String>, String>) {
-        val candidate = HashMap<String, HashMap<String, String>>(data.size)
-        data.forEach { (ns, entries) -> candidate[ns] = HashMap(entries) }
-        buffer.forEach { (nsKey, value) ->
-            candidate.getOrPut(nsKey.first) { HashMap() }[nsKey.second] = value
-        }
-
-        persist(candidate)
-
-        data.clear()
-        data.putAll(candidate)
+        if (buffer.isEmpty()) return
+        persist(buffer)
+        apply(buffer)
     }
 
     /**
@@ -166,15 +166,19 @@ open class FileDurableKv(val directory: File) : DurableKv {
      */
     private fun load() {
         data.clear()
-        if (!file.isFile) return
-        file.readLines().forEachIndexed { index, line ->
+        if (file.isFile) applySnapshot(file.readLines(), file)
+        loadJournal()
+    }
+
+    private fun applySnapshot(lines: List<String>, source: File) {
+        lines.forEachIndexed { index, line ->
             if (line.isEmpty()) return@forEachIndexed
             val parts = line.split(FS)
             if (parts.size != 3) {
                 throw IllegalStateException(
-                    "corrupt durable store at $file line ${index + 1}: expected 3 " +
-                        "unit-separated fields, found ${parts.size}. Refusing to load " +
-                        "a partial state — a subset of the last commit is a torn state."
+                    "corrupt durable store at $source line ${index + 1}: expected 3 " +
+                    "unit-separated fields, found ${parts.size}. Refusing to load " +
+                    "a partial state — a subset of the last commit is a torn state."
                 )
             }
             val (ns, key, value) = parts
@@ -182,41 +186,110 @@ open class FileDurableKv(val directory: File) : DurableKv {
         }
     }
 
-    /**
-     * Serialize everything, fsync, then rename over the live file.
-     *
-     * The fsync is not optional: rename only guarantees that the directory entry
-     * flips atomically, not that the bytes it points at reached the disk. Without
-     * it a power loss can leave the new name pointing at a truncated file, which
-     * would be a torn state wearing a committed state's name.
-     *
-     * There is deliberately NO fallback when rename fails. An earlier version
-     * tried `file.delete()` then renamed again — which converts one atomic
-     * replace into delete-then-create, and a crash in that window leaves NO live
-     * file at all. It traded the single guarantee this class exists to provide
-     * for a slightly better success rate on a path that should be failing loudly.
-     * If rename fails, the previous file is still intact and the caller is told.
-     */
-    private fun persist(state: Map<String, Map<String, String>>) {
-        val text = buildString {
-            state.forEach { (ns, entries) ->
-                entries.forEach { (key, value) ->
-                    append(escape(ns)).append(FS)
-                        .append(escape(key)).append(FS)
-                        .append(escape(value)).append('\n')
-                }
+    /** Replays complete journal records. A partial final record never committed. */
+    private fun loadJournal() {
+        if (!journalFile.isFile) return
+        incompleteJournalOffset = null
+        val bytes = journalFile.readBytes()
+        var cursor = 0
+        while (cursor < bytes.size) {
+            val headerEnd = bytes.indexOfByte('\n'.code.toByte(), cursor)
+            if (headerEnd < 0) break // interrupted header at EOF
+            val header = String(bytes, cursor, headerEnd - cursor, StandardCharsets.US_ASCII)
+            val match = JOURNAL_HEADER.matchEntire(header)
+                ?: throw IllegalStateException("corrupt durable journal at $journalFile offset $cursor: bad header")
+            val length = match.groupValues[1].toIntOrNull()
+                ?: throw IllegalStateException("corrupt durable journal at $journalFile offset $cursor: bad length")
+            require(length >= 0) { "corrupt durable journal at $journalFile offset $cursor: negative length" }
+            val bodyStart = headerEnd + 1
+            val bodyEnd = bodyStart + length
+            if (bodyEnd > bytes.size) break // interrupted body at EOF
+            val body = bytes.copyOfRange(bodyStart, bodyEnd)
+            val expectedDigest = match.groupValues[2]
+            if (!sha256(body).equals(expectedDigest, ignoreCase = true)) {
+                throw IllegalStateException("corrupt durable journal at $journalFile offset $cursor: digest mismatch")
+            }
+            applyRecord(String(body, StandardCharsets.UTF_8), cursor)
+            cursor = bodyEnd
+        }
+        // Keep a read-only open observationally pure. The incomplete suffix is
+        // removed only immediately before a future append, when retaining it
+        // would make a malformed middle record. It never represented a commit.
+        if (cursor < bytes.size) {
+            incompleteJournalOffset = cursor.toLong()
+        }
+    }
+
+    private fun applyRecord(record: String, offset: Int) {
+        if (record.isEmpty()) {
+            throw IllegalStateException("corrupt durable journal at $journalFile offset $offset: empty transaction")
+        }
+        val writes = HashMap<Pair<String, String>, String>()
+        record.lineSequence().forEachIndexed { index, line ->
+            if (line.isEmpty()) return@forEachIndexed
+            val parts = line.split(FS)
+            if (parts.size != 3) {
+                throw IllegalStateException(
+                    "corrupt durable journal at $journalFile offset $offset record line ${index + 1}: expected 3 fields"
+                )
+            }
+            val key = unescape(parts[0]) to unescape(parts[1])
+            if (writes.put(key, unescape(parts[2])) != null) {
+                throw IllegalStateException("corrupt durable journal at $journalFile offset $offset: duplicate key")
             }
         }
-
-        writeTempFile(tempFile, text)
-        RandomAccessFile(tempFile, "rws").use { it.fd.sync() }
-
-        if (!tempFile.renameTo(file)) {
-            throw IllegalStateException(
-                "could not atomically replace $file; previous state is intact"
-            )
+        if (writes.isEmpty()) {
+            throw IllegalStateException("corrupt durable journal at $journalFile offset $offset: empty transaction")
         }
+        apply(writes)
+    }
 
+    private fun apply(writes: Map<Pair<String, String>, String>) {
+        writes.forEach { (nsKey, value) ->
+            data.getOrPut(nsKey.first) { HashMap() }[nsKey.second] = value
+        }
+    }
+
+    /**
+     * Stage and append one self-validating transaction record.
+     *
+     * A staged record lets the existing fault-injection seam prove that a failed
+     * serialization never reaches the journal. The actual journal append is
+     * followed by fsync before memory advances. If a power loss tears that final
+     * append, [loadJournal] ignores the incomplete suffix; it can never expose a
+     * subset of the transaction.
+     */
+    private fun persist(writes: Map<Pair<String, String>, String>) {
+        val body = buildString {
+            writes.toSortedMap(compareBy<Pair<String, String>> { it.first }.thenBy { it.second })
+                .forEach { (nsKey, value) ->
+                    append(escape(nsKey.first)).append(FS)
+                        .append(escape(nsKey.second)).append(FS)
+                        .append(escape(value)).append('\n')
+                }
+        }.toByteArray(StandardCharsets.UTF_8)
+        val record = "#${body.size}:${sha256(body)}\n".toByteArray(StandardCharsets.US_ASCII) + body
+        writeTempFile(tempFile, String(record, StandardCharsets.UTF_8))
+        RandomAccessFile(tempFile, "rws").use { it.fd.sync() }
+        val staged = tempFile.readBytes()
+        if (!staged.contentEquals(record)) {
+            throw IllegalStateException("staged durable journal record is corrupt; previous state is intact")
+        }
+        discardIncompleteSuffixBeforeAppend()
+        FileOutputStream(journalFile, true).use { out ->
+            out.write(staged)
+            out.fd.sync()
+        }
+        syncDirectory()
+    }
+
+    private fun discardIncompleteSuffixBeforeAppend() {
+        val offset = incompleteJournalOffset ?: return
+        RandomAccessFile(journalFile, "rws").use {
+            it.setLength(offset)
+            it.fd.sync()
+        }
+        incompleteJournalOffset = null
         syncDirectory()
     }
 
@@ -290,8 +363,19 @@ open class FileDurableKv(val directory: File) : DurableKv {
         }
     }
 
+    private fun ByteArray.indexOfByte(needle: Byte, start: Int): Int {
+        for (index in start until size) if (this[index] == needle) return index
+        return -1
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
+
     private companion object {
         const val STORE_FILE = "environment-control-v1.kv"
+        const val JOURNAL_FILE = "environment-control-v1.journal"
+        val JOURNAL_HEADER = Regex("#([0-9]+):([0-9a-fA-F]{64})")
 
         /** ASCII unit separator: escaped on write, so it can never occur in a field. */
         const val FS = '\u001F'

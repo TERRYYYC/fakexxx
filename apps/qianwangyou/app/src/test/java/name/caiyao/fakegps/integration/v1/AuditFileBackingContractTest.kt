@@ -14,7 +14,7 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-/** #83: exercise the production audit codec/transactions/file replacement, not InMemoryDurableKv. */
+/** #83: exercise the production audit codec/transactions/journal backing, not InMemoryDurableKv. */
 class AuditFileBackingContractTest {
     @get:Rule val temporary = TemporaryFolder()
 
@@ -58,7 +58,7 @@ class AuditFileBackingContractTest {
                 val clock = InterruptibleClock()
                 val audit = DurableIntegrationAuditStore(kv, clock)
                 val before = (1..prefixSize).map { audit.append("observe", operationId = "op-$it") }
-                val file = File(directory, "environment-control-v1.kv")
+                val file = File(directory, "environment-control-v1.journal")
                 val bytesBefore = if (file.exists()) file.readBytes() else null
                 var returned: QwyAuditEvent? = null
                 kv.fault = fault
@@ -84,7 +84,7 @@ class AuditFileBackingContractTest {
                 assertEquals(if (prefixSize == 0) null else "$prefixSize", kv.read(NS, "__seq__"))
                 assertNull(kv.read(NS, "evt:${prefixSize + 1}"))
 
-                // New object reads only the committed live file, including with an orphan .tmp.
+                // New object reads only complete journal commits, including with an orphan .tmp.
                 val reopened = DurableIntegrationAuditStore(FileDurableKv(directory), clock)
                 assertEquals(before, reopened.all())
                 before.forEach { assertEquals(it, reopened.resolve(it.seq)) }
