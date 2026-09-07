@@ -43,6 +43,11 @@ class CutoverProductionConsumerCensusTest {
                 // resolves the DB and gate through the app-singleton-derived
                 // seams (CellRebelAutoApp.databaseFor / accessGateFor), so the
                 // CUT-A26 ownership stays closed and gated.
+                // Rebase note: T8's config-bundle exporter reads plan/task/pairing
+                // rows directly (BundleExportSource.read). It receives the
+                // ViewModel's gated db and threads the cutover gate, so the
+                // CUT-A26 ownership stays closed and gated.
+                "configbundle/AutoBundleExporter.kt",
                 "remote/RemoteControlReceiver.kt",
                 "repository/PlanRepository.kt",
                 "ui/MainViewModel.kt"

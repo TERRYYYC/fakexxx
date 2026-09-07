@@ -94,13 +94,56 @@ fun PlanScreen(
     // #12: plan-reset entry (confirm dialog lives in this screen).
     onResetPlan: () -> Unit = {},
     providerScheduleResetCommand: String = "",
-    providerPairingApprovalCommand: String = ""
+    providerPairingApprovalCommand: String = "",
+    // T8 (P0.3): configuration bundle export/import (SAF launchers live in this screen).
+    onExportBundle: (Uri) -> Unit = {},
+    onImportBundle: (Uri) -> Unit = {},
+    bundleConflict: BundlePlanConflict? = null,
+    onBundleOverwrite: () -> Unit = {},
+    onBundleSkip: () -> Unit = {},
+    onBundleConflictDismiss: () -> Unit = {},
+    bundlePairingFingerprints: List<com.example.cellrebelauto.configbundle.ProviderFingerprint> = emptyList(),
+    onDismissBundleFingerprints: () -> Unit = {}
 ) {
     // # SAF 文件选择器（无需新增权限）
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) onImport(uri)
+    }
+    // # T8：配置包选择器（导入 OpenDocument / 导出 CreateDocument）
+    val bundleImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) onImportBundle(uri)
+    }
+    val bundleExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        if (uri != null) onExportBundle(uri)
+    }
+
+    bundleConflict?.let { conflict ->
+        AlertDialog(
+            onDismissRequest = onBundleConflictDismiss,
+            title = { Text("Import bundle over current plan?") },
+            text = {
+                Text(
+                    "The bundle carries ${conflict.rows.size} plan row(s) " +
+                        "(${conflict.sourceFileName}, buffer ${conflict.bufferSeconds}s) but " +
+                        "${conflict.oldSourceFileName} is still unfinished.\n\n" +
+                        "Overwrite: safely stop and archive the current plan, then import the " +
+                        "bundle rows.\n" +
+                        "Skip plan: keep the current plan; only the bundle parameters apply.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = onBundleOverwrite) { Text("Overwrite") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = onBundleSkip) { Text("Skip plan") }
+            }
+        )
     }
 
     importProposal?.let { proposal ->
@@ -210,6 +253,67 @@ fun PlanScreen(
                         enabled = !isRunning
                     ) {
                         Text("Import CSV")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // # T8：配置包导出/导入（第二台设备一键对齐）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                bundleExportLauncher.launch(
+                                    com.example.cellrebelauto.configbundle.AutoBundleExporter
+                                        .suggestedFileName(System.currentTimeMillis())
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Export bundle")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                bundleImportLauncher.launch(
+                                    arrayOf("application/zip", "application/octet-stream")
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Import bundle")
+                        }
+                    }
+                }
+            }
+        }
+
+        // # T8：包内配对指纹的人工核对卡片（导入方仍须重新走批准——绝不静默授权）
+        if (bundlePairingFingerprints.isNotEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "Pairing fingerprints from the bundle — verify these match the " +
+                                "device you migrated from, then RE-APPROVE (fingerprints never " +
+                                "restore trust automatically).",
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        bundlePairingFingerprints.forEach { fingerprint ->
+                            Text(
+                                "${fingerprint.applicationId}\n" +
+                                    "signer: ${fingerprint.signerDigest}" +
+                                    (fingerprint.approvedVersionCode?.let { " · v$it" } ?: ""),
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(onClick = onDismissBundleFingerprints) { Text("Got it") }
                     }
                 }
             }

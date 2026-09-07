@@ -92,6 +92,19 @@ data class ImportProposal(
     val rows: List<com.example.cellrebelauto.model.plan.WorklistRow>
 )
 
+/**
+ * T8: a parsed config bundle plan that COLLIDES with the current unfinished plan.
+ * Staged until the operator picks overwrite (through the T2 replacement machinery)
+ * or skip (parameters only). # 冲突提示的暂存态：覆盖走 T2 替换机制，跳过仅参数
+ */
+data class BundlePlanConflict(
+    val oldPlanId: Long,
+    val oldSourceFileName: String,
+    val sourceFileName: String,
+    val rows: List<com.example.cellrebelauto.model.plan.WorklistRow>,
+    val bufferSeconds: Int,
+)
+
 /** Testable UI boundary over the accessibility service's request-id-bound stop proof flow. */
 interface SupersessionStopClient {
     val status: StateFlow<SupersessionStopStatus>
@@ -434,6 +447,213 @@ class MainViewModel @JvmOverloads constructor(
     // # 导入提示（拒绝原因或成功摘要）
     private val _importNotice = MutableStateFlow<String?>(null)
     val importNotice: StateFlow<String?> = _importNotice
+
+    // ---- T8 (P0.3): configuration bundle import / export ----
+
+    private val bundleImporter =
+        com.example.cellrebelauto.configbundle.AutoBundleImporter()
+
+    // # 冲突提示暂存（覆盖/跳过 二选一；默认提示）
+    private val _bundleConflict = MutableStateFlow<BundlePlanConflict?>(null)
+    val bundleConflict: StateFlow<BundlePlanConflict?> = _bundleConflict
+
+    // # 包内配对指纹：仅供人工核对，导入绝不写 provider_pairing_records（无静默 TOFU）
+    private val _bundlePairingFingerprints =
+        MutableStateFlow<List<com.example.cellrebelauto.configbundle.ProviderFingerprint>>(emptyList())
+    val bundlePairingFingerprints: StateFlow<List<com.example.cellrebelauto.configbundle.ProviderFingerprint>> =
+        _bundlePairingFingerprints
+
+    // # 行数对账警告（清单声明 vs 包内实际），经 T2 警告通道呈现
+    private val _bundleWarnings = MutableStateFlow<List<String>>(emptyList())
+    val bundleWarnings: StateFlow<List<String>> = _bundleWarnings
+
+    fun dismissBundleFingerprints() {
+        _bundlePairingFingerprints.value = emptyList()
+    }
+
+    /**
+     * T8: import a configuration bundle chosen via SAF. Fail-closed parsing (unknown
+     * schemaVersion / manifest mismatch rejects everything), plan parameters always
+     * apply, plan rows are idempotent-skipped when identical, and a colliding unfinished
+     * plan stages the overwrite/skip conflict instead of importing.
+     * # 导入配置包：fail-closed + 参数必应用 + 计划幂等跳过 + 冲突默认提示
+     */
+    fun importConfigBundle(uri: android.net.Uri) {
+        viewModelScope.launch {
+            _importErrors.value = emptyList()
+            _planProfileMismatch.value = null
+            val bytes = withContext(Dispatchers.IO) {
+                try {
+                    getApplication<Application>().contentResolver.openInputStream(uri)
+                        ?.use { it.readBytes() }
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (bytes == null) {
+                _importNotice.value = "Cannot read the selected bundle"
+                return@launch
+            }
+            val ready = when (val outcome = bundleImporter.parse(bytes)) {
+                is com.example.cellrebelauto.configbundle.AutoBundleImportOutcome.Rejected -> {
+                    _importNotice.value = "Import rejected — ${outcome.reason}"
+                    return@launch
+                }
+                is com.example.cellrebelauto.configbundle.AutoBundleImportOutcome.Ready -> outcome
+            }
+            _bundleWarnings.value = ready.warnings
+            _bundlePairingFingerprints.value = ready.pairing
+
+            // Plan parameters (buffer + advanced + stage toggles) are not conflicting data.
+            ready.planConfig?.config?.let { config ->
+                com.example.cellrebelauto.configbundle.BundlePlanParams.apply(
+                    config,
+                    planConfigStore::setGlobalBufferSeconds,
+                    planConfigStore::setTestTimeoutSeconds,
+                    planConfigStore::setGpsSettleSeconds,
+                    planConfigStore::setLocationStageEnabled,
+                    planConfigStore::setTestStageEnabled,
+                )
+            }
+
+            val payload = ready.plan
+            if (payload == null) {
+                _importNotice.value = "Bundle applied — plan parameters only (no plan section)"
+                return@launch
+            }
+            val buffer = ready.planConfig?.config?.globalBufferSeconds
+                ?: planConfig.value.readyValueOrNull()?.globalBufferSeconds
+            if (buffer == null) {
+                _importNotice.value = "Set global buffer first"
+                return@launch
+            }
+            val current = withContext(Dispatchers.IO) { db.planDao().getLatestPlan() }
+            if (current != null) {
+                val tasks = withContext(Dispatchers.IO) {
+                    db.locationTaskDao().getTasksForPlan(current.id)
+                }
+                if (bundlePlanMatches(current, tasks, payload, buffer)) {
+                    _importNotice.value =
+                        "Bundle plan is already current — skipped (parameters applied)"
+                    return@launch
+                }
+                val unfinished = tasks.isNotEmpty() && tasks.any { it.status != "completed" }
+                if (unfinished) {
+                    _bundleConflict.value = BundlePlanConflict(
+                        oldPlanId = current.id,
+                        oldSourceFileName = current.sourceFileName,
+                        sourceFileName = payload.sourceFileName,
+                        rows = payload.rows,
+                        bufferSeconds = buffer,
+                    )
+                    _importNotice.value = "Review the bundle replacement before importing"
+                    return@launch
+                }
+            }
+            importBundlePlanRows(payload, buffer)
+        }
+    }
+
+    /** Overwrite decision: the bundle rows route through the EXISTING T2 replacement machinery. */
+    fun confirmBundleOverwrite() {
+        val conflict = _bundleConflict.value ?: return
+        _bundleConflict.value = null
+        _importProposal.value = ImportProposal(
+            expectedOldPlanId = conflict.oldPlanId,
+            oldSourceFileName = conflict.oldSourceFileName,
+            sourceFileName = conflict.sourceFileName,
+            globalBufferSeconds = conflict.bufferSeconds,
+            rows = conflict.rows,
+        )
+        _importNotice.value = "Review replacement before importing ${conflict.sourceFileName}"
+    }
+
+    /** Skip decision: keep the current plan; the bundle parameters were already applied. */
+    fun skipBundlePlanApply() {
+        _bundleConflict.value = null
+        _importNotice.value = "Kept the current plan — bundle parameters applied"
+    }
+
+    fun dismissBundleConflict() {
+        _bundleConflict.value = null
+        _importNotice.value = "Kept the current plan; no bundle content was imported"
+    }
+
+    /** Pure content equality: same rows (csvRow order) AND same buffer → idempotent skip. */
+    private fun bundlePlanMatches(
+        plan: com.example.cellrebelauto.model.plan.LocationPlan,
+        tasks: List<com.example.cellrebelauto.model.plan.LocationTask>,
+        payload: com.example.cellrebelauto.configbundle.PlanPayload,
+        buffer: Int,
+    ): Boolean {
+        if (plan.globalBufferSeconds != buffer) return false
+        val local = tasks.sortedBy { it.csvRow }
+            .map { Triple(it.longitude, it.latitude, it.priority to it.requiredSuccesses) }
+        val bundle = payload.rows
+            .map { Triple(it.longitude, it.latitude, it.priority to it.requiredSuccesses) }
+        return local == bundle
+    }
+
+    private fun importBundlePlanRows(
+        payload: com.example.cellrebelauto.configbundle.PlanPayload,
+        buffer: Int,
+    ) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                planRepository.importPlan(
+                    sourceFileName = payload.sourceFileName,
+                    globalBufferSeconds = buffer,
+                    rows = payload.rows,
+                    importedAt = System.currentTimeMillis(),
+                )
+            }
+            _importNotice.value =
+                "Imported ${payload.rows.size} rows from config bundle, " +
+                    "${payload.rows.sumOf { it.requiredSuccesses }} successes total"
+            checkPlanProfileConsistency(payload.rows.size)
+        }
+    }
+
+    /**
+     * T8: export the config bundle (plan rows in T2 CSV semantics + parameters + pairing
+     * fingerprints + lane metadata) to a SAF-created zip. Run history is NOT exported.
+     */
+    fun exportConfigBundle(uri: android.net.Uri) {
+        viewModelScope.launch {
+            try {
+                val export = withContext(Dispatchers.IO) {
+                    val current = db.planDao().getLatestPlan() ?: return@withContext null
+                    com.example.cellrebelauto.configbundle.BundleExportSource.read(
+                        db = db,
+                        accessGate = accessGate,
+                        planId = current.id,
+                        // #103 cutover architecture: unwrap the gated config flow;
+                        // fail-closed (no export) while protected data is unavailable.
+                        planConfig = planConfig.value.readyValueOrNull()
+                            ?: return@withContext null,
+                    )
+                }
+                if (export == null) {
+                    showToast("No plan to export yet")
+                    return@launch
+                }
+                val bytes = com.example.cellrebelauto.configbundle.AutoBundleExporter
+                    .export(export)
+                    .zipBytes
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
+                        ?.use { it.write(bytes) }
+                        ?: error("cannot create the bundle file")
+                }
+                showToast(
+                    "Exported config bundle: ${export.planRows.size} plan rows + parameters " +
+                        "+ ${export.pairingFingerprints.size} pairing fingerprint(s) — no secrets",
+                )
+            } catch (e: Exception) {
+                showToast("Export failed: ${e.message}")
+            }
+        }
+    }
 
     // The parsed rows remain memory-only until the operator explicitly confirms replacement.
     private val _importProposal = MutableStateFlow<ImportProposal?>(null)
