@@ -1,6 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
 import io.github.terryyyc.fakexxx.contract.v1.CanonicalDigestV1
+import io.github.terryyyc.fakexxx.contract.v1.ContinuityCoverageV1
 import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentObservationV1
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
@@ -22,6 +23,10 @@ class EnvironmentObserver(
     private val environment: QwyEnvironment,
     private val clock: MonotonicClock,
     private val audit: IntegrationAuditStore,
+    private val authoritativeSource: AuthoritativeContinuitySource? = null,
+    private val expectedOracleOwnerPackage: String? = null,
+    private val expectedOracleOwnerUid: Int? = null,
+    private val authoritativeCommitStore: AuthoritativeObservationCommitStore? = null,
 ) {
     /**
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
@@ -36,9 +41,102 @@ class EnvironmentObserver(
             )
         }
 
-        val snap = tracker.snapshot()
+        // The only production FULL path reads an external source immediately
+        // before and after the complete local projection. A source is optional
+        // only for legacy JVM harnesses; ProviderRuntime always supplies it.
+        val pre = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
+        val windowStartElapsedRealtimeMs = clock.elapsedRealtimeMs()
+        var snap = tracker.snapshot()
         val effective = environment.observeEffective()
         val schedule = environment.scheduleSnapshot()
+        val post = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
+        val expectedDigest = QwyObservedSemanticDigest.compute(
+            ownerGeneration = snap.generation,
+            effective = effective,
+            schedule = schedule,
+        )
+        var authoritativeWindowIsValid = when {
+            authoritativeSource == null -> false
+            expectedOracleOwnerPackage == null || expectedOracleOwnerUid == null -> false
+            classifyAuthoritativeWindow(
+                pre = pre,
+                post = post,
+                expectedPackage = expectedOracleOwnerPackage,
+                expectedUid = expectedOracleOwnerUid,
+            ) != AuthoritativeWindowVerdict.VALID -> false
+            pre?.qwySemanticDigest != expectedDigest -> false
+            post?.qwySemanticDigest != expectedDigest -> false
+            else -> true
+        }
+        var authoritativeCursor = if (authoritativeWindowIsValid) {
+            val stablePre = checkNotNull(pre)
+            AuthoritativeObservationCursor(
+                bootId = stablePre.bootId,
+                oracleInstanceId = stablePre.oracleInstanceId,
+                sequence = stablePre.sequence,
+                qwySemanticDigest = checkNotNull(stablePre.qwySemanticDigest),
+            )
+        } else {
+            null
+        }
+        // PRE/POST alone establishes interval consistency, but cannot detect a
+        // stale replay from an earlier completed interval. Once this owner has
+        // acknowledged sequence N for an epoch, a later observation of N-2 is
+        // fail-closed even when its own endpoints match.
+        authoritativeCursor?.let { cursor ->
+            val highest = authoritativeCommitStore?.highestAcknowledgedSequenceForSourceEpoch(cursor)
+            val knownDigest = authoritativeCommitStore?.digestForAcknowledgedSequence(cursor)
+            if ((highest != null && cursor.sequence < highest) ||
+                (knownDigest != null && knownDigest != cursor.qwySemanticDigest)) {
+                authoritativeWindowIsValid = false
+                authoritativeCursor = null
+            }
+        }
+        authoritativeCursor?.let { cursor ->
+            if (authoritativeCommitStore?.hasAcknowledgementForDifferentSourceEpoch(snap.generation, cursor) == true) {
+                // Do not silently treat a producer reboot or replacement as a
+                // continuous local history. This owner emits NONE; the next
+                // owner generation must obtain a fresh window before it can
+                // establish a new local epoch.
+                authoritativeWindowIsValid = false
+                authoritativeCursor = null
+            }
+        }
+        // A new stable cursor in the same authoritative epoch reports a
+        // producer-observed semantic change which local callbacks may not have
+        // delivered. The revision owner, not the replay store, conservatively
+        // advances the local revision once before the observation is bound.
+        // The first cursor of an epoch is only acknowledged; repeating it never
+        // bumps revision. All calls are enclosed by the handler's outer
+        // DurableKv transaction in production.
+        authoritativeCursor?.let { cursor ->
+            if (authoritativeCommitStore != null &&
+                authoritativeCommitStore.acknowledgement(cursor) == null &&
+                authoritativeCommitStore.hasAcknowledgementForSourceEpoch(cursor)
+            ) {
+                tracker.bump(RevisionBumpReason.AUTHORITATIVE_CURSOR_CHANGED)
+                snap = tracker.snapshot()
+            }
+        }
+        if (authoritativeCommitStore != null) {
+            if (authoritativeWindowIsValid && snap.continuitySinceElapsedRealtimeMs == null) {
+                tracker.recordAuthoritativeObservationStart()
+                snap = tracker.snapshot()
+            } else if (!authoritativeWindowIsValid && authoritativeSource != null) {
+                tracker.reportObserverGap()
+                snap = tracker.snapshot()
+            }
+        }
+        val coverageWire = when {
+            authoritativeSource == null -> snap.coverageWire
+            authoritativeWindowIsValid -> ContinuityCoverageV1.FULL.wire
+            else -> ContinuityCoverageV1.NONE.wire
+        }
+        val continuitySince = when {
+            authoritativeSource == null -> snap.continuitySinceElapsedRealtimeMs
+            authoritativeWindowIsValid -> snap.continuitySinceElapsedRealtimeMs ?: windowStartElapsedRealtimeMs
+            else -> null
+        }
 
         val observation = EnvironmentObservationV1(
             leaseId = lease.leaseId,
@@ -47,12 +145,12 @@ class EnvironmentObserver(
             observedAtElapsedRealtimeMs = clock.elapsedRealtimeMs(),
             environmentRevision = snap.revision,
             environmentFingerprint = effective.environmentFingerprint,
-            continuityCoverageWire = snap.coverageWire,
-            continuitySinceEpochMs = snap.continuitySinceElapsedRealtimeMs?.let {
+            continuityCoverageWire = coverageWire,
+            continuitySinceEpochMs = continuitySince?.let {
                 // Convert elapsed to epoch for the epoch field (audit only)
                 clock.epochMs() - (clock.elapsedRealtimeMs() - it)
             },
-            continuitySinceElapsedRealtimeMs = snap.continuitySinceElapsedRealtimeMs,
+            continuitySinceElapsedRealtimeMs = continuitySince,
             deliveryModeWire = effective.deliveryModeWire,
             verificationLevelWire = effective.verificationLevelWire,
             effectiveLatitude = effective.latitude,
@@ -69,13 +167,23 @@ class EnvironmentObserver(
         // The reference crosses Binder only after its backing row is durable.
         // A write failure therefore fails the whole observe call closed; it can
         // never return a structurally valid but unresolvable evidence ref.
+        val evidenceDigest = QwyObservationEvidenceDigest.compute(observation)
         val evidence = audit.append(
             event = "observe",
             callerApplicationId = lease.callerApplicationId,
             leaseId = lease.leaseId,
             operationId = request.operationId,
-            payloadDigest = QwyObservationEvidenceDigest.compute(observation),
+            payloadDigest = evidenceDigest,
         )
+        authoritativeCursor?.let { cursor ->
+            authoritativeCommitStore?.record(
+                cursor = cursor,
+                localGeneration = snap.generation,
+                localRevision = snap.revision,
+                evidence = evidence,
+                evidenceDigest = evidenceDigest,
+            )
+        }
         return observation.copy(evidenceRefs = listOf("qwy:audit:${evidence.seq}"))
     }
 }

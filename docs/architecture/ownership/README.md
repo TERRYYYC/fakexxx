@@ -87,3 +87,23 @@ the three lanes must not each invent their own compatibility.
 | Dual-app integration + device evidence | not yet created | Sol / PR-6 |
 
 No cat merges. Every PR stops at `ready for operator decision`.
+
+## 6. Current-main #83 proposed observation-admission boundary
+
+This additive row records the boundary a later #83 candidate must use. It does
+not rewrite the historical PR-1..6 ownership claims above, and it does not
+choose a rate, quota number, window lifetime, or retry policy. The prior
+candidate was withdrawn; no admission helper is active in current production
+code.
+
+| Responsibility | Runtime owner | Must do | Must not do |
+|---|---|---|---|
+| Proposed observe admission gate | future Qianwangyou `EnvironmentControlHandler` extension | Authorize the Binder caller, require that caller's effective lease, then apply a later-approved policy before the audit append. | Bypass caller/lease checks, classify oracle coverage, or append evidence after rejection. |
+| Proposed non-evidence admission state | future Qianwangyou provider-private helper/store | Hold only the policy-selected bounded consumption state and join the handler's `DurableKv` transaction. | Issue/resolve `qwy:audit:<seq>`, prune audit history, or manufacture a replay observation. |
+| Evidence identity and retention | `IntegrationAuditStore` | Keep allocating and durably appending the exact audit event under the existing behavior; a future admission policy may only join this transaction. | Treat quota state as audit evidence or allow quota expiry to delete retained evidence. |
+
+The authoritative continuity oracle remains outside this boundary: it fixes
+`FULL` eligibility before admission, so the admission gate can reduce service
+availability but cannot create trust. The exact admission policy remains an
+unfrozen #83 decision in
+`feature-specs/2026-09-06-qwy-current-main-trust-closure.md`.

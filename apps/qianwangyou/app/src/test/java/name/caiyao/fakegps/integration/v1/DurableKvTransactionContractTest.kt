@@ -237,8 +237,8 @@ class FileDurableKvFaultInjectionTest {
             write("receipts", "advance-1", "receipt")
         }
 
-        val storeFile = dir.listFiles()!!.first { it.name.endsWith(".kv") }
-        storeFile.appendText("this line has no separators at all\n")
+        val storeFile = File(dir, "environment-control-v1.journal")
+        storeFile.appendText("this line has no valid journal header\n")
 
         try {
             FileDurableKv(dir)

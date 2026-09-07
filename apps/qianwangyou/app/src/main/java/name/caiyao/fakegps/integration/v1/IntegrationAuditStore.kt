@@ -19,6 +19,9 @@ interface IntegrationAuditStore {
         payloadDigest: String? = null,
     ): QwyAuditEvent
 
+    /** Resolves one exact durable sequence, or null only when it was never assigned. */
+    fun resolve(seq: Long): QwyAuditEvent?
+
     /** Read back in seq order (for operator review and tests). */
     fun all(): List<QwyAuditEvent>
 }
@@ -56,10 +59,27 @@ class DurableIntegrationAuditStore(
         auditEvent
     }
 
+    override fun resolve(seq: Long): QwyAuditEvent? {
+        require(seq > 0L) { "audit sequence must be positive" }
+        val maxSeq = storage.read(AUDIT_NS, SEQ_KEY)?.toLong() ?: return null
+        if (seq > maxSeq) return null
+        val encoded = storage.read(AUDIT_NS, "evt:$seq")
+            ?: throw IllegalStateException("corrupt audit: missing assigned sequence $seq")
+        val decoded = try {
+            deserializeEvent(encoded)
+        } catch (e: RuntimeException) {
+            throw IllegalStateException("corrupt audit event at sequence $seq", e)
+        }
+        check(decoded.seq == seq) {
+            "corrupt audit: key sequence $seq contains event sequence ${decoded.seq}"
+        }
+        return decoded
+    }
+
     override fun all(): List<QwyAuditEvent> {
         val maxSeq = storage.read(AUDIT_NS, SEQ_KEY)?.toLong() ?: return emptyList()
-        return (1..maxSeq).mapNotNull { seq ->
-            storage.read(AUDIT_NS, "evt:$seq")?.let { deserializeEvent(it) }
+        return (1L..maxSeq).map { seq ->
+            checkNotNull(resolve(seq)) { "assigned audit sequence $seq disappeared" }
         }
     }
 

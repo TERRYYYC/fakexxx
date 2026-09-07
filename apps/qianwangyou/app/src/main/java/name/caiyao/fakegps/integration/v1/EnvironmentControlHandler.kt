@@ -110,7 +110,7 @@ class EnvironmentControlHandler(
             ),
             continuityCoverageWire = snap.coverageWire,
             environmentRevision = snap.revision,
-            profileRefs = emptyList(),
+            profileRefs = environment.profileRefsSnapshot(),
             scheduleRefs = if (schedule != null) listOf(schedule.scheduleId) else emptyList(),
             // v1.55 schedule projection group: all four null together when no
             // active schedule, all four non-null together otherwise.
@@ -287,8 +287,9 @@ class EnvironmentControlHandler(
 
             // Bump revision for the environment change
             tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
-            // Mark continuity established from now
-            tracker.markContinuityEstablished()
+            // An app-local apply cannot establish uninterrupted continuity.
+            // Until an authoritative source proves the full history window,
+            // the tracker remains degraded and observations fail closed.
 
             val receipt = ApplyReceiptV1(
                 operationId = operationId,
@@ -370,7 +371,10 @@ class EnvironmentControlHandler(
             }
         }
 
-        observer.observe(lease, request)
+        // The source cursor acknowledgement and the returned audit reference
+        // have one crash boundary. Nested store transactions join this owner
+        // transaction on every DurableKv implementation.
+        storage.transaction { observer.observe(lease, request) }
     }
 
     fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {

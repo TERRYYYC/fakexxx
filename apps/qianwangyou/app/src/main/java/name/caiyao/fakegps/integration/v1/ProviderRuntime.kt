@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.SystemClock
 import java.io.File
 import java.security.MessageDigest
+import name.caiyao.fakegps.data.db.AppDatabase
 
 /**
  * Production wiring for the v1 provider: the Android-backed implementations of
@@ -181,11 +182,22 @@ object ProviderRuntime {
         // commits each write on its own. See FileDurableKv's header.
         val kv = FileDurableKv(File(appContext.filesDir, "environment-control-v1"))
         kvRef = kv
+        // Recovery is an owner-start lifecycle action. A snapshot read must
+        // never retry it because recovery can stage/copy/rename the profile DB.
+        val profileDatabaseAvailable = try {
+            AppDatabase.ensureLegacyDatabaseRecovered(appContext)
+            true
+        } catch (_: Exception) {
+            false
+        }
         return compose(
             kv = kv,
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
-            environment = QwyEnvironmentController(appContext),
+            environment = QwyEnvironmentController(appContext, profileDatabaseAvailable),
+            authoritativeSource = BinderAuthoritativeContinuitySource(),
+            expectedOracleOwnerPackage = appContext.packageName,
+            expectedOracleOwnerUid = appContext.applicationInfo.uid,
         )
     }
 
@@ -208,6 +220,9 @@ object ProviderRuntime {
         clock: MonotonicClock,
         resolver: PackageIdentityResolver,
         environment: QwyEnvironment,
+        authoritativeSource: AuthoritativeContinuitySource? = null,
+        expectedOracleOwnerPackage: String? = null,
+        expectedOracleOwnerUid: Int? = null,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -215,7 +230,17 @@ object ProviderRuntime {
         val leases = EnvironmentLeaseStore(kv, clock)
         val idempotency = DurableIdempotencyStore(kv)
         val audit = DurableIntegrationAuditStore(kv, clock)
-        val observer = EnvironmentObserver(tracker, environment, clock, audit)
+        val authoritativeCommitStore = AuthoritativeObservationCommitStore(kv)
+        val observer = EnvironmentObserver(
+            tracker,
+            environment,
+            clock,
+            audit,
+            authoritativeSource,
+            expectedOracleOwnerPackage,
+            expectedOracleOwnerUid,
+            authoritativeCommitStore,
+        )
 
         val handler = EnvironmentControlHandler(
             authorizer = authorizer,

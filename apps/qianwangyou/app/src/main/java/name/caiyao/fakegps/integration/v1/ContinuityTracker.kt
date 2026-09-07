@@ -99,14 +99,23 @@ class ContinuityTracker(
             storage.write(REVISION_NAMESPACE, KEY_REVISION, (current + 1L).toString())
             storage.write(REVISION_NAMESPACE, KEY_COVERAGE,
                 ContinuityCoverageV1.PARTIAL.wire.toString())
+            storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE, "")
         }
     }
 
-    /** Mark that full-coverage continuity is established from now (window start). */
+    /** Legacy local-owner full marker; callers need an independent local proof. */
     fun markContinuityEstablished() {
         storage.transaction {
             storage.write(REVISION_NAMESPACE, KEY_COVERAGE,
                 ContinuityCoverageV1.FULL.wire.toString())
+            storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE,
+                clock.elapsedRealtimeMs().toString())
+        }
+    }
+
+    /** Records oracle-observation timing without granting public local FULL. */
+    fun recordAuthoritativeObservationStart() {
+        storage.transaction {
             storage.write(REVISION_NAMESPACE, KEY_CONTINUITY_SINCE,
                 clock.elapsedRealtimeMs().toString())
         }

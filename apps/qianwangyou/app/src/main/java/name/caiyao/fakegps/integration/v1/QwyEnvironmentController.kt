@@ -12,7 +12,6 @@ import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PayloadRead
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.SpoofConfig
-import name.caiyao.fakegps.data.db.AppDatabase
 import name.caiyao.fakegps.mockprovider.AndroidMockProviderGateway
 import name.caiyao.fakegps.mockprovider.CoordinatedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolution
@@ -27,6 +26,8 @@ import name.caiyao.fakegps.mockprovider.MockProviderGateway
  */
 interface QwyEnvironment {
 
+    /** Ordered, read-only profile owner projection. Empty is an honest unavailable projection. */
+    fun profileRefsSnapshot(): List<String> = emptyList()
     fun scheduleSnapshot(): ScheduleSnapshot?
     fun advancePointer(fromItemId: String): AdvancePointerOutcome
     fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean = false
@@ -103,6 +104,7 @@ data class EffectiveEnvironment(
  */
 class QwyEnvironmentController(
     private val context: Context,
+    private val profileDatabaseAvailable: Boolean,
 ) : QwyEnvironment {
 
     private val appContext = context.applicationContext
@@ -118,25 +120,31 @@ class QwyEnvironmentController(
     }
 
     private fun initScheduleFromDb() {
-        AppDatabase.ensureLegacyDatabaseRecovered(appContext)
-        val dbFile = appContext.getDatabasePath("fakegps.db")
-        if (!dbFile.exists()) return
-        val db = SQLiteDatabase.openDatabase(
-            dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
-        )
-        val profileIds = try {
-            val cursor = db.rawQuery("SELECT id FROM temp ORDER BY id ASC", null)
-            val ids = mutableListOf<Long>()
-            while (cursor.moveToNext()) {
-                ids.add(cursor.getLong(0))
-            }
-            cursor.close()
-            ids
-        } finally {
-            db.close()
-        }
+        val profileIds = readProfileIds()
         if (profileIds.isNotEmpty()) {
             scheduleStore.initFromProfileIds(profileIds)
+        }
+    }
+
+    override fun profileRefsSnapshot(): List<String> =
+        ProfileRefProjection.fromLegacyIds(readProfileIds())
+
+    private fun readProfileIds(): List<Long> {
+        if (!profileDatabaseAvailable) return emptyList()
+        val dbFile = appContext.getDatabasePath("fakegps.db")
+        if (!dbFile.exists()) return emptyList()
+        return try {
+            SQLiteDatabase.openDatabase(
+                dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY,
+            ).use { db ->
+                db.rawQuery("SELECT id FROM temp ORDER BY id ASC", null).use { cursor ->
+                    buildList {
+                        while (cursor.moveToNext()) add(cursor.getLong(0))
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -236,12 +244,8 @@ class QwyEnvironmentController(
      */
     private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? {
         if (!itemId.startsWith("profile-")) return null
+        if (!profileDatabaseAvailable) return null
         val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
-        try {
-            AppDatabase.ensureLegacyDatabaseRecovered(appContext)
-        } catch (_: Exception) {
-            return null
-        }
         val dbFile = appContext.getDatabasePath("fakegps.db")
         if (!dbFile.exists()) return null
         return try {
