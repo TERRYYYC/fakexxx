@@ -31,6 +31,21 @@ class CutoverArchiveV2CodecTest {
     }
 
     @Test
+    fun `every successful decode is an exact canonical round trip`() {
+        listOf(
+            archive(),
+            archive().copy(captureId = "capture-捕获-📦")
+        ).forEach { candidate ->
+            val encoded = codec.encode(candidate)
+            val decoded = codec.decode(encoded.serialized)
+            val reencoded = codec.encode(decoded.archive)
+
+            assertEquals(encoded.serialized, reencoded.serialized)
+            assertEquals(decoded.archiveDigest, reencoded.archiveDigest)
+        }
+    }
+
+    @Test
     fun `five raw preferences preserve absence separately from an explicit default`() {
         val encodedAbsent = codec.encode(archive()).serialized
         val explicitDefault = archive().copy(
@@ -188,6 +203,50 @@ class CutoverArchiveV2CodecTest {
         assertThrows(IllegalArgumentException::class.java) { tinyCodec.decode(serialized) }
         assertDecodeRejected("id,result\n1,success")
         assertDecodeRejected(trailing)
+    }
+
+    @Test
+    fun `valid Base64URL containing malformed UTF-8 is rejected`() {
+        val serialized = codec.encode(archive()).serialized
+        val malformedCapture = serialized.replace("capture=Y2FwdHVyZS0wMDE", "capture=_w")
+
+        assertDecodeRejected(resign(malformedCapture))
+    }
+
+    @Test
+    fun `isolated UTF-16 surrogate is rejected before encoding`() {
+        assertRejected(archive().copy(captureId = "capture-\uD800"))
+    }
+
+    @Test
+    fun `encoder applies the encoded field limit to table metadata`() {
+        val oversizedSchemaDigest = "x".repeat(25)
+        val limits = CutoverArchiveLimits(
+            maxArchiveBytes = 10_000,
+            maxEncodedFieldChars = 32
+        )
+        val boundedPolicy = policy(limits).let { baseline ->
+            baseline.copy(
+                requiredTableSchemaDigests = baseline.requiredTableSchemaDigests +
+                    ("alpha" to oversizedSchemaDigest)
+            )
+        }
+        val boundedCodec = CutoverArchiveV2Codec(boundedPolicy)
+        val candidate = archive().copy(
+            tables = archive().tables.map { table ->
+                if (table.name == "alpha") table.copy(schemaDigest = oversizedSchemaDigest) else table
+            }
+        )
+
+        assertThrows(IllegalArgumentException::class.java) { boundedCodec.encode(candidate) }
+    }
+
+    @Test
+    fun `blank line immediately before archive digest is rejected`() {
+        val serialized = codec.encode(archive()).serialized
+        val withBlankLine = serialized.replace("\narchiveDigest=", "\n\narchiveDigest=")
+
+        assertDecodeRejected(resign(withBlankLine))
     }
 
     @Test

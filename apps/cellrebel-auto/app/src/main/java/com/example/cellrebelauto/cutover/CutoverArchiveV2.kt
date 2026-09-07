@@ -1,5 +1,9 @@
 package com.example.cellrebelauto.cutover
 
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 import java.util.Base64
 
@@ -161,6 +165,7 @@ class CutoverArchiveV2Codec(
         require(!serialized.endsWith('\n')) { "archive has trailing data" }
         val digestSeparator = serialized.lastIndexOf('\n')
         require(digestSeparator > 0) { "missing archive digest" }
+        require(serialized[digestSeparator - 1] != '\n') { "archive cannot contain blank lines" }
         val digestLineLength = serialized.length - digestSeparator - 1
         require(digestLineLength == ARCHIVE_DIGEST_PREFIX.length + DIGEST_LENGTH) {
             "missing archive digest"
@@ -254,10 +259,9 @@ class CutoverArchiveV2Codec(
 
     private fun validateArchive(archive: CutoverArchiveV2) {
         require(archive.sourcePackage == LEGACY_PACKAGE) { "archive must originate from legacyId" }
+        requireEncodedTextWithinLimit(archive.sourcePackage, "source package")
         require(archive.captureId.isNotBlank()) { "capture id cannot be blank" }
-        require(encodeUtf8(archive.captureId).length <= policy.limits.maxEncodedFieldChars) {
-            "capture id exceeds field limit"
-        }
+        requireEncodedTextWithinLimit(archive.captureId, "capture id")
         require(archive.schemaVersion == policy.schemaVersion) { "unexpected schema version" }
         require(archive.tables.size <= policy.limits.maxTables) { "table count exceeds limit" }
         require(archive.tables.sumOf { it.rows.size.toLong() } <= policy.limits.maxTotalRows) {
@@ -271,6 +275,8 @@ class CutoverArchiveV2Codec(
         }
         archive.tables.forEach { table ->
             require(table.name.isNotBlank()) { "table name cannot be blank" }
+            requireEncodedTextWithinLimit(table.name, "table name")
+            requireEncodedTextWithinLimit(table.schemaDigest, "schema digest")
             require(table.schemaDigest == policy.requiredTableSchemaDigests.getValue(table.name)) {
                 "unexpected schema digest for ${table.name}"
             }
@@ -297,15 +303,23 @@ class CutoverArchiveV2Codec(
             "preference census must contain exactly five owned keys"
         }
         archive.preferences.forEach { preference ->
+            requireEncodedTextWithinLimit(preference.key, "preference key")
             require(preference.type == policy.preferenceTypes.getValue(preference.key)) {
                 "unexpected preference type for ${preference.key}"
             }
             if (preference.present) {
                 val value = requireNotNull(preference.value) { "present preference requires a value" }
+                requireEncodedTextWithinLimit(value, "preference value")
                 validatePreferenceValue(preference.type, value)
             } else {
                 require(preference.value == null) { "absent preference cannot carry a value" }
             }
+        }
+    }
+
+    private fun requireEncodedTextWithinLimit(value: String, field: String) {
+        require(encodeUtf8(value).length <= policy.limits.maxEncodedFieldChars) {
+            "$field exceeds field limit"
         }
     }
 
@@ -390,10 +404,32 @@ class CutoverArchiveV2Codec(
         return fields
     }
 
-    private fun encodeUtf8(value: String): String = ENCODER.encodeToString(value.toByteArray(Charsets.UTF_8))
+    private fun encodeUtf8(value: String): String {
+        val encoded = try {
+            Charsets.UTF_8.newEncoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .encode(CharBuffer.wrap(value))
+        } catch (_: CharacterCodingException) {
+            throw IllegalArgumentException("text cannot be encoded as UTF-8")
+        }
+        val bytes = ByteArray(encoded.remaining())
+        encoded.get(bytes)
+        return ENCODER.encodeToString(bytes)
+    }
 
-    private fun decodeUtf8(value: String, field: String, allowEmpty: Boolean): String =
-        decodeBase64Url(value, field, allowEmpty).toString(Charsets.UTF_8)
+    private fun decodeUtf8(value: String, field: String, allowEmpty: Boolean): String {
+        val decoded = decodeBase64Url(value, field, allowEmpty)
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(decoded))
+                .toString()
+        } catch (_: CharacterCodingException) {
+            throw IllegalArgumentException("invalid UTF-8 in $field")
+        }
+    }
 
     private fun requireCanonicalBase64Url(value: String, field: String, allowEmpty: Boolean) {
         decodeBase64Url(value, field, allowEmpty)
