@@ -663,6 +663,56 @@ class PlanRepository(private val db: AppDatabase) {
     suspend fun markAplusLease(attemptId: Long, leaseId: String) =
         db.testAttemptDao().markAplusLease(attemptId, leaseId)
 
+    // ---- P1.3 self-heal (attempt watchdog / coordinate guard / service reconnect) ----
+
+    /**
+     * The task's historical median terminal-attempt duration — the watchdog's history multiplier
+     * input. Null when the task has no terminal attempts yet (watchdog falls back to its floor).
+     * # 该任务历史中位 attempt 时长；无终态历史时为 null（看门狗退回 90s 下限）
+     */
+    suspend fun medianTerminalAttemptDurationMs(taskId: Long): Long? =
+        com.example.cellrebelauto.automation.selfheal.AttemptWatchdogPolicy.median(
+            db.testAttemptDao().terminalAttemptDurationsForTask(taskId)
+        )
+
+    /**
+     * Append-only audit row for one watchdog intervention (the attempt's terminalization itself is
+     * owned by the §8.1 release path; this row records THAT the watchdog — not the runner — fired).
+     * # 看门狗干预审计行：只追加，记录"是看门狗开的枪"这一事实
+     */
+    suspend fun recordAttemptWatchdogAudit(attemptId: Long, detail: String, recordedAt: Long) =
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = db.auditEventDao().count().toLong() + 1,
+                attemptId = attemptId,
+                correlationRef = null,
+                eventType = "ATTEMPT_WATCHDOG_TIMEOUT",
+                payloadDigest = detail,
+                recordedAt = recordedAt
+            )
+        )
+
+    /**
+     * Append-only audit row for a SERVICE-level self-heal action (attemptId-less: service reconnect
+     * auto-resume decisions happen outside any attempt lifecycle).
+     * # 服务级自愈动作审计行（自动恢复执行/拒绝）
+     */
+    suspend fun recordServiceHealAudit(
+        eventType: String,
+        correlationRef: String?,
+        detail: String,
+        recordedAt: Long
+    ) = db.auditEventDao().insert(
+        AutoAuditEvent(
+            seq = db.auditEventDao().count().toLong() + 1,
+            attemptId = null,
+            correlationRef = correlationRef,
+            eventType = eventType,
+            payloadDigest = detail,
+            recordedAt = recordedAt
+        )
+    )
+
     suspend fun getAplusLeaseId(attemptId: Long): String? =
         db.testAttemptDao().getAplusLeaseId(attemptId)
 

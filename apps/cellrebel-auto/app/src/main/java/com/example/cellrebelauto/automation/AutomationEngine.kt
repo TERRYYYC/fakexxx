@@ -10,7 +10,11 @@ import com.example.cellrebelauto.automation.aplus.AttemptTransitions
 import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
+import com.example.cellrebelauto.automation.selfheal.AttemptWatchdogPolicy
+import com.example.cellrebelauto.automation.selfheal.CoordinateGuard
 import com.example.cellrebelauto.environment.CompletionTrustContext
+import com.example.cellrebelauto.environment.TrustPolicy
+import com.example.cellrebelauto.environment.ObservationSnapshot
 import com.example.cellrebelauto.environment.TrustDecision
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.StageToggles
@@ -27,15 +31,19 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
 import io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1
 import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 
 /**
  * Snapshot of the task currently being attempted (Run page status card).
@@ -131,7 +139,10 @@ class AutomationEngine(
     // # hash 不由它提供——ctx 由持久 attempt intent 组装（INV-23）。默认 null = legacy。
     private val completionEvidenceSource: APlusEvidenceSource? = null,
     /** #80: service admission owns this durable session before the engine begins work. */
-    private val initialRunSessionId: Long? = null
+    private val initialRunSessionId: Long? = null,
+    // # P1.3 自愈开关（看门狗/坐标校验）快照提供者，默认全默认值（看门狗 on / 坐标校验 on）
+    private val selfHealConfig: suspend () -> com.example.cellrebelauto.data.SelfHealConfig =
+        { com.example.cellrebelauto.data.SelfHealConfig() }
 ) {
     private enum class AdvanceVerificationResult {
         FAILED,
@@ -149,6 +160,11 @@ class AutomationEngine(
         private const val TAG = "AutoEngine"
         // # 单步操作失败后的最大重试次数
         private const val MAX_STEP_RETRIES = 3
+
+        // # P1.3 attempt 看门狗：注入时钟巡检节奏（生产=1s 真实延迟；测试=虚拟/手动时钟）
+        private const val WATCHDOG_POLL_MS = 1_000L
+        // # 看门狗 Phase-1 真实时钟宽限：快跑者在此完成，注入时钟零开销
+        private const val WATCHDOG_REAL_GRACE_MS = 200L
     }
 
     // # 当前状态
@@ -209,6 +225,215 @@ class AutomationEngine(
     private var runSessionId: Long = initialRunSessionId ?: 0
     // # 在途尝试（停止/取消时标记 interrupted）
     private var currentAttemptId: Long? = null
+
+    // # P1.3 看门狗结果标记：true = 看门狗收尸后 release 未能持久收敛、引擎已暂停（调用方须停跑）
+    private var planHaltedByWatchdog = false
+
+    /**
+     * INV-5 buffer gate between attempts (extracted to keep the [run] closure under the JVM
+     * method-size ceiling — behavior unchanged). Waits from the persisted last-terminal endedAt and
+     * emits the Run-page cooldown projection.
+     */
+    private suspend fun awaitBufferGate(advancingToNewTask: Boolean) {
+        val lastEndedAt = planRepository.latestTerminalAttemptEndedAt(planId)
+        val remainingMs = bufferGate.remainingMs(lastEndedAt)
+        if (remainingMs <= 0) return
+        updateState(AutomationState.COOLDOWN)
+        _cooldown.value = CooldownInfo(
+            startedAtMs = nowMs(),
+            remainingMs = remainingMs,
+            totalMs = bufferGate.bufferSeconds * 1000L,
+            nextAction = if (advancingToNewTask)
+                "advance to next location"
+            else
+                "retry same location"
+        )
+        log("Buffer gate: waiting ${remainingMs / 1000}s before next attempt")
+        delayMs(remainingMs)
+        _cooldown.value = null
+        currentCoroutineContext().ensureActive()
+    }
+
+    /**
+     * Issue #88 pre-attempt anchor re-read (extracted for the same method-size reason — behavior
+     * unchanged). @return the discovered anchor projection, or null when the engine was paused.
+     */
+    private suspend fun rediscoverAttemptAnchor(
+        aplusCoord: RecoveryCoordinator
+    ): CapabilitySnapshotV1? {
+        val discovered = aplusCoord.executorBackend().discover()
+        if (discovered == null ||
+            discovered.protocolVersion !=
+            io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
+        ) {
+            aplusPause("provider discover failed or protocol incompatible before attempt anchor (v1 required)")
+            return null
+        }
+        if (discovered.exhausted == true) {
+            aplusPause(
+                "provider schedule is EXHAUSTED immediately before attempt — " +
+                    "no attempt was created"
+            )
+            return null
+        }
+        if (discovered.currentScheduleId == null ||
+            discovered.currentItemId == null ||
+            discovered.scheduleVersion == null
+        ) {
+            // v1.55 group invariant: a partial-null projection is illegal — fail-closed
+            // before creating an attempt or dispatching any external execution.
+            aplusPause("discover projection incomplete before attempt — cannot anchor the advance CAS triple")
+            return null
+        }
+        return discovered
+    }
+
+    /** §6.7 / #88 preflight denial: typed failure + no apply + no quota, then durable pause. */
+    private suspend fun denyPreflightAndPause(
+        attemptId: Long,
+        preflight: PreflightReportV1?,
+        anchorProjection: CapabilitySnapshotV1
+    ) {
+        val why = when {
+            preflight == null -> "unavailable (fail-closed)"
+            preflight.scheduleItemId != anchorProjection.currentItemId ->
+                "item changed (${anchorProjection.currentItemId} -> ${preflight.scheduleItemId})"
+            preflight.scheduleVersion != anchorProjection.scheduleVersion ->
+                "version changed (${anchorProjection.scheduleVersion} -> ${preflight.scheduleVersion})"
+            else -> "decision=${preflight.scheduleDecisionWire}"
+        }
+        planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
+        aplusPause("preflight denied schedule for attempt $attemptId ($why)")
+    }
+
+    /** AC-F3-3 / KD-F3-2: test stage OFF ⇒ the GPS-verified attempt terminalizes ok_gps_only. */
+    private suspend fun finalizeGpsOnlyAttempt(
+        attemptId: Long,
+        task: com.example.cellrebelauto.model.plan.LocationTask,
+        attemptOrdinal: Int
+    ) {
+        // # KD-F3-2：ok_gps_only 计配额；同事务守卫式收尾（INV-3 语义不变）
+        log("CellRebel stage OFF — GPS-verified attempt terminates as ok_gps_only")
+        planRepository.finalizeAttemptSuccess(
+            attemptId = attemptId,
+            taskId = task.id,
+            expectedCompletedSuccesses = task.completedSuccesses,
+            runningObservedAt = null,
+            endedAt = nowMs(),
+            webScore = null,
+            videoScore = null,
+            status = "ok_gps_only"
+        )
+        val updated = planRepository.getTask(task.id)
+        if (updated != null) {
+            _currentTask.value = _currentTask.value
+                ?.copy(completedSuccesses = planRepository.trustedCountForTask(task.id))
+            if (updated.status == "completed") {
+                log("Location csvRow=${task.csvRow} quota complete ✔")
+            }
+        }
+        updateState(AutomationState.SUCCEEDED)
+        log("Attempt $attemptOrdinal ok_gps_only (test_skipped)")
+    }
+
+    /**
+     * P1.3 #1 — the attempt watchdog. Races [call] against `max(90s, 3× the task's historical median
+     * terminal-attempt duration)` (90s floor with no history). The measured incident: a service
+     * rebuild left the engine holding a dead runner callback and the attempt ran 8+ minutes with no
+     * timeout and no reaping — only the next manual Resume reaped it. A runner still alive at the
+     * deadline is cancelled and its attempt is reaped through the §8.2 RECOVERING terminalization
+     * path ([terminalizeZombieAttempt]); the loop then retries through the normal COOLDOWN gate.
+     * The threshold sits at/above the runner's own `testTimeoutMs` default — this is a zombie
+     * safety net, never a second normal-path timeout.
+     *
+     * Phasing keeps NORMAL runs byte-identical (and virtual-clock test suites unperturbed):
+     *  1. a short REAL-TIME grace join — fast runners complete with zero injected-clock cost;
+     *  2. only then the injected-clock polling loop, yielding the worker a slice before every poll.
+     *
+     * @return the runner's outcome; `null` when the watchdog intervened — check
+     *   [planHaltedByWatchdog]: false = reaped + retried (caller continues the loop), true =
+     *   release not durably converged (engine paused; caller must stop).
+     */
+    private suspend fun runTestUnderWatchdog(
+        attemptId: Long,
+        taskId: Long,
+        attemptOrdinal: Int,
+        startedAt: Long,
+        aplusLane: Boolean,
+        call: suspend () -> AttemptOutcome
+    ): AttemptOutcome? {
+        planHaltedByWatchdog = false
+        if (!selfHealConfig().attemptWatchdogEnabled) return call()
+        val medianMs = planRepository.medianTerminalAttemptDurationMs(taskId)
+        val thresholdMs = AttemptWatchdogPolicy.timeoutMs(medianMs)
+        var outcome: AttemptOutcome? = null
+        coroutineScope {
+            val worker = launch { outcome = call() }
+            // Phase 1 — REAL-TIME grace: a fast/normal runner completes here with zero
+            // injected-clock cost (no delayMs, no virtual time). `join` returns early on
+            // completion; only a genuinely-stalled runner pays the full grace.
+            withContext(Dispatchers.Default) {
+                withTimeoutOrNull(WATCHDOG_REAL_GRACE_MS) { worker.join() }
+            }
+            // Phase 2 — the injected-clock race. Yield FIRST: a worker that just needs
+            // scheduling slices completes without a single delayMs (manual test clocks and
+            // real devices alike stay unperturbed).
+            val deadline = nowMs() + thresholdMs
+            while (outcome == null && worker.isActive && nowMs() < deadline) {
+                yield()
+                if (outcome != null || !worker.isActive || nowMs() >= deadline) break
+                delayMs(WATCHDOG_POLL_MS)
+                yield()
+            }
+            if (outcome == null && worker.isActive) worker.cancel()
+            worker.join()
+        }
+        outcome?.let { return it }
+        val detail = "ATTEMPT_WATCHDOG_TIMEOUT:running ${nowMs() - startedAt}ms >= threshold " +
+            "${thresholdMs}ms (median history ${medianMs ?: "none"})"
+        val reaped = terminalizeZombieAttempt(attemptId, taskId, detail, aplusLane)
+        updateState(AutomationState.FAILED)
+        _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
+        log(
+            "watchdog: attempt $attemptOrdinal exceeded ${thresholdMs / 1000}s — " +
+                "terminalized UNTRUSTED, retry after cooldown"
+        )
+        if (!reaped) planHaltedByWatchdog = true
+        return null
+    }
+
+    /**
+     * The §8.2 RECOVERING terminalization, reused for watchdog reaping (never a second terminal
+     * enum): on the A+ lane the §8.1 owner walks TIMEOUT_INTERRUPTED → RECOVERY_REQUIRED →
+     * RECONCILE → RELEASE_PENDING → durable release → CLOSED with the typed UNTRUSTED failure —
+     * exactly what a Resume-time sweep does to a zombie; the legacy lane takes the typed-failure
+     * finalize. An append-only audit row records that the WATCHDOG — not the runner — fired.
+     */
+    private suspend fun terminalizeZombieAttempt(
+        attemptId: Long,
+        taskId: Long,
+        detail: String,
+        aplusLane: Boolean
+    ): Boolean {
+        planRepository.recordAttemptWatchdogAudit(attemptId, detail, nowMs())
+        if (aplusLane) {
+            updateState(AutomationState.RECOVERING)
+            val durableState = planRepository.getAttempt(attemptId)?.aplusState
+            if (!enterRecoveryReleasePending(attemptId, durableState)) return false
+            return aplusReleaseAndFinalize(
+                attemptId = attemptId,
+                taskId = taskId,
+                currentState = AttemptState.RELEASE_PENDING,
+                success = false,
+                reason = FailureReason.UNTRUSTED.name,
+                endedAt = nowMs(),
+                webScore = null,
+                videoScore = null
+            )
+        }
+        planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
+        return true
+    }
 
     /**
      * Runs the full plan loop. Call from a coroutine scope; cancelling the
@@ -333,24 +558,7 @@ class AutomationEngine(
                     "success ${task.completedSuccesses}/${task.requiredSuccesses} ---")
 
                 // # 缓冲门禁（INV-5）：成功和失败后都要等（从持久化 endedAt 投影）
-                val lastEndedAt = planRepository.latestTerminalAttemptEndedAt(planId)
-                val remainingMs = bufferGate.remainingMs(lastEndedAt)
-                if (remainingMs > 0) {
-                    updateState(AutomationState.COOLDOWN)
-                    _cooldown.value = CooldownInfo(
-                        startedAtMs = nowMs(),
-                        remainingMs = remainingMs,
-                        totalMs = bufferGate.bufferSeconds * 1000L,
-                        nextAction = if (advancingToNewTask)
-                            "advance to next location"
-                        else
-                            "retry same location"
-                    )
-                    log("Buffer gate: waiting ${remainingMs / 1000}s before next attempt")
-                    delayMs(remainingMs)
-                    _cooldown.value = null
-                    ensureActive()
-                }
+                awaitBufferGate(advancingToNewTask)
 
                 // # F003：每次 attempt 重新读取开关快照（AC-F3-5 中途切换下个 attempt 生效）
                 val toggles = stageToggles()
@@ -383,31 +591,7 @@ class AutomationEngine(
                 // the terminal-admission decision and the CAS anchor persisted below; never discover
                 // again between admission and attempt creation.
                 val aplusAnchorProjection = if (aplusCoord != null && aplusEvidenceSrc != null) {
-                    val discovered = aplusCoord.executorBackend().discover()
-                    if (discovered == null ||
-                        discovered.protocolVersion !=
-                        io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROTOCOL_VERSION
-                    ) {
-                        aplusPause("provider discover failed or protocol incompatible before attempt anchor (v1 required)")
-                        return@coroutineScope
-                    }
-                    if (discovered.exhausted == true) {
-                        aplusPause(
-                            "provider schedule is EXHAUSTED immediately before attempt — " +
-                                "no attempt was created"
-                        )
-                        return@coroutineScope
-                    }
-                    if (discovered.currentScheduleId == null ||
-                        discovered.currentItemId == null ||
-                        discovered.scheduleVersion == null
-                    ) {
-                        // v1.55 group invariant: a partial-null projection is illegal — fail-closed
-                        // before creating an attempt or dispatching any external execution.
-                        aplusPause("discover projection incomplete before attempt — cannot anchor the advance CAS triple")
-                        return@coroutineScope
-                    }
-                    discovered
+                    rediscoverAttemptAnchor(aplusCoord) ?: return@coroutineScope
                 } else {
                     null
                 }
@@ -538,16 +722,7 @@ class AutomationEngine(
                         // terminal was already rejected before durable attempt admission above;
                         // exhausted=null remains compatible, but never acts as a wildcard for the
                         // identity tuple.
-                        val why = when {
-                            preflight == null -> "unavailable (fail-closed)"
-                            preflight.scheduleItemId != anchorProjection.currentItemId ->
-                                "item changed (${anchorProjection.currentItemId} -> ${preflight.scheduleItemId})"
-                            preflight.scheduleVersion != anchorProjection.scheduleVersion ->
-                                "version changed (${anchorProjection.scheduleVersion} -> ${preflight.scheduleVersion})"
-                            else -> "decision=${preflight.scheduleDecisionWire}"
-                        }
-                        planRepository.finalizeAttemptFailure(attemptId, FailureReason.UNTRUSTED.name, nowMs())
-                        aplusPause("preflight denied schedule for attempt $attemptId ($why)")
+                        denyPreflightAndPause(attemptId, preflight, anchorProjection)
                         return@coroutineScope
                     }
                     // # P1-3：持久化当前操作（§7.1 Attempt 拥有当前 operation）。
@@ -589,24 +764,34 @@ class AutomationEngine(
                     updateState(AutomationState.LAUNCHING_CELLREBEL)
                     var startInteractionAtElapsed: Long? = null
                     var runningConfirmedAtElapsed = 0L
-                    val outcome = cellRebelRunner.runTest(
-                        startedAt = startedAt,
-                        testTimeoutMs = testTimeoutMs,
-                        onStartInteraction = {
-                            // §6.4.2: this is the actual Start interaction boundary, after PRE and
-                            // after launch/navigation. Attempt creation and runTest entry are too early.
-                            if (startInteractionAtElapsed == null) {
-                                startInteractionAtElapsed = elapsedClockMs()
+                    // # P1.3 看门狗包裹：runner 挂死（服务实例重建后持旧回调的实测事故）→ 阈值处收尸重试
+                    val outcome = runTestUnderWatchdog(attemptId, task.id, attemptOrdinal, startedAt, aplusLane = true) {
+                        cellRebelRunner.runTest(
+                            startedAt = startedAt,
+                            testTimeoutMs = testTimeoutMs,
+                            onStartInteraction = {
+                                // §6.4.2: this is the actual Start interaction boundary, after PRE and
+                                // after launch/navigation. Attempt creation and runTest entry are too early.
+                                if (startInteractionAtElapsed == null) {
+                                    startInteractionAtElapsed = elapsedClockMs()
+                                }
+                            },
+                            onRunningObserved = { runningAt ->
+                                // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
+                                runningConfirmedAtElapsed = elapsedClockMs()
+                                planRepository.markAttemptRunning(attemptId, runningAt)
+                                aplusState = driveAplusTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED)
+                                planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
                             }
-                        },
-                        onRunningObserved = { runningAt ->
-                            // R44 (Sol GREEN-review-3 F3): RUNNING confirmed in the elapsed domain too.
-                            runningConfirmedAtElapsed = elapsedClockMs()
-                            planRepository.markAttemptRunning(attemptId, runningAt)
-                            aplusState = driveAplusTransition(attemptId, aplusState, AttemptEvent.NEW_RUN_OBSERVED)
-                            planRepository.markAplusState(attemptId, "CELLREBEL_RUNNING")
-                        }
-                    )
+                        )
+                    }
+                    if (outcome == null) {
+                        // # 看门狗已收尸：重试走循环顶的 COOLDOWN；若 release 未收敛则引擎已暂停
+                        if (planHaltedByWatchdog) return@coroutineScope
+                        currentAttemptId = null
+                        tasks = planRepository.getTasks(planId)
+                        continue
+                    }
                     ensureActive()
                     when (outcome) {
                         is AttemptOutcome.Failure -> {
@@ -774,6 +959,28 @@ class AutomationEngine(
                                 preObservation = preObservation,
                                 postObservation = postObservation
                             )
+                            // # P1.3 #3 配额 commit 前坐标校验：观察坐标与计划行期望坐标差必须 ≤ ±0.0002°。
+                            // # 52/51 档案错位实测事故：锚点对、坐标错、provider 自验照样 PASS——这道
+                            // # plan-vs-observation 断言在入账前一击拦截（零配额 + ANCHOR_MISMATCH + 暂停）。
+                            // # 只拦截"信任判定本会通过"的完成：TrustPolicy 本就拒绝的坐标（非法/不一致）
+                            // # 走既有 UNTRUSTED fail-closed，不换道。
+                            if (selfHealConfig().coordinateGuardEnabled &&
+                                TrustPolicy().evaluate(trustCtx) == TrustDecision.PASS &&
+                                coordinateGuardVeto(
+                                    attemptId = attemptId,
+                                    taskId = task.id,
+                                    attemptOrdinal = attemptOrdinal,
+                                    currentState = aplusState,
+                                    endedAt = outcome.endedAt,
+                                    pre = preObservation,
+                                    post = postObservation,
+                                    expectedLat = task.latitude,
+                                    expectedLng = task.longitude,
+                                    evidenceDigest = evidence.execution.evidencePayloadDigest
+                                )
+                            ) {
+                                return@coroutineScope
+                            }
                             val decision = planRepository.recordTrustedCompletion(trustCtx, commitClockMs())
                             val trusted = decision == TrustDecision.PASS
                             if (trusted) {
@@ -897,28 +1104,7 @@ class AutomationEngine(
 
                 // ==================== Test stage OFF：GPS 验证即终态（AC-F3-3） ====================
                 if (!toggles.testStageEnabled) {
-                    // # KD-F3-2：ok_gps_only 计配额；同事务守卫式收尾（INV-3 语义不变）
-                    log("CellRebel stage OFF — GPS-verified attempt terminates as ok_gps_only")
-                    planRepository.finalizeAttemptSuccess(
-                        attemptId = attemptId,
-                        taskId = task.id,
-                        expectedCompletedSuccesses = task.completedSuccesses,
-                        runningObservedAt = null,
-                        endedAt = nowMs(),
-                        webScore = null,
-                        videoScore = null,
-                        status = "ok_gps_only"
-                    )
-                    val updated = planRepository.getTask(task.id)
-                    if (updated != null) {
-                        _currentTask.value = _currentTask.value
-                            ?.copy(completedSuccesses = planRepository.trustedCountForTask(task.id))
-                        if (updated.status == "completed") {
-                            log("Location csvRow=${task.csvRow} quota complete ✔")
-                        }
-                    }
-                    updateState(AutomationState.SUCCEEDED)
-                    log("Attempt $attemptOrdinal ok_gps_only (test_skipped)")
+                    finalizeGpsOnlyAttempt(attemptId, task, attemptOrdinal)
                     currentAttemptId = null
                     returnToSelf()
                     tasks = planRepository.getTasks(planId)
@@ -928,10 +1114,20 @@ class AutomationEngine(
                 // ==================== CellRebel verified attempt ====================
                 returnToSelf()
                 updateState(AutomationState.LAUNCHING_CELLREBEL)
-                val outcome = cellRebelRunner.runTest(startedAt, testTimeoutMs, onStartInteraction = {}, onRunningObserved = { runningAt ->
-                    // # C2：观察到 RUNNING 的瞬间持久化 starting -> running 迁移（spec O3）
-                    planRepository.markAttemptRunning(attemptId, runningAt)
-                })
+                // # P1.3 看门狗包裹：runner 挂死 → 阈值处收尸 UNTRUSTED + 审计行 + COOLDOWN 重试
+                val outcome = runTestUnderWatchdog(attemptId, task.id, attemptOrdinal, startedAt, aplusLane = false) {
+                    cellRebelRunner.runTest(startedAt, testTimeoutMs, onStartInteraction = {}, onRunningObserved = { runningAt ->
+                        // # C2：观察到 RUNNING 的瞬间持久化 starting -> running 迁移（spec O3）
+                        planRepository.markAttemptRunning(attemptId, runningAt)
+                    })
+                }
+                if (outcome == null) {
+                    // # 看门狗已收尸：重试走循环顶的 COOLDOWN；若 release 未收敛则引擎已暂停
+                    if (planHaltedByWatchdog) return@coroutineScope
+                    currentAttemptId = null
+                    tasks = planRepository.getTasks(planId)
+                    continue
+                }
                 ensureActive()
                 returnToSelf()
 
@@ -2041,6 +2237,13 @@ class AutomationEngine(
             preObservation = pre,
             postObservation = post
         )
+        // # P1.3 #3：恢复重判与正路径过同一道坐标 guard——错位坐标的 durable carriers 绝不能在
+        // # 崩溃恢复窗口里铸币（否则正路径拦截了、恢复又把配额补回来）。
+        if (decidingCoordinateGuardVeto(crashed, execution.evidencePayloadDigest, pre, post, trustCtx) != null) {
+            // No mint: the caller falls through to the release convergence, which terminalizes
+            // the attempt failed with the same typed reason.
+            return false
+        }
         val decision = planRepository.recordTrustedCompletion(trustCtx, commitClockMs())
         if (decision == TrustDecision.PASS) {
             val committedState = driveAplusTransition(
@@ -2419,6 +2622,108 @@ class AutomationEngine(
     }
 
     /**
+     * P1.3 #3 — the pre-mint coordinate veto (extracted to keep [run] under the JVM method-size
+     * ceiling). Compares each observation's effectiveLat/Lng against the plan row's expected
+     * coordinates (±0.0002° per axis). On violation: NO mint — the §8.1 owner walks the honest
+     * TRUST_POLICY_FAIL edge, the exact unverified carrier + typed ANCHOR_MISMATCH reason persist,
+     * the attempt release-converges to CLOSED failed, and the engine pauses with a human-readable
+     * reason (the operator must see the suspected profile/plan misalignment).
+     *
+     * @return true when the veto fired and the caller must stop (engine paused or fail-closed).
+     */
+    private suspend fun coordinateGuardVeto(
+        attemptId: Long,
+        taskId: Long,
+        attemptOrdinal: Int,
+        currentState: AttemptState,
+        endedAt: Long,
+        pre: ObservationSnapshot,
+        post: ObservationSnapshot,
+        expectedLat: Double,
+        expectedLng: Double,
+        evidenceDigest: String
+    ): Boolean {
+        val violation = CoordinateGuard.violation(
+            expectedLat = expectedLat,
+            expectedLng = expectedLng,
+            observed = listOf(
+                Triple("PRE", pre.effectiveLat, pre.effectiveLng),
+                Triple("POST", post.effectiveLat, post.effectiveLng)
+            )
+        ) ?: return false
+        val unverifiedState = driveAplusTransition(attemptId, currentState, AttemptEvent.TRUST_POLICY_FAIL)
+        planRepository.recordUnverifiedOutcome(
+            attemptId = attemptId,
+            reason = violation,
+            evidenceDigest = evidenceDigest
+        )
+        planRepository.markAplusState(attemptId, "UNVERIFIED_RECORDED")
+        updateState(AutomationState.FAILED)
+        _lastFailure.value = LastFailureInfo(attemptOrdinal, violation)
+        log("ERROR: coordinate guard vetoed attempt $attemptOrdinal — quota NOT committed ($violation)")
+        if (!aplusReleaseAndFinalize(
+                attemptId = attemptId,
+                taskId = taskId,
+                currentState = unverifiedState,
+                success = false,
+                reason = violation,
+                endedAt = endedAt,
+                webScore = null,
+                videoScore = null
+            )
+        ) {
+            return true
+        }
+        aplusPause(
+            "coordinate guard: attempt $attemptOrdinal observed coordinates do not match plan row " +
+                "($expectedLat,$expectedLng) within ±${CoordinateGuard.TOLERANCE_DEG}° — " +
+                "profile/plan misalignment suspected. Fix the pairing, then resume. ($violation)"
+        )
+        return true
+    }
+
+    /**
+     * P1.3 #3 — the SAME guard for the DECIDING crash recovery re-decision: durable carriers with
+     * off-plan coordinates must never mint through the recovery window what the normal path would
+     * have vetoed. On violation the unverified carrier + typed reason persist and the caller falls
+     * through to the release convergence (attempt terminalized failed with the same typed reason).
+     *
+     * @return the typed violation when the veto fired (caller must NOT mint), null otherwise.
+     */
+    private suspend fun decidingCoordinateGuardVeto(
+        crashed: TestAttempt,
+        executionEvidenceDigest: String,
+        pre: ObservationSnapshot,
+        post: ObservationSnapshot,
+        trustCtx: CompletionTrustContext
+    ): String? {
+        if (!selfHealConfig().coordinateGuardEnabled) return null
+        // # 只拦截"信任判定本会通过"的完成（见正路径同名注释）
+        if (TrustPolicy().evaluate(trustCtx) != TrustDecision.PASS) return null
+        val violation = CoordinateGuard.violation(
+            expectedLat = crashed.latitude,
+            expectedLng = crashed.longitude,
+            observed = listOf(
+                Triple("PRE", pre.effectiveLat, pre.effectiveLng),
+                Triple("POST", post.effectiveLat, post.effectiveLng)
+            )
+        ) ?: return null
+        val unverifiedState = driveAplusTransition(
+            crashed.id,
+            AttemptState.DECIDING,
+            AttemptEvent.TRUST_POLICY_FAIL
+        )
+        planRepository.recordUnverifiedOutcome(
+            attemptId = crashed.id,
+            reason = violation,
+            evidenceDigest = executionEvidenceDigest
+        )
+        planRepository.markAplusState(crashed.id, unverifiedState.name)
+        log("ERROR: coordinate guard vetoed the DECIDING re-decision of attempt ${crashed.id} — quota NOT committed ($violation)")
+        return violation
+    }
+
+    /**
      * #86: before a non-wire-1 path can release or close an attempt, persist the exact durable
      * negative outcome. When completion evidence was already captured, bind that exact payload
      * digest; otherwise bind the durable absence fact to this attempt and typed reason. Replays
@@ -2428,8 +2733,7 @@ class AutomationEngine(
         attemptId: Long,
         recoveryReason: String,
         unverifiedReason: String = recoveryReason
-    ) {
-        val execution = planRepository.getCurrentExecutionId(attemptId)
+    ) {        val execution = planRepository.getCurrentExecutionId(attemptId)
             ?.let { planRepository.getExecutionByExecutionId(it) }
         if (execution != null) {
             check(execution.attemptId == attemptId) {
