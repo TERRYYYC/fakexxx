@@ -1,5 +1,8 @@
 package name.caiyao.fakegps.mockprovider
 
+import name.caiyao.fakegps.motion.RoutePlayer
+import name.caiyao.fakegps.motion.RouteSpec
+
 enum class MockProviderRecovery {
     SelectThisAppAndRetryStart,
     ReselectThisAppAndRetryStop,
@@ -22,6 +25,22 @@ sealed interface MockProviderState {
     data class Running(
         val config: MockLocationConfig,
         val emittedCount: Long,
+        /**
+         * P3.1 运动链: the streaming route player for THIS session, null for a static-point
+         * session. Each tick() advances it by one 1 Hz beat and publishes its emission instead
+         * of re-publishing [config]; [config] stays the session's STATIC base (the departure
+         * fix) so refresh comparison and UI projections remain meaningful while moving.
+         */
+        val routePlayer: RoutePlayer? = null,
+        /** Identity of the playing route ([RouteSpec.sessionKey]); null = static session. */
+        val routeKey: String? = null,
+        /** Flips true exactly once, on the tick that publishes the arrival fix. */
+        val routeCompleted: Boolean = false,
+        /**
+         * The fix published on ticks AFTER completion: the exact final waypoint. Publishing the
+         * static [config] again would visibly teleport the vehicle back to the route origin.
+         */
+        val routeArrival: MockLocationConfig? = null,
     ) : MockProviderState
     data object Stopping : MockProviderState
     data class Failed(
@@ -35,6 +54,8 @@ sealed interface MockProviderState {
 class MockProviderSessionController(
     private val gateway: MockProviderGateway,
     private val onStateChanged: (MockProviderState) -> Unit = {},
+    /** P3.1: fired ONCE when a playing route reaches its final waypoint (日程推进挂钩点). */
+    private val onRouteCompleted: (RouteSpec) -> Unit = {},
 ) {
     var state: MockProviderState = MockProviderState.Idle
         private set
@@ -42,6 +63,7 @@ class MockProviderSessionController(
     fun start(
         config: MockLocationConfig,
         providerMayAlreadyExist: Boolean = state is MockProviderState.Running,
+        route: RoutePlayer? = null,
     ) {
         var providerMutationStarted = providerMayAlreadyExist
         updateState(MockProviderState.Starting(config))
@@ -55,17 +77,43 @@ class MockProviderSessionController(
                 gateway.replaceGpsProvider()
                 gateway.publish(config)
             },
-            success = MockProviderState.Running(config, emittedCount = 1),
+            success = MockProviderState.Running(
+                config,
+                emittedCount = 1,
+                routePlayer = route,
+                routeKey = route?.spec?.sessionKey(),
+                routeArrival = route?.spec?.waypoints?.lastOrNull()?.let { waypoint ->
+                    MockLocationConfig(
+                        waypoint.latitude,
+                        waypoint.longitude,
+                        accuracyMeters = config.accuracyMeters,
+                        altitudeMeters = config.altitudeMeters,
+                    )
+                },
+            ),
             cleanupRequiredOnFailure = { providerMutationStarted },
         )
     }
 
     fun tick() {
         val running = state as? MockProviderState.Running ?: return
+        val emission = running.routePlayer?.tick()
+        val publishedConfig = when {
+            emission != null -> emission.toMockLocationConfig(running.config)
+            running.routeArrival != null -> running.routeArrival
+            else -> running.config
+        }
         transition(
-            sideEffect = { gateway.publish(running.config) },
-            success = running.copy(emittedCount = running.emittedCount + 1),
+            sideEffect = { gateway.publish(publishedConfig) },
+            success = running.copy(
+                emittedCount = running.emittedCount + 1,
+                routeCompleted = running.routeCompleted || running.routePlayer?.completed == true,
+            ),
         )
+        val next = state as? MockProviderState.Running
+        if (next?.routeCompleted == true && !running.routeCompleted) {
+            next.routePlayer?.let { onRouteCompleted(it.spec) }
+        }
     }
 
     fun stop() {

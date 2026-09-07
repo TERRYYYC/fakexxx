@@ -354,7 +354,8 @@ class APlus10AFixtureSeedTest {
         mode: String = "always_on",
         delivery: String = "hook",
         modules: String =
-            """{"location":true,"cellular":true,"wifi":true,"networkIp":true,"phoneState":true,"fused":true}""",
+            // P3: motion joins the canonical vocabulary with factory default OFF.
+            """{"location":true,"cellular":true,"wifi":true,"networkIp":true,"phoneState":true,"fused":true,"motion":false}""",
         activeHours: String = """"activeHours":{"start":7,"end":22},""",
         fields: String = canonicalFields(),
         unavailable: String = "[]",

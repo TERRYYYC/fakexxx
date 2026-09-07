@@ -243,7 +243,9 @@ object APlus10AFixtureSeed {
         val activeHourEnd: Int,
         /** v5 module switches as persisted; the mirror enumerates the full canonical set. */
         val spoofModules: Map<String, Boolean> =
-            name.caiyao.fakegps.config.SpoofModules.ALL.associateWith { true },
+            name.caiyao.fakegps.config.SpoofModules.ALL.associateWith {
+                name.caiyao.fakegps.config.SpoofModules.defaultEnabled(it)
+            },
     )
 
     /**
@@ -279,10 +281,15 @@ object APlus10AFixtureSeed {
         val requested = UnavailableFieldSet.decode(row.unavailableFields).toList()
         val unavailable = UnavailablePayloadContract.validate(fieldNames, requested)
         // v5: one explicit boolean per canonical module, mirroring the writer's always-in-full
-        // modules object (an absent switch means enabled, but the writer never emits absence).
+        // modules object (an absent switch takes the module's factory default: v4-era modules
+        // enabled, motion disabled).
         val modules = JSONObject()
         for (module in name.caiyao.fakegps.config.SpoofModules.ALL) {
-            modules.put(module, settings.spoofModules[module] ?: true)
+            modules.put(
+                module,
+                settings.spoofModules[module]
+                    ?: name.caiyao.fakegps.config.SpoofModules.defaultEnabled(module),
+            )
         }
         return JSONObject()
             .put("schemaVersion", ConfigPrefsSync.SCHEMA_VERSION)

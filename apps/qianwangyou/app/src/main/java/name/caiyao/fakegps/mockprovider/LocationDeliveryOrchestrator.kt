@@ -17,7 +17,8 @@ class LocationDeliveryOrchestrator(
     private val persistCleanupRequired: (Boolean) -> Boolean,
 ) {
     fun enable(): MockProviderState {
-        val resolution = EffectiveMockLocationResolver.resolve(readPublished())
+        val published = readPublished()
+        val resolution = EffectiveMockLocationResolver.resolve(published)
         val ready = resolution as? EffectiveMockLocationResolution.Ready
         if (ready == null) {
             val reason = (resolution as EffectiveMockLocationResolution.Invalid).message
@@ -38,7 +39,7 @@ class LocationDeliveryOrchestrator(
             return MockProviderState.Failed("无法保存 Mock Provider 恢复标记")
         }
 
-        controller.start(ready.config, providerMayAlreadyExist)
+        controller.start(ready.config, providerMayAlreadyExist, RoutePlaybackPlanner.player(published))
         if (controller.state !is MockProviderState.Running) {
             val failure = controller.state as? MockProviderState.Failed
             if (failure?.providerCleanupRequired == false && !persistCleanupRequired(false)) {
@@ -80,7 +81,10 @@ class LocationDeliveryOrchestrator(
     fun refresh(): MockProviderState {
         if (readMode() != LocationDeliveryMode.SYSTEM_MOCK) return disable()
 
-        val resolution = EffectiveMockLocationResolver.resolve(readPublished())
+        // Read ONCE: the fixture-free contract is one publish per refresh; reading twice would
+        // consume queued payloads twice and could tick against a different config than resolved.
+        val published = readPublished()
+        val resolution = EffectiveMockLocationResolver.resolve(published)
         val ready = resolution as? EffectiveMockLocationResolution.Ready
         if (ready == null) {
             val reason = (resolution as EffectiveMockLocationResolution.Invalid).message
@@ -88,11 +92,16 @@ class LocationDeliveryOrchestrator(
             return if (stopped is MockProviderState.Failed) stopped else MockProviderState.Failed(reason)
         }
 
+        val routePlayer = RoutePlaybackPlanner.player(published)
+        val routeKey = routePlayer?.spec?.sessionKey()
         val running = controller.state as? MockProviderState.Running
-        if (running?.config == ready.config) {
+        if (running?.config == ready.config && running.routeKey == routeKey) {
+            // Same static base AND same route identity: keep playing. Comparing the MOVING
+            // current point instead would treat every 1 Hz tick as a config change and rebuild
+            // the test provider once per second.
             controller.tick()
         } else {
-            controller.start(ready.config, providerMayAlreadyExist = true)
+            controller.start(ready.config, providerMayAlreadyExist = true, routePlayer)
         }
         maybeRebuildDroppedProvider(ready.config)
         return controller.state

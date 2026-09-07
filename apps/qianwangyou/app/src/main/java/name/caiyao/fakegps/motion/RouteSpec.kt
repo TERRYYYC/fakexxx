@@ -80,6 +80,9 @@ data class RouteSpec(
     /** Path length in meters along the waypoint polyline (waypoints deduplicated). */
     fun totalLengthMeters(): Double = segments().sumOf { it.lengthMeters }
 
+    /** True when the route has at least one traversable (non-zero-length) segment. */
+    fun isPlayable(): Boolean = segments().isNotEmpty()
+
     internal data class Segment(
         val from: RouteWaypoint,
         val to: RouteWaypoint,
