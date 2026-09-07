@@ -206,29 +206,121 @@ Siblings scanned and disposition:
 
 ### 2. Source capture session
 
-Lifecycle owner: future `AutoCutoverSnapshotPort`; normal mutation and capture must share one owner/quiescence seam.
+Lifecycle owner: `AutoCutoverSnapshotPort`, reached only through the application-scoped
+`AutoCutoverCoordinator`. Normal mutation and capture share `CutoverAccessGate`; stopping only the
+export coroutine is not quiescence.
 
-| State | Event | Next | Rule |
+| State | Event / proof | Next | Side effect / forbidden bypass |
 | --- | --- | --- | --- |
-| `IDLE` | capture while no active run and owner lock held | `CAPTURING` | read Room and five raw preferences under one logical generation |
-| `CAPTURING` | content/digest complete | `EXPORTED` | source remains unchanged |
-| `CAPTURING` | crash/error | `IDLE` | no partial archive is published |
+| `IDLE` | capture requested | `QUIESCING` | close admission for every normal reader/writer; a direct DAO/DataStore bypass is forbidden |
+| `QUIESCING` | AutomationService cancellation and durable run convergence prove no active owner | `CAPTURING` | acquire the exclusive cutover lease after all admitted accesses drain |
+| `QUIESCING` | stop/convergence fails or times out | `IDLE` | reopen admission; no Room/DataStore read and no archive publication |
+| `CAPTURING` | schema-9 Room transaction plus five raw preferences captured under one lease | `ENCODING` | source remains unchanged; defaults are never materialized |
+| `ENCODING` | canonical codec returns complete bytes/digest | `EXPORTED` | publish exactly one immutable archive, then release the lease |
+| `CAPTURING` / `ENCODING` | crash/error/cancellation | `IDLE` on next process start | no partial archive is published; source bytes remain authoritative |
+
+### 2a. Room v9 schema/table census and canonical row projection
+
+The Room owner truth is
+`apps/cellrebel-auto/app/schemas/com.example.cellrebelauto.db.AppDatabase/9.json` at merged
+implementation `fb6284a7793e07333634d6fdf05a4688a6b8396c` and integration commit
+`b53dfc3cba8d7eb91b53964410d1f871f7b69f89`. Capture and restore require exactly these 18 user
+tables; `room_master_table`, `sqlite_sequence`, temp objects, views, and any later/unknown table are
+not silently included:
+
+| Dependency tier | Tables | Restore rule |
+| --- | --- | --- |
+| roots | `run_sessions`, `location_plans`, `trusted_quota_entries`, `cellrebel_executions`, `auto_audit_events`, `legacy_completion_snapshots`, `provider_pairing_records`, `unverified_attempt_records`, `durable_observation_records`, `durable_completion_receipts`, `operation_receipts`, `recovery_checkpoints`, `release_receipts`, `advance_replay_carriers`, `advance_receipts` | insert in canonical table-name order after schema/census proof |
+| child of `run_sessions` | `test_results` | insert after `run_sessions` |
+| child of `location_plans` | `location_tasks` | insert after `location_plans` |
+| child of `location_tasks` and `run_sessions` | `test_attempts` | insert after both parents |
+
+Each per-table schema digest is recomputed from a canonical descriptor containing ordered
+`PRAGMA table_info`, foreign keys, and named indexes; capture and restore compare the descriptor to
+the checked schema-9 census before reading or writing rows. Row payloads are a versioned binary
+sequence in schema column order: column count, then a one-byte `NULL` / `INTEGER` / `REAL` / `TEXT` /
+`BLOB` tag and a checked length-delimited value. Integers use signed 64-bit big endian, reals use raw
+IEEE-754 bits, text uses reporting UTF-8, and blobs remain opaque. The row order key is the same
+framing over declared primary-key columns; capture sorts by unsigned key bytes and rejects empty or
+duplicate keys. Restore decodes exact column count/type, uses bound statements, inserts in dependency
+order inside one Room transaction, and never disables foreign keys.
+
+`provider_pairing_records` is projected before hashing: a source row with `revokedAt == null` is
+captured with `revokedAt = approvedAt`. Thus the archive and readback digest describe a deterministic
+historical-only row; source state is unchanged and target state can never contain an active imported
+principal.
+
+### 2b. Room/DataStore access census
+
+Every production access surface below must receive the same application-scoped gate. Constructor
+injection is the enforcement seam; retaining an ungated production constructor is a bypass.
+
+| Surface | Reads | Writes | Gate obligation |
+| --- | --- | --- | --- |
+| `MainViewModel` / Compose projections | plan, task, attempt, provider history, five mapped preferences | plan import/edit, provider approve/revoke, five preference setters | reject actions and suppress restored projections while restore is non-ready |
+| `AutomationService` | plan/config/run recovery and per-attempt toggle snapshots | session lifecycle and engine-triggered persistence | start admission fails while cutover closes; active job cancels and durably converges before capture/restore |
+| `PlanRepository` | every DAO-backed plan/task/attempt/ledger/recovery projection | all plan, session, attempt, quota, observation, receipt, recovery, result, and supersession mutations | every public entry runs inside a normal-access lease; Flow collection holds/reacquires a read lease per emission |
+| `APlusComposition` / `APlusAttemptDriver` / `AutomationEngineFactory` | direct attempt/plan/receipt/observation lookups | direct audit writes | use gated owner ports; no direct production DAO escape |
+| `RoomDurableRecoveryLog` and advance receipt/carrier adapters | operation/checkpoint/release/advance receipts | insert/upsert receipts and checkpoints | synchronous bridge acquires the same normal-access lease |
+| `ProviderTrustStore` | active/all pairing rows | approve/revoke | normal-access lease; imported history never reaches approve |
+| `PlanConfigStore` | mapped config and raw five-key snapshot | five setters and exact raw replacement/clear | mapped defaults are UI/runtime only; cutover API reads presence and replaces all five keys in one `edit` |
+| `AutoCutoverSnapshotPort` / `AutoCutoverRestoreCoordinator` | raw schema-9 rows, raw five preferences, durable cutover control | Room generation, raw preferences, journal | the only exclusive-access callers; they cannot call a normal-access wrapper recursively |
+
+The DAO census is `TestResultDao`, `RunSessionDao`, `PlanDao`, `LocationTaskDao`, `TestAttemptDao`,
+`TrustedQuotaDao`, `AttemptExecutionDao`, `AuditEventDao`, `LegacyCompletionDao`,
+`ProviderPairingDao`, `UnverifiedAttemptRecordDao`, `DurableObservationDao`,
+`DurableCompletionReceiptDao`, `OperationReceiptDao`, `RecoveryCheckpointRoomDao`,
+`ReleaseReceiptDao`, `AdvanceReplayCarrierDao`, and `AdvanceReceiptDao`. A static guard enumerates
+their production consumers and fails when a new direct consumer appears without a census update.
+
+### 2c. Application access gate
+
+Lifecycle owner: one `CutoverAccessGate` in `CellRebelAutoApp`. Its state is process-local, but restore
+visibility is initialized from the durable control journal before production repositories/services
+are constructed. Admission tokens are capabilities, not booleans callers may forge.
+
+| Current | Event / proof | Next | Rule |
+| --- | --- | --- | --- |
+| `OPEN` | normal reader/writer enters | `OPEN(n+1)` | token must close exactly once; new work is admitted only while open |
+| `OPEN(n)` | exclusive cutover requested | `DRAINING(n)` | close new normal admission before requesting run cancellation/convergence |
+| `DRAINING(n>0)` | normal token closes | `DRAINING(n-1)` | wait without holding a Room transaction or DataStore edit |
+| `DRAINING(0)` | exclusive owner identity bound | `EXCLUSIVE(owner)` | exactly one capture/restore owner; second owner gets typed busy/conflict |
+| `EXCLUSIVE(owner)` | successful source export or target reaches `READY` / `ROLLED_BACK` | `OPEN` | release once; stale owner cannot reopen a newer generation |
+| any | process restart | derived from durable journal | absent/`READY`/`ROLLED_BACK` opens; active non-ready phase starts closed and may only resume/rollback |
+
+Normal readers never return an empty/default substitute for blocked restored data: one-shot calls
+return a typed unavailable result and flows wait until the journal permits visibility. Normal writers
+fail before side effects. This makes absence distinguishable from cutover unavailability.
 
 ### 3. Restore journal / visibility
 
-Lifecycle owner: future `CutoverRestoreCoordinator`. Generic restore/delete APIs may not advance the journal or publish visibility. `isVisible` is a pure projection and is never stored separately.
+Lifecycle owner: `AutoCutoverRestoreCoordinator`. The journal lives in a separate
+`cutover_control` DataStore so it is neither part of the schema-9 payload nor cleared with target
+Room/PlanConfig rollback. It persists `(archiveDigest, captureId, phase, failureReason)`; generation
+identity is exactly `(archiveDigest, captureId)`, not a new column copied into every Room table.
+Generic restore/delete APIs may not advance the journal or publish visibility. `isVisible` is a pure
+projection and is never stored separately.
 
 | Current | Event / proof | Next | Side-effect authority |
 | --- | --- | --- | --- |
-| absent | stage canonical archive + `ELIGIBLE` | `STAGED` | persist digest/capture only |
-| `STAGED` | exact Room generation committed | `ROOM_WRITTEN` | Room adapter |
-| `ROOM_WRITTEN` | exactly five raw preferences committed | `DATASTORE_WRITTEN` | DataStore adapter |
+| absent | canonical archive + fresh `ELIGIBLE` + target Room empty + all five target raw preferences absent | `STAGED` | persist digest/capture before target write; non-empty target fails closed |
+| `STAGED` | target still empty | `ROOM_WRITTEN` | insert all 18 tables in one Room transaction, read back and prove exact table digests |
+| `STAGED` after restart | target Room already equals archive Room projection | `ROOM_WRITTEN` | recognize the prior atomic commit; never insert a duplicate generation |
+| `STAGED` | target Room non-empty and digest differs | `ROLLBACK_REQUIRED` | no preference write; an ungated writer or corruption is not treated as progress |
+| `ROOM_WRITTEN` | five target raw preferences still absent | `DATASTORE_WRITTEN` | replace exactly five presence/value states in one DataStore `edit` |
+| `ROOM_WRITTEN` after restart | raw preferences already equal archive | `DATASTORE_WRITTEN` | recognize the prior atomic edit |
+| `ROOM_WRITTEN` | raw preferences neither all absent nor exact archive | `ROLLBACK_REQUIRED` | no default/mixed state is accepted |
 | `DATASTORE_WRITTEN` | full readback digest equals archive | `VERIFIED` | verifier only |
 | `VERIFIED` | fresh `ELIGIBLE` | `READY` | journal owner publishes visibility |
 | any non-ready | failure/crash mismatch | `ROLLBACK_REQUIRED` | no normal reader access |
-| `ROLLBACK_REQUIRED` | product target returned to pre-import state | `ROLLED_BACK` | rollback adapter; legacy untouched |
+| `ROLLBACK_REQUIRED` | all 18 target tables cleared in reverse dependency order and all five raw preferences absent | `ROLLED_BACK` | rollback adapter; valid because staging proved the target was empty; legacy untouched |
 | same phase | retry with same archive digest/capture | same or next proven phase | idempotent replay |
 | any active phase | different archive or second importer | reject | no overwrite/interleaving |
+
+Crash recovery never guesses which write ran. Room transaction and the single DataStore `edit` are
+each atomic; exact readback distinguishes `not written`, `fully written`, and `mismatch`. The target
+empty precondition is evaluated before `STAGED`, so rollback has one honest baseline instead of a
+second hidden backup generation.
 
 ### 4. Eligibility observation
 
@@ -263,6 +355,18 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
   overhead; no record borrows a shorter sibling's bound.
 - `CUT-INV-19`: archive/line/field/count limits are enforced before proportional allocation and all
   derived arithmetic is overflow-safe.
+- `CUT-INV-20`: the schema-9 adapter accepts exactly the 18 owner tables and canonical column,
+  foreign-key, and index descriptors; unknown/missing/drifted schema fails before row capture/restore.
+- `CUT-INV-21`: target staging proves all 18 user tables empty and all five raw preferences absent;
+  a non-empty product target is never overwritten or reclassified as an interrupted import.
+- `CUT-INV-22`: one Room transaction and one DataStore edit are independently atomic; restart
+  advances only after exact generation readback and mismatch moves to rollback-required.
+- `CUT-INV-23`: every normal Room/DataStore reader and writer is admitted by the application gate;
+  capture/restore exclusive ownership closes new admission and drains existing access first.
+- `CUT-INV-24`: imported pairing rows are hashed and restored with non-null `revokedAt`; no target
+  query can observe imported active trust even after `READY`.
+- `CUT-INV-25`: blocked reads surface typed unavailability or wait; they never masquerade as an
+  empty database or defaulted PlanConfig, and blocked writes have zero side effects.
 
 ## Adversarial matrix
 
@@ -287,6 +391,13 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 | `CUT-A17` | one blank line immediately before the digest | cursor rejects instead of treating the body as exhausted |
 | `CUT-A18` | maximum legal table metadata, five preferences spanning absent/present-int/present-boolean, and valid non-ASCII text | exact bytes/digest round-trip; changing one target past its bound rejects for that target |
 | `CUT-A19` | legal non-empty schema-digest baseline, then only that policy field becomes empty/blank | invalid policy/archive rejects before serialized output; decode continues to reject empty text |
+| `CUT-A20` | schema-9 table/column/index/FK missing, extra, or drifted | adapter rejects before reading or deleting a row |
+| `CUT-A21` | product target has one Room row or one raw preference before staging | import fails closed; existing target bytes remain unchanged |
+| `CUT-A22` | crash before/after Room commit and before/after DataStore edit | retry recognizes only empty or exact generation; mismatch requires rollback |
+| `CUT-A23` | new normal write races capture/restore while an admitted write is draining | new admission rejects; exclusive owner begins only after the admitted write completes |
+| `CUT-A24` | process restarts in each non-ready journal phase | gate initializes closed before repository/service construction; resume/rollback is the only access |
+| `CUT-A25` | active source pairing is captured and target reaches ready | source stays active; target row is historical with non-null `revokedAt`; active lookup returns none |
+| `CUT-A26` | a production caller obtains a DAO/DataStore without the gate | static consumer census test fails |
 
 ## Implementation tasks
 
@@ -346,6 +457,25 @@ snapshot/restore API; mapped `PlanConfig` defaults are not a round-trip carrier.
 edits, add source-capture and target-restore state/owner/side-effect tables, a complete writer/reader
 census, and crash/retry/concurrency RED tests. Do not duplicate #79 DAO/schema logic or treat its
 review status as merged.
+
+Implementation order for the first independently reviewable adapter/core slice:
+
+1. Add pure RED tests for access-gate drain/exclusion/restart state, non-empty target rejection,
+   crash readback classification, pairing-history projection, and typed blocked reads/writes.
+2. Implement the capability-based `CutoverAccessGate`, durable-journal port, and coordinator core
+   against fake Room/raw-preference ports; no Android UI or SAF code enters this slice.
+3. Add Robolectric RED tests opening the production Room v9 schema and asserting the exact 18-table
+   census, per-table descriptor digests, canonical row round-trip, FK insertion order, empty-target
+   precondition, atomic rollback, and historical-only pairing readback.
+4. Implement `RoomV9CutoverStore` over `SupportSQLiteDatabase` with schema introspection, typed binary
+   rows, one capture transaction, one restore transaction, exact readback, and reverse-order clear.
+5. Add DataStore RED tests proving raw absence survives capture and one atomic replace/clear touches
+   exactly the five owned keys; implement those narrow methods in `PlanConfigStore` without using
+   mapped defaults.
+6. Wire `CellRebelAutoApp`, `AutomationService`, `MainViewModel`, `PlanRepository`, A+/recovery/trust
+   adapters through the gate. Add the direct-consumer static guard plus reader/writer race tests.
+7. Run only affected host tests in both flavors with `--max-workers=1`, then the risk-matched Auto
+   host gate. Commit the adapter/core slice independently and request review for this new scope.
 
 ### Task 5: Flavor-only SAF surfaces
 
