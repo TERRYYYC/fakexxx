@@ -113,6 +113,27 @@ class APlusAttemptDriverRedTest {
                     "every audit row must bind to the real attempt identity",
                     events.all { it.attemptId == attemptId }
                 )
-            }
+        }
+    }
+
+    @Test
+    fun `driver records each named failure event instead of a generic recovery marker`() = runTest {
+        val attemptId = 993L
+        val event = AttemptEvent.valueOf("POST_OBSERVATION_MISSING")
+
+        val next = driver.driveRecoveryTransition(
+            attemptId = attemptId,
+            current = AttemptState.POST_OBSERVE_PENDING,
+            event = event,
+            reason = "MISSING_POST_OBSERVATION"
+        )
+
+        assertEquals(AttemptState.RECOVERY_REQUIRED, next)
+        val audit = db.auditEventDao().forAttempt(attemptId).single()
+        assertEquals("POST_OBSERVATION_MISSING", audit.eventType)
+        assertEquals(
+            "POST_OBSERVE_PENDING->RECOVERY_REQUIRED[MISSING_POST_OBSERVATION]",
+            audit.payloadDigest
+        )
     }
 }

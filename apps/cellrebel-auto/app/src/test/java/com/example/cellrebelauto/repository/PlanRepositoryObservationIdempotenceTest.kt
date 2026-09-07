@@ -42,6 +42,7 @@ class PlanRepositoryObservationIdempotenceTest {
         scheduleDecision = "ALLOWED_NOW", effectiveLat = 50.45, effectiveLng = 30.52,
         environmentRevision = 7L, environmentFingerprint = "fp", observedAtElapsedRealtimeMs = 1000L,
         observedAtEpochMs = 1_700_000_000_000L, continuitySinceElapsedRealtimeMs = 900L, evidenceRefs = listOf("ref-1"),
+        scheduleItemId = "item-1", scheduleVersion = 11L,
     )
 
     @Test
@@ -51,7 +52,10 @@ class PlanRepositoryObservationIdempotenceTest {
         // a second time. It must neither throw nor create a second carrier.
         repo.persistObservation(1L, "PRE", snapshot())
         assertEquals(1, db.durableObservationDao().countForAttempt(1L))
-        assertEquals("lease-1", db.durableObservationDao().forAttemptPhase(1L, "PRE")!!.leaseId)
+        val durable = db.durableObservationDao().forAttemptPhase(1L, "PRE")!!
+        assertEquals("lease-1", durable.leaseId)
+        assertEquals("item-1", durable.scheduleItemId)
+        assertEquals(11L, durable.scheduleVersion)
     }
 
     @Test

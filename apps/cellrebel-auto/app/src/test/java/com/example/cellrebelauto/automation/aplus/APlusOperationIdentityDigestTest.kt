@@ -121,6 +121,21 @@ class APlusOperationIdentityDigestTest {
     }
 
     @Test
+    fun `null profile ref preserves the historical plan literal while a bound item changes the digest`() {
+        val legacy = APlusOperationIdentity.intent(5L, 77L, 9L, "schedule-a", 100L, 200L)
+        val bound = APlusOperationIdentity.intent(
+            5L, 77L, 9L, "schedule-a", 100L, 200L, profileRef = "item-7"
+        )
+
+        assertEquals("plan-9", legacy.profileRef)
+        assertEquals("item-7", bound.profileRef)
+        assertNotEquals(
+            APlusOperationIdentity.requestDigest(legacy),
+            APlusOperationIdentity.requestDigest(bound)
+        )
+    }
+
+    @Test
     fun `the release digest is a real frozen-domain digest over the lease`() {
         val d1 = APlusOperationIdentity.releaseDigest("lease-77")
         assertEquals("64 hex chars", 64, d1.length)

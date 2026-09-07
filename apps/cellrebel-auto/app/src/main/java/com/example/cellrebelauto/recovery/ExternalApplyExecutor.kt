@@ -119,11 +119,56 @@ sealed interface CompleteAndAdvanceOutcome {
     data class Receipt(val value: io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1) :
         CompleteAndAdvanceOutcome
 
-    data class Failure(val reason: String) : CompleteAndAdvanceOutcome
+    data class Failure(val failure: AdvanceFailure) : CompleteAndAdvanceOutcome {
+        constructor(reason: String) : this(AdvanceFailure.fromProviderOutcome(reason))
+        val reason: String get() = failure.reason
+    }
 
     companion object {
         fun fromReceipt(receipt: io.github.terryyyc.fakexxx.contract.v1.AdvanceReceiptV1?):
-            CompleteAndAdvanceOutcome = receipt?.let(::Receipt) ?: Failure("ADVANCE_NOT_PROVEN")
+            CompleteAndAdvanceOutcome = receipt?.let(::Receipt)
+                ?: Failure(AdvanceFailure.InvalidResponse("ADVANCE_NOT_PROVEN"))
+    }
+}
+
+/** Stable, structured reasons for the provider failing to prove complete-and-advance. */
+sealed interface AdvanceFailure {
+    val reason: String
+
+    data class ProviderError(val code: Int) : AdvanceFailure {
+        init {
+            require(code >= 0) { "provider error code must be non-negative" }
+        }
+        override val reason: String = "PROVIDER_ERROR_$code"
+    }
+
+    data class InvalidResponse(val detail: String) : AdvanceFailure {
+        init {
+            require(detail.isNotBlank()) { "invalid-response detail must not be blank" }
+        }
+        override val reason: String = detail
+    }
+
+    data object TransportFailure : AdvanceFailure {
+        override val reason: String = "PROVIDER_TRANSPORT_FAILURE"
+    }
+
+    data object ProviderNotBound : AdvanceFailure {
+        override val reason: String = "PROVIDER_NOT_BOUND"
+    }
+
+    companion object {
+        private val providerError = Regex("^PROVIDER_ERROR_(\\d+)$")
+
+        fun fromProviderOutcome(outcome: String): AdvanceFailure {
+            val code = providerError.matchEntire(outcome)?.groupValues?.get(1)?.toIntOrNull()
+            return when {
+                code != null -> ProviderError(code)
+                outcome == TransportFailure.reason -> TransportFailure
+                outcome == ProviderNotBound.reason -> ProviderNotBound
+                else -> InvalidResponse(outcome)
+            }
+        }
     }
 }
 

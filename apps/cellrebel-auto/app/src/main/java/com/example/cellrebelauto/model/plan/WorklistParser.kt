@@ -9,7 +9,9 @@ data class WorklistRow(
     val latitude: Double,
     val priority: Int,
     val requiredSuccesses: Int,
-    val csvRow: Int
+    val csvRow: Int,
+    val scheduleId: String? = null,
+    val scheduleItemId: String? = null
 )
 
 /**
@@ -31,8 +33,10 @@ sealed interface ParseResult {
  * Atomic parser for the operator's CSV worklist.
  * # operator CSV 清单的原子解析器
  *
- * Canonical contract (design gate, no third-party dependency):
+ * Canonical legacy contract (design gate, no third-party dependency):
  *   longitude,latitude,priority,required_successes
+ * Bound v2 contract:
+ *   longitude,latitude,priority,required_successes,schedule_id,schedule_item_id
  *
  * Rules:
  * - First non-blank line must be the exact header.
@@ -44,6 +48,8 @@ sealed interface ParseResult {
 object WorklistParser {
 
     const val HEADER = "longitude,latitude,priority,required_successes"
+    const val BOUND_HEADER =
+        "longitude,latitude,priority,required_successes,schedule_id,schedule_item_id"
 
     fun parse(text: String): ParseResult {
         val lines = text.lines()
@@ -53,19 +59,34 @@ object WorklistParser {
         if (lines.isEmpty()) {
             return ParseResult.Failure(listOf(RowError(0, "empty file: expected header '$HEADER'")))
         }
-        if (lines.first() != HEADER) {
+        val bound = lines.first() == BOUND_HEADER
+        if (lines.first() != HEADER && !bound) {
             return ParseResult.Failure(
-                listOf(RowError(0, "invalid header: expected '$HEADER', got '${lines.first()}'"))
+                listOf(
+                    RowError(
+                        0,
+                        "invalid header: expected '$HEADER' or '$BOUND_HEADER', got '${lines.first()}'"
+                    )
+                )
             )
         }
 
         val rows = mutableListOf<WorklistRow>()
         val errors = mutableListOf<RowError>()
+        val expectedColumns = if (bound) 6 else 4
+        var boundScheduleId: String? = null
+        val seenItemIds = mutableSetOf<String>()
 
-        lines.drop(1).forEachIndexed { index, line ->            val csvRow = index + 1
+        lines.drop(1).forEachIndexed { index, line ->
+            val csvRow = index + 1
             val fields = line.split(",").map { it.trim() }
-            if (fields.size != 4) {
-                errors.add(RowError(csvRow, "expected 4 columns (longitude,latitude,priority,required_successes), got ${fields.size}"))
+            if (fields.size != expectedColumns) {
+                errors.add(
+                    RowError(
+                        csvRow,
+                        "expected $expectedColumns columns (${if (bound) BOUND_HEADER else HEADER}), got ${fields.size}"
+                    )
+                )
                 return@forEachIndexed
             }
 
@@ -83,8 +104,47 @@ object WorklistParser {
                     errors.add(RowError(csvRow, "priority '${fields[2]}' must be an integer ≥ 0"))
                 requiredSuccesses == null || requiredSuccesses < 1 ->
                     errors.add(RowError(csvRow, "required_successes '${fields[3]}' must be an integer ≥ 1"))
-                else ->
-                    rows.add(WorklistRow(longitude, latitude, priority, requiredSuccesses, csvRow))
+                else -> {
+                    val scheduleId = fields.getOrNull(4)
+                    val scheduleItemId = fields.getOrNull(5)
+                    var bindingValid = true
+                    if (bound) {
+                        if (scheduleId.isNullOrBlank()) {
+                            errors.add(RowError(csvRow, "schedule_id must be non-blank"))
+                            bindingValid = false
+                        } else if (boundScheduleId == null) {
+                            boundScheduleId = scheduleId
+                        } else if (scheduleId != boundScheduleId) {
+                            errors.add(
+                                RowError(
+                                    csvRow,
+                                    "schedule_id '$scheduleId' differs from plan schedule_id '$boundScheduleId'"
+                                )
+                            )
+                            bindingValid = false
+                        }
+                        if (scheduleItemId.isNullOrBlank()) {
+                            errors.add(RowError(csvRow, "schedule_item_id must be non-blank"))
+                            bindingValid = false
+                        } else if (!seenItemIds.add(scheduleItemId)) {
+                            errors.add(RowError(csvRow, "duplicate schedule_item_id '$scheduleItemId'"))
+                            bindingValid = false
+                        }
+                    }
+                    if (bindingValid) {
+                        rows.add(
+                            WorklistRow(
+                                longitude,
+                                latitude,
+                                priority,
+                                requiredSuccesses,
+                                csvRow,
+                                scheduleId,
+                                scheduleItemId
+                            )
+                        )
+                    }
+                }
             }
         }
 

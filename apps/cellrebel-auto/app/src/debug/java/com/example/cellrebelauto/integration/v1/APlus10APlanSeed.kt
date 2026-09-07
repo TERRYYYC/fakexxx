@@ -15,7 +15,8 @@ import org.json.JSONObject
  * only `scheduleItemId`/`scheduleVersion` references, the distance comparison
  * is provider-exclusive, and Auto must never claim independent position
  * verification (KB-8 permanent `limit`). So this seeder consumes exactly the
- * wire-safe triple {order, journeyCaseId, requiredSuccesses} and REFUSES to
+ * wire-safe identity/quota tuple {order, journeyCaseId, scheduleItemId,
+ * requiredSuccesses} and REFUSES to
  * read the fixture's coordinate fields — importing them would recreate the
  * second coordinate holder that the A adjudication exists to eliminate
  * (PR #62 review P1-1).
@@ -24,20 +25,18 @@ import org.json.JSONObject
  * import flow; they are seeded with an INERT placeholder. Under the frozen
  * §6.4.1 predicate they are not consumed (the Auto-side legs are structural
  * non-null on the provider's effective coords + the identity leg). NOTE the
- * known product/spec drift: the CURRENT TrustPolicy still evaluates a
- * haversine against these columns (the "旧文" shape spec L1757 retired), so
- * until that product fix lands the A-block cannot produce trusted
- * completions from any seed — tracked as the gap⑥ product-fix prerequisite,
- * not something this seeder may paper over by smuggling coordinates in.
+ * current TrustPolicy only validates that provider-returned effective
+ * coordinates are finite and geographically valid; it never compares these
+ * placeholders with provider truth.
  *
  * ATTRIBUTION
  * -----------
- * [LocationTask] has no journeyCaseId column. The seed report is therefore the
- * ONLY record binding an executed task back to a fixture journey. It emits the
- * fixtureIndex ↔ taskId ↔ journeyCaseId ↔ requiredSuccesses map so a run
- * outcome is attributable; csvRow/priority follow fixtureIndex so execution
- * order (priority, csvRow) equals fixture order, which keeps Auto task[i]
- * aligned with provider schedule item profile-(i+1).
+ * [LocationTask.scheduleItemId] is the durable runtime authority binding each
+ * task to provider item profile-N. [LocationTask] still has no journeyCaseId,
+ * so the seed report emits fixtureIndex ↔ taskId ↔ journeyCaseId ↔
+ * scheduleItemId ↔ requiredSuccesses for human acceptance attribution.
+ * csvRow/priority remain deterministic display/report order only; the engine
+ * selects a bound task by the provider's currentItemId.
  *
  * src/debug ONLY — production carries none of this.
  */
@@ -110,7 +109,7 @@ object APlus10APlanSeed {
      */
     const val COORDINATE_PLACEHOLDER = 999.0
 
-    /** The wire-safe triple Auto is allowed to consume (KB-8). No coordinates. */
+    /** The wire-safe identity/quota tuple Auto is allowed to consume (KB-8). No coordinates. */
     data class FixtureItem(
         val fixtureIndex: Int,
         val journeyCaseId: String,
@@ -176,13 +175,14 @@ object APlus10APlanSeed {
             globalBufferSeconds = globalBufferSeconds,
             totalRows = items.size,
             totalRequiredSuccesses = items.sumOf { it.requiredSuccesses },
+            boundScheduleId = EXPECTED_SCHEDULE_ID,
         )
 
     /**
      * The task rows. planId=0 is a placeholder — PlanDao.insertPlanWithTasks
      * reassigns it inside the transaction. csvRow AND priority both follow
-     * fixtureIndex so the engine's (priority ASC, csvRow ASC) execution order
-     * is exactly the fixture order. Coordinates carry the KB-8 placeholder —
+     * fixtureIndex for deterministic display/reporting; runtime selection for
+     * this bound plan is by scheduleItemId. Coordinates carry the KB-8 placeholder —
      * see the class doc for why they are never taken from the fixture.
      */
     fun toTasks(items: List<FixtureItem>): List<LocationTask> =
@@ -194,6 +194,7 @@ object APlus10APlanSeed {
                 latitude = COORDINATE_PLACEHOLDER,
                 priority = item.fixtureIndex,
                 requiredSuccesses = item.requiredSuccesses,
+                scheduleItemId = item.expectedScheduleItemId,
             )
         }
 
@@ -216,6 +217,9 @@ object APlus10APlanSeed {
         if (plan.totalRequiredSuccesses != EXPECTED_TOTAL_REQUIRED_SUCCESSES) {
             return "plan totalRequiredSuccesses ${plan.totalRequiredSuccesses} != $EXPECTED_TOTAL_REQUIRED_SUCCESSES"
         }
+        if (plan.boundScheduleId != EXPECTED_SCHEDULE_ID) {
+            return "plan boundScheduleId '${plan.boundScheduleId}' != '$EXPECTED_SCHEDULE_ID'"
+        }
         if (tasks.size != EXPECTED_ITEM_COUNT) {
             return "plan carries ${tasks.size} tasks, expected $EXPECTED_ITEM_COUNT"
         }
@@ -227,6 +231,10 @@ object APlus10APlanSeed {
             if (t.requiredSuccesses != EXPECTED_QUOTA_VECTOR[i]) {
                 return "task csvRow ${t.csvRow} requiredSuccesses ${t.requiredSuccesses} != " +
                     "registered ${EXPECTED_QUOTA_VECTOR[i]} (no same-total redistribution)"
+            }
+            if (t.scheduleItemId != "$SCHEDULE_ITEM_PREFIX${i + 1}") {
+                return "task csvRow ${t.csvRow} scheduleItemId '${t.scheduleItemId}' != " +
+                    "'$SCHEDULE_ITEM_PREFIX${i + 1}'"
             }
             if (t.latitude != COORDINATE_PLACEHOLDER || t.longitude != COORDINATE_PLACEHOLDER) {
                 return "task csvRow ${t.csvRow} carries real coordinates (${t.latitude},${t.longitude}) — " +

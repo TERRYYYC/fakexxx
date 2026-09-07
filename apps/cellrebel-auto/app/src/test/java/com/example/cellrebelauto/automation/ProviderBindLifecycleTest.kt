@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.recovery.BinderExternalApplyExecutor
+import com.example.cellrebelauto.recovery.AdvanceFailure
 import com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome
 import com.example.cellrebelauto.recovery.testApplyIntent
 import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
@@ -31,6 +32,16 @@ import org.robolectric.shadows.ShadowApplication
  */
 @RunWith(RobolectricTestRunner::class)
 class ProviderBindLifecycleTest {
+
+    @Test
+    fun `advance failure classifier keeps provider error transport and invalid response distinct`() {
+        assertEquals(AdvanceFailure.ProviderError(16), AdvanceFailure.fromProviderOutcome("PROVIDER_ERROR_16"))
+        assertEquals(AdvanceFailure.TransportFailure, AdvanceFailure.fromProviderOutcome("PROVIDER_TRANSPORT_FAILURE"))
+        assertEquals(
+            AdvanceFailure.InvalidResponse("PROVIDER_ADVANCE_WITHOUT_RECEIPT"),
+            AdvanceFailure.fromProviderOutcome("PROVIDER_ADVANCE_WITHOUT_RECEIPT")
+        )
+    }
 
     @Test
     fun `bind issues a bindService intent against the frozen contract component`() {

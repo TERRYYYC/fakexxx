@@ -14,6 +14,8 @@ import org.junit.Test
 class WorklistParserTest {
 
     private val header = "longitude,latitude,priority,required_successes"
+    private val boundHeader =
+        "longitude,latitude,priority,required_successes,schedule_id,schedule_item_id"
 
     @Test
     fun `valid file parses all rows with 1-based csv row numbers`() {
@@ -32,6 +34,43 @@ class WorklistParserTest {
         assertEquals(WorklistRow(116.397, 39.908, 1, 3, csvRow = 1), rows[0])
         assertEquals(WorklistRow(121.474, 31.230, 1, 5, csvRow = 2), rows[1])
         assertEquals(WorklistRow(113.2644, 23.1291, 2, 2, csvRow = 3), rows[2])
+        assertTrue(rows.all { it.scheduleId == null && it.scheduleItemId == null })
+    }
+
+    @Test
+    fun `bound v2 file preserves explicit schedule and item identities`() {
+        val csv = """
+            $boundHeader
+            116.397,39.908,9,2,schedule-generation-a,item-2
+            121.474,31.230,1,1,schedule-generation-a,item-1
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Success)
+        val rows = (result as ParseResult.Success).rows
+        assertEquals("schedule-generation-a", rows[0].scheduleId)
+        assertEquals("item-2", rows[0].scheduleItemId)
+        assertEquals("schedule-generation-a", rows[1].scheduleId)
+        assertEquals("item-1", rows[1].scheduleItemId)
+    }
+
+    @Test
+    fun `bound v2 rejects blank duplicate and cross-schedule item identities atomically`() {
+        val csv = """
+            $boundHeader
+            116.397,39.908,1,1,schedule-a,item-1
+            121.474,31.230,2,1,schedule-b,item-1
+            113.264,23.129,3,1,schedule-a,
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Failure)
+        val errors = (result as ParseResult.Failure).errors
+        assertTrue(errors.any { it.csvRow == 2 && it.message.contains("schedule_id") })
+        assertTrue(errors.any { it.csvRow == 2 && it.message.contains("duplicate") })
+        assertTrue(errors.any { it.csvRow == 3 && it.message.contains("schedule_item_id") })
     }
 
     @Test

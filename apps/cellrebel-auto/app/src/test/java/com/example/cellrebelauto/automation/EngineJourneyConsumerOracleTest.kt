@@ -104,6 +104,8 @@ class EngineJourneyConsumerOracleTest {
 
     /** Test hook: mutate the armed post-advance observation (tamper one four-leg). */
     private var observationTamper: (EnvironmentObservationV1) -> EnvironmentObservationV1 = { it }
+    private var evidenceScheduleItemId: String? = null
+    private var evidenceScheduleVersion: Long? = null
 
     private val journeyExecutor = object : ExternalApplyExecutor {
         override fun apply(attemptId: Long, intent: EnvironmentIntentV1, idempotencyKey: String, requestDigest: String, now: Long): ApplyOutcome {
@@ -215,20 +217,31 @@ class EngineJourneyConsumerOracleTest {
             )!!
             return com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.requestDigest(
                 com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.intent(
-                    runSessionId, attemptId, plan.id, attempt.aplusAnchorScheduleId!!, attempt.startedAt, attempt.startedAt + 90_000L
+                    runSessionId,
+                    attemptId,
+                    plan.id,
+                    attempt.aplusAnchorScheduleId!!,
+                    attempt.startedAt,
+                    attempt.startedAt + 90_000L,
+                    profileRef = attempt.aplusIntentProfileRef
                 )
             )
         }
-        suspend fun snap(attemptId: Long, runSessionId: Long, observedAt: Long) =
-            com.example.cellrebelauto.environment.ObservationSnapshot(
+        suspend fun snap(attemptId: Long, runSessionId: Long, observedAt: Long):
+            com.example.cellrebelauto.environment.ObservationSnapshot {
+            val attempt = db.testAttemptDao().getAttemptById(attemptId)!!
+            return com.example.cellrebelauto.environment.ObservationSnapshot(
                 leaseId = "lease-$attemptId", acceptedIntentHash = hash(attemptId, runSessionId),
                 coverage = "FULL", verificationLevel = "SYSTEM_MOCK_INDEPENDENTLY_VERIFIED",
                 deliveryMode = "SYSTEM_MOCK", isMock = true, scheduleDecision = "ALLOWED_NOW",
                 effectiveLat = 39.9, effectiveLng = 116.4,
                 environmentRevision = 7L, environmentFingerprint = "fp",
                 observedAtElapsedRealtimeMs = observedAt, observedAtEpochMs = 900L,
-                continuitySinceElapsedRealtimeMs = 500L, evidenceRefs = listOf("qwy:s:1")
+                continuitySinceElapsedRealtimeMs = 500L, evidenceRefs = listOf("qwy:s:1"),
+                scheduleItemId = evidenceScheduleItemId ?: attempt.aplusAnchorItemId,
+                scheduleVersion = evidenceScheduleVersion ?: attempt.aplusAnchorVersion
             )
+        }
         override suspend fun acquirePreObservation(attemptId: Long, runSessionId: Long) =
             snap(attemptId, runSessionId, 1000L)
         override suspend fun acquirePostObservation(attemptId: Long, runSessionId: Long) =
@@ -307,6 +320,41 @@ class EngineJourneyConsumerOracleTest {
         )
         val tasks = db.locationTaskDao().getTasksForPlan(planId)
         return Triple(planId, tasks[0].id, tasks[1].id)
+    }
+
+    private suspend fun seedBoundPlan(requiredSuccesses: Int = 1): Triple<Long, Long, Long> {
+        val planId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "bound.csv",
+                importedAt = 1000L,
+                globalBufferSeconds = 0,
+                totalRows = 2,
+                totalRequiredSuccesses = requiredSuccesses + 1,
+                boundScheduleId = anchorScheduleId
+            ),
+            listOf(
+                LocationTask(
+                    planId = 0,
+                    csvRow = 1,
+                    longitude = 116.5,
+                    latitude = 40.0,
+                    priority = 1,
+                    requiredSuccesses = 1,
+                    scheduleItemId = "local-first"
+                ),
+                LocationTask(
+                    planId = 0,
+                    csvRow = 2,
+                    longitude = 116.4,
+                    latitude = 39.9,
+                    priority = 9,
+                    requiredSuccesses = requiredSuccesses,
+                    scheduleItemId = anchorItemId
+                )
+            )
+        )
+        val byItem = db.locationTaskDao().getTasksForPlan(planId).associateBy { it.scheduleItemId }
+        return Triple(planId, byItem.getValue("local-first").id, byItem.getValue(anchorItemId).id)
     }
 
     private suspend fun seedCreatedRecoveryOwner(): Triple<Long, Long, Long> {
@@ -442,6 +490,109 @@ class EngineJourneyConsumerOracleTest {
             0, db.testAttemptDao().getAttemptsForTask(taskId).size
         )
         assertEquals("no session activity beyond the pause", 0, db.trustedQuotaDao().countAll())
+    }
+
+    @Test
+    fun `bound plan rejects service 1_0_0 before selecting or opening an attempt`() = runTest {
+        val (planId, localFirstId, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.0.0")
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(localFirstId).size)
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(providerCurrentId).size)
+        assertEquals(emptyList<String>(), events)
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
+    }
+
+    @Test
+    fun `bound plan selects current provider item despite reversed local order and persists its wire identity`() = runTest {
+        val (planId, localFirstId, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.1.0")
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(localFirstId).size)
+        val attempt = db.testAttemptDao().getAttemptsForTask(providerCurrentId).single()
+        assertEquals(anchorItemId, attempt.aplusIntentProfileRef)
+        assertEquals(anchorItemId, preflightCalls.single().profileRef)
+        assertEquals(1, db.trustedQuotaDao().trustedCountForTask(providerCurrentId))
+    }
+
+    @Test
+    fun `bound plan rejects partial four-field discovery even when protocol and service match`() = runTest {
+        val (planId, _, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.1.0", exhausted = null)
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(providerCurrentId).size)
+        assertEquals(emptyList<String>(), events)
+    }
+
+    @Test
+    fun `bound plan rejects a different current schedule before opening an attempt`() = runTest {
+        val (planId, localFirstId, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(
+            serviceVersion = "1.1.0",
+            currentScheduleId = "other-generation"
+        )
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(localFirstId).size)
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(providerCurrentId).size)
+        assertEquals(emptyList<String>(), events)
+    }
+
+    @Test
+    fun `bound item remains current until all required successes then advances exactly once`() = runTest {
+        val (planId, localFirstId, providerCurrentId) = seedBoundPlan(requiredSuccesses = 2)
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.1.0")
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(localFirstId).size)
+        assertEquals(2, db.testAttemptDao().getAttemptsForTask(providerCurrentId).size)
+        assertEquals(2, db.trustedQuotaDao().trustedCountForTask(providerCurrentId))
+        assertEquals(1, advanceCalls.size)
+    }
+
+    @Test
+    fun `bound observation item drift records no trusted count`() = runTest {
+        val (planId, _, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.1.0")
+        evidenceScheduleItemId = "same-profile-wrong-item"
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.trustedQuotaDao().trustedCountForTask(providerCurrentId))
+        assertEquals(0, advanceCalls.size)
+    }
+
+    @Test
+    fun `bound observation version drift records no trusted count`() = runTest {
+        val (planId, _, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.1.0")
+        evidenceScheduleVersion = anchorVersion + 1
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.trustedQuotaDao().trustedCountForTask(providerCurrentId))
+        assertEquals(0, advanceCalls.size)
+    }
+
+    @Test
+    fun `bound exhausted provider is not mistaken for local quota completion`() = runTest {
+        val (planId, localFirstId, providerCurrentId) = seedBoundPlan()
+        discoverAnswer = checkNotNull(discoverAnswer).copy(serviceVersion = "1.1.0", exhausted = true)
+
+        buildEngine(planId, VClock(), null).run()
+
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(localFirstId).size)
+        assertEquals(0, db.testAttemptDao().getAttemptsForTask(providerCurrentId).size)
+        assertEquals(0, db.trustedQuotaDao().countAll())
+        assertEquals("paused", db.runSessionDao().getLatest()!!.status)
     }
 
     @Test
