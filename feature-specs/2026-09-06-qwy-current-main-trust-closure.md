@@ -12,7 +12,7 @@ created: 2026-09-06
 **Acceptance Criteria:** #66 AC1–7; #79 ordered profile-1..10 `discover()` readback; #83 append identity/durability, no TTL pruning, bounded caller-driven admission backed by measurement; #90 exact-source evidence remains fail-closed.
 **Architecture cell:** `fakexxx::android-dual-app-contract`
 **Map delta:** update required
-**Map delta why:** QWY owns both its private system-server oracle producer/installer and its read-only Binder consumer; Vector supplies independent framework/readback validation only. #83 additionally introduces a provider-owned admission boundary: authorization and effective-lease validation remain in `EnvironmentControlHandler`; any quota state is non-evidence state and must share the audit append's one `DurableKv` commit.
+**Map delta why:** QWY owns both its private system-server oracle producer/installer and its read-only Binder consumer; Vector supplies independent framework/readback validation only. A future #83 admission candidate must be provider-owned: authorization and effective-lease validation remain in `EnvironmentControlHandler`; any quota state is non-evidence state and must share the audit append's one `DurableKv` commit. No admission candidate is active after the withdrawn `16749ff8` experiment.
 **Architecture:** The authoritative oracle remains outside QWY’s authority. QWY reads PRE and POST snapshots around the complete observed projection (tracker, effective environment, and schedule) and only projects `FULL` for a valid stable window. QWY persists its local acknowledgement/revision and the observation audit together; that record is a replay watermark, never a source of continuity truth.
 **Tech Stack:** Kotlin/JUnit, existing `DurableKv` transaction seam, Android Binder private bridge.
 **前端验证:** No — Binder/provider and persistence behavior only.
@@ -44,7 +44,7 @@ The producer must register through that UID-1000 Binder only, send the exact v1 
 | QWY oracle bridge client | QWY process | UID-1000 registration, Binder death/rebind, strict decode | app-local tracker may not promote `FULL` or cache a dead producer |
 | QWY local continuity acknowledgement | `ContinuityTracker` under `DurableKv.transaction` | valid window ACK, authoritative mutation ACK, restart/replay | direct writes to revision namespace |
 | Observation audit sequence/event | `IntegrationAuditStore` | durable append, crash/reopen, authorized observe admission | TTL/pruning, unbacked evidence reply |
-| Observation admission quota | `EnvironmentControlHandler` after `CallerAuthorizer` + effective `EnvironmentLeaseStore` gate | admit or typed-reject before audit append; policy parameters are pending | minting `FULL`, changing audit retention, bypassing caller/lease gates |
+| Proposed observation admission quota | future `EnvironmentControlHandler` helper after `CallerAuthorizer` + effective `EnvironmentLeaseStore` gate | if authorized by a later decision, admit or typed-reject before audit append | minting `FULL`, changing audit retention, bypassing caller/lease gates |
 | Profile projection | `QwyEnvironment` profile reader | read-only discover snapshot, profile change | caller-provided ordering or a duplicate cache |
 
 ### #66 state × event table
@@ -89,7 +89,7 @@ to a source decision.
 | `feature-specs/2026-08-09-cellrebel-qianwangyou-a-plus.md` §6.3.4 and `M-ID-02` | `operationId` is a per-call correlation field and is excluded from request-digest idempotency; the same request with a changed operation ID must not become `IDEMPOTENCY_CONFLICT`. | That equal operation IDs identify a retry, or that observe has a persisted replay payload. |
 | `AuditFileBackingMeasurementTest` on the current append journal, exact `16749ff8226c5ddf00df219eca6f57e36aadf21a` | A host-only descriptive curve at checkpoints 64/128/256/512/1024. The fresh run recorded 64 audit rows as 18,149 staged/live journal bytes (83,785 live bytes with an unrelated 64 KiB snapshot), and 1,024 rows as 293,639 staged/live journal bytes (359,275 with that snapshot). | Android capacity, a safe observation rate, a latency SLO, or that the first checkpoint (64) is the correct cap. |
 
-The implementation boundary is fixed now:
+Any later implementation must preserve this boundary:
 
 1. `EnvironmentControlHandler` first authorizes the Binder caller and validates
    the caller-owned effective lease. Only then may it ask an admission helper.
@@ -114,8 +114,12 @@ admission candidate** until a decision source records all answers:
 
 Until then, no numeric cap, no generation/revision-only lifetime policy, and no
 operation-ID duplicate rule is claimed as frozen or eligible for formal
-approval. This does not weaken `TTL=0`: it distinguishes permanent evidence
-from the still-undecided, bounded admission state.
+approval. The `16749ff8` admission experiment was withdrawn by the normal
+revert `5e30544a` after the real Auto PRE→POST caller flow proved that both
+calls share the apply receipt's `operationId`; it is retained only as design
+evidence, not a feature flag or active production path. This does not weaken
+`TTL=0`: it distinguishes permanent evidence from the still-undecided, bounded
+admission state.
 
 ## Test matrix before implementation
 

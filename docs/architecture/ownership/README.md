@@ -88,17 +88,19 @@ the three lanes must not each invent their own compatibility.
 
 No cat merges. Every PR stops at `ready for operator decision`.
 
-## 6. Current-main #83 observation-admission boundary
+## 6. Current-main #83 proposed observation-admission boundary
 
-This additive row records the current runtime boundary only. It does not
-rewrite the historical PR-1..6 ownership claims above, and it does not choose a
-rate, quota number, window lifetime, or retry policy.
+This additive row records the boundary a later #83 candidate must use. It does
+not rewrite the historical PR-1..6 ownership claims above, and it does not
+choose a rate, quota number, window lifetime, or retry policy. The prior
+candidate was withdrawn; no admission helper is active in current production
+code.
 
 | Responsibility | Runtime owner | Must do | Must not do |
 |---|---|---|---|
-| Observe admission gate | Qianwangyou `EnvironmentControlHandler` | Authorize the Binder caller, require that caller's effective lease, then admit or typed-reject before the audit append. | Bypass caller/lease checks, classify oracle coverage, or append evidence after rejection. |
-| Non-evidence admission state | Qianwangyou provider-private helper/store | Hold only the policy-selected bounded consumption state and join the handler's `DurableKv` transaction. | Issue/resolve `qwy:audit:<seq>`, prune audit history, or manufacture a replay observation. |
-| Evidence identity and retention | `IntegrationAuditStore` | Allocate and durably append the exact audit event only after admission succeeds, in the same outer transaction. | Treat quota state as audit evidence or allow quota expiry to delete retained evidence. |
+| Proposed observe admission gate | future Qianwangyou `EnvironmentControlHandler` extension | Authorize the Binder caller, require that caller's effective lease, then apply a later-approved policy before the audit append. | Bypass caller/lease checks, classify oracle coverage, or append evidence after rejection. |
+| Proposed non-evidence admission state | future Qianwangyou provider-private helper/store | Hold only the policy-selected bounded consumption state and join the handler's `DurableKv` transaction. | Issue/resolve `qwy:audit:<seq>`, prune audit history, or manufacture a replay observation. |
+| Evidence identity and retention | `IntegrationAuditStore` | Keep allocating and durably appending the exact audit event under the existing behavior; a future admission policy may only join this transaction. | Treat quota state as audit evidence or allow quota expiry to delete retained evidence. |
 
 The authoritative continuity oracle remains outside this boundary: it fixes
 `FULL` eligibility before admission, so the admission gate can reduce service
