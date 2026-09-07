@@ -269,6 +269,33 @@ class CutoverAccessGateTest {
         assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
     }
 
+    @Test
+    fun cancellingFalseQuiescenceWhileCleanupLockIsContendedStillReopensAdmission() = runTest {
+        val gate = CutoverAccessGate.open()
+        val quiescenceEntered = CompletableDeferred<Unit>()
+        val returnFalse = CompletableDeferred<Unit>()
+        val requester = async {
+            gate.acquireExclusive(identity) {
+                quiescenceEntered.complete(Unit)
+                returnFalse.await()
+                false
+            }
+        }
+        quiescenceEntered.await()
+        val mutex = mutexOf(gate)
+        mutex.lock()
+        returnFalse.complete(Unit)
+        runCurrent()
+
+        requester.cancel()
+        runCurrent()
+        mutex.unlock()
+        requester.join()
+
+        assertEquals(CutoverGateSnapshot.open(), gate.snapshot())
+        assertEquals(CutoverAccessResult.Granted("open"), gate.withNormalAccess { "open" })
+    }
+
     private fun mutexOf(gate: CutoverAccessGate): Mutex {
         val field = CutoverAccessGate::class.java.getDeclaredField("mutex")
         field.isAccessible = true

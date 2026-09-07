@@ -381,7 +381,9 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 - `CUT-INV-27`: an unconfirmed journal write or unreadable durable journal keeps admission recovery-
   closed, including when the attempted phase was terminal.
 - `CUT-INV-28`: target pairing verification uses raw stored cells; source-only historical projection
-  cannot make a target row with `revokedAt == null` classify exact.
+  cannot make a target row with `revokedAt == null` classify exact. The Room owner also validates
+  every archive row before restore; a `HISTORICAL_ONLY` pairing payload with `revokedAt == null` is
+  semantically invalid even when its codec structure and digests are canonical.
 - `CUT-INV-29`: target emptiness and archive equality are independent proofs and may both hold for an
   empty archive.
 - `CUT-INV-30`: cancellation at drain wait, normal-token cleanup, or exclusive release cannot strand
@@ -425,6 +427,7 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 | `CUT-A30` | archive Room is empty and all five preferences are absent | classification proves both empty and exact; coordinator completes without manufacturing rows/defaults |
 | `CUT-A31` | cancellation while waiting for drain, cleaning a normal token, or releasing an exclusive lease | cleanup completes or reopens safely; no permanent gate/token leak |
 | `CUT-A32` | blocked normal call races the exclusive owner's release | caller receives the typed rejection captured at admission; no state-change exception |
+| `CUT-A33` | canonical, digest-valid `HISTORICAL_ONLY` pairing payload contains `revokedAt == null` | Room owner rejects before any target insert; the generation can never reach `READY` |
 
 ## Implementation tasks
 

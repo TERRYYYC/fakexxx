@@ -241,14 +241,7 @@ class RoomV9CutoverStore(
             .map { it.index }
         sql.compileStatement(insert).use { statement ->
             section.rows.forEach { row ->
-                val values = decodeCells(decodeBase64Url(row.canonicalRowBase64Url), meta.columns.size)
-                values.forEachIndexed { index, value ->
-                    validateCell(meta.name, meta.columns[index], value)
-                }
-                val expectedOrderKey = base64Url(encodeCells(primaryIndices.map(values::get)))
-                require(row.orderKeyBase64Url == expectedOrderKey) {
-                    "row order key mismatch for ${meta.name}"
-                }
+                val values = decodeAndValidateRow(meta, row, primaryIndices)
                 statement.clearBindings()
                 values.forEachIndexed { index, value -> value.bind(statement, index + 1) }
                 statement.executeInsert()
@@ -272,6 +265,26 @@ class RoomV9CutoverStore(
         require(matches) { "row type mismatch for $tableName.${column.name}" }
     }
 
+    private fun decodeAndValidateRow(
+        meta: TableMeta,
+        row: CutoverRowPayload,
+        primaryIndices: List<Int> = meta.columns.withIndex()
+            .filter { it.value.primaryKeyPosition > 0 }
+            .sortedBy { it.value.primaryKeyPosition }
+            .map { it.index }
+    ): List<SqlCell> {
+        val values = decodeCells(decodeBase64Url(row.canonicalRowBase64Url), meta.columns.size)
+        values.forEachIndexed { index, value -> validateCell(meta.name, meta.columns[index], value) }
+        val expectedOrderKey = base64Url(encodeCells(primaryIndices.map(values::get)))
+        require(row.orderKeyBase64Url == expectedOrderKey) { "row order key mismatch for ${meta.name}" }
+        if (meta.name == PAIRING_TABLE) {
+            val revokedAtIndex = meta.columns.indexOfFirst { it.name == "revokedAt" }
+            check(revokedAtIndex >= 0) { "Room v9 schema mismatch: pairing revocation column missing" }
+            require(values[revokedAtIndex] != SqlCell.Null) { "historical pairing must be revoked" }
+        }
+        return values
+    }
+
     private fun validateArchiveTables(archive: CutoverArchiveV2, schema: RoomSchema) {
         check(archive.schemaVersion == SCHEMA_VERSION) { "archive Room schema version mismatch" }
         check(archive.tables.map { it.name }.sorted() == EXPECTED_TABLES) { "archive table census mismatch" }
@@ -285,6 +298,8 @@ class RoomV9CutoverStore(
                 CutoverRestorationMode.EXACT
             }
             check(table.restorationMode == expectedMode) { "archive restoration mode mismatch for ${table.name}" }
+            val meta = schema.tables.getValue(table.name)
+            table.rows.forEach { row -> decodeAndValidateRow(meta, row) }
         }
     }
 

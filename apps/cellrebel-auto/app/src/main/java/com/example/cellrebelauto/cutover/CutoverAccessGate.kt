@@ -144,7 +144,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
             throw failure
         }
         if (!quiesced) {
-            reopenFailedDrain(owner, waitForDrain.requestId)
+            withContext(NonCancellable) { reopenFailedDrain(owner, waitForDrain.requestId) }
             return CutoverExclusiveAdmission.QuiescenceFailed
         }
         return try {

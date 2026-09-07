@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.util.Base64
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -184,6 +188,40 @@ class RoomV9CutoverStoreTest {
         assertTrue(after.matchesArchive)
     }
 
+    @Test
+    fun canonicalHistoricalPairingPayloadWithNullRevocationRejectsBeforeRestore() = runTest {
+        val source = database()
+        val sourceStore = RoomV9CutoverStore(source)
+        val target = database()
+        seedSource(source)
+        val policy = sourceStore.schemaPolicy()
+        val captured = archive(sourceStore.captureTables()).copy(preferences = allAbsentPreferences())
+        val activePayload = captured.copy(
+            tables = captured.tables.map { table ->
+                if (table.name != "provider_pairing_records") table else table.copy(
+                    rows = table.rows.map { row ->
+                        row.copy(
+                            canonicalRowBase64Url = encode(
+                                replaceCellWithNull(decode(row.canonicalRowBase64Url), cellIndex = 4)
+                            )
+                        )
+                    }
+                )
+            }
+        )
+        val decoded = CutoverArchiveV2Codec(policy).decode(
+            CutoverArchiveV2Codec(policy).encode(activePayload).serialized
+        )
+
+        val failure = runCatching {
+            RoomV9CutoverStore(target).restore(decoded.archive)
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(failure?.message.orEmpty().contains("historical pairing must be revoked"))
+        assertTrue(EXPECTED_TABLES.all { count(target, it) == 0L })
+    }
+
     private fun database(): AppDatabase {
         val context = ApplicationProvider.getApplicationContext<Context>()
         return Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
@@ -237,6 +275,33 @@ class RoomV9CutoverStoreTest {
 
     private fun decode(value: String): ByteArray = Base64.getUrlDecoder().decode(value)
     private fun encode(value: ByteArray): String = Base64.getUrlEncoder().withoutPadding().encodeToString(value)
+
+    private fun replaceCellWithNull(row: ByteArray, cellIndex: Int): ByteArray {
+        val input = DataInputStream(ByteArrayInputStream(row))
+        val outputBytes = ByteArrayOutputStream()
+        DataOutputStream(outputBytes).use { output ->
+            val count = input.readInt()
+            output.writeInt(count)
+            repeat(count) { index ->
+                val tag = input.readUnsignedByte()
+                val length = input.readInt()
+                val value = ByteArray(length).also(input::readFully)
+                if (index == cellIndex) {
+                    output.writeByte(0)
+                    output.writeInt(0)
+                } else {
+                    output.writeByte(tag)
+                    output.writeInt(length)
+                    output.write(value)
+                }
+            }
+        }
+        return outputBytes.toByteArray()
+    }
+
+    private fun allAbsentPreferences() = CutoverPlanConfigSchema.preferenceTypes.map { (key, type) ->
+        CutoverPreferenceEntry(key, type, present = false, value = null)
+    }
 
     private companion object {
         val EXPECTED_TABLES = sortedSetOf(
