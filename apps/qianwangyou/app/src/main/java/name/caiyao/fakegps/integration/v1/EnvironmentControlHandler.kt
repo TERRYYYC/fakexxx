@@ -69,6 +69,8 @@ class EnvironmentControlHandler(
     // keeps testing the rejection paths through a recorder.
     private val diagnostics: DiagnosticLog = DiagnosticLog.ANDROID,
 ) {
+    private val observationAdmission = ObservationAdmissionStore(storage)
+
     fun restartScheduleForOperator(): OperatorScheduleRestartResult = withOwnerFence {
         if (leaseStore.blockingLease() != null) {
             return@withOwnerFence OperatorScheduleRestartResult.BLOCKED_BY_LEASE
@@ -371,7 +373,13 @@ class EnvironmentControlHandler(
             }
         }
 
-        observer.observe(lease, request)
+        // The admission record and audit append share one DurableKv commit. A
+        // rejected or failed observe cannot consume quota or leave an audit row.
+        storage.transaction {
+            observer.observe(lease, request) { window ->
+                observationAdmission.admit(caller, lease.leaseId, window, request.operationId)
+            }
+        }
     }
 
     fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {
