@@ -62,7 +62,10 @@ object AutomationEngineFactory {
         // R44 (Sol GREEN-review-3 F3): the execution-evidence elapsed clock — same production default
         // wiring, observable by tests through the same factory path.
         elapsedClockMs: () -> Long = productionElapsedClockMs,
-        initialRunSessionId: Long? = null
+        initialRunSessionId: Long? = null,
+        // # P1.3 自愈开关（看门狗/坐标校验）——与 stageToggles 同样的运行时快照 seam
+        selfHealConfig: suspend () -> com.example.cellrebelauto.data.SelfHealConfig =
+            { com.example.cellrebelauto.data.SelfHealConfig() }
     ): AutomationEngine = AutomationEngine(
         planId = planId,
         planRepository = planRepository,
@@ -80,6 +83,7 @@ object AutomationEngineFactory {
         delayMs = delayMs,
         commitClockMs = commitClockMs,
         elapsedClockMs = elapsedClockMs,
-        initialRunSessionId = initialRunSessionId
+        initialRunSessionId = initialRunSessionId,
+        selfHealConfig = selfHealConfig
     )
 }

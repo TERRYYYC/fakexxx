@@ -6,9 +6,13 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.cellrebelauto.CellRebelAutoApp
 import com.example.cellrebelauto.automation.aplus.APlusBackend
+import com.example.cellrebelauto.automation.selfheal.ServiceReconnectAutoResumeCoordinator
+import com.example.cellrebelauto.automation.selfheal.ServiceReconnectAutoResumePolicy
+import com.example.cellrebelauto.automation.selfheal.ServiceRecycleMarkerStore
 import com.example.cellrebelauto.cutover.CutoverAccessResult
 import com.example.cellrebelauto.cutover.CutoverUnavailableReason
 import com.example.cellrebelauto.data.PlanConfigStore
+import com.example.cellrebelauto.data.SelfHealSettings
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.StageToggles
@@ -55,6 +59,14 @@ class AutomationService : AccessibilityService() {
     // # MIUI 弹窗去抖：上次自动点击"允许"的时间戳
     private var lastMiuiDismissTime = 0L
 
+    // ---- P1.3 自愈三件套：服务重连自动恢复 ----
+    // # 本实例正在跑的计划 id——startWithPlan 时捕获，服务回收（onUnbind/onDestroy）时写入 reconnect 标记
+    private var activePlanId: Long? = null
+
+    private val selfHealSettings by lazy { SelfHealSettings(applicationContext) }
+    private val recycleMarkerStore by lazy { ServiceRecycleMarkerStore(applicationContext) }
+    private val reconnectPolicy by lazy { ServiceReconnectAutoResumePolicy() }
+
     companion object {
         private const val TAG = "AutomationSvc"
 
@@ -75,8 +87,8 @@ class AutomationService : AccessibilityService() {
         // # MIUI SecurityCenter 包名（后台启动拦截弹窗的来源）
         private const val MIUI_SECURITY_PKG = "com.miui.securitycenter"
 
-        // # 服务实例引用（供 UI 调用）
-        private var instance: AutomationService? = null
+    // # 服务实例引用（供 UI 调用）
+    private var instance: AutomationService? = null
 
         // ---- Shared state (collected by UI) ----
 
@@ -188,6 +200,50 @@ class AutomationService : AccessibilityService() {
         providerBindAttempts++
         lastProviderBindReturnedTrue = bound
         addLog(if (bound) "A+ provider service bind requested" else "A+ provider unavailable — apply will fail closed")
+        // # P1.3 #2：重连自动恢复决策（默认 off——开关关闭时这里至多写一条 hold 原因）
+        serviceScope.launch {
+            runCatching { maybeAutoResumeAfterServiceRecycle() }
+                .onFailure { Log.w(TAG, "auto-resume decision failed", it) }
+        }
+    }
+
+    /**
+     * P1.3 #2 — the reconnect auto-resume. The measured incident: a uiautomator dump kills the
+     * accessibility service; the system rebuilds it ~1s later; the run sat at the SERVICE_RECYCLED
+     * terminal until a HUMAN pressed Resume — the highest-frequency manual intervention in
+     * unattended runs. When the persisted toggle is ON and a recycle marker is pending (written by
+     * [publishServiceRecycledTerminal] while a run was active), this consults
+     * [ServiceReconnectAutoResumePolicy] and resumes the recycled plan through the SAME
+     * startWithPlan entry a manual Resume uses — every action lands in the durable audit stream,
+     * and the 30-min/3 budget holds the engine stopped (with the reason) once exhausted.
+     */
+    private suspend fun maybeAutoResumeAfterServiceRecycle() {
+        val marker = recycleMarkerStore.pendingRecycle() ?: return
+        ServiceReconnectAutoResumeCoordinator(
+            settings = selfHealSettings,
+            markerStore = recycleMarkerStore,
+            policy = reconnectPolicy,
+            audit = ::recordServiceHealAudit,
+            log = ::addLog,
+            resume = ::startWithPlan
+        ).afterServiceConnected()
+    }
+
+    /** The audit-stream writer for service-level self-heal actions; audit failure never breaks connect. */
+    private suspend fun recordServiceHealAudit(
+        eventType: String,
+        correlationRef: String?,
+        detail: String,
+        recordedAt: Long
+    ) {
+        runCatching {
+            PlanRepository(AppDatabase.getInstance(applicationContext)).recordServiceHealAudit(
+                eventType = eventType,
+                correlationRef = correlationRef,
+                detail = detail,
+                recordedAt = recordedAt
+            )
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -306,12 +362,19 @@ class AutomationService : AccessibilityService() {
      * # #15：宿主服务消亡——在取消任何协程之前，同步发布类型化终态并清空运行投影
      */
     private fun publishServiceRecycledTerminal() {
+        // # P1.3 #2：若回收时有活跃 run，先捕获计划 id——#15a 的同步终态发布仍然第一且不阻塞，
+        // # 标记写入（SharedPreferences.apply，内存写 + 后台落盘）排在其后。
+        val recycledPlanId = if (automationJob?.isActive == true) activePlanId else null
         projectionFence.close {
             addLog("SERVICE_RECYCLED — accessibility service destroyed; engine stopped. Restart the plan to continue.")
             _currentState.value = AutomationState.SERVICE_RECYCLED
             _currentTask.value = null
             _cooldown.value = null
             _isRunning.value = false
+        }
+        if (recycledPlanId != null) {
+            recycleMarkerStore.saveRecycle(recycledPlanId)
+            Log.w(TAG, "Self-heal: recycle marker saved for plan #$recycledPlanId")
         }
     }
 
@@ -368,6 +431,9 @@ class AutomationService : AccessibilityService() {
             return
         }
 
+        // # P1.3 #2：一旦启动成为可能就记住计划（服务回收时写 reconnect 标记用）
+        activePlanId = planId
+
         val bridge = AccessibilityBridge(this)
         val app = application as CellRebelAutoApp
         val accessGate = app.cutoverAccessGate
@@ -405,6 +471,8 @@ class AutomationService : AccessibilityService() {
             val runGeneration = projectionFence.beginRun()
             projectionFence.publish(runGeneration) { _isRunning.value = true }
             _startStatus.value = AutomationStartStatus.Accepted(sessionId)
+            // # P1.3 #2：启动/恢复被持久受理——reconnect 标记使命完成
+            recycleMarkerStore.clearPendingRecycle()
 
             val newEngine = buildProductionEngine(
                 planId, sessionId, plan, planConfig, planRepository, db, configStore, bridge
@@ -482,7 +550,9 @@ class AutomationService : AccessibilityService() {
             aplusCoordinator = aplusCoordinator,
             aplusEvidence = aplusEvidence,
             bridge = bridge,
-            initialRunSessionId = sessionId
+            initialRunSessionId = sessionId,
+            // # P1.3：自愈开关（看门狗/坐标校验）与阶段开关同一条 DataStore 快照 seam
+            selfHealConfig = { selfHealSettings.config.first() }
         )
     }
 

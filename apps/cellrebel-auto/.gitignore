@@ -11,3 +11,6 @@
 截图/
 hs_err_pid*.log
 replay_pid*.log
+
+# Kotlin compiler session artifacts (error logs, etc.)
+.kotlin/
