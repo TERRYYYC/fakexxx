@@ -238,6 +238,44 @@ public class MainHookRefreshContractTest {
                 observedCalls >= 8);
     }
 
+    // --- transport schema v5: per-module registration gating ---------------------------------
+
+    /**
+     * v5: registerAllHooks must take the snapshot's disabled-module set and route EVERY one of the
+     * 16 groups through the gate — a group registered outside the gate could not be dismantled by
+     * the module switch, breaking the "off = fully native behaviour" contract.
+     */
+    @Test
+    public void registerAllHooksIsGatedByTheSnapshotModuleDecisions() throws Exception {
+        String hookUtils = readSource("name/caiyao/fakegps/hook/HookUtils.java");
+
+        assertTrue("registerAllHooks must accept the disabled-module set",
+                hookUtils.contains("registerAllHooks(ClassLoader cl, Set<String> disabledModules)"));
+        assertEquals("every hook group must be registered through the gate (16 groups)",
+                16, countOccurrences(hookUtils, "registerGated(\""));
+        assertTrue("a skipped group must leave its own evidence line",
+                hookUtils.contains("SKIPPED"));
+        assertTrue("the gate decision must come from ModuleGate (single decision point)",
+                hookUtils.contains("ModuleGate.shouldRegister"));
+    }
+
+    /**
+     * MainHook must load the modules decision from the ACCEPTED snapshot load and hand it to
+     * registration; a malformed modules object must take the existing rejection path (keep
+     * last-known-good), never fall back to real device data.
+     */
+    @Test
+    public void mainHookFeedsRegistrationFromTheLoadedSnapshotModules() throws Exception {
+        String mainHook = readSource("name/caiyao/fakegps/hook/MainHook.java");
+
+        assertTrue("MainHook must consult ModuleGate for payload modules",
+                mainHook.contains("ModuleGate.fromPayload"));
+        assertTrue("rejection must keep last-known-good (transport rejected modules)",
+                mainHook.contains("transport rejected modules"));
+        assertTrue("registration must receive the loaded module decisions",
+                mainHook.contains("registerAllHooks(targetClassLoader, disabledModules)"));
+    }
+
     private static String readSource(String relative) throws Exception {
         String[] roots = {"app/src/main/java/", "src/main/java/"};
         for (String root : roots) {
