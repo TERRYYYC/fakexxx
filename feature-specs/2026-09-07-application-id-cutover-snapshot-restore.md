@@ -115,6 +115,24 @@ then by unpadded Base64URL. Decode performs canonical Base64URL re-encoding and 
 decode; malformed bytes and isolated UTF-16 surrogates reject rather than becoming replacement
 characters. Row order keys and row payloads are deliberately opaque bytes, not UTF-8 text.
 
+Empty/minimum-value rules are field-specific and apply identically to policy, encode, and decode:
+
+| Field | Empty / minimum disposition | Why |
+| --- | --- | --- |
+| source package | empty/blank forbidden; exact legacy package only | direction and sandbox identity |
+| capture id | empty/blank forbidden | restore identity cannot be anonymous |
+| table name | empty/blank forbidden in policy and archive | census key and canonical ordering |
+| schema digest | empty/blank forbidden in policy and archive | a table cannot claim an absent schema identity |
+| row order key | zero-byte value forbidden | uniqueness/order proof needs an identity |
+| row payload | zero-byte value allowed | an owner-declared canonical row may have an empty payload |
+| preference key | exactly the five non-empty owned keys | no unknown/default-materialized key |
+| present preference value | empty forbidden by canonical `Int`/`Boolean` grammar | value must match its declared type |
+| absent preference value | model value is `null`; wire value is exactly `-` | absence remains distinct from a default |
+| schema version | smallest legal value is `1` | zero/negative versions are outside policy |
+| table row count | smallest legal value is `0` | empty tables are required to round-trip |
+| preference integer | `Int.MIN_VALUE..Int.MAX_VALUE`, canonical decimal including `0` | codec preserves raw typed value; business ranges belong to the owner |
+| size/count limits | archive/field/line/table limits are positive; row limits may be zero | zero-capacity row policies are valid; zero-byte archives are not |
+
 Blank lines, raw non-ASCII syntax bytes, CR/LF variants, padding, extra delimiters, unknown records,
 and a final LF are not alternate spellings. A successful decode must satisfy the test-only composite
 invariant `encode(decoded.archive).serialized == input` and equal archive digests; production decode
@@ -122,7 +140,8 @@ must prove this through the individual grammar checks rather than allocating a s
 
 #### Codec policy domain and bidirectional resource limits
 
-A legal policy has a positive schema version; a non-empty table census no larger than `maxTables`;
+A legal policy has a positive schema version; a non-empty table census no larger than `maxTables`
+whose names and schema-digest values are non-blank, strict-UTF-8, and representable within `F`;
 `provider_pairing_records` present and `HISTORICAL_ONLY`; no historical-only name outside the census;
 the exact five-key `CutoverPlanConfigSchema`; positive archive/field/line limits; and non-negative
 per-table/total row limits. A restrictive legal policy may reject every candidate, but it must never
@@ -161,10 +180,11 @@ exit; none is persisted or recoverable as application state.
 
 #### Finding pattern summary and sibling sweep
 
-R1–R3 exposed one pattern: canonicality and allocation safety were described globally while the
+R1–R4 exposed one pattern: canonicality and allocation safety were described globally while the
 implementation normalized heterogeneous records independently. R1 found unbounded whole-input
 splitting; R2 found lossy UTF-8 and a cursor terminal-empty-line gap; R3 found a row-only line formula
-applied to a longer table record. The governing invariant is now: **every accepted representation has
+applied to a longer table record; R4 found that the legal policy domain omitted a schema-digest
+non-blank lower bound already required by decode. The governing invariant is now: **every accepted representation has
 one spelling, and every successful encoder output is accepted identically by the same policy without
 an allocation that exceeds that policy's declared bounds**.
 
@@ -174,6 +194,9 @@ Siblings scanned and disposition:
 - Numeric spellings: schema and row counts must equal their parsed canonical decimal rendering.
 - Base64URL: alphabet, decoder validity, no padding, and re-encode equality are all required.
 - Empty/trailing syntax: blank body records, trailing LF/data, extra separators, and unknown lines reject.
+- Empty/minimum field values: source, capture, table name, schema digest, row order key, row payload,
+  preference key/value, schema version, row count, and resource limits follow the field table above;
+  the only intentionally empty payload is an opaque row value, and zero rows are valid.
 - Record overhead: format/source/capture/schema/preference/table/row/footer each owns its formula;
   table mode/count/digest overhead may not borrow the row formula.
 - Counts and overflow: line/table/per-table-row/total-row arithmetic uses checked `Long` bounds before
@@ -263,6 +286,7 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 | `CUT-A16` | valid Base64URL wrapping malformed UTF-8, or isolated UTF-16 surrogate on encode | target text boundary rejects without replacement |
 | `CUT-A17` | one blank line immediately before the digest | cursor rejects instead of treating the body as exhausted |
 | `CUT-A18` | maximum legal table metadata, five preferences spanning absent/present-int/present-boolean, and valid non-ASCII text | exact bytes/digest round-trip; changing one target past its bound rejects for that target |
+| `CUT-A19` | legal non-empty schema-digest baseline, then only that policy field becomes empty/blank | invalid policy/archive rejects before serialized output; decode continues to reject empty text |
 
 ## Implementation tasks
 
@@ -286,7 +310,7 @@ Lifecycle owner after restore remains the existing `ProviderTrustStore`. Importe
 3. Implement the minimal length-delimited canonical codec, strict bounds, recomputed digests, five-key presence contract, and historical-only pairing-table rule.
 4. RED→GREEN the record grammar matrix: small legal policy, empty table, maximum table metadata,
    five-preference presence/type states, valid non-ASCII, malformed UTF-8, isolated surrogate,
-   digest-preceding blank line, and each grammar-specific line bound. Every negative first proves its
+   digest-preceding blank line, field-specific empty/minimum values, and each grammar-specific line bound. Every negative first proves its
    unchanged baseline succeeds and then mutates only the named target.
 5. Re-run the exact tests in both flavors; expected result is all new V2 tests passing.
 6. Commit only the codec and its tests.
