@@ -74,6 +74,13 @@ interface TestAttemptDao {
     @Query("SELECT COUNT(*) FROM test_attempts WHERE taskId = :taskId")
     suspend fun countAttemptsForTask(taskId: Long): Int
 
+    // # P1.3 attempt 看门狗：该任务全部终态尝试的时长样本（中位时长=3×阈值的历史依据）
+    @Query(
+        "SELECT (endedAt - startedAt) FROM test_attempts " +
+            "WHERE taskId = :taskId AND endedAt IS NOT NULL AND startedAt IS NOT NULL"
+    )
+    suspend fun terminalAttemptDurationsForTask(taskId: Long): List<Long>
+
     // # 观察某计划下每个任务的尝试总数（Plan 页卡片 Attempts n）
     @Query(
         "SELECT a.taskId AS taskId, COUNT(*) AS count FROM test_attempts a " +
