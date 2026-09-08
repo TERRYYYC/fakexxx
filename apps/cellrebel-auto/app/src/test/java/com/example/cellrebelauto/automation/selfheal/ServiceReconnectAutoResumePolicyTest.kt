@@ -136,13 +136,14 @@ class ServiceReconnectAutoResumePolicyTest {
     }
 
     @Test
-    fun `self-heal toggles default to watchdog on guard on autoresume off`() = runTest {
+    fun `self-heal toggles default to watchdog on guard on autoresume on`() = runTest {
+        // Operator decision 2026-09-08: auto-resume defaults ON (budget 3/30min still caps).
         val settings = newSettings()
         assertEquals(
             SelfHealConfig(
                 attemptWatchdogEnabled = true,
                 coordinateGuardEnabled = true,
-                serviceReconnectAutoResumeEnabled = false
+                serviceReconnectAutoResumeEnabled = true
             ),
             settings.config.first()
         )

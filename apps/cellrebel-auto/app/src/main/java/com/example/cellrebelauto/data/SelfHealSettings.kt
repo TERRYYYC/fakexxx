@@ -27,7 +27,10 @@ private val Context.selfHealConfigDataStore: DataStore<Preferences> by preferenc
 data class SelfHealConfig(
     val attemptWatchdogEnabled: Boolean = true,
     val coordinateGuardEnabled: Boolean = true,
-    val serviceReconnectAutoResumeEnabled: Boolean = false
+    // Operator decision 2026-09-08: default ON — "出问题时快捷自动重启很关键".
+    // The T4 budget (3 resumes / 30 min rolling) still caps storms; past budget the
+    // engine holds stopped with the typed reason + audit row, exactly as before.
+    val serviceReconnectAutoResumeEnabled: Boolean = true
 )
 
 class SelfHealSettings(
@@ -47,7 +50,7 @@ class SelfHealSettings(
             attemptWatchdogEnabled = prefs[Keys.ATTEMPT_WATCHDOG_ENABLED] ?: true,
             coordinateGuardEnabled = prefs[Keys.COORDINATE_GUARD_ENABLED] ?: true,
             serviceReconnectAutoResumeEnabled =
-                prefs[Keys.SERVICE_RECONNECT_AUTO_RESUME_ENABLED] ?: false
+                prefs[Keys.SERVICE_RECONNECT_AUTO_RESUME_ENABLED] ?: true
         )
     }
 

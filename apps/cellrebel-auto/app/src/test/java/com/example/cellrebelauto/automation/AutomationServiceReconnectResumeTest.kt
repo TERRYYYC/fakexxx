@@ -31,7 +31,7 @@ import org.robolectric.annotation.Config
  * entry a manual Resume uses — with a durable audit row per action and the 30-min/3 budget holding
  * the engine stopped (with the reason) once exhausted.
  *
- * # 服务重连自动恢复 oracle：重连回调发现回收标记 → 自动 Resume；默认关不干预；动作必有审计行
+ * # 服务重连自动恢复 oracle：重连回调发现回收标记 → 自动 Resume；显式关不干预（默认 2026-09-08 起 on）；动作必有审计行
  */
 // Rebase note: #103/#108 make the resume entry resolve the app-singleton cutover
 // gate — the harness therefore must host the REAL CellRebelAutoApp (journal-derived
@@ -164,7 +164,7 @@ class AutomationServiceReconnectResumeTest {
     }
 
     @Test
-    fun `with the toggle off (default) a pending recycle marker never auto-starts`() = runTest {
+    fun `with the toggle off (explicit) a pending recycle marker never auto-starts`() = runTest {
         resetToggles()
         resetStartStatus()
         ServiceRecycleMarkerStore(context).saveRecycle(planId = 424_242L)
