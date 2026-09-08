@@ -4,6 +4,33 @@
 
   exported=true so `adb shell am start` can drive it without a launcher tile.
   This manifest is src/debug, so the entry point cannot reach a release build.
+
+  #12 PLAN RE-RUN SEQUENCE (the Auto half of it lives in the PRODUCT Plan
+  screen — "⟲ Reset plan & re-run", visible once the plan is complete or an
+  attempt is stuck RECOVERY_REQUIRED — this seam documents the whole sequence
+  because the operator drives it from both sides):
+
+    1. AUTO  Plan screen → Reset plan & re-run → confirm. Re-imports the SAME
+            worklist as a NEW plan generation (tasks restart pending, attempts/
+            quota projections start clean; old attempts stay in History) and
+            appends a PLAN_RESET row to auto_audit_events.
+    2. QWY   adb shell am start -n <providerPkg>/
+            name.caiyao.fakegps.integration.v1.FaultCollectorActivity
+            with string extra cmd=schedule_reset
+            — new schedule generation (version+1, exhausted cleared, pointer to
+            first item) + FULL contract durable wipe (lease/idempotency/audit).
+    3. RE-PAIRING — REQUIRED, not optional: step 2 wipes the provider's
+            pairing rows too. The first Auto handshake fail-closes NOT_PAIRED
+            and records a candidate; approve it via
+            adb shell am start -n <providerPkg>/
+            name.caiyao.fakegps.integration.v1.PairingApprovalActivity
+            (list, then approve naming BOTH the applicationId AND the signer
+            digest extras — §6.5 forbids silent re-grants).
+    4. AUTO  Start Plan.
+
+  <providerPkg> is this build's selected provider principal (debug/bench lane:
+  name.caiyao.fakegps.bench; glmbench lane: name.caiyao.fakegps.glmbench) —
+  the confirm dialog in the Plan screen prints the exact commands.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
