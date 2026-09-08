@@ -22,12 +22,15 @@ private val Context.selfHealConfigDataStore: DataStore<Preferences> by preferenc
  *  - coordinate guard        ON  (the 52/51 profile-misalignment quota burn incident);
  *  - service auto-resume     OFF (conservative — highest-blast-radius intervention).
  *
- * # 自愈开关持久化：看门狗默认开、坐标校验默认开、服务重连自动恢复默认关（保守）
+ * # 自愈开关持久化：看门狗默认开、坐标校验默认开、服务重连自动恢复默认开（operator 2026-09-08 拍板）
  */
 data class SelfHealConfig(
     val attemptWatchdogEnabled: Boolean = true,
     val coordinateGuardEnabled: Boolean = true,
-    val serviceReconnectAutoResumeEnabled: Boolean = false
+    // Operator decision 2026-09-08: default ON — "出问题时快捷自动重启很关键".
+    // The T4 budget (3 resumes / 30 min rolling) still caps storms; past budget the
+    // engine holds stopped with the typed reason + audit row, exactly as before.
+    val serviceReconnectAutoResumeEnabled: Boolean = true
 )
 
 class SelfHealSettings(
@@ -47,7 +50,7 @@ class SelfHealSettings(
             attemptWatchdogEnabled = prefs[Keys.ATTEMPT_WATCHDOG_ENABLED] ?: true,
             coordinateGuardEnabled = prefs[Keys.COORDINATE_GUARD_ENABLED] ?: true,
             serviceReconnectAutoResumeEnabled =
-                prefs[Keys.SERVICE_RECONNECT_AUTO_RESUME_ENABLED] ?: false
+                prefs[Keys.SERVICE_RECONNECT_AUTO_RESUME_ENABLED] ?: true
         )
     }
 

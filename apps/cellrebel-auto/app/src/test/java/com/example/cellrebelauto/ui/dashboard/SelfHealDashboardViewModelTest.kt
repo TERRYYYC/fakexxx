@@ -129,10 +129,10 @@ class SelfHealDashboardViewModelTest {
     fun `config flow surfaces the persisted defaults`() = runTest {
         val viewModel = vm(settings())
         val config = viewModel.selfHealConfig.first()
-        // P1.3 defaults: watchdog ON, coordinate guard ON, auto-resume OFF.
+        // P1.3 defaults: watchdog ON, coordinate guard ON, auto-resume ON (2026-09-08 decision).
         org.junit.Assert.assertTrue(config.attemptWatchdogEnabled)
         org.junit.Assert.assertTrue(config.coordinateGuardEnabled)
-        org.junit.Assert.assertFalse(config.serviceReconnectAutoResumeEnabled)
+        org.junit.Assert.assertTrue(config.serviceReconnectAutoResumeEnabled)
     }
 
 
