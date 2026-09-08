@@ -224,6 +224,8 @@ class MainViewModel @JvmOverloads constructor(
     private val cellPollIntervalMs: Long = 2_000,
     private val cellPollDispatcher: kotlinx.coroutines.CoroutineDispatcher =
         kotlinx.coroutines.Dispatchers.IO,
+    // T-tilemap (2026-09-08): the tiles-basemap switch store; tests inject a file-backed one.
+    injectedMapTilesSettings: com.example.cellrebelauto.data.MapTilesSettings? = null,
 ) : AndroidViewModel(application) {
 
     private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
@@ -1285,6 +1287,43 @@ class MainViewModel @JvmOverloads constructor(
 
     fun setMetricSelection(keys: List<com.example.cellrebelauto.ui.dashboard.v2.MetricKey>) {
         viewModelScope.launch { metricsSettings.setSelection(keys) }
+    }
+
+    // ---- T-tilemap (2026-09-08): tiles-basemap switch + sticky tile failure ----
+    //
+    // The dashboard's dual-card fallback is decided by
+    // TileMapCardPolicy.decide(enabled, network, tileFailure) — the network leg
+    // is observed UI-side; THIS owns the persisted switch and the failure latch.
+
+    private val mapTilesSettings = injectedMapTilesSettings
+        ?: com.example.cellrebelauto.data.MapTilesSettings(application)
+
+    private val _mapTileFailure = MutableStateFlow(false)
+
+    /**
+     * The persisted `map_tiles_enabled` switch (default ON). Eagerly (not
+     * Lazily): the map card is the landing surface and must show the PERSISTED
+     * value the moment the VM exists — same reasoning as selfHealConfig above.
+     */
+    val mapTilesEnabled: StateFlow<Boolean> = mapTilesSettings.enabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+
+    /** 首次瓦片回调失败后粘住（本会话回退）；重连或重新打开开关时清除。 */
+    val mapTileFailure: StateFlow<Boolean> = _mapTileFailure
+
+    fun setMapTilesEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            mapTilesSettings.setEnabled(enabled)
+            if (enabled) _mapTileFailure.value = false // 重新打开 = 重试瓦片
+        }
+    }
+
+    fun reportTileLoadFailure() {
+        _mapTileFailure.value = true
+    }
+
+    fun clearTileLoadFailure() {
+        _mapTileFailure.value = false
     }
 
     private val _servingCell =

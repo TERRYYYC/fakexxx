@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- # T-tilemap (2026-09-08)：运行台地图卡的 OSM 瓦片底图（osmdroid）。本 app 此前
+         # 完全离线所以未声明联网权限；这两个权限仅服务瓦片下载与连通性探测
+         # （TileNetworkGate——无网自动回退抽象 Canvas 地图）。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- # WRITE_EXTERNAL_STORAGE 刻意不申请：osmdroid 6.x 的瓦片缓存已显式配置到
+         # 应用内部存储（TilePlanMapCard.kt 的 OsmdroidBootstrap.ensure → cacheDir），
+         # 按需最小化，无外部存储访问。 -->
+
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

@@ -144,6 +144,12 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                     metricSelection = vm.metricSelection.collectAsState().value,
                     logs = logs,
                     selfHealConfig = vm.selfHealConfig.collectAsState().value,
+                    // T-tilemap: 瓦片底图开关（DataStore 持久化）+ sticky 失败位
+                    mapTilesEnabled = vm.mapTilesEnabled.collectAsState().value,
+                    mapTileFailure = vm.mapTileFailure.collectAsState().value,
+                    onSetMapTilesEnabled = { vm.setMapTilesEnabled(it) },
+                    onReportTileFailure = { vm.reportTileLoadFailure() },
+                    onClearTileFailure = { vm.clearTileLoadFailure() },
                     // T7v2: 重启恢复/启动 = 同一 startOrResumePlan 入口；停止/导出/导航同 v1
                     onResume = { vm.resumeRun() },
                     onStop = { vm.stopAutomation() },
