@@ -35,6 +35,8 @@ sealed interface ProfileImportUiState {
         override val generation: Long,
         val fileName: String,
         val fileDuplicates: Int,
+        /** 首行档案名（文件顺序第一条数据行的 addname），供「设为生效档案」按钮文案。 */
+        val firstRowName: String? = null,
     ) : ProfileImportUiState
 
     data class Success(
@@ -42,6 +44,9 @@ sealed interface ProfileImportUiState {
         val fileName: String,
         val imported: Int,
         val duplicates: Int,
+        /** 一键锚定按钮的文案（首行档案名）与目标（首条插入行的 DB id）；全重复导入时为 null。 */
+        val firstRowName: String? = null,
+        val firstInsertedId: Long? = null,
     ) : ProfileImportUiState
 
     data class Failure(
@@ -107,6 +112,7 @@ object ProfileImportReducer {
                 generation = current.generation,
                 fileName = current.fileName,
                 fileDuplicates = current.fileDuplicates,
+                firstRowName = current.records.firstOrNull()?.addname,
             ),
             records = current.records,
         )
@@ -122,6 +128,8 @@ object ProfileImportReducer {
             fileName = current.fileName,
             imported = result.imported,
             duplicates = current.fileDuplicates + result.duplicates,
+            firstRowName = current.firstRowName,
+            firstInsertedId = result.firstInsertedId,
         )
     }
 

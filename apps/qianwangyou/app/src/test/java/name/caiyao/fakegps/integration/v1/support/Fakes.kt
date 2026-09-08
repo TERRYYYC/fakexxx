@@ -151,6 +151,8 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     // --- config (memory by design) ---
     var scheduleId: String = "sched-1"
     var itemIds: MutableList<String> = mutableListOf("item-1", "item-2", "item-3")
+
+    /** P0.1-5: the profile collection discover() must project (default: none known). */
     var profileRefs: List<String> = emptyList()
     var cleanupOutcome: CleanupOutcome = CleanupOutcome.Complete
     var isMock: Boolean? = true

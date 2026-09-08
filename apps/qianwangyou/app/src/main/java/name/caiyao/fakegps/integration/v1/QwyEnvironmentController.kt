@@ -50,6 +50,12 @@ interface QwyEnvironment {
      */
     fun achievableVerificationLevelWire(): Int
     fun setRelevantChangeListener(listener: (RevisionBumpReason) -> Unit)
+
+    // Rebase note: T2's parallel profileRefs() hook is superseded by #105's
+    // profileRefsSnapshot() above — discover() projects that one into
+    // CapabilitySnapshotV1.profileRefs; a second, unconsumed projection would
+    // also violate LegacyRecoveryDirectOpenGuardTest (no recovery call, no
+    // third direct open in the read-only controller).
 }
 
 data class ScheduleSnapshot(

@@ -58,6 +58,8 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     val importErrors by vm.importErrors.collectAsState()
     val importNotice by vm.importNotice.collectAsState()
     val importProposal by vm.importProposal.collectAsState()
+    // P0.1-5: plan↔profile count mismatch warning after a CSV import.
+    val planProfileMismatch by vm.planProfileMismatch.collectAsState()
     val isImportReplacementStopping by vm.isImportReplacementStopping.collectAsState()
     val currentTask by vm.currentTask.collectAsState()
     val cooldown by vm.cooldown.collectAsState()
@@ -90,6 +92,8 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                                     importErrors = importErrors,
                                     importNotice = importNotice,
                                     importProposal = importProposal,
+                                    // P0.1: plan↔profile count mismatch warning (T2)
+                                    planProfileMismatch = planProfileMismatch,
                                     isImportReplacementStopping = isImportReplacementStopping,
                                     onImport = { vm.importCsv(it) },
                                     onConfirmImportReplacement = { vm.confirmImportReplacement() },

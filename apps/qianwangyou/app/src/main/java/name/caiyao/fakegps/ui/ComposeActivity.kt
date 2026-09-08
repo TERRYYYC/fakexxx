@@ -34,8 +34,12 @@ class ComposeActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             FakeGpsTheme {
-                val navController = rememberNavController()
-                AppNavGraph(navController = navController)
+                // P0.1-1 首启权限流：缺 ACCESS_FINE/COARSE_LOCATION、POST_NOTIFICATIONS 时
+                // 主动弹标准运行时权限申请（代替 adb pm grant）；拒绝后由设置页权限卡重试。
+                name.caiyao.fakegps.ui.onboarding.FirstLaunchPermissionGate {
+                    val navController = rememberNavController()
+                    AppNavGraph(navController = navController)
+                }
             }
         }
     }

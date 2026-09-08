@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.ui
 
 import android.app.Application
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
@@ -8,6 +9,7 @@ import com.example.cellrebelauto.cutover.CutoverDataState
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -39,6 +41,20 @@ class ProviderDiscoveryViewModelTest {
 
     private lateinit var db: AppDatabase
 
+    // Rebase note (round-3): this class was the visible victim AND a silent
+    // contributor of the tree-level TestMainDispatcher race — its MainViewModels
+    // run live Eagerly stateIn chains whose Room resumptions kept dispatching
+    // past tearDown into the next class's setMain/resetMain window. Cancel every
+    // created VM BEFORE resetMain (same drain as PlanProfileConsistencyViewModel
+    // Test / PlanResetViewModelTest / MainViewModelCutoverProjectionTest).
+    private val createdVms = mutableListOf<MainViewModel>()
+
+    private fun newVm(): MainViewModel = MainViewModel(
+        ApplicationProvider.getApplicationContext(),
+        injectedDb = db,
+        injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+    ).also { createdVms += it }
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -50,13 +66,14 @@ class ProviderDiscoveryViewModelTest {
 
     @After
     fun tearDown() {
+        createdVms.forEach { it.viewModelScope.cancel() }
+        createdVms.clear()
         db.close()
         Dispatchers.resetMain()
     }
 
     @Test
     fun `pending candidates come from INSTALLED provider discovery - never from revoked history`() = runTest {
-        val app = ApplicationProvider.getApplicationContext<Application>()
         // Install the frozen production provider package with a signing certificate (Robolectric shadow).
         val providerPkg = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_PRODUCTION
         val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -80,11 +97,7 @@ class ProviderDiscoveryViewModelTest {
             )
         )
 
-        val vm = MainViewModel(
-            app,
-            injectedDb = db,
-            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
-        )
+        val vm = newVm()
         vm.refreshProviders()
         // The refresh launches on viewModelScope; Room suspend calls hop to Room's own executor,
         // which is OUTSIDE runTest's scheduler — await the StateFlow value with a bounded spin.
@@ -112,7 +125,6 @@ class ProviderDiscoveryViewModelTest {
 
     @Test
     fun `an approved principal is listed as approved - not rediscovered as pending`() = runTest {
-        val app = ApplicationProvider.getApplicationContext<Application>()
         val providerPkg = io.github.terryyyc.fakexxx.contract.v1.ContractV1.PROVIDER_APPLICATION_ID_BENCH
         db.providerPairingDao().insert(
             ProviderPairingRecord(
@@ -121,11 +133,7 @@ class ProviderDiscoveryViewModelTest {
                 approvedAt = 1000L, revokedAt = null, approvedVersionCode = 3
             )
         )
-        val vm = MainViewModel(
-            app,
-            injectedDb = db,
-            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
-        )
+        val vm = newVm()
         vm.refreshProviders()
         var entries = vm.providerEntries.value.readyValueOrEmpty()
         val deadline = System.currentTimeMillis() + 5_000

@@ -3,11 +3,13 @@ package name.caiyao.fakegps.data.repository
 import android.content.Context
 import android.util.Log
 import androidx.room.withTransaction
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.data.db.AppDatabase
 import name.caiyao.fakegps.data.db.ProfileEntity
 import name.caiyao.fakegps.data.db.ProfileSummary
-import kotlinx.coroutines.flow.Flow
 
 class ProfileRepository(
     private val db: AppDatabase,
@@ -16,7 +18,17 @@ class ProfileRepository(
 ) {
 
     data class SaveResult(val id: Long, val published: Boolean)
-    data class ImportResult(val imported: Int, val duplicates: Int)
+
+    /**
+     * [firstInsertedId] carries the FIRST inserted row of the batch (file order), so the
+     * import-finished dialog can offer the one-tap anchor without a second query. Null when
+     * everything was already present (all duplicates).
+     */
+    data class ImportResult(
+        val imported: Int,
+        val duplicates: Int,
+        val firstInsertedId: Long? = null,
+    )
     data class PublishRequest(val profileId: Long?, val clearIfMissing: Boolean)
 
     private val dao get() = db.profileDao()
@@ -57,8 +69,22 @@ class ProfileRepository(
      */
     suspend fun importAll(candidates: List<ProfileEntity>): ImportResult = db.withTransaction {
         val plan = ProfileImportPlanner.plan(dao.getAll(), candidates)
-        if (plan.toInsert.isNotEmpty()) dao.insertAll(plan.toInsert)
-        ImportResult(imported = plan.toInsert.size, duplicates = plan.duplicates)
+        val insertedIds = if (plan.toInsert.isNotEmpty()) dao.insertAll(plan.toInsert) else emptyList()
+        ImportResult(
+            imported = insertedIds.size,
+            duplicates = plan.duplicates,
+            firstInsertedId = insertedIds.firstOrNull(),
+        )
+    }
+
+    /**
+     * P0.1-3 一键锚定：把显式选中的档案发布为生效配置（republish 的 explicit-id 形态）。
+     * 已验证发布时 ConfigPrefsSync 会把该 id 作为 durable activeProfileId 持久化
+     * （ConfigPublicationContract.onVerifiedPublish，持久化规则由 PublicationStateMachineTest 钉死），
+     * 这正是「导入→锚定」从滚 15+ 屏进编辑页点保存变成一次点击的机制。
+     */
+    suspend fun setActiveProfile(profileId: Long): Boolean = withContext(Dispatchers.IO) {
+        republish(profileId = profileId)
     }
 
     /**

@@ -2,6 +2,8 @@ package name.caiyao.fakegps.ui.screen.collection
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,9 +25,12 @@ import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,8 +66,11 @@ fun CollectionScreen(
     val effectiveId by vm.effectiveProfileId.collectAsState()
     val importState by vm.importState.collectAsState()
     val templateSaveState by vm.templateSaveState.collectAsState()
+    val downloadCandidates by vm.downloadCandidates.collectAsState()
+    val activationNotice by vm.activationNotice.collectAsState()
     var showClearDialog by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<ProfileSummary?>(null) }
+    var anchorTarget by remember { mutableStateOf<ProfileSummary?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(vm::previewImport)
@@ -85,6 +93,12 @@ fun CollectionScreen(
             snackbarHostState.showSnackbar(message)
             vm.dismissTemplateSaveResult()
         }
+    }
+
+    LaunchedEffect(activationNotice) {
+        val notice = activationNotice ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(notice)
+        vm.dismissActivationNotice()
     }
 
     Scaffold(
@@ -130,49 +144,76 @@ fun CollectionScreen(
             )
         },
     ) { innerPadding ->
-        if (profiles.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("暂无档案", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                item(key = "__effective_hint") {
-                    Text(
-                        text = if (effectiveId == null) {
-                            "当前没有收藏档案与已发布 Hook 配置匹配；导入只新增收藏，不会自动生效。"
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
+            // P0.1-3：Download/ 里发现未导入过的 CSV → 一次性提示条（可关闭），直达导入。
+            if (downloadCandidates.isNotEmpty()) {
+                DownloadImportHintCard(
+                    files = downloadCandidates.map { it.displayName },
+                    onImport = {
+                        val direct = downloadCandidates.firstOrNull { it.localPath != null }
+                        if (direct != null) {
+                            vm.previewDownloadCsv(direct)
                         } else {
-                            "只有标记「生效中」的档案与已发布 Hook 配置一致。" +
-                                "编辑其它档案不会改变伪装结果。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 8.dp),
-                    )
-                }
-                items(profiles, key = { it.id }) { profile ->
-                    ProfileCard(
-                        profile = profile,
-                        isEffective = profile.id == effectiveId,
-                        onClick = {
-                            onEditProfile(
-                                profile.id,
-                                profile.latitude ?: 0.0,
-                                profile.longitude ?: 0.0,
+                            importLauncher.launch(
+                                arrayOf(
+                                    "text/csv",
+                                    "text/comma-separated-values",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    "application/octet-stream",
+                                ),
                             )
-                        },
-                        onDelete = { deleteTarget = profile },
-                    )
+                        }
+                    },
+                    onDismiss = vm::dismissDownloadCandidates,
+                )
+            }
+            if (profiles.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("暂无档案", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item(key = "__effective_hint") {
+                        Text(
+                            text = if (effectiveId == null) {
+                                "当前没有收藏档案与已发布 Hook 配置匹配；导入只新增收藏，不会自动生效。"
+                            } else {
+                                "只有标记「生效中」的档案与已发布 Hook 配置一致。" +
+                                    "编辑其它档案不会改变伪装结果。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 8.dp),
+                        )
+                    }
+                    items(profiles, key = { it.id }) { profile ->
+                        ProfileCard(
+                            profile = profile,
+                            isEffective = profile.id == effectiveId,
+                            onClick = {
+                                onEditProfile(
+                                    profile.id,
+                                    profile.latitude ?: 0.0,
+                                    profile.longitude ?: 0.0,
+                                )
+                            },
+                            onDelete = { deleteTarget = profile },
+                            onAnchor = { anchorTarget = profile },
+                        )
+                    }
                 }
             }
         }
@@ -214,10 +255,32 @@ fun CollectionScreen(
         )
     }
 
+    // Anchor via long-press menu (P0.1-3): one tap replaces the old scroll-into-editor-save ritual.
+    anchorTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { anchorTarget = null },
+            title = { Text("设为生效档案") },
+            text = { Text("将 \"${target.addname ?: "未命名"}\" 发布为生效配置？Hook 将立即使用该档案。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.setActiveProfile(target.id)
+                    anchorTarget = null
+                }) { Text("设为生效档案") }
+            },
+            dismissButton = {
+                TextButton(onClick = { anchorTarget = null }) { Text("取消") }
+            },
+        )
+    }
+
     ProfileImportDialogs(
         state = importState,
         onConfirm = vm::confirmImport,
         onDismiss = vm::dismissImport,
+        onAnchorProfile = { id ->
+            vm.setActiveProfile(id)
+            vm.dismissImport()
+        },
     )
 }
 
@@ -226,6 +289,7 @@ private fun ProfileImportDialogs(
     state: ProfileImportUiState,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
+    onAnchorProfile: (Long) -> Unit,
 ) {
     when (state) {
         ProfileImportUiState.Idle -> Unit
@@ -319,6 +383,13 @@ private fun ProfileImportDialogs(
                 Text("新增 ${state.imported} 个档案，跳过重复 ${state.duplicates} 个。生效档案未改变。")
             },
             confirmButton = {
+                // P0.1-3 一键锚定：导入完成后直接把首行档案设为生效（写 activeProfileId
+                // 并走既有 publish 链），消灭「滚 15+ 屏进编辑页点保存」的隐藏步骤。
+                if (state.firstInsertedId != null) {
+                    Button(onClick = { onAnchorProfile(state.firstInsertedId!!) }) {
+                        Text("将 ${state.firstRowName ?: "首行档案"} 设为生效档案")
+                    }
+                }
                 TextButton(onClick = onDismiss) { Text("完成") }
             },
         )
@@ -333,15 +404,21 @@ private fun ProfileImportDialogs(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ProfileCard(
     profile: ProfileSummary,
     isEffective: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit,
+    onAnchor: () -> Unit,
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
     Card(
-        onClick = onClick,
+        modifier = Modifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = { menuExpanded = true },
+        ),
         colors = CardDefaults.cardColors(
             containerColor = if (isEffective) MaterialTheme.colorScheme.primaryContainer
             else MaterialTheme.colorScheme.surfaceContainerLow,
@@ -397,6 +474,50 @@ private fun ProfileCard(
                     contentDescription = "删除",
                     tint = MaterialTheme.colorScheme.error,
                 )
+            }
+        }
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("设为生效档案") },
+                onClick = {
+                    menuExpanded = false
+                    onAnchor()
+                },
+            )
+        }
+    }
+}
+
+/** P0.1-3：Download 发现未导入 CSV 的一次性提示条（可关闭，直达导入）。 */
+@Composable
+private fun DownloadImportHintCard(
+    files: List<String>,
+    onImport: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "Download 中发现未导入的档案文件：${files.joinToString("、")}",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(onClick = onImport) { Text("导入") }
+                TextButton(onClick = onDismiss) { Text("关闭") }
             }
         }
     }

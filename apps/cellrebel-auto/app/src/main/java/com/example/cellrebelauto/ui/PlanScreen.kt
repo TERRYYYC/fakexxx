@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.PlanConfig
+import com.example.cellrebelauto.model.plan.PlanProfileMismatch
 import com.example.cellrebelauto.model.plan.RowError
 
 /**
@@ -73,6 +74,8 @@ fun PlanScreen(
     importErrors: List<RowError>,
     importNotice: String?,
     importProposal: ImportProposal?,
+    // P0.1-5: prominent plan↔profile count mismatch warning (null = consistent / check skipped).
+    planProfileMismatch: PlanProfileMismatch? = null,
     isImportReplacementStopping: Boolean = false,
     onImport: (Uri) -> Unit,
     onConfirmImportReplacement: () -> Unit,
@@ -208,6 +211,26 @@ fun PlanScreen(
                     ) {
                         Text("Import CSV")
                     }
+                }
+            }
+        }
+
+        // # P0.1-5：计划-档案错配的显著警告（两侧数字 + 建议）。
+        // # 51 行计划配 52 档案 → 逐行取档案整体错位一档，空转烧配额——开跑前必须拦住。
+        planProfileMismatch?.let { mismatch ->
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Text(
+                        text = "⚠ " + mismatch.message,
+                        modifier = Modifier.padding(16.dp),
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
                 }
             }
         }
