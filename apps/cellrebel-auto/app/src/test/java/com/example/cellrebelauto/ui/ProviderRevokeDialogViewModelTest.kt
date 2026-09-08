@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.ui
 
 import android.app.Application
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
@@ -9,6 +10,7 @@ import com.example.cellrebelauto.cutover.CutoverExclusiveRelease
 import com.example.cellrebelauto.model.plan.ProviderPairingRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -40,6 +42,12 @@ class ProviderRevokeDialogViewModelTest {
 
     private lateinit var db: AppDatabase
 
+    // Rebase note (round-3): same tree-level TestMainDispatcher race as
+    // PlanProfileConsistencyViewModelTest — the VMs' live Eagerly stateIn chains
+    // must be cancelled BEFORE resetMain (the #112/#111 drain pattern,
+    // MainViewModelCutoverProjectionTest's finally precedent).
+    private val createdVms = mutableListOf<MainViewModel>()
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -51,6 +59,8 @@ class ProviderRevokeDialogViewModelTest {
 
     @After
     fun tearDown() {
+        createdVms.forEach { it.viewModelScope.cancel() }
+        createdVms.clear()
         db.close()
         Dispatchers.resetMain()
     }
@@ -160,7 +170,7 @@ class ProviderRevokeDialogViewModelTest {
             ApplicationProvider.getApplicationContext<Application>(),
             injectedDb = db,
             injectedAccessGate = gate
-        )
+        ).also { createdVms += it }
         vm.requestRevoke(entry)
 
         vm.confirmRevoke()
@@ -187,5 +197,5 @@ class ProviderRevokeDialogViewModelTest {
         ApplicationProvider.getApplicationContext<Application>(),
         injectedDb = db,
         injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
-    )
+    ).also { createdVms += it }
 }

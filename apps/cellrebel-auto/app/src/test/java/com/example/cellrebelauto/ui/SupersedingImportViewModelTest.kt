@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.ui
 
 import android.app.Application
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.automation.SupersessionStopStatus
@@ -14,6 +15,7 @@ import com.example.cellrebelauto.model.plan.WorklistRow
 import com.example.cellrebelauto.repository.PlanRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -44,6 +46,12 @@ class SupersedingImportViewModelTest {
         }
     }
 
+    // Rebase note (round-3): same tree-level TestMainDispatcher race as
+    // PlanProfileConsistencyViewModelTest — cancel every created VM's scope
+    // BEFORE resetMain so no Eagerly stateIn resumption escapes into the next
+    // class's setMain window (the #112/#111 drain pattern).
+    private val createdVms = mutableListOf<MainViewModel>()
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -55,6 +63,8 @@ class SupersedingImportViewModelTest {
 
     @After
     fun tearDown() {
+        createdVms.forEach { it.viewModelScope.cancel() }
+        createdVms.clear()
         db.close()
         Dispatchers.resetMain()
     }
@@ -94,7 +104,7 @@ class SupersedingImportViewModelTest {
             injectedDb = db,
             supersessionStopClient = client,
             injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
-        )
+        ).also { createdVms += it }
         stageProposal(
             vm,
             ImportProposal(oldPlanId, "old.csv", "new.csv", 5,
@@ -155,7 +165,7 @@ class SupersedingImportViewModelTest {
             injectedDb = db,
             supersessionStopClient = FakeStopClient(),
             injectedAccessGate = gate
-        )
+        ).also { createdVms += it }
         stageProposal(
             vm,
             ImportProposal(oldPlanId, "old.csv", "new.csv", 5,
@@ -199,7 +209,7 @@ class SupersedingImportViewModelTest {
             injectedDb = db,
             supersessionStopClient = client,
             injectedAccessGate = gate
-        )
+        ).also { createdVms += it }
         stageProposal(
             vm,
             ImportProposal(oldPlanId, "old.csv", "new.csv", 5,
