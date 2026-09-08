@@ -2,6 +2,7 @@ package com.example.cellrebelauto.ui
 
 import android.app.Application
 import android.net.Uri
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.db.AppDatabase
@@ -9,6 +10,7 @@ import com.example.cellrebelauto.model.plan.PlanProfileConsistency
 import com.example.cellrebelauto.model.plan.PlanProfileMismatch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -37,6 +39,15 @@ class PlanProfileConsistencyViewModelTest {
 
     private lateinit var db: AppDatabase
 
+    // Rebase note (round-2 CI flake): with an open gate the VMs run live Eagerly
+    // stateIn chains whose Room resumptions race the NEXT test class's
+    // setMain/resetMain ("Dispatchers.Main is used concurrently with setting it",
+    // observed as ProviderDiscoveryViewModelTest failures on the PR×main merge
+    // preview tree). Cancel every created VM BEFORE resetMain — the same drain
+    // pattern the #112 follow-up applied to PlanResetViewModelTest and
+    // MainViewModelCutoverProjectionTest uses in its finally.
+    private val createdVms = mutableListOf<MainViewModel>()
+
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
@@ -48,9 +59,22 @@ class PlanProfileConsistencyViewModelTest {
 
     @After
     fun tearDown() {
+        createdVms.forEach { it.viewModelScope.cancel() }
+        createdVms.clear()
         db.close()
         Dispatchers.resetMain()
     }
+
+    private fun newVm(
+        profileCountProbe: ProfileCountProbe? = null
+    ): MainViewModel = MainViewModel(
+        ApplicationProvider.getApplicationContext(),
+        injectedDb = db,
+        // Rebase note: without an injected open gate the VM builds recoveryRequired()
+        // (Robolectric has no cutover app state) and every import early-returns.
+        injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
+        profileCountProbe = profileCountProbe,
+    ).also { createdVms += it }
 
     private fun registerCsv(csv: String) {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -89,14 +113,7 @@ class PlanProfileConsistencyViewModelTest {
     @Test
     fun `importing a 51-row plan against 52 provider profiles raises the mismatch warning`() = runTest {
         registerCsv(csvWithRows(51))
-        val vm = MainViewModel(
-            ApplicationProvider.getApplicationContext(),
-            injectedDb = db,
-            // Rebase note: without an injected open gate the VM builds recoveryRequired()
-            // (Robolectric has no cutover app state) and every import early-returns.
-            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
-            profileCountProbe = { 52 },
-        )
+        val vm = newVm(profileCountProbe = { 52 })
 
         awaitConfigReady(vm)
         vm.importCsv(Uri.parse("content://test/worklist.csv"))
@@ -114,14 +131,7 @@ class PlanProfileConsistencyViewModelTest {
     @Test
     fun `equal counts raise no warning`() = runTest {
         registerCsv(csvWithRows(3))
-        val vm = MainViewModel(
-            ApplicationProvider.getApplicationContext(),
-            injectedDb = db,
-            // Rebase note: without an injected open gate the VM builds recoveryRequired()
-            // (Robolectric has no cutover app state) and every import early-returns.
-            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
-            profileCountProbe = { 3 },
-        )
+        val vm = newVm(profileCountProbe = { 3 })
 
         awaitConfigReady(vm)
         vm.importCsv(Uri.parse("content://test/worklist.csv"))
@@ -133,14 +143,7 @@ class PlanProfileConsistencyViewModelTest {
     @Test
     fun `a failing discover channel silently skips the check without crashing`() = runTest {
         registerCsv(csvWithRows(2))
-        val vm = MainViewModel(
-            ApplicationProvider.getApplicationContext(),
-            injectedDb = db,
-            // Rebase note: without an injected open gate the VM builds recoveryRequired()
-            // (Robolectric has no cutover app state) and every import early-returns.
-            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
-            profileCountProbe = { throw IllegalStateException("binder death") },
-        )
+        val vm = newVm(profileCountProbe = { throw IllegalStateException("binder death") })
 
         awaitConfigReady(vm)
         vm.importCsv(Uri.parse("content://test/worklist.csv"))
