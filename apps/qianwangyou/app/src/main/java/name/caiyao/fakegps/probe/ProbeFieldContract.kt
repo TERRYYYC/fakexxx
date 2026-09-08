@@ -1,7 +1,30 @@
 package name.caiyao.fakegps.probe
 
 object ProbeFieldContract {
-    const val VERSION = 2
+    const val VERSION = 3
+
+    /**
+     * The wifi surfaces HookProbe.collectWifi observes (report paths under
+     * "wifi."). Mirrors HookUtils.hookWifi one-to-one so the wifi acceptance
+     * matrix can never expect a path no probe emits. VERSION bumps 2 -> 3:
+     * the wifi observation group was added.
+     */
+    val wifiFields: Set<String> = setOf(
+        "enabled",
+        "state",
+        "scanResultsCount",
+        "ssid",
+        "bssid",
+        "rssi",
+        "frequency",
+        "mac",
+        "linkSpeed",
+        "txLinkSpeed",
+        "rxLinkSpeed",
+        "standard",
+        "securityType",
+        "ip",
+    )
 
     val cellInfoPaths: Set<String> = setOf("sync", "request")
 

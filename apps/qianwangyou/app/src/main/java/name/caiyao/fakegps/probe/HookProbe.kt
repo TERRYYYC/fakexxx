@@ -715,21 +715,52 @@ object HookProbe {
         fun value(): JSONObject = physical.get()
     }
 
+    /**
+     * Observe every surface HookUtils.hookWifi spoofs so the wifi acceptance
+     * matrix can verify each published field individually (paths under
+     * "wifi."). Mirrors the hook's API gates: tx/rx link speed (API 29+),
+     * wifi standard (API 30+), current security type (API 31+). The SSID
+     * observation keeps the WifiInfo quoting convention the hook preserves.
+     */
+    // getScanResults() is ACCESS_FINE_LOCATION-gated; this debug-only probe
+    // runs in-process with the host app's declared+granted location permission
+    // (same premise as the other permission-gated observers in this file).
+    @SuppressLint("MissingPermission")
     private fun collectWifi(context: Context, out: JSONObject, errors: JSONArray) {
         val wifi = JSONObject()
         try {
             val manager = context.applicationContext
                 .getSystemService(Context.WIFI_SERVICE) as WifiManager
+            observe(wifi, "enabled", errors, "wifi") { manager.isWifiEnabled }
+            observe(wifi, "state", errors, "wifi") { manager.wifiState }
+            observe(wifi, "scanResultsCount", errors, "wifi") {
+                manager.scanResults.size
+            }
             @Suppress("DEPRECATION")
             val info = manager.connectionInfo
+            observe(wifi, "ssid", errors, "wifi") { info?.ssid }
             @Suppress("DEPRECATION")
-            putValue(wifi, "ssid", info?.ssid)
+            observe(wifi, "bssid", errors, "wifi") { info?.bssid }
             @Suppress("DEPRECATION")
-            putValue(wifi, "bssid", info?.bssid)
+            observe(wifi, "rssi", errors, "wifi") { info?.rssi }
             @Suppress("DEPRECATION")
-            putValue(wifi, "rssi", info?.rssi)
+            observe(wifi, "frequency", errors, "wifi") { info?.frequency }
             @Suppress("DEPRECATION")
-            putValue(wifi, "frequency", info?.frequency)
+            observe(wifi, "mac", errors, "wifi") { info?.macAddress }
+            @Suppress("DEPRECATION")
+            observe(wifi, "linkSpeed", errors, "wifi") { info?.linkSpeed }
+            if (Build.VERSION.SDK_INT >= 29) {
+                observe(wifi, "txLinkSpeed", errors, "wifi") { info?.txLinkSpeedMbps }
+                observe(wifi, "rxLinkSpeed", errors, "wifi") { info?.rxLinkSpeedMbps }
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                observe(wifi, "standard", errors, "wifi") { info?.wifiStandard }
+            }
+            if (Build.VERSION.SDK_INT >= 31) {
+                observe(wifi, "securityType", errors, "wifi") { info?.currentSecurityType }
+            }
+            @Suppress("DEPRECATION")
+            observe(wifi, "ip", errors, "wifi") { info?.ipAddress }
         } catch (failure: Throwable) {
             recordError(errors, "wifi", failure)
         }

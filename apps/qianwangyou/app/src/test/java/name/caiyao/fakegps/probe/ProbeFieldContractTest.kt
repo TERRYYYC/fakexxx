@@ -162,6 +162,32 @@ class ProbeFieldContractTest {
             ),
             ProbeFieldContract.physicalChannelDeliveryModes,
         )
-        assertEquals(2, ProbeFieldContract.VERSION)
+        assertEquals(3, ProbeFieldContract.VERSION)
+    }
+
+    @Test
+    fun wifiFieldContractMirrorsTheHookedWifiSurfaces() {
+        // One entry per HookUtils.hookWifi spoofing surface that
+        // HookProbe.collectWifi observes; a drift on either side must red-fail
+        // here and in the wifi acceptance matrix's source-parsing checks.
+        assertEquals(
+            setOf(
+                "enabled",
+                "state",
+                "scanResultsCount",
+                "ssid",
+                "bssid",
+                "rssi",
+                "frequency",
+                "mac",
+                "linkSpeed",
+                "txLinkSpeed",
+                "rxLinkSpeed",
+                "standard",
+                "securityType",
+                "ip",
+            ),
+            ProbeFieldContract.wifiFields,
+        )
     }
 }

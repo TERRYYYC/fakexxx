@@ -170,6 +170,10 @@ SCRIPT_DIR="$(cd "$(dirname "$TEST_HOOK_PATH")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PY="$(command -v python3)"
 MATRIX_TOOL="$SCRIPT_DIR/cellular_acceptance_matrix.py"
+WIFI_MATRIX_TOOL="$SCRIPT_DIR/wifi_acceptance_matrix.py"
+# The shipped run_scenario drives the ACTIVE matrix tool; run_cellular_matrix
+# keeps the cellular default, which is the wiring this driver emulates.
+ACTIVE_MATRIX_TOOL="$MATRIX_TOOL"
 BENCH_PACKAGE="name.caiyao.fakegps.bench"
 ACCEPTANCE_ACT="$BENCH_PACKAGE/name.caiyao.fakegps.probe.HookAcceptanceActivity"
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fakegps-acceptance.XXXXXX") || exit 99

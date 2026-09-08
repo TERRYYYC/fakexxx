@@ -137,15 +137,77 @@ class HookAcceptancePayloadTest {
     }
 
     @Test
-    fun rejectsFieldsOutsideTheCellularProfileContract() {
+    fun rejectsFieldsOutsideTheWifiAndCellularProfileContract() {
         val failure = assertThrows(IllegalArgumentException::class.java) {
             HookAcceptancePayload.validate(
                 "acceptance-123",
-                """{"schemaVersion":5,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","wifi_ssid":"not-cellular"}}""",
+                """{"schemaVersion":5,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","not_a_profile_field":"rejected"}}""",
             )
         }
 
-        assertEquals("unsupported acceptance fields: wifi_ssid", failure.message)
+        assertEquals(
+            "unsupported acceptance fields: not_a_profile_field",
+            failure.message,
+        )
+        // wifi_channel is parsed by Snapshot but consumed by NO hook getter, so
+        // the strict validator rejects it: a published channel could never be
+        // verified per-field by the acceptance probe.
+        val channelFailure = assertThrows(IllegalArgumentException::class.java) {
+            HookAcceptancePayload.validate(
+                "acceptance-123",
+                """{"schemaVersion":5,"acceptanceSessionId":"acceptance-123","mode":"always_on","fields":{"operator_name":"HOOK-SESSION:acceptance-123","wifi_channel":6}}""",
+            )
+        }
+
+        assertEquals(
+            "unsupported acceptance fields: wifi_channel",
+            channelFailure.message,
+        )
+    }
+
+    @Test
+    fun acceptsWifiFieldsForTheWifiMatrix() {
+        // --wifi-matrix publishes the same strict acceptance envelope with the
+        // wifi_* profile columns the hook layer consumes (Snapshot.fromJson).
+        // Red-first against the cellular-only ALLOWED_FIELDS contract.
+        val validated = HookAcceptancePayload.validate(
+            "acceptance-wifi-123",
+            """
+                {
+                  "schemaVersion": 5,
+                  "acceptanceSessionId": "acceptance-wifi-123",
+                  "mode": "always_on",
+                  "fields": {
+                    "operator_name": "HOOK-SESSION:acceptance-wifi-123",
+                    "wifi_ssid": "hook-lab-wifi",
+                    "wifi_bssid": "aa:bb:cc:dd:ee:ff",
+                    "wifi_rssi": -55,
+                    "wifi_frequency": 5180,
+                    "wifi_link_speed": 866,
+                    "wifi_tx_link_speed": 433,
+                    "wifi_rx_link_speed": 433,
+                    "wifi_standard": 6,
+                    "wifi_security_type": 3,
+                    "wifi_mac": "02:11:22:33:44:55",
+                    "wifi_ip": "192.168.77.42",
+                    "wifi_hidden": 0,
+                    "wifi_enabled": 1
+                  },
+                  "unavailable": []
+                }
+            """.trimIndent(),
+        )
+        val fields = Json.parseToJsonElement(validated.json).jsonObject
+            .getValue("fields").jsonObject
+
+        assertEquals(
+            "hook-lab-wifi",
+            fields.getValue("wifi_ssid").jsonPrimitive.content,
+        )
+        assertEquals(
+            1,
+            fields.getValue("wifi_enabled").jsonPrimitive.content.toInt(),
+        )
     }
 
     @Test

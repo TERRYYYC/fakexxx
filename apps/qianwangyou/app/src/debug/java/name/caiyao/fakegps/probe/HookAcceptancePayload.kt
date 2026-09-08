@@ -75,6 +75,25 @@ internal object HookAcceptancePayload {
         "cell_bandwidth_downlink",
         "physical_cell_id",
         "neighbor_cells_json",
+        // WiFi group for --wifi-matrix: exactly the wifi_* fields the hook
+        // layer consumes via Snapshot.fromJson + HookUtils.hookWifi. Keep this
+        // list free of parentheses characters — host-side contract tests parse
+        // it with a simple setOf regex. wifi_channel is deliberately ABSENT:
+        // Snapshot parses the column but no hook getter consumes it, so a
+        // published channel could never be verified per-field.
+        "wifi_ssid",
+        "wifi_bssid",
+        "wifi_rssi",
+        "wifi_frequency",
+        "wifi_link_speed",
+        "wifi_tx_link_speed",
+        "wifi_rx_link_speed",
+        "wifi_standard",
+        "wifi_security_type",
+        "wifi_mac",
+        "wifi_ip",
+        "wifi_hidden",
+        "wifi_enabled",
     )
 
     data class Validated(

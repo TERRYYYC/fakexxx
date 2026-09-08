@@ -378,6 +378,15 @@ jobs:
         # selftest that exists but never runs is not a guard.
         run: ./scripts/selftest-test-hook-acceptance-readiness.sh
 
+      - name: selftest-test-hook-wifi-matrix
+        # --wifi-matrix (wireless expansion): the strict isolated acceptance
+        # transaction applied to the HookUtils.hookWifi surfaces. Device-free:
+        # golden expected JSON, shared-verdict pass/fail loop, static wiring
+        # of the mode, contract parity against the REAL Kotlin validator
+        # (ALLOWED_FIELDS parsed from source), and a field-dropping mutation
+        # that must stay detectable.
+        run: ./scripts/selftest-test-hook-wifi-matrix.sh
+
       - name: hook-matrix-contract (python payload/verdict suites)
         # PR #62 P1-4: these suites existed but were wired into NO gate, so
         # the matrix tool emitted schemaVersion 3 for a writer contract at 4
@@ -385,7 +394,10 @@ jobs:
         # report_ready — §G unexecutable while all checks stayed green. The
         # version pin reads ConfigPrefsSync.SCHEMA_VERSION from source, so a
         # future writer bump red-fails HERE instead of on a device lease.
-        run: cd apps/qianwangyou && python3 -m unittest scripts.test_cellular_acceptance_matrix scripts.test_hook_verdict
+        # test_wifi_acceptance_matrix additionally parses the device
+        # ALLOWED_FIELDS and HookProbe.collectWifi sources so the wifi
+        # harness cannot drift from the device contract.
+        run: cd apps/qianwangyou && python3 -m unittest scripts.test_cellular_acceptance_matrix scripts.test_wifi_acceptance_matrix scripts.test_hook_verdict
 
   row2-exec:
     # G2 Row 2 execution plane (host-side lane of the PR #55 evidence
