@@ -34,7 +34,11 @@ public final class UnavailableValueResolver {
         DISPLAY_OVERRIDE,
         PHYSICAL_ZERO,
         PHYSICAL_CELL_ID,
-        NEIGHBOR_CELL_LIST
+        NEIGHBOR_CELL_LIST,
+        WIFI_RSSI,
+        WIFI_INFO_INT,
+        WIFI_STANDARD,
+        WIFI_INFO_TEXT
     }
 
     public static final class Resolution {
@@ -87,6 +91,30 @@ public final class UnavailableValueResolver {
     private static final Set<String> PHYSICAL_ZERO = immutableSet(
             "band", "channel_bandwidth", "cell_bandwidth_downlink");
 
+    /**
+     * Wi-Fi unknown sentinels, verified against AOSP source on the exact hooked getters
+     * ({@code frameworks WifiInfo} / {@code packages/modules/Wifi}, Android 11 through 15):
+     * <ul>
+     *   <li>{@code WifiInfo.INVALID_RSSI = -127} — clear()/reset() leave RSSI there;</li>
+     *   <li>{@code WifiInfo.LINK_SPEED_UNKNOWN = -1} and {@code WifiInfo.UNKNOWN_FREQUENCY = -1} —
+     *       reset() defaults for link speed, tx/rx link speed and frequency;</li>
+     *   <li>{@code ScanResult.WIFI_STANDARD_UNKNOWN = 0} (NOT -1) — public constant, and
+     *       {@code WifiInfo.mWifiStandard} has no field initializer, i.e. default 0;</li>
+     *   <li>{@code WifiManager.UNKNOWN_SSID = "<unknown ssid>"} — the double quotes are part of
+     *       the value {@code getSSID()} returns;</li>
+     *   <li>{@code getBSSID()} unknown is {@code null} (mBSSID null in clear()/reset()).</li>
+     * </ul>
+     */
+    static final int WIFI_RSSI_UNKNOWN = -127;
+    static final int WIFI_LINK_UNKNOWN = -1;
+    static final int WIFI_STANDARD_UNKNOWN = 0;
+    static final String WIFI_SSID_UNKNOWN = "\"<unknown ssid>\"";
+
+    private static final Set<String> WIFI_INFO_INT_FIELDS = immutableSet(
+            "wifi_frequency", "wifi_link_speed", "wifi_tx_link_speed", "wifi_rx_link_speed");
+
+    private static final Set<String> WIFI_TEXT_FIELDS = immutableSet("wifi_ssid", "wifi_bssid");
+
     private static final Map<String, Surface> SNAPSHOT_SURFACES;
     static {
         Map<String, Surface> surfaces = new HashMap<>();
@@ -101,6 +129,11 @@ public final class UnavailableValueResolver {
         surfaces.put("data_activity", Surface.DATA_ACTIVITY);
         surfaces.put("override_network_type", Surface.DISPLAY_OVERRIDE);
         surfaces.put("physical_cell_id", Surface.PHYSICAL_CELL_ID);
+        surfaces.put("wifi_rssi", Surface.WIFI_RSSI);
+        surfaces.put("wifi_standard", Surface.WIFI_STANDARD);
+        WIFI_INFO_INT_FIELDS.forEach(field -> surfaces.put(field, Surface.WIFI_INFO_INT));
+        WIFI_TEXT_FIELDS.forEach(field -> surfaces.put(field, Surface.WIFI_INFO_TEXT));
+        surfaces.put("neighbor_cells_json", Surface.NEIGHBOR_CELL_LIST);
         SNAPSHOT_SURFACES = Collections.unmodifiableMap(surfaces);
     }
 
@@ -159,8 +192,25 @@ public final class UnavailableValueResolver {
             case PHYSICAL_CELL_ID:
                 return "physical_cell_id".equals(field)
                         ? Resolution.handled(-1) : Resolution.unhandled();
-            case NEIGHBOR_CELL_LIST:
+            case WIFI_RSSI:
+                return "wifi_rssi".equals(field)
+                        ? Resolution.handled(WIFI_RSSI_UNKNOWN) : Resolution.unhandled();
+            case WIFI_INFO_INT:
+                return WIFI_INFO_INT_FIELDS.contains(field)
+                        ? Resolution.handled(WIFI_LINK_UNKNOWN) : Resolution.unhandled();
+            case WIFI_STANDARD:
+                return "wifi_standard".equals(field)
+                        ? Resolution.handled(WIFI_STANDARD_UNKNOWN) : Resolution.unhandled();
+            case WIFI_INFO_TEXT:
+                if ("wifi_ssid".equals(field)) return Resolution.handled(WIFI_SSID_UNKNOWN);
+                if ("wifi_bssid".equals(field)) return Resolution.handled(null);
                 return Resolution.unhandled();
+            case NEIGHBOR_CELL_LIST:
+                // Canonical "no neighbour entries". The list surface implements the decision by
+                // dropping real non-registered entries while keeping registered serving cells
+                // (Snapshot#replacesRealNeighbors), not by replacing the list with an empty one.
+                return "neighbor_cells_json".equals(field)
+                        ? Resolution.handled("") : Resolution.unhandled();
             default:
                 return Resolution.unhandled();
         }
@@ -185,6 +235,11 @@ public final class UnavailableValueResolver {
     public static Resolution resolveObservedField(String field) {
         if ("mcc".equals(field) || "mnc".equals(field)) {
             return resolve(field, Surface.CELL_IDENTITY_PLMN_STRING);
+        }
+        if ("wifi_ssid".equals(field)) {
+            // DeviceObserver strips WifiInfo#getSSID's surrounding double quotes before storing,
+            // so the observer-side form of the unknown is the bare UNKNOWN_SSID body.
+            return Resolution.handled("<unknown ssid>");
         }
         return resolveSnapshotField(field);
     }

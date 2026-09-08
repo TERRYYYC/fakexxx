@@ -2,6 +2,7 @@ package name.caiyao.fakegps.config;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.ArrayList;
@@ -91,6 +92,10 @@ public class UnavailableSpecCoverageTest {
             Object value = resolution.value();
             if ("nci".equals(column)) {
                 assertTrue("nci must keep 64-bit width", value instanceof Long);
+            } else if ("wifi_bssid".equals(column)) {
+                // The canonical snapshot value IS null: WifiInfo.getBSSID() returns null when
+                // unknown. The explicit-null override happens at the call site (hookWifi).
+                assertNull(value);
             } else if (specs.get(column).getType() == FieldType.INTEGER) {
                 assertTrue(column + " must resolve to Integer", value instanceof Integer);
             } else if (specs.get(column).getType() == FieldType.TEXT) {
@@ -140,14 +145,66 @@ public class UnavailableSpecCoverageTest {
         }
     }
 
-    /** Wi-Fi integers: RSSI unknown is -127, frequency / link speed are -1. */
+    /**
+     * Wi-Fi integers whose unknown is verified against AOSP on the exact hooked surface
+     * (WifiInfo getters): RSSI = INVALID_RSSI (-127), frequency / link speeds =
+     * LINK_SPEED_UNKNOWN / UNKNOWN_FREQUENCY (-1), standard = ScanResult.WIFI_STANDARD_UNKNOWN (0).
+     */
     @Test
-    public void wifiIntegers_areNotCleared() {
+    public void verifiedWifiIntegers_areCleared() {
         for (String col : new String[] {
                 "wifi_rssi", "wifi_frequency", "wifi_link_speed", "wifi_tx_link_speed",
-                "wifi_rx_link_speed", "wifi_channel", "wifi_standard", "wifi_security_type"}) {
-            assertFalse(col + " must not inherit a cellular sentinel",
-                    UnavailableSpec.supportsUnavailable(col));
+                "wifi_rx_link_speed", "wifi_standard"}) {
+            assertTrue(col + " has a verified WifiInfo unknown", UnavailableSpec.supportsUnavailable(col));
+        }
+    }
+
+    /**
+     * Wi-Fi fields that must NOT be cleared, each with the missing evidence named:
+     * wifi_channel has no hooked platform surface (nothing reads it), and the remaining
+     * WifiInfo getters' unknown sentinels are not yet verified against AOSP.
+     */
+    @Test
+    public void unverifiableWifiFields_stayRejected() {
+        for (String col : new String[] {
+                "wifi_channel", "wifi_security_type", "wifi_mac", "wifi_ip"}) {
+            assertFalse(col + " must stay rejected", UnavailableSpec.supportsUnavailable(col));
+            assertFalse(col + " must name its missing evidence",
+                    UnavailableSpec.reasonFor(col).isEmpty());
+        }
+    }
+
+    /** Wi-Fi identity text unknowns: SSID is WifiManager.UNKNOWN_SSID, BSSID is null. */
+    @Test
+    public void wifiIdentityText_isClearedWithPlatformUnknowns() {
+        assertTrue(UnavailableSpec.supportsUnavailable("wifi_ssid"));
+        assertTrue(UnavailableSpec.supportsUnavailable("wifi_bssid"));
+    }
+
+    /**
+     * DECISION (T6): "--" on neighbor_cells_json is implemented as drop-real-neighbours /
+     * keep-registered-serving on the List&lt;CellInfo&gt; surfaces — the list-level "no neighbour
+     * data" state (CellInfo.isRegistered() distinguishes the two). Not a silent leak any more.
+     */
+    @Test
+    public void neighborCellsJson_isClearedWithFilterSemantics() {
+        assertTrue(UnavailableSpec.supportsUnavailable("neighbor_cells_json"));
+    }
+
+    /**
+     * IP / DNS / routing text stays rejected, each reason naming the surface whose empty state
+     * is missing: LinkProperties' collection surfaces could honour "--", but the paired
+     * DhcpInfo int fields have no documented unknown, so honouring "--" only on
+     * LinkProperties would leak the real value through getDhcpInfo().
+     */
+    @Test
+    public void ipConnectivityTextGroup_staysRejectedWithSurfaceReasons() {
+        for (String col : new String[] {
+                "local_ipv4", "local_ipv6", "dns_primary", "dns_secondary", "gateway",
+                "subnet_mask", "connection_type", "interface_name"}) {
+            assertFalse(col + " must stay rejected", UnavailableSpec.supportsUnavailable(col));
+            assertFalse(col + " must name its missing evidence",
+                    UnavailableSpec.reasonFor(col).isEmpty());
         }
     }
 
@@ -161,19 +218,6 @@ public class UnavailableSpecCoverageTest {
         }
         assertFalse("ServiceState has no UNKNOWN constant",
                 UnavailableSpec.supportsUnavailable("service_state"));
-    }
-
-    /** SSID unknown is "&lt;unknown ssid&gt;", BSSID is null — neither is the empty string. */
-    @Test
-    public void wifiIdentityText_isNotCleared() {
-        assertFalse(UnavailableSpec.supportsUnavailable("wifi_ssid"));
-        assertFalse(UnavailableSpec.supportsUnavailable("wifi_bssid"));
-    }
-
-    @Test
-    public void structuredNeighborListFailsClosedUntilItsPublicListSurfaceIsImplemented() {
-        assertFalse(UnavailableSpec.supportsUnavailable("neighbor_cells_json"));
-        assertFalse(UnavailableSpec.reasonFor("neighbor_cells_json").isEmpty());
     }
 
     @Test
