@@ -28,6 +28,16 @@ interface QwyEnvironment {
 
     /** Ordered, read-only profile owner projection. Empty is an honest unavailable projection. */
     fun profileRefsSnapshot(): List<String> = emptyList()
+
+    /**
+     * v1.81: the effective schedule item's cellular columns for the discover()
+     * CI-attestation group. Null = not evaluable right now — discover() then
+     * answers all-null columns + cellularHookConfigured=false (fail-closed
+     * honesty: an unreadable configuration is attested as absent, never
+     * guessed). Default null so inert/test environments stay honest without
+     * implementing the group.
+     */
+    fun configuredCellSnapshot(): ConfiguredCellSnapshot? = null
     fun scheduleSnapshot(): ScheduleSnapshot?
     fun advancePointer(fromItemId: String): AdvancePointerOutcome
     fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean = false
@@ -65,6 +75,38 @@ data class ScheduleSnapshot(
     val itemIds: List<String>,
     val exhausted: Boolean,
 )
+
+/**
+ * v1.81 CI-attestation projection source: the EFFECTIVE schedule item's
+ * profile-row cellular columns — the values the hook would inject into
+ * serving-cell reads while that item is applied. Null (from
+ * [QwyEnvironment.configuredCellSnapshot]) = not evaluable right now (no
+ * current item, profile DB unavailable, read failure); discover() then
+ * projects all-null columns with cellularHookConfigured=false, never a
+ * guessed value.
+ *
+ * ATTESTATION-ONLY: this projection exists so Auto can cross-check what the
+ * device reports against what QWY configured. It never feeds the §6.4 trust
+ * predicates — the observation evidence chain stays the only trust path.
+ *
+ * Column mapping is the LTE-named profile columns only (`ci`/`tac`/`pci`
+ * + `mcc`/`mnc`), widened to the contract carrier types; mcc/mnc travel as
+ * the decimal strings TelephonyManager reports so both sides of the
+ * cross-attestation compare one representation. NR-only profiles (nci /
+ * nr_tac / nr_pci filled, LTE columns empty) project all-null + hook=false —
+ * an honest "no LTE identity attested", never a substituted NR value.
+ */
+data class ConfiguredCellSnapshot(
+    val ci: Long?,
+    val tac: Int?,
+    val pci: Int?,
+    val mcc: String?,
+    val mnc: String?,
+) {
+    /** 蜂窝组任一字段有值 = true；全空组 = 完全透传（false）。 */
+    val cellularHookConfigured: Boolean
+        get() = ci != null || tac != null || pci != null || mcc != null || mnc != null
+}
 
 sealed class AdvancePointerOutcome {
     data class Advanced(val toItemId: String, val versionAfter: Long) : AdvancePointerOutcome()
@@ -134,6 +176,48 @@ class QwyEnvironmentController(
 
     override fun profileRefsSnapshot(): List<String> =
         ProfileRefProjection.fromLegacyIds(readProfileIds())
+
+    /**
+     * v1.81 CI-attestation source: the CURRENT schedule item's profile row,
+     * resolved by the SAME qwy-owned path as the KB-8 coordinates
+     * ([resolveItemCoordinates]) — currentItemId is the single effective-item
+     * authority, read here so the projection is internally consistent with the
+     * item it names. Read failure = null (discover attests "not configured"),
+     * never a partial or zero-filled row.
+     */
+    override fun configuredCellSnapshot(): ConfiguredCellSnapshot? {
+        val itemId = scheduleStore.getCurrentItemId() ?: return null
+        return readProfileCellRow(itemId)
+    }
+
+    private fun readProfileCellRow(itemId: String): ConfiguredCellSnapshot? {
+        if (!itemId.startsWith("profile-")) return null
+        if (!profileDatabaseAvailable) return null
+        val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
+        val dbFile = appContext.getDatabasePath("fakegps.db")
+        if (!dbFile.exists()) return null
+        return try {
+            SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                db.rawQuery(
+                    "SELECT ci, tac, pci, mcc, mnc FROM temp WHERE id = ?",
+                    arrayOf(dbId.toString()),
+                ).use { cursor ->
+                    if (!cursor.moveToFirst()) return@use null
+                    // Every column is independently nullable: NULL = the operator
+                    // left this field unconfigured = passthrough for that field.
+                    ConfiguredCellSnapshot(
+                        ci = if (cursor.isNull(0)) null else cursor.getLong(0),
+                        tac = if (cursor.isNull(1)) null else cursor.getInt(1),
+                        pci = if (cursor.isNull(2)) null else cursor.getInt(2),
+                        mcc = if (cursor.isNull(3)) null else cursor.getInt(3).toString(),
+                        mnc = if (cursor.isNull(4)) null else cursor.getInt(4).toString(),
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     private fun readProfileIds(): List<Long> {
         if (!profileDatabaseAvailable) return emptyList()

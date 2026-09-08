@@ -101,6 +101,11 @@ class EnvironmentControlHandler(
         authorizer.authorize(callingUid)
         val snap = tracker.snapshot()
         val schedule = environment.scheduleSnapshot()
+        // v1.81 CI-attestation group: the effective item's cellular columns,
+        // resolved by the qwy-owned path (currentItemId → profile row). Null
+        // source = attested absence (all-null + hook=false), never a guess.
+        // ATTESTATION-ONLY: this group never enters the §6.4 trust predicates.
+        val configuredCell = environment.configuredCellSnapshot()
         CapabilitySnapshotV1(
             protocolVersion = ContractV1.PROTOCOL_VERSION,
             serviceVersion = "1.0.0",
@@ -122,6 +127,13 @@ class EnvironmentControlHandler(
             currentItemId = schedule?.currentItemId,
             scheduleVersion = schedule?.scheduleVersion,
             exhausted = schedule?.exhausted,
+            // v1.81 cellular projection group (appended; parcel order untouched).
+            configuredCellCi = configuredCell?.ci,
+            configuredCellTac = configuredCell?.tac,
+            configuredCellPci = configuredCell?.pci,
+            configuredCellMcc = configuredCell?.mcc,
+            configuredCellMnc = configuredCell?.mnc,
+            cellularHookConfigured = configuredCell?.cellularHookConfigured ?: false,
         )
     }
 
