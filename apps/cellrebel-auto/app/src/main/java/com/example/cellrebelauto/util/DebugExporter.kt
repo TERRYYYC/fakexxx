@@ -62,6 +62,23 @@ class DebugExporter(private val context: Context) {
         return fileName
     }
 
+    /**
+     * Saves a pre-built diagnostic bundle zip into Downloads.
+     * Returns the file name on success.
+     *
+     * # 将构建好的诊断包 zip 保存到 Downloads，成功返回文件名
+     */
+    fun saveBundle(zipBytes: ByteArray): String {
+        val fileName = "cellrebel_diagnostic_${timestampFormat.format(Date())}.zip"
+        val stream = createOutputStream(fileName, "application/zip")
+            ?: throw IllegalStateException("Cannot create diagnostic bundle file")
+        stream.use { out ->
+            out.write(zipBytes)
+            out.flush()
+        }
+        return fileName
+    }
+
     // ==================== Accessibility Tree Dump ====================
 
     /**

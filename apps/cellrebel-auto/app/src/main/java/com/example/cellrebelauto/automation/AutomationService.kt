@@ -193,6 +193,10 @@ class AutomationService : AccessibilityService() {
         // Issue #16: background-uid DEBUG is dropped by logd — lifecycle markers must survive.
         Log.w(TAG, "Service connected")
         addLog("Accessibility service connected")
+        // T7 P1.2: mirror the rolling log ring to the DISK ring (2 MB cap). Additive
+        // observability only — the in-memory flow and the logcat WARN lines above are
+        // untouched. LogDiff handles the engine's wholesale list reset between runs.
+        attachRollingLogPersistence()
         // F1: bind the frozen-contract provider service for the accessibility-service lifetime.
         val executor = com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(applicationContext)
         val bound = executor.bind()
@@ -247,6 +251,33 @@ class AutomationService : AccessibilityService() {
                 detail = detail,
                 recordedAt = recordedAt
             )
+        }
+    }
+
+    /**
+     * T7 P1.2: mirrors the companion log ring into the disk ring. The old
+     * service scope dies with the instance (onDestroy), so at most ONE
+     * collector per live service exists — no double-append. The disk file
+     * itself persists across service instances, which is the point: a run
+     * that ended in a process kill still leaves its trail for the bundle.
+     * # 将日志环镜像落盘：服务实例唯一收集器；文件跨实例持续，供诊断包使用
+     */
+    private fun attachRollingLogPersistence() {
+        val rolling = com.example.cellrebelauto.util.RollingLogFile(
+            com.example.cellrebelauto.util.DiagnosticFiles.rollingLogFile(applicationContext)
+        )
+        var previous: List<String> = emptyList()
+        serviceScope.launch {
+            _logs.collect { current ->
+                val fresh = com.example.cellrebelauto.util.LogDiff.newLines(previous, current)
+                val wholesaleReset = previous.isNotEmpty() && current != previous &&
+                    fresh == current
+                previous = current
+                if (wholesaleReset) {
+                    rolling.append("---- new engine run ----")
+                }
+                fresh.forEach { rolling.append(it) }
+            }
         }
     }
 
