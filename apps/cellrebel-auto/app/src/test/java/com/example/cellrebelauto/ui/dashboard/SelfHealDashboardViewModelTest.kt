@@ -58,6 +58,7 @@ class SelfHealDashboardViewModelTest {
 
     private lateinit var db: AppDatabase
     private lateinit var dataStoreFile: File
+    private lateinit var metricsStoreFile: File
     private lateinit var dataStoreScope: CoroutineScope
 
     @Before
@@ -70,6 +71,10 @@ class SelfHealDashboardViewModelTest {
         dataStoreFile = File(
             System.getProperty("java.io.tmpdir"),
             "self-heal-dash-test-${UUID.randomUUID()}.preferences_pb"
+        )
+        metricsStoreFile = File(
+            System.getProperty("java.io.tmpdir"),
+            "dash-metrics-test-${UUID.randomUUID()}.preferences_pb"
         )
         // A REAL scope, not runTest's backgroundScope: DataStore IO dispatched to the
         // test scheduler would deadlock under the oracle's runBlocking polling.
@@ -84,6 +89,12 @@ class SelfHealDashboardViewModelTest {
         // test class's setMain (the PlanProfileConsistencyViewModelTest flake).
         createdViewModels.forEach { it.viewModelScope.cancel() }
         createdViewModels.clear()
+        // Full drain (review §②): viewModelScope.cancel() is asynchronous — in-flight
+        // DataStore/Room continuations still dispatch through the process-global
+        // TestMainDispatcher, whose RW lock the NEXT setMain/resetMain takes. Give
+        // them a bounded settle window so the lock is free when the next class
+        // swaps the delegate.
+        Thread.sleep(250)
         db.close()
         Dispatchers.resetMain()
         dataStoreFile.delete()
@@ -96,6 +107,13 @@ class SelfHealDashboardViewModelTest {
         PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { dataStoreFile })
     )
 
+    // Rebase note (T7 isolation): inject the metrics store too — the VM's default
+    // DashboardMetricsSettings(application) falls back to a PROCESS-PERSISTENT
+    // preferencesDataStore delegate shared across Robolectric class boundaries.
+    private fun metricsSettings() = com.example.cellrebelauto.data.DashboardMetricsSettings(
+        PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { metricsStoreFile })
+    )
+
     private fun vm(selfHeal: SelfHealSettings): MainViewModel =
         MainViewModel(
             ApplicationProvider.getApplicationContext(),
@@ -103,7 +121,8 @@ class SelfHealDashboardViewModelTest {
             // #103 cutover architecture: inject an open gate (app gate = recoveryRequired
             // under Robolectric would gate every protected projection).
             injectedAccessGate = CutoverAccessGate.open(),
-            injectedSelfHealSettings = selfHeal
+            injectedSelfHealSettings = selfHeal,
+            injectedMetricsSettings = metricsSettings()
         ).also { createdViewModels += it }
 
     @Test

@@ -61,6 +61,7 @@ class RunV2DashboardViewModelTest {
 
     private lateinit var db: AppDatabase
     private lateinit var dataStoreFile: File
+    private lateinit var selfHealStoreFile: File
     private lateinit var dataStoreScope: CoroutineScope
 
     @Before
@@ -75,6 +76,10 @@ class RunV2DashboardViewModelTest {
             System.getProperty("java.io.tmpdir"),
             "metrics-settings-test-${UUID.randomUUID()}.preferences_pb"
         )
+        selfHealStoreFile = File(
+            System.getProperty("java.io.tmpdir"),
+            "self-heal-settings-test-${UUID.randomUUID()}.preferences_pb"
+        )
         dataStoreScope = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.Job())
     }
 
@@ -86,6 +91,12 @@ class RunV2DashboardViewModelTest {
         // test class's setMain (the PlanProfileConsistencyViewModelTest flake).
         createdViewModels.forEach { it.viewModelScope.cancel() }
         createdViewModels.clear()
+        // Full drain (review §②): viewModelScope.cancel() is asynchronous — in-flight
+        // DataStore/Room continuations still dispatch through the process-global
+        // TestMainDispatcher, whose RW lock the NEXT setMain/resetMain takes. Give
+        // them a bounded settle window so the lock is free when the next class
+        // swaps the delegate.
+        Thread.sleep(250)
         db.close()
         Dispatchers.resetMain()
         dataStoreFile.delete()
@@ -113,6 +124,14 @@ class RunV2DashboardViewModelTest {
         PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { dataStoreFile })
     )
 
+    // Rebase note (T7 isolation): without this injection the VM falls back to
+    // SelfHealSettings' PROCESS-PERSISTENT preferencesDataStore delegate — whatever
+    // another class (e.g. the reconnect oracle) last wrote there leaks in across
+    // Robolectric class boundaries. Every store this VM touches is now per-test.
+    private fun selfHealSettings() = com.example.cellrebelauto.data.SelfHealSettings(
+        PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { selfHealStoreFile })
+    )
+
     /**
      * The AutomationService companion flows are JVM-STATIC and other oracle
      * classes in this fork (AutomationServiceReconnectResumeTest) legitimately
@@ -129,6 +148,29 @@ class RunV2DashboardViewModelTest {
         companionFlow("_startStatus").value =
             com.example.cellrebelauto.automation.AutomationStartStatus.IDLE
         companionFlow("_currentTask").value = null
+        // Rebase note (T7 isolation): the static `instance` IS the connection gate —
+        // a service left connected by another oracle class routes resumeRun into the
+        // REAL startWithPlan (app-singleton DB → PLAN_NOT_FOUND) instead of the
+        // typed SERVICE_NOT_CONNECTED rejection this oracle pins.
+        setCompanionField("instance", null)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun setCompanionField(name: String, value: Any?) {
+        val outer = com.example.cellrebelauto.automation.AutomationService::class.java
+        val staticField = outer.declaredFields.firstOrNull { it.name == name }
+        if (staticField != null) {
+            staticField.isAccessible = true
+            staticField.set(null, value)
+            return
+        }
+        val companionClass = outer.declaredClasses.first { it.simpleName == "Companion" }
+        val holder = outer.declaredFields.first { it.type == companionClass }
+        holder.isAccessible = true
+        val companionInstance = holder.get(null)
+        val field = companionClass.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(companionInstance, value)
     }
 
     /** AutomationService's companion MutableStateFlows live as static or companion fields. */
@@ -164,6 +206,7 @@ class RunV2DashboardViewModelTest {
         // #103 cutover architecture: inject an open gate (app gate = recoveryRequired
         // under Robolectric would hide the seeded plan behind CutoverDataState).
         injectedAccessGate = CutoverAccessGate.open(),
+        injectedSelfHealSettings = selfHealSettings(),
         injectedMetricsSettings = metrics ?: metricsSettings(),
         cellProbe = cell,
         configuredCiProbe = configuredCi,
