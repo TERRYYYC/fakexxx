@@ -35,7 +35,7 @@ class AutoBundleExportTest {
         ),
         pairingFingerprints = listOf(
             ProviderFingerprint(
-                applicationId = "name.caiyao.fakegps",
+                applicationId = "test.bundle.provider",
                 signerDigest = "deadbeef",
                 approvedVersionCode = 7,
             ),

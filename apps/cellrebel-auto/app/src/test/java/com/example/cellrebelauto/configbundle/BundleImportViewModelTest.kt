@@ -75,7 +75,7 @@ class BundleImportViewModelTest {
                     testStageEnabled = true,
                 ),
                 pairingFingerprints = listOf(
-                    ProviderFingerprint("name.caiyao.fakegps", "deadbeef", approvedVersionCode = 7),
+                    ProviderFingerprint("test.bundle.provider", "deadbeef", approvedVersionCode = 7),
                 ),
                 lane = AutoBundleSections.LaneMetadata(
                     qwyApplicationId = null,

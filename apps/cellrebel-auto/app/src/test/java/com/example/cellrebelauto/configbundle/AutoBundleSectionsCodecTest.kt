@@ -83,7 +83,7 @@ class AutoBundleSectionsCodecTest {
         val json = AutoBundleSections.encodePairing(
             listOf(
                 ProviderFingerprint(
-                    applicationId = "name.caiyao.fakegps",
+                    applicationId = "test.bundle.provider",
                     signerDigest = "ab12cd34",
                     approvedVersionCode = 7,
                 ),
