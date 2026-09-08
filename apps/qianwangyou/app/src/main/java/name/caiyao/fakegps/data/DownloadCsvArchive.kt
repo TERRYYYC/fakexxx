@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.annotation.RequiresApi
 
 /**
  * P0.1-3 Download/ 目录的档案文件发现（Android 粘合层）。
@@ -26,6 +27,11 @@ object DownloadCsvArchive {
             .sortedBy { it.displayName }
     }
 
+    // Lint ratchet: the SDK_INT >= Q guard lives in the caller's runCatching
+    // lambda, which NewApi cannot see across functions — annotate the callee
+    // instead (zero behavior change; the Q=29 check also covers the API 26
+    // four-argument ContentResolver.query overload).
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun scanMediaStore(context: Context, out: MutableList<DownloadCsvScanner.Entry>) {
         val projection = arrayOf(
             MediaStore.MediaColumns.DISPLAY_NAME,
