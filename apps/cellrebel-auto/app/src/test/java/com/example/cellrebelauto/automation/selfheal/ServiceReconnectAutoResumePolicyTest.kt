@@ -28,7 +28,7 @@ import java.util.UUID
  * through the EXISTING start/resume entry; the 30-minute rolling window admits at most 3
  * auto-resumes — over budget the engine stays at its typed terminal with a human-readable reason.
  *
- * # 服务重连自动恢复 oracle：默认关；marker 存在才动作；30 分钟 ≤3 次，超限持停机+原因
+ * # 服务重连自动恢复 oracle：默认开（2026-09-08 起）；显式关；marker 存在才动作；30 分钟 ≤3 次，超限持停机+原因
  */
 @RunWith(RobolectricTestRunner::class)
 class ServiceReconnectAutoResumePolicyTest {

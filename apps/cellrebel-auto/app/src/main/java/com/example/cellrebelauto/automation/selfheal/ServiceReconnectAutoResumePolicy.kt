@@ -14,10 +14,10 @@ package com.example.cellrebelauto.automation.selfheal
  * (30 min / 3). Over budget the engine STAYS at its typed terminal with the reason — unattended
  * crash-loops must converge to a stopped state, never to a restart storm.
  *
- * Default is OFF (conservative): the caller must not even consult this policy's Resume branch
+ * Default is ON (operator 2026-09-08): the budget below remains the storm cap; explicit OFF
  * unless the persisted toggle is on.
  *
- * # 服务重连自动恢复决策：默认关；30 分钟滚动窗口 ≤3 次，超限维持停机终态+原因
+ * # 服务重连自动恢复决策：默认开（2026-09-08 operator 拍板）；30 分钟滚动窗口 ≤3 次，超限维持停机终态+原因
  */
 class ServiceReconnectAutoResumePolicy(
     private val nowMs: () -> Long = { System.currentTimeMillis() },

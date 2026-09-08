@@ -175,7 +175,7 @@ class AutomationServiceReconnectResumeTest {
             startStatus() !is AutomationStartStatus.IDLE
         }
         assertTrue(
-            "default OFF must not intervene (status stayed ${startStatus()})",
+            "explicit OFF must not intervene (status stayed ${startStatus()})",
             !settled || startStatus() is AutomationStartStatus.IDLE
         )
         // The marker stays pending for a later manual Resume (or a later enabled reconnect).

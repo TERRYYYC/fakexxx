@@ -22,7 +22,7 @@ private val Context.selfHealConfigDataStore: DataStore<Preferences> by preferenc
  *  - coordinate guard        ON  (the 52/51 profile-misalignment quota burn incident);
  *  - service auto-resume     OFF (conservative — highest-blast-radius intervention).
  *
- * # 自愈开关持久化：看门狗默认开、坐标校验默认开、服务重连自动恢复默认关（保守）
+ * # 自愈开关持久化：看门狗默认开、坐标校验默认开、服务重连自动恢复默认开（operator 2026-09-08 拍板）
  */
 data class SelfHealConfig(
     val attemptWatchdogEnabled: Boolean = true,
