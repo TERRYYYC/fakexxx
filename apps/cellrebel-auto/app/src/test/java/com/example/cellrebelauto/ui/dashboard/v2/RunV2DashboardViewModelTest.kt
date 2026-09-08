@@ -305,6 +305,25 @@ class RunV2DashboardViewModelTest {
     }
 
     @Test
+    fun `nrReadingWithLteConfigured_staysDeviceReading - review cross-RAT fail-closed leg`() = runTest {
+        seedPlan()
+        // Mixed LTE+NR profile: the wire group projects the LTE columns only,
+        // but the hook also injects NR identity from nci/nr_* and the selector
+        // ranks NR above LTE — the displayed value may be an INJECTED NCI. It
+        // must be attested 设备读数, never 透传·真实. Mutation: MainViewModel (or
+        // the classifier) dropping the observedRat leg → red (the pre-review
+        // code answers PASSTHROUGH_REAL here).
+        val vm = viewModel(
+            cell = { reading(ci = 123456789012345L, rat = "NR") },
+            configuredCell = configuredCellProbe(ci = 289001L),
+        )
+        startDashboard(vm)
+        awaitUntil { vm.dashboardState.value.ciHero.badge != null }
+        assertEquals(123456789012345L, vm.dashboardState.value.ciHero.reading?.ci)
+        assertEquals(CiBadge.DEVICE_READING, vm.dashboardState.value.ciHero.badge)
+    }
+
+    @Test
     fun `productionDiscoverCellProbe_failsClosedToNullWithoutProvider`() {
         // The production probe over the real Binder channel: on this host there
         // is no provider service, so the handshake cannot connect — the probe

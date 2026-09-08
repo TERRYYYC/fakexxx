@@ -66,6 +66,8 @@ data class CurrentPointView(
  * Decision table (三态穷尽, v1.81 wiring):
  *   observedCi == null                                   → null               (无读数，不打徽标)
  *   configuredCi == null                                 → DEVICE_READING     (配置不可得 → 只能证"设备读数")
+ *   observedRat not "LTE" (or unknown)                   → DEVICE_READING     (配置组是 LTE 语义列；NR 读数可能来自
+ *                                                                              未投影的 nr_* 注入，互证不成立 → 只能证"设备读数")
  *   observedCi == configuredCi && cellularHookConfigured → INJECTED           (观察值即档案配置值，且蜂窝组确已配置)
  *   otherwise                                            → PASSTHROUGH_REAL   (配置可得但不等；或相等却无蜂窝配置 →
  *                                                                              相等只是巧合，读数仍是真实小区)
@@ -73,16 +75,29 @@ data class CurrentPointView(
  * [cellularHookConfigured] is the fail-closed leg: an INJECTED claim requires
  * the provider to attest a configured cellular group, so a lying or buggy
  * discover projection can never mint the strong claim by equality alone.
+ *
+ * [observedRat] is the second fail-closed leg (review 2026-09-08): the wire
+ * group projects the LTE-named profile columns ONLY (v1.81 spec freeze), while
+ * the hook also injects NR identity from the unprojected `nci`/`nr_*` columns
+ * and [ServingCellSelector] ranks NR above LTE. An NR reading compared against
+ * an LTE configured value would mislabel an injected value as 透传·真实, so any
+ * non-LTE or unknown-RAT reading is attested only as 设备读数 — equality-based
+ * claims (注入 AND 透传·真实 alike) require an LTE reading.
  */
 object CiHeroClassifier {
 
-    fun classify(observedCi: Long?, configuredCi: Long?, cellularHookConfigured: Boolean = false): CiBadge? =
-        when {
-            observedCi == null -> null
-            configuredCi == null -> CiBadge.DEVICE_READING
-            observedCi == configuredCi && cellularHookConfigured -> CiBadge.INJECTED
-            else -> CiBadge.PASSTHROUGH_REAL
-        }
+    fun classify(
+        observedCi: Long?,
+        configuredCi: Long?,
+        cellularHookConfigured: Boolean = false,
+        observedRat: String? = null,
+    ): CiBadge? = when {
+        observedCi == null -> null
+        configuredCi == null -> CiBadge.DEVICE_READING
+        !observedRat.equals("LTE", ignoreCase = true) -> CiBadge.DEVICE_READING
+        observedCi == configuredCi && cellularHookConfigured -> CiBadge.INJECTED
+        else -> CiBadge.PASSTHROUGH_REAL
+    }
 }
 
 /**

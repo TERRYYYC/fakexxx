@@ -1539,7 +1539,10 @@ class MainViewModel @JvmOverloads constructor(
             // T7v2 §A1-v2 #2: CI hero — the VALUE is the raw device reading;
             // the badge is the pure three-state classifier over (observed,
             // configured, hookConfigured) — v1.81 wiring. INJECTED additionally
-            // requires the provider-asserted cellularHookConfigured.
+            // requires the provider-asserted cellularHookConfigured, and any
+            // equality-based claim requires an LTE reading (the configured group
+            // is the LTE-named profile columns; an NR reading may be injected
+            // from unprojected nr_* columns and can only attest 设备读数).
             .combine(_servingCell) { partial, reading ->
                 partial.copy(
                     ciHero = com.example.cellrebelauto.ui.dashboard.v2.CiHeroView(
@@ -1550,6 +1553,7 @@ class MainViewModel @JvmOverloads constructor(
                                 configuredCi = _configuredCell.value?.ci,
                                 cellularHookConfigured =
                                     _configuredCell.value?.cellularHookConfigured == true,
+                                observedRat = reading?.rat,
                             ),
                     ),
                 )
@@ -1562,6 +1566,7 @@ class MainViewModel @JvmOverloads constructor(
                                 observedCi = partial.ciHero.reading?.ci,
                                 configuredCi = configured?.ci,
                                 cellularHookConfigured = configured?.cellularHookConfigured == true,
+                                observedRat = partial.ciHero.reading?.rat,
                             ),
                     ),
                 )
