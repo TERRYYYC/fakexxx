@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- fakexxx lane: renamed identity (was 千网游) for the Wave-1 integrated build.
+         Distinct launcher name so the operator can tell it from production/bench/glmbench
+         installs at a glance; Xposed module list must be matched by PACKAGE, not name. -->
+    <string name="app_name">fakexxx-map</string>
+</resources>

@@ -54,6 +54,16 @@ android {
             matchingFallbacks.add("debug")
             buildConfigField("String", "PROVIDER_APPLICATION_ID_OVERRIDE", "\"name.caiyao.fakegps.glmbench\"")
         }
+        // fakexxx lane: renamed identity for the Wave-1 integrated build — installs as a
+        // SEPARATE app (com.example.cellrebelauto.fakexxx, label "fakexxx-auto"), pairs
+        // ONLY with name.caiyao.fakegps.fakexxx via the BuildConfig override, and reuses
+        // the debug tooling source set. Existing lanes stay untouched.
+        create("fakexxx") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".fakexxx"
+            matchingFallbacks.add("debug")
+            buildConfigField("String", "PROVIDER_APPLICATION_ID_OVERRIDE", "\"name.caiyao.fakegps.fakexxx\"")
+        }
         release {
             signingConfig = signingConfigs.getByName("bench")
             isMinifyEnabled = false
@@ -94,6 +104,12 @@ android {
         // debug ProviderPrincipalBuild); its own srcDir stays available for lane-only
         // additions. Manifest merge pulls the debug-only exported probe activities.
         getByName("glmbench") {
+            java.srcDir("src/debug/java")
+            manifest.srcFile("src/debug/AndroidManifest.xml")
+        }
+        // fakexxx lane reuses the same debug tooling sources; src/fakexxx stays available
+        // for lane-only additions (launcher label res).
+        getByName("fakexxx") {
             java.srcDir("src/debug/java")
             manifest.srcFile("src/debug/AndroidManifest.xml")
         }
