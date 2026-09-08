@@ -106,7 +106,13 @@ object APlusComposition {
         // service-lifecycle BinderExternalApplyExecutor (typed as BinderExternalApplyExecutor below
         // for Service wiring), tests pass a fake that implements the SAME journey surface. This is
         // what makes the production evidence source's observe/consumption chain oracle-drivable.
-        serviceLifecycleExecutor: ExternalApplyExecutor? = null
+        serviceLifecycleExecutor: ExternalApplyExecutor? = null,
+        // v1.81 CI-attestation: the device-side serving-cell reader invoked at the
+        // moment a PRE/POST observation is minted (observeLive). Production reads
+        // TelephonyManager (hooked env → injected values; hook off → real values);
+        // tests inject fakes. A failing/null read is honest "未捕获" (null columns),
+        // never a fabricated cell and never an observe failure.
+        servingCellReader: (() -> com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading?)? = null
     ): APlusBackend {
         val rawExecutor: ExternalApplyExecutor = serviceLifecycleExecutor
             ?: com.example.cellrebelauto.recovery.BinderExternalApplyExecutor(
@@ -184,6 +190,12 @@ object APlusComposition {
             db.releaseReceiptDao(),
             accessGate
         )
+        // v1.81: production default device-side reader — the SAME thin
+        // TelephonyManager poller the CI hero uses (LTE/NR serving selection).
+        val effectiveServingCellReader: () -> com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading? =
+            servingCellReader
+                ?: { com.example.cellrebelauto.ui.dashboard.v2.TelephonyServingCellPoller(context).probe() }
+
         return object : APlusBackend {
             override val executor: ExternalApplyExecutor = binderExecutor
             override val recoveryLog: DurableRecoveryLog = roomLog
@@ -274,6 +286,12 @@ object APlusComposition {
                         )
                     val wire = binderExecutor.observe(leaseId, operationId, expectedHash) ?: return null
                     val snapshot = com.example.cellrebelauto.environment.ObservationWireAdapter.toSnapshot(wire)
+                    // v1.81 CI-attestation: capture the serving cell AS THE DEVICE
+                    // REPORTS IT at observation time (one read per phase record).
+                    // Fail-closed to null columns — an unreadable radio is "未捕获",
+                    // never a fabricated cell; and this evidence never re-decides
+                    // trust (scope red line).
+                    val servingCell = try { effectiveServingCellReader() } catch (_: Throwable) { null }
                     // Persist BEFORE returning: a crash mid-decision re-reads durability (F3 pattern).
                     db.durableObservationDao().insert(
                         com.example.cellrebelauto.model.ledger.DurableObservationRecord(
@@ -292,7 +310,13 @@ object APlusComposition {
                             evidenceRefsJson = org.json.JSONArray(snapshot.evidenceRefs).toString(),
                             evidenceRefs = snapshot.evidenceRefs.joinToString(";"),
                             scheduleItemId = snapshot.scheduleItemId,
-                            scheduleVersion = snapshot.scheduleVersion
+                            scheduleVersion = snapshot.scheduleVersion,
+                            servingCi = servingCell?.ci,
+                            servingTac = servingCell?.tac,
+                            servingPci = servingCell?.pci,
+                            servingMcc = servingCell?.mcc,
+                            servingMnc = servingCell?.mnc,
+                            servingRsrpDbm = servingCell?.rsrpDbm
                         )
                     )
                     return snapshot

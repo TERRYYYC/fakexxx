@@ -65,12 +65,60 @@ class ContractRoundTripTest {
             currentItemId = "item-7",
             scheduleVersion = 3L,
             exhausted = false,
+            // v1.81 CI-attestation projection group.
+            configuredCellCi = 289_001L,
+            configuredCellTac = 31461,
+            configuredCellPci = 210,
+            configuredCellMcc = "460",
+            configuredCellMnc = "00",
+            cellularHookConfigured = true,
         )
         val restored = roundTrip(original)
         assertEquals(original, restored)
         assertEquals(ContractV1.PROTOCOL_VERSION, restored.protocolVersion)
         // Wire-code list order is part of the representation, not incidental.
         assertEquals(original.supportedModeWires, restored.supportedModeWires)
+        // The cellular columns cross positionally — every one must come back.
+        assertEquals(289_001L, restored.configuredCellCi)
+        assertEquals(31461, restored.configuredCellTac)
+        assertEquals(210, restored.configuredCellPci)
+        assertEquals("460", restored.configuredCellMcc)
+        assertEquals("00", restored.configuredCellMnc)
+        assertEquals(true, restored.cellularHookConfigured)
+    }
+
+    @Test
+    fun `CapabilitySnapshotV1 cellular columns default to passthrough semantics`() {
+        // v1.81: the group is optional at construction — a snapshot built without
+        // it means "no cellular configuration attested" (all columns null, hook
+        // flag false), and THAT is exactly what crosses the parcel untouched.
+        val bare = CapabilitySnapshotV1(
+            serviceVersion = "3.0.0",
+            supportedModeWires = listOf(DeliveryModeV1.SYSTEM_MOCK.wire),
+            supportedVerificationLevelWires = listOf(
+                VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire,
+            ),
+            continuityCoverageWire = ContinuityCoverageV1.FULL.wire,
+            environmentRevision = 42L,
+            profileRefs = listOf("p1"),
+            scheduleRefs = emptyList(),
+            currentScheduleId = null,
+            currentItemId = null,
+            scheduleVersion = null,
+            exhausted = null,
+        )
+        assertNull(bare.configuredCellCi)
+        assertNull(bare.configuredCellTac)
+        assertNull(bare.configuredCellPci)
+        assertNull(bare.configuredCellMcc)
+        assertNull(bare.configuredCellMnc)
+        assertEquals(false, bare.cellularHookConfigured)
+        assertEquals(bare, roundTrip(bare))
+        // A partially configured profile keeps its per-column nulls on the wire.
+        val partial = bare.copy(configuredCellCi = 289_001L, cellularHookConfigured = true)
+        assertEquals(partial, roundTrip(partial))
+        assertNull("an unfilled column must stay null (passthrough), never 0",
+            roundTrip(partial).configuredCellMnc)
     }
 
     @Test

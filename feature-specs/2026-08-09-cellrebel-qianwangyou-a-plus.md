@@ -166,6 +166,7 @@ source_threads:
 | **v1.78** | PR #41 R4（Sol 契约裁定） | **步 3b 的 `unproven` 曾经把「存在但从未到达 `RELEASED`」与「无 provider record／无 originating-item attribution」混作一谈——活跃性与归因被写成同一条判据，与步 5 的 `LEASE_CONFLICT(7)` 直接矛盾（canonical §6.7.4b 自身两处互撞：`unproven` 定义写 8，同一步的注写本步不判活跃性、活跃性归步 5）。** 裁定：**归因与活跃性正交**。存在且 caller/item 可归因的 non-RELEASED 行**不是** unproven——它通过步 3b，由步 5 的设备全局 lease 门判 `LEASE_CONFLICT(7)`（§6.7.4a / `M-AD-12` / 当前 handler 三者本已如此实现）；`unproven → 8` 收窄为「无 provider record」或「无 originating-item attribution」；`foreign`／`wrong-item` 仍为 8。同步修步 3b 的 `unproven` 定义与 `STALE_LEASE(8)` KDoc，保留 `M-AD-12` 的 own-ACTIVE → 7 killing assertion。本轮无 AIDL／DTO／wire／provider 行为变更（实现本就是 7，仅契约投影此前写错）。见 §6.3.3 / §6.7.4b / §6.7.4a / §10 |
 | **v1.79** | Issue #86（Auto 失败事件闭合） | **通用 `RECOVERY_REQUIRED` 审计不能说明失败发生在哪条边，也允许 reducer 事件与 durable owner 分两次写入。** 新增四个命名事件：`START_FAILED_BEFORE_RUNNING`、`POST_OBSERVATION_MISSING`、`COMPLETION_EVIDENCE_MISSING`、`ADVANCE_NOT_PROVEN`；最后一项覆盖 `ADVANCE_PENDING`／`ADVANCE_OBSERVING`／`ADVANCE_STATE_READBACK` 三个可能发起或重放 provider 调用的 owner。命名失败必须在同一 Room transaction 内完成 durable phase re-read、合法 reducer edge 校验、精确事件审计（含 typed reason）与 owner CAS；任一写失败则整体回滚。正常执行与崩溃恢复共用该路径。`PRE_EXISTING_RUN` 仍先分类到 `CELLREBEL_RUNNING`，随后只有 `TIMEOUT_INTERRUPTED` 可拥有其 recovery edge；不得伪造成“启动前失败”。provider `ERROR(16)`、transport failure、invalid response 保留不同 typed failure，统一由 `ADVANCE_NOT_PROVEN` 承载，且都不伪造 receipt、不进入 `CLOSED`。见 §8.1 |
 | **v1.80** | Issue #79（Auto↔QWY 调度绑定冻结） | **字段存在不等于跨 App 身份已经可用。** QWY owner 冻结：只有 exact `serviceVersion = "1.1.0"` 可声明绑定能力，`1.0.0` 永久不可按绑定协议解释；活动投影 `currentScheduleId/currentItemId/scheduleVersion/exhausted` 必须来自同一快照且四者全有或全空，partial tuple fail-closed；一个 schedule generation 内 schedule id 与 item id 不变且唯一，身份变化的重建/重导入必须 mint 新 schedule id，其余影响当前项或终态的 mutation 必须使 generation 内版本单调前移，同项 Auto 配额累积本身不得推动 QWY version。Auto 的 host-first 输入是显式六列 CSV v2；`profileRefs` 仍只是 catalog。绑定 attempt 持久化 pre-apply tuple，provider exhaustion 不等于本地计划完成，只有真实配额满足并经 fresh 四字段 readback 验证推进/终末后才可进入完成路径；legacy 四列 CSV、`plan-$planId` digest/replay 与真正 `CLOSED` sink 不变。见 §6.7.1 / §8.1 |
+| **v1.81** | operator 拍板（2026-09-08，ui-hifi/v3 数据面缺口第 1 项：服务小区 CI 互证） | **「CellRebel 看到的小区标识」与配额入账各说各话：Auto 只能拿到设备读数，拿不到 provider 生效档案配置的蜂窝标识，三态徽标（注入/透传·真实/设备读数）永远到不了「注入」。** ①`CapabilitySnapshotV1`（§6.3）追加 CI-attestation 投影组 `configuredCellCi/configuredCellTac/configuredCellPci/configuredCellMcc/configuredCellMnc` + `cellularHookConfigured`（组尾追加，v1.55 先例；parcelize 按声明序读写，不扰动既有 parcel 位置；值 = 生效 schedule item 档案行对应列，列未填即 null = 该字段透传语义；`cellularHookConfigured` = 五列任一有值，全 null 恒 false，null 列与 true 不共存）。②**ATTESTATION-ONLY 红线（冻结）**：本组字段只服务互证证据——消费方徽标与 `durable_observation_records` 服务小区列的比对；**不进入任何 §6.4 可信谓词，不参与 TrustPolicy/配额入账判定**——观察证据链仍是唯一信任路径。③与 `KB-8` 的关系：`KB-8` 冻结的是**坐标**不跨边界（投影出去即制造第二个位置持有者）；蜂窝配置投影是 provider 对自己将注入什么的**自述配置**，且消费方**永不把它渲染为 hero 值**（hero 数值恒为设备原始读数），第二持有者缺陷形态不成立。④digest 安全：`CapabilitySnapshotV1` 不在任何 canonical preimage 内（v1.55 ④同款实查，`CanonicalDigestV1` 零引用），新增字段不变更任何 digest。⑤skew：v1 wire 未冻结（Draft PR，v1.55 ⑤同判），两端同仓发布，版本 skew 不适用。见 §6.3 / §6.7.1 |
 
 
 v1.1 的动因：主实现作者在动手前对照两个上游的精确 SHA 做了只读核验，发现若按 v1 原样冻结 AIDL，其中数项缺口只能靠 v2 或用户数据迁移来补救。全部修订均在 contract 冻结前落地，因此不产生 v2 债务。
@@ -1331,6 +1332,20 @@ data class CapabilitySnapshotV1(
     val currentItemId: String?,
     val scheduleVersion: Long?,
     val exhausted: Boolean?,
+    /** v1.81 CI-attestation projection group: the EFFECTIVE schedule item's configured
+     *  cellular identity columns (the values the provider's hook would inject). Null
+     *  column = not configured (passthrough for that field); all five null = the
+     *  effective profile carries no cellular identity (or no effective profile).
+     *  cellularHookConfigured = true iff ANY of the five columns has a value — null
+     *  columns never coexist with true. ATTESTATION-ONLY: 供消费方把设备上报与 provider
+     *  配置互证（CI hero 徽标、持久观察证据），不进入任何 §6.4 可信谓词。追加于组尾，
+     *  kotlin-parcelize 按声明序读写，不扰动既有字段的 parcel 位置（v1.55 先例）。 */
+    val configuredCellCi: Long? = null,
+    val configuredCellTac: Int? = null,
+    val configuredCellPci: Int? = null,
+    val configuredCellMcc: String? = null,
+    val configuredCellMnc: String? = null,
+    val cellularHookConfigured: Boolean = false,
 ) : Parcelable
 
 @Parcelize
@@ -1904,6 +1919,8 @@ ProviderPairingRecord(
 **profile 是一个完整环境**：位置与蜂窝/网络/Wi-Fi Hook 字段属于同一 `scheduleItem`，不得被拆成两个可独立排序的维度——这正是双排序会让位置与网络状态漂移的地方。优先级属于**计划项**，不属于可复用的 profile 行。
 
 **坐标不跨边界投影（v1.62 `KB-8` = A 冻结）**：`discover()` 的 `CapabilitySnapshotV1` 只投影 ref、指针与版本（`profileRefs` / `scheduleRefs` / `currentScheduleId` / `currentItemId` / `scheduleVersion` / `exhausted`），**不投影 item 的经纬度**；`EnvironmentIntentV1` 也不回传坐标。这两条是同一个裁定的一进一出：**投影出去就制造了第二个持有者**，而第二个持有者正是 `KB-8` 登记的那个缺陷本体——它必然漂移，且漂移时没有任何 wire 表达"我们不同意"。"provider 用谁的坐标"（自己的）、"不匹配返回什么 code"（无此分支——不存在能与之不匹配的对端断言）、"discover 是否投影 item 坐标"（否）三问就此全部冻结。
+
+**蜂窝配置跨边界投影（v1.81，operator 2026-09-08 拍板；上段「只投影 ref、指针与版本」的投影集列举自本轮起扩宽，坐标禁投不变）**：`discover()` 的 `CapabilitySnapshotV1` 追加生效 schedule item 档案行的蜂窝配置列 `configuredCellCi/configuredCellTac/configuredCellPci/configuredCellMcc/configuredCellMnc` 与判别位 `cellularHookConfigured`（五列任一有值即 true）。与坐标裁定同为「一进一出」的两半：**进**——互证需要消费方持有一份 provider 自述的配置值，否则「CellRebel 看到的 CI」与配额入账永远各说各话；**出**——消费方对它的用途被同轮冻结为**仅互证证据**：CI hero 徽标的语义判定与 `durable_observation_records` 服务小区列的离线比对，绝不渲染为 hero 数值（数值恒为设备原始读数），绝不进入 §6.4 可信谓词或配额判定。列未填（null）读作该字段透传，绝不可读作「配置了真实值」。生效档案当前项的解析千网游独占（`currentItemId` → 档案行），Auto 不做任何二次推断。
 
 #### 6.7.2 完成证明（Auto 拥有，千网游不重算）
 

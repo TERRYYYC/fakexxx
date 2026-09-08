@@ -47,5 +47,22 @@ data class DurableObservationRecord(
     val evidenceRefs: String,
     /** #79 identity legs from the provider observation; nullable only for migrated v8 history. */
     val scheduleItemId: String? = null,
-    val scheduleVersion: Long? = null
+    val scheduleVersion: Long? = null,
+    // ---- v10 (v1.81 CI-attestation): the serving cell AS THE DEVICE REPORTED IT ----
+    /** Captured at observation mint time (observeLive) from THIS device's
+     *  TelephonyManager — under the hook that is the injected value, without it
+     *  the real cell. This is the device-side half of the cross-attestation
+     *  against the discover `configuredCell*` projection (CellRebel 看到的小区
+     * 标识 ↔ 配额入账互证). Null = NOT CAPTURED (migrated v9 rows, or the radio
+     *  read failed/withheld the field) — "未捕获" is honest absence, never zero.
+     *  SCOPE RED LINE (operator, 2026-09-08): evidence ONLY — never read by
+     *  TrustPolicy or the quota path; the §6.4 evidence chain stays the sole
+     *  trust input. */
+    val servingCi: Long? = null,
+    val servingTac: Int? = null,
+    val servingPci: Int? = null,
+    val servingMcc: String? = null,
+    val servingMnc: String? = null,
+    /** LTE RSRP / NR SS-RSRP in dBm at capture time. */
+    val servingRsrpDbm: Int? = null,
 )

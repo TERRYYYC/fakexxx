@@ -91,13 +91,28 @@ class ProductionEvidenceSourceOracleTest {
             )
         )
 
+    // v1.81 CI-attestation: the device-side serving-cell reader seam. Default
+    // null → production TelephonyServingCellPoller (fails closed to null columns
+    // under Robolectric); tests program `servingCellResult`.
+    private var servingCellResult:
+        com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading? = null
+    private var servingCellReads: Int = 0
+    private var servingCellThrows: Boolean = false
+
+    private fun servingCell(): com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading? {
+        servingCellReads += 1
+        if (servingCellThrows) throw java.lang.IllegalStateException("radio failure")
+        return servingCellResult
+    }
+
     private fun backend() = APlusComposition.productionBackend(
         ApplicationProvider.getApplicationContext(),
         db,
         accessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
         providerSignerDigest = { if (signerTrusted) "sha256:trusted" else "sha256:other" },
         attemptValidityTimeoutMs = attemptTimeoutMs,
-        serviceLifecycleExecutor = fakeExecutor
+        serviceLifecycleExecutor = fakeExecutor,
+        servingCellReader = { servingCell() }
     )
 
     @Before
@@ -199,6 +214,43 @@ class ProductionEvidenceSourceOracleTest {
         val pre2 = evidence.acquirePreObservation(77L, 5L)
         assertEquals("durable replay: no second observe call", 1, observeCalls.size)
         assertEquals("the replayed snapshot equals the persisted one", pre, pre2)
+    }
+
+    @Test
+    fun `observeLive captures the device serving cell INTO the durable record - v1-81`() = runBlocking {
+        // The device-side half of the CI cross-attestation: the reading taken at
+        // observation mint time (hooked env → the injected value) must land in
+        // the SAME durable_observation_records row, per phase. Mutation: drop the
+        // capture wiring → servingCi columns revert to null → red.
+        servingCellResult =
+            com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading(
+                rat = "LTE", ci = 289001L, tac = 31461, pci = 210, mcc = "460", mnc = "0",
+                rsrpDbm = -95, registered = true, readAtMs = 42L,
+            )
+        val evidence = backend().evidenceSource
+        assertNotNull(evidence.acquirePreObservation(77L, 5L))
+        val pre = db.durableObservationDao().forAttemptPhase(77L, "PRE")!!
+        assertEquals(289001L, pre.servingCi)
+        assertEquals(31461, pre.servingTac)
+        assertEquals(210, pre.servingPci)
+        assertEquals("460", pre.servingMcc)
+        assertEquals("0", pre.servingMnc)
+        assertEquals(-95, pre.servingRsrpDbm)
+        assertEquals("exactly one device read per phase record", 1, servingCellReads)
+    }
+
+    @Test
+    fun `a failing device read is honest uncaptured - observation still persists`() = runBlocking {
+        // Fail-closed: a throwing radio read must NOT fail the observation nor
+        // fabricate values — the record persists with NULL serving columns
+        // ("未捕获"), and the attestation query excludes it.
+        servingCellThrows = true
+        val evidence = backend().evidenceSource
+        assertNotNull(evidence.acquirePreObservation(77L, 5L))
+        val pre = db.durableObservationDao().forAttemptPhase(77L, "PRE")!!
+        assertNull(pre.servingCi)
+        assertNull(pre.servingRsrpDbm)
+        assertTrue(db.durableObservationDao().observationsWithServingCellForPlan(seededPlanId).isEmpty())
     }
 
     @Test

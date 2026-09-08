@@ -214,10 +214,11 @@ class MainViewModel @JvmOverloads constructor(
     // T7v2 §A1-v2 #2: the CI hero's serving-cell probe seam; tests inject fakes.
     // Production = TelephonyServingCellPoller over the EXISTING COARSE permission.
     private val cellProbe: (() -> com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading?)? = null,
-    // T7v2 §A1-v2 #2: the effective profile's configured-CI seam; tests inject.
-    // Production = DiscoverConfiguredCiProbe (contract v1 carries no CI → null
-    // → the badge honestly falls to 设备读数).
-    private val configuredCiProbe: com.example.cellrebelauto.ui.dashboard.v2.ConfiguredCellIdentityProbe? = null,
+    // v1.81 CI-attestation: the effective profile's configured cellular identity
+    // seam (discover `configuredCell*` group); tests inject. Production =
+    // DiscoverConfiguredCellProbe (fail-closed: unreachable channel → null →
+    // the badge honestly falls to 设备读数).
+    private val configuredCellProbe: com.example.cellrebelauto.ui.dashboard.v2.ConfiguredCellIdentityProbe? = null,
     // T7v2 §A1-v2 #4: the metric-pill selection store; tests inject a file-backed one.
     injectedMetricsSettings: com.example.cellrebelauto.data.DashboardMetricsSettings? = null,
     // T7v2: the CI hero poll cadence/dispatcher (real time — never the test scheduler).
@@ -1328,26 +1329,32 @@ class MainViewModel @JvmOverloads constructor(
 
     private val _servingCell =
         MutableStateFlow<com.example.cellrebelauto.ui.dashboard.v2.ServingCellReading?>(null)
-    private val _configuredCi = MutableStateFlow<Long?>(null)
+    private val _configuredCell =
+        MutableStateFlow<com.example.cellrebelauto.ui.dashboard.v2.ConfiguredCellIdentity?>(null)
 
     /**
      * The CI hero poll loop. Deliberately on a REAL dispatcher (never the test
      * scheduler): the first probe fires immediately, then every
      * [cellPollIntervalMs]. A failing probe is a null reading — the hero shows
-     * "--", never a crash, never a fabricated value. In Robolectric oracles the
-     * default probe short-circuits on the permission check (null) — harmless.
+     * "--", never a crash, never a fabricated value. The configured-cell probe
+     * is fail-closed the same way: an unreachable discover channel is a null
+     * projection, and the badge renders 设备读数, never a guessed 注入.
+     * In Robolectric oracles the default probes short-circuit (permission /
+     * no provider) — harmless.
      */
     private val cellPolling: kotlin.Any = run {
         val probe = cellProbe
             ?: { com.example.cellrebelauto.ui.dashboard.v2.TelephonyServingCellPoller(
                     getApplication()
                 ).probe() }
-        val ciProbe = configuredCiProbe
-            ?: com.example.cellrebelauto.ui.dashboard.v2.DiscoverConfiguredCiProbe
+        val ciProbe = configuredCellProbe
+            ?: com.example.cellrebelauto.ui.dashboard.v2.DiscoverConfiguredCellProbe(
+                getApplication()
+            )
         viewModelScope.launch(cellPollDispatcher) {
             while (true) {
                 _servingCell.value = runCatching { probe() }.getOrNull()
-                _configuredCi.value = runCatching { ciProbe.configuredCi() }.getOrNull()
+                _configuredCell.value = runCatching { ciProbe.configuredCell() }.getOrNull()
                 kotlinx.coroutines.delay(cellPollIntervalMs)
             }
         }
@@ -1569,7 +1576,12 @@ class MainViewModel @JvmOverloads constructor(
                 )
             }
             // T7v2 §A1-v2 #2: CI hero — the VALUE is the raw device reading;
-            // the badge is the pure three-state classifier over (observed, configured).
+            // the badge is the pure three-state classifier over (observed,
+            // configured, hookConfigured) — v1.81 wiring. INJECTED additionally
+            // requires the provider-asserted cellularHookConfigured, and any
+            // equality-based claim requires an LTE reading (the configured group
+            // is the LTE-named profile columns; an NR reading may be injected
+            // from unprojected nr_* columns and can only attest 设备读数).
             .combine(_servingCell) { partial, reading ->
                 partial.copy(
                     ciHero = com.example.cellrebelauto.ui.dashboard.v2.CiHeroView(
@@ -1577,18 +1589,23 @@ class MainViewModel @JvmOverloads constructor(
                         badge = com.example.cellrebelauto.ui.dashboard.v2.CiHeroClassifier
                             .classify(
                                 observedCi = reading?.ci,
-                                configuredCi = _configuredCi.value,
+                                configuredCi = _configuredCell.value?.ci,
+                                cellularHookConfigured =
+                                    _configuredCell.value?.cellularHookConfigured == true,
+                                observedRat = reading?.rat,
                             ),
                     ),
                 )
             }
-            .combine(_configuredCi) { partial, configured ->
+            .combine(_configuredCell) { partial, configured ->
                 partial.copy(
                     ciHero = partial.ciHero.copy(
                         badge = com.example.cellrebelauto.ui.dashboard.v2.CiHeroClassifier
                             .classify(
                                 observedCi = partial.ciHero.reading?.ci,
-                                configuredCi = configured,
+                                configuredCi = configured?.ci,
+                                cellularHookConfigured = configured?.cellularHookConfigured == true,
+                                observedRat = partial.ciHero.reading?.rat,
                             ),
                     ),
                 )

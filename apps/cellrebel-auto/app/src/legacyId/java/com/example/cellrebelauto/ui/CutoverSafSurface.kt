@@ -28,7 +28,7 @@ import com.example.cellrebelauto.cutover.CutoverSafContract
 import com.example.cellrebelauto.cutover.LegacyCutoverExportRejection
 import com.example.cellrebelauto.cutover.LegacyCutoverExportResult
 import com.example.cellrebelauto.cutover.LegacyCutoverExporter
-import com.example.cellrebelauto.cutover.RoomV9CutoverStore
+import com.example.cellrebelauto.cutover.RoomV10CutoverStore
 import java.util.UUID
 import kotlinx.coroutines.launch
 
@@ -47,7 +47,7 @@ fun CutoverSafSurface(modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     val exporter = remember(context) {
         val app = context.applicationContext as CellRebelAutoApp
-        val roomStore = RoomV9CutoverStore(app.database)
+        val roomStore = RoomV10CutoverStore(app.database)
         val snapshotPort = AutoCutoverSnapshotPort(
             accessGate = app.cutoverAccessGate,
             quiescencePort = app.cutoverRunQuiescence,

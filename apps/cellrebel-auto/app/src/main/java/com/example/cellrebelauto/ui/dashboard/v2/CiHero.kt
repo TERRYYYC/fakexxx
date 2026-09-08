@@ -63,40 +63,99 @@ data class CurrentPointView(
  * Pure, exhaustive badge decision. Returns null ONLY when there is no observed
  * CI (nothing to badge — the UI renders a placeholder, never a fabricated state).
  *
- * Decision table (三态穷尽):
- *   observedCi == null            → null               (无读数，不打徽标)
- *   configuredCi == null          → DEVICE_READING     (配置不可得 → 只能证"设备读数")
- *   observedCi == configuredCi    → INJECTED           (观察值即档案配置值)
- *   otherwise                     → PASSTHROUGH_REAL   (配置可得但不等)
+ * Decision table (三态穷尽, v1.81 wiring):
+ *   observedCi == null                                   → null               (无读数，不打徽标)
+ *   configuredCi == null                                 → DEVICE_READING     (配置不可得 → 只能证"设备读数")
+ *   observedRat not "LTE" (or unknown)                   → DEVICE_READING     (配置组是 LTE 语义列；NR 读数可能来自
+ *                                                                              未投影的 nr_* 注入，互证不成立 → 只能证"设备读数")
+ *   observedCi == configuredCi && cellularHookConfigured → INJECTED           (观察值即档案配置值，且蜂窝组确已配置)
+ *   otherwise                                            → PASSTHROUGH_REAL   (配置可得但不等；或相等却无蜂窝配置 →
+ *                                                                              相等只是巧合，读数仍是真实小区)
+ *
+ * [cellularHookConfigured] is the fail-closed leg: an INJECTED claim requires
+ * the provider to attest a configured cellular group, so a lying or buggy
+ * discover projection can never mint the strong claim by equality alone.
+ *
+ * [observedRat] is the second fail-closed leg (review 2026-09-08): the wire
+ * group projects the LTE-named profile columns ONLY (v1.81 spec freeze), while
+ * the hook also injects NR identity from the unprojected `nci`/`nr_*` columns
+ * and [ServingCellSelector] ranks NR above LTE. An NR reading compared against
+ * an LTE configured value would mislabel an injected value as 透传·真实, so any
+ * non-LTE or unknown-RAT reading is attested only as 设备读数 — equality-based
+ * claims (注入 AND 透传·真实 alike) require an LTE reading.
  */
 object CiHeroClassifier {
 
-    fun classify(observedCi: Long?, configuredCi: Long?): CiBadge? = when {
+    fun classify(
+        observedCi: Long?,
+        configuredCi: Long?,
+        cellularHookConfigured: Boolean = false,
+        observedRat: String? = null,
+    ): CiBadge? = when {
         observedCi == null -> null
         configuredCi == null -> CiBadge.DEVICE_READING
-        observedCi == configuredCi -> CiBadge.INJECTED
+        !observedRat.equals("LTE", ignoreCase = true) -> CiBadge.DEVICE_READING
+        observedCi == configuredCi && cellularHookConfigured -> CiBadge.INJECTED
         else -> CiBadge.PASSTHROUGH_REAL
     }
 }
 
 /**
- * Seam for the effective profile's configured CI (the value the provider's hook
- * would inject). Tests inject fakes; production is [DiscoverConfiguredCiProbe].
+ * The effective profile's configured cellular identity as discover() projects
+ * it (contract v1, v1.81 `configuredCell*` group), plus the provider-asserted
+ * [cellularHookConfigured] discriminator (true iff any column carries a value).
+ *
+ * ATTESTATION-ONLY: never rendered as the hero's VALUE (that stays the raw
+ * device reading), never read by TrustPolicy — badge semantics and durable
+ * observation cross-checks are the only consumers.
+ */
+data class ConfiguredCellIdentity(
+    val ci: Long?,
+    val tac: Int?,
+    val pci: Int?,
+    val mcc: String?,
+    val mnc: String?,
+    /** discover().cellularHookConfigured — 蜂窝组任一字段有值 = true. */
+    val cellularHookConfigured: Boolean,
+)
+
+/**
+ * Seam for the effective profile's configured cellular identity (the values the
+ * provider's hook would inject). Tests inject fakes; production is
+ * [DiscoverConfiguredCellProbe].
  */
 fun interface ConfiguredCellIdentityProbe {
-    fun configuredCi(): Long?
+    fun configuredCell(): ConfiguredCellIdentity?
 }
 
 /**
- * Production probe over the EXISTING discover/contract channel. Contract v1's
- * discover() snapshot (CapabilitySnapshotV1) carries profileRefs/scheduleRefs
- * and schedule projection state ONLY — there is NO cell-identity field. Until a
- * contract revision exposes the profile's configured CI, this probe answers
- * null, which the classifier honestly renders as 设备读数. This is the operator's
- * mandated bias: an unprovable 注入 must never be claimed.
+ * Production probe over the EXISTING discover/contract channel: one synchronous
+ * handshake (v1.81 carries the `configuredCell*` group). Fail-closed end to end:
+ * an unreachable provider, a refused handshake or ANY transport failure answers
+ * null, which the classifier honestly renders as 设备读数 — never a fabricated
+ * configuration, never a crash.
  */
-object DiscoverConfiguredCiProbe : ConfiguredCellIdentityProbe {
-    override fun configuredCi(): Long? = null
+class DiscoverConfiguredCellProbe(private val context: android.content.Context) :
+    ConfiguredCellIdentityProbe {
+    override fun configuredCell(): ConfiguredCellIdentity? = try {
+        when (val result =
+            com.example.cellrebelauto.integration.v1.EnvironmentControlClient(context).handshake()) {
+            is com.example.cellrebelauto.integration.v1.EnvironmentControlClient.HandshakeResult.Connected -> {
+                val snapshot = result.snapshot
+                ConfiguredCellIdentity(
+                    ci = snapshot.configuredCellCi,
+                    tac = snapshot.configuredCellTac,
+                    pci = snapshot.configuredCellPci,
+                    mcc = snapshot.configuredCellMcc,
+                    mnc = snapshot.configuredCellMnc,
+                    cellularHookConfigured = snapshot.cellularHookConfigured,
+                )
+            }
+            else -> null
+        }
+    } catch (_: Throwable) {
+        null
+    }
 }
 
 /** Picks the serving cell out of one getAllCellInfo() batch (pure). */

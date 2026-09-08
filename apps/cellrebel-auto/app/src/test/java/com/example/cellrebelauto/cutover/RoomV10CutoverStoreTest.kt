@@ -19,7 +19,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
-class RoomV9CutoverStoreTest {
+class RoomV10CutoverStoreTest {
     private val databases = mutableListOf<AppDatabase>()
 
     @After
@@ -28,12 +28,12 @@ class RoomV9CutoverStoreTest {
     }
 
     @Test
-    fun schemaPolicyIsTheExactRoomV9TableCensus() = runTest {
-        val store = RoomV9CutoverStore(database())
+    fun schemaPolicyIsTheExactRoomV10TableCensus() = runTest {
+        val store = RoomV10CutoverStore(database())
 
         val policy = store.schemaPolicy()
 
-        assertEquals(9, policy.schemaVersion)
+        assertEquals(10, policy.schemaVersion)
         assertEquals(EXPECTED_TABLES, policy.requiredTableSchemaDigests.keys)
         assertTrue(policy.requiredTableSchemaDigests.values.all { it.matches(Regex("sha256:[0-9a-f]{64}")) })
         assertEquals(setOf("provider_pairing_records"), policy.historicalOnlyTables)
@@ -44,8 +44,8 @@ class RoomV9CutoverStoreTest {
         val source = database()
         val target = database()
         seedSource(source)
-        val sourceStore = RoomV9CutoverStore(source)
-        val targetStore = RoomV9CutoverStore(target)
+        val sourceStore = RoomV10CutoverStore(source)
+        val targetStore = RoomV10CutoverStore(target)
         val archive = archive(sourceStore.captureTables())
 
         assertEquals(CutoverGenerationState.EMPTY, targetStore.classify(archive))
@@ -79,8 +79,8 @@ class RoomV9CutoverStoreTest {
                 "(id, sourceFileName, importedAt, globalBufferSeconds, totalRows, totalRequiredSuccesses) " +
                 "VALUES (99, 'target.csv', 99, 9, 0, 0)"
         )
-        val archive = archive(RoomV9CutoverStore(source).captureTables())
-        val targetStore = RoomV9CutoverStore(target)
+        val archive = archive(RoomV10CutoverStore(source).captureTables())
+        val targetStore = RoomV10CutoverStore(target)
 
         assertEquals(CutoverGenerationState.MISMATCH, targetStore.classify(archive))
         val failure = runCatching { targetStore.restore(archive) }.exceptionOrNull()
@@ -94,13 +94,13 @@ class RoomV9CutoverStoreTest {
     fun runtimeSchemaDriftRejectsBeforeCaptureOrClear() = runTest {
         val db = database()
         db.openHelper.writableDatabase.execSQL("ALTER TABLE location_plans ADD COLUMN rogue TEXT")
-        val store = RoomV9CutoverStore(db)
+        val store = RoomV10CutoverStore(db)
 
         val captureFailure = runCatching { store.captureTables() }.exceptionOrNull()
         val clearFailure = runCatching { store.clear() }.exceptionOrNull()
 
         assertTrue(captureFailure is IllegalStateException)
-        assertTrue(captureFailure?.message.orEmpty().contains("Room v9 schema mismatch"))
+        assertTrue(captureFailure?.message.orEmpty().contains("Room v10 schema mismatch"))
         assertTrue(clearFailure is IllegalStateException)
         assertFalse(clearFailure?.message.orEmpty().contains("no such table"))
     }
@@ -110,7 +110,7 @@ class RoomV9CutoverStoreTest {
         val source = database()
         val target = database()
         seedSource(source)
-        val archive = archive(RoomV9CutoverStore(source).captureTables())
+        val archive = archive(RoomV10CutoverStore(source).captureTables())
         val changed = archive.copy(
             tables = archive.tables.map { table ->
                 if (table.name != "location_plans") table else table.copy(
@@ -121,7 +121,7 @@ class RoomV9CutoverStoreTest {
             }
         )
 
-        val failure = runCatching { RoomV9CutoverStore(target).restore(changed) }.exceptionOrNull()
+        val failure = runCatching { RoomV10CutoverStore(target).restore(changed) }.exceptionOrNull()
 
         assertTrue(failure is IllegalArgumentException)
         assertTrue(failure?.message.orEmpty().contains("row order key mismatch"))
@@ -133,7 +133,7 @@ class RoomV9CutoverStoreTest {
         val source = database()
         val target = database()
         seedSource(source)
-        val archive = archive(RoomV9CutoverStore(source).captureTables())
+        val archive = archive(RoomV10CutoverStore(source).captureTables())
         val changed = archive.copy(
             tables = archive.tables.map { table ->
                 if (table.name != "location_plans") table else table.copy(
@@ -148,7 +148,7 @@ class RoomV9CutoverStoreTest {
             }
         )
 
-        val failure = runCatching { RoomV9CutoverStore(target).restore(changed) }.exceptionOrNull()
+        val failure = runCatching { RoomV10CutoverStore(target).restore(changed) }.exceptionOrNull()
 
         assertTrue(failure is IllegalArgumentException)
         assertTrue(failure?.message.orEmpty().contains("row type mismatch for location_plans.id"))
@@ -160,8 +160,8 @@ class RoomV9CutoverStoreTest {
         val source = database()
         val target = database()
         seedSource(source)
-        val archive = archive(RoomV9CutoverStore(source).captureTables())
-        val targetStore = RoomV9CutoverStore(target)
+        val archive = archive(RoomV10CutoverStore(source).captureTables())
+        val targetStore = RoomV10CutoverStore(target)
         targetStore.restore(archive)
         target.openHelper.writableDatabase.execSQL(
             "UPDATE provider_pairing_records SET revokedAt = NULL"
@@ -175,8 +175,8 @@ class RoomV9CutoverStoreTest {
 
     @Test
     fun emptyRoomArchiveIsBothAnEmptyTargetAndAnExactGeneration() = runTest {
-        val sourceStore = RoomV9CutoverStore(database())
-        val targetStore = RoomV9CutoverStore(database())
+        val sourceStore = RoomV10CutoverStore(database())
+        val targetStore = RoomV10CutoverStore(database())
         val archive = archive(sourceStore.captureTables())
 
         val before = targetStore.classify(archive)
@@ -191,7 +191,7 @@ class RoomV9CutoverStoreTest {
     @Test
     fun canonicalHistoricalPairingPayloadWithNullRevocationRejectsBeforeRestore() = runTest {
         val source = database()
-        val sourceStore = RoomV9CutoverStore(source)
+        val sourceStore = RoomV10CutoverStore(source)
         val target = database()
         seedSource(source)
         val policy = sourceStore.schemaPolicy()
@@ -214,7 +214,7 @@ class RoomV9CutoverStoreTest {
         )
 
         val failure = runCatching {
-            RoomV9CutoverStore(target).restore(decoded.archive)
+            RoomV10CutoverStore(target).restore(decoded.archive)
         }.exceptionOrNull()
 
         assertTrue(failure is IllegalArgumentException)
@@ -262,7 +262,7 @@ class RoomV9CutoverStoreTest {
     private fun archive(tables: List<CutoverTableSection>) = CutoverArchiveV2(
         sourcePackage = "com.example.cellrebelauto",
         captureId = "capture-room",
-        schemaVersion = 9,
+        schemaVersion = 10,
         tables = tables,
         preferences = emptyList()
     )

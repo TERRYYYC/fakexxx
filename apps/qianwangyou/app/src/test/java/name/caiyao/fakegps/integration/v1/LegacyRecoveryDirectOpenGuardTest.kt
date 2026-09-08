@@ -20,9 +20,13 @@ class LegacyRecoveryDirectOpenGuardTest {
             .map { it.range.first }
             .toList()
 
-        assertEquals("schedule initialization and coordinate lookup are the only direct opens", 2, opens.size)
         assertEquals(
-            "the read-only controller must not start recovery from a profile projection or coordinate lookup",
+            "schedule initialization, coordinate lookup and the v1.81 cell-identity lookup " +
+                "are the only direct opens",
+            3, opens.size)
+        assertEquals(
+            "the read-only controller must not start recovery from a profile projection, " +
+                "coordinate lookup or cell-identity lookup",
             0,
             Regex("AppDatabase\\.ensureLegacyDatabaseRecovered").findAll(controllerSource).count(),
         )
@@ -31,5 +35,9 @@ class LegacyRecoveryDirectOpenGuardTest {
         assertTrue("owner-start recovery must precede controller construction", recovery >= 0 && recovery < controller)
 // Rebase note: T2's third direct-open came from its (dropped) parallel profileRefs();
 // #105's merged profileRefsSnapshot() keeps the count at 2.
+// v1.81 rebase note: the CI-attestation projection (operator 2026-09-08) adds ONE
+// more read-only open — same class as the coordinate lookup: READONLY, never calls
+// recovery itself, and safe because owner-start recovery precedes controller
+// construction (asserted above).
     }
 }

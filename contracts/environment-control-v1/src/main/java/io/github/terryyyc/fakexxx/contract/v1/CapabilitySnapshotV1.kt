@@ -53,4 +53,27 @@ data class CapabilitySnapshotV1(
     val currentItemId: String?,
     val scheduleVersion: Long?,
     val exhausted: Boolean?,
+    /**
+     * CI-attestation projection group (v1.81, operator ruling 2026-09-08): the
+     * EFFECTIVE schedule item's configured cellular identity columns — the
+     * values the provider's hook would inject into serving-cell reads. A null
+     * column means "not configured" (passthrough semantics for that field);
+     * ALL five null means the effective profile carries no cellular identity
+     * (or there is no effective profile at all). [cellularHookConfigured] is
+     * true iff ANY of the five columns has a value; with all five null it is
+     * false — null columns never coexist with `true`.
+     *
+     * ATTESTATION-ONLY: these columns exist so the consumer can cross-check
+     * what the device reports against what the provider configured (CI hero
+     * badge, durable observation evidence). They are not part of any §6.4
+     * trust predicate and must never enter one — the observation evidence
+     * chain stays the only trust path. Like the schedule projection group they
+     * are appended, never renumbered: kotlin-parcelize reads positionally.
+     */
+    val configuredCellCi: Long? = null,
+    val configuredCellTac: Int? = null,
+    val configuredCellPci: Int? = null,
+    val configuredCellMcc: String? = null,
+    val configuredCellMnc: String? = null,
+    val cellularHookConfigured: Boolean = false,
 ) : Parcelable

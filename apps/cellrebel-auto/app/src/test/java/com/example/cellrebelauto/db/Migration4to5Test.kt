@@ -142,7 +142,7 @@ class Migration4to5Test {
         Room.databaseBuilder(context, AppDatabase::class.java, dbName)
             // This test focuses on 4→5 semantics; the current schema continues through the
             // no-op 5→6 step and additive history-preserving 6→7 / 7→8 steps.
-            .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
             .allowMainThreadQueries()
             .build()
 
@@ -250,7 +250,7 @@ class Migration4to5Test {
             assertEquals(1, db.testAttemptDao().getAttemptsForTask(1L).size)
 
             // And the file really is at the current schema version.
-            assertEquals(9, db.openHelper.readableDatabase.version)
+            assertEquals(10, db.openHelper.readableDatabase.version)
         } finally {
             db.close()
         }

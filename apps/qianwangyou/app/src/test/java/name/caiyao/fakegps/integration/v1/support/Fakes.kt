@@ -6,6 +6,7 @@ import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
 import name.caiyao.fakegps.integration.v1.AdvancePointerOutcome
 import name.caiyao.fakegps.integration.v1.ApplyOutcome
 import name.caiyao.fakegps.integration.v1.CleanupOutcome
+import name.caiyao.fakegps.integration.v1.ConfiguredCellSnapshot
 import name.caiyao.fakegps.integration.v1.DurableKv
 import name.caiyao.fakegps.integration.v1.EffectiveEnvironment
 import name.caiyao.fakegps.integration.v1.MonotonicClock
@@ -154,6 +155,13 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     /** P0.1-5: the profile collection discover() must project (default: none known). */
     var profileRefs: List<String> = emptyList()
+
+    /**
+     * v1.81: the cellular projection discover() must carry (null = not
+     * evaluable → the wire answers all-null columns +
+     * cellularHookConfigured=false, never a guessed value).
+     */
+    var configuredCell: ConfiguredCellSnapshot? = null
     var cleanupOutcome: CleanupOutcome = CleanupOutcome.Complete
     var isMock: Boolean? = true
     var fingerprint: String = "fp-1"
@@ -219,6 +227,8 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
         set(value) = kv.write(SCHEDULE_NAMESPACE, "present", if (value) "1" else "0")
 
     override fun profileRefsSnapshot(): List<String> = profileRefs
+
+    override fun configuredCellSnapshot(): ConfiguredCellSnapshot? = configuredCell
 
     override fun scheduleSnapshot(): ScheduleSnapshot? =
         if (!hasSchedule) {
