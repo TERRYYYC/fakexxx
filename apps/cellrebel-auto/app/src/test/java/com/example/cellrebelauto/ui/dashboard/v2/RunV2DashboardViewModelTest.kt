@@ -196,9 +196,19 @@ class RunV2DashboardViewModelTest {
         rsrpDbm = -95, registered = true, readAtMs = 1L,
     )
 
+    /** v1.81 probe fake: full configured group, hook configured by default. */
+    private fun configuredCellProbe(
+        ci: Long?, cellularHookConfigured: Boolean = true,
+    ): ConfiguredCellIdentityProbe = ConfiguredCellIdentityProbe {
+        ConfiguredCellIdentity(
+            ci = ci, tac = 31461, pci = 210, mcc = "460", mnc = "0",
+            cellularHookConfigured = cellularHookConfigured,
+        )
+    }
+
     private fun viewModel(
         cell: (() -> ServingCellReading?)? = null,
-        configuredCi: ConfiguredCellIdentityProbe? = null,
+        configuredCell: ConfiguredCellIdentityProbe? = null,
         metrics: DashboardMetricsSettings? = null,
     ): MainViewModel = MainViewModel(
         ApplicationProvider.getApplicationContext(),
@@ -209,7 +219,7 @@ class RunV2DashboardViewModelTest {
         injectedSelfHealSettings = selfHealSettings(),
         injectedMetricsSettings = metrics ?: metricsSettings(),
         cellProbe = cell,
-        configuredCiProbe = configuredCi,
+        configuredCellProbe = configuredCell,
         cellPollIntervalMs = 60_000L, // one shot per test; no background churn
     ).also { createdViewModels += it }
 
@@ -242,7 +252,7 @@ class RunV2DashboardViewModelTest {
         seedPlan()
         val vm = viewModel(
             cell = { reading(ci = 289001L) },
-            configuredCi = ConfiguredCellIdentityProbe { 289001L },
+            configuredCell = configuredCellProbe(ci = 289001L),
         )
         startDashboard(vm)
         awaitUntil { vm.dashboardState.value.ciHero.reading != null }
@@ -250,7 +260,7 @@ class RunV2DashboardViewModelTest {
         assertEquals(289001L, hero.reading?.ci)
         assertEquals(31461, hero.reading?.tac)
         assertEquals(-95, hero.reading?.rsrpDbm)
-        // observed == configured → 注入
+        // observed == configured 且蜂窝组已配置 → 注入
         assertEquals(CiBadge.INJECTED, hero.badge)
     }
 
@@ -259,8 +269,8 @@ class RunV2DashboardViewModelTest {
         seedPlan()
         val vm = viewModel(
             cell = { reading(ci = 46692113L) },
-            // production contract v1 channel: no configured CI obtainable
-            configuredCi = null,
+            // production discover channel unreachable → null projection (fail-closed)
+            configuredCell = null,
         )
         startDashboard(vm)
         awaitUntil { vm.dashboardState.value.ciHero.badge != null }
@@ -272,11 +282,37 @@ class RunV2DashboardViewModelTest {
         seedPlan()
         val vm = viewModel(
             cell = { reading(ci = 46692113L) },
-            configuredCi = ConfiguredCellIdentityProbe { 289001L },
+            configuredCell = configuredCellProbe(ci = 289001L),
         )
         startDashboard(vm)
         awaitUntil { vm.dashboardState.value.ciHero.badge != null }
         assertEquals(CiBadge.PASSTHROUGH_REAL, vm.dashboardState.value.ciHero.badge)
+    }
+
+    @Test
+    fun `equalCiWithoutConfiguredCellularGroup_staysNonInjected - v1-81 fail-closed leg`() = runTest {
+        seedPlan()
+        // A contradictory projection (configured ci present, hook NOT configured)
+        // must never mint 注入 from equality alone: the honest claim is 透传·真实.
+        // Mutation: MainViewModel dropping the cellularHookConfigured leg → red.
+        val vm = viewModel(
+            cell = { reading(ci = 289001L) },
+            configuredCell = configuredCellProbe(ci = 289001L, cellularHookConfigured = false),
+        )
+        startDashboard(vm)
+        awaitUntil { vm.dashboardState.value.ciHero.badge != null }
+        assertEquals(CiBadge.PASSTHROUGH_REAL, vm.dashboardState.value.ciHero.badge)
+    }
+
+    @Test
+    fun `productionDiscoverCellProbe_failsClosedToNullWithoutProvider`() {
+        // The production probe over the real Binder channel: on this host there
+        // is no provider service, so the handshake cannot connect — the probe
+        // MUST answer null (badge → 设备读数), never throw, never invent data.
+        val probe = com.example.cellrebelauto.ui.dashboard.v2.DiscoverConfiguredCellProbe(
+            ApplicationProvider.getApplicationContext()
+        )
+        assertNull(probe.configuredCell())
     }
 
     @Test

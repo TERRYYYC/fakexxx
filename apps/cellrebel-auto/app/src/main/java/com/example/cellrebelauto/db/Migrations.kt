@@ -389,3 +389,26 @@ val MIGRATION_8_9 = object : Migration(8, 9) {
         )
     }
 }
+
+/**
+ * v9 → v10 (v1.81 CI-attestation, operator 2026-09-08): `durable_observation_records`
+ * gains six serving-cell columns (ci/tac/pci/mcc/mnc/rsrp) capturing what THIS
+ * device's TelephonyManager reported at PRE/POST observation time — the
+ * device-side half of the cross-attestation against the discover
+ * `configuredCell*` projection. Additive only, INV-24-safe: existing rows keep
+ * NULL, which is exactly the "未捕获" semantics (the observation happened
+ * before capture existed; absence of evidence, never fabricated evidence).
+ * The columns are ATTESTATION-ONLY: no TrustPolicy/quota path reads them.
+ *
+ * # v9→v10 迁移：durable_observation_records 增服务小区六列；旧行保持 null = 未捕获
+ */
+val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingCi INTEGER")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingTac INTEGER")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingPci INTEGER")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingMcc TEXT")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingMnc TEXT")
+        db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingRsrpDbm INTEGER")
+    }
+}
