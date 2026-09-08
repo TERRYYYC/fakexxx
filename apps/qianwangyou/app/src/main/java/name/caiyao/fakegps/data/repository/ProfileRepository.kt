@@ -88,6 +88,20 @@ class ProfileRepository(
     }
 
     /**
+     * P3.1 运动链（来源 a）：attach/detach an independent route (parsed by
+     * [name.caiyao.fakegps.motion.RouteCsvParser]) to a profile, then republish so the motion
+     * chain sees the new route on the next session. Null json = detach (back to single point).
+     * Returns false when the profile id does not exist.
+     */
+    suspend fun attachRoute(profileId: Long, routeWaypointsJson: String?): Boolean =
+        withContext(Dispatchers.IO) {
+            val existing = dao.getById(profileId) ?: return@withContext false
+            dao.update(existing.copy(routeWaypointsJson = routeWaypointsJson))
+            republish(profileId = profileId)
+            true
+        }
+
+    /**
      * Re-publish the effective config to the world-readable prefs the hook reads.
      *
      * This lives in the REPOSITORY, not in a screen: the app has two parallel UIs (legacy

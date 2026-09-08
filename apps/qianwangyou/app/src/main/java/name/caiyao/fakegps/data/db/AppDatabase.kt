@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import java.io.File
 import java.io.RandomAccessFile
 
-@Database(entities = [ProfileEntity::class], version = 2, exportSchema = true)
+@Database(entities = [ProfileEntity::class], version = 3, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun profileDao(): ProfileDao
@@ -19,7 +19,9 @@ abstract class AppDatabase : RoomDatabase() {
         private const val DATABASE_NAME = "fakegps.db"
         private const val BACKUP_SUFFIX = ".legacy-v0-backup"
         private const val STAGING_SUFFIX = ".legacy-v0-migrating"
-        private const val NEW_V2_COLUMN = "unavailable_fields"
+
+        /** Columns added AFTER the legacy v0 schema, in upgrade order. */
+        private val POST_LEGACY_COLUMNS = listOf("unavailable_fields", "route_waypoints_json")
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -42,7 +44,7 @@ abstract class AppDatabase : RoomDatabase() {
 
         /**
          * Repairs only the pre-Room v0 shape proved by the legacy fixture. The old database is
-         * never deleted: rows are copied into a separately validated Room v2 staging database,
+         * never deleted: rows are copied into a separately validated Room staging database,
          * then the original is retained under [BACKUP_SUFFIX] before the staged database becomes
          * the live file. Re-entry after a process death resumes from those files.
          *
@@ -92,16 +94,16 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        private fun buildRoomDatabase(context: Context, databaseName: String): AppDatabase =
-            Room.databaseBuilder(
-                context,
-                AppDatabase::class.java,
-                databaseName,
-            ).addMigrations(MIGRATION_1_2).build()
+    private fun buildRoomDatabase(context: Context, databaseName: String): AppDatabase =
+        Room.databaseBuilder(
+            context,
+            AppDatabase::class.java,
+            databaseName,
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
 
         private fun ensureStagingDatabase(context: Context, legacy: File, staging: File) {
             if (staging.exists()) {
-                check(isCompletedRoomV2Database(staging)) {
+                check(isCompletedCurrentRoomDatabase(staging)) {
                     "Legacy recovery staging database is incomplete: ${staging.name}"
                 }
                 return
@@ -121,13 +123,14 @@ abstract class AppDatabase : RoomDatabase() {
                 // backup that is missing committed profile rows.
                 requireFullyCheckpointed(source, legacy)
 
-                val sourceColumns = tableColumns(source, "temp")
-                val sourceCount = tableRowCount(source, "temp")
-                val stagedRoom = buildRoomDatabase(context, staging.name)
-                try {
-                    val target = stagedRoom.openHelper.writableDatabase
-                    val targetColumns = tableColumns(target, "temp")
-                    val expectedLegacyColumns = targetColumns.filterNot { it == NEW_V2_COLUMN }
+                    val sourceColumns = tableColumns(source, "temp")
+                    val sourceCount = tableRowCount(source, "temp")
+                    val stagedRoom = buildRoomDatabase(context, staging.name)
+                    try {
+                        val target = stagedRoom.openHelper.writableDatabase
+                        val targetColumns = tableColumns(target, "temp")
+                        val expectedLegacyColumns =
+                            targetColumns.filterNot { it in POST_LEGACY_COLUMNS }
                     check(sourceColumns.toSet() == expectedLegacyColumns.toSet() &&
                         sourceColumns.size == expectedLegacyColumns.size) {
                         "Legacy recovery refuses an unrecognized temp schema"
@@ -162,8 +165,8 @@ abstract class AppDatabase : RoomDatabase() {
                 closeLegacyWal(source, legacy)
             }
 
-            check(isCompletedRoomV2Database(staging)) {
-                "Legacy recovery staging database did not reach Room v2"
+            check(isCompletedCurrentRoomDatabase(staging)) {
+                "Legacy recovery staging database did not reach Room schema version 3"
             }
         }
 
@@ -178,19 +181,19 @@ abstract class AppDatabase : RoomDatabase() {
                 hasTable(database, "temp") &&
                 !hasTable(database, "room_master_table")
 
-        private fun isCompletedRoomV2Database(file: File): Boolean = SQLiteDatabase.openDatabase(
+        private fun isCompletedCurrentRoomDatabase(file: File): Boolean = SQLiteDatabase.openDatabase(
             file.absolutePath,
             null,
             SQLiteDatabase.OPEN_READONLY,
         ).use { database ->
-            pragmaUserVersion(database) == 2 &&
+            pragmaUserVersion(database) == 3 &&
                 hasTable(database, "temp") &&
                 hasTable(database, "room_master_table")
         }
 
         private fun promoteStagingDatabase(staging: File, live: File) {
             check(!live.exists()) { "Legacy recovery live database unexpectedly exists" }
-            check(isCompletedRoomV2Database(staging)) {
+            check(isCompletedCurrentRoomDatabase(staging)) {
                 "Legacy recovery refuses to promote an incomplete staging database"
             }
             moveDatabaseFiles(staging, live)
@@ -342,6 +345,18 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE temp ADD COLUMN unavailable_fields TEXT DEFAULT NULL")
+            }
+        }
+
+        /**
+         * P3.1 运动链: the "路线" profile kind. Existing rows keep NULL, which is exactly the
+         * pre-v3 behavior: a null route column IS a single-point profile, unchanged in every
+         * downstream path (the payload walker skips NULL columns; the resolver reads lat/lng
+         * exactly as before).
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE temp ADD COLUMN route_waypoints_json TEXT DEFAULT NULL")
             }
         }
     }

@@ -134,6 +134,10 @@ data class ProfileEntity(
     // Neighbor Cells
     @ColumnInfo(name = "neighbor_cells_json") val neighborCellsJson: String? = null,
 
+    // Route (P3.1 运动链): ordered waypoints for the "路线" profile kind. NULL = single-point
+    // profile (the historical shape) — every existing row keeps null and keeps its behavior.
+    @ColumnInfo(name = "route_waypoints_json") val routeWaypointsJson: String? = null,
+
     // Orthogonal third state. Canonical JSON array; null/[] means no explicit-unavailable fields.
     @ColumnInfo(name = "unavailable_fields") val unavailableFields: String? = null,
 )

@@ -25,6 +25,7 @@ import name.caiyao.fakegps.R
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.motion.RouteSpec
 import name.caiyao.fakegps.ui.ComposeActivity
 
 class MockProviderService : Service() {
@@ -52,6 +53,15 @@ class MockProviderService : Service() {
         controller = MockProviderSessionController(
             gateway,
             MockProviderStatusStore::publish,
+            onRouteCompleted = { spec ->
+                // P3.1 路线完成事件：一个路线 = 一个任务（走完即完成）。日程推进引擎（T2/T4 的
+                // advance 语义）挂钩点在此；本线程只落日志，不改 required_successes 语义。
+                Log.i(
+                    TAG,
+                    "route completed: waypoints=${spec.waypoints.size} " +
+                        "length=${spec.totalLengthMeters().toInt()}m",
+                )
+            },
         )
         sessionRunner = MockProviderSessionRunner(
             worker = commandExecutor,

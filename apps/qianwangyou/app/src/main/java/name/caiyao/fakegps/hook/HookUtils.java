@@ -99,6 +99,13 @@ class HookUtils {
         registerGated("PhysicalChannelConfig", cl, disabledModules, () -> hookPhysicalChannelConfig(cl));
         registerGated("SubscriptionAware", cl, disabledModules, () -> hookSubscriptionAware(cl));
         registerGated("FusedLocation", cl, disabledModules, () -> hookFusedLocation(cl));
+        // P3.2 (T9, deliberately NOT implemented in this thread): the "Sensors" hook group is
+        // reserved in SpoofModules under the "motion" module. When it lands it joins the gated
+        // registration list above with the synthetic TYPE_STEP_COUNTER / TYPE_STEP_DETECTOR /
+        // TYPE_ACCELEROMETER stream driven by the SAME RoutePlayer the System Mock lane plays
+        // (MotionSensorModel: v = f x stride coherence). Route playback in the hook delivery lane
+        // (Location fields following the published `route` object) is the second reserved seam —
+        // both require root + Vector device verification first.
     }
 
     /**

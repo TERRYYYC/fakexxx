@@ -120,13 +120,14 @@ class SpoofSettings private constructor(private val prefs: SharedPreferences) {
     }
 
     /**
-     * Read the module switches as the writer publishes them. Unknown stored entries (a module
-     * removed from the vocabulary) are ignored; absent entries default to ENABLED so the
-     * first publish after an upgrade is v4-equivalent.
+     * Read the module switches as the writer publishes them. Absent entries take the module's
+     * factory default ([SpoofModules.defaultEnabled]): v4-era modules are ENABLED so the first
+     * publish after an upgrade is v4-equivalent; the motion module is OFF so the motion chain
+     * never changes what the target app reads until the user explicitly turns it on.
      */
     fun readModulesEnabled(): Map<String, Boolean> = buildMap {
         for (module in SpoofModules.ALL) {
-            put(module, prefs.getBoolean(KEY_MODULE_PREFIX + module, true))
+            put(module, prefs.getBoolean(KEY_MODULE_PREFIX + module, SpoofModules.defaultEnabled(module)))
         }
     }
 

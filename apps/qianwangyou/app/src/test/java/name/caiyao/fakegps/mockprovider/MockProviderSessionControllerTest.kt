@@ -10,7 +10,7 @@ class MockProviderSessionControllerTest {
     fun `start removes stale provider then registers and publishes immediately`() {
         val gateway = RecordingMockProviderGateway()
         val states = mutableListOf<MockProviderState>()
-        val controller = MockProviderSessionController(gateway) { states += it }
+        val controller = MockProviderSessionController(gateway, onStateChanged = { states += it })
         val config = MockLocationConfig(50.4501, 30.5234)
 
         controller.start(config)
@@ -30,7 +30,7 @@ class MockProviderSessionControllerTest {
     fun `fresh controller stop still removes a provider orphaned by a dead process`() {
         val gateway = RecordingMockProviderGateway()
         val states = mutableListOf<MockProviderState>()
-        val controller = MockProviderSessionController(gateway) { states += it }
+        val controller = MockProviderSessionController(gateway, onStateChanged = { states += it })
 
         controller.stop()
 
@@ -216,6 +216,9 @@ internal class RecordingMockProviderGateway(
 ) : MockProviderGateway {
     val calls = mutableListOf<String>()
 
+    /** Typed record of every published config — the route tests assert on real fixes. */
+    val publishedConfigs = mutableListOf<MockLocationConfig>()
+
     override fun replaceGpsProvider() {
         calls += "replace"
         if (failAt == "replace") throw failure
@@ -223,6 +226,7 @@ internal class RecordingMockProviderGateway(
 
     override fun publish(config: MockLocationConfig) {
         calls += if (failAt == "publish") "publish" else "publish:$config"
+        publishedConfigs += config
         if (failAt == "publish") throw failure
     }
 

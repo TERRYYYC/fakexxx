@@ -4,8 +4,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 import java.security.MessageDigest
+import name.caiyao.fakegps.motion.RoutePayload
 
 /**
  * The published transport payload, read back.
@@ -50,6 +52,12 @@ data class PublishedConfig(
      */
     val modules: Map<String, Boolean> = emptyMap(),
     val modulesPresent: Boolean = false,
+    /**
+     * The payload's `route` object (P3.1 motion chain), null when absent. Present-but-malformed
+     * makes the WHOLE payload unreadable (parse returns null): the delivery scheduler must never
+     * guess a route, and the verify UI must never describe a payload the scheduler refuses to run.
+     */
+    val route: RoutePayload? = null,
 ) {
     companion object {
         /** No `schemaVersion` key at all — an older or corrupt payload, never assumed compatible. */
@@ -58,6 +66,9 @@ data class PublishedConfig(
         /** Mirrors the hook's own fallback in MainHook#loadSnapshot (`optString("mode","always_on")`). */
         private const val DEFAULT_MODE = "always_on"
         private const val DEFAULT_LOCATION_DELIVERY_MODE = "hook"
+
+        /** The only route sources the writer emits; anything else is a hand-crafted payload. */
+        private val SOURCES = setOf(RoutePayload.SOURCE_PROFILE, RoutePayload.SOURCE_PLAN)
 
         private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -111,6 +122,24 @@ data class PublishedConfig(
                 parsed
             }
 
+            // P3.1: the `route` object (motion chain). Present-but-malformed — wrong JSON type,
+            // unknown source, out-of-range coordinates, zero traversable segments — makes the
+            // WHOLE payload unreadable: the delivery scheduler must never guess a route, and the
+            // verify UI must never describe a payload the scheduler refuses to run.
+            val routeElement = root["route"]
+            val route = when {
+                routeElement == null -> null
+                routeElement !is JsonObject -> return null
+                else -> runCatching {
+                    json.decodeFromJsonElement(RoutePayload.serializer(), routeElement)
+                }.getOrNull()?.takeIf { payload ->
+                    payload.source in SOURCES &&
+                        // Waypoint validation happens in RouteWaypoint's init; a decoded payload
+                        // with out-of-range coordinates is as unreadable as missing JSON.
+                        runCatching { payload.toRouteSpec() }.getOrNull()?.isPlayable() == true
+                } ?: return null
+            }
+
             return PublishedConfig(
                 schemaVersion = root["schemaVersion"]?.intOrNull() ?: SCHEMA_UNKNOWN,
                 mode = (root["mode"] as? JsonPrimitive)?.content ?: DEFAULT_MODE,
@@ -126,6 +155,7 @@ data class PublishedConfig(
                 activeHourEnd = hours?.get("end")?.intOrNull(),
                 modules = modules,
                 modulesPresent = modulesObject != null,
+                route = route,
             )
         }
 

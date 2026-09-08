@@ -101,8 +101,15 @@ class ModulesPublishReadbackTest {
         val modules = modulesOfPayload(payload!!)
         assertEquals("payload must enumerate exactly the canonical modules",
             SpoofModules.ALL.toSet(), modules.keys.toSet())
-        assertTrue("factory state is all-enabled (v4-equivalent behaviour)",
-            modules.values.all { it })
+        // v4-era modules default ENABLED (v4-equivalent behaviour); motion (P3) defaults OFF —
+        // enabling it changes what the target app reads, so it is an explicit user decision.
+        for (module in SpoofModules.ALL) {
+            assertEquals(
+                "factory default of $module",
+                SpoofModules.defaultEnabled(module),
+                modules[module],
+            )
+        }
 
         // The app-side readback (verify UI) must agree with the bytes the hook reads.
         val publishedViaApp = PublishedConfig.parse(ConfigPrefsSync.readPublished(context()).textOrNull)!!
@@ -180,7 +187,7 @@ class ModulesPublishReadbackTest {
         publishCurrentSettings()
 
         val disabled = ModuleGate.fromPayload(JSONObject(hookReadPayload()!!).get("modules"))
-        assertEquals(setOf(SpoofModules.PHONE_STATE), disabled)
+        assertEquals(setOf(SpoofModules.PHONE_STATE, SpoofModules.MOTION), disabled)
         // phoneState owns BOTH listener groups — both must be skipped…
         assertFalse(ModuleGate.shouldRegister("PhoneStateListener", disabled))
         assertFalse(ModuleGate.shouldRegister("TelephonyCallback", disabled))

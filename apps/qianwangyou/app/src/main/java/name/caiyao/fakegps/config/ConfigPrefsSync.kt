@@ -12,6 +12,8 @@ import org.json.JSONObject
 import name.caiyao.fakegps.data.ProviderAuthority
 import name.caiyao.fakegps.data.db.AppDatabase
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.motion.RoutePayload
+import name.caiyao.fakegps.motion.RoutePublishPolicy
 
 /**
  * WRITE side of the XSharedPreferences config transport.
@@ -278,12 +280,59 @@ object ConfigPrefsSync {
         val unavailable = UnavailablePayloadContract.validate(fieldNames, requested)
         root.put("fields", fields)
         root.put("unavailable", JSONArray(unavailable.asList()))
+
+        // P3.1 运动链: the `route` object is emitted ONLY when the motion module is on AND a
+        // playable route exists (explicit profile route, else plan-adjacent synthesis). Motion
+        // off produces a byte-identical legacy payload — the key is simply absent.
+        val motionEnabled = moduleStates[SpoofModules.MOTION]
+            ?: SpoofModules.defaultEnabled(SpoofModules.MOTION)
+        if (motionEnabled) {
+            buildRouteObject(context, root, resolvedProfileId)
+        }
         Log.w(
             TAG,
             "field map built: ${fields.length()} spoof fields, " +
                 "${unavailable.asList().size} unavailable fields",
         )
         return BuiltPayload(root.toString(), resolvedProfileId)
+    }
+
+    /**
+     * Resolves and attaches the `route` object for the motion chain (P3.1). All failures are
+     * silent-by-design here: a route is an ENHANCEMENT of the static profile, never a reason to
+     * fail a publish that already carries a valid static configuration.
+     */
+    private fun buildRouteObject(context: Context, root: JSONObject, resolvedProfileId: Long?) {
+        val planRows = buildList {
+            context.contentResolver.query(
+                APP_URI,
+                arrayOf("id", "latitude", "longitude", "speed", "route_waypoints_json"),
+                null,
+                null,
+                "id ASC",
+            )?.use { c ->
+                val idIdx = c.getColumnIndexOrThrow("id")
+                val latIdx = c.getColumnIndexOrThrow("latitude")
+                val lngIdx = c.getColumnIndexOrThrow("longitude")
+                val speedIdx = c.getColumnIndexOrThrow("speed")
+                val routeIdx = c.getColumnIndexOrThrow("route_waypoints_json")
+                while (c.moveToNext()) {
+                    add(
+                        RoutePublishPolicy.PlanRow(
+                            id = c.getLong(idIdx),
+                            latitude = if (c.isNull(latIdx)) null else c.getDouble(latIdx),
+                            longitude = if (c.isNull(lngIdx)) null else c.getDouble(lngIdx),
+                            speedMps = if (c.isNull(speedIdx)) null else c.getDouble(speedIdx),
+                            routeWaypointsJson = if (c.isNull(routeIdx)) null else c.getString(routeIdx),
+                        ),
+                    )
+                }
+            }
+        }
+        val route = RoutePublishPolicy.build(motionEnabled = true, activeProfileId = resolvedProfileId, planRows = planRows)
+            ?: return
+        root.put("route", JSONObject(RoutePayload.encode(route)))
+        Log.w(TAG, "route attached: source=${route.source} waypoints=${route.waypoints.size}")
     }
 
     /**
