@@ -17,6 +17,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
 
 /**
  * P1.3 #2 — the service-side reconnect auto-resume oracle.
@@ -31,7 +32,11 @@ import org.robolectric.Shadows.shadowOf
  *
  * # 服务重连自动恢复 oracle：重连回调发现回收标记 → 自动 Resume；默认关不干预；动作必有审计行
  */
+// Rebase note: #103/#108 make the resume entry resolve the app-singleton cutover
+// gate — the harness therefore must host the REAL CellRebelAutoApp (journal-derived
+// gate: OPEN on a fresh host), not Robolectric's default Application.
 @RunWith(RobolectricTestRunner::class)
+@Config(application = com.example.cellrebelauto.CellRebelAutoApp::class)
 class AutomationServiceReconnectResumeTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
@@ -42,6 +47,14 @@ class AutomationServiceReconnectResumeTest {
             .getDeclaredMethod("attachBaseContext", Context::class.java)
         attach.isAccessible = true
         attach.invoke(service, context)
+        // Rebase note: #103/#108 make startWithPlan resolve the app-singleton
+        // cutover gate via Service.getApplication(). A bare attachBaseContext
+        // leaves mApplication null (the real system rebuild supplies it), so
+        // bind the Robolectric application here — its journal-derived gate is
+        // OPEN on a fresh host, which is exactly the production reconnect case.
+        val appField = android.app.Service::class.java.getDeclaredField("mApplication")
+        appField.isAccessible = true
+        appField.set(service, context.applicationContext)
         val connect = AutomationService::class.java.getDeclaredMethod("onServiceConnected")
         connect.isAccessible = true
         connect.invoke(service)
@@ -109,7 +122,10 @@ class AutomationServiceReconnectResumeTest {
         // The marker is consumed by the action.
         assertNull(ServiceRecycleMarkerStore(context).pendingRecycle())
         // The action is auditable durably (service-level audit row, attemptId-less).
-        val audit = AppDatabase.getInstance(context).auditEventDao()
+        // Rebase note: #103 threads the gate through getInstance; the harness db is standalone.
+        val audit = AppDatabase.getInstance(
+            context, com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
+        ).auditEventDao()
             .forEventType("SERVICE_AUTO_RESUME")
         assertTrue(audit.isNotEmpty())
         assertEquals("plan:424242", audit.last().correlationRef)

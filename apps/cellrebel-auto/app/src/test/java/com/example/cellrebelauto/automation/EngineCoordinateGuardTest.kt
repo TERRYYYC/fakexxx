@@ -79,7 +79,7 @@ class EngineCoordinateGuardTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        repo = PlanRepository(db)
+        repo = PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open())
     }
 
     @After
@@ -268,7 +268,8 @@ class EngineCoordinateGuardTest {
         val coordinator = RecoveryCoordinator(
             journeyExecutor,
             RoomDurableRecoveryLog(
-                db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao()
+                db.operationReceiptDao(), db.recoveryCheckpointRoomDao(), db.releaseReceiptDao(),
+                com.example.cellrebelauto.cutover.CutoverAccessGate.open()
             ),
             observe = ObserveIntentAcquirer { true },
             receiptRevision = ReceiptRevisionAcquirer { _, _ -> true },

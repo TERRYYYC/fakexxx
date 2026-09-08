@@ -1251,24 +1251,6 @@ class AutomationEngine(
         return true
     }
 
-    /** Persisted last-terminal cooldown, kept behaviorally identical but outside the giant run body. */
-    private suspend fun awaitBufferGate(advancingToNewTask: Boolean) {
-        val lastEndedAt = planRepository.latestTerminalAttemptEndedAt(planId)
-        val remainingMs = bufferGate.remainingMs(lastEndedAt)
-        if (remainingMs <= 0) return
-        updateState(AutomationState.COOLDOWN)
-        _cooldown.value = CooldownInfo(
-            startedAtMs = nowMs(),
-            remainingMs = remainingMs,
-            totalMs = bufferGate.bufferSeconds * 1000L,
-            nextAction = if (advancingToNewTask) "advance to next location" else "retry same location"
-        )
-        log("Buffer gate: waiting ${remainingMs / 1000}s before next attempt")
-        delayMs(remainingMs)
-        _cooldown.value = null
-        kotlinx.coroutines.currentCoroutineContext().ensureActive()
-    }
-
     /** Fresh provider-current authority used solely to choose a bound local task. */
     private suspend fun discoverBoundSelectionProjection(
         plan: com.example.cellrebelauto.model.plan.LocationPlan
