@@ -1,6 +1,7 @@
 package name.caiyao.fakegps.ui.screen.settings
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +14,15 @@ import name.caiyao.fakegps.config.PublishedConfig
 import name.caiyao.fakegps.config.PublishPropagation
 import name.caiyao.fakegps.data.LocationDeliveryMode
 import name.caiyao.fakegps.data.SpoofSettings
+import name.caiyao.fakegps.data.bundle.ConfigBundleImportDecision
+import name.caiyao.fakegps.data.bundle.ConfigBundleImportResult
+import name.caiyao.fakegps.data.bundle.QwyBundleExport
+import name.caiyao.fakegps.data.bundle.QwyBundleExporter
+import name.caiyao.fakegps.data.bundle.QwyBundleImporter
+import name.caiyao.fakegps.data.bundle.QwyBundleSections
+import name.caiyao.fakegps.data.bundle.QwyProfileFingerprint
+import name.caiyao.fakegps.data.db.AppDatabase
+import name.caiyao.fakegps.data.repository.ProfileRepository
 import name.caiyao.fakegps.mockprovider.MockLocationAppOps
 import name.caiyao.fakegps.mockprovider.MockProviderRuntime
 import name.caiyao.fakegps.mockprovider.MockProviderState
@@ -20,6 +30,7 @@ import name.caiyao.fakegps.mockprovider.MockProviderStatusStore
 import name.caiyao.fakegps.integration.v1.OperatorScheduleRestartResult
 import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
 import name.caiyao.fakegps.integration.v1.ProviderRuntime
+import name.caiyao.fakegps.ui.screen.collection.PublishedProfileMatcher
 
 class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -238,4 +249,194 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     private fun readPublishedConfig(): PublishedConfig? = PublishedConfig.parse(
         ConfigPrefsSync.readPublished(getApplication()).textOrNull,
     )
+
+    // ---- T8 (P0.3): configuration bundle export / import ----
+
+    /** Human-readable bundle import outcome (success summary / rejection), null = silent. */
+    data class BundleImportUi(
+        val message: String,
+        val warnings: List<String> = emptyList(),
+        val callerFingerprints: List<QwyBundleSections.CallerFingerprint> = emptyList(),
+        val isError: Boolean = false,
+    )
+
+    private val _bundleImportUi = MutableStateFlow<BundleImportUi?>(null)
+    val bundleImportUi: StateFlow<BundleImportUi?> = _bundleImportUi
+
+    /** True while a parsed bundle waits for the overwrite/skip decision (existing profiles). */
+    private val _bundleConflictPending = MutableStateFlow(false)
+    val bundleConflictPending: StateFlow<Boolean> = _bundleConflictPending
+
+    private var pendingBundleBytes: ByteArray? = null
+
+    fun dismissBundleImportUi() {
+        _bundleImportUi.value = null
+    }
+
+    fun exportConfigBundle(uri: Uri) {
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val app = getApplication<Application>()
+                    val db = AppDatabase.getInstance(app)
+                    val entities = db.profileDao().getAll()
+                    // The truthful pointer is the profile the hook is ACTUALLY running.
+                    val activeId = PublishedProfileMatcher.effectiveProfileId(
+                        entities,
+                        ConfigPrefsSync.readPublished(app),
+                    )
+                    val active = activeId?.let { id -> entities.firstOrNull { it.id == id } }
+                    val settings = SpoofSettings.getInstance(app)
+                    val export = QwyBundleExport(
+                        profiles = entities,
+                        activeProfile = active?.let {
+                            QwyBundleExport.ActiveProfileRef(
+                                QwyProfileFingerprint.of(it),
+                                it.addname,
+                            )
+                        },
+                        settings = QwyBundleSections.SettingsSnapshot(
+                            spoofMode = settings.getRawMode(),
+                            activeHourStart = settings.getRawHourStart(),
+                            activeHourEnd = settings.getRawHourEnd(),
+                            refreshIntervalSec = settings.readRefreshIntervalSec(),
+                            locationDeliveryMode = settings.readLocationDeliveryMode().wireValue,
+                            modules = settings.readModulesEnabled(),
+                        ),
+                        callers = ProviderRuntime.pairingFingerprints(app)
+                            .filter { it.revokedAtElapsedRealtimeMs == null }
+                            .map {
+                                QwyBundleSections.CallerFingerprint(
+                                    applicationId = it.applicationId,
+                                    signerDigest = it.signerDigest,
+                                    observedVersionCode = it.observedVersionCode,
+                                )
+                            },
+                        lane = QwyBundleSections.LaneMetadata(
+                            qwyApplicationId = app.packageName,
+                            qwyVersionName = name.caiyao.fakegps.BuildConfig.VERSION_NAME,
+                            transportSchemaVersion = ConfigPrefsSync.SCHEMA_VERSION,
+                            autoApplicationId = null,
+                            autoVersionName = null,
+                            providerPrincipal = null,
+                        ),
+                        createdAtEpochMs = System.currentTimeMillis(),
+                    )
+                    val bytes = QwyBundleExporter.export(export).zipBytes
+                    app.contentResolver.openOutputStream(uri, "wt")?.use { stream ->
+                        stream.write(bytes)
+                    } ?: error("无法创建配置包文件")
+                    entities.size
+                }
+            }
+            _bundleImportUi.value = outcome.fold(
+                onSuccess = { count ->
+                    BundleImportUi("配置包已导出：$count 个档案、车道配置与调用方指纹（不含任何密钥）")
+                },
+                onFailure = { BundleImportUi("导出失败：${it.message}", isError = true) },
+            )
+        }
+    }
+
+    fun importConfigBundle(uri: Uri) {
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching {
+                    getApplication<Application>().contentResolver.openInputStream(uri)
+                        ?.use { it.readBytes() }
+                }.getOrNull()
+            }
+            if (bytes == null) {
+                _bundleImportUi.value = BundleImportUi("无法读取所选配置包", isError = true)
+                return@launch
+            }
+            // Conflict policy: existing profiles → the overwrite/skip dialog (default prompt).
+            val existingCount = withContext(Dispatchers.IO) {
+                AppDatabase.getInstance(getApplication()).profileDao().getAll().size
+            }
+            if (existingCount > 0) {
+                pendingBundleBytes = bytes
+                _bundleConflictPending.value = true
+            } else {
+                runBundleImport(bytes, ConfigBundleImportDecision.Replace)
+            }
+        }
+    }
+
+    /** Overwrite decision: the bundle's profile set replaces the local one. */
+    fun confirmBundleReplace() {
+        val bytes = pendingBundleBytes ?: return
+        clearBundleConflict()
+        runBundleImport(bytes, ConfigBundleImportDecision.Replace)
+    }
+
+    /** Skip decision: keep local profiles entirely; the rest of the bundle still applies. */
+    fun confirmBundleKeepExisting() {
+        val bytes = pendingBundleBytes ?: return
+        clearBundleConflict()
+        runBundleImport(bytes, ConfigBundleImportDecision.KeepExisting)
+    }
+
+    fun dismissBundleConflict() {
+        clearBundleConflict()
+        _bundleImportUi.value = BundleImportUi("已取消导入：本机档案保持不变")
+    }
+
+    private fun clearBundleConflict() {
+        pendingBundleBytes = null
+        _bundleConflictPending.value = false
+    }
+
+    private fun runBundleImport(bytes: ByteArray, decision: ConfigBundleImportDecision) {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val result = withContext(Dispatchers.IO) {
+                val db = AppDatabase.getInstance(app)
+                QwyBundleImporter(
+                    db = db,
+                    repository = ProfileRepository(db, app),
+                    settingsApplier = { snapshot ->
+                        val settings = SpoofSettings.getInstance(app)
+                        settings.setSpoofMode(snapshot.spoofMode)
+                        settings.setActiveHourStart(snapshot.activeHourStart)
+                        settings.setActiveHourEnd(snapshot.activeHourEnd)
+                        settings.setRefreshIntervalSec(snapshot.refreshIntervalSec)
+                        settings.setLocationDeliveryMode(
+                            LocationDeliveryMode.fromWireValue(snapshot.locationDeliveryMode),
+                        )
+                        for ((module, enabled) in snapshot.modules) {
+                            settings.setModuleEnabled(module, enabled)
+                        }
+                        // One publish carries mode/hours/refresh/delivery/modules to the hook.
+                        ConfigPrefsSync.sync(app)
+                    },
+                ).import(bytes, decision)
+            }
+            _bundleImportUi.value = when (result) {
+                is ConfigBundleImportResult.Rejected ->
+                    BundleImportUi("导入已拒绝：${result.reason}", isError = true)
+                is ConfigBundleImportResult.Done -> BundleImportUi(
+                    message = buildString {
+                        if (result.profilesSectionApplied) {
+                            append("已导入档案 ${result.profilesImported} 个")
+                            if (result.profilesDuplicate > 0) {
+                                append("（重复跳过 ${result.profilesDuplicate}）")
+                            }
+                            append("；")
+                        }
+                        if (result.anchoredProfileId != null) {
+                            append("已锚定生效档案：${result.anchoredProfileName ?: result.anchoredProfileId}；")
+                        }
+                        if (result.settingsApplied) append("车道配置已应用；")
+                        if (result.callerFingerprints.isNotEmpty()) {
+                            append("包内含 ${result.callerFingerprints.size} 个 Auto 指纹，仅用于核对——请在下方重新批准；")
+                        }
+                        append("完成。")
+                    },
+                    warnings = result.warnings,
+                    callerFingerprints = result.callerFingerprints,
+                )
+            }
+        }
+    }
 }

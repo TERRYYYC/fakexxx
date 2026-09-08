@@ -61,6 +61,9 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     // P0.1-5: plan↔profile count mismatch warning after a CSV import.
     val planProfileMismatch by vm.planProfileMismatch.collectAsState()
     val isImportReplacementStopping by vm.isImportReplacementStopping.collectAsState()
+    // T8 (P0.3): configuration bundle state (conflict prompt, fingerprints, warnings).
+    val bundleConflict by vm.bundleConflict.collectAsState()
+    val bundlePairingFingerprints by vm.bundlePairingFingerprints.collectAsState()
     val currentTask by vm.currentTask.collectAsState()
     val cooldown by vm.cooldown.collectAsState()
     val lastFailure by vm.lastFailure.collectAsState()
@@ -113,7 +116,16 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                                     // CutoverSafSurface + double CutoverDataBoundary wrapper.
                                     onResetPlan = { vm.resetPlan() },
                                     providerScheduleResetCommand = vm.providerScheduleResetCommand,
-                                    providerPairingApprovalCommand = vm.providerPairingApprovalCommand
+                                    providerPairingApprovalCommand = vm.providerPairingApprovalCommand,
+                                    // T8 (P0.3): configuration bundle export/import + conflict surfaces.
+                                    onExportBundle = { vm.exportConfigBundle(it) },
+                                    onImportBundle = { vm.importConfigBundle(it) },
+                                    bundleConflict = bundleConflict,
+                                    onBundleOverwrite = { vm.confirmBundleOverwrite() },
+                                    onBundleSkip = { vm.skipBundlePlanApply() },
+                                    onBundleConflictDismiss = { vm.dismissBundleConflict() },
+                                    bundlePairingFingerprints = bundlePairingFingerprints,
+                                    onDismissBundleFingerprints = { vm.dismissBundleFingerprints() }
                                 )
                             }
                         }
