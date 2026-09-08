@@ -9,6 +9,7 @@ import com.example.cellrebelauto.data.SelfHealSettings
 import com.example.cellrebelauto.db.AppDatabase
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -41,6 +42,32 @@ class AutomationServiceReconnectResumeTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
 
+    // Rebase note (T7 isolation): every connected service leaves the companion's
+    // static `instance` pointing at it AND serviceScope coroutines alive — on CI's
+    // class ordering that residue let a LATER class's resumeRun reach the REAL
+    // startWithPlan (app-singleton DB → PLAN_NOT_FOUND) instead of the typed
+    // SERVICE_NOT_CONNECTED rejection. onDestroy() is the production drain:
+    // cancels serviceScope, unbinds, nulls instance, clears the connected
+    // projection. Also restores the SelfHealSettings delegate default (its
+    // preferencesDataStore singleton is process-persistent across classes).
+    private val createdServices = mutableListOf<AutomationService>()
+
+    @After
+    fun tearDown() {
+        createdServices.forEach { service ->
+            runCatching { service.onDestroy() }
+        }
+        createdServices.clear()
+        runCatching {
+            kotlinx.coroutines.runBlocking {
+                SelfHealSettings(context).setServiceReconnectAutoResumeEnabled(false)
+            }
+        }
+        // Settle in-flight app-DB/DataStore continuations so the next class's
+        // setMain/resetMain (global TestMainDispatcher RW lock) never collides.
+        Thread.sleep(250)
+    }
+
     private fun newConnectedService(): AutomationService {
         val service = AutomationService()
         val attach = android.content.ContextWrapper::class.java
@@ -58,6 +85,7 @@ class AutomationServiceReconnectResumeTest {
         val connect = AutomationService::class.java.getDeclaredMethod("onServiceConnected")
         connect.isAccessible = true
         connect.invoke(service)
+        createdServices += service
         return service
     }
 
