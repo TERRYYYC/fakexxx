@@ -1,6 +1,9 @@
 package com.example.cellrebelauto.ui
 
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -39,6 +42,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +69,8 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.cellrebelauto.data.SelfHealConfig
 import com.example.cellrebelauto.ui.dashboard.DashboardAction
 import com.example.cellrebelauto.ui.dashboard.HealthLamp
@@ -78,6 +84,9 @@ import com.example.cellrebelauto.ui.dashboard.v2.MetricPillFormatter
 import com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints
 import com.example.cellrebelauto.ui.dashboard.v2.PlanMapProjector
 import com.example.cellrebelauto.ui.dashboard.v2.RunStatusBarProjection
+import com.example.cellrebelauto.ui.dashboard.v2.TileMapCardPolicy
+import com.example.cellrebelauto.ui.dashboard.v2.TileNetworkGate
+import com.example.cellrebelauto.ui.dashboard.v2.TilePlanMapCard
 import com.example.cellrebelauto.ui.theme.LocalShadcnSemantic
 import com.example.cellrebelauto.ui.theme.ShadcnCard
 
@@ -116,6 +125,12 @@ fun RunDashboardScreen(
     onSetCoordinateGuard: (Boolean) -> Unit,
     onSetServiceAutoResume: (Boolean) -> Unit,
     onSetMetricSelection: (List<MetricKey>) -> Unit,
+    // T-tilemap (2026-09-08): the tiles-basemap switch + sticky failure latch.
+    mapTilesEnabled: Boolean,
+    mapTileFailure: Boolean,
+    onSetMapTilesEnabled: (Boolean) -> Unit,
+    onReportTileFailure: () -> Unit,
+    onClearTileFailure: () -> Unit,
     resumeOutcome: MainViewModel.ResumeOutcome?,
     onConsumeResumeOutcome: () -> Unit,
 ) {
@@ -123,6 +138,7 @@ fun RunDashboardScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var drawerExpanded by remember { mutableStateOf(false) }
     var metricsSheetOpen by remember { mutableStateOf(false) }
+    var mapFullscreen by remember { mutableStateOf(false) }
 
     // # 一键恢复的成败走 snackbar；失败时主按钮由投影切为「查看日志」
     LaunchedEffect(resumeOutcome) {
@@ -164,11 +180,16 @@ fun RunDashboardScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // ---- ③ 内嵌地图卡（可缩放，占屏约 1/3） ----------------------------
+            // ---- ③ 内嵌地图卡（状态驱动双卡：瓦片真图 ⇄ 抽象 Canvas，⛶ 全屏） ----
             ShadcnCard(modifier = Modifier.fillMaxWidth()) {
-                PlanMapCard(
+                MapCardSection(
                     points = state.mapPoints,
                     currentPoint = state.currentPoint,
+                    mapTilesEnabled = mapTilesEnabled,
+                    mapTileFailure = mapTileFailure,
+                    onReportTileFailure = onReportTileFailure,
+                    onClearTileFailure = onClearTileFailure,
+                    onOpenFullscreen = { mapFullscreen = true },
                 )
             }
 
@@ -197,6 +218,8 @@ fun RunDashboardScreen(
                 state = state,
                 logs = logs,
                 selfHealConfig = selfHealConfig,
+                mapTilesEnabled = mapTilesEnabled,
+                onSetMapTilesEnabled = onSetMapTilesEnabled,
                 onOpenPlan = onOpenPlan,
                 onOpenProviders = onOpenProviders,
                 onResetPlan = onResetPlan,
@@ -238,6 +261,46 @@ fun RunDashboardScreen(
             },
             onDismiss = { metricsSheetOpen = false },
         )
+    }
+
+    // T-tilemap：⛶ 全屏地图（照 v3 MAP 态）；返回键/手势返回经 onDismissRequest 关闭
+    if (mapFullscreen) {
+        Dialog(
+            onDismissRequest = { mapFullscreen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Surface(modifier = Modifier.fillMaxSize()) {
+                Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("计划地图", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            "双指缩放 · 拖动平移",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(modifier = Modifier.weight(1f))
+                        OutlinedButton(onClick = { mapFullscreen = false }) { Text("返回") }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp))) {
+                        MapCardSection(
+                            points = state.mapPoints,
+                            currentPoint = state.currentPoint,
+                            mapTilesEnabled = mapTilesEnabled,
+                            mapTileFailure = mapTileFailure,
+                            onReportTileFailure = onReportTileFailure,
+                            onClearTileFailure = onClearTileFailure,
+                            onOpenFullscreen = null,
+                            fullscreen = true,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -348,12 +411,113 @@ private fun CiHeroContent(ciHero: com.example.cellrebelauto.ui.dashboard.v2.CiHe
     }
 }
 
+// ---- ③ 地图卡：状态驱动双卡切换 -------------------------------------------------
+//
+// 选卡 = TileMapCardPolicy.decide(tilesEnabled, networkOnline, tileFailure)：
+//   TILES  → TilePlanMapCard（osmdroid 真图；内部先垫抽象地图，首次瓦片成功才
+//            移除垫层——无闪烁；首次瓦片失败上报 sticky 失败位）；
+//   CANVAS → 下方原样保留的抽象 Canvas 地图（离线回退，永不删除）。
+// 重连（network false→true）自动清失败位 → 瓦片图自动重试。
+
+/**
+ * The CONNECTIVITY observation. One default-network callback re-probes
+ * [TileNetworkGate]; snapshot writes from the callback thread are safe.
+ */
+@Composable
+private fun rememberNetworkOnline(): Boolean {
+    val context = LocalContext.current
+    var online by remember { mutableStateOf(TileNetworkGate.isOnline(context)) }
+    DisposableEffect(Unit) {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { online = true }
+            override fun onLost(network: Network) { online = TileNetworkGate.isOnline(context) }
+        }
+        val registered = runCatching {
+            cm?.registerDefaultNetworkCallback(callback)
+        }.isSuccess && cm != null
+        onDispose {
+            if (registered) runCatching { cm?.unregisterNetworkCallback(callback) }
+        }
+    }
+    return online
+}
+
+@Composable
+private fun MapCardSection(
+    points: List<PlanMapPoints.MapPoint>,
+    currentPoint: CurrentPointView?,
+    mapTilesEnabled: Boolean,
+    mapTileFailure: Boolean,
+    onReportTileFailure: () -> Unit,
+    onClearTileFailure: () -> Unit,
+    onOpenFullscreen: (() -> Unit)?,
+    fullscreen: Boolean = false,
+) {
+    val networkOnline = rememberNetworkOnline()
+
+    // 重连自动重试瓦片：失败位只在离线→在线的跳变时清除（避免失败↔回退振荡）
+    LaunchedEffect(networkOnline) {
+        if (networkOnline) onClearTileFailure()
+    }
+
+    val card = TileMapCardPolicy.decide(
+        tilesEnabled = mapTilesEnabled,
+        networkOnline = networkOnline,
+        tileLoadFailed = mapTileFailure,
+    )
+
+    // 双卡共用同一尺寸语义：嵌入=宽满+220dp，全屏=铺满（CANVAS 卡走 modifier 参数）
+    val mapModifier = if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth()
+
+    Box(modifier = if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(220.dp)) {
+        if (points.isEmpty()) {
+            Text(
+                "导入计划后显示点位",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.Center),
+            )
+        } else {
+            when (card) {
+                TileMapCardPolicy.PlanMapCard.TILES -> TilePlanMapCard(
+                    points = points,
+                    modifier = mapModifier,
+                    fullscreen = fullscreen,
+                    fallback = { PlanMapCard(points = points, currentPoint = currentPoint) },
+                    onTileFailure = onReportTileFailure,
+                )
+                TileMapCardPolicy.PlanMapCard.CANVAS -> PlanMapCard(
+                    points = points,
+                    currentPoint = currentPoint,
+                    modifier = mapModifier,
+                )
+            }
+        }
+        // ⛶ 全屏入口（照 v3 expando：地图右上角；全屏态内不再叠加）
+        if (onOpenFullscreen != null && points.isNotEmpty()) {
+            Text(
+                "⛶",
+                fontSize = 15.sp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.85f))
+                    .padding(horizontal = 10.dp, vertical = 2.dp)
+                    .clickable(onClick = onOpenFullscreen),
+            )
+        }
+    }
+}
+
 // ---- ③ 内嵌地图卡（可缩放） ------------------------------------------------------
 
 @Composable
 private fun PlanMapCard(
     points: List<PlanMapPoints.MapPoint>,
     currentPoint: CurrentPointView?,
+    modifier: Modifier = Modifier.fillMaxWidth().height(220.dp), // T-tilemap: fullscreen reuses this card at fillMaxSize
 ) {
     val semantic = LocalShadcnSemantic.current
     var viewSize by remember { mutableStateOf(IntSize.Zero) }
@@ -398,9 +562,7 @@ private fun PlanMapCard(
     val outlineColor = MaterialTheme.colorScheme.outline
     val legendBg = MaterialTheme.colorScheme.surface
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(220.dp)
+        modifier = modifier
             .onSizeChanged { viewSize = it }
     ) {
         if (points.isEmpty()) {
@@ -649,6 +811,8 @@ private fun LogDrawer(
     state: MainViewModel.RunDashboardUiState,
     logs: List<String>,
     selfHealConfig: SelfHealConfig,
+    mapTilesEnabled: Boolean,
+    onSetMapTilesEnabled: (Boolean) -> Unit,
     onOpenPlan: () -> Unit,
     onOpenProviders: () -> Unit,
     onResetPlan: () -> Unit,
@@ -782,13 +946,14 @@ private fun LogDrawer(
                         }
                     }
                 }
-                // —— 自愈三开关（v1；同一 DataStore，引擎实时读取） ——
+                // —— 自愈三开关（v1；同一 DataStore，引擎实时读取） + 瓦片底图开关（T-tilemap） ——
                 item {
                     ShadcnCard(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             SwitchRow("Attempt 看门狗（僵死尝试自动收尾）", selfHealConfig.attemptWatchdogEnabled, onSetAttemptWatchdog)
                             SwitchRow("坐标校验（配额入账前核对档案/计划）", selfHealConfig.coordinateGuardEnabled, onSetCoordinateGuard)
                             SwitchRow("服务重连自动恢复（服务被回收后自动 Resume）", selfHealConfig.serviceReconnectAutoResumeEnabled, onSetServiceAutoResume)
+                            SwitchRow("瓦片真实底图（关闭回退抽象地图）", mapTilesEnabled, onSetMapTilesEnabled)
                         }
                     }
                 }

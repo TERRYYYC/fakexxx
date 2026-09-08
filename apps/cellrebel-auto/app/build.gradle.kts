@@ -165,6 +165,13 @@ dependencies {
     // DataStore for config persistence
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    // Tile map (T-tilemap, 2026-09-08): osmdroid 6.1.20 — the latest stable raster
+    // tile engine (Maven Central). Deliberately chosen over MapLibre (raster need
+    // only, smaller footprint, swappable tile source — full rationale on
+    // OsmTileSource / TilePlanMapCard). Its AAR declares NO permissions; the host
+    // app adds INTERNET + ACCESS_NETWORK_STATE only (see AndroidManifest.xml).
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // Unit tests (F001 baseline)
