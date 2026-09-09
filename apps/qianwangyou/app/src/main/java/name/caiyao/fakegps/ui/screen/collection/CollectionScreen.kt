@@ -17,7 +17,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Download
@@ -59,7 +58,6 @@ import name.caiyao.fakegps.data.importer.ProfileImportTemplate
 @Composable
 fun CollectionScreen(
     onEditProfile: (id: Long, lat: Double, lon: Double) -> Unit,
-    onBack: () -> Unit,
     vm: CollectionViewModel = viewModel(),
 ) {
     val profiles by vm.profiles.collectAsState()
@@ -106,13 +104,10 @@ fun CollectionScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
+            // #139：档案页升为底栏顶层 tab（状态中心/档案/设置）——顶层页没有返回箭头，
+            // 系统返回 = 回状态中心（见 QwyBottomNav 返回栈矩阵）。
             TopAppBar(
                 title = { Text("收藏档案 (${profiles.size})") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
                 actions = {
                     val importBusy = importState is ProfileImportUiState.Parsing ||
                         importState is ProfileImportUiState.Importing

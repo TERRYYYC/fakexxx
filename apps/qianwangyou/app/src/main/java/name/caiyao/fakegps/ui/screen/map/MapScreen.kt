@@ -20,28 +20,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Bookmarks
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -49,7 +39,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -82,19 +71,14 @@ import org.osmdroid.views.overlay.ScaleBarOverlay
 fun MapScreen(
     onOpenStatusCenter: () -> Unit,
     onAddProfile: (lat: Double, lon: Double) -> Unit,
-    onOpenCollection: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenVerify: () -> Unit,
     vm: MapViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     val tapped by vm.tappedPoint.collectAsState()
     val profiles by vm.profiles.collectAsState()
-    val count by vm.profileCount.collectAsState()
 
     var showSearchDialog by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -114,82 +98,27 @@ fun MapScreen(
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        gesturesEnabled = false,
-        drawerContent = {
-                ModalDrawerSheet {
-                    Text(
-                        text = "FakeGPS",
-                        style = MaterialTheme.typography.headlineMedium,
-                        modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
-                    )
-                    // T11b：状态中心是默认落地页，从任何抽屉都要能回去。
-                    NavigationDrawerItem(
-                        icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                        label = { Text("状态中心") },
-                        selected = false,
-                        onClick = {
-                            scope.launch { drawerState.close() }
-                            onOpenStatusCenter()
-                        },
-                    )
-                    NavigationDrawerItem(
-                    icon = {
-                        BadgedBox(badge = {
-                            if (count > 0) Badge { Text("$count") }
-                        }) {
-                            Icon(Icons.Default.Bookmarks, contentDescription = null)
-                        }
-                    },
-                    label = { Text("收藏档案") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenCollection()
-                    },
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text("设置") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenSettings()
-                    },
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
-                    label = { Text("验证") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenVerify()
-                    },
-                )
-            }
+    // #139：地图降为状态中心的子页（从状态中心进）——抽屉删除，返回箭头=回状态中心。
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = { Text("FakeGPS") },
+                navigationIcon = {
+                    IconButton(onClick = onOpenStatusCenter) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回状态中心")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showSearchDialog = true }) {
+                        Icon(Icons.Default.Search, contentDescription = "搜索")
+                    }
+                    IconButton(onClick = { showClearDialog = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "清空")
+                    }
+                },
+            )
         },
-    ) {
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            topBar = {
-                TopAppBar(
-                    title = { Text("FakeGPS") },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "菜单")
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = { showSearchDialog = true }) {
-                            Icon(Icons.Default.Search, contentDescription = "搜索")
-                        }
-                        IconButton(onClick = { showClearDialog = true }) {
-                            Icon(Icons.Default.Delete, contentDescription = "清空")
-                        }
-                    },
-                )
-            },
             floatingActionButton = {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -240,7 +169,6 @@ fun MapScreen(
                 )
             }
         }
-    }
 
     // Search dialog
     if (showSearchDialog) {
