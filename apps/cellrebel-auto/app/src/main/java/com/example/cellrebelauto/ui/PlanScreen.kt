@@ -552,7 +552,6 @@ fun PlanScreen(
 
         // #139（v3 底栏：运行台/计划/Provider）：History 不再占底栏，从计划页进——
         // 系统返回=回运行台（BackHandler 矩阵在 MainApp/AutoBottomNav）。
-        // Rebase note: fix/135 也改本文件（放弃计划入口）——机械合并即可。
         item {
             OutlinedButton(
                 onClick = onOpenHistory,

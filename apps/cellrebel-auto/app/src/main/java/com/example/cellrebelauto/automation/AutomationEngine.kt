@@ -568,7 +568,6 @@ class AutomationEngine(
                 // the terminal-admission decision and the CAS anchor persisted below; never discover
                 // again between admission and attempt creation.
                 val aplusAnchorProjection = if (aplusCoord != null && aplusEvidenceSrc != null) {
-                    // Rebase note: main's discoverAttemptAnchor supersedes T4's
                     // rediscoverAttemptAnchor — it adds the bound-schedule pinning
                     // checks (#103-era) on top of the same protocol/exhausted/
                     // completeness fail-closes, and the watchdog reuses its result.
@@ -706,7 +705,6 @@ class AutomationEngine(
                         // terminal was already rejected before durable attempt admission above;
                         // exhausted=null remains compatible, but never acts as a wildcard for the
                         // identity tuple.
-                        // Rebase note: T4's denyPreflightAndPause extraction kept, extended
                         // with main's bound-schedule diagnostic branch (#103-era) so the
                         // operator-facing "why" is byte-identical to main's inline version.
                         denyPreflightAndPause(attemptId, plan, preflight, anchorProjection)
@@ -1269,7 +1267,6 @@ class AutomationEngine(
 
     /**
      * Fresh attempt anchor; a cooldown-time pointer change pauses instead of retargeting silently.
-     * Rebase note: T4's parallel rediscoverAttemptAnchor was superseded by this main version —
      * it adds the bound-schedule pinning checks on top of the same protocol/exhausted/
      * completeness fail-closes, and the watchdog race reuses its result.
      */
@@ -2881,7 +2878,6 @@ class AutomationEngine(
      */
     private suspend fun recordUnverifiedNegative(
         attemptId: Long,
-        // Rebase note: main's single-parameter signature wins — the merged
         // transitionToRecoveryRequired wrapper carries T4's recoveryReason into
         // planRepository.transitionToRecoveryRequired separately, so the plain
         // negative-record needs only the unverified reason.

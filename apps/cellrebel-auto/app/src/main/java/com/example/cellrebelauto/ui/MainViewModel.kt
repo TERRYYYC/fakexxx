@@ -462,7 +462,6 @@ class MainViewModel @JvmOverloads constructor(
 
     // # T7 P1.1：运行台是首页；#139：底栏=运行台/计划/Provider（v3），History 收进
     // 计划页作子页。单状态天然单顶：tab 互切不堆栈，返回矩阵见 AutoBottomNav。
-    // Rebase note: fix/135 改本 VM 的导入/放弃计划区，与导航无关——机械合并即可。
     private val _currentScreen = MutableStateFlow(Screen.RUN)
     val currentScreen: StateFlow<Screen> = _currentScreen
 

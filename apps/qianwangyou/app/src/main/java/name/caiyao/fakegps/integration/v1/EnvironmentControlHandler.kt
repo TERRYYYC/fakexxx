@@ -117,7 +117,6 @@ class EnvironmentControlHandler(
             environmentRevision = snap.revision,
             // P0.1-5: the provider's profile collection is the source of truth Auto's
             // plan↔profile consistency check reads over the existing discover channel.
-            // Rebase note: #105 shipped the equivalent projection as profileRefsSnapshot();
             // T2 adopts the merged interface instead of its parallel profileRefs().
             profileRefs = environment.profileRefsSnapshot(),
             scheduleRefs = if (schedule != null) listOf(schedule.scheduleId) else emptyList(),

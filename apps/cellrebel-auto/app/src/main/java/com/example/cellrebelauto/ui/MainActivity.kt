@@ -131,9 +131,7 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                                     onOpenRun = { vm.navigateTo(Screen.RUN) },
                                     onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
                                     // #12：计划重置入口（provider 侧命令文本供确认框复制）
-                                    // Rebase note: T3's plan-reset entry rides inside main's
                                     // CutoverSafSurface + double CutoverDataBoundary wrapper.
-                                    // Rebase note (#139): fix/135 also adds an arg here
                                     // (onAbandonPlan) — re-add it mechanically on merge.
                                     onResetPlan = { vm.resetPlan() },
                                     // #135：放弃当前计划入口（确认框在 PlanScreen 内）
