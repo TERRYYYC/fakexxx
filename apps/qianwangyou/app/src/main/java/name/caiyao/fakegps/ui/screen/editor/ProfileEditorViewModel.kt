@@ -143,7 +143,11 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                 val errors = ProfileFieldDraft.validationErrors(values)
                 _fieldErrors.value = errors
                 if (errors.isNotEmpty()) {
-                    _notice.value = "有 ${errors.size} 个字段格式无效，尚未保存"
+                    // #129: 校验失败发生在任何写库之前 —— 文案如实说"尚未保存"。
+                    _notice.value = saveFailureNotice(
+                        SaveFailureCause.FIELD_VALIDATION,
+                        errorCount = errors.size,
+                    )
                     return@launch
                 }
                 runCatching {
@@ -154,12 +158,17 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                     when (postSaveAction(result.published, thenVerify)) {
                         PostSaveAction.VERIFY -> _verifyRequested.value = true
                         PostSaveAction.BACK -> _saved.value = true
+                        // #129: saveAndVerify 先写库后发布，走到这里说明档案【已保存】、
+                        // 只是发布不可达（车道 Vector 模块未启用/hook 未生效）。文案必须如实
+                        // 说"已保存"并给出路（稍后验证 / 下方「仅保存」重试发布）。
                         PostSaveAction.STAY ->
-                            _notice.value =
-                                "档案已写入数据库，但未发布给 Hook；当前目标 App 仍使用上一份配置"
+                            _notice.value = saveFailureNotice(SaveFailureCause.PUBLISH_UNREACHABLE)
                     }
                 }.onFailure { failure ->
-                    _notice.value = "保存失败：${failure.message ?: failure.javaClass.simpleName}"
+                    _notice.value = saveFailureNotice(
+                        SaveFailureCause.WRITE_FAILED,
+                        reason = failure.message ?: failure.javaClass.simpleName,
+                    )
                 }
             } finally {
                 // This gate belongs to this ViewModel. The default viewModelScope dispatcher is

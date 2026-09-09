@@ -25,7 +25,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -115,12 +114,15 @@ fun ProfileEditorScreen(
                         .padding(bottom = 12.dp)
                         .alpha(if (saving) 0.5f else 1f),
                 )
-                FloatingActionButton(
+                // #129: 失败提示指向「点下方『仅保存』」，所以这个纯保存入口必须可见、可读 ——
+                // 曾经只是个无文字的保存图标，提示里的出路用户根本找不到。仅保存 = 只写库+
+                // 尝试发布，不跳验证页（发布失败时留在本页，可当作重试发布的出路）。
+                ExtendedFloatingActionButton(
                     onClick = { if (!saving) vm.save() },
+                    text = { Text("仅保存") },
+                    icon = { Icon(Icons.Default.Save, contentDescription = null) },
                     modifier = Modifier.alpha(if (saving) 0.5f else 1f),
-                ) {
-                    Icon(Icons.Default.Save, contentDescription = "保存")
-                }
+                )
             }
         },
     ) { innerPadding ->

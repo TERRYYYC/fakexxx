@@ -68,7 +68,9 @@ fun CollectionScreen(
     val templateSaveState by vm.templateSaveState.collectAsState()
     val downloadCandidates by vm.downloadCandidates.collectAsState()
     val activationNotice by vm.activationNotice.collectAsState()
-    var showClearDialog by remember { mutableStateOf(false) }
+    // #129: 清空对话框改由 ViewModel 两步闸门驱动 —— 点图标只挂起请求（pendingClearAll），
+    // 确认才执行；误触（清空与相邻导入图标相距很近）最多打开对话框，不可能直接清库。
+    val pendingClearAll by vm.pendingClearAll.collectAsState()
     var deleteTarget by remember { mutableStateOf<ProfileSummary?>(null) }
     var anchorTarget by remember { mutableStateOf<ProfileSummary?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -136,7 +138,7 @@ fun CollectionScreen(
                         Icon(Icons.Default.FileUpload, contentDescription = "导入 CSV/Excel")
                     }
                     if (profiles.isNotEmpty()) {
-                        IconButton(onClick = { showClearDialog = true }) {
+                        IconButton(onClick = vm::requestClearAll) {
                             Icon(Icons.Default.DeleteSweep, contentDescription = "清空")
                         }
                     }
@@ -237,20 +239,24 @@ fun CollectionScreen(
         )
     }
 
-    // Delete all
-    if (showClearDialog) {
+    // Delete all — #129: 两步确认的确认框（请求由 vm.requestClearAll 挂起，确认才删）。
+    if (pendingClearAll) {
         AlertDialog(
-            onDismissRequest = { showClearDialog = false },
+            onDismissRequest = vm::cancelClearAll,
             title = { Text("清空所有档案") },
-            text = { Text("删除全部 ${profiles.size} 个档案？此操作不可撤销。") },
+            text = {
+                Text(
+                    "将删除全部 ${profiles.size} 个档案。" +
+                        "生效中档案与发布配置将被清除，不可恢复。",
+                )
+            },
             confirmButton = {
-                TextButton(onClick = {
-                    vm.deleteAll()
-                    showClearDialog = false
-                }) { Text("确定") }
+                TextButton(onClick = vm::confirmClearAll) {
+                    Text("清空", color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
-                TextButton(onClick = { showClearDialog = false }) { Text("取消") }
+                TextButton(onClick = vm::cancelClearAll) { Text("取消") }
             },
         )
     }
