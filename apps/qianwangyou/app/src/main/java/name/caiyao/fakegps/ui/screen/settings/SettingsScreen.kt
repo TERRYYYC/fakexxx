@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -35,13 +37,17 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -58,6 +64,10 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
+    // T11c: true when the fakexxx-map://pending deep link landed here — the Auto 协作
+    // pairing area is scrolled into view and highlighted so the "待批准的 Auto" todo
+    // is the first thing the operator sees.
+    highlightPendingPairing: Boolean = false,
     vm: SettingsViewModel = viewModel(),
 ) {
     val spoofMode by vm.spoofMode.collectAsState()
@@ -145,6 +155,23 @@ fun SettingsScreen(
     val bundleImportUi by vm.bundleImportUi.collectAsState()
     val bundleConflictPending by vm.bundleConflictPending.collectAsState()
 
+    // T11c: the pairing area's anchor — when the deep link lands here, scroll the
+    // Auto 协作 section into view once it has been measured.
+    val listScrollState = rememberScrollState()
+    var pairingSectionTopPx by remember { mutableStateOf<Int?>(null) }
+    val currentPairingSectionTop by rememberUpdatedState(pairingSectionTopPx)
+    LaunchedEffect(highlightPendingPairing) {
+        if (!highlightPendingPairing) return@LaunchedEffect
+        var waitedMs = 0
+        while (currentPairingSectionTop == null && waitedMs < 2000) {
+            kotlinx.coroutines.delay(50)
+            waitedMs += 50
+        }
+        currentPairingSectionTop?.let { top ->
+            listScrollState.animateScrollTo(top.coerceAtLeast(0))
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -161,7 +188,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(listScrollState),
         ) {
             // A setting that was persisted but never reached the hook must say so: the preference
             // is kept, but presenting it as in effect would reproduce the exact "changed it and
@@ -309,44 +336,68 @@ fun SettingsScreen(
             // --- 模块（v5 注册开关；独立 composable，避免碰既有区块） ---
             ModulesSection(vm)
 
-            SectionHeader("Auto 协作")
-            environmentControlMessage?.let { message ->
-                ListItem(
-                    headlineContent = { Text(message) },
-                    trailingContent = {
-                        TextButton(onClick = vm::dismissEnvironmentControlMessage) { Text("关闭") }
-                    },
-                )
-            }
-            ListItem(
-                headlineContent = { Text("待批准的 Auto") },
-                supportingContent = {
-                    Text(
-                        if (pendingCallers.isEmpty())
-                            "先在 Auto 发起一次运行，再回来刷新并核对调用方身份"
-                        else "只批准你确认安装的 applicationId 与完整签名摘要",
+            // --- Auto 协作 ---
+            // T11c: the fakexxx-map://pending anchor — when the deep link lands here the
+            // whole pairing section (待批准的 Auto list included) is scrolled into view and
+            // tinted so the operator's eye lands on the todo. Pure presentation.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (highlightPendingPairing) {
+                            Modifier
+                                .background(
+                                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.35f),
+                                    RoundedCornerShape(12.dp),
+                                )
+                                .padding(vertical = 4.dp)
+                        } else {
+                            Modifier
+                        }
                     )
-                },
-                trailingContent = {
-                    TextButton(onClick = vm::refreshPendingCallers) { Text("刷新") }
-                },
-            )
-            pendingCallers.forEach { candidate ->
+                    .onGloballyPositioned { coordinates ->
+                        pairingSectionTopPx = coordinates.positionInParent().y.roundToInt()
+                    },
+            ) {
+                SectionHeader("Auto 协作")
+                environmentControlMessage?.let { message ->
+                    ListItem(
+                        headlineContent = { Text(message) },
+                        trailingContent = {
+                            TextButton(onClick = vm::dismissEnvironmentControlMessage) { Text("关闭") }
+                        },
+                    )
+                }
                 ListItem(
-                    headlineContent = { Text(candidate.callerApplicationId) },
+                    headlineContent = { Text("待批准的 Auto") },
                     supportingContent = {
-                        Text("签名：${candidate.currentSignerDigest}\n版本：${candidate.observedVersionCode ?: "未知"}")
+                        Text(
+                            if (pendingCallers.isEmpty())
+                                "先在 Auto 发起一次运行，再回来刷新并核对调用方身份"
+                            else "只批准你确认安装的 applicationId 与完整签名摘要",
+                        )
                     },
                     trailingContent = {
-                        TextButton(onClick = { callerToApprove = candidate }) { Text("批准") }
+                        TextButton(onClick = vm::refreshPendingCallers) { Text("刷新") }
                     },
                 )
+                pendingCallers.forEach { candidate ->
+                    ListItem(
+                        headlineContent = { Text(candidate.callerApplicationId) },
+                        supportingContent = {
+                            Text("签名：${candidate.currentSignerDigest}\n版本：${candidate.observedVersionCode ?: "未知"}")
+                        },
+                        trailingContent = {
+                            TextButton(onClick = { callerToApprove = candidate }) { Text("批准") }
+                        },
+                    )
+                }
+                ListItem(
+                    headlineContent = { Text("重新运行已完成日程") },
+                    supportingContent = { Text("仅在日程已完成且没有未释放环境时，创建 generation+1 并回到第一项") },
+                    modifier = Modifier.clickable { showRestartConfirmation = true },
+                )
             }
-            ListItem(
-                headlineContent = { Text("重新运行已完成日程") },
-                supportingContent = { Text("仅在日程已完成且没有未释放环境时，创建 generation+1 并回到第一项") },
-                modifier = Modifier.clickable { showRestartConfirmation = true },
-            )
             HorizontalDivider()
 
             // --- 外观 ---

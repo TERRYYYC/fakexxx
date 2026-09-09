@@ -2,6 +2,7 @@ package name.caiyao.fakegps.ui.navigation
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.navigation.NavBackStackEntry
@@ -17,9 +18,20 @@ import name.caiyao.fakegps.ui.screen.statuscenter.StatusCenterScreen
 import name.caiyao.fakegps.ui.screen.verify.VerifyScreen
 
 @Composable
-fun AppNavGraph(navController: NavHostController) {
-    // T11b：状态中心是默认落地页；地图/档案/设置/验证全部保留，从抽屉可达。
-    NavHost(navController = navController, startDestination = Screen.StatusCenter) {
+fun AppNavGraph(
+    navController: NavHostController,
+    // T11c: fakexxx-map://pending lands straight on the settings page with the
+    // pairing area scrolled into view and highlighted. The status center STAYS the
+    // startDestination (T11b) — Settings is pushed on top of it (see below) — so the
+    // back stack is valid in every entry path: Settings' popBackStack() always has a
+    // destination to land on, and Map's popBackStack(StatusCenter) can never hit a
+    // status center that is missing from the stack.
+    startOnPendingPairing: Boolean = false,
+) {
+    NavHost(
+        navController = navController,
+        startDestination = Screen.StatusCenter,
+    ) {
         composable<Screen.StatusCenter> { entry ->
             val navigation = entry.rememberNavigationActionGuard()
             StatusCenterScreen(
@@ -122,6 +134,8 @@ fun AppNavGraph(navController: NavHostController) {
                         navController.popBackStack()
                     }
                 },
+                // T11c: deep-link landing highlights the 待批准的 Auto pairing area.
+                highlightPendingPairing = startOnPendingPairing,
             )
         }
         composable<Screen.Verify> { entry ->
@@ -133,6 +147,16 @@ fun AppNavGraph(navController: NavHostController) {
                     }
                 },
             )
+        }
+    }
+
+    // T11c deep-link landing: push Settings ON TOP of the status center (never as the
+    // startDestination — see the parameter KDoc). launchSingleTop keeps an activity
+    // recreation (rotation / process restore) from stacking a second Settings entry
+    // when the restored back stack already shows it.
+    LaunchedEffect(startOnPendingPairing) {
+        if (startOnPendingPairing) {
+            navController.navigate(Screen.Settings) { launchSingleTop = true }
         }
     }
 }

@@ -61,6 +61,11 @@ fun ProviderApprovalScreen(
     onRevokeDismissed: () -> Unit = {},
     revokeImpactNotice: String? = null,
     onRevokeNoticeDismissed: () -> Unit = {},
+    // T11c: the reverse-direction todo bar ("对方（QWY）还未批准我方") + the one-tap
+    // jump into QWY's pending-approval section (fakexxx-map://pending). Pure render —
+    // the projection lives in PeerApprovalTodoBar.project.
+    peerApprovalTodo: PeerApprovalTodoBar? = null,
+    onOpenPeerApproval: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // # Issue #10：不可逆撤销必须经确认对话框；撤销后以横幅说明引擎影响
@@ -88,6 +93,39 @@ fun ProviderApprovalScreen(
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
             Text("Provider 管理", style = MaterialTheme.typography.titleMedium)
             OutlinedButton(onClick = onBack) { Text("返回") }
+        }
+
+        // T11c: 页顶待办条 —— "对方（QWY）还未批准我方"（既有 discover 状态的盲区）。
+        // 仅待办态给跨 app 跳转按钮（导航 only）；其余状态如实说明、不给动作。
+        peerApprovalTodo?.let { todo ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (todo.isTodo) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
+                    }
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        todo.statusLine,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (todo.isTodo) {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                    if (todo.isTodo) {
+                        Button(onClick = onOpenPeerApproval) { Text(todo.actionLabel) }
+                    }
+                }
+            }
         }
 
         revokeImpactNotice?.let { notice ->

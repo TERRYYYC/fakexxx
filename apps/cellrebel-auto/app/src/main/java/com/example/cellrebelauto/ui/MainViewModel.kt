@@ -227,6 +227,9 @@ class MainViewModel @JvmOverloads constructor(
         kotlinx.coroutines.Dispatchers.IO,
     // T-tilemap (2026-09-08): the tiles-basemap switch store; tests inject a file-backed one.
     injectedMapTilesSettings: com.example.cellrebelauto.data.MapTilesSettings? = null,
+    // T11c: the peer-approval (对方是否已批准我方) discover probe; tests inject. Production =
+    // DiscoverPeerApprovalProbe (fail-closed: probe failure → null → UNKNOWN line).
+    private val peerApprovalProbe: PeerApprovalProbe? = null,
 ) : AndroidViewModel(application) {
 
     private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
@@ -293,6 +296,26 @@ class MainViewModel @JvmOverloads constructor(
 
     fun refreshProviders() {
         _providerRefreshVersion.value += 1L
+    }
+
+    // ---- T11c: 对方（QWY）是否已批准我方 —— A2 Provider 页待办条的数据源 ----
+
+    /** The discover-channel peer-approval projection; null = probe failed (UNKNOWN). */
+    private val _peerPairingStatus = MutableStateFlow<PeerPairingStatus?>(null)
+    val peerPairingStatus: StateFlow<PeerPairingStatus?> = _peerPairingStatus
+
+    /**
+     * One discover handshake on IO — the SAME channel the health lamps ride —
+     * projected into [PeerPairingStatus]. Never throws; a failed probe is the
+     * UNKNOWN line, never a crash, never a guessed todo. Suspending so tests
+     * (runTest) await the probe deterministically instead of racing real IO.
+     */
+    suspend fun refreshPeerApproval() {
+        val probe = peerApprovalProbe ?: DiscoverPeerApprovalProbe(getApplication())
+        val result = withContext(Dispatchers.IO) {
+            runCatching { probe.probe() }.getOrNull()
+        }
+        _peerPairingStatus.value = PeerPairingStatus.fromHandshake(result)
     }
 
     private suspend fun loadProviderEntriesUnderLease(): List<ProviderEntry> {

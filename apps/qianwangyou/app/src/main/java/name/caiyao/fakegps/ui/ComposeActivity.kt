@@ -8,6 +8,7 @@ import androidx.navigation.compose.rememberNavController
 import name.caiyao.fakegps.probe.DebugHookProbeController
 import name.caiyao.fakegps.mockprovider.MockProviderRuntime
 import name.caiyao.fakegps.ui.navigation.AppNavGraph
+import name.caiyao.fakegps.ui.navigation.MapDeepLink
 import name.caiyao.fakegps.ui.theme.FakeGpsTheme
 
 class ComposeActivity : ComponentActivity() {
@@ -21,6 +22,11 @@ class ComposeActivity : ComponentActivity() {
         // This is the REAL launcher entry point; the legacy SplashActivity is never opened.
         name.caiyao.fakegps.config.ConfigPrefsSync.sync(applicationContext)
         MockProviderRuntime.reconcileOnAppLaunch(applicationContext)
+
+        // T11c: `fakexxx-map://pending` (from Auto's Provider page) lands straight on the
+        // settings page anchored onto the pairing area. Navigation only — the URI becomes
+        // a (destination, anchor) pair and nothing else is read from it.
+        val deepLinkRoute = MapDeepLink.route(intent)
 
         // Read-back probe, DEBUG builds only: logs what this (self-hooked) process observes through
         // the public Android APIs, so scripts/test-hook.sh can assert the whole chain with no
@@ -38,7 +44,10 @@ class ComposeActivity : ComponentActivity() {
                 // 主动弹标准运行时权限申请（代替 adb pm grant）；拒绝后由设置页权限卡重试。
                 name.caiyao.fakegps.ui.onboarding.FirstLaunchPermissionGate {
                     val navController = rememberNavController()
-                    AppNavGraph(navController = navController)
+                    AppNavGraph(
+                        navController = navController,
+                        startOnPendingPairing = deepLinkRoute != null,
+                    )
                 }
             }
         }
