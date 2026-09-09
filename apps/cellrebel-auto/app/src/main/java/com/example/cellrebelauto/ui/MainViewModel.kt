@@ -67,9 +67,12 @@ data class PlanUiState(
     // # 已验证成功总数（计划级进度）——可信计数求和，不读 legacy 列
     val completedSuccesses: Int get() = trustedCounts.values.sum()
 
-    // # 计划未完成：存在未 completed 的任务
+    // # 计划未完成：存在未 completed 且未 cancelled 的任务。
+    // # #135：放弃把剩余任务置 cancelled（既有任务状态字符串词汇，不造新枚举）——
+    // # 全 completed/cancelled 的计划不再挡导入，导入保护不再是死墙
     val isUnfinished: Boolean
-        get() = plan != null && tasks.isNotEmpty() && tasks.any { it.status != "completed" }
+        get() = plan != null && tasks.isNotEmpty() &&
+            tasks.any { it.status != "completed" && it.status != "cancelled" }
 
     // # 计划已启动过：有非 pending 任务或已有尝试记录
     val isStarted: Boolean
@@ -78,6 +81,15 @@ data class PlanUiState(
     // # 计划全部完成
     val isComplete: Boolean
         get() = plan != null && tasks.isNotEmpty() && tasks.all { it.status == "completed" }
+
+    /**
+     * #135：计划已放弃——既非完成也非未完成（存在 cancelled 且无活跃任务）。
+     * Plan 页据此显示"已放弃、可导入新 CSV"的终态，而不是无声地卡住。
+     */
+    val isAbandoned: Boolean
+        get() = plan != null && tasks.isNotEmpty() && !isComplete &&
+            tasks.all { it.status == "completed" || it.status == "cancelled" } &&
+            tasks.any { it.status == "cancelled" }
 
     /**
      * #12：重置入口可见性 —— 计划已全部完成，或存在 RECOVERY_REQUIRED 终态死尝试
@@ -230,6 +242,10 @@ class MainViewModel @JvmOverloads constructor(
     // T11c: the peer-approval (对方是否已批准我方) discover probe; tests inject. Production =
     // DiscoverPeerApprovalProbe (fail-closed: probe failure → null → UNKNOWN line).
     private val peerApprovalProbe: PeerApprovalProbe? = null,
+    // #135: engine-liveness seam for the replacement routing — the abandon fallback is
+    // only taken while the engine is NOT live (or after the stop coordinator joined the
+    // engine job); tests inject to drive both branches. Production reads the service flow.
+    private val runningProbe: () -> Boolean = { AutomationService.isRunning.value },
 ) : AndroidViewModel(application) {
 
     private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
@@ -798,11 +814,12 @@ class MainViewModel @JvmOverloads constructor(
                         commitVerifiedReplacement(status.proof)
                     }
                     is SupersessionStopStatus.Blocked -> {
-                        if (status.requestId != activeRequestId) return@collect
+                        if (status.requestId != activeReplacementStopRequestId) return@collect
                         activeReplacementStopRequestId = null
-                        _isImportReplacementStopping.value = false
-                        _importNotice.value =
-                            "Current plan could not be safely stopped (${status.reason}); review and retry"
+                        // #135: a blocked safe stop must NOT dead-end the replacement.
+                        // The coordinator has already joined the engine job at this point,
+                        // so the same single confirmation falls back to abandon+import.
+                        fallbackToAbandonReplacement()
                     }
                     SupersessionStopStatus.Idle -> Unit
                 }
@@ -994,7 +1011,14 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    /** Commits a validated replacement only after the Plan screen's explicit confirmation. */
+    /**
+     * Commits a validated replacement only after the Plan screen's explicit confirmation.
+     * ONE confirmation completes the whole replacement (#135): with the engine live it
+     * rides the EXISTING #97 stop-proof machinery; while the engine is NOT live (the
+     * paused/crashed field case) it abandons the remaining tasks and imports in one
+     * transaction — the a11y stop round trip is never a precondition again. A blocked
+     * or stale stop proof falls back to the same abandon semantics instead of dead-ending.
+     */
     fun confirmImportReplacement() {
         if (activeReplacementConfirmationId != null || activeReplacementStopRequestId != null) return
         val proposal = _importProposal.value ?: return
@@ -1024,14 +1048,17 @@ class MainViewModel @JvmOverloads constructor(
                             checkPlanProfileConsistency(proposal.rows.size)
                         }
                         is PlanRepository.SupersedingImportResult.ActiveSession -> {
-                            requestSupersessionStop(proposal, result.sessionId)
+                            if (runningProbe()) requestSupersessionStop(proposal, result.sessionId)
+                            else abandonAndImportReplacementUnderLease(proposal)
                         }
                         is PlanRepository.SupersedingImportResult.StopVerificationRequired -> {
-                            requestSupersessionStop(proposal, result.sessionId)
+                            if (runningProbe()) requestSupersessionStop(proposal, result.sessionId)
+                            else abandonAndImportReplacementUnderLease(proposal)
                         }
                         PlanRepository.SupersedingImportResult.StaleStopProof -> {
-                            _importNotice.value =
-                                "The stopped plan changed; verify it again before replacing it"
+                            // #135: no "verify it again" dead end — same confirmation falls
+                            // back to abandon+import (plan state re-guarded in-transaction).
+                            abandonAndImportReplacementUnderLease(proposal)
                         }
                         PlanRepository.SupersedingImportResult.StalePlan -> {
                             _importProposal.value = null
@@ -1050,6 +1077,63 @@ class MainViewModel @JvmOverloads constructor(
                         _isImportReplacementStopping.value = false
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * #135: the stop-proof path's guaranteed exit. When the safe stop cannot be proven
+     * (service off, non-convergent A+ owner, stale proof), the SAME single confirmation
+     * completes via the abandon semantics — the coordinator has already joined the
+     * engine job whenever this runs, so the durable abandon+import is safe.
+     */
+    private fun fallbackToAbandonReplacement() {
+        val proposal = _importProposal.value
+        if (proposal == null) {
+            _isImportReplacementStopping.value = false
+            return
+        }
+        _isImportReplacementStopping.value = true
+        viewModelScope.launch {
+            try {
+                val access = accessGate.withNormalAccess {
+                    abandonAndImportReplacementUnderLease(proposal)
+                }
+                if (access is CutoverAccessResult.Unavailable) {
+                    _importNotice.value =
+                        "Replacement paused while data is unavailable (${access.reason})"
+                }
+            } finally {
+                _isImportReplacementStopping.value = false
+            }
+        }
+    }
+
+    /** The abandon+import half of #135; caller must hold the data lease. */
+    private suspend fun abandonAndImportReplacementUnderLease(proposal: ImportProposal) {
+        when (val result = withContext(Dispatchers.IO) {
+            planRepository.confirmSupersedingImportAfterAbandon(
+                expectedOldPlanId = proposal.expectedOldPlanId,
+                sourceFileName = proposal.sourceFileName,
+                globalBufferSeconds = proposal.globalBufferSeconds,
+                rows = proposal.rows,
+                importedAt = System.currentTimeMillis(),
+                supersededAt = System.currentTimeMillis()
+            )
+        }) {
+            is PlanRepository.SupersedingImportResult.Imported -> {
+                _importProposal.value = null
+                _importNotice.value =
+                    "Archived ${proposal.oldSourceFileName} — remaining task(s) cancelled; " +
+                        "imported ${proposal.sourceFileName}"
+                checkPlanProfileConsistency(proposal.rows.size)
+            }
+            PlanRepository.SupersedingImportResult.StalePlan -> {
+                _importProposal.value = null
+                _importNotice.value = "Current plan changed; review the CSV again before replacing it"
+            }
+            else -> {
+                _importNotice.value = "Replacement could not be completed; review and retry"
             }
         }
     }
@@ -1104,7 +1188,12 @@ class MainViewModel @JvmOverloads constructor(
                     "Archived ${proposal.oldSourceFileName}; imported ${proposal.sourceFileName}"
                 checkPlanProfileConsistency(proposal.rows.size)
             }
-            PlanRepository.SupersedingImportResult.StaleStopProof,
+            PlanRepository.SupersedingImportResult.StaleStopProof -> {
+                // #135: the proof went stale (durable state moved under it) — the same
+                // confirmation falls back to abandon+import instead of a verify-again
+                // dead end. The engine job is already joined on this path.
+                abandonAndImportReplacementUnderLease(proposal)
+            }
             is PlanRepository.SupersedingImportResult.ActiveSession,
             is PlanRepository.SupersedingImportResult.StopVerificationRequired -> {
                 _importNotice.value =
@@ -1184,6 +1273,38 @@ class MainViewModel @JvmOverloads constructor(
                     _importNotice.value = "Reset refused — ${outcome.reason}"
                 PlanRepository.PlanResetOutcome.NoPlan ->
                     _importNotice.value = "No plan to reset"
+            }
+        }
+    }
+
+    // ---- #135 plan-abandon（放弃当前未完成计划——导入死墙的出路） ----
+
+    /**
+     * Operator-confirmed abandon of the current unfinished plan (Plan-page entry,
+     * issue #135 option 1): remaining tasks → `cancelled`, the active session is
+     * terminalized, one PLAN_ABANDONED audit row is appended. Quota already spent
+     * stays exactly as accounted and the plan row is retained in History. After
+     * this the plan no longer counts as unfinished — a new CSV imports freely.
+     * The Plan page only offers this while the engine is not running.
+     *
+     * # 放弃当前未完成计划：剩余任务置 cancelled、终结 session、追加审计；
+     * # 已入账配额不动；放弃后计划不再"未完成"，导入畅通
+     */
+    fun abandonPlan() {
+        viewModelScope.launch {
+            _importErrors.value = emptyList()
+            when (val outcome = withContext(Dispatchers.IO) {
+                planRepository.abandonCurrentPlan()
+            }) {
+                is PlanRepository.PlanAbandonOutcome.Abandoned -> {
+                    _importNotice.value =
+                        "Plan abandoned — ${outcome.cancelledTasks} remaining task(s) " +
+                            "marked cancelled. Import a new CSV to continue."
+                }
+                PlanRepository.PlanAbandonOutcome.NoPlan ->
+                    _importNotice.value = "No plan to abandon"
+                is PlanRepository.PlanAbandonOutcome.Refused ->
+                    _importNotice.value = "Abandon refused — ${outcome.reason}"
             }
         }
     }

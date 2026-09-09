@@ -93,6 +93,8 @@ fun PlanScreen(
     onOpenProviders: () -> Unit = {},
     // #12: plan-reset entry (confirm dialog lives in this screen).
     onResetPlan: () -> Unit = {},
+    // #135: abandon-current-plan entry (confirm dialog lives in this screen).
+    onAbandonPlan: () -> Unit = {},
     providerScheduleResetCommand: String = "",
     providerPairingApprovalCommand: String = "",
     // T8 (P0.3): configuration bundle export/import (SAF launchers live in this screen).
@@ -147,20 +149,30 @@ fun PlanScreen(
     }
 
     importProposal?.let { proposal ->
+        // #135：同一次确认完成 停止（若在跑）+ 放弃剩余任务 + 导入——不再有第二层对话框，
+        // 也不再依赖无障碍 stop-proof 往返；文案明示放弃影响（x/y、剩余 N 个任务）。
+        val remaining = planState.tasks.count { it.status != "completed" && it.status != "cancelled" }
         AlertDialog(
             onDismissRequest = { if (!isImportReplacementStopping) onCancelImportReplacement() },
             title = { Text("Archive current plan and import new CSV?") },
             text = {
                 Text(
-                    "${proposal.oldSourceFileName} stays in History with its attempts, quota, " +
-                        "receipts and audit. Import ${proposal.sourceFileName} only after the " +
-                        "current plan has safely stopped."
+                    "${proposal.oldSourceFileName} is unfinished " +
+                        "(${planState.completedSuccesses}/${planState.plan?.totalRequiredSuccesses ?: 0} verified " +
+                        "successes). This ONE confirmation stops the run if active and ABANDONS the " +
+                        "remaining $remaining task(s) — they are marked cancelled and the run session " +
+                        "is closed — then imports ${proposal.sourceFileName}. The old plan stays in " +
+                        "History with its attempts, quota, receipts and audit."
                 )
             },
             confirmButton = {
                 Button(
                     onClick = onConfirmImportReplacement,
-                    enabled = !isImportReplacementStopping
+                    enabled = !isImportReplacementStopping,
+                    // 破坏性确认（放弃剩余任务）用红色键
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
                 ) {
                     Text(if (isImportReplacementStopping) "Stopping Safely…" else "Stop Safely & Import")
                 }
@@ -176,6 +188,8 @@ fun PlanScreen(
 
     // #12：重置确认对话框开关
     var showResetDialog by remember { mutableStateOf(false) }
+    // #135：放弃当前计划确认对话框开关
+    var showAbandonDialog by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = Modifier
@@ -471,6 +485,15 @@ fun PlanScreen(
                         Text("⏸ Resume Plan", modifier = Modifier.padding(vertical = 8.dp))
                     }
                 }
+                // #135：计划已放弃（剩余任务全 cancelled）——终态提示，导入新 CSV 畅通
+                planState.isAbandoned -> {
+                    Text(
+                        "Plan abandoned — remaining tasks were cancelled. " +
+                            "Import a new CSV to continue.",
+                        color = Color.Gray,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
                 // # 计划已全部完成
                 planState.isComplete -> {
                     Text(
@@ -478,6 +501,22 @@ fun PlanScreen(
                         color = Color(0xFF4CAF50),
                         fontWeight = FontWeight.Medium
                     )
+                }
+            }
+        }
+
+        // #135：放弃当前计划入口——未完成且未在运行时可见（运行中先 Stop），
+        // 让"未完成计划"永远有出路，导入保护不再成为死墙
+        if (planState.isUnfinished && !isRunning) {
+            item {
+                OutlinedButton(
+                    onClick = { showAbandonDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Abandon plan", modifier = Modifier.padding(vertical = 8.dp))
                 }
             }
         }
@@ -524,6 +563,38 @@ fun PlanScreen(
                 }
             }
         }
+    }
+
+    // #135：放弃确认框——明示影响（x/y、剩余 N 个任务将标记取消），确认键红色破坏性样式
+    if (showAbandonDialog) {
+        val remaining = planState.tasks.count { it.status != "completed" && it.status != "cancelled" }
+        AlertDialog(
+            onDismissRequest = { showAbandonDialog = false },
+            title = { Text("Abandon current plan?") },
+            text = {
+                Text(
+                    "${planState.plan?.sourceFileName ?: "This plan"} is unfinished " +
+                        "(${planState.completedSuccesses}/${planState.plan?.totalRequiredSuccesses ?: 0} verified " +
+                        "successes). Abandoning marks the remaining $remaining task(s) as CANCELLED " +
+                        "and closes the run session. Verified successes, attempts and quota already " +
+                        "spent stay in History. You can import a new CSV right after."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAbandonDialog = false
+                        onAbandonPlan()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("Abandon Plan") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showAbandonDialog = false }) { Text("Keep Plan") }
+            }
+        )
     }
 
     // #12：重置确认框——说清三件事：同清单重建、provider 侧需另跑 schedule_reset（给出命令）、

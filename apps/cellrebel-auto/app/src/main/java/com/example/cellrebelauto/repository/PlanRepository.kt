@@ -635,6 +635,160 @@ class PlanRepository(
         SupersedingImportResult.Imported(successorId)
     }
 
+    /** Outcome of [abandonCurrentPlan] (#135). */
+    sealed interface PlanAbandonOutcome {
+        /** Abandon done: remaining tasks cancelled, session terminal, audit appended. */
+        data class Abandoned(val planId: Long, val cancelledTasks: Int, val sessionId: Long?) :
+            PlanAbandonOutcome
+
+        /** No plan exists — nothing to abandon. */
+        data object NoPlan : PlanAbandonOutcome
+
+        /** Guard refused the abandon (already superseded / complete / no tasks). */
+        data class Refused(val reason: String) : PlanAbandonOutcome
+    }
+
+    /** The durable effects of the shared abandon semantics, for audit and notices. */
+    private data class AbandonLedger(val cancelledTasks: Int, val sessionId: Long?)
+
+    /**
+     * #135: operator-confirmed abandon of the current UNFINISHED plan — the escape
+     * hatch that makes the import protection a wall with a door. In ONE transaction:
+     * every non-completed task → `cancelled` (existing status vocabulary, no new enum),
+     * the active run session → terminal `stopped` (same guarded owner shape as the
+     * supersession stop), non-terminal attempt rows → the EXISTING `interrupted` path,
+     * and one append-only PLAN_ABANDONED audit row.
+     *
+     * DISCIPLINE: abandon only touches TASK status, the SESSION and attempt generic
+     * status projections. A+ owner state (aplusState), leases, receipts and the
+     * trusted-quota ledger are NEVER written here — quota already spent stays exactly
+     * as accounted; the plan row itself is retained (History keeps the audit trail).
+     *
+     * # 放弃当前未完成计划（#135）：剩余任务置 cancelled、终结 session、
+     * # 非终态尝试走既有 interrupted 路径、追加 PLAN_ABANDONED 审计——单事务。
+     * # 绝不触碰 A+ owner 状态/lease/回执/可信配额账本
+     */
+    suspend fun abandonCurrentPlan(nowMs: Long = System.currentTimeMillis()): PlanAbandonOutcome =
+        db.withTransaction {
+            val plan = db.planDao().getLatestPlan() ?: return@withTransaction PlanAbandonOutcome.NoPlan
+            if (plan.supersededAt != null) {
+                return@withTransaction PlanAbandonOutcome.Refused("plan is already superseded")
+            }
+            val tasks = db.locationTaskDao().getTasksForPlan(plan.id)
+            if (tasks.isEmpty()) {
+                return@withTransaction PlanAbandonOutcome.Refused("plan has no tasks")
+            }
+            if (tasks.all { it.status == "completed" }) {
+                return@withTransaction PlanAbandonOutcome.Refused(
+                    "plan is already complete — nothing to abandon"
+                )
+            }
+            val ledger = abandonPlanWithinTransaction(plan, tasks, nowMs)
+            PlanAbandonOutcome.Abandoned(plan.id, ledger.cancelledTasks, ledger.sessionId)
+        }
+
+    /**
+     * Shared abandon semantics INSIDE the caller's transaction (#135): task cancellation,
+     * session terminalization, the existing interrupted path for non-terminal attempts,
+     * and the PLAN_ABANDONED audit row. Used by [abandonCurrentPlan] and
+     * [confirmSupersedingImportAfterAbandon] so both paths write identical durable shape.
+     */
+    private suspend fun abandonPlanWithinTransaction(
+        plan: LocationPlan,
+        tasks: List<LocationTask>,
+        nowMs: Long
+    ): AbandonLedger {
+        val cancelledTasks = db.locationTaskDao().cancelUnfinishedForPlan(plan.id)
+        val session = db.runSessionDao().findActiveRunningSession(plan.id)
+        if (session != null) {
+            check(db.runSessionDao().stopForAbandon(session.id, nowMs) == 1) {
+                "abandon lost its active-session owner"
+            }
+        }
+        db.testAttemptDao().getAttemptsForPlan(plan.id).forEach { attempt ->
+            if (attempt.status in setOf("starting", "running")) {
+                db.testAttemptDao().markInterruptedIfNonTerminal(attempt.id, nowMs)
+            }
+        }
+        // Typed audit row (§7.1 stream is append-only, never a state owner); seq follows
+        // the same single-writer monotonic convention as PLAN_RESET.
+        db.auditEventDao().insert(
+            AutoAuditEvent(
+                seq = db.auditEventDao().count().toLong() + 1,
+                attemptId = null, // plan-level event
+                correlationRef = "plan:${plan.id}" +
+                    (session?.let { ":session:${it.id}" } ?: ""),
+                eventType = "PLAN_ABANDONED",
+                payloadDigest = "src=${plan.sourceFileName}:" +
+                    "cancelledTasks=$cancelledTasks:totalTasks=${tasks.size}:" +
+                    "completedTasks=${tasks.count { it.status == "completed" }}",
+                recordedAt = nowMs
+            )
+        )
+        return AbandonLedger(cancelledTasks, session?.id)
+    }
+
+    /**
+     * #135: the ONE-CONFIRMATION replacement path — abandon the old plan's remaining
+     * work and import the successor in a single transaction. This is the door that
+     * stays open when the a11y stop-proof cannot be obtained (service off, crashed
+     * leftovers, non-convergent A+ owner): the operator's single confirmation already
+     * consented to abandoning the remaining tasks, so no engine round trip is required
+     * — the caller only takes this path while the engine is NOT running (or after the
+     * coordinator has joined the engine job).
+     *
+     * Guards mirror [confirmSupersedingImport] (still-current active plan). A plan that
+     * FINISHED between proposal and confirmation skips the abandon semantics (nothing
+     * left to cancel) and imports plainly.
+     *
+     * # 单确认替换（#135）：同事务内放弃旧计划剩余任务 + 导入后继计划并标记 superseded。
+     * # 仅在引擎未运行（或已被 join）时调用；提议与确认间跑完的计划直接普通替换
+     */
+    suspend fun confirmSupersedingImportAfterAbandon(
+        expectedOldPlanId: Long,
+        sourceFileName: String,
+        globalBufferSeconds: Int,
+        rows: List<WorklistRow>,
+        importedAt: Long,
+        supersededAt: Long
+    ): SupersedingImportResult = db.withTransaction {
+        val boundScheduleId = requireValidWorklistBinding(rows)
+        val activePlan = db.planDao().getLatestPlan()
+            ?: return@withTransaction SupersedingImportResult.StalePlan
+        if (activePlan.id != expectedOldPlanId || activePlan.supersededAt != null) {
+            return@withTransaction SupersedingImportResult.StalePlan
+        }
+        val oldTasks = db.locationTaskDao().getTasksForPlan(expectedOldPlanId)
+        if (oldTasks.isNotEmpty() && oldTasks.any { it.status != "completed" }) {
+            abandonPlanWithinTransaction(activePlan, oldTasks, supersededAt)
+        }
+        val successorId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = sourceFileName,
+                importedAt = importedAt,
+                globalBufferSeconds = globalBufferSeconds,
+                totalRows = rows.size,
+                totalRequiredSuccesses = rows.sumOf { it.requiredSuccesses },
+                boundScheduleId = boundScheduleId
+            ),
+            rows.map {
+                LocationTask(
+                    planId = 0,
+                    csvRow = it.csvRow,
+                    longitude = it.longitude,
+                    latitude = it.latitude,
+                    priority = it.priority,
+                    requiredSuccesses = it.requiredSuccesses,
+                    scheduleItemId = it.scheduleItemId
+                )
+            }
+        )
+        check(db.planDao().markSuperseded(expectedOldPlanId, successorId, supersededAt) == 1) {
+            "abandoning import lost its active-plan owner"
+        }
+        SupersedingImportResult.Imported(successorId)
+    }
+
     // ---- #12 plan-reset (re-run a finished/dead plan) ----
 
     /** Outcome of [resetPlanAsFreshGeneration]. */
