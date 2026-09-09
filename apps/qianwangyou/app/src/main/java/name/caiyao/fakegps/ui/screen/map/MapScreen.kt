@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MyLocation
@@ -79,6 +80,7 @@ import org.osmdroid.views.overlay.ScaleBarOverlay
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapScreen(
+    onOpenStatusCenter: () -> Unit,
     onAddProfile: (lat: Double, lon: Double) -> Unit,
     onOpenCollection: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -116,13 +118,23 @@ fun MapScreen(
         drawerState = drawerState,
         gesturesEnabled = false,
         drawerContent = {
-            ModalDrawerSheet {
-                Text(
-                    text = "FakeGPS",
-                    style = MaterialTheme.typography.headlineMedium,
-                    modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
-                )
-                NavigationDrawerItem(
+                ModalDrawerSheet {
+                    Text(
+                        text = "FakeGPS",
+                        style = MaterialTheme.typography.headlineMedium,
+                        modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
+                    )
+                    // T11b：状态中心是默认落地页，从任何抽屉都要能回去。
+                    NavigationDrawerItem(
+                        icon = { Icon(Icons.Default.Home, contentDescription = null) },
+                        label = { Text("状态中心") },
+                        selected = false,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            onOpenStatusCenter()
+                        },
+                    )
+                    NavigationDrawerItem(
                     icon = {
                         BadgedBox(badge = {
                             if (count > 0) Badge { Text("$count") }

@@ -365,6 +365,14 @@ object ConfigPrefsSync {
     fun hasPublicationFailure(context: Context): Boolean = readPublishState(context).publishFailed
 
     /**
+     * The durable active profile pointer (persisted by onVerifiedPublish on every verified
+     * publish), or null when none was ever anchored. UI read-only — the status-center profile
+     * card projects from THIS pointer, not from a Room-order guess; writing stays inside sync().
+     */
+    @JvmStatic
+    fun readActiveProfileId(context: Context): Long? = readPublishState(context).activeProfileId
+
+    /**
      * The durable publication outcome, from the private store ONLY (never PREFS_NAME) — so a UI read
      * can never open the transport name with MODE_PRIVATE and poison its SharedPreferences cache. A
      * failed read fails closed. The active pointer here is whatever the store holds; [sync] migrates

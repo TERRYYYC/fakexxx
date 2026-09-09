@@ -4,6 +4,8 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 sealed interface Screen {
+    /** T11b：状态中心，app 默认落地页。 */
+    @Serializable data object StatusCenter : Screen
     @Serializable data object Map : Screen
     @Serializable data object Collection : Screen
     @Serializable data object Settings : Screen
