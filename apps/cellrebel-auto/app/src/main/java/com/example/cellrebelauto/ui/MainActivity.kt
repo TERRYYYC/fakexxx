@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -77,10 +80,19 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
         initialScreen?.let { vm.navigateTo(it) }
     }
 
+    // #139 返回栈矩阵（AutoBottomNav.kt）：历史→计划、计划/Provider→运行台；
+    // 运行台没有 backTarget → BackHandler 关闭 → 系统默认行为 = 退出 app。
+    val backTarget = AutoBottomNav.backTarget(currentScreen)
+    androidx.activity.compose.BackHandler(enabled = backTarget != null) {
+        backTarget?.let { vm.navigateTo(it) }
+    }
+
     // # targetSdk 35 强制 edge-to-edge：统一处理状态栏/导航栏 insets，
     // # 否则标题绘制在状态栏下、右上角服务指示被裁切
     Box(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
-        when (currentScreen) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Box(modifier = Modifier.weight(1f)) {
+                when (currentScreen) {
             Screen.PLAN -> {
                 Column(modifier = Modifier.fillMaxSize()) {
                     // The product importer must stay reachable while normal data is recovery-closed.
@@ -116,12 +128,13 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                                     onSetTestStage = { vm.setTestStageEnabled(it) },
                                     onStartOrResume = { vm.startOrResumePlan() },
                                     onStop = { vm.stopAutomation() },
-                                    onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
                                     onOpenRun = { vm.navigateTo(Screen.RUN) },
                                     onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
                                     // #12：计划重置入口（provider 侧命令文本供确认框复制）
                                     // Rebase note: T3's plan-reset entry rides inside main's
                                     // CutoverSafSurface + double CutoverDataBoundary wrapper.
+                                    // Rebase note (#139): fix/135 also adds an arg here
+                                    // (onAbandonPlan) — re-add it mechanically on merge.
                                     onResetPlan = { vm.resetPlan() },
                                     // #135：放弃当前计划入口（确认框在 PlanScreen 内）
                                     onAbandonPlan = { vm.abandonPlan() },
@@ -163,8 +176,8 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                     // T7v2: 重启恢复/启动 = 同一 startOrResumePlan 入口；停止/导出/导航同 v1
                     onResume = { vm.resumeRun() },
                     onStop = { vm.stopAutomation() },
+                    // #139：History 不再从运行台可达（收进计划页）；底栏替代页内导航行
                     onOpenPlan = { vm.navigateTo(Screen.PLAN) },
-                    onOpenHistory = { vm.navigateTo(Screen.HISTORY) },
                     onOpenProviders = { vm.navigateTo(Screen.PROVIDERS) },
                     onResetPlan = { vm.resetPlan() },
                     onExportDiagnostics = { vm.exportDiagnosticBundle() },
@@ -211,7 +224,7 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                         approved = readyEntries.filter { it.isApproved },
                         onApprove = { vm.approveProvider(it) },
                         onRevoke = { vm.requestRevoke(it) },
-                        onBack = { vm.navigateTo(Screen.PLAN) },
+                        // #139：Provider 升为底栏顶层 tab——不再有页内返回按钮
                         revokeDialog = revokeCandidate?.let {
                             ProviderRevokeDialogState(candidate = it)
                         },
@@ -232,6 +245,24 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                         },
                         modifier = Modifier
                     )
+                }
+            }
+        }
+        }
+
+            // ---- #139 底栏：运行台/计划/Provider 三个顶层 tab（v3 原型）----
+            // 只在 tab 页显示；History 是子页，从计划页进。
+            val currentTab = AutoBottomNav.tabOf(currentScreen)
+            if (currentTab != null) {
+                NavigationBar {
+                    AutoBottomNav.tabs.forEach { tab ->
+                        NavigationBarItem(
+                            selected = tab.screen == currentScreen,
+                            onClick = { vm.navigateTo(tab.screen) },
+                            icon = { Icon(tab.icon, contentDescription = tab.label) },
+                            label = { Text(tab.label) },
+                        )
+                    }
                 }
             }
         }

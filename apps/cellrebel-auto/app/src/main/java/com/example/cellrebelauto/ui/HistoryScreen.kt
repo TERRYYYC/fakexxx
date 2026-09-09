@@ -58,9 +58,9 @@ fun HistoryScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // # 操作按钮
+        // # 操作按钮（#139：历史是计划页的子页——返回=回父级「计划」，与系统返回一致）
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onBack) { Text("Back") }
+            OutlinedButton(onClick = onBack) { Text("返回计划") }
             Button(
                 onClick = onExportCsv,
                 enabled = attempts.isNotEmpty() || legacyResults.isNotEmpty()
