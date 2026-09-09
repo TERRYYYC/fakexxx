@@ -57,6 +57,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- # T11c 跨 app deep link：fakexxx-auto://providers 直达 Provider 页（A2）。
+                 # 仅导航：intent 只被解析成目标 Screen，不携带数据、不执行任何动作，
+                 # 因此无权限门槛（exported 本就因 LAUNCHER 必需）。往返约定见
+                 # docs/deep-links.md（对侧为 fakexxx-map://pending）。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="fakexxx-auto"
+                    android:host="providers" />
+            </intent-filter>
         </activity>
 
         <!-- # 无障碍服务（新路径：automation 包下） -->

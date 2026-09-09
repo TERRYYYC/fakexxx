@@ -29,9 +29,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // T11c: `fakexxx-auto://providers` lands directly on the Provider page.
+        // Navigation only — the URI becomes a Screen, nothing else is read from it.
+        val deepLinkScreen = CrossAppDeepLinks.routeToScreen(intent?.data)
         setContent {
             CellRebelAutoTheme {
-                MainApp()
+                MainApp(initialScreen = deepLinkScreen)
             }
         }
     }
@@ -42,7 +45,7 @@ class MainActivity : ComponentActivity() {
  * # 根 Composable，通过 ViewModel 管理页面导航
  */
 @Composable
-fun MainApp(vm: MainViewModel = viewModel()) {
+fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
     val currentScreen by vm.currentScreen.collectAsState()
     val isRunning by vm.isRunning.collectAsState()
     val currentState by vm.currentState.collectAsState()
@@ -68,6 +71,11 @@ fun MainApp(vm: MainViewModel = viewModel()) {
     val cooldown by vm.cooldown.collectAsState()
     val lastFailure by vm.lastFailure.collectAsState()
     val pairingState by vm.pairingUiState.collectAsState()
+
+    // T11c: a deep link arriving with the launch intent overrides the landing page once.
+    androidx.compose.runtime.LaunchedEffect(initialScreen) {
+        initialScreen?.let { vm.navigateTo(it) }
+    }
 
     // # targetSdk 35 强制 edge-to-edge：统一处理状态栏/导航栏 insets，
     // # 否则标题绘制在状态栏下、右上角服务指示被裁切
@@ -182,11 +190,19 @@ fun MainApp(vm: MainViewModel = viewModel()) {
 
             Screen.PROVIDERS -> {
                 // R43 (spec Task 6): the §6.5.3 operator approval/revocation surface.
-                androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshProviders() }
+                // T11c: entry also probes 对方（QWY）是否已批准我方（既有 discover 通道）。
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    vm.refreshProviders()
+                    vm.refreshPeerApproval()
+                }
                 val entries by vm.providerEntries.collectAsState()
                 // # Issue #10：撤销走 暂存→确认对话框→执行；撤销后横幅说明引擎影响
                 val revokeCandidate by vm.revokeCandidate.collectAsState()
                 val revokeNotice by vm.revokeImpactNotice.collectAsState()
+                val peerApprovalTodo = PeerApprovalTodoBar.project(
+                    vm.peerPairingStatus.collectAsState().value
+                )
+                val context = androidx.compose.ui.platform.LocalContext.current
                 CutoverDataBoundary(entries) { readyEntries ->
                     ProviderApprovalScreen(
                         pending = readyEntries.filter { !it.isApproved },
@@ -201,6 +217,17 @@ fun MainApp(vm: MainViewModel = viewModel()) {
                         onRevokeDismissed = { vm.dismissRevokeDialog() },
                         revokeImpactNotice = revokeNotice,
                         onRevokeNoticeDismissed = { vm.dismissRevokeNotice() },
+                        peerApprovalTodo = peerApprovalTodo,
+                        onOpenPeerApproval = {
+                            // 导航 only：跳不出去（对方未安装）时如实说明，绝不静默。
+                            if (!CrossAppDeepLinks.launchPeerPending(context)) {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "未找到千网游（fakexxx-map）— 请先安装并批准配对",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        },
                         modifier = Modifier
                     )
                 }
