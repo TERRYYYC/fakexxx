@@ -861,7 +861,17 @@ class MainViewModel @JvmOverloads constructor(
                 "Both stages are OFF — nothing would run. Enable Location and/or CellRebel test stage first."
             return
         }
-        val plan = planUiState.value.readyValueOrNull()?.plan ?: return
+        val planState = planUiState.value.readyValueOrNull() ?: return
+        // #135 review: the Run console's Resume suggestion is engine-state-driven and can
+        // still offer Resume after a Plan-page abandon — refuse it honestly here instead
+        // of starting the engine on a terminal plan (UI hiding is not a safety boundary).
+        // # 已放弃的计划不再可启动：诚实拒绝，出路是导入新 CSV
+        if (planState.isAbandoned) {
+            _importNotice.value =
+                "Plan abandoned — remaining tasks were cancelled. Import a new CSV to continue."
+            return
+        }
+        val plan = planState.plan ?: return
         _startRequested.value = true
         AutomationService.startAutomation(plan.id)
     }

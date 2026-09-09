@@ -157,11 +157,17 @@ fun PlanScreen(
             title = { Text("Archive current plan and import new CSV?") },
             text = {
                 Text(
+                    // #135 review: honest in BOTH branches — with the engine live the #97
+                    // stop-proof path archives the plan as superseded WITHOUT cancelling
+                    // tasks; only the not-running path marks them cancelled.
+                    // # 文案对两条分支都诚实：活引擎走 #97 归档（任务原样保留），
+                    // # 引擎未运行才标记 cancelled
                     "${proposal.oldSourceFileName} is unfinished " +
                         "(${planState.completedSuccesses}/${planState.plan?.totalRequiredSuccesses ?: 0} verified " +
-                        "successes). This ONE confirmation stops the run if active and ABANDONS the " +
-                        "remaining $remaining task(s) — they are marked cancelled and the run session " +
-                        "is closed — then imports ${proposal.sourceFileName}. The old plan stays in " +
+                        "successes). This ONE confirmation stops the run if active, then archives " +
+                        "the plan — the remaining $remaining task(s) will never run again (while " +
+                        "the engine is off they are marked cancelled) — then imports " +
+                        "${proposal.sourceFileName}. The old plan stays in " +
                         "History with its attempts, quota, receipts and audit."
                 )
             },

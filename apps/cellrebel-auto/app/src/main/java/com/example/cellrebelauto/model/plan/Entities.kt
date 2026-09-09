@@ -37,8 +37,10 @@ data class LocationPlan(
 )
 
 /**
- * One location from the worklist. status: pending | active | completed.
- * # 工作清单中的一个位置。状态：pending / active / completed
+ * One location from the worklist. status: pending | active | completed |
+ * cancelled (#135 plan abandon — terminal, never re-driven).
+ * # 工作清单中的一个位置。状态：pending / active / completed；
+ * # cancelled（#135 放弃计划——终态，绝不被重新驱动）
  */
 @Entity(
     tableName = "location_tasks",

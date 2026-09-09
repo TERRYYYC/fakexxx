@@ -133,7 +133,12 @@ class PlanRepository(
                 refreshed.singleOrNull { it.scheduleItemId == itemId }
             } ?: return null
             return bound.takeIf {
-                it.status != "completed" &&
+                // #135 review: the bound lane must exclude 'cancelled' too — the Run
+                // console's Resume suggestion survives a Plan-page abandon (it reads the
+                // engine state, not the plan), and re-selecting a cancelled task here
+                // would let markTaskActive silently resurrect abandoned work.
+                // # 绑定车道同样排除 cancelled：放弃的任务绝不被重新驱动
+                it.status != "completed" && it.status != "cancelled" &&
                     db.trustedQuotaDao().trustedCountForTask(it.id) < it.requiredSuccesses
             }
         }

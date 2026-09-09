@@ -178,4 +178,39 @@ class PlanAbandonViewModelTest {
         )
         assertFalse(readyPlanState(vm)?.isAbandoned ?: false)
     }
+
+    /**
+     * #135 review RED: after abandon the Run console's Resume suggestion is still
+     * engine-state-driven (PAUSED projection), so startOrResumePlan is the last line
+     * of defense — it must refuse an abandoned plan honestly instead of starting the
+     * engine on a terminal plan (a bound provider could even re-drive cancelled rows).
+     */
+    @Test
+    fun `startOrResumePlan refuses an abandoned plan with an honest notice`() = runTest {
+        val planId = db.planDao().insertPlanWithTasks(
+            LocationPlan(
+                sourceFileName = "abandoned.csv", importedAt = 100L, globalBufferSeconds = 5,
+                totalRows = 2, totalRequiredSuccesses = 2
+            ),
+            listOf(task("completed"), task("cancelled", csvRow = 2))
+        )
+        val vm = newVm()
+        await("plan UI projection reached Ready") {
+            vm.planUiState.value is com.example.cellrebelauto.cutover.CutoverDataState.Ready<*>
+        }
+        await("the seeded plan must project as abandoned") {
+            readyPlanState(vm)?.isAbandoned == true
+        }
+
+        vm.startOrResumePlan()
+
+        await("the abandoned plan must be refused with the abandon wording") {
+            vm.importNotice.value?.contains("abandoned", ignoreCase = true) == true
+        }
+        assertEquals(
+            "the abandoned plan row must be untouched",
+            planId,
+            db.planDao().getLatestPlan()?.id
+        )
+    }
 }

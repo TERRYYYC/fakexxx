@@ -92,4 +92,30 @@ class PlanScheduleBindingTest {
             )
         )
     }
+
+    /**
+     * #135 review RED: the bound lane must NEVER re-select an abandoned task. The
+     * Run console's Resume suggestion is engine-state-driven and still offers Resume
+     * after a Plan-page abandon, so the engine can be started on an abandoned plan;
+     * a bound 'cancelled' task passing this takeIf would be marked 'active' again by
+     * markTaskActive — silently resurrecting work the operator explicitly abandoned.
+     */
+    @Test fun `bound selection never re-drives an abandoned cancelled task`() = runTest {
+        val planId = repo.importPlan(
+            "abandoned.csv",
+            0,
+            listOf(WorklistRow(30.5, 50.4, 1, 1, 1, "schedule-a", "provider-current")),
+            100L
+        )
+        db.locationTaskDao().cancelUnfinishedForPlan(planId)
+
+        assertNull(
+            "a cancelled bound task must not be re-selected for driving",
+            repo.selectNextTrustedTask(
+                planId,
+                attemptedTaskIds = emptySet(),
+                activeScheduleItemId = "provider-current"
+            )
+        )
+    }
 }
