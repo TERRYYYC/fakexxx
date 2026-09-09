@@ -116,8 +116,8 @@ fun RunDashboardScreen(
     selfHealConfig: SelfHealConfig,
     onResume: () -> Unit,
     onStop: () -> Unit,
+    // #139：底栏接管 运行台/计划/Provider；History 收进计划页，运行台不再有 History 入口
     onOpenPlan: () -> Unit,
-    onOpenHistory: () -> Unit,
     onOpenProviders: () -> Unit,
     onResetPlan: () -> Unit,
     onExportDiagnostics: () -> Unit,
@@ -139,6 +139,9 @@ fun RunDashboardScreen(
     var drawerExpanded by remember { mutableStateOf(false) }
     var metricsSheetOpen by remember { mutableStateOf(false) }
     var mapFullscreen by remember { mutableStateOf(false) }
+
+    // #139：⛶ 全屏地图是运行台的内嵌子态——返回先收起全屏，再按才走顶层返回矩阵
+    androidx.activity.compose.BackHandler(enabled = mapFullscreen) { mapFullscreen = false }
 
     // # 一键恢复的成败走 snackbar；失败时主按钮由投影切为「查看日志」
     LaunchedEffect(resumeOutcome) {
@@ -234,12 +237,8 @@ fun RunDashboardScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            // ---- 底栏导航（不变） ----------------------------------------------
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onOpenPlan, modifier = Modifier.weight(1f)) { Text("Plan") }
-                OutlinedButton(onClick = onOpenHistory, modifier = Modifier.weight(1f)) { Text("History") }
-                OutlinedButton(onClick = onOpenProviders, modifier = Modifier.weight(1f)) { Text("Provider") }
-            }
+            // ---- #139 底栏导航已上移到 MainApp（运行台/计划/Provider 三 tab）----
+            // 页内不再重复一套导航行；计划/Provider 快捷入口保留在 log 抽屉里。
         }
 
         SnackbarHost(

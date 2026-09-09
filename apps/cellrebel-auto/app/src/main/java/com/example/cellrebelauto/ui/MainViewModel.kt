@@ -460,7 +460,8 @@ class MainViewModel @JvmOverloads constructor(
 
     // ---- Navigation ----
 
-    // # T7 P1.1：运行台是新首页（新入口）；Plan/History/Provider 仍在底栏可达
+    // # T7 P1.1：运行台是首页；#139：底栏=运行台/计划/Provider（v3），History 收进
+    // 计划页作子页。单状态天然单顶：tab 互切不堆栈，返回矩阵见 AutoBottomNav。
     private val _currentScreen = MutableStateFlow(Screen.RUN)
     val currentScreen: StateFlow<Screen> = _currentScreen
 
@@ -1900,11 +1901,11 @@ class MainViewModel @JvmOverloads constructor(
 
 /**
  * Navigation screens.
- * # 导航页面枚举
+ * # 导航页面枚举（#139：RUN/PLAN/PROVIDERS=底栏顶层 tab；HISTORY=计划页子页）
  */
 enum class Screen {
-    PLAN,     // # 位置计划页（F001 首页）
-    RUN,      // # 运行仪表盘（由旧 CONTROL 演进）
-    HISTORY,  // # 历史记录页面
-    PROVIDERS // # R43（spec Task 6）：Provider 批准/撤销管理页
+    PLAN,     // # 位置计划页（底栏 tab「计划」；History 从这里进）
+    RUN,      // # 运行仪表盘——app 首页，底栏 tab「运行台」（返回矩阵的终点）
+    HISTORY,  // # 历史记录（子页，父=计划；返回→计划）
+    PROVIDERS // # R43（spec Task 6）：Provider 批准/撤销管理页（底栏 tab）
 }

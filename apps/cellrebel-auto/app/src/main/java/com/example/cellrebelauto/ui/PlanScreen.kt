@@ -89,8 +89,6 @@ fun PlanScreen(
     onStop: () -> Unit,
     onOpenRun: () -> Unit,
     onOpenHistory: () -> Unit,
-    // R44 (Sol GREEN-review-3 F5): entry into provider management (§6.5.3 approval surface).
-    onOpenProviders: () -> Unit = {},
     // #12: plan-reset entry (confirm dialog lives in this screen).
     onResetPlan: () -> Unit = {},
     // #135: abandon-current-plan entry (confirm dialog lives in this screen).
@@ -552,21 +550,14 @@ fun PlanScreen(
             }
         }
 
-        // # 底部导航
+        // #139（v3 底栏：运行台/计划/Provider）：History 不再占底栏，从计划页进——
+        // 系统返回=回运行台（BackHandler 矩阵在 MainApp/AutoBottomNav）。
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            OutlinedButton(
+                onClick = onOpenHistory,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                OutlinedButton(onClick = onOpenRun, modifier = Modifier.weight(1f)) {
-                    Text("Run")
-                }
-                OutlinedButton(onClick = onOpenHistory, modifier = Modifier.weight(1f)) {
-                    Text("History")
-                }
-                OutlinedButton(onClick = onOpenProviders, modifier = Modifier.weight(1f)) {
-                    Text("Provider")
-                }
+                Text("Test History ▸")
             }
         }
     }

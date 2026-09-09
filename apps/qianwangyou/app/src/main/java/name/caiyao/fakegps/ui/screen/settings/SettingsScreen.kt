@@ -20,13 +20,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
@@ -63,7 +60,9 @@ import kotlin.math.roundToInt
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    onBack: () -> Unit,
+    // #139：验证（专家诊断，W8）原在抽屉里；抽屉删除后从这里进——设置 tab 的子页，
+    // 返回=回设置（QwyBottomNav 返回栈矩阵）。
+    onOpenVerify: () -> Unit = {},
     // T11c: true when the fakexxx-map://pending deep link landed here — the Auto 协作
     // pairing area is scrolled into view and highlighted so the "待批准的 Auto" todo
     // is the first thing the operator sees.
@@ -174,13 +173,10 @@ fun SettingsScreen(
 
     Scaffold(
         topBar = {
+            // #139：设置页升为底栏顶层 tab（状态中心/档案/设置）——顶层页没有返回箭头，
+            // 系统返回 = 回状态中心（见 QwyBottomNav 返回栈矩阵）。
             TopAppBar(
                 title = { Text("设置") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
             )
         },
     ) { innerPadding ->
@@ -443,6 +439,15 @@ fun SettingsScreen(
             ListItem(
                 headlineContent = { Text("清空所有档案") },
                 supportingContent = { Text("删除所有已保存的档案") },
+            )
+            HorizontalDivider()
+
+            // --- 诊断（专家，W8）：验证从原抽屉迁到这里（#139 抽屉删除） ---
+            SectionHeader("诊断")
+            ListItem(
+                headlineContent = { Text("验证（字段对照）") },
+                supportingContent = { Text("发布探针逐字段对照真实读数，核对伪装是否生效") },
+                modifier = Modifier.clickable(onClick = onOpenVerify),
             )
             HorizontalDivider()
 

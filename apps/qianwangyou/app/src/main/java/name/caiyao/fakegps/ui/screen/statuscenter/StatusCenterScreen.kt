@@ -18,23 +18,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Map
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -43,14 +34,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,7 +48,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
 import name.caiyao.fakegps.ui.theme.LocalShadcnSemantic
 import name.caiyao.fakegps.ui.theme.ShadcnCard
 
@@ -77,11 +65,8 @@ fun StatusCenterScreen(
     onOpenMap: () -> Unit,
     onOpenCollection: () -> Unit,
     onOpenSettings: () -> Unit,
-    onOpenVerify: () -> Unit,
     vm: StatusCenterViewModel = viewModel(),
 ) {
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     val ui by vm.ui.collectAsState()
@@ -117,74 +102,21 @@ fun StatusCenterScreen(
         )
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        gesturesEnabled = false,
-        drawerContent = {
-            ModalDrawerSheet {
-                Text(
-                    text = "fakexxx-map",
-                    style = MaterialTheme.typography.headlineMedium,
-                    modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 16.dp),
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                    label = { Text("状态中心") },
-                    selected = true,
-                    onClick = { scope.launch { drawerState.close() } },
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Bookmarks, contentDescription = null) },
-                    label = { Text("收藏档案") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenCollection()
-                    },
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Map, contentDescription = null) },
-                    label = { Text("地图") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenMap()
-                    },
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text("设置") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenSettings()
-                    },
-                )
-                NavigationDrawerItem(
-                    icon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
-                    label = { Text("验证") },
-                    selected = false,
-                    onClick = {
-                        scope.launch { drawerState.close() }
-                        onOpenVerify()
-                    },
-                )
-            }
+    // #139：抽屉已删除（与底栏重复，二选一保留底栏）。地图入口在这里——
+    // v3：地图从状态中心进，保留全屏能力；档案/设置走底栏 tab。
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = { Text("状态中心") },
+                actions = {
+                    IconButton(onClick = onOpenMap) {
+                        Icon(Icons.Default.Map, contentDescription = "打开地图")
+                    }
+                },
+            )
         },
-    ) {
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            topBar = {
-                TopAppBar(
-                    title = { Text("状态中心") },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "菜单")
-                        }
-                    },
-                )
-            },
-        ) { innerPadding ->
+    ) { innerPadding ->
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -241,7 +173,6 @@ fun StatusCenterScreen(
                     }
                 }
             }
-        }
     }
 }
 

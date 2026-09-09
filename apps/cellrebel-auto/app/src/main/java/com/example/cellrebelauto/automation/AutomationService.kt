@@ -241,7 +241,6 @@ class AutomationService : AccessibilityService() {
         recordedAt: Long
     ) {
         runCatching {
-            // Rebase note: #103/#108 thread the gate through DB/repository
             // constructors — resolve the app singletons like every other
             // AutomationService owner instead of a raw getInstance here.
             val app = application as CellRebelAutoApp

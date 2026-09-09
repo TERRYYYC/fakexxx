@@ -54,7 +54,6 @@ fun ProviderApprovalScreen(
     approved: List<ProviderEntry>,
     onApprove: (ProviderEntry) -> Unit,
     onRevoke: (ProviderEntry) -> Unit,
-    onBack: () -> Unit = {},
     // Issue #10: staged-revoke confirmation + post-revoke impact banner.
     revokeDialog: ProviderRevokeDialogState? = null,
     onRevokeConfirmed: () -> Unit = {},
@@ -90,10 +89,9 @@ fun ProviderApprovalScreen(
     }
 
     Column(modifier = modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-            Text("Provider 管理", style = MaterialTheme.typography.titleMedium)
-            OutlinedButton(onClick = onBack) { Text("返回") }
-        }
+        // #139：Provider 升为底栏顶层 tab（运行台/计划/Provider）——顶层页没有页内返回按钮，
+        // 系统返回=回运行台（MainApp BackHandler 矩阵）。
+        Text("Provider 管理", style = MaterialTheme.typography.titleMedium)
 
         // T11c: 页顶待办条 —— "对方（QWY）还未批准我方"（既有 discover 状态的盲区）。
         // 仅待办态给跨 app 跳转按钮（导航 only）；其余状态如实说明、不给动作。
