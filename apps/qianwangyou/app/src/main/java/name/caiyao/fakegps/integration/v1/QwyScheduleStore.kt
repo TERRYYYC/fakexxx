@@ -121,6 +121,39 @@ class QwyScheduleStore(context: Context) {
     }
 
     /**
+     * #140 quick reset: committed reset to a fresh generation WITHOUT the
+     * operator restart's exhaustion guard — any durable generation is
+     * resettable (the whole point of the operator's one-tap recovery), not only
+     * an exhausted one. Same generation shape as the §5A seed's schedule_reset:
+     * version strictly +1 (M-AD-24), pointer to the FIRST item, exhausted
+     * cleared, advance counter zeroed — and the last-applied residue removed in
+     * the SAME commit (a stale run's intent coordinates must not outlive the
+     * generation they belonged to).
+     *
+     * Idempotent against its exact target: the already-applied state replays
+     * true so a crash between the reset commit and this external write
+     * converges on the next fenced entry. Anything off-target (including a
+     * divergent version) fails closed and never launders a diverged store.
+     */
+    fun resetToFirstItem(targetVersion: Long, firstItemId: String): Boolean {
+        val items = getItemIds()
+        if (items.isEmpty() || items.first() != firstItemId) return false
+        val alreadyApplied =
+            !isExhausted() && getScheduleVersion() == targetVersion && getCurrentItemId() == firstItemId
+        if (!alreadyApplied && targetVersion != getScheduleVersion() + 1L) return false
+        return prefs.edit()
+            .putLong(KEY_SCHEDULE_VERSION, targetVersion)
+            .putString(KEY_CURRENT_ITEM_ID, firstItemId)
+            .putBoolean(KEY_EXHAUSTED, false)
+            .putLong(KEY_ADVANCE_COUNT, 0L)
+            .remove(KEY_LAST_APPLIED_LAT)
+            .remove(KEY_LAST_APPLIED_LNG)
+            .remove(KEY_LAST_APPLIED_AT)
+            .remove(KEY_LAST_APPLIED_VERIFIED)
+            .commit()
+    }
+
+    /**
      * Advance the pointer to the next item. Returns the outcome: either the
      * next itemId (Advanced) or null (Exhausted — last item retained).
      *

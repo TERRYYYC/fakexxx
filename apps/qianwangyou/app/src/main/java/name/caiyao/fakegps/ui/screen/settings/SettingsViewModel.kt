@@ -87,6 +87,50 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- #140 快速重置（本机日程）----
+
+    /** Human-readable quick-reset outcome, null = nothing to show. */
+    private val _quickResetMessage = MutableStateFlow<String?>(null)
+    val quickResetMessage: StateFlow<String?> = _quickResetMessage
+
+    fun dismissQuickResetMessage() {
+        _quickResetMessage.value = null
+    }
+
+    /**
+     * #140 quick reset (local entry): schedule_reset productized — any durable
+     * generation back to the FIRST item (V+1), last-applied residue removed,
+     * effective profile re-anchored and re-published. Operator-initiated, so
+     * this is the owner path (no Binder authorization). The message honestly
+     * names partial outcomes (publish failed / lease blocking), and reminds the
+     * operator that Auto's plan state is reset from the AUTO side's entry —
+     * one tap there drives both apps.
+     */
+    fun quickResetScheduleLocal() {
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                ProviderRuntime.quickResetScheduleForOperator(getApplication())
+            }
+            _quickResetMessage.value = when (outcome) {
+                is name.caiyao.fakegps.integration.v1.QuickResetScheduleOutcome.Reset ->
+                    "本机日程已重置：回到第一项（第 ${outcome.scheduleVersionAfter} 代），" +
+                        "生效档案已重新发布（${outcome.republishedProfileRef}）。" +
+                        "如需同时清掉 Auto 的计划态，请在 Auto 计划页用「快速重置」——一次操作双 app 生效。"
+                is name.caiyao.fakegps.integration.v1.QuickResetScheduleOutcome.ResetButPublishFailed ->
+                    "日程已重置到第一项（第 ${outcome.scheduleVersionAfter} 代），但重新发布生效档案失败——" +
+                        "请检查 System Mock / Hook 状态后重试。"
+                name.caiyao.fakegps.integration.v1.QuickResetScheduleOutcome.BlockedByLease ->
+                    "无法重置：仍有未释放的运行环境，请先让当前运行完成或释放。"
+                name.caiyao.fakegps.integration.v1.QuickResetScheduleOutcome.NoSchedule ->
+                    "无法重置：当前没有可用日程（请先导入档案）。"
+                name.caiyao.fakegps.integration.v1.QuickResetScheduleOutcome.CorruptScheduleState ->
+                    "无法重置：日程状态损坏（fail-closed，未改动）。"
+                name.caiyao.fakegps.integration.v1.QuickResetScheduleOutcome.WriteFailed ->
+                    "重置失败：状态未写入，请重试。"
+            }
+        }
+    }
+
     fun dismissEnvironmentControlMessage() {
         _environmentControlMessage.value = null
     }

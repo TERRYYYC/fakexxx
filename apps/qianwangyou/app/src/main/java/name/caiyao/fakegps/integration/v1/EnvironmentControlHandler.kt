@@ -97,6 +97,85 @@ class EnvironmentControlHandler(
         }
     }
 
+    /**
+     * #140 dual-app quick reset — the authorized-caller entry (contract channel).
+     * Authorization rides the SAME CallerAuthorizer principal as every control
+     * op (NOT_PAIRED / CALLER_NOT_ALLOWED are typed ContractExceptions); the
+     * reset itself is [quickResetScheduleForOperator].
+     */
+    fun quickResetScheduleForCaller(callerUid: Int): QuickResetScheduleOutcome {
+        authorizer.authorize(callerUid)
+        return quickResetScheduleForOperator()
+    }
+
+    /**
+     * #140 quick reset — productization of the provider-side schedule_reset
+     * (the §5A seed's debug operation) as an owner-fenced recovery command:
+     * from ANY durable generation (not only an exhausted one) back to the
+     * FIRST item of a NEW generation (V+1, M-AD-24 monotonic), last-applied
+     * residue removed, then the effective profile re-anchored and re-published.
+     *
+     * Trust-chain discipline: leases, receipts, idempotency and quota are NEVER
+     * written here. The §6.7.5 single-commit discipline of the operator restart
+     * is reused verbatim (intent committed in one transaction, then the external
+     * schedule write, then the marker clear — a crash in the window converges on
+     * the next fenced entry); the pending marker carries its mode so a reset
+     * marker replays through the UNGUARDED reset write while legacy restart
+     * markers keep the exhausted-guarded semantics.
+     *
+     * Refusals are typed and leave NO durable trace: a non-converged lease still
+     * blocks (INV-28 — its recovery paths may still write against the old
+     * generation), no schedule is an honest NO_SCHEDULE, and a corrupt store
+     * (version 0 over surviving keys) fails closed like the seed's Partial
+     * classification — never laundered into a fresh generation.
+     */
+    fun quickResetScheduleForOperator(): QuickResetScheduleOutcome = withOwnerFence {
+        val blocking = leaseStore.blockingLease()
+        if (blocking != null) {
+            val effState = leaseStore.effectiveState(blocking.leaseId, tracker.generation)
+            if (effState != LeaseState.RELEASED) {
+                return@withOwnerFence QuickResetScheduleOutcome.BlockedByLease
+            }
+        }
+        val schedule = environment.scheduleSnapshot()
+            ?: return@withOwnerFence QuickResetScheduleOutcome.NoSchedule
+        if (schedule.scheduleVersion < 1L) {
+            // A present-but-unversioned store is corrupt, not "generation 0" —
+            // the same fail-closed classification the schedule_reset seed pins.
+            return@withOwnerFence QuickResetScheduleOutcome.CorruptScheduleState
+        }
+        val firstItemId = schedule.itemIds.firstOrNull()
+            ?: return@withOwnerFence QuickResetScheduleOutcome.NoSchedule
+        val targetVersion = schedule.scheduleVersion + 1L
+        storage.transaction {
+            storage.write(
+                RESTART_PENDING_NAMESPACE,
+                RESTART_PENDING_KEY,
+                DurableFieldCodec.encode(
+                    listOf(
+                        targetVersion.toString(),
+                        firstItemId,
+                        RESTART_MARKER_MODE_RESET,
+                    ),
+                ),
+            )
+            tracker.bump(RevisionBumpReason.SCHEDULE_BOUNDARY)
+            audit.append("schedule_reset")
+        }
+        if (!settlePendingScheduleRestart()) {
+            return@withOwnerFence QuickResetScheduleOutcome.WriteFailed
+        }
+        // 重锚生效档案 + 重发布: the reset committed; republish the re-anchored
+        // effective profile. A publish failure is an HONEST partial — the
+        // schedule stays reset, the outcome says so.
+        val republished = environment.republishCurrentItem()
+        if (republished != null) {
+            QuickResetScheduleOutcome.Reset(targetVersion, republished)
+        } else {
+            QuickResetScheduleOutcome.ResetButPublishFailed(targetVersion)
+        }
+    }
+
     fun discover(callingUid: Int): CapabilitySnapshotV1 = withOwnerFence {
         authorizer.authorize(callingUid)
         val snap = tracker.snapshot()
@@ -815,10 +894,15 @@ class EnvironmentControlHandler(
     }
 
     /**
-     * Roll forward a provider-committed operator restart into qwy's separate
-     * SharedPreferences store. The external apply receives an exact target and
-     * is idempotent, so failures before/after its commit converge on re-entry.
-     * A false return keeps the marker durable for a later retry.
+     * Roll forward a provider-committed operator restart/reset into qwy's
+     * separate SharedPreferences store. The external apply receives an exact
+     * target and is idempotent, so failures before/after its commit converge on
+     * re-entry. A false return keeps the marker durable for a later retry.
+     *
+     * #140: the pending marker carries its MODE. A reset marker replays through
+     * the UNGUARDED reset write (any generation is resettable); a legacy
+     * restart marker (2 fields, pre-#140) keeps the exhausted-guarded operator
+     * restart semantics. Each marker settles through its OWN operation.
      */
     private fun settlePendingScheduleRestart(): Boolean {
         val marker = storage.read(RESTART_PENDING_NAMESPACE, RESTART_PENDING_KEY)
@@ -826,7 +910,13 @@ class EnvironmentControlHandler(
         val parts = DurableFieldCodec.decodeNonNull(marker)
         val targetVersion = parts[0].toLong()
         val firstItemId = parts[1]
-        if (!environment.applyScheduleRestart(targetVersion, firstItemId)) return false
+        val mode = parts.getOrNull(2) ?: RESTART_MARKER_MODE_RESTART
+        val appliedExternally = if (mode == RESTART_MARKER_MODE_RESET) {
+            environment.resetScheduleToFreshGeneration(targetVersion, firstItemId)
+        } else {
+            environment.applyScheduleRestart(targetVersion, firstItemId)
+        }
+        if (!appliedExternally) return false
         val applied = checkNotNull(environment.scheduleSnapshot()) {
             "pending schedule restart present but environment has no schedule"
         }
@@ -1000,6 +1090,16 @@ class EnvironmentControlHandler(
         const val RESTART_PENDING_KEY: String = "slot"
 
         /**
+         * #140: pending-marker modes. A 2-field marker (legacy shape) settles
+         * as RESTART; a quick-reset commit writes a 3-field marker with
+         * [RESTART_MARKER_MODE_RESET] so a crashed window replays through the
+         * unguarded reset write, never through the restart's exhausted-only
+         * guard.
+         */
+        const val RESTART_MARKER_MODE_RESTART: String = "restart"
+        const val RESTART_MARKER_MODE_RESET: String = "reset"
+
+        /**
          * §6.3.3 wire-8 observe exception window (v1.75 GREEN): per-caller slot
          * (storage key = total-codec framing of applicationId + signerDigest)
          * holding the leaseId carried by that caller's most recent
@@ -1066,4 +1166,31 @@ enum class OperatorScheduleRestartResult {
     NO_SCHEDULE,
     NOT_EXHAUSTED,
     WRITE_FAILED,
+}
+
+/**
+ * #140 quick reset outcome. [Reset] is the only full success;
+ * [ResetButPublishFailed] is an HONEST partial (the schedule reset committed —
+ * the carrier still carries its generation); the rest are typed refusals that
+ * wrote nothing.
+ */
+sealed interface QuickResetScheduleOutcome {
+    /** Reset committed and the effective profile was re-published. */
+    data class Reset(val scheduleVersionAfter: Long, val republishedProfileRef: String) :
+        QuickResetScheduleOutcome
+
+    /** Reset committed, but re-anchoring/re-publishing the profile failed. */
+    data class ResetButPublishFailed(val scheduleVersionAfter: Long) : QuickResetScheduleOutcome
+
+    /** A non-converged lease still blocks schedule mutation (INV-28). */
+    data object BlockedByLease : QuickResetScheduleOutcome
+
+    /** No schedule exists — nothing to reset. */
+    data object NoSchedule : QuickResetScheduleOutcome
+
+    /** Durable schedule state is corrupt — fail-closed, never laundered. */
+    data object CorruptScheduleState : QuickResetScheduleOutcome
+
+    /** The reset commit could not be made durable. */
+    data object WriteFailed : QuickResetScheduleOutcome
 }

@@ -326,6 +326,16 @@ object ProviderRuntime {
         handler(context).restartScheduleForOperator()
 
     /**
+     * #140: operator-facing QUICK RESET of this app's schedule (local settings
+     * entry) — the same owner-fenced productization the contract channel
+     * serves to Auto: any generation → first item (V+1), last-applied residue
+     * removed, effective profile re-anchored and re-published. No Binder
+     * caller here: the operator IS the owner.
+     */
+    fun quickResetScheduleForOperator(context: Context): QuickResetScheduleOutcome =
+        handler(context).quickResetScheduleForOperator()
+
+    /**
      * T8 export surface: read-only pairing fingerprints (applicationId + signer digest)
      * for the configuration bundle. This is NOT a trust decision — the importing side
      * must re-walk operator approval; the bundle only carries identity material for

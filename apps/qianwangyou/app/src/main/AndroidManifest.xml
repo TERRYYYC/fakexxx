@@ -144,6 +144,15 @@
             android:name=".integration.v1.EnvironmentControlService"
             android:exported="true" />
 
+        <!-- #140 environment MAINTENANCE contract v1 (dual-app quick reset).
+             Same posture as the control service: exported with NO intent-filter
+             (explicit ComponentName only), every call Binder-resolves its caller
+             and authorizes through the SAME pairing (NOT_PAIRED, never a reset).
+             # 快速重置契约通道：与控制服务同款暴露方式，签名/配对授权不变 -->
+        <service
+            android:name=".integration.v1.EnvironmentMaintenanceService"
+            android:exported="true" />
+
         <!-- Private system_server oracle registrar; every registration independently checks UID 1000. -->
         <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
         <service
