@@ -484,7 +484,15 @@ private fun MapCardSection(
                     points = points,
                     modifier = mapModifier,
                     fullscreen = fullscreen,
-                    fallback = { PlanMapCard(points = points, currentPoint = currentPoint) },
+                    // 垫层尺寸随全屏态走（P3-5）：全屏时默认 220dp 高的 canvas 卡会
+                    // 只垫住顶部一条，与铺满的 MapView 错位
+                    fallback = {
+                        PlanMapCard(
+                            points = points,
+                            currentPoint = currentPoint,
+                            modifier = mapModifier,
+                        )
+                    },
                     onTileFailure = onReportTileFailure,
                 )
                 TileMapCardPolicy.PlanMapCard.CANVAS -> PlanMapCard(

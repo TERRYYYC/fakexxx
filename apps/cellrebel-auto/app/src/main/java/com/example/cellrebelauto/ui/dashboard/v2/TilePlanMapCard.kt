@@ -40,6 +40,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.example.cellrebelauto.ui.theme.LocalShadcnSemantic
 import kotlinx.coroutines.delay
 import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.MapTileProviderBase
 import org.osmdroid.tileprovider.MapTileProviderBasic
 import org.osmdroid.tileprovider.MapTileRequestState
 import org.osmdroid.tileprovider.tilesource.XYTileSource
@@ -69,9 +70,14 @@ import java.io.File
  * 官方迁移说明（6.0 默认内部存储后写存储权限不再是必需项）。
  *
  * ## 无闪烁降级
- * 组合序：先画 fallback 槽（= 现有抽象 Canvas 地图），MapView 透明叠在其上
- * （TilesOverlay 的 loading 底色也设透明）；首次瓦片成功回调后移除 fallback。
- * 首次瓦片失败回调 → 上抛 sticky 失败位 → 选卡策略翻回 CANVAS 卡。
+ * 组合序：先画 fallback 槽（= 现有抽象 Canvas 地图，尺寸随全屏态走），MapView
+ * 透明叠在其上（TilesOverlay 的 loading 底色也设透明）；首次瓦片成功回调后移除
+ * fallback。首次瓦片失败回调 → 上抛 sticky 失败位 → 选卡策略翻回 CANVAS 卡。
+ * sticky 位生命周期：每位（每次进入运行台组合）只在「首次瓦片失败」时置位、
+ * 离线→在线跳变或重进页面时清除——因此 provider 的死亡必须只发生在终局
+ * onRelease（见 [buildTileMapView]），否则任何中途窗口 detach 都会以
+ * "mWriter being null (map shutdown?)" 的形式把首启变成永远不出图的寂静卡
+ * （2026-09-09 真机 mi14 首启修复）。
  *
  * # 瓦片地图卡：osmdroid 原生手势 + 三色标记 + 虚线顺序连线 + 比例尺 + ODbL 归属
  */
@@ -272,6 +278,44 @@ private class PlanPointsOverlay : Overlay() {
 private fun currentEntries(points: List<PlanMapPoints.MapPoint>): List<PlanPointsOverlay.Entry> =
     points.map { PlanPointsOverlay.Entry(it.latitude, it.longitude, it.state) }
 
+/**
+ * Single construction point of the card's MapView + its tile provider wiring.
+ * Isolated from the @Composable so the lifecycle is Robolectric-testable
+ * (TileMapViewLifecycleTest drives attach/detach/request against THIS code).
+ *
+ * ## 生命周期根因（真机 mi14 首启瓦片不渲染，2026-09-09；osmdroid 6.1.20 字节码核实）
+ * 1. **孤儿 provider**：`MapView(ctx)` 单参构造总是先自建一个内部
+ *    `MapTileProviderBasic`（默认 Mapnik 源，自带 SqlTileWriter + 每模块线程池，
+ *    与真 provider 指向同一个 osmdroid.db），真机日志 "Using tile source: Mapnik"
+ *    即是它。随后 setTileProvider 再把它 detach——首启即双 provider 栈并发
+ *    初始化 + 互踩。现改为构造期注入唯一 provider（走
+ *    `MapView(Context, MapTileProviderBase, Handler, AttributeSet)`），孤儿与
+ *    setTileProvider 的 detach-clear-swap 全部消失。
+ * 2. **窗口级 detach 即永久死亡**：MapView 默认 `mDestroyModeOnDetach=true`，
+ *    任何 onDetachedFromWindow 都会级联 `onDetach()` → tile provider 各模块
+ *    线程池 shutdown；之后的请求被 `MapTileModuleProviderBase.loadMapTileAsync`
+ *    的 isShutdown 检查**静默丢弃**（无日志、永不成功）。而 Compose 完全可能
+ *    在不弃用组合的情况下 detach/reattach 同一 AndroidView（兄弟节点移动、
+ *    Dialog 窗口等）。`setDestroyMode(false)` 把销毁责任收归一处：只有
+ *    AndroidView onRelease 里的显式 `MapView.onDetach()`（终局清理）。
+ *    detach 与在飞下载赛跑时，正是真机 "mWriter being null (map shutdown?)"
+ *    洪水的来源——非终局的 provider 死亡由此禁绝。
+ */
+internal fun buildTileMapView(context: Context, provider: MapTileProviderBase): MapView =
+    MapView(context, provider, null, null).apply {
+        setDestroyMode(false)
+        setMultiTouchControls(true)
+        setBuiltInZoomControls(false)
+        setMinZoomLevel(OsmTileSource.MIN_ZOOM.toDouble())
+        setMaxZoomLevel(OsmTileSource.MAX_ZOOM.toDouble())
+        // 透明底：瓦片未到前透出 fallback（先 canvas 后瓦片，无闪烁）
+        setBackgroundColor(Color.TRANSPARENT)
+        overlayManager.tilesOverlay?.let {
+            it.loadingBackgroundColor = Color.TRANSPARENT
+            it.loadingLineColor = Color.TRANSPARENT
+        }
+    }
+
 /** Prototype fitZoom / mapFSReset semantics applied to the live osmdroid view. */
 private fun fitInsideBounds(
     mv: MapView,
@@ -364,25 +408,15 @@ fun TilePlanMapCard(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 OsmdroidBootstrap.ensure(ctx)
-                MapView(ctx).apply {
-                    setTileProvider(
-                        ReportingTileProvider(
-                            ctx,
-                            onFirstSuccess = { tilesReady = true },
-                            onFirstFailure = onTileFailure,
-                        )
-                    )
+                buildTileMapView(
+                    context = ctx,
+                    provider = ReportingTileProvider(
+                        ctx,
+                        onFirstSuccess = { tilesReady = true },
+                        onFirstFailure = onTileFailure,
+                    ),
+                ).apply {
                     // osmdroid 原生双指缩放/平移/双击放大；本卡不写任何自定义手势
-                    setMultiTouchControls(true)
-                    setBuiltInZoomControls(false)
-                    setMinZoomLevel(OsmTileSource.MIN_ZOOM.toDouble())
-                    setMaxZoomLevel(OsmTileSource.MAX_ZOOM.toDouble())
-                    // 透明底：瓦片未到前透出 fallback（先 canvas 后瓦片，无闪烁）
-                    setBackgroundColor(Color.TRANSPARENT)
-                    overlayManager.tilesOverlay?.let {
-                        it.loadingBackgroundColor = Color.TRANSPARENT
-                        it.loadingLineColor = Color.TRANSPARENT
-                    }
                     // 比例尺（osmdroid 内置，metric，左下）
                     overlays.add(
                         ScaleBarOverlay(this).apply {
