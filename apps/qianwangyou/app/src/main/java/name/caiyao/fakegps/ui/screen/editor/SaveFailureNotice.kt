@@ -36,6 +36,6 @@ fun saveFailureNotice(
     SaveFailureCause.WRITE_FAILED ->
         "保存失败：${reason ?: "未知错误"}"
     SaveFailureCause.PUBLISH_UNREACHABLE ->
-        "无法发布给 Hook（当前车道 Vector 模块未启用）——档案已保存。" +
+        "无法发布给 Hook（常见原因：Vector 模块未启用或发布通道不可达）——档案已保存。" +
             "可稍后验证，或点下方「仅保存」。"
 }
