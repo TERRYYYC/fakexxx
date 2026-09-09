@@ -55,6 +55,17 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
     private var editingNameOverride: String? = null
 
     /**
+     * Set by the first [updateField] and never cleared: the operator has touched the draft, so a
+     * DB read that was launched before that edit and finishes after it must NOT overwrite
+     * [_fieldValues] with the stored row. Without this guard, a load landing in that window
+     * silently reverts the draft (an "不上报" toggle included) and the eventual save publishes a
+     * byte-identical payload — the exact zero-effect save observed in issue #127. Identity/route
+     * metadata (editingId/editingNameOverride/editingRouteWaypointsJson) is NOT draft state and
+     * always applies, so a save still updates the edited row instead of inserting a duplicate.
+     */
+    private var draftDirty = false
+
+    /**
      * P3.1 运动链: the profile's route column is NOT an editable text field — it is owned by the
      * route CSV import — so the editor carries it opaquely and MUST hand it back on save (a plain
      * round-trip through the field draft would silently strip it, turning a route profile into a
@@ -75,6 +86,7 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                         editingNameOverride = profileNameOverride(entity)
                         editingRouteWaypointsJson = entity.routeWaypointsJson
                         _routeSummary.value = RouteSummary.of(entity.routeWaypointsJson)
+                        if (draftDirty) return@runCatching
                         _fieldValues.value = runCatching { entityToMap(entity) }
                             .getOrElse {
                                 _notice.value =
@@ -103,6 +115,7 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateField(column: String, value: String) {
+        draftDirty = true
         val previousRouting = DeviceObserver.wcdmaDbmColumn(referenceColumns(_fieldValues.value))
         _fieldValues.value = ProfileFieldDraft.update(_fieldValues.value, column, value)
         _fieldErrors.value = ProfileFieldDraft.validationErrors(_fieldValues.value)
