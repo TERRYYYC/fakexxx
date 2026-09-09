@@ -150,7 +150,31 @@ class CollectionViewModel @JvmOverloads constructor(
         }
     }
 
-    fun deleteAll() {
+    // ---- #129: 「清空」两步确认（真机数据丢失事故的 UX 修复） ----
+
+    /**
+     * 清空的第二步闸门。#129 现场：「清空」与「导入 CSV/Excel」两个图标相邻，一次合成输入
+     * 曾把收藏页全部档案（含生效指针）清空且不可恢复。因此入口只允许挂起请求（打开确认
+     * 对话框），真正的 deleteAll 只能由确认动作触发；未请求的 confirm 被拦截为 no-op，
+     * 取消/dismiss 无任何副作用。单测：ui/CollectionViewModelClearAllTest。
+     */
+    private val _pendingClearAll = MutableStateFlow(false)
+    val pendingClearAll: StateFlow<Boolean> = _pendingClearAll
+
+    /** 第一步：只挂起请求（打开确认对话框），绝不碰数据库。 */
+    fun requestClearAll() {
+        _pendingClearAll.value = true
+    }
+
+    /** 取消 / dismiss：只关掉请求，无副作用。 */
+    fun cancelClearAll() {
+        _pendingClearAll.value = false
+    }
+
+    /** 第二步（唯一的清空执行点）：必须先有未决请求；没有请求的直接调用一律 no-op。 */
+    fun confirmClearAll() {
+        if (!_pendingClearAll.value) return
+        _pendingClearAll.value = false
         viewModelScope.launch {
             repo.deleteAll()
             publicationRevision.value++
