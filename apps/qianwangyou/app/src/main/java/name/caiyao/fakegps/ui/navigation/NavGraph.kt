@@ -13,14 +13,46 @@ import name.caiyao.fakegps.ui.screen.collection.CollectionScreen
 import name.caiyao.fakegps.ui.screen.editor.ProfileEditorScreen
 import name.caiyao.fakegps.ui.screen.map.MapScreen
 import name.caiyao.fakegps.ui.screen.settings.SettingsScreen
+import name.caiyao.fakegps.ui.screen.statuscenter.StatusCenterScreen
 import name.caiyao.fakegps.ui.screen.verify.VerifyScreen
 
 @Composable
 fun AppNavGraph(navController: NavHostController) {
-    NavHost(navController = navController, startDestination = Screen.Map) {
+    // T11b：状态中心是默认落地页；地图/档案/设置/验证全部保留，从抽屉可达。
+    NavHost(navController = navController, startDestination = Screen.StatusCenter) {
+        composable<Screen.StatusCenter> { entry ->
+            val navigation = entry.rememberNavigationActionGuard()
+            StatusCenterScreen(
+                onOpenMap = {
+                    navigation.submit(entry.lifecycle.currentState) {
+                        navController.navigate(Screen.Map)
+                    }
+                },
+                onOpenCollection = {
+                    navigation.submit(entry.lifecycle.currentState) {
+                        navController.navigate(Screen.Collection)
+                    }
+                },
+                onOpenSettings = {
+                    navigation.submit(entry.lifecycle.currentState) {
+                        navController.navigate(Screen.Settings)
+                    }
+                },
+                onOpenVerify = {
+                    navigation.submit(entry.lifecycle.currentState) {
+                        navController.navigate(Screen.Verify)
+                    }
+                },
+            )
+        }
         composable<Screen.Map> { entry ->
             val navigation = entry.rememberNavigationActionGuard()
             MapScreen(
+                onOpenStatusCenter = {
+                    navigation.submit(entry.lifecycle.currentState) {
+                        navController.popBackStack(Screen.StatusCenter, inclusive = false)
+                    }
+                },
                 onAddProfile = { lat, lon ->
                     navigation.submit(entry.lifecycle.currentState) {
                         navController.navigate(Screen.Editor(lat = lat, lon = lon))
