@@ -80,6 +80,7 @@ fun SettingsScreen(
     val publishedConfig by vm.publishedConfig.collectAsState()
     val pendingCallers by vm.pendingCallers.collectAsState()
     val environmentControlMessage by vm.environmentControlMessage.collectAsState()
+    val quickResetMessage by vm.quickResetMessage.collectAsState()
     val locationModel = LocationDeliveryUiContract.model(
         locationDeliveryMode,
         mockProviderState,
@@ -143,6 +144,9 @@ fun SettingsScreen(
     var showHourEndDialog by remember { mutableStateOf(false) }
     var callerToApprove by remember { mutableStateOf<PendingPairingCandidate?>(null) }
     var showRestartConfirmation by remember { mutableStateOf(false) }
+    // #140 快速重置：两步确认（清单确认 → 最终红色确认），破坏性入口。
+    var showQuickResetConfirm by remember { mutableStateOf(false) }
+    var showQuickResetFinalConfirm by remember { mutableStateOf(false) }
 
     // T8 (P0.3): 配置包导出/导入（SAF，无需权限）
     val bundleExportLauncher = rememberLauncherForActivityResult(
@@ -393,6 +397,20 @@ fun SettingsScreen(
                     supportingContent = { Text("仅在日程已完成且没有未释放环境时，创建 generation+1 并回到第一项") },
                     modifier = Modifier.clickable { showRestartConfirmation = true },
                 )
+                // #140 快速重置（本机日程）：破坏性入口——任意代际回到第一项 + 重锚/重发布生效档案，
+                // 不要求日程已完成。两步确认见下方对话框；Auto 侧同名入口会经契约通道联动本机。
+                ListItem(
+                    headlineContent = {
+                        Text(
+                            "快速重置（本机日程）",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    },
+                    supportingContent = {
+                        Text("遇任何怪状态的一键恢复：日程回到第一项（V+1）并重新发布生效档案；档案、配对、模块开关与设置全部保留")
+                    },
+                    modifier = Modifier.clickable { showQuickResetConfirm = true },
+                )
             }
             HorizontalDivider()
 
@@ -494,6 +512,64 @@ fun SettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showRestartConfirmation = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // #140 快速重置（本机日程）：第一步——保留/重置清单。
+    if (showQuickResetConfirm) {
+        AlertDialog(
+            onDismissRequest = { showQuickResetConfirm = false },
+            title = { Text("快速重置本机日程？", color = MaterialTheme.colorScheme.error) },
+            text = {
+                Text(
+                    "将保留：档案全集、Auto 配对与信任、模块开关、车道设置、历史记录。\n\n" +
+                        "将重置：日程指针回到第一项并创建新代（V+1）、清除耗尽态与最近应用残留、" +
+                        "重新锚定并发布生效档案。\n\n" +
+                        "有未释放的运行环境时会拒绝，不会清空档案或历史。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showQuickResetConfirm = false
+                    showQuickResetFinalConfirm = true
+                }) {
+                    Text("继续", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showQuickResetConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+    // #140 第二步——最终确认（红色破坏性键）。
+    if (showQuickResetFinalConfirm) {
+        AlertDialog(
+            onDismissRequest = { showQuickResetFinalConfirm = false },
+            title = { Text("最终确认：重置本机日程？", color = MaterialTheme.colorScheme.error) },
+            text = { Text("重置后无法撤销：当前日程进度（指针/耗尽态）将被新代取代；已入账的配额与历史不受影响。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showQuickResetFinalConfirm = false
+                    vm.quickResetScheduleLocal()
+                }) {
+                    Text("确认重置", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showQuickResetFinalConfirm = false }) { Text("取消") }
+            },
+        )
+    }
+
+    // #140 快速重置结果（诚实回执，含部分失败）。
+    quickResetMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = vm::dismissQuickResetMessage,
+            title = { Text("快速重置") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = vm::dismissQuickResetMessage) { Text("知道了") }
             },
         )
     }

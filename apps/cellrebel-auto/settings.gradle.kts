@@ -23,3 +23,10 @@ include(":app")
 include(":environment-control-v1")
 project(":environment-control-v1").projectDir =
     file("${rootProject.projectDir}/../../contracts/environment-control-v1")
+
+// #140: the additive maintenance surface (dual-app quick reset). Same shared
+// module pattern as the control contract — two independent Gradle roots, one
+// source tree, independent build dirs (INV-19).
+include(":environment-maintenance-v1")
+project(":environment-maintenance-v1").projectDir =
+    file("${rootProject.projectDir}/../../contracts/environment-maintenance-v1")

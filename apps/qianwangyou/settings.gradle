@@ -26,3 +26,8 @@ include ':app'
 include ':environment-control-v1'
 project(':environment-control-v1').projectDir =
         file('../../contracts/environment-control-v1')
+
+// #140: additive Environment Maintenance contract v1 (dual-app quick reset).
+include ':environment-maintenance-v1'
+project(':environment-maintenance-v1').projectDir =
+        file('../../contracts/environment-maintenance-v1')

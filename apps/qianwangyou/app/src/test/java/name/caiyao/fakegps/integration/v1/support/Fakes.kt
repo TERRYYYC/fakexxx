@@ -277,6 +277,40 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     }
 
     /**
+     * #140 quick reset: the UNGUARDED monotonic reset — any durable generation
+     * is resettable, not only an exhausted one. Same target shape as the
+     * operator restart (V+1, first item, exhausted cleared, advance counter
+     * zeroed) and idempotent against its exact target. Mirrors production
+     * QwyScheduleStore.resetToFirstItem's eligibility.
+     */
+    override fun resetScheduleToFreshGeneration(targetVersion: Long, firstItemId: String): Boolean {
+        if (itemIds.isEmpty() || itemIds.first() != firstItemId) return false
+        val alreadyApplied =
+            !exhausted && scheduleVersion == targetVersion && currentItemId == firstItemId
+        if (!alreadyApplied && targetVersion != scheduleVersion + 1L) return false
+        kv.transaction {
+            scheduleVersion = targetVersion
+            currentItemId = firstItemId
+            exhausted = false
+            advanceCount = 0
+        }
+        return true
+    }
+
+    /**
+     * #140 quick reset: republish knob. Default models a healthy publish of the
+     * re-anchored item; tests flip it to null to model a failed publish (the
+     * honest-partial branch).
+     */
+    var republishResult: String? = "profile-1"
+    var republishCount: Int = 0
+
+    override fun republishCurrentItem(): String? {
+        republishCount += 1
+        return republishResult
+    }
+
+    /**
      * F14 (C5): the REAL controller computes this from the actual publish
      * outcome (ConfigPrefsSync success → VERIFIED, failure → NONE; P1-2 fix).
      * The fake exposes it as a knob so tests can model a failed publish and

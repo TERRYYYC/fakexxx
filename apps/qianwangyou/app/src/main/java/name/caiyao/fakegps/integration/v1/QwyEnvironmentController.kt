@@ -41,6 +41,24 @@ interface QwyEnvironment {
     fun scheduleSnapshot(): ScheduleSnapshot?
     fun advancePointer(fromItemId: String): AdvancePointerOutcome
     fun applyScheduleRestart(targetVersion: Long, firstItemId: String): Boolean = false
+
+    /**
+     * #140 quick reset: committed reset to a fresh generation WITHOUT the
+     * operator restart's exhaustion guard (any durable generation is resettable,
+     * not only an exhausted one). Default delegates to [applyScheduleRestart];
+     * production implements the unguarded monotonic write.
+     */
+    fun resetScheduleToFreshGeneration(targetVersion: Long, firstItemId: String): Boolean =
+        applyScheduleRestart(targetVersion, firstItemId)
+
+    /**
+     * #140 quick reset: re-anchor the effective profile (the CURRENT schedule
+     * item's row) and republish it to the hook transport. Returns the published
+     * profile ref, or null when the publish did not happen or failed (honest
+     * partial — never a guessed ref). Default null: environments without a
+     * publish path report the failure instead of faking success.
+     */
+    fun republishCurrentItem(): String? = null
     fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome
     fun cleanup(leaseId: String): CleanupOutcome
     fun observeEffective(): EffectiveEnvironment
@@ -175,6 +193,31 @@ class QwyEnvironmentController(
 
     override fun profileRefsSnapshot(): List<String> =
         ProfileRefProjection.fromLegacyIds(readProfileIds())
+
+    /**
+     * #140 quick reset: apply a committed reset instruction — generation+1,
+     * pointer back to the FIRST item, exhausted cleared — WITHOUT the operator
+     * restart's exhaustion guard, removing last-applied residue in the same
+     * commit. Idempotent against its exact target (already-applied replays
+     * true) so a crash between the reset commit and this external write
+     * converges on re-entry.
+     */
+    override fun resetScheduleToFreshGeneration(targetVersion: Long, firstItemId: String): Boolean =
+        scheduleStore.resetToFirstItem(targetVersion, firstItemId)
+
+    /**
+     * #140 quick reset: re-anchor the effective profile (the CURRENT schedule
+     * item's row) and republish it to the hook transport. Returns the published
+     * profile ref, or null when the publish did not happen or failed — an
+     * honest partial, never a guessed ref.
+     */
+    override fun republishCurrentItem(): String? {
+        if (!profileDatabaseAvailable) return null
+        val itemId = scheduleStore.getCurrentItemId() ?: return null
+        val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
+        val published = ConfigPrefsSync.sync(appContext, profileId = dbId)
+        return if (published) itemId else null
+    }
 
     /**
      * v1.81 CI-attestation source: the CURRENT schedule item's profile row,
