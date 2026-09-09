@@ -103,7 +103,9 @@ class SupersedingImportViewModelTest {
             ApplicationProvider.getApplicationContext<Application>(),
             injectedDb = db,
             supersessionStopClient = client,
-            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open()
+            injectedAccessGate = com.example.cellrebelauto.cutover.CutoverAccessGate.open(),
+            // #135: the #97 stop-proof path is the LIVE-engine branch — pin the probe.
+            runningProbe = { true }
         ).also { createdVms += it }
         stageProposal(
             vm,
@@ -123,25 +125,21 @@ class SupersedingImportViewModelTest {
         client.mutableStatus.value = SupersessionStopStatus.Blocked("late-other-request", "late")
         assertTrue("a late foreign callback is ignored", vm.isImportReplacementStopping.value)
 
+        // #135: a MATCHING Blocked is no longer a "review and retry" dead end — the same
+        // single confirmation falls back to abandon+import (the coordinator has joined
+        // the engine job by then), and the durable shape must be the abandon semantics.
         client.mutableStatus.value = SupersessionStopStatus.Blocked(firstRequest.third, "retryable")
-        await("the matching block permits a retry") { !vm.isImportReplacementStopping.value }
-        assertNotNull("the in-memory CSV proposal survives a retryable block", vm.importProposal.value)
-
-        vm.confirmImportReplacement()
-        await("retry gets a fresh request id") { client.requests.size == 2 }
-        val retryRequest = client.requests.last()
-        assertNotEquals(firstRequest.third, retryRequest.third)
-        val proof = (PlanRepository(db, com.example.cellrebelauto.cutover.CutoverAccessGate.open()).verifyAndStopForSupersession(
-            retryRequest.third, oldPlanId, sessionId, 300L
-        ) as PlanRepository.SupersessionStopVerification.Verified).proof
-
-        client.mutableStatus.value = SupersessionStopStatus.Verified(retryRequest.third, proof)
-        await("the matching proof atomically imports the replacement") {
-            vm.importProposal.value == null
+        await("the matching Blocked completes via abandon+import") {
+            !vm.isImportReplacementStopping.value && vm.importProposal.value == null
         }
         assertEquals("new.csv", db.planDao().getLatestPlan()?.sourceFileName)
-        assertEquals(300L, db.runSessionDao().getById(sessionId)!!.endedAt)
+        assertTrue(
+            "remaining tasks must be cancelled",
+            db.locationTaskDao().getTasksForPlan(oldPlanId)
+                .all { it.status == "completed" || it.status == "cancelled" }
+        )
         assertEquals("stopped", db.runSessionDao().getById(sessionId)!!.status)
+        assertEquals(1, db.auditEventDao().forEventType("PLAN_ABANDONED").size)
     }
 
     @Test
@@ -208,7 +206,9 @@ class SupersedingImportViewModelTest {
             ApplicationProvider.getApplicationContext<Application>(),
             injectedDb = db,
             supersessionStopClient = client,
-            injectedAccessGate = gate
+            injectedAccessGate = gate,
+            // #135: this oracle pins the LIVE-engine proof branch — pin the probe.
+            runningProbe = { true }
         ).also { createdVms += it }
         stageProposal(
             vm,

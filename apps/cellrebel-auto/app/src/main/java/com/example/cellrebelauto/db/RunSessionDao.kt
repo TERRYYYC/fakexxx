@@ -40,6 +40,19 @@ interface RunSessionDao {
     )
     suspend fun stopForSupersession(id: Long, endedAt: Long): Int
 
+    /**
+     * #135 abandon: terminalize the plan's exact active session with the SAME guarded
+     * owner shape as [stopForSupersession] — never touches a terminal row or the
+     * accumulated cycle count.
+     * # 放弃计划（#135）：以与 stopForSupersession 相同的 owner 守卫终态化活跃 session；
+     * # 绝不覆盖已终态行与累计循环数
+     */
+    @Query(
+        "UPDATE run_sessions SET status = 'stopped', endedAt = :endedAt " +
+            "WHERE id = :id AND status IN ('starting','running','recovering','paused')"
+    )
+    suspend fun stopForAbandon(id: Long, endedAt: Long): Int
+
     @Query("SELECT * FROM run_sessions WHERE id = :id")
     suspend fun getById(id: Long): RunSession?
 

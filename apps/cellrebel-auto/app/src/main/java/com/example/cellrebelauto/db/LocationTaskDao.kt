@@ -60,6 +60,16 @@ interface LocationTaskDao {
     suspend fun updateTaskStatus(taskId: Long, status: String)
 
     /**
+     * #135 abandon: cancel every non-completed task of the plan. Completed rows are
+     * untouched history; 'cancelled' reuses the EXISTING task-status string vocabulary
+     * (no new enum). Returns affected rows.
+     * # 放弃计划（#135）：该计划全部未完成任务置 cancelled（沿用既有状态词汇，不造新枚举）；
+     * # 已完成行是历史、绝不动；返回受影响行数
+     */
+    @Query("UPDATE location_tasks SET status = 'cancelled' WHERE planId = :planId AND status != 'completed'")
+    suspend fun cancelUnfinishedForPlan(planId: Long): Int
+
+    /**
      * Guarded increment for INV-3 idempotency: only increments when the current
      * completedSuccesses still equals the expected value. Returns affected rows.
      * # 守卫式自增（INV-3 幂等）：仅当前值仍等于期望值时才 +1，返回受影响行数

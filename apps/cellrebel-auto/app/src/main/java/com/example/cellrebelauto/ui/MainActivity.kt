@@ -123,6 +123,8 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                                     // Rebase note: T3's plan-reset entry rides inside main's
                                     // CutoverSafSurface + double CutoverDataBoundary wrapper.
                                     onResetPlan = { vm.resetPlan() },
+                                    // #135：放弃当前计划入口（确认框在 PlanScreen 内）
+                                    onAbandonPlan = { vm.abandonPlan() },
                                     providerScheduleResetCommand = vm.providerScheduleResetCommand,
                                     providerPairingApprovalCommand = vm.providerPairingApprovalCommand,
                                     // T8 (P0.3): configuration bundle export/import + conflict surfaces.
