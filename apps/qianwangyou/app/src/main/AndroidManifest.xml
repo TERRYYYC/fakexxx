@@ -61,6 +61,21 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+                T11c 跨 app deep link: fakexxx-map://pending lands on the settings
+                page's pairing area (待批准的 Auto), scrolled + highlighted. NAVIGATION
+                ONLY — the URI is parsed into (destination, anchor) and nothing else;
+                it carries no data and approves nothing, so no permission guards it.
+                Counterpart: fakexxx-auto://providers. See docs/deep-links.md.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="fakexxx-map"
+                    android:host="pending" />
+            </intent-filter>
         </activity>
 
         <!-- Legacy activities kept for reference during migration -->
