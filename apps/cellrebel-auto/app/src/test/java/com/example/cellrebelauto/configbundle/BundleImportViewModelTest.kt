@@ -342,4 +342,36 @@ class BundleImportViewModelTest {
 
         assertNotNull(vm.bundleConflict.value)
     }
+
+    /**
+     * #142 RED: cancelled tasks are TERMINAL (#135 abandon) — an ABANDONED plan is no
+     * longer unfinished, so importing a bundle with different rows must NOT stage the
+     * conflict prompt anymore; the import passes straight through. Before the fix the
+     * inline predicate `status != "completed"` still counted cancelled tasks and the
+     * abandoned plan raised the conflict dialog (a confirm-overwrite escape existed, so
+     * this was friction, not a dead wall — hence the one-line fix).
+     */
+    @Test
+    fun `abandoned plan with cancelled tasks no longer stages the bundle conflict`() = runTest {
+        val repository = PlanRepository(db, CutoverAccessGate.open())
+        repository.importPlan("local.csv", 5, listOf(WorklistRow(1.0, 2.0, 0, 1, csvRow = 1)), 100L)
+        val abandonOutcome = repository.abandonCurrentPlan()
+        assertTrue(
+            "seed must abandon the plan, got $abandonOutcome",
+            abandonOutcome is PlanRepository.PlanAbandonOutcome.Abandoned,
+        )
+
+        registerBundle(bundleBytes(rows))
+        val vm = vm()
+
+        vm.importConfigBundle(bundleUri)
+        await { vm.importNotice.value?.contains("Imported") == true }
+
+        assertNull("an abandoned plan must not raise the conflict prompt", vm.bundleConflict.value)
+        assertEquals(
+            "the bundle plan must import straight through",
+            "bundle-plan.csv",
+            db.planDao().getLatestPlan()!!.sourceFileName,
+        )
+    }
 }

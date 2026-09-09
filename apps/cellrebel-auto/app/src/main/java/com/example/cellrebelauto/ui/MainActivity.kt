@@ -136,6 +136,8 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                                     onResetPlan = { vm.resetPlan() },
                                     // #135：放弃当前计划入口（确认框在 PlanScreen 内）
                                     onAbandonPlan = { vm.abandonPlan() },
+                                    // #140：快速重置入口（两步确认框在 PlanScreen 内；一次操作双 app 生效）
+                                    onQuickReset = { vm.quickResetAll() },
                                     providerScheduleResetCommand = vm.providerScheduleResetCommand,
                                     providerPairingApprovalCommand = vm.providerPairingApprovalCommand,
                                     // T8 (P0.3): configuration bundle export/import + conflict surfaces.

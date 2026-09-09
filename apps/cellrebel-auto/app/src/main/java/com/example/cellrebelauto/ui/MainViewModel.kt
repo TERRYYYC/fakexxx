@@ -194,6 +194,17 @@ fun interface PublishTimestampProbe {
     fun publishedAtMs(): Long?
 }
 
+/**
+ * #140: the provider leg of the quick reset — ONE authorized call on the
+ * maintenance contract channel asking the paired provider to productize its
+ * own schedule_reset (generation+1 → first item, residue removed, effective
+ * profile re-anchored + re-published). Blocking; run on IO. Tests inject
+ * fakes; production = [com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient].
+ */
+fun interface QuickResetChannel {
+    suspend fun scheduleReset(): com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult
+}
+
 private object AutomationServiceSupersessionStopClient : SupersessionStopClient {
     override val status: StateFlow<SupersessionStopStatus> = AutomationService.supersessionStopStatus
     override fun request(planId: Long, sessionId: Long, requestId: String) {
@@ -246,12 +257,25 @@ class MainViewModel @JvmOverloads constructor(
     // only taken while the engine is NOT live (or after the stop coordinator joined the
     // engine job); tests inject to drive both branches. Production reads the service flow.
     private val runningProbe: () -> Boolean = { AutomationService.isRunning.value },
+    // #140: the provider leg of the quick reset — the paired provider's
+    // schedule_reset productized over the maintenance contract channel; tests
+    // inject fakes. Production binds the maintenance service (release-reachable,
+    // pairing-authorized — no debug seam).
+    private val quickResetChannel: QuickResetChannel? = null,
 ) : AndroidViewModel(application) {
 
     private val accessGate = injectedAccessGate ?: CellRebelAutoApp.accessGateFor(application)
     private val db = injectedDb ?: CellRebelAutoApp.databaseFor(application, accessGate)
     private val planRepository = PlanRepository(db, accessGate)
     private val planConfigStore = CellRebelAutoApp.planConfigStoreFor(application, accessGate)
+    // #140: production quick-reset channel over the maintenance contract (the
+    // paired provider's authorized schedule_reset); tests inject a fake instead.
+    private val quickResetChannelOrDefault: QuickResetChannel =
+        quickResetChannel ?: QuickResetChannel {
+            com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient(
+                getApplication()
+            ).scheduleReset()
+        }
 
     // R43 (spec Task 6 / Sol GREEN-review-2 F5): the ProviderTrustStore PRODUCTION callers —
     // the operator approval/revocation surface (§6.5.3). No silent TOFU: approval is explicit.
@@ -646,7 +670,12 @@ class MainViewModel @JvmOverloads constructor(
                         "Bundle plan is already current — skipped (parameters applied)"
                     return@launch
                 }
-                val unfinished = tasks.isNotEmpty() && tasks.any { it.status != "completed" }
+                // #142: cancelled tasks are TERMINAL (#135 abandon) — an abandoned plan
+                // must not raise the bundle conflict dialog; the conflict exists to
+                // protect unfinished (resumable) work only.
+                // #142：cancelled 是终态（#135 放弃）——已放弃计划不再弹冲突框
+                val unfinished = tasks.isNotEmpty() &&
+                    tasks.any { it.status != "completed" && it.status != "cancelled" }
                 if (unfinished) {
                     _bundleConflict.value = BundlePlanConflict(
                         oldPlanId = current.id,
@@ -1317,6 +1346,182 @@ class MainViewModel @JvmOverloads constructor(
                 is PlanRepository.PlanAbandonOutcome.Refused ->
                     _importNotice.value = "Abandon refused — ${outcome.reason}"
             }
+        }
+    }
+
+    // ---- #140 dual-app quick reset（一键恢复到可用初始态） ----
+
+    /**
+     * One-tap recovery to a clean usable state, BOTH apps in one action:
+     *   1. stop the engine if live (await convergence — NonCancellable cleanup
+     *      terminalizes the run; the engine state machine lands back at IDLE);
+     *   2. abandon the current plan (#135 semantics — remaining tasks →
+     *      cancelled, session terminal, audit row; quota/leases untouched);
+     *   3. sweep residual recovery state and clear the service-recycle marker
+     *      (a stale marker would auto-resume the just-abandoned plan — the
+     *      ghost-revival hole #135 review closed for UI, closed here for the
+     *      self-heal path too);
+     *   4. drive the paired provider's schedule_reset over the maintenance
+     *      contract channel (schedule → first item, generation+1, effective
+     *      profile re-anchored + re-published);
+     *   5. append ONE typed QUICK_RESET audit row and surface an honest
+     *      summary — 「双 app 已重置 ✓」 only when every leg converged.
+     *
+     * KEPT: profile references, pairing/trust, the trusted-quota ledger, history
+     * attempts and all settings — the reset never writes leases, receipts or
+     * quota (trust-chain red line shared with #135).
+     */
+    fun quickResetAll() {
+        viewModelScope.launch {
+            _importErrors.value = emptyList()
+            _importNotice.value = "快速重置进行中…"
+            _importNotice.value = withContext(Dispatchers.IO) {
+                runCatching { performQuickReset() }
+                    .getOrElse { "快速重置失败 — ${it.javaClass.simpleName}: ${it.message}" }
+            }
+        }
+    }
+
+    /** Engine-stop convergence deadline for the quick reset (ms). */
+    private val quickResetEngineStopTimeoutMs = 15_000L
+
+    private suspend fun performQuickReset(): String {
+        val now = System.currentTimeMillis()
+
+        // 1. Engine live → stop and WAIT for it: abandoning under a live engine
+        //    would race the driver, and the provider reset needs its lease
+        //    released first (a non-converged lease makes QWY refuse).
+        var engineStopConverged = true
+        val engineWasLive = runningProbe()
+        if (engineWasLive) {
+            AutomationService.stopAutomation()
+            val deadline = System.currentTimeMillis() + quickResetEngineStopTimeoutMs
+            while (AutomationService.isRunning.value && System.currentTimeMillis() < deadline) {
+                kotlinx.coroutines.delay(100L)
+            }
+            engineStopConverged = !AutomationService.isRunning.value
+        }
+
+        // 2. Abandon (#135 semantics); a complete/superseded/no plan is honest NoPlan/Refused.
+        val abandon = planRepository.abandonCurrentPlan(now)
+
+        // 3. Recovery sweep + recycle marker (residue from any plan, not just the current one).
+        val interrupted = planRepository.markNonTerminalInterrupted(now)
+        planRepository.markStaleSessionsInterrupted(now)
+        val markerStore = com.example.cellrebelauto.automation.selfheal.ServiceRecycleMarkerStore(
+            getApplication()
+        )
+        val hadRecycleMarker = markerStore.pendingRecycle() != null
+        markerStore.clearPendingRecycle()
+
+        // 4. Provider leg — the maintenance contract channel (authorized, release-reachable).
+        val providerOutcome: com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult? =
+            try {
+                quickResetChannelOrDefault.scheduleReset()
+            } catch (t: Throwable) {
+                null
+            }
+
+        // 5. Audit + honest summary.
+        appendQuickResetAudit(now, abandon, engineWasLive, engineStopConverged, interrupted, hadRecycleMarker, providerOutcome)
+        return quickResetNotice(
+            abandon, engineWasLive, engineStopConverged, hadRecycleMarker, providerOutcome,
+        )
+    }
+
+    private suspend fun appendQuickResetAudit(
+        now: Long,
+        abandon: PlanRepository.PlanAbandonOutcome,
+        engineWasLive: Boolean,
+        engineStopConverged: Boolean,
+        interrupted: Int,
+        hadRecycleMarker: Boolean,
+        providerOutcome: com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult?,
+    ) {
+        val planLeg = when (abandon) {
+            is PlanRepository.PlanAbandonOutcome.Abandoned ->
+                "plan=ABANDONED:id=${abandon.planId}:cancelled=${abandon.cancelledTasks}:session=${abandon.sessionId ?: "-"}"
+            PlanRepository.PlanAbandonOutcome.NoPlan -> "plan=NO_PLAN"
+            is PlanRepository.PlanAbandonOutcome.Refused -> "plan=REFUSED:${abandon.reason}"
+        }
+        val providerLeg = when (providerOutcome) {
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.ResetDone ->
+                "provider=RESET_DONE:V=${providerOutcome.scheduleVersionAfter}:ref=${providerOutcome.republishedProfileRef}"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.PublishFailed ->
+                "provider=PUBLISH_FAILED:V=${providerOutcome.scheduleVersionAfter}"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.Refused ->
+                "provider=REFUSED:code=${providerOutcome.errorCodeWire}"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.Anomalous ->
+                "provider=ANOMALOUS"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.NotBindable ->
+                "provider=NOT_BINDABLE"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.TimedOut ->
+                "provider=TIMEOUT:${providerOutcome.waitedMs}ms"
+            null -> "provider=CHANNEL_CRASHED"
+        }
+        val digest = "$planLeg;engine=${if (engineWasLive) {
+            if (engineStopConverged) "STOPPED" else "STOP_NOT_CONVERGED"
+        } else "IDLE"};interrupted=$interrupted;recycleMarker=${if (hadRecycleMarker) "CLEARED" else "NONE"};$providerLeg"
+        runCatching {
+            db.auditEventDao().insert(
+                com.example.cellrebelauto.model.audit.AutoAuditEvent(
+                    seq = db.auditEventDao().count().toLong() + 1,
+                    attemptId = null, // plan/engine-level event
+                    correlationRef = "quickReset",
+                    eventType = "QUICK_RESET",
+                    payloadDigest = digest,
+                    recordedAt = now,
+                )
+            )
+        } // audit failure never breaks the reset itself
+    }
+
+    private fun quickResetNotice(
+        abandon: PlanRepository.PlanAbandonOutcome,
+        engineWasLive: Boolean,
+        engineStopConverged: Boolean,
+        hadRecycleMarker: Boolean,
+        providerOutcome: com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult?,
+    ): String {
+        val planLeg = when (abandon) {
+            is PlanRepository.PlanAbandonOutcome.Abandoned ->
+                "计划已放弃（${abandon.cancelledTasks} 项 cancelled）"
+            PlanRepository.PlanAbandonOutcome.NoPlan -> "当前无计划"
+            is PlanRepository.PlanAbandonOutcome.Refused -> "计划未动（${abandon.reason}）"
+        }
+        val engineLeg = when {
+            !engineWasLive -> "引擎已在 IDLE"
+            engineStopConverged -> "引擎已停止（回 IDLE）"
+            else -> "引擎停止未收敛——请查看运行页"
+        }
+        val residueLeg = if (hadRecycleMarker) "恢复态/回收标记已清" else null
+        val providerLeg = when (providerOutcome) {
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.ResetDone ->
+                "QWY 日程已重置到第一项（第 ${providerOutcome.scheduleVersionAfter} 代），生效档案已重新发布（${providerOutcome.republishedProfileRef}）"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.PublishFailed ->
+                "QWY 日程已重置（第 ${providerOutcome.scheduleVersionAfter} 代），但重新发布失败——请检查 QWY 设置"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.Refused ->
+                "QWY 拒绝重置（code=${providerOutcome.errorCodeWire}${providerOutcome.diagnostic?.let { ": $it" } ?: ""}）"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.Anomalous ->
+                "QWY 返回了无法解读的结果"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.NotBindable ->
+                "QWY 不可达（未安装或服务不可绑定）"
+            is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.TimedOut ->
+                "QWY 无响应（${providerOutcome.waitedMs}ms 超时）"
+            null -> "QWY 重置通道异常"
+        }
+        // Success = the provider leg fully converged AND the engine is back at
+        // rest. The plan leg's NoPlan/Refused outcomes are ALREADY clean states
+        // (complete / superseded / empty — all importable), so only a refusal
+        // there shows in the summary, never in the verdict.
+        val providerResetDone =
+            providerOutcome is com.example.cellrebelauto.integration.v1.EnvironmentMaintenanceClient.ResetResult.ResetDone
+        val fullSuccess = providerResetDone && (!engineWasLive || engineStopConverged)
+        val summary = listOf(planLeg, engineLeg, residueLeg, providerLeg).filterNotNull().joinToString("；")
+        return if (fullSuccess) {
+            "双 app 已重置 ✓ — $summary。可导入可 Start。"
+        } else {
+            "快速重置未完全完成 — $summary。"
         }
     }
 

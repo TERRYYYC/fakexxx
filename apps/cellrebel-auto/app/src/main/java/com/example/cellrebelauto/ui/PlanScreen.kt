@@ -93,6 +93,8 @@ fun PlanScreen(
     onResetPlan: () -> Unit = {},
     // #135: abandon-current-plan entry (confirm dialog lives in this screen).
     onAbandonPlan: () -> Unit = {},
+    // #140: dual-app quick reset entry (two-step destructive confirm lives in this screen).
+    onQuickReset: () -> Unit = {},
     providerScheduleResetCommand: String = "",
     providerPairingApprovalCommand: String = "",
     // T8 (P0.3): configuration bundle export/import (SAF launchers live in this screen).
@@ -194,6 +196,9 @@ fun PlanScreen(
     var showResetDialog by remember { mutableStateOf(false) }
     // #135：放弃当前计划确认对话框开关
     var showAbandonDialog by remember { mutableStateOf(false) }
+    // #140：快速重置两步确认（清单确认 → 最终红色确认）
+    var showQuickResetConfirm by remember { mutableStateOf(false) }
+    var showQuickResetFinalConfirm by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = Modifier
@@ -552,6 +557,30 @@ fun PlanScreen(
 
         // #139（v3 底栏：运行台/计划/Provider）：History 不再占底栏，从计划页进——
         // 系统返回=回运行台（BackHandler 矩阵在 MainApp/AutoBottomNav）。
+
+        // #140：快速重置入口——任何状态可达（重置本身会先停引擎），破坏性红色样式；
+        // 两步确认列出保留/重置清单。一次操作双 app 生效（经契约通道联动 QWY）。
+        item {
+            Column {
+                Text(
+                    "遇到任何 bug/怪状态的一键恢复：停引擎 → 放弃当前计划 → 清恢复态 → " +
+                        "QWY 日程重置并重新发布生效档案",
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(
+                    onClick = { showQuickResetConfirm = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("快速重置（双 app 联动）", modifier = Modifier.padding(vertical = 8.dp))
+                }
+            }
+        }
+
         item {
             OutlinedButton(
                 onClick = onOpenHistory,
@@ -560,6 +589,64 @@ fun PlanScreen(
                 Text("Test History ▸")
             }
         }
+    }
+
+    // #140：快速重置第一步——保留/重置清单确认。
+    if (showQuickResetConfirm) {
+        AlertDialog(
+            onDismissRequest = { showQuickResetConfirm = false },
+            title = { Text("快速重置？", color = MaterialTheme.colorScheme.error) },
+            text = {
+                Text(
+                    "将保留：档案引用、配对与信任、可信配额历史（已入账证据不动）、" +
+                        "模块开关与车道设置、全部 History 审计。\n\n" +
+                        "将重置：当前计划（剩余任务 → cancelled、终结 session、清恢复态/回收标记）、" +
+                        "引擎状态机（回 IDLE）、QWY 日程（回到第一项、V+1、重锚生效档案并重新发布）。"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showQuickResetConfirm = false
+                        showQuickResetFinalConfirm = true
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("继续") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showQuickResetConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // #140：快速重置第二步——最终确认（红色破坏性键）。
+    if (showQuickResetFinalConfirm) {
+        AlertDialog(
+            onDismissRequest = { showQuickResetFinalConfirm = false },
+            title = { Text("最终确认：双 app 快速重置？", color = MaterialTheme.colorScheme.error) },
+            text = {
+                Text(
+                    "重置后无法撤销：未完成的计划任务将永久取消（History 保留审计），" +
+                        "QWY 日程回到第一项并重建代际。完成后两 app 回到「可导入可 Start」。"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showQuickResetFinalConfirm = false
+                        onQuickReset()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("确认重置（双 app）") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showQuickResetFinalConfirm = false }) { Text("取消") }
+            }
+        )
     }
 
     // #135：放弃确认框——明示影响（x/y、剩余 N 个任务将标记取消），确认键红色破坏性样式
