@@ -18,6 +18,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executor
 
 enum class CutoverGatePhase {
@@ -94,7 +95,10 @@ sealed interface CutoverExclusiveRelease {
  * journal in a non-terminal phase bootstraps the gate closed, so application restart cannot expose
  * a partially restored generation while the coordinator is being reconstructed.
  */
-class CutoverAccessGate private constructor(initial: GateState) {
+class CutoverAccessGate private constructor(
+    initial: GateState,
+    private val admissionWaitBudgetMs: Long
+) {
     private val mutex = Mutex()
     private var state: GateState = initial
     private var nextLeaseId = 1L
@@ -120,25 +124,41 @@ class CutoverAccessGate private constructor(initial: GateState) {
         }
     }
 
-    private suspend fun acquireNormalAccess(): CutoverAccessResult<GateAccessContext> = mutex.withLock {
-        when (val current = state) {
-            is GateState.Open -> {
-                setState(current.copy(activeNormalAccesses = current.activeNormalAccesses + 1))
-                CutoverAccessResult.Granted(GateAccessContext(this, GateAccessKind.NORMAL))
-            }
-            is GateState.Draining -> CutoverAccessResult.Unavailable(
-                CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
-                current.owner.restoreIdentity
-            )
-            is GateState.Exclusive -> CutoverAccessResult.Unavailable(
-                CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
-                current.owner.restoreIdentity
-            )
-            is GateState.RecoveryRequired -> CutoverAccessResult.Unavailable(
-                CutoverUnavailableReason.RECOVERY_REQUIRED,
-                current.identity
-            )
+    private suspend fun acquireNormalAccess(): CutoverAccessResult<GateAccessContext> {
+        // #161 fast path: an uncontended gate decides inline — no suspension, no event loop — so
+        // callers that must not enter the coroutine world (guardExecutor on a submitting thread)
+        // pay zero suspension in the common case. Only a contended mutex suspends.
+        tryAcquireNormalAccessWithoutSuspending()?.let { return it }
+        return mutex.withLock { admissionDecisionLocked() }
+    }
+
+    /** Non-suspending admission probe; null means "mutex contended — caller decides how to wait". */
+    private fun tryAcquireNormalAccessWithoutSuspending(): CutoverAccessResult<GateAccessContext>? {
+        if (!mutex.tryLock()) return null
+        try {
+            return admissionDecisionLocked()
+        } finally {
+            mutex.unlock()
         }
+    }
+
+    private fun admissionDecisionLocked(): CutoverAccessResult<GateAccessContext> = when (val current = state) {
+        is GateState.Open -> {
+            setState(current.copy(activeNormalAccesses = current.activeNormalAccesses + 1))
+            CutoverAccessResult.Granted(GateAccessContext(this, GateAccessKind.NORMAL))
+        }
+        is GateState.Draining -> CutoverAccessResult.Unavailable(
+            CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+            current.owner.restoreIdentity
+        )
+        is GateState.Exclusive -> CutoverAccessResult.Unavailable(
+            CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+            current.owner.restoreIdentity
+        )
+        is GateState.RecoveryRequired -> CutoverAccessResult.Unavailable(
+            CutoverUnavailableReason.RECOVERY_REQUIRED,
+            current.identity
+        )
     }
 
     suspend fun <T> withNormalAccessOrThrow(block: suspend () -> T): T =
@@ -155,19 +175,25 @@ class CutoverAccessGate private constructor(initial: GateState) {
      * Room executors preserve an already-admitted owner across their worker-thread hop. A query
      * submitted without an owner acquires synchronously, so a closed gate rejects the DAO call at
      * submission instead of throwing later on a worker and stranding Room's continuation.
+     *
+     * #161: "synchronously" must never mean "parked indefinitely". The admission on the submitting
+     * thread (often the Android main thread via a Room Flow emit chain) takes the uncontended
+     * fast path inline; only a genuinely contended mutex suspends, and even then inside a bounded
+     * wait — a budget lapse fail-closes with [CutoverAccessUnavailableException] at submission
+     * (Room callers already handle gate rejection) instead of joining a coroutine that itself
+     * needs the parked thread. This is the exact shape of the #161 engine freeze: main parked in
+     * `runBlocking { acquireNormalAccess() }` while the mutex owner needed main to progress, and
+     * the attempt watchdog — on the same dispatcher — died with it. Rejected alternative: moving
+     * admission inside `delegate.execute` would throw the rejection on a worker instead of at
+     * submission and strand Room continuations (breaks the documented semantics above).
      */
     fun guardExecutor(delegate: Executor): Executor = Executor { command ->
         val inherited = currentAccess.get()?.retainIfActiveFor(this)
-        val access = inherited ?: runBlocking {
-            when (val admission = acquireNormalAccess()) {
-                is CutoverAccessResult.Granted -> admission.value
-                is CutoverAccessResult.Unavailable -> throw admission.toException()
-            }
-        }
+        val access = inherited ?: acquireNormalAccessBlocking()
         try {
             delegate.execute { runGuardedCommand(access, command) }
         } catch (failure: Throwable) {
-            runBlocking { releaseAccessReference(access) }
+            releaseAccessReferenceBlocking(access)
             throw failure
         }
     }
@@ -179,7 +205,58 @@ class CutoverAccessGate private constructor(initial: GateState) {
             command.run()
         } finally {
             currentAccess.set(prior)
-            runBlocking { releaseAccessReference(access) }
+            releaseAccessReferenceBlocking(access)
+        }
+    }
+
+    /**
+     * Blocking admission for non-suspending submitters. Uncontended: decided inline. Contended:
+     * bounded wait; a budget lapse fails closed — typed [CutoverAccessUnavailableException] with
+     * `CUTOVER_IN_PROGRESS` (identity unknowable while the mutex is wedged). `gateFlow` treats the
+     * rejection exactly like any other gate rejection: the flow stalls until the next availability
+     * revision instead of freezing the submitting thread forever.
+     */
+    private fun acquireNormalAccessBlocking(): GateAccessContext {
+        val admission = tryAcquireNormalAccessWithoutSuspending()
+            ?: runBlocking {
+                withTimeoutOrNull(admissionWaitBudgetMs) { acquireNormalAccess() }
+            } ?: throw CutoverAccessUnavailableException(
+                CutoverUnavailableReason.CUTOVER_IN_PROGRESS,
+                identity = null
+            )
+        return when (admission) {
+            is CutoverAccessResult.Granted -> admission.value
+            is CutoverAccessResult.Unavailable -> throw admission.toException()
+        }
+    }
+
+    /**
+     * Blocking mirror of [releaseAccessReference] for non-suspending contexts (the guarded
+     * command's finally, and guardExecutor's synchronous-rejection catch branch).
+     *
+     * Admission may fail closed; release may not — a dropped normal-access slot wedges the next
+     * drain ("normal access outlived its drain") for the whole process. So: uncontended fast path
+     * inline; contended bounded waits with retry. Retries make progress the moment the holder
+     * does, and a holder that permanently needs the releasing thread is unresolvable by any
+     * design — documented here rather than papered over with a leak.
+     */
+    private fun releaseAccessReferenceBlocking(access: GateAccessContext) {
+        if (!access.releaseReference() || access.kind != GateAccessKind.NORMAL) return
+        while (!tryReleaseNormalAccessWithoutSuspending()) {
+            val released = runBlocking {
+                withTimeoutOrNull(admissionWaitBudgetMs) { releaseNormalAccess() }
+            }
+            if (released != null) return
+        }
+    }
+
+    private fun tryReleaseNormalAccessWithoutSuspending(): Boolean {
+        if (!mutex.tryLock()) return false
+        try {
+            releaseNormalAccessLocked()
+            return true
+        } finally {
+            mutex.unlock()
         }
     }
 
@@ -350,21 +427,23 @@ class CutoverAccessGate private constructor(initial: GateState) {
     }
 
     private suspend fun releaseNormalAccess() {
-        mutex.withLock {
-            when (val current = state) {
-                is GateState.Open -> {
-                    check(current.activeNormalAccesses > 0) { "normal access underflow" }
-                    setState(current.copy(activeNormalAccesses = current.activeNormalAccesses - 1))
-                }
-                is GateState.Draining -> {
-                    check(current.activeNormalAccesses > 0) { "normal access underflow while draining" }
-                    val remaining = current.activeNormalAccesses - 1
-                    setState(current.copy(activeNormalAccesses = remaining))
-                    if (remaining == 0) current.drained.complete(Unit)
-                }
-                is GateState.Exclusive,
-                is GateState.RecoveryRequired -> error("normal access outlived its drain")
+        mutex.withLock { releaseNormalAccessLocked() }
+    }
+
+    private fun releaseNormalAccessLocked() {
+        when (val current = state) {
+            is GateState.Open -> {
+                check(current.activeNormalAccesses > 0) { "normal access underflow" }
+                setState(current.copy(activeNormalAccesses = current.activeNormalAccesses - 1))
             }
+            is GateState.Draining -> {
+                check(current.activeNormalAccesses > 0) { "normal access underflow while draining" }
+                val remaining = current.activeNormalAccesses - 1
+                setState(current.copy(activeNormalAccesses = remaining))
+                if (remaining == 0) current.drained.complete(Unit)
+            }
+            is GateState.Exclusive,
+            is GateState.RecoveryRequired -> error("normal access outlived its drain")
         }
     }
 
@@ -395,10 +474,17 @@ class CutoverAccessGate private constructor(initial: GateState) {
     }
 
     companion object {
-        fun open(): CutoverAccessGate = CutoverAccessGate(GateState.Open(activeNormalAccesses = 0))
+        /** #161: blocking admissions never park longer than this before failing closed. */
+        internal const val DEFAULT_ADMISSION_WAIT_BUDGET_MS = 5_000L
+
+        fun open(): CutoverAccessGate =
+            open(admissionWaitBudgetMs = DEFAULT_ADMISSION_WAIT_BUDGET_MS)
+
+        internal fun open(admissionWaitBudgetMs: Long): CutoverAccessGate =
+            CutoverAccessGate(GateState.Open(activeNormalAccesses = 0), admissionWaitBudgetMs)
 
         fun recoveryRequired(identity: CutoverRestoreIdentity? = null): CutoverAccessGate =
-            CutoverAccessGate(GateState.RecoveryRequired(identity))
+            CutoverAccessGate(GateState.RecoveryRequired(identity), DEFAULT_ADMISSION_WAIT_BUDGET_MS)
 
         fun fromJournal(journal: CutoverRestoreJournal?): CutoverAccessGate {
             val open = journal == null || journal.phase == CutoverRestorePhase.READY ||
@@ -406,7 +492,7 @@ class CutoverAccessGate private constructor(initial: GateState) {
             return if (open) {
                 open()
             } else {
-                CutoverAccessGate(GateState.RecoveryRequired(journal.identity))
+                CutoverAccessGate(GateState.RecoveryRequired(journal.identity), DEFAULT_ADMISSION_WAIT_BUDGET_MS)
             }
         }
     }
