@@ -115,6 +115,12 @@ public final class SystemServerOracleInstaller {
                 new String[] {"onEnabledChanged"},
                 Android15OracleHookPlan.COVERAGE_LOCATION_EFFECTIVE_ENABLED);
         installPhase600Bridge(loader, plan);
+        // #153: one typed line per system_server boot, AFTER every group above has had its
+        // chance to markInstalled/poison. This is the only install-time window observability:
+        // the oracle is silent by design (fail-closed), so without it a NONE coverage trace
+        // cannot be attributed to a missing hook group versus a runtime predicate. Read-only.
+        XposedBridge.log(TAG + ": installed mask=0x" + Long.toHexString(oracleBinder.installedCoverageMask())
+                + " binderReady=" + (oracleBinder != null));
     }
 
     private static void tryInstallMutationGroup(

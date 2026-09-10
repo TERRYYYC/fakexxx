@@ -61,6 +61,7 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
     }
     void abandonCoveredMutation(long token, Throwable failure) { state.abandonCoveredMutation(token, failure); }
     void markInstalled(long bit) { state.markInstalled(bit); }
+    long installedCoverageMask() { return state.installedCoverageMask(); }
     void poisonCallback(Throwable failure) { state.poisonCallback(failure); }
 
     void configureExpectedQwyIdentity(Context context, String pkg) {
