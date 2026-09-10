@@ -49,6 +49,12 @@ class AutomationService : AccessibilityService() {
 
     // # 服务级别的协程作用域
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    // #161 防御深度：engine 状态机（含 T4 attempt watchdog 竞速）曾与 UI/广播共用主线程——
+    // 主线程一旦被卡（#161 的 gate admission 自死锁），看门狗随主线程一起死，僵死尝试收割失效。
+    // 迁到独立的单协程 dispatcher（Default 的串行视图）：engine 协程彼此仍然严格串行（状态机
+    // 语义不变），但不再依赖主 Looper 存活；UI 投影经 StateFlow 跨线程发布，Compose 端照旧在
+    // 主线程采集。相比自建单线程 Executor 免去生命周期/线程泄漏管理。
+    private val engineDispatcher = Dispatchers.Default.limitedParallelism(1)
     // # 当前运行的自动化任务
     private var automationJob: Job? = null
     private var supersessionStopJob: Job? = null
@@ -477,7 +483,8 @@ class AutomationService : AccessibilityService() {
 
         _startStatus.value = AutomationStartStatus.STARTING
 
-        automationJob = serviceScope.launch {
+        // #161：engine run（含 T4 attempt watchdog）在独立 dispatcher 上串行执行，不再与主线程共存亡
+        automationJob = serviceScope.launch(engineDispatcher) {
             val access = accessGate.withNormalAccess access@{
             // # 读取计划与高级配置（超时/GPS 稳定）
             val plan = planRepository.getPlan(planId)
@@ -600,7 +607,8 @@ class AutomationService : AccessibilityService() {
         activeSupersessionStopRequestId = requestId
         _supersessionStopStatus.value = SupersessionStopStatus.Stopping(requestId, planId, sessionId)
 
-        supersessionStopJob = serviceScope.launch {
+        // #161：stop-only 恢复里也驱动 engine 协程（convergeForSupersessionStop），同样离开主线程
+        supersessionStopJob = serviceScope.launch(engineDispatcher) {
             val access = accessGate.withNormalAccess stop@{
             previousStopJob?.cancelAndJoin()
             if (activeSupersessionStopRequestId != requestId) return@stop
