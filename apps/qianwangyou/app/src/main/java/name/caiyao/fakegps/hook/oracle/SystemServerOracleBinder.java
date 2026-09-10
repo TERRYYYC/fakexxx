@@ -30,10 +30,13 @@ public final class SystemServerOracleBinder extends IAuthoritativeContinuityOrac
                 () -> AndroidOracleEndpointReader.sample(systemContext));
     }
 
-    static SystemServerOracleBinder create(String fingerprint, boolean supported, boolean attested) {
-        // The adapter independently checks the same allowlist; call-site booleans cannot attest it.
-        return new SystemServerOracleBinder(readKernelBootId(), supported,
-                attested && Android15OracleHookPlan.isFingerprintAttested(fingerprint));
+    static SystemServerOracleBinder create(
+            String buildFingerprint,
+            String buildIncremental,
+            OracleHookPlan plan) {
+        // The plan independently re-checks the same allowlist; call-site booleans cannot attest it.
+        return new SystemServerOracleBinder(readKernelBootId(), true,
+                plan.attests(buildFingerprint, buildIncremental));
     }
 
     @Override public Bundle snapshot() { return OracleBundleCodec.encode(state.snapshot()); }

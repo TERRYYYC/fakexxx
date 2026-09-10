@@ -3,13 +3,21 @@ package name.caiyao.fakegps.hook.oracle;
 import java.util.Collections;
 import java.util.Set;
 
-import name.caiyao.fakegps.oracle.OracleWireHealth;
+/**
+ * Exact Android-16 resolver (docs/oracle-a16-research.md, #149). Deliberately inert on every
+ * unattested build.
+ *
+ * <p>Hook-surface derivation: every class/method constant below was diffed against AOSP
+ * {@code android-15.0.0_r1} vs {@code android-16.0.0_r1} (docs/oracle-a16-research.md §2). All
+ * seven hook points survive API 36 unchanged (four files byte-identical, three with additive-only
+ * deltas), so the strings match the API-35 pilot exactly and a test freezes that lockstep.
+ * HyperOS private deltas cannot be proven offline; a missing class/method poisons the oracle
+ * (fail-closed NONE) and never blocks system_server boot.</p>
+ */
+public final class Android16OracleHookPlan {
+    private Android16OracleHookPlan() {}
 
-/** Exact Android-15 pilot resolver. It is deliberately inert on every unattested fingerprint. */
-public final class Android15OracleHookPlan {
-    private Android15OracleHookPlan() {}
-
-    public static final int API_LEVEL = 35;
+    public static final int API_LEVEL = 36;
 
     public static final String APP_OPS_WRAPPER_CLASS =
             "com.android.server.appop.AppOpsCheckingServiceTracingDecorator";
@@ -25,6 +33,7 @@ public final class Android15OracleHookPlan {
             "com.android.server.location.LocationManagerService";
     public static final String SYSTEM_SERVICE_MANAGER_CLASS =
             "com.android.server.SystemServiceManager";
+    /** Must stay identical to the API-35 tag: QWY's own mutations are attributed by this value. */
     public static final String QWY_MUTATION_ATTRIBUTION_TAG =
             "qwy_authoritative_continuity";
 
@@ -37,9 +46,6 @@ public final class Android15OracleHookPlan {
     public static final String[] ACCESS_CHECKING_LIFECYCLE_METHODS = {
             "onPackageRemoved", "onPackageUninstalled", "onUserRemoved"
     };
-    public static final String[] LOCATION_MUTATION_METHODS = {
-            "onStateChanged", "onEnabledChanged"
-    };
     public static final String[] LOCATION_QWY_MUTATION_ENTRY_METHODS = {
             "addTestProvider", "removeTestProvider", "setTestProviderEnabled"
     };
@@ -48,23 +54,42 @@ public final class Android15OracleHookPlan {
     public static final String LOCATION_SEMANTIC_MUTATION_METHOD =
             "setProviderLocation";
 
-    public static final long COVERAGE_APP_OPS_WRAPPER = 1L << 0;
-    public static final long COVERAGE_ACCESS_CHECKING_DELEGATE = 1L << 1;
-    public static final long COVERAGE_ACCESS_CHECKING_LIFECYCLE = 1L << 2;
-    public static final long COVERAGE_LOCATION_PROVIDER_STATE = 1L << 3;
-    public static final long COVERAGE_LOCATION_EFFECTIVE_ENABLED = 1L << 4;
-    public static final long COVERAGE_QWY_SERVICE_GENERATION = 1L << 5;
-    public static final long COVERAGE_QWY_SEMANTIC_SESSION = 1L << 6;
-    public static final long COVERAGE_BRIDGE_SESSION = 1L << 7;
-    public static final long COVERAGE_BUILD_ATTESTED = 1L << 8;
-    public static final long COVERAGE_LOCATION_SEMANTIC_COORDINATE = 1L << 9;
-    public static final long REQUIRED_COVERAGE_MASK = 0x3ffL;
+    /**
+     * Exact-build attestation (the #149 "attested" process): every entry is one exact OEM OTA
+     * build added only by a separately reviewed evidence change. BP2A.250605.031.A3 is the
+     * Xiaomi 14 (mi14) HyperOS 3 / Android 16 pilot build from the 285 rerun.
+     *
+     * <p>Runtime-configurable allowlists (system properties, remote config) were evaluated and
+     * rejected: an editable attestation softens fail-closed into a runtime switch. Gradle-time
+     * injection stays a future evolution once the device count grows; it must keep the
+     * exact-build, review-per-entry property.</p>
+     */
+    public static final Set<String> ATTESTED_BUILD_IDS =
+            Collections.singleton("OS3.0.303.0.WNCCNXM");
+    // Device evidence (mi14 e53cfd3d, 2026-09-10): `getprop ro.build.version.incremental`
+    // -> OS3.0.303.0.WNCCNXM (HyperOS incremental), NOT the BP2A build-ID form. The prior
+    // BP2A value would have left the lane permanently inert — caught by review P2 before
+    // the stage-3 device run. ro.build.fingerprint for the pinning channel:
+    // Xiaomi/houji/houji:16/BP2A.250605.031.A3/OS3.0.303.0.WNCCNXM:user/release-keys
 
-    /** Populated only by a separately reviewed exact-build evidence change. */
+    /** Exact whole-fingerprint pinning channel; populated only with the same review evidence. */
     public static final Set<String> ATTESTED_FINGERPRINTS = Collections.emptySet();
+
+    public static boolean isBuildIdAttested(String buildIncremental) {
+        return buildIncremental != null && ATTESTED_BUILD_IDS.contains(buildIncremental);
+    }
 
     public static boolean isFingerprintAttested(String fingerprint) {
         return fingerprint != null && ATTESTED_FINGERPRINTS.contains(fingerprint);
+    }
+
+    /** Pure fail-closed attestation: exact API level AND an exactly attested build. */
+    public static boolean isBuildAttested(
+            int sdkInt,
+            String buildIncremental,
+            String buildFingerprint) {
+        return sdkInt == API_LEVEL
+                && (isBuildIdAttested(buildIncremental) || isFingerprintAttested(buildFingerprint));
     }
 
     /** The version-neutral surface this plan serves; consumed only through the plan gate. */
@@ -72,8 +97,7 @@ public final class Android15OracleHookPlan {
         @Override public int apiLevel() { return API_LEVEL; }
 
         @Override public boolean attests(String buildFingerprint, String buildIncremental) {
-            // API-35 attestation stays fingerprint-only (allowlist empty today = inert pilot).
-            return isFingerprintAttested(buildFingerprint);
+            return isBuildAttested(apiLevel(), buildIncremental, buildFingerprint);
         }
 
         @Override public String appOpsWrapperClass() { return APP_OPS_WRAPPER_CLASS; }
@@ -110,29 +134,4 @@ public final class Android15OracleHookPlan {
         }
         @Override public String systemServiceManagerClass() { return SYSTEM_SERVICE_MANAGER_CLASS; }
     };
-
-    /** Pure fail-closed health policy shared by the Binder and host tests. */
-    public static OracleWireHealth classifyHealth(
-            boolean supportedPlatform,
-            boolean buildAttested,
-            boolean bootIdValid,
-            boolean invariantFailure,
-            boolean callbackPoisoned,
-            long installedCoverageMask,
-            boolean bridgeConnected,
-            boolean qwySessionActive,
-            boolean endpointValid) {
-        if (!supportedPlatform) return OracleWireHealth.UNSUPPORTED_PLATFORM;
-        if (!buildAttested) return OracleWireHealth.BUILD_UNATTESTED;
-        if (!bootIdValid) return OracleWireHealth.BOOT_ID_UNAVAILABLE;
-        if (invariantFailure) return OracleWireHealth.INVARIANT_FAILURE;
-        if (callbackPoisoned) return OracleWireHealth.CALLBACK_POISONED;
-        if ((installedCoverageMask & REQUIRED_COVERAGE_MASK) != REQUIRED_COVERAGE_MASK) {
-            return OracleWireHealth.HOOKS_INCOMPLETE;
-        }
-        if (!bridgeConnected) return OracleWireHealth.BRIDGE_UNAVAILABLE;
-        if (!qwySessionActive) return OracleWireHealth.SESSION_UNAVAILABLE;
-        if (!endpointValid) return OracleWireHealth.ENDPOINT_UNAVAILABLE;
-        return OracleWireHealth.HEALTHY;
-    }
 }

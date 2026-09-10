@@ -38,11 +38,11 @@ class CurrentOracleWiringTest {
     @Test
     fun `installer refuses unattested builds before producer construction and uses explicit registrar`() {
         val installer = File(root, "src/main/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleInstaller.java").readText()
-        val platformGate = installer.indexOf("if (!supportedPlatform)")
-        val buildGate = installer.indexOf("if (!buildAttested)")
+        val planGate = installer.indexOf("SystemServerOraclePlanGate.resolvePlan(")
+        val inertBranch = installer.indexOf("if (plan == null)")
         val construction = installer.indexOf("oracleBinder = SystemServerOracleBinder.create(")
-        assertTrue(platformGate >= 0 && platformGate < construction)
-        assertTrue(buildGate >= 0 && buildGate < construction)
+        assertTrue("plan resolution must gate producer construction", planGate >= 0 && planGate < construction)
+        assertTrue("inert null-plan branch must sit between gate and construction", inertBranch > planGate && inertBranch < construction)
         assertTrue(installer.contains("SystemServerOracleEntryPolicy.shouldBindBridgeAtPhase(phase)"))
         assertTrue(installer.contains("new ComponentName(BuildConfig.APPLICATION_ID, BRIDGE_SERVICE_CLASS)"))
         assertTrue(installer.contains("registrar.registerOracle(oracleBinder)"))
@@ -52,7 +52,7 @@ class CurrentOracleWiringTest {
         assertTrue(binder.contains("new SystemServerOracleState("))
         assertTrue(binder.contains("Binder.getCallingUid()"))
         assertTrue(binder.contains("OracleBundleCodec.encode(state.snapshot())"))
-        assertTrue(binder.contains("attested && Android15OracleHookPlan.isFingerprintAttested(fingerprint)"))
+        assertTrue(binder.contains("plan.attests(buildFingerprint, buildIncremental)"))
     }
 
     @Test
