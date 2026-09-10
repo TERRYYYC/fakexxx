@@ -180,6 +180,13 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     var failNextAdvancePointer: Boolean = false
 
     /**
+     * #155 one-shot crash injection at applyEnvironment — models the external
+     * publish failing mid-bracket so the handler's uncertain-finish path is
+     * reachable without a second fake environment.
+     */
+    var failNextApplyEnvironment: Boolean = false
+
+    /**
      * Test seam for the §6.7.5 window Terra's interleaving lives in: invoked at
      * the external pointer-apply point, AFTER the failNext check but BEFORE the
      * pointer actually moves. Lets a test act while an advance is committed but
@@ -338,6 +345,10 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
     private var lastAppliedVerificationLevelWire: Int? = null
 
     override fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome {
+        if (failNextApplyEnvironment) {
+            failNextApplyEnvironment = false
+            throw SimulatedWriteCrash(SCHEDULE_NAMESPACE, "applyEnvironment")
+        }
         applyCount += 1
         // KB-8 (v1.62): the intent no longer carries coordinates — the
         // provider resolves them from the current schedule item. The fake

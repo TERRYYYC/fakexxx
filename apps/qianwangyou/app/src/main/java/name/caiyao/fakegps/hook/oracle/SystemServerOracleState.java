@@ -288,6 +288,20 @@ final class SystemServerOracleState {
                 qwySessionActive = false;
                 qwySessionUncertain = true;
                 installedCoverageMask &= ~Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
+            } else if (mutationDepth == 0 && !aggregateUncertain && aggregateChanged) {
+                // #155 (parent #66): the reserved semantic-writer bit is granted
+                // by a COMPLETED clean interval that actually changed the
+                // semantic state, never by registration alone. #66 withheld it
+                // because "current-main writers are not yet all bracketed";
+                // with apply/release/advance now bracketed in the QWY handler,
+                // one changed, clean, depth-0 interval IS that proof. A proved
+                // no-op deliberately grants nothing: its snapshot must stay
+                // byte-identical (see the no-op stability invariant). The grant
+                // runs after this method's entry barrier drained covered
+                // children, and a nested uncertain child keeps the bit cleared.
+                // All five existing clear paths still remove it fail-closed.
+                installedCoverageMask |=
+                        Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION;
             }
         }
     }

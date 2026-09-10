@@ -7,6 +7,9 @@ import android.os.SystemClock
 import java.io.File
 import java.security.MessageDigest
 import name.caiyao.fakegps.data.db.AppDatabase
+import name.caiyao.fakegps.oracle.IAuthoritativeContinuityOracle
+import name.caiyao.fakegps.oracle.OracleClientRegistry
+import name.caiyao.fakegps.oracle.OracleSessionDriver
 
 /**
  * Production wiring for the v1 provider: the Android-backed implementations of
@@ -217,6 +220,11 @@ object ProviderRuntime {
             authoritativeSource = BinderAuthoritativeContinuitySource(),
             expectedOracleOwnerPackage = appContext.packageName,
             expectedOracleOwnerUid = appContext.applicationInfo.uid,
+            // #155: the production registry the system-server oracle arrives in.
+            // The composed session driver registers the QWY session (bit 5) on
+            // arrival and brackets every semantic write (bit 6) — the producer
+            // side the observer's FULL path has been missing.
+            oracleRegistry = OracleClientRegistry.process,
         )
     }
 
@@ -242,6 +250,10 @@ object ProviderRuntime {
         authoritativeSource: AuthoritativeContinuitySource? = null,
         expectedOracleOwnerPackage: String? = null,
         expectedOracleOwnerUid: Int? = null,
+        // #155: when a registry is supplied, a session driver is composed over
+        // it and handed to the handler as the semantic-mutation bracket seam.
+        // Null keeps the legacy harness wiring: no driver, unbracketed writes.
+        oracleRegistry: OracleClientRegistry<IAuthoritativeContinuityOracle>? = null,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -261,6 +273,17 @@ object ProviderRuntime {
             authoritativeCommitStore,
         )
 
+        // The driver's digest source is bound to the SAME tracker/environment
+        // instances the observer reads — that identity, not a copied formula,
+        // is what makes the registered baseline and an observation's
+        // recomputation agree (§6.4 producer digest honesty).
+        val sessionDriver = oracleRegistry?.let { registry ->
+            OracleSessionDriver(
+                registry,
+                semanticDigest = { observedSemanticDigestNow(tracker, environment) },
+            )
+        }
+
         val handler = EnvironmentControlHandler(
             authorizer = authorizer,
             pairingStore = pairing,
@@ -272,6 +295,7 @@ object ProviderRuntime {
             environment = environment,
             clock = clock,
             storage = kv,
+            semanticMutations = sessionDriver,
         )
 
         // A provider process that starts without proof of a clean shutdown must
@@ -287,6 +311,13 @@ object ProviderRuntime {
         // two registrations racing to be the survivor. Composition's job is to
         // call onOwnerProcessStart, not to re-do what it does.
         handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
+
+        // Attached only after owner start: startup reconciliation (pending
+        // advance/restart roll-forwards) writes schedule state, and a session
+        // registered before that would carry a baseline the next bracket cannot
+        // match. An oracle that arrived before this point is replayed by
+        // addListener, so no arrival is lost.
+        sessionDriver?.attach()
 
         oracleProbeSeam = OracleProbeSeam(
             authoritativeSource = authoritativeSource,

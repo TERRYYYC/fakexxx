@@ -24,6 +24,17 @@ data class OracleRegistration<T : Any>(
     val deathLink: OracleDeathLink,
 )
 
+/**
+ * Registration-arrival/departure notification (#155). [onChanged] receives the
+ * newly published oracle, or null when the registry lost it (explicit clear or
+ * binder death). Callbacks run OUTSIDE the registry lock — a listener may make
+ * Binder calls back into the publisher — and must tolerate reordering against
+ * later notifications; staleness is the listener's to check via [OracleClientRegistry.current].
+ */
+fun interface OracleRegistryListener<T> {
+    fun onChanged(oracle: T?)
+}
+
 /** One system authority per QWY process; Binder death removes rather than preserving proof. */
 class OracleClientRegistry<T : Any>(
     private val systemUid: Int = OracleBridgePolicy.SYSTEM_UID,
@@ -35,16 +46,45 @@ class OracleClientRegistry<T : Any>(
 
     private val lock = Any()
     private var current: Slot<T>? = null
+    private val listeners = mutableListOf<OracleRegistryListener<T>>()
+
+    /**
+     * Subscribes to arrival/departure. An oracle registered BEFORE this call is
+     * replayed immediately, so a late-attaching consumer (the session driver at
+     * first provider touch) cannot miss an arrival that already happened.
+     */
+    fun addListener(listener: OracleRegistryListener<T>) {
+        val present = synchronized(lock) {
+            listeners += listener
+            current?.registration?.oracle
+        }
+        if (present != null) listener.onChanged(present)
+    }
+
+    fun removeListener(listener: OracleRegistryListener<T>) {
+        synchronized(lock) { listeners -= listener }
+    }
+
+    private fun notifyChanged(oracle: T?) {
+        val targets = synchronized(lock) { listeners.toList() }
+        targets.forEach { listener -> listener.onChanged(oracle) }
+    }
 
     fun register(callingUid: Int, registration: OracleRegistration<T>): Boolean {
         if (callingUid != systemUid) return false
         val candidate = Slot(registration)
         try {
             registration.deathLink.link {
+                var removed: T? = null
                 synchronized(lock) {
                     candidate.diedBeforePublish = true
-                    if (current === candidate) current = null
+                    if (current === candidate) {
+                        current = null
+                        removed = candidate.registration.oracle
+                    }
                 }
+                // Outside the registry lock: listeners may make Binder calls.
+                if (removed != null) notifyChanged(null)
             }
         } catch (_: RuntimeException) {
             return false
@@ -57,6 +97,7 @@ class OracleClientRegistry<T : Any>(
             return false
         }
         try { publishable.previous?.registration?.deathLink?.unlink() } catch (_: RuntimeException) { }
+        notifyChanged(candidate.registration.oracle)
         return true
     }
 
@@ -67,6 +108,7 @@ class OracleClientRegistry<T : Any>(
     fun clear() {
         val old = synchronized(lock) { current.also { current = null } }
         try { old?.registration?.deathLink?.unlink() } catch (_: RuntimeException) { }
+        if (old != null) notifyChanged(null)
     }
 
     companion object {
