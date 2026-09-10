@@ -7,7 +7,13 @@ import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
 /**
@@ -17,10 +23,38 @@ import kotlin.coroutines.resume
  * # 无障碍服务桥接层：将 AccessibilityService 的底层操作
  * # 封装为干净的挂起函数接口，供 Handler 调用
  */
-class AccessibilityBridge(private val service: AccessibilityService) {
+class AccessibilityBridge(
+    private val service: AccessibilityService,
+    // # [2026-09-09] #147：手势 binder 派发线程。默认为单 daemon 串行线程（手势系统本就互斥——
+    // # 新手势会取消在途手势，串行化把"binder 挂死丢线程"的损失上限定为 1）；测试注入直接执行器。
+    private val gestureDispatchExecutor: Executor = sharedGestureDispatchExecutor(),
+    // # [2026-09-09] #147：手势回调等待上限。须覆盖最长手势（1s long-press）+ 系统调度余量，
+    // # 远小于 runner testTimeoutMs 与看门狗 90s 阈值——超时是失败信号，不是正常路径。
+    private val gestureDispatchTimeoutMs: Long = GESTURE_DISPATCH_TIMEOUT_MS
+) {
 
     companion object {
         private const val TAG = "A11yBridge"
+
+        // # [2026-09-09] #147：手势派发等待上限（8s）。回调永不触发（display binder 无响应）
+        // # 时按超时返回 false，不再永久挂起。
+        const val GESTURE_DISPATCH_TIMEOUT_MS = 8_000L
+
+        @Volatile
+        private var sharedExecutor: Executor? = null
+
+        /** #147: 进程级单例派发线程（daemon，不阻止 JVM 退出；服务重建后复用同一实例）。 */
+        internal fun sharedGestureDispatchExecutor(): Executor {
+            sharedExecutor?.let { return it }
+            synchronized(this) {
+                sharedExecutor?.let { return it }
+                val created = Executors.newSingleThreadExecutor { r ->
+                    Thread(r, "a11y-gesture-dispatch").apply { isDaemon = true }
+                }
+                sharedExecutor = created
+                return created
+            }
+        }
     }
 
     // ---- Node access ----
@@ -152,26 +186,81 @@ class AccessibilityBridge(private val service: AccessibilityService) {
         return dispatchGesture(gesture)
     }
 
-    // # 底层手势派发，使用 suspendCancellableCoroutine 包装回调
-    private suspend fun dispatchGesture(gesture: GestureDescription): Boolean {
-        return suspendCancellableCoroutine { cont ->
-            val dispatched = service.dispatchGesture(
-                gesture,
-                object : AccessibilityService.GestureResultCallback() {
-                    override fun onCompleted(gestureDescription: GestureDescription?) {
-                        if (cont.isActive) cont.resume(true)
-                    }
+    // # 底层手势派发，使用 suspendCancellableCoroutine 包装回调。
+    //
+    // # [2026-09-09] #147（285 压测现场：attempt 卡 LAUNCHING_CELLREBEL 17 分钟，main 被
+    // # binder 占住导致引擎与看门狗同线程双重僵死）——两道防线：
+    // #   1) binder 派发移出 main（gestureDispatchExecutor，单 daemon 串行线程）；
+    // #   2) 回调等待包 withTimeout（默认 8s，超时返回 false + Log.w，不再永久挂起）。
+    //
+    // # AOSP 依据（frameworks/base/core/java/android/accessibilityservice/AccessibilityService.java）：
+    // # dispatchGesture 无主线程约束。阻塞点 calculateGestureSampleTimeMs
+    // # （DisplayManager.getDisplay → DisplayManagerGlobal.getDisplayInfo → binder transact，
+    // # 即 285 现场挂死点）与 MotionEventGenerator.getGestureStepsFromGestureDescription
+    // # （纯本地计算）都在 synchronized(mLock) 之外执行；callback 登记与
+    // # connection.dispatchGesture 段在 mLock 内——任意线程调用皆安全。
+    // # handler=null 的回调线程语义（AOSP javadoc）："If null, the object is called back on
+    // # the service's main thread"——本修复后 main 不再进入 binder 调用，回调可及时投递；
+    // # 且协程恢复（cont.resume）与线程无关，回调线程不构成约束。
+    private suspend fun dispatchGesture(gesture: GestureDescription): Boolean =
+        dispatchGestureCore(gestureDispatchTimeoutMs) { callback ->
+            service.dispatchGesture(gesture, callback, null)
+        }
 
-                    override fun onCancelled(gestureDescription: GestureDescription?) {
-                        Log.w(TAG, "Gesture cancelled")
+    /**
+     * #147 dispatch core: runs [serviceCall] on [gestureDispatchExecutor] (off main) and bounds
+     * the wait for the system gesture callback with [timeoutMs]. internal 供 #147 oracle 直接驱动
+     * （GestureDescription 在 Robolectric JVM 上无法构造，端到端走真机复验）。
+     *
+     * # 超时语义：withTimeout 只能打断"已挂起等回调"的等待；若 binder transact 本身不返回，
+     * # 挂起的只是派发 daemon 线程（main/引擎/看门狗全部存活），attempt 由既有 P1.3 看门狗收尸重试。
+     */
+    internal suspend fun dispatchGestureCore(
+        timeoutMs: Long,
+        serviceCall: (AccessibilityService.GestureResultCallback) -> Boolean
+    ): Boolean {
+        return try {
+            withTimeout(timeoutMs) {
+                suspendCancellableCoroutine { cont ->
+                    val callback = object : AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            if (cont.isActive) cont.resume(true)
+                        }
+
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
+                            Log.w(TAG, "Gesture cancelled")
+                            if (cont.isActive) cont.resume(false)
+                        }
+                    }
+                    try {
+                        gestureDispatchExecutor.execute {
+                            // # 超时/取消后才轮到的陈旧派发绝不落地（迟到的手势会误点屏幕上的任意 UI）
+                            if (!cont.isActive) return@execute
+                            val dispatched = try {
+                                serviceCall(callback)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "dispatchGesture threw ${t.javaClass.simpleName}: ${t.message}")
+                                false
+                            }
+                            if (!dispatched && cont.isActive) cont.resume(false)
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "gesture dispatch executor rejected: ${t.message}")
                         if (cont.isActive) cont.resume(false)
                     }
-                },
-                null
-            )
-            if (!dispatched) {
-                Log.w(TAG, "dispatchGesture returned false")
-                if (cont.isActive) cont.resume(false)
+                }
+            }
+        } catch (e: CancellationException) {
+            // # 区分自身超时与父协程取消（#15a 纪律：绝不吞掉外部取消——取消须继续传播）
+            if (currentCoroutineContext().isActive) {
+                Log.w(
+                    TAG,
+                    "dispatchGesture did not complete within ${timeoutMs}ms — " +
+                        "returning false (display binder unresponsive?)"
+                )
+                false
+            } else {
+                throw e
             }
         }
     }
