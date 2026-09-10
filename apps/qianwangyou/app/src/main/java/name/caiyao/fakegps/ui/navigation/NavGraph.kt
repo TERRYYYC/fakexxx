@@ -22,7 +22,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.toRoute
 import name.caiyao.fakegps.ui.screen.collection.CollectionScreen
-import name.caiyao.fakegps.ui.screen.editor.ProfileEditorScreen
+import name.caiyao.fakegps.ui.screen.editor.ProfileEditorHost
 import name.caiyao.fakegps.ui.screen.map.MapScreen
 import name.caiyao.fakegps.ui.screen.settings.SettingsScreen
 import name.caiyao.fakegps.ui.screen.statuscenter.StatusCenterScreen
@@ -75,7 +75,9 @@ internal class QwyNavScreens(
         onBack: () -> Unit,
         onVerify: () -> Unit,
     ) -> Unit = { profileId, lat, lon, onBack, onVerify ->
-        ProfileEditorScreen(
+        // T11d：模式分发在编辑器内容层（ProfileEditorHost）——简单模式默认，专家模式原样；
+        // Screen.Editor 路由与 #139 返回栈矩阵保持不变。
+        ProfileEditorHost(
             profileId = profileId,
             lat = lat,
             lon = lon,

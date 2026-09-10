@@ -55,6 +55,28 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
     private var editingNameOverride: String? = null
 
     /**
+     * T11d 简单模式：名称草稿。专家编辑器不暴露名称输入（[nameDirty] 恒为 false，保存走
+     * 既有 [editingNameOverride] 语义）；简单编辑器的「名称」框经 [updateName] 写入，保存时
+     * 覆盖档案名（空白 = 交回坐标自动命名）。
+     */
+    private val _profileName = MutableStateFlow("")
+    val profileName: StateFlow<String> = _profileName
+    private var nameDirty = false
+
+    fun updateName(value: String) {
+        draftDirty = true
+        nameDirty = true
+        _profileName.value = value
+    }
+
+    /**
+     * 保存时的名称覆盖：简单模式里被编辑过 → 用草稿（trim 后空白 = null = 坐标自动命名）；
+     * 未编辑过 → 既有语义原样（导入的自定义名保留，自动名随坐标再生成）。
+     */
+    private fun effectiveNameOverride(): String? =
+        if (nameDirty) _profileName.value.trim().takeIf { it.isNotEmpty() } else editingNameOverride
+
+    /**
      * Set by the first [updateField] and never cleared: the operator has touched the draft, so a
      * DB read that was launched before that edit and finishes after it must NOT overwrite
      * [_fieldValues] with the stored row. Without this guard, a load landing in that window
@@ -76,7 +98,17 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _routeSummary = MutableStateFlow<RouteSummary?>(null)
     val routeSummary: StateFlow<RouteSummary?> = _routeSummary
 
+    /**
+     * T11d：同一目的地的重复 load（简单/专家切换导致另一渲染层重入 LaunchedEffect）在 VM 内
+     * 去重——同键第二次 load 直接返回，操作者草稿绝不因切模式被重置。真正的重新载入只发生在
+     * 新的编辑器目的地（全新 VM 实例）。
+     */
+    private var loadedProfileId: Long? = null
+
     fun load(profileId: Long, defaultLat: Double, defaultLon: Double) {
+        val requested = if (profileId > 0) profileId else -1L
+        if (loadedProfileId == requested) return
+        loadedProfileId = requested
         viewModelScope.launch {
             runCatching {
                 if (profileId > 0) {
@@ -87,6 +119,9 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                         editingRouteWaypointsJson = entity.routeWaypointsJson
                         _routeSummary.value = RouteSummary.of(entity.routeWaypointsJson)
                         if (draftDirty) return@runCatching
+                        // 名称与字段同属草稿态：一份在途编辑不允许被迟到的行覆盖（#127 同型）。
+                        nameDirty = false
+                        _profileName.value = entity.addname.orEmpty()
                         _fieldValues.value = runCatching { entityToMap(entity) }
                             .getOrElse {
                                 _notice.value =
@@ -101,6 +136,8 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                 editingNameOverride = null
                 editingRouteWaypointsJson = null
                 _routeSummary.value = null
+                nameDirty = false
+                _profileName.value = ""
                 _fieldValues.value = mapOf(
                     "latitude" to defaultLat.toString(),
                     "longitude" to defaultLon.toString(),
@@ -151,7 +188,7 @@ class ProfileEditorViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 runCatching {
-                    val entity = mapToEntity(values, editingId, editingNameOverride)
+                    val entity = mapToEntity(values, editingId, effectiveNameOverride())
                         .copy(routeWaypointsJson = editingRouteWaypointsJson)
                     val result = repo.save(entity)
                     editingId = result.id
