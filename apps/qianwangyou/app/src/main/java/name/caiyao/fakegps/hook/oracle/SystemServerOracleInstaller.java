@@ -9,6 +9,7 @@ import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
 
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -133,7 +134,7 @@ public final class SystemServerOracleInstaller {
         try {
             Class<?> target = XposedHelpers.findClass(className, loader);
             for (String method : methods) {
-                Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
+                Set<XC_MethodHook.Unhook> hooks = hookAllMethodsResolvingJarJarRenames(
                         target, method, new CoveredMutationHook(captureCallerProvenance));
                 if (hooks == null || hooks.isEmpty()) {
                     throw new NoSuchMethodException(className + "#" + method);
@@ -145,6 +146,27 @@ public final class SystemServerOracleInstaller {
             oracleBinder.poisonCallback(failure);
             XposedBridge.log(TAG + ": required hook missing " + className + " " + failure);
         }
+    }
+
+    /**
+     * Hook by bare plan name, falling back to jarjar-renamed spellings when the bare name hooks
+     * nothing. HyperOS jarjars some services-permission methods into
+     * {@code bareName$…pre_jarjar} forms (mi14 HyperOS 3.0.303 dexdump: AccessCheckingService
+     * lifecycle methods, #149), so a bare-name miss no longer means the method is absent. The
+     * discipline is unchanged: when neither the bare name nor any renamed spelling yields a
+     * method, the returned set is empty and the caller throws its existing
+     * NoSuchMethodException into poisonCallback (fail-closed).
+     */
+    private static Set<XC_MethodHook.Unhook> hookAllMethodsResolvingJarJarRenames(
+            Class<?> target, String bareName, XC_MethodHook hook) {
+        Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(target, bareName, hook);
+        if (hooks != null && !hooks.isEmpty()) return hooks;
+        Set<XC_MethodHook.Unhook> renamedHooks = new LinkedHashSet<>();
+        for (String actualName : HookMethodNameResolver.resolveActualHookNames(
+                HookMethodNameResolver.declaredMethodNames(target), bareName)) {
+            renamedHooks.addAll(XposedBridge.hookAllMethods(target, actualName, hook));
+        }
+        return renamedHooks;
     }
 
     private static final class CoveredMutationHook extends XC_MethodHook {
@@ -270,7 +292,7 @@ public final class SystemServerOracleInstaller {
     private static void tryInstallLocationSemanticCoverage(ClassLoader loader, OracleHookPlan plan) {
         try {
             Class<?> entry = XposedHelpers.findClass(plan.locationManagerServiceClass(), loader);
-            Set<XC_MethodHook.Unhook> provenanceHooks = XposedBridge.hookAllMethods(
+            Set<XC_MethodHook.Unhook> provenanceHooks = hookAllMethodsResolvingJarJarRenames(
                     entry,
                     plan.locationQwyProvenanceEntryMethod(),
                     new CallerProvenanceHook());
@@ -281,7 +303,7 @@ public final class SystemServerOracleInstaller {
             }
 
             Class<?> provider = XposedHelpers.findClass(plan.locationMockProviderClass(), loader);
-            Set<XC_MethodHook.Unhook> semanticHooks = XposedBridge.hookAllMethods(
+            Set<XC_MethodHook.Unhook> semanticHooks = hookAllMethodsResolvingJarJarRenames(
                     provider,
                     plan.locationSemanticMutationMethod(),
                     new SemanticLocationMutationHook());
@@ -387,7 +409,7 @@ public final class SystemServerOracleInstaller {
     private static void installPhase600Bridge(ClassLoader loader, OracleHookPlan plan) {
         try {
             Class<?> manager = XposedHelpers.findClass(plan.systemServiceManagerClass(), loader);
-            Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
+            Set<XC_MethodHook.Unhook> hooks = hookAllMethodsResolvingJarJarRenames(
                     manager,
                     "startBootPhase",
                     new XC_MethodHook() {
