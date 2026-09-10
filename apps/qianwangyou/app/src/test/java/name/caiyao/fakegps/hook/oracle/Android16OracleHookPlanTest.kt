@@ -161,12 +161,12 @@ class Android16OracleHookPlanTest {
     @Test
     fun `mi14 pilot build is the only attested build id`() {
         assertEquals(
-            setOf("BP2A.250605.031.A3"),
+            setOf("OS3.0.303.0.WNCCNXM"),
             Android16OracleHookPlan.ATTESTED_BUILD_IDS,
         )
-        assertTrue(Android16OracleHookPlan.isBuildIdAttested("BP2A.250605.031.A3"))
+        assertTrue(Android16OracleHookPlan.isBuildIdAttested("OS3.0.303.0.WNCCNXM"))
         assertFalse("prefix builds are not the attested OTA", Android16OracleHookPlan.isBuildIdAttested("BP2A.250605.031"))
-        assertFalse(Android16OracleHookPlan.isBuildIdAttested("BP2A.250605.031.A3/user"))
+        assertFalse(Android16OracleHookPlan.isBuildIdAttested("OS3.0.303.0.WNCCNXM/user"))
         assertFalse(Android16OracleHookPlan.isBuildIdAttested(null))
         assertFalse(Android16OracleHookPlan.isBuildIdAttested(""))
     }
@@ -179,7 +179,7 @@ class Android16OracleHookPlanTest {
 
     @Test
     fun `build attestation needs the exact sdk and an attested build`() {
-        val mi14Incremental = "BP2A.250605.031.A3"
+        val mi14Incremental = "OS3.0.303.0.WNCCNXM"
         assertTrue(Android16OracleHookPlan.isBuildAttested(36, mi14Incremental, "any/fingerprint"))
         assertFalse("wrong SDK is never attested", Android16OracleHookPlan.isBuildAttested(35, mi14Incremental, null))
         assertFalse("unknown incremental is never attested", Android16OracleHookPlan.isBuildAttested(36, "OTHER.INCREMENTAL", null))
@@ -189,7 +189,8 @@ class Android16OracleHookPlanTest {
     @Test
     fun `surface attestation delegates to the pure policy`() {
         val a16 = Android16OracleHookPlan.SURFACE
-        assertTrue(a16.attests("whatever", "BP2A.250605.031.A3"))
+        assertTrue(a16.attests("whatever", "OS3.0.303.0.WNCCNXM"))
+            // BP2A is the build-ID form, NOT the incremental — must stay unattested (review P2 regression)
         assertFalse(a16.attests("whatever", "OTHER"))
         val a15 = Android15OracleHookPlan.SURFACE
         assertFalse(

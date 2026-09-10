@@ -11,7 +11,7 @@ import org.junit.Test
  * inert, never half-installed.
  */
 class SystemServerOraclePlanGateTest {
-    private val mi14Incremental = "BP2A.250605.031.A3"
+    private val mi14Incremental = "OS3.0.303.0.WNCCNXM"
 
     @Test
     fun `api 34 and below never resolve a plan`() {

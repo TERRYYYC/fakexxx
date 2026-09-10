@@ -65,7 +65,12 @@ public final class Android16OracleHookPlan {
      * exact-build, review-per-entry property.</p>
      */
     public static final Set<String> ATTESTED_BUILD_IDS =
-            Collections.singleton("BP2A.250605.031.A3");
+            Collections.singleton("OS3.0.303.0.WNCCNXM");
+    // Device evidence (mi14 e53cfd3d, 2026-09-10): `getprop ro.build.version.incremental`
+    // -> OS3.0.303.0.WNCCNXM (HyperOS incremental), NOT the BP2A build-ID form. The prior
+    // BP2A value would have left the lane permanently inert — caught by review P2 before
+    // the stage-3 device run. ro.build.fingerprint for the pinning channel:
+    // Xiaomi/houji/houji:16/BP2A.250605.031.A3/OS3.0.303.0.WNCCNXM:user/release-keys
 
     /** Exact whole-fingerprint pinning channel; populated only with the same review evidence. */
     public static final Set<String> ATTESTED_FINGERPRINTS = Collections.emptySet();
