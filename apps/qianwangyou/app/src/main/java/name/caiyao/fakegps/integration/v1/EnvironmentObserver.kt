@@ -83,6 +83,8 @@ class EnvironmentObserver(
         // stale replay from an earlier completed interval. Once this owner has
         // acknowledged sequence N for an epoch, a later observation of N-2 is
         // fail-closed even when its own endpoints match.
+        var staleReplayRejected = false
+        var epochStable = true
         authoritativeCursor?.let { cursor ->
             val highest = authoritativeCommitStore?.highestAcknowledgedSequenceForSourceEpoch(cursor)
             val knownDigest = authoritativeCommitStore?.digestForAcknowledgedSequence(cursor)
@@ -90,6 +92,7 @@ class EnvironmentObserver(
                 (knownDigest != null && knownDigest != cursor.qwySemanticDigest)) {
                 authoritativeWindowIsValid = false
                 authoritativeCursor = null
+                staleReplayRejected = true
             }
         }
         authoritativeCursor?.let { cursor ->
@@ -100,6 +103,7 @@ class EnvironmentObserver(
                 // establish a new local epoch.
                 authoritativeWindowIsValid = false
                 authoritativeCursor = null
+                epochStable = false
             }
         }
         // A new stable cursor in the same authoritative epoch reports a
@@ -126,6 +130,30 @@ class EnvironmentObserver(
                 tracker.reportObserverGap()
                 snap = tracker.snapshot()
             }
+        }
+        // #153 diagnostics-only audit row: when an authoritative source is present
+        // but the window ended up INVALID, name the failing predicate (payloadDigest
+        // carries the short reason). It adds ONE row to the existing append-only
+        // audit stream; it does not touch the wire contract, the trust judgement
+        // above, or any observation record schema. A source-less observe (legacy
+        // JVM harness) has no window to diagnose and appends nothing.
+        if (authoritativeSource != null && !authoritativeWindowIsValid) {
+            val trace = OracleWindowDiagnostics.decompose(
+                pre = pre,
+                post = post,
+                expectedPackage = expectedOracleOwnerPackage,
+                expectedUid = expectedOracleOwnerUid,
+                expectedDigest = expectedDigest,
+                staleReplayRejected = staleReplayRejected,
+                epochStable = epochStable,
+            )
+            audit.append(
+                event = "ORACLE_WINDOW_INVALID",
+                callerApplicationId = lease.callerApplicationId,
+                leaseId = lease.leaseId,
+                operationId = request.operationId,
+                payloadDigest = trace.invalidReason(),
+            )
         }
         val coverageWire = when {
             authoritativeSource == null -> snap.coverageWire

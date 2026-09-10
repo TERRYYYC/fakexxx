@@ -167,6 +167,25 @@ object ProviderRuntime {
     @Volatile
     private var kvRef: DurableKv? = null
 
+    /**
+     * #153: read-only view of exactly the components the observer judges the
+     * authoritative window with, kept aside at composition time so the debug
+     * probe reconstructs predicates from the LIVE single-writer state instead
+     * of forking a second owner over the same directory. Never written to.
+     */
+    @Volatile
+    private var oracleProbeSeam: OracleProbeSeam? = null
+
+    /** The observer's exact collaborators, read-only, for [oracleWindowDiagnostics]. */
+    internal data class OracleProbeSeam(
+        val authoritativeSource: AuthoritativeContinuitySource?,
+        val expectedOracleOwnerPackage: String?,
+        val expectedOracleOwnerUid: Int?,
+        val tracker: ContinuityTracker,
+        val environment: QwyEnvironment,
+        val commitStore: AuthoritativeObservationCommitStore?,
+    )
+
     private val bootLock = Any()
 
     fun handler(context: Context): EnvironmentControlHandler {
@@ -269,6 +288,15 @@ object ProviderRuntime {
         // call onOwnerProcessStart, not to re-do what it does.
         handler.onOwnerProcessStart(cleanlinessProvable = CleanShutdownMarker.consume(kv))
 
+        oracleProbeSeam = OracleProbeSeam(
+            authoritativeSource = authoritativeSource,
+            expectedOracleOwnerPackage = expectedOracleOwnerPackage,
+            expectedOracleOwnerUid = expectedOracleOwnerUid,
+            tracker = tracker,
+            environment = environment,
+            commitStore = authoritativeCommitStore,
+        )
+
         return handler
     }
 
@@ -294,6 +322,70 @@ object ProviderRuntime {
         return store.pendingCandidates().filter { candidate ->
             store.findActive(candidate.callerApplicationId, candidate.currentSignerDigest) == null
         }
+    }
+
+    /**
+     * #153 debug-probe view: reconstruct one PRE/POST oracle window from the LIVE
+     * runtime and decompose the observer's window predicates over it, including
+     * the durable replay-watermark checks. READ-ONLY — it boots the provider
+     * through the normal composition root when this is the first touch (exactly
+     * like a service bind would), then only reads snapshots; it never bumps,
+     * acknowledges, or audits. Null only when no authoritative source was
+     * composed (legacy harness wiring), which is itself a diagnostic answer.
+     */
+    fun oracleWindowDiagnostics(context: Context): OracleWindowLiveDiagnostics? {
+        handler(context)
+        val seam = oracleProbeSeam ?: return null
+        val source = seam.authoritativeSource ?: return null
+        val pre = runCatching(source::snapshot).getOrNull()
+        val post = runCatching(source::snapshot).getOrNull()
+        val snap = seam.tracker.snapshot()
+        val effective = seam.environment.observeEffective()
+        val schedule = seam.environment.scheduleSnapshot()
+        val expectedDigest = QwyObservedSemanticDigest.compute(
+            ownerGeneration = snap.generation,
+            effective = effective,
+            schedule = schedule,
+        )
+        var trace = OracleWindowDiagnostics.decompose(
+            pre = pre,
+            post = post,
+            expectedPackage = seam.expectedOracleOwnerPackage,
+            expectedUid = seam.expectedOracleOwnerUid,
+            expectedDigest = expectedDigest,
+        )
+        var acknowledgedCursor: AuthoritativeObservationCursor? = null
+        // Same judgement order as EnvironmentObserver: only a still-valid window
+        // reaches the durable replay checks, and the epoch check needs a cursor.
+        if (trace.verdict == AuthoritativeWindowVerdict.VALID && trace.digestMatch) {
+            val stablePre = checkNotNull(pre)
+            val cursor = AuthoritativeObservationCursor(
+                bootId = stablePre.bootId,
+                oracleInstanceId = stablePre.oracleInstanceId,
+                sequence = stablePre.sequence,
+                qwySemanticDigest = checkNotNull(stablePre.qwySemanticDigest),
+            )
+            val highest = seam.commitStore?.highestAcknowledgedSequenceForSourceEpoch(cursor)
+            val knownDigest = seam.commitStore?.digestForAcknowledgedSequence(cursor)
+            when {
+                (highest != null && cursor.sequence < highest) ||
+                    (knownDigest != null && knownDigest != cursor.qwySemanticDigest) ->
+                    trace = trace.copy(staleReplayRejected = true)
+
+                seam.commitStore?.hasAcknowledgementForDifferentSourceEpoch(snap.generation, cursor) == true ->
+                    trace = trace.copy(epochStable = false)
+
+                else -> acknowledgedCursor = cursor
+            }
+        }
+        return OracleWindowLiveDiagnostics(
+            localGeneration = snap.generation,
+            expectedDigest = expectedDigest,
+            pre = pre,
+            post = post,
+            trace = trace,
+            acknowledgedCursor = acknowledgedCursor,
+        )
     }
 
     /**

@@ -358,6 +358,13 @@ final class SystemServerOracleState {
         }
     }
 
+    /** Read-only view for the one-shot install-time log line (#153); never a trust input. */
+    long installedCoverageMask() {
+        synchronized (lock) {
+            return installedCoverageMask;
+        }
+    }
+
     void configureExpectedQwyIdentity(int uid, String qwyPackage) {
         if (uid < 0 || qwyPackage == null || qwyPackage.trim().isEmpty()) {
             throw new IllegalArgumentException("resolved QWY identity is required");

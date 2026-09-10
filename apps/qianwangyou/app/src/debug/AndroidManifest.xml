@@ -45,6 +45,15 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:label="EC v1 P10 fault/revoke collector" />
+        <!-- #153 oracle window diagnostics: read-only probe over the live
+             ProviderRuntime composition (wire snapshot four-piece + window
+             predicate decomposition). Exported so adb can drive it; debug
+             source set only, never ships. -->
+        <activity
+            android:name="name.caiyao.fakegps.integration.v1.OracleStatusProbeActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="Oracle status probe" />
     </application>
 
 </manifest>
