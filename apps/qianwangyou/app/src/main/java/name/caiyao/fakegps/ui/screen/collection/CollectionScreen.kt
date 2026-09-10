@@ -49,10 +49,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import name.caiyao.fakegps.data.db.ProfileSummary
 import name.caiyao.fakegps.data.importer.ProfileImportTemplate
+import name.caiyao.fakegps.ui.screen.editor.EditorModePrefs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -210,6 +212,29 @@ fun CollectionScreen(
                             onDelete = { deleteTarget = profile },
                             onAnchor = { anchorTarget = profile },
                         )
+                    }
+                    // T11d：专家模式入口（v3 原型 M2 底部「专家模式 ▸」）——进入完整 14 组
+                    // 90 字段编辑器并记住专家模式（下次打开编辑器仍专家，编辑器内可一键回切）。
+                    item(key = "__expert_entry") {
+                        val target = expertEntryTarget(profiles, effectiveId)
+                        if (target != null) {
+                            val modePrefs = EditorModePrefs.getInstance(LocalContext.current)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center,
+                            ) {
+                                TextButton(onClick = {
+                                    modePrefs.setSimpleMode(false)
+                                    onEditProfile(
+                                        target.id,
+                                        target.latitude ?: 0.0,
+                                        target.longitude ?: 0.0,
+                                    )
+                                }) {
+                                    Text("专家模式 ▸")
+                                }
+                            }
+                        }
                     }
                 }
             }

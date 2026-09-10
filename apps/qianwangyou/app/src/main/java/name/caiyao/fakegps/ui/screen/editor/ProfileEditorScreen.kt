@@ -45,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -79,6 +80,8 @@ fun ProfileEditorScreen(
 
     val verifyRequested by vm.verifyRequested.collectAsState()
 
+    val context = LocalContext.current
+
     LaunchedEffect(saved) {
         if (saved) onBack()
     }
@@ -96,6 +99,15 @@ fun ProfileEditorScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    // T11d：专家模式的「一键回切」——同一 VM 原地换渲染层，草稿不丢；
+                    // 模式记忆持久化，回简单后下次默认简单。
+                    TextButton(onClick = {
+                        EditorModePrefs.getInstance(context).setSimpleMode(true)
+                    }) {
+                        Text("简单模式")
                     }
                 },
             )
@@ -147,35 +159,8 @@ fun ProfileEditorScreen(
             // P3.1 运动链: a route profile announces itself here (waypoint count / total length /
             // play time at the speed profile). The waypoints themselves come from a route CSV or
             // the plan-adjacent synthesis — they are not typed into the field grid.
-            routeSummary?.let { summary ->
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "路线",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        Text(
-                            text = "${summary.waypointCount} 个路点 · " +
-                                "%.1f km".format(summary.lengthMeters / 1000.0) + " · " +
-                                "预计 %d 分钟".format(
-                                    (summary.estimatedDurationSeconds / 60.0).toInt().coerceAtLeast(1),
-                                ),
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Text(
-                            text = "开启「运动链」模块后，System Mock 沿该路线以 1 Hz 连续投递（速度剖面 + GPS 抖动）。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
+            // T11d: the same card the simple editor shows (ProfileRouteCard).
+            routeSummary?.let { summary -> ProfileRouteCard(summary) }
             for ((category, fields) in categories) {
                 val expanded = expandedState[category] ?: (category == "定位")
                 val activeCount = fields.count { fieldValues.containsKey(it.dbColumn) }
