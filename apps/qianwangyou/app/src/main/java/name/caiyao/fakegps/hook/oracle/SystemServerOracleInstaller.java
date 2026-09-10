@@ -18,7 +18,6 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import name.caiyao.fakegps.BuildConfig;
 import name.caiyao.fakegps.oracle.IContinuityOracleRegistrar;
-import name.caiyao.fakegps.oracle.OracleWireHealth;
 
 /** Dedicated legacy LSPosed system_server branch. It never installs generic spoof hooks. */
 public final class SystemServerOracleInstaller {
@@ -64,55 +63,57 @@ public final class SystemServerOracleInstaller {
         ClassLoader loader = systemClassLoader != null
                 ? systemClassLoader
                 : SystemServerOracleInstaller.class.getClassLoader();
-        boolean supportedPlatform = Build.VERSION.SDK_INT == Android15OracleHookPlan.API_LEVEL;
-        boolean buildAttested = Android15OracleHookPlan.isFingerprintAttested(Build.FINGERPRINT);
+        // Gate order is load-bearing: platform gate (plan resolution) → build attestation gate →
+        // only then is the producer constructed and the first hook registered. Null plan means
+        // the installer returns inert before touching system_server.
+        OracleHookPlan plan = SystemServerOraclePlanGate.resolvePlan(
+                Build.VERSION.SDK_INT, Build.FINGERPRINT, Build.VERSION.INCREMENTAL);
 
-        if (!supportedPlatform) {
-            XposedBridge.log(TAG + ": unsupported SDK " + Build.VERSION.SDK_INT);
-            return;
-        }
-        if (!buildAttested) {
-            // Pilot safety gate: empty production allowlist means BUILD_UNATTESTED and no hooks.
-            XposedBridge.log(TAG + ": " + OracleWireHealth.BUILD_UNATTESTED
+        if (plan == null) {
+            XposedBridge.log(TAG + ": unsupported SDK " + Build.VERSION.SDK_INT
+                    + " or unattested build incremental=" + Build.VERSION.INCREMENTAL
                     + " fingerprint=" + Build.FINGERPRINT);
             return;
         }
         oracleBinder = SystemServerOracleBinder.create(
-                Build.FINGERPRINT, true, true);
+                Build.FINGERPRINT, Build.VERSION.INCREMENTAL, plan);
 
+        // Coverage bit VALUES below are the version-neutral wire contract (protocolVersion=1
+        // installedCoverageMask, consumed by SystemServerOracleState). They are declared once —
+        // with the API-35 pilot — and shared by every platform branch; never fork per API level.
         tryInstallMutationGroup(
                 loader,
-                Android15OracleHookPlan.APP_OPS_WRAPPER_CLASS,
-                Android15OracleHookPlan.APP_OPS_WRAPPER_MUTATION_METHODS,
+                plan.appOpsWrapperClass(),
+                plan.appOpsWrapperMutationMethods(),
                 Android15OracleHookPlan.COVERAGE_APP_OPS_WRAPPER);
         tryInstallMutationGroup(
                 loader,
-                Android15OracleHookPlan.ACCESS_CHECKING_DELEGATE_CLASS,
-                Android15OracleHookPlan.ACCESS_CHECKING_MUTATION_METHODS,
+                plan.accessCheckingDelegateClass(),
+                plan.accessCheckingMutationMethods(),
                 Android15OracleHookPlan.COVERAGE_ACCESS_CHECKING_DELEGATE);
         tryInstallMutationGroup(
                 loader,
-                Android15OracleHookPlan.ACCESS_CHECKING_LIFECYCLE_CLASS,
-                Android15OracleHookPlan.ACCESS_CHECKING_LIFECYCLE_METHODS,
+                plan.accessCheckingLifecycleClass(),
+                plan.accessCheckingLifecycleMethods(),
                 Android15OracleHookPlan.COVERAGE_ACCESS_CHECKING_LIFECYCLE);
         tryInstallMutationGroup(
                 loader,
-                Android15OracleHookPlan.LOCATION_MANAGER_SERVICE_CLASS,
-                Android15OracleHookPlan.LOCATION_QWY_MUTATION_ENTRY_METHODS,
+                plan.locationManagerServiceClass(),
+                plan.locationQwyMutationEntryMethods(),
                 0L,
                 true);
-        tryInstallLocationSemanticCoverage(loader);
+        tryInstallLocationSemanticCoverage(loader, plan);
         tryInstallMutationGroup(
                 loader,
-                Android15OracleHookPlan.LOCATION_PROVIDER_MANAGER_CLASS,
+                plan.locationProviderManagerClass(),
                 new String[] {"onStateChanged"},
                 Android15OracleHookPlan.COVERAGE_LOCATION_PROVIDER_STATE);
         tryInstallMutationGroup(
                 loader,
-                Android15OracleHookPlan.LOCATION_PROVIDER_MANAGER_CLASS,
+                plan.locationProviderManagerClass(),
                 new String[] {"onEnabledChanged"},
                 Android15OracleHookPlan.COVERAGE_LOCATION_EFFECTIVE_ENABLED);
-        installPhase600Bridge(loader);
+        installPhase600Bridge(loader, plan);
     }
 
     private static void tryInstallMutationGroup(
@@ -266,30 +267,28 @@ public final class SystemServerOracleInstaller {
         }
     }
 
-    private static void tryInstallLocationSemanticCoverage(ClassLoader loader) {
+    private static void tryInstallLocationSemanticCoverage(ClassLoader loader, OracleHookPlan plan) {
         try {
-            Class<?> entry = XposedHelpers.findClass(
-                    Android15OracleHookPlan.LOCATION_MANAGER_SERVICE_CLASS, loader);
+            Class<?> entry = XposedHelpers.findClass(plan.locationManagerServiceClass(), loader);
             Set<XC_MethodHook.Unhook> provenanceHooks = XposedBridge.hookAllMethods(
                     entry,
-                    Android15OracleHookPlan.LOCATION_QWY_PROVENANCE_ENTRY_METHOD,
+                    plan.locationQwyProvenanceEntryMethod(),
                     new CallerProvenanceHook());
             if (provenanceHooks == null || provenanceHooks.isEmpty()) {
                 throw new NoSuchMethodException(
-                        Android15OracleHookPlan.LOCATION_MANAGER_SERVICE_CLASS + "#"
-                                + Android15OracleHookPlan.LOCATION_QWY_PROVENANCE_ENTRY_METHOD);
+                        plan.locationManagerServiceClass() + "#"
+                                + plan.locationQwyProvenanceEntryMethod());
             }
 
-            Class<?> provider = XposedHelpers.findClass(
-                    Android15OracleHookPlan.LOCATION_MOCK_PROVIDER_CLASS, loader);
+            Class<?> provider = XposedHelpers.findClass(plan.locationMockProviderClass(), loader);
             Set<XC_MethodHook.Unhook> semanticHooks = XposedBridge.hookAllMethods(
                     provider,
-                    Android15OracleHookPlan.LOCATION_SEMANTIC_MUTATION_METHOD,
+                    plan.locationSemanticMutationMethod(),
                     new SemanticLocationMutationHook());
             if (semanticHooks == null || semanticHooks.isEmpty()) {
                 throw new NoSuchMethodException(
-                        Android15OracleHookPlan.LOCATION_MOCK_PROVIDER_CLASS + "#"
-                                + Android15OracleHookPlan.LOCATION_SEMANTIC_MUTATION_METHOD);
+                        plan.locationMockProviderClass() + "#"
+                                + plan.locationSemanticMutationMethod());
             }
             oracleBinder.markInstalled(
                     Android15OracleHookPlan.COVERAGE_LOCATION_SEMANTIC_COORDINATE);
@@ -385,10 +384,9 @@ public final class SystemServerOracleInstaller {
         COVERED_MUTATION_FINISHER.awaitDrained();
     }
 
-    private static void installPhase600Bridge(ClassLoader loader) {
+    private static void installPhase600Bridge(ClassLoader loader, OracleHookPlan plan) {
         try {
-            Class<?> manager = XposedHelpers.findClass(
-                    Android15OracleHookPlan.SYSTEM_SERVICE_MANAGER_CLASS, loader);
+            Class<?> manager = XposedHelpers.findClass(plan.systemServiceManagerClass(), loader);
             Set<XC_MethodHook.Unhook> hooks = XposedBridge.hookAllMethods(
                     manager,
                     "startBootPhase",
