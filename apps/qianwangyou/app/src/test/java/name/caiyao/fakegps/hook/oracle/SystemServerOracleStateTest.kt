@@ -152,6 +152,80 @@ class SystemServerOracleStateTest {
         assertEquals(OracleWireHealth.CALLBACK_POISONED, f.producer.snapshot().health)
     }
 
+    /**
+     * #155: the reserved semantic-session bit is granted by a COMPLETED clean
+     * (non-uncertain) QWY mutation, never by registration alone — registration
+     * still proves only service generation (the assertion above stays), but a
+     * bracketed writer finishing cleanly is exactly the proof #66 was waiting
+     * for. With all other bits installed, one clean finish must make the
+     * producer HEALTHY and close a VALID consumer window over the new digest.
+     */
+    @Test
+    fun `completed clean semantic mutation grants semantic session coverage and closes a valid window`() {
+        val f = Fixture()
+        f.installPlatformHooks()
+        f.connect()
+        f.producer.registerQwySession("digest-a", f.session)
+        val token = f.producer.beginQwySemanticMutation("apply-lease-1", "digest-a", f.session)
+        f.producer.finishQwySemanticMutation(token, true, false, "digest-b")
+        val wire = f.producer.snapshot()
+        assertNotEquals(
+            0L,
+            wire.installedCoverageMask and Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION,
+        )
+        assertEquals(
+            Android15OracleHookPlan.REQUIRED_COVERAGE_MASK,
+            wire.installedCoverageMask,
+        )
+        assertEquals(OracleWireHealth.HEALTHY, wire.health)
+        val registry = OracleClientRegistry<SystemServerOracleState>()
+        val death = object : OracleDeathLink { override fun link(onDeath: () -> Unit) = Unit }
+        assertTrue(registry.register(1000, OracleRegistration(f.producer, death)))
+        val consumer = BinderAuthoritativeContinuitySource { registry.current()?.snapshot() }
+        val pre = consumer.snapshot()
+        val post = consumer.snapshot()
+        assertEquals(
+            AuthoritativeWindowVerdict.VALID,
+            classifyAuthoritativeWindow(pre, post, qwyPackage, qwyUid),
+        )
+        assertEquals("digest-b", pre?.qwySemanticDigest)
+        registry.clear()
+    }
+
+    /** #155: the uncertain-finish clear path must keep removing the granted bit. */
+    @Test
+    fun `uncertain semantic finish revokes semantic session coverage`() {
+        val f = Fixture()
+        f.installPlatformHooks()
+        f.connect()
+        f.producer.registerQwySession("digest-a", f.session)
+        val token = f.producer.beginQwySemanticMutation("apply-lease-1", "digest-a", f.session)
+        f.producer.finishQwySemanticMutation(token, true, true, "digest-b")
+        val wire = f.producer.snapshot()
+        assertEquals(
+            0L,
+            wire.installedCoverageMask and Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION,
+        )
+        // Generation proof (bit 5) survives; the session is inactive, so no FULL.
+        assertNotEquals(OracleWireHealth.HEALTHY, wire.health)
+    }
+
+    /** #155: a begin with no live session keeps the existing fail-closed answer. */
+    @Test
+    fun `begin without a registered session fails closed and grants nothing`() {
+        val f = Fixture()
+        f.installPlatformHooks()
+        f.connect()
+        assertThrows(IllegalStateException::class.java) {
+            f.producer.beginQwySemanticMutation("apply-lease-1", "digest-a", f.session)
+        }
+        assertEquals(
+            0L,
+            f.producer.snapshot().installedCoverageMask and
+                Android15OracleHookPlan.COVERAGE_QWY_SEMANTIC_SESSION,
+        )
+    }
+
     @Test
     fun `production fingerprint allowlist remains empty and runtime flags cannot attest it`() {
         assertTrue(Android15OracleHookPlan.ATTESTED_FINGERPRINTS.isEmpty())

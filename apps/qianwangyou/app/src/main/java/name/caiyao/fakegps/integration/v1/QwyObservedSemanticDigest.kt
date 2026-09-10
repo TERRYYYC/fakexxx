@@ -35,3 +35,20 @@ object QwyObservedSemanticDigest {
             .joinToString("") { "%02x".format(it) }
     }
 }
+
+/**
+ * The digest EXACTLY as [EnvironmentObserver] computes it inside an oracle
+ * window, exposed as the single shared computation for the #155 producer side:
+ * the session driver registers with it and every semantic-mutation bracket
+ * recomputes it before/after the bracketed write. Three independent inlining of
+ * these parameters would eventually drift, and a registered digest that no
+ * longer matches the observer's recomputation is a structural coverage=NONE.
+ */
+internal fun observedSemanticDigestNow(
+    tracker: ContinuityTracker,
+    environment: QwyEnvironment,
+): String = QwyObservedSemanticDigest.compute(
+    ownerGeneration = tracker.generation,
+    effective = environment.observeEffective(),
+    schedule = environment.scheduleSnapshot(),
+)

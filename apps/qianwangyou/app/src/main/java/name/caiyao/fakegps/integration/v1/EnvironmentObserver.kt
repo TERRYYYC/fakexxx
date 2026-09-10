@@ -50,6 +50,10 @@ class EnvironmentObserver(
         val effective = environment.observeEffective()
         val schedule = environment.scheduleSnapshot()
         val post = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
+        // The observer reads each digest input exactly once and binds them to the
+        // observation. The #155 driver/brackets use the same formula via
+        // observedSemanticDigestNow; this site stays inline so the window digest
+        // provably derives from the SAME effective/schedule reads emitted below.
         val expectedDigest = QwyObservedSemanticDigest.compute(
             ownerGeneration = snap.generation,
             effective = effective,

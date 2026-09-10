@@ -64,6 +64,11 @@ class EnvironmentControlHandler(
     private val environment: QwyEnvironment,
     private val clock: MonotonicClock,
     private val storage: DurableKv,
+    // #155: producer-side bracket seam. Null (legacy harnesses) or a source
+    // whose begin returns null (no live oracle session) = the pre-driver
+    // unbracketed mode. When a session is live, every semantic write below is
+    // bracketed against the system oracle — see [bracketedSemanticMutation].
+    private val semanticMutations: QwySemanticMutationSource? = null,
     // F-15: diagnostics seam so the step-3b species line reaches logcat in
     // production while the JVM lane (which does not mock android.util.Log)
     // keeps testing the rejection paths through a recorder.
@@ -168,7 +173,12 @@ class EnvironmentControlHandler(
         // 重锚生效档案 + 重发布: the reset committed; republish the re-anchored
         // effective profile. A publish failure is an HONEST partial — the
         // schedule stays reset, the outcome says so.
-        val republished = environment.republishCurrentItem()
+        // #155: the republish moves the effective profile, so it is its own
+        // bracketed semantic transition (the reset write itself was already
+        // bracketed inside settlePendingScheduleRestart).
+        val republished = bracketedSemanticMutation("reset-republish-v$targetVersion") {
+            environment.republishCurrentItem()
+        }
         if (republished != null) {
             QuickResetScheduleOutcome.Reset(targetVersion, republished)
         } else {
@@ -373,17 +383,23 @@ class EnvironmentControlHandler(
             // made every trusted-ledger entry's verification level a CLAIM,
             // not a measurement (C5: receipt verif=1 while observe reported
             // verified=false).
-            val applyOutcome = environment.applyEnvironment(intent)
-
-            // Transition to ACTIVE
-            val activeLease = lease.copy(state = LeaseState.ACTIVE)
-            leaseStore.put(activeLease)
-
-            // Bump revision for the environment change
-            tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
-            // An app-local apply cannot establish uninterrupted continuity.
-            // Until an authoritative source proves the full history window,
-            // the tracker remains degraded and observations fail closed.
+            //
+            // #155: the publish is a semantic state transition, so it is
+            // bracketed against the oracle session — begin/finish exactly once
+            // around every digest-input write (effective profile here), with
+            // the finish digest computed after ALL local state has settled.
+            val bracketed = bracketedSemanticMutation("apply-$leaseId") {
+                val outcome = environment.applyEnvironment(intent)
+                // Transition to ACTIVE
+                leaseStore.put(lease.copy(state = LeaseState.ACTIVE))
+                // Bump revision for the environment change
+                tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
+                // An app-local apply cannot establish uninterrupted continuity.
+                // Until an authoritative source proves the full history window,
+                // the tracker remains degraded and observations fail closed.
+                outcome to tracker.snapshot().revision
+            }
+            val (applyOutcome, revisionAfter) = bracketed
 
             val receipt = ApplyReceiptV1(
                 operationId = operationId,
@@ -391,7 +407,7 @@ class EnvironmentControlHandler(
                 leaseId = leaseId,
                 acceptedIntentHash = intentHash,
                 appliedAtEpochMs = nowEpoch,
-                environmentRevision = tracker.snapshot().revision,
+                environmentRevision = revisionAfter,
                 verificationLevelWire = applyOutcome.verificationLevelWire,
             )
 
@@ -514,31 +530,32 @@ class EnvironmentControlHandler(
             // Transition to RELEASING
             leaseStore.put(lease.copy(state = LeaseState.RELEASING, releaseIdempotencyKey = request.idempotencyKey))
 
-            // Cleanup
-            val outcome = environment.cleanup(request.leaseId)
+            // #155: cleanup is the release-side semantic transition (un-publishes
+            // the mock environment) — bracketed like apply's publish.
             val nowEpoch = clock.epochMs()
-
-            val releaseComplete: Boolean
-            val residualWires: List<Int>
-            when (outcome) {
-                is CleanupOutcome.Complete -> {
-                    leaseStore.put(lease.copy(state = LeaseState.RELEASED, releaseIdempotencyKey = request.idempotencyKey))
-                    releaseComplete = true
-                    residualWires = emptyList()
+            var releaseComplete = false
+            var residualWires: List<Int> = emptyList()
+            bracketedSemanticMutation("release-${request.leaseId}") {
+                val outcome = environment.cleanup(request.leaseId)
+                when (outcome) {
+                    is CleanupOutcome.Complete -> {
+                        leaseStore.put(lease.copy(state = LeaseState.RELEASED, releaseIdempotencyKey = request.idempotencyKey))
+                        releaseComplete = true
+                        residualWires = emptyList()
+                    }
+                    is CleanupOutcome.Incomplete -> {
+                        leaseStore.put(lease.copy(
+                            state = LeaseState.RELEASE_INCOMPLETE,
+                            releaseIdempotencyKey = request.idempotencyKey,
+                            residualReasonWires = outcome.residualReasonWires,
+                        ))
+                        releaseComplete = false
+                        residualWires = outcome.residualReasonWires
+                    }
                 }
-                is CleanupOutcome.Incomplete -> {
-                    leaseStore.put(lease.copy(
-                        state = LeaseState.RELEASE_INCOMPLETE,
-                        releaseIdempotencyKey = request.idempotencyKey,
-                        residualReasonWires = outcome.residualReasonWires,
-                    ))
-                    releaseComplete = false
-                    residualWires = outcome.residualReasonWires
-                }
+                // Bump revision for the environment change
+                tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
             }
-
-            // Bump revision for the environment change
-            tracker.bump(RevisionBumpReason.MODE_OR_PROVIDER_CHANGED)
 
             val receipt = ReleaseReceiptV1(
                 operationId = request.operationId,
@@ -844,7 +861,12 @@ class EnvironmentControlHandler(
         // next. Apply the external mutation and clear the slot; any crash in
         // this window is finished by settlePendingAdvance() at the next fenced
         // entry or owner startup.
-        applyCommittedAdvance(committed.advancedFromItemId, committed.advancedToItemId)
+        applyCommittedAdvance(
+            committed.advancedFromItemId,
+            committed.advancedToItemId,
+            // #155: the pointer move is the advance's semantic transition.
+            mutationId = "advance-${request.idempotencyKey}",
+        )
         storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
         committed
     }
@@ -855,15 +877,23 @@ class EnvironmentControlHandler(
      * agreed with the committed outcome. Divergence here is an integrity
      * failure (fail loud), never a typed business answer — the receipt is
      * already durable truth.
+     *
+     * #155: the pointer move is a semantic transition (schedule projection) —
+     * bracketed against the oracle session for BOTH callers: the advance that
+     * just committed, and the crash roll-forward in [settlePendingAdvance].
+     * A divergence check failure finishes the bracket uncertain before the
+     * integrity exception propagates.
      */
-    private fun applyCommittedAdvance(fromItemId: String, expectedToItemId: String?) {
-        val actual = when (val outcome = environment.advancePointer(fromItemId)) {
-            is AdvancePointerOutcome.Advanced -> outcome.toItemId
-            is AdvancePointerOutcome.Exhausted -> null
-        }
-        check(actual == expectedToItemId) {
-            "committed advance diverged: receipt says ${expectedToItemId ?: "EXHAUSTED"}, " +
-                "environment answered ${actual ?: "EXHAUSTED"}"
+    private fun applyCommittedAdvance(fromItemId: String, expectedToItemId: String?, mutationId: String) {
+        bracketedSemanticMutation(mutationId) {
+            val actual = when (val outcome = environment.advancePointer(fromItemId)) {
+                is AdvancePointerOutcome.Advanced -> outcome.toItemId
+                is AdvancePointerOutcome.Exhausted -> null
+            }
+            check(actual == expectedToItemId) {
+                "committed advance diverged: receipt says ${expectedToItemId ?: "EXHAUSTED"}, " +
+                    "environment answered ${actual ?: "EXHAUSTED"}"
+            }
         }
     }
 
@@ -888,7 +918,7 @@ class EnvironmentControlHandler(
         val alreadyApplied =
             if (toItemId != null) schedule.currentItemId == toItemId else schedule.exhausted
         if (!alreadyApplied) {
-            applyCommittedAdvance(fromItemId, toItemId)
+            applyCommittedAdvance(fromItemId, toItemId, mutationId = "settle-advance-$fromItemId")
         }
         storage.write(ADVANCE_PENDING_NAMESPACE, ADVANCE_PENDING_KEY, "")
     }
@@ -911,20 +941,28 @@ class EnvironmentControlHandler(
         val targetVersion = parts[0].toLong()
         val firstItemId = parts[1]
         val mode = parts.getOrNull(2) ?: RESTART_MARKER_MODE_RESTART
-        val appliedExternally = if (mode == RESTART_MARKER_MODE_RESET) {
-            environment.resetScheduleToFreshGeneration(targetVersion, firstItemId)
-        } else {
-            environment.applyScheduleRestart(targetVersion, firstItemId)
+        // #155: the external restart/reset write is a schedule-projection
+        // semantic transition, and the divergence check below reads it back —
+        // both belong inside one bracket, so a diverged restart finishes
+        // uncertain before the integrity failure propagates.
+        val appliedExternally = bracketedSemanticMutation("settle-restart-v$targetVersion") {
+            val applied = if (mode == RESTART_MARKER_MODE_RESET) {
+                environment.resetScheduleToFreshGeneration(targetVersion, firstItemId)
+            } else {
+                environment.applyScheduleRestart(targetVersion, firstItemId)
+            }
+            if (!applied) return@bracketedSemanticMutation false
+            val appliedState = checkNotNull(environment.scheduleSnapshot()) {
+                "pending schedule restart present but environment has no schedule"
+            }
+            check(
+                appliedState.scheduleVersion == targetVersion &&
+                    appliedState.currentItemId == firstItemId &&
+                    !appliedState.exhausted,
+            ) { "committed schedule restart diverged from environment" }
+            true
         }
         if (!appliedExternally) return false
-        val applied = checkNotNull(environment.scheduleSnapshot()) {
-            "pending schedule restart present but environment has no schedule"
-        }
-        check(
-            applied.scheduleVersion == targetVersion &&
-                applied.currentItemId == firstItemId &&
-                !applied.exhausted,
-        ) { "committed schedule restart diverged from environment" }
         storage.write(RESTART_PENDING_NAMESPACE, RESTART_PENDING_KEY, "")
         return true
     }
@@ -1003,6 +1041,49 @@ class EnvironmentControlHandler(
     private fun leaseBelongsToCaller(lease: LeaseRecord, caller: CallerIdentity): Boolean =
         lease.callerApplicationId == caller.applicationId &&
             lease.callerSignerDigest == caller.signerDigest
+
+    /**
+     * #155: brackets one REAL semantic state transition against the system
+     * oracle. Runs [block] between `beginQwySemanticMutation` and
+     * `finishQwySemanticMutation` so the producer journal records the interval
+     * and publishes the after-digest on clean completion — that publish is what
+     * lets COVERAGE_QWY_SEMANTIC_SESSION be granted and the next observation
+     * classify VALID.
+     *
+     * The before/after digests come from [observedSemanticDigestNow] — the same
+     * tracker/environment collaborators the observer reads, so a finish digest
+     * is by construction the digest the next observation recomputes. `changed`
+     * is the measured digest delta, which makes a true no-op a PROVED no-op
+     * (stable cursor, unchanged semantic snapshot).
+     *
+     * Failure discipline (fail-closed, never silent): a begin that returns no
+     * bracket (no oracle, no live session) runs [block] unbracketed — the
+     * pre-driver behavior, which every observation already answers NONE for.
+     * Once a bracket IS open, an exception inside [block] finishes it
+     * uncertain=true before rethrowing (a half-applied external write must not
+     * look like clean history), and a finish that itself fails propagates: the
+     * oracle side has already fail-closed its session, and the dangling token
+     * is retired by the state machine's own death/registration paths.
+     */
+    private fun <T> bracketedSemanticMutation(mutationId: String, block: () -> T): T {
+        val source = semanticMutations ?: return block()
+        val mutation = source.begin(mutationId) ?: return block()
+        return try {
+            val result = block()
+            val after = observedSemanticDigestNow(tracker, environment)
+            mutation.finish(changed = after != mutation.beforeDigest, uncertain = false, afterDigest = after)
+            result
+        } catch (failure: Throwable) {
+            runCatching {
+                mutation.finish(
+                    changed = true,
+                    uncertain = true,
+                    afterDigest = observedSemanticDigestNow(tracker, environment),
+                )
+            }
+            throw failure
+        }
+    }
 
     /** Durable key for state owned by the frozen full caller principal. */
     private fun observeWindowKey(caller: CallerIdentity): String =
