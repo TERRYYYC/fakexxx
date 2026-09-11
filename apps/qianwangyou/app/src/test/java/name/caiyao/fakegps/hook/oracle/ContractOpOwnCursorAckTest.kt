@@ -24,6 +24,8 @@ import name.caiyao.fakegps.integration.v1.support.FakeQwyEnvironment
 import name.caiyao.fakegps.integration.v1.support.InMemoryDurableKv
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
 import name.caiyao.fakegps.integration.v1.support.RecordingDiagnosticLog
+import name.caiyao.fakegps.integration.v1.CleanupOutcome
+import name.caiyao.fakegps.integration.v1.QwyEnvironment
 import name.caiyao.fakegps.oracle.FakeBinder
 import name.caiyao.fakegps.oracle.FakeOracleDeathLink
 import name.caiyao.fakegps.oracle.IAuthoritativeContinuityOracle
@@ -161,7 +163,18 @@ class ContractOpOwnCursorAckTest {
     private class Graph {
         val kv = InMemoryDurableKv()
         val clock = FakeMonotonicClock()
-        val env = FakeQwyEnvironment(kv)
+        val envBase = FakeQwyEnvironment(kv)
+        /** #167 review P2-2: strictly-nested foreign injection INSIDE the owner bracket. */
+        @Volatile var nestedForeignArmed = false
+        val env = object : QwyEnvironment by envBase {
+            override fun cleanup(leaseId: String): CleanupOutcome {
+                if (nestedForeignArmed) {
+                    nestedForeignArmed = false
+                    foreignCoveredMutation()
+                }
+                return envBase.cleanup(leaseId)
+            }
+        }
         val diagnostics = RecordingDiagnosticLog()
 
         /** The REAL producer state machine, wired exactly like the device Binder. */
@@ -277,8 +290,8 @@ class ContractOpOwnCursorAckTest {
                         leaseId = receipt.leaseId,
                         idempotencyKey = key,
                         requestDigest = "",
-                        expectedScheduleId = env.scheduleId,
-                        expectedScheduleVersion = env.scheduleVersion,
+                        expectedScheduleId = envBase.scheduleId,
+                        expectedScheduleVersion = envBase.scheduleVersion,
                         expectedCurrentItemId = "item-1",
                         completionProof = CompletionProofV1(
                             scheduleItemId = "item-1",
@@ -430,6 +443,31 @@ class ContractOpOwnCursorAckTest {
             verify.environmentRevision,
         )
         assertEquals(ContinuityCoverageV1.FULL.wire, verify.continuityCoverageWire)
+    }
+
+    /**
+     * #167 review P2-1/P2-2: a foreign covered mutation completing STRICTLY NESTED inside
+     * the owner's bracket aggregates into the owner's own +2 — the sequence-delta guard
+     * alone cannot distinguish it — but it also nulls lastCompletedQwyMutationId. The
+     * correlation-id guard must withhold the ack for exactly this shape.
+     */
+    @Test
+    fun `strictly nested foreign mutation nullifies correlation id and is not acknowledged`() {
+        val g = Graph()
+        val applyReceipt = g.apply("apply-nested")
+        g.observeActive(applyReceipt, "obs-nested")
+
+        // Foreign covered mutation fires INSIDE release's own bracket (env.cleanup is the
+        // block body): aggregated +2, lastCompletedQwyMutationId == null.
+        g.nestedForeignArmed = true
+        g.release(applyReceipt, "release-nested")
+        assertEquals(false, g.nestedForeignArmed)
+
+        val cursorAfter = checkNotNull(g.stableCursor())
+        assertNull(
+            "a strictly-nested foreign advance (null correlation id) must not be owner-acknowledged",
+            g.commitStore.acknowledgement(cursorAfter),
+        )
     }
 }
 

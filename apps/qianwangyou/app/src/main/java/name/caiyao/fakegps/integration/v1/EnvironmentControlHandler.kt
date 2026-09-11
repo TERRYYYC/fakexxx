@@ -1127,11 +1127,13 @@ class EnvironmentControlHandler(
      *  - an earlier UNacknowledged cursor of this source epoch exists → skip
      *    (acking over it would swallow a real pending external change).
      *
-     * Residual risk (accepted, documented): a foreign covered mutation that
-     * completes strictly NESTED inside this owner's bracket interval is
-     * aggregated by the seqlock into the owner's single +2 and cannot be
-     * distinguished by sequence alone. The window is the bracket's own
-     * milliseconds (all handler brackets hold the owner fence), and the
+     * A foreign covered mutation completing strictly NESTED inside this owner's
+     * bracket interval aggregates into the owner's single +2, but it also clears
+     * lastCompletedQwyMutationId — the fifth guard below requires OUR mutation id
+     * there, so the nested-foreign window is skipped too (review #167 P2-1).
+     * Remaining residual risk is a foreign mutation that is provably a no-op at
+     * the oracle level while the owner's own change lands — indistinguishable
+     * from the owner acting alone, and semantically equivalent to it. The
      * observation's own PRE/POST + digest predicates remain the authoritative
      * semantic gate — the ack is diagnostic replay-watermark state, never a
      * coverage source.
@@ -1180,6 +1182,18 @@ class EnvironmentControlHandler(
                 diagnostics.warn(
                     DIAG_TAG,
                     "#166 $mutationId: owner cursor ack skipped — oracle semantic digest absent",
+                )
+                return
+            }
+            // #167 review P2-1: a foreign covered mutation completing strictly nested inside
+            // this bracket aggregates into the same +2 the delta guard accepts — but it also
+            // nulls lastCompletedQwyMutationId (the state machine discards the correlation id
+            // when a foreign change shares the window). Requiring OUR id here closes that gap.
+            if (after.lastCompletedQwyMutationId != mutationId) {
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#166 $mutationId: owner cursor ack skipped — last completed oracle " +
+                        "mutation is ${after.lastCompletedQwyMutationId ?: "null"} (foreign change in window)",
                 )
                 return
             }
