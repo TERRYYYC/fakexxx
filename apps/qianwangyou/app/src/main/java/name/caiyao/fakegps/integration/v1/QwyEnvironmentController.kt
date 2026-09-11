@@ -18,6 +18,7 @@ import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolution
 import name.caiyao.fakegps.mockprovider.EffectiveMockLocationResolver
 import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
+import name.caiyao.fakegps.mockprovider.MockProviderEmissionTrigger
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
 
 /**
@@ -221,6 +222,11 @@ data class EffectiveEnvironment(
 class QwyEnvironmentController(
     private val context: Context,
     private val profileDatabaseAvailable: Boolean,
+    // #173: the process emission hub — when MockProviderService is live, the
+    // republish below can trigger its one immediate delivery instead of
+    // waiting for the next 1 Hz tick. Null (tests without a delivery runtime)
+    // degrades to the pre-#173 behavior honestly.
+    private val emissionTrigger: MockProviderEmissionTrigger? = null,
 ) : QwyEnvironment {
 
     private val appContext = context.applicationContext
@@ -290,6 +296,27 @@ class QwyEnvironmentController(
      * [ConfigPrefsSync.sync] write [republishCurrentItem] performs, now
      * carrying the applied row to BOTH legacy readers (the hook projection and
      * MockProviderMain's 1 Hz refresh).
+     *
+     * #173: the payload write alone is not enough — the refresh's FIRST
+     * delivery of the new coordinates used to wait for the next 1 Hz tick,
+     * whose phase does not respect the caller's semantic bracket. The first
+     * emission then landed outside the bracket as an unacked changed +2 and
+     * the resulting cursor backlog let #167's guard 4 refuse every later ack
+     * on the row. So the Republished branch triggers the emission hub
+     * SYNCHRONOUSLY: the delivery (and its covered mutation) completes inside
+     * the caller's still-open bracket, deep-aggregates into the owner's single
+     * +2, and the existing #166/#167 ack covers it. Subsequent ticks then
+     * re-deliver bit-identical coordinates — never journalled (the semantic
+     * comparator classifies them as no-ops before any mutation begins).
+     *
+     * Threading: the bracket runs on a binder thread, but the delivery is NOT
+     * called directly here — [MockProviderEmissionTrigger] hands it to the
+     * service, which runs it on the SAME single worker executor its 1 Hz ticks
+     * use (the serialization point for the mock session's provider state) and
+     * bounds the wait. Best-effort: a false/absent trigger degrades to the
+     * pre-#173 behavior — the next tick delivers, and observations keep
+     * reporting any resulting cursor change fail-closed. The payload write
+     * itself already succeeded and is not invalidated either way.
      */
     override fun syncLegacyAnchorToCurrentItem(): LegacyAnchorSync {
         val itemId = currentItemItemId() ?: return LegacyAnchorSync.PublishFailed
@@ -299,6 +326,7 @@ class QwyEnvironmentController(
             return LegacyAnchorSync.Current
         }
         return if (ConfigPrefsSync.sync(appContext, profileId = dbId)) {
+            runCatching { emissionTrigger?.deliverPublishedNow() }
             LegacyAnchorSync.Republished(itemId)
         } else {
             LegacyAnchorSync.PublishFailed

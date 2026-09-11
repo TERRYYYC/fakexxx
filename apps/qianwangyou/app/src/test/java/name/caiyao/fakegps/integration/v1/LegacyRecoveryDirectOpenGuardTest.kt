@@ -31,7 +31,10 @@ class LegacyRecoveryDirectOpenGuardTest {
             Regex("AppDatabase\\.ensureLegacyDatabaseRecovered").findAll(controllerSource).count(),
         )
         val recovery = runtimeSource.indexOf("AppDatabase.ensureLegacyDatabaseRecovered(appContext)")
-        val controller = runtimeSource.indexOf("QwyEnvironmentController(appContext")
+        // #173 note: the controller now takes a third (emission hub) argument, so
+        // the construction site wraps lines — the needle matches the constructor
+        // reference, not one frozen formatting of it.
+        val controller = runtimeSource.indexOf("QwyEnvironmentController(")
         assertTrue("owner-start recovery must precede controller construction", recovery >= 0 && recovery < controller)
 // Rebase note: T2's third direct-open came from its (dropped) parallel profileRefs();
 // #105's merged profileRefsSnapshot() keeps the count at 2.

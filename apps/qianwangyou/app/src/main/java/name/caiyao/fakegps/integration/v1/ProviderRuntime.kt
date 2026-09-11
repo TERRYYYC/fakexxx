@@ -7,6 +7,7 @@ import android.os.SystemClock
 import java.io.File
 import java.security.MessageDigest
 import name.caiyao.fakegps.data.db.AppDatabase
+import name.caiyao.fakegps.mockprovider.ProcessMockProviderEmission
 import name.caiyao.fakegps.oracle.IAuthoritativeContinuityOracle
 import name.caiyao.fakegps.oracle.OracleClientRegistry
 import name.caiyao.fakegps.oracle.OracleSessionDriver
@@ -216,7 +217,13 @@ object ProviderRuntime {
             kv = kv,
             clock = AndroidMonotonicClock(),
             resolver = AndroidPackageIdentityResolver(appContext),
-            environment = QwyEnvironmentController(appContext, profileDatabaseAvailable),
+            // #173: the republish bracket triggers the process emission hub so
+            // the first Mock delivery lands inside the owner bracket.
+            environment = QwyEnvironmentController(
+                appContext,
+                profileDatabaseAvailable,
+                emissionTrigger = ProcessMockProviderEmission,
+            ),
             authoritativeSource = BinderAuthoritativeContinuitySource(),
             expectedOracleOwnerPackage = appContext.packageName,
             expectedOracleOwnerUid = appContext.applicationInfo.uid,
@@ -257,6 +264,9 @@ object ProviderRuntime {
         // F-15 seam passthrough so JVM lanes can record the handler's own
         // diagnostics without mocking android.util.Log.
         diagnostics: DiagnosticLog = DiagnosticLog.ANDROID,
+        // #173 face 3: bounded re-read policy for the owner cursor ack's
+        // after-read; defaulted here so the production wiring stays implicit.
+        ackCursorReRead: AckCursorReRead = AckCursorReRead(),
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -307,6 +317,7 @@ object ProviderRuntime {
             authoritativeSource = authoritativeSource,
             authoritativeCommitStore = authoritativeCommitStore,
             diagnostics = diagnostics,
+            ackCursorReRead = ackCursorReRead,
         )
 
         // A provider process that starts without proof of a clean shutdown must
