@@ -43,7 +43,17 @@ class MockProviderService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val manager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        // #170: refresh ticks that land inside an owner bracket must be attributable as
+        // QWY's own, or the nested foreign judgment clears the oracle correlation id.
+        val baseCtx = applicationContext
+        val taggedCtx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            baseCtx.createAttributionContext(
+                name.caiyao.fakegps.hook.oracle.Android15OracleHookPlan.QWY_MUTATION_ATTRIBUTION_TAG,
+            )
+        } else {
+            baseCtx
+        }
+        val manager = taggedCtx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         val gateway = CoordinatedMockProviderGateway(
             framework = AndroidMockProviderGateway(manager),
             fused = GooglePlayServicesFusedMockProviderGateway(

@@ -1,6 +1,7 @@
 package name.caiyao.fakegps.integration.v1
 
 import android.content.Context
+import android.os.Build
 import android.database.sqlite.SQLiteDatabase
 import android.location.LocationManager
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
@@ -372,7 +373,17 @@ class QwyEnvironmentController(
     // P1-2 fix: mockGateway construction failure is tracked; apply/cleanup
     // must report honestly when it is null.
     private val mockGateway: MockProviderGateway? = try {
-        val lm = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        // #170: the oracle's attribution policy only recognizes platform mutations that
+        // arrive carrying the QWY continuity tag — an untagged LocationManager makes our own
+        // nested setTestProviderLocation look foreign and clears lastCompletedQwyMutationId.
+        val taggedContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            appContext.createAttributionContext(
+                name.caiyao.fakegps.hook.oracle.Android15OracleHookPlan.QWY_MUTATION_ATTRIBUTION_TAG,
+            )
+        } else {
+            appContext
+        }
+        val lm = taggedContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         CoordinatedMockProviderGateway(
             AndroidMockProviderGateway(lm),
             NoopFusedGateway,
