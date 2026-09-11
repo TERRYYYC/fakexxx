@@ -396,8 +396,25 @@ class EnvironmentControlHandler(
             // bracketed against the oracle session — begin/finish exactly once
             // around every digest-input write (effective profile here), with
             // the finish digest computed after ALL local state has settled.
+            //
+            // #168: the bracket is also where the LEGACY publish chains are
+            // driven to the applied item. applyEnvironment moves the contract
+            // effective and the system mock's one-shot coordinates, but the
+            // anchored profile + spoof_config payload (what the hook projects
+            // and what MockProviderMain's 1 Hz refresh re-delivers) follow the
+            // previously anchored row — the three-chain split that kept the
+            // oracle cursor advancing and every post-boundary attempt
+            // fail-closed. The linkage runs INSIDE the bracket so the payload
+            // write settles before the finish digest is computed, and the one
+            // coordinate delivery the chains now agree on is this bracket's
+            // own covered mutation (+2) — acknowledged below like every owner
+            // advance. No separate cursor story is created: the payload file
+            // write is not a platform mutation, and the subsequent 1 Hz
+            // refreshes re-deliver bit-identical coordinates, which the oracle
+            // semantic comparator classifies as no-op.
             val bracketed = bracketedSemanticMutation("apply-$leaseId") {
                 val outcome = environment.applyEnvironment(intent)
+                reportLegacyLinkage(leaseId, environment.syncLegacyAnchorToCurrentItemSafely())
                 // Transition to ACTIVE
                 leaseStore.put(lease.copy(state = LeaseState.ACTIVE))
                 // Bump revision for the environment change
@@ -1049,6 +1066,49 @@ class EnvironmentControlHandler(
     private fun leaseBelongsToCaller(lease: LeaseRecord, caller: CallerIdentity): Boolean =
         lease.callerApplicationId == caller.applicationId &&
             lease.callerSignerDigest == caller.signerDigest
+
+    /**
+     * #168: [QwyEnvironment.syncLegacyAnchorToCurrentItem] with the owner's
+     * failure discipline folded in. The contract chain is authoritative — an
+     * apply whose semantic write succeeded must never fail because its legacy
+     * linkage threw — so an unexpected seam failure is downgraded to the
+     * honest-partial answer with the exception on the record. Production
+     * implementations report their own publish outcome; this guard is for the
+     * seam contract itself.
+     */
+    private fun QwyEnvironment.syncLegacyAnchorToCurrentItemSafely(): LegacyAnchorSync =
+        try {
+            syncLegacyAnchorToCurrentItem()
+        } catch (failure: RuntimeException) {
+            diagnostics.warn(
+                DIAG_TAG,
+                "#168 apply: legacy republish threw — " +
+                    "${failure.javaClass.simpleName}: ${failure.message}",
+            )
+            LegacyAnchorSync.PublishFailed
+        }
+
+    /**
+     * #168: the linkage outcome is honest-partial by contract. Apply has
+     * already succeeded semantically (durable lease, receipt, effective), so a
+     * failed legacy republish never fails it — but it is WARNed at the moment
+     * the split is created, because the consequences stay honest: the chains
+     * keep the previous row and observations keep failing closed until they
+     * realign, exactly the pre-fix behavior but now named and greppable (same
+     * discipline as the #166 ack skips).
+     */
+    private fun reportLegacyLinkage(leaseId: String, linkage: LegacyAnchorSync) {
+        when (linkage) {
+            LegacyAnchorSync.Current -> Unit
+            is LegacyAnchorSync.Republished -> Unit
+            LegacyAnchorSync.PublishFailed -> diagnostics.warn(
+                DIAG_TAG,
+                "#168 apply-$leaseId: legacy republish failed — anchored profile/spoof_config " +
+                    "left at the previous item (apply stays authoritative; observations fail " +
+                    "closed until the chains realign)",
+            )
+        }
+    }
 
     /**
      * #155: brackets one REAL semantic state transition against the system

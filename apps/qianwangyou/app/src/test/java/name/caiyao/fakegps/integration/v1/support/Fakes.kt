@@ -9,6 +9,7 @@ import name.caiyao.fakegps.integration.v1.CleanupOutcome
 import name.caiyao.fakegps.integration.v1.ConfiguredCellSnapshot
 import name.caiyao.fakegps.integration.v1.DurableKv
 import name.caiyao.fakegps.integration.v1.EffectiveEnvironment
+import name.caiyao.fakegps.integration.v1.LegacyAnchorSync
 import name.caiyao.fakegps.integration.v1.MonotonicClock
 import name.caiyao.fakegps.integration.v1.PackageIdentityResolver
 import name.caiyao.fakegps.integration.v1.QwyEnvironment
@@ -147,6 +148,9 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     companion object {
         const val SCHEDULE_NAMESPACE = "fakeqwy.schedule"
+
+        /** #168: the legacy publish-chain anchor (publish_state's activeProfileId model). */
+        const val PUBLISH_NAMESPACE = "fakeqwy.publish"
     }
 
     // --- config (memory by design) ---
@@ -314,7 +318,58 @@ class FakeQwyEnvironment(private val kv: DurableKv) : QwyEnvironment {
 
     override fun republishCurrentItem(): String? {
         republishCount += 1
-        return republishResult
+        val published = republishResult
+        // A successful reset republish re-anchors the chains at the republished
+        // item — production syncs the CURRENT item's row (sync(profileId=dbId)).
+        if (published != null) legacyAnchoredItemId = currentItemId
+        return published
+    }
+
+    // --- #168 apply→legacy publish-chain linkage state -----------------------
+    //
+    // The legacy carriers model: the anchored profile (publish_state's
+    // activeProfileId) determines the published spoof_config payload, and that
+    // one payload is what BOTH legacy readers consume — the hook projection
+    // (CellRebel's view) and MockProviderMain's 1 Hz refresh re-delivery. So
+    // one durable "anchored item" is the shared state of all legacy chains,
+    // while the contract chain (effective coords below) follows apply.
+
+    /**
+     * The item id the legacy chains currently reflect. Durable for F-2: the
+     * production anchor lives in publish_state and survives restarts. Null =
+     * never anchored. ("" in the kv — DurableKv has no delete.)
+     */
+    var legacyAnchoredItemId: String?
+        get() = kv.read(PUBLISH_NAMESPACE, "anchoredItem")?.takeIf { it.isNotEmpty() }
+        set(value) = kv.write(PUBLISH_NAMESPACE, "anchoredItem", value ?: "")
+
+    /** Linkage seam invocations vs ACTUAL republishes (the idempotency gate splits them). */
+    var legacyAnchorSyncCount: Int = 0
+    var legacyRepublishCount: Int = 0
+
+    /** One-shot: the next linkage republish fails (the honest-partial branch). */
+    var failNextLegacyRepublish: Boolean = false
+
+    /**
+     * The coordinates the legacy chains currently project — the three-chain
+     * drift assertion reads THIS against the contract effective.
+     */
+    val legacyProjectedCoordinates: Pair<Double, Double>?
+        get() = legacyAnchoredItemId?.let { itemCoordinates[it] }
+
+    override fun syncLegacyAnchorToCurrentItem(): LegacyAnchorSync {
+        legacyAnchorSyncCount += 1
+        if (failNextLegacyRepublish) {
+            failNextLegacyRepublish = false
+            return LegacyAnchorSync.PublishFailed
+        }
+        val item = currentItemId ?: return LegacyAnchorSync.PublishFailed
+        // The idempotency gate: an item the chains already reflect is NOT
+        // republished — same-item apply replay stays publish-silent.
+        if (legacyAnchoredItemId == item) return LegacyAnchorSync.Current
+        legacyAnchoredItemId = item
+        legacyRepublishCount += 1
+        return LegacyAnchorSync.Republished(item)
     }
 
     /**
