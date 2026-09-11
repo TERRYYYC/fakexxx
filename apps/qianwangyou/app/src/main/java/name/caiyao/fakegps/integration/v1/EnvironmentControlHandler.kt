@@ -69,6 +69,14 @@ class EnvironmentControlHandler(
     // unbracketed mode. When a session is live, every semantic write below is
     // bracketed against the system oracle — see [bracketedSemanticMutation].
     private val semanticMutations: QwySemanticMutationSource? = null,
+    // #166: the oracle read seam and the replay-watermark store, wired to the
+    // SAME instances the observer uses. When both are present, a cleanly
+    // completed bracket acknowledges the oracle cursor it just produced, so
+    // the next observe does not misreport the owner's own advance as an
+    // external semantic change. Null either (legacy harnesses) = no ack, the
+    // pre-#166 behavior.
+    private val authoritativeSource: AuthoritativeContinuitySource? = null,
+    private val authoritativeCommitStore: AuthoritativeObservationCommitStore? = null,
     // F-15: diagnostics seam so the step-3b species line reaches logcat in
     // production while the JVM lane (which does not mock android.util.Log)
     // keeps testing the rejection paths through a recorder.
@@ -1064,14 +1072,28 @@ class EnvironmentControlHandler(
      * look like clean history), and a finish that itself fails propagates: the
      * oracle side has already fail-closed its session, and the dangling token
      * is retired by the state machine's own death/registration paths.
+     *
+     * #166: after a CLEAN finish, the cursor the bracket just produced is
+     * acknowledged as the owner's own advance — see
+     * [acknowledgeOwnCursorAdvance] for the fail-closed guard set.
      */
     private fun <T> bracketedSemanticMutation(mutationId: String, block: () -> T): T {
         val source = semanticMutations ?: return block()
+        // #166: capture the stable cursor BEFORE the bracket opens — the
+        // baseline the completion ack validates its own sequence delta against.
+        val beforeAckSnapshot =
+            if (authoritativeSource != null && authoritativeCommitStore != null) {
+                runCatching { authoritativeSource?.snapshot() }.getOrNull()
+            } else {
+                null
+            }
         val mutation = source.begin(mutationId) ?: return block()
         return try {
             val result = block()
             val after = observedSemanticDigestNow(tracker, environment)
-            mutation.finish(changed = after != mutation.beforeDigest, uncertain = false, afterDigest = after)
+            val changed = after != mutation.beforeDigest
+            mutation.finish(changed = changed, uncertain = false, afterDigest = after)
+            acknowledgeOwnCursorAdvance(mutationId, changed, beforeAckSnapshot)
             result
         } catch (failure: Throwable) {
             runCatching {
@@ -1082,6 +1104,111 @@ class EnvironmentControlHandler(
                 )
             }
             throw failure
+        }
+    }
+
+    /**
+     * #166: acknowledge the oracle cursor this owner's own bracketed mutation
+     * just produced, so the next observe's AUTHORITATIVE_CURSOR_CHANGED
+     * predicate does not misreport the owner's own advance as an external
+     * semantic change (the mi14 device failure: advance receipt revision 224,
+     * verify observe bumped to 225 → OBSERVED_TUPLE_MISMATCH →
+     * RECOVERY_REQUIRED; 285 structurally dead at its first row boundary).
+     *
+     * The ack runs only after a CLEAN finish (an uncertain failure path never
+     * acks). Fail-closed discipline: every guard below that cannot prove "this
+     * cursor is the product of my own mutation chain" skips the ack with a
+     * WARN — the next observe then keeps the pre-#166 conservative behavior
+     * (bump once), never a swallowed external change:
+     *  - oracle unreadable before or after the bracket → skip (cannot prove),
+     *  - boot/instance changed across the bracket → skip (epoch boundary),
+     *  - sequence delta is not exactly this mutation's own (+2 changed / 0
+     *    proved no-op) → skip (a foreign covered mutation shares the window),
+     *  - an earlier UNacknowledged cursor of this source epoch exists → skip
+     *    (acking over it would swallow a real pending external change).
+     *
+     * Residual risk (accepted, documented): a foreign covered mutation that
+     * completes strictly NESTED inside this owner's bracket interval is
+     * aggregated by the seqlock into the owner's single +2 and cannot be
+     * distinguished by sequence alone. The window is the bracket's own
+     * milliseconds (all handler brackets hold the owner fence), and the
+     * observation's own PRE/POST + digest predicates remain the authoritative
+     * semantic gate — the ack is diagnostic replay-watermark state, never a
+     * coverage source.
+     */
+    private fun acknowledgeOwnCursorAdvance(
+        mutationId: String,
+        changed: Boolean,
+        before: AuthoritativeContinuitySnapshot?,
+    ) {
+        val commitStore = authoritativeCommitStore ?: return
+        val source = authoritativeSource ?: return
+        if (before == null) {
+            diagnostics.warn(
+                DIAG_TAG,
+                "#166 $mutationId: owner cursor ack skipped — oracle unreadable before bracket",
+            )
+            return
+        }
+        try {
+            val after = source.snapshot()
+            if (after == null) {
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#166 $mutationId: owner cursor ack skipped — oracle unreadable after bracket",
+                )
+                return
+            }
+            if (after.bootId != before.bootId || after.oracleInstanceId != before.oracleInstanceId) {
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#166 $mutationId: owner cursor ack skipped — oracle epoch changed across bracket",
+                )
+                return
+            }
+            val expectedDelta = if (changed) 2L else 0L
+            if (after.sequence - before.sequence != expectedDelta) {
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#166 $mutationId: owner cursor ack skipped — sequence delta " +
+                        "${after.sequence - before.sequence} != own +$expectedDelta (foreign advance in window)",
+                )
+                return
+            }
+            val digest = after.qwySemanticDigest
+            if (digest.isNullOrBlank()) {
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#166 $mutationId: owner cursor ack skipped — oracle semantic digest absent",
+                )
+                return
+            }
+            val cursor = AuthoritativeObservationCursor(
+                bootId = after.bootId,
+                oracleInstanceId = after.oracleInstanceId,
+                sequence = after.sequence,
+                qwySemanticDigest = digest,
+            )
+            val highest = commitStore.highestAcknowledgedSequenceForSourceEpoch(cursor)
+            if (highest != null && before.sequence > highest) {
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#166 $mutationId: owner cursor ack skipped — pending external cursor below " +
+                        "(highest acknowledged $highest < bracket baseline ${before.sequence})",
+                )
+                return
+            }
+            commitStore.acknowledgeOwnerMutation(
+                cursor = cursor,
+                localGeneration = tracker.generation,
+                localRevision = tracker.snapshot().revision,
+            )
+        } catch (failure: RuntimeException) {
+            diagnostics.warn(
+                DIAG_TAG,
+                "#166 $mutationId: owner cursor ack failed — " +
+                    "${failure.javaClass.simpleName}: ${failure.message}",
+            )
         }
     }
 

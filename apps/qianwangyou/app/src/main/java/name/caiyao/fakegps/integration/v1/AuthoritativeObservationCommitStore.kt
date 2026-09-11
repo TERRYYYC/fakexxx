@@ -101,6 +101,44 @@ class AuthoritativeObservationCommitStore(
         }
     }
 
+    /**
+     * #166: first local acknowledgement of a cursor the OWNER itself just
+     * produced by completing one of its own bracketed semantic mutations. It
+     * writes the same replay-watermark rows as [record] — the observe-side
+     * predicates read both identically — but without an observe audit row,
+     * because the producing event is the owner's own operation, not an
+     * observation. First-write-wins exactly like [record]; nested calls join
+     * the caller's outer DurableKv transaction.
+     */
+    internal fun acknowledgeOwnerMutation(
+        cursor: AuthoritativeObservationCursor,
+        localGeneration: Long,
+        localRevision: Long,
+    ) = storage.transaction {
+        require(cursor.bootId.isNotBlank() && cursor.oracleInstanceId.isNotBlank()) {
+            "authoritative observation cursor identity must be present"
+        }
+        require(cursor.sequence >= 0L && cursor.sequence and 1L == 0L) {
+            "authoritative observation cursor must be a stable even sequence"
+        }
+        require(cursor.qwySemanticDigest.isNotBlank()) {
+            "authoritative observation cursor requires a semantic digest"
+        }
+        require(localGeneration >= 0L && localRevision >= 0L) {
+            "authoritative observation local generation and revision must be non-negative"
+        }
+        val acknowledgementKey = ACK_PREFIX + encodeCursor(cursor)
+        if (storage.read(NAMESPACE, acknowledgementKey) == null) {
+            storage.write(
+                NAMESPACE,
+                acknowledgementKey,
+                encodeAcknowledgement(
+                    AuthoritativeObservationAcknowledgement(cursor, localGeneration, localRevision),
+                ),
+            )
+        }
+    }
+
     internal fun acknowledgement(cursor: AuthoritativeObservationCursor): AuthoritativeObservationAcknowledgement? =
         storage.read(NAMESPACE, ACK_PREFIX + encodeCursor(cursor))?.let(::decodeAcknowledgement)
 

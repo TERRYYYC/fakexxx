@@ -254,6 +254,9 @@ object ProviderRuntime {
         // it and handed to the handler as the semantic-mutation bracket seam.
         // Null keeps the legacy harness wiring: no driver, unbracketed writes.
         oracleRegistry: OracleClientRegistry<IAuthoritativeContinuityOracle>? = null,
+        // F-15 seam passthrough so JVM lanes can record the handler's own
+        // diagnostics without mocking android.util.Log.
+        diagnostics: DiagnosticLog = DiagnosticLog.ANDROID,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -296,6 +299,14 @@ object ProviderRuntime {
             clock = clock,
             storage = kv,
             semanticMutations = sessionDriver,
+            // #166: the handler acknowledges the oracle cursor its own
+            // bracketed semantic mutations produce — the same source and
+            // replay-watermark store the observer reads, so a post-operation
+            // observe no longer misreports the owner's own advance as an
+            // external semantic change.
+            authoritativeSource = authoritativeSource,
+            authoritativeCommitStore = authoritativeCommitStore,
+            diagnostics = diagnostics,
         )
 
         // A provider process that starts without proof of a clean shutdown must
