@@ -25,6 +25,13 @@ public final class Android15OracleHookPlan {
             "com.android.server.location.LocationManagerService";
     public static final String SYSTEM_SERVICE_MANAGER_CLASS =
             "com.android.server.SystemServiceManager";
+    /**
+     * Reserved attribution tag for QWY's own covered mutations. #170 direction A: the
+     * oracle attribution predicate treats this tag as a NON-CONTRADICTING CONFIRMATION,
+     * not a required match — same uid/pid/package provenance inside an active bracket is
+     * attributed even when the tag is absent (HyperOS does not propagate the app-side tag
+     * into system_server), while a non-empty foreign tag still fails attribution.
+     */
     public static final String QWY_MUTATION_ATTRIBUTION_TAG =
             "qwy_authoritative_continuity";
 

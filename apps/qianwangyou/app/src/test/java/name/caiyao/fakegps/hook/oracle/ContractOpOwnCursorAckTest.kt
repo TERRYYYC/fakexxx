@@ -166,11 +166,27 @@ class ContractOpOwnCursorAckTest {
         val envBase = FakeQwyEnvironment(kv)
         /** #167 review P2-2: strictly-nested foreign injection INSIDE the owner bracket. */
         @Volatile var nestedForeignArmed = false
+
+        /**
+         * #170 direction A: strictly-nested injection of the QWY app's OWN platform call
+         * carrying the owner triple but NO attribution tag — the exact mi14 shape (the app's
+         * own 1Hz refresh / contract gateway LM call landing inside the release bracket,
+         * tag dropped by the HyperOS binder path). The effective coordinate shift mirrors
+         * the device release bracket, whose removeTestProvider actually changes semantic
+         * state: changed=true, expected delta +2, and the FIFTH (correlation) guard is what
+         * decides the ack — exactly the guard the device failure tripped.
+         */
+        @Volatile var nestedOwnUntaggedArmed = false
         val env = object : QwyEnvironment by envBase {
             override fun cleanup(leaseId: String): CleanupOutcome {
                 if (nestedForeignArmed) {
                     nestedForeignArmed = false
                     foreignCoveredMutation()
+                }
+                if (nestedOwnUntaggedArmed) {
+                    nestedOwnUntaggedArmed = false
+                    envBase.effectiveLatitude = (envBase.effectiveLatitude ?: 50.0) + 0.001
+                    ownUntaggedCoveredMutation()
                 }
                 return envBase.cleanup(leaseId)
             }
@@ -182,7 +198,7 @@ class ContractOpOwnCursorAckTest {
             BOOT_ID, true, true,
             object : SystemServerOracleState.CallerIdentity {
                 override fun uid() = QWY_UID
-                override fun pid() = 4321
+                override fun pid() = QWY_PID
             },
             Runnable { },
             SystemServerOracleState.EndpointReader {
@@ -204,6 +220,15 @@ class ContractOpOwnCursorAckTest {
         /** Test-only foreign covered platform mutation (unattributed caller). */
         private fun foreignCoveredMutation() {
             val token = state.beginCoveredMutation(2000, 7000, "foreign.app", null)
+            state.finishCoveredMutation(token, false)
+        }
+
+        /**
+         * Test-only covered platform mutation from the QWY app itself: exact owner triple,
+         * null attribution tag (the HyperOS #170 provenance gap).
+         */
+        private fun ownUntaggedCoveredMutation() {
+            val token = state.beginCoveredMutation(QWY_UID, QWY_PID, QWY_PACKAGE, null)
             state.finishCoveredMutation(token, false)
         }
 
@@ -324,6 +349,7 @@ class ContractOpOwnCursorAckTest {
     private companion object {
         const val QWY_PACKAGE = "name.caiyao.fakegps.bench"
         const val QWY_UID = 10_321
+        const val QWY_PID = 4321
         const val BOOT_ID = "6c6742ae-f815-4589-93cb-02b375d629be"
     }
 
@@ -466,6 +492,36 @@ class ContractOpOwnCursorAckTest {
         val cursorAfter = checkNotNull(g.stableCursor())
         assertNull(
             "a strictly-nested foreign advance (null correlation id) must not be owner-acknowledged",
+            g.commitStore.acknowledgement(cursorAfter),
+        )
+    }
+
+    /**
+     * #170 direction A end-to-end: inside the owner's bracket, the QWY app's OWN platform
+     * call shares the exact uid/pid/package triple but carries NO attribution tag — on mi14
+     * HyperOS the app-side tag never reaches the system_server provenance (even with #171's
+     * createAttributionContext), so the old tag-required predicate judged it foreign,
+     * cleared lastCompletedQwyMutationId, skipped the #167 fifth ack guard, and left the
+     * cursor unacked — which then dead-ended apply/advance on the fourth guard and
+     * mismatched every row-boundary verify. Within an active bracket the owner triple is
+     * closed (only the contract gateway and the app's 1Hz refresh run there), so an own
+     * untagged call must stay attributed: the correlation id survives and the ack passes.
+     */
+    @Test
+    fun `nested own untagged platform mutation stays attributed - ack guard passes`() {
+        val g = Graph()
+        val applyReceipt = g.apply("apply-own-untagged")
+        g.observeActive(applyReceipt, "obs-own-untagged")
+
+        // The mi14 #170 shape: an own untagged LM call lands INSIDE release's own bracket
+        // (env.cleanup is the block body): aggregated changed, but NOT foreign.
+        g.nestedOwnUntaggedArmed = true
+        g.release(applyReceipt, "release-own-untagged")
+        assertEquals(false, g.nestedOwnUntaggedArmed)
+
+        val cursorAfter = checkNotNull(g.stableCursor())
+        assertNotNull(
+            "own untagged platform mutation must not nullify the correlation id — the fifth ack guard must pass",
             g.commitStore.acknowledgement(cursorAfter),
         )
     }
