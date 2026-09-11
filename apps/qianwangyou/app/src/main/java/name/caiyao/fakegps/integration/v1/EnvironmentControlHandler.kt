@@ -81,6 +81,9 @@ class EnvironmentControlHandler(
     // production while the JVM lane (which does not mock android.util.Log)
     // keeps testing the rejection paths through a recorder.
     private val diagnostics: DiagnosticLog = DiagnosticLog.ANDROID,
+    // #173 face 3: bounded re-read policy for the owner cursor ack's after-read
+    // while the oracle sequence is odd (a covered platform mutation in flight).
+    private val ackCursorReRead: AckCursorReRead = AckCursorReRead(),
 ) {
     fun restartScheduleForOperator(): OperatorScheduleRestartResult = withOwnerFence {
         if (leaseStore.blockingLease() != null) {
@@ -1176,7 +1179,10 @@ class EnvironmentControlHandler(
      * RECOVERY_REQUIRED; 285 structurally dead at its first row boundary).
      *
      * The ack runs only after a CLEAN finish (an uncertain failure path never
-     * acks). Fail-closed discipline: every guard below that cannot prove "this
+     * acks). #173 face 3: the after-read itself re-reads a bounded number of
+     * times while the sequence is odd (a covered platform mutation in flight),
+     * so a delivery that completes within the window no longer costs the ack.
+     * Fail-closed discipline: every guard below that cannot prove "this
      * cursor is the product of my own mutation chain" skips the ack with a
      * WARN — the next observe then keeps the pre-#166 conservative behavior
      * (bump once), never a swallowed external change:
@@ -1213,11 +1219,36 @@ class EnvironmentControlHandler(
             return
         }
         try {
-            val after = source.snapshot()
+            var after = source.snapshot()
+            // #173 face 3: an odd sequence here means a covered platform
+            // mutation is IN FLIGHT — its begin ran inside the bracket (the
+            // sequence has not finalized back to even) while its finish
+            // callback is still queued (enqueue-only inside the framework
+            // locks; the mi14 attempt-69 shape: the release bracket's after
+            // read straddling the 1 Hz refresh delivery, delta 1, ack skipped,
+            // nothing ever retried it). Wait a bounded number of times and
+            // re-read so a delivery that completes within the window lets the
+            // sequence finalize and the guards below judge a stable reading.
+            var reReads = 0
+            while (after != null && after.sequence and 1L != 0L && reReads < ackCursorReRead.attempts) {
+                runCatching { ackCursorReRead.wait(ackCursorReRead.delayMillis) }
+                after = source.snapshot()
+                reReads += 1
+            }
             if (after == null) {
                 diagnostics.warn(
                     DIAG_TAG,
                     "#166 $mutationId: owner cursor ack skipped — oracle unreadable after bracket",
+                )
+                return
+            }
+            if (after.sequence and 1L != 0L) {
+                // The bounded window closed with the mutation still in flight:
+                // the pre-#173 semantics — skip, never guess.
+                diagnostics.warn(
+                    DIAG_TAG,
+                    "#173 $mutationId: owner cursor ack skipped — oracle sequence still odd " +
+                        "after $reReads bounded re-reads (covered platform mutation in flight)",
                 )
                 return
             }
@@ -1448,6 +1479,26 @@ enum class OperatorScheduleRestartResult {
     NO_SCHEDULE,
     NOT_EXHAUSTED,
     WRITE_FAILED,
+}
+
+/**
+ * #173 face 3: bounded re-read policy for the owner cursor ack's after-read.
+ * An odd oracle sequence means a covered platform mutation is in flight (its
+ * begin ran inside the bracket, its finish callback is still queued). While
+ * odd, the ack re-reads up to [attempts] times, waiting [delayMillis] between
+ * reads; a delivery that completes within the window yields a stable even
+ * reading the guards can judge. A persistently odd sequence keeps the ack
+ * skipped — fail-closed, never guessed.
+ */
+data class AckCursorReRead(
+    val attempts: Int = 3,
+    val delayMillis: Long = 5,
+    val wait: (Long) -> Unit = Thread::sleep,
+) {
+    init {
+        require(attempts >= 0) { "re-read attempts must be non-negative" }
+        require(delayMillis >= 0) { "re-read delay must be non-negative" }
+    }
 }
 
 /**

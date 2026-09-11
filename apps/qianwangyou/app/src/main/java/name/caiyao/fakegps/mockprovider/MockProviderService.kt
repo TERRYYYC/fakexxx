@@ -19,8 +19,11 @@ import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.google.android.gms.location.LocationServices
+import java.util.concurrent.Callable
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import name.caiyao.fakegps.R
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishedConfig
@@ -79,6 +82,10 @@ class MockProviderService : Service() {
             publishConfig = { ConfigPrefsSync.sync(this) },
             persistCleanupRequired = settings::setMockProviderCleanupRequired,
         )
+        // #173: while this service owns the delivery pipeline, the contract
+        // side's republish bracket can trigger an immediate in-bracket
+        // emission instead of waiting for the next 1 Hz tick.
+        ProcessMockProviderEmission.register(MockProviderEmissionTrigger { deliverPublishedNow() })
     }
 
     @RequiresPermission(Manifest.permission.FOREGROUND_SERVICE)
@@ -101,6 +108,9 @@ class MockProviderService : Service() {
     }
 
     override fun onDestroy() {
+        // #173: the pipeline is going away — the hub must answer false (honest
+        // "nothing to deliver") instead of reaching a dead executor.
+        ProcessMockProviderEmission.register(null)
         handler.removeCallbacks(tick)
         if (::orchestrator.isInitialized) {
             // Best effort only. SIGKILL/force-stop can skip onDestroy; startup reconciliation is
@@ -138,6 +148,37 @@ class MockProviderService : Service() {
             } else {
                 finishService()
             }
+        }
+    }
+
+    /**
+     * #173: one synchronous delivery of the published payload, run on the SAME
+     * worker executor the 1 Hz ticks use. That executor is the serialization
+     * point for the mock session's provider state (controller.start/tick are
+     * not synchronized), so the delivery must queue behind any in-flight tick
+     * there rather than run on a caller's thread; a bounded wait keeps the
+     * bracket that triggered it from stalling if the pipeline is stuck, and a
+     * timeout/interrupt simply degrades to the next scheduled tick (the
+     * pre-#173 behavior) — never a faked success. This extra refresh is
+     * deliberately NOT routed through [runSession]: the regular tick chain
+     * self-schedules and must stay untouched.
+     */
+    private fun deliverPublishedNow(): Boolean {
+        if (!::orchestrator.isInitialized) return false
+        val future = try {
+            commandExecutor.submit(Callable {
+                val state = orchestrator.refresh()
+                publishState("in-bracket-emission", state)
+                state is MockProviderState.Running
+            })
+        } catch (_: RejectedExecutionException) {
+            return false // service is shutting down
+        }
+        return try {
+            future.get(EMISSION_DELIVERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+            future.cancel(true)
+            false
         }
     }
 
@@ -209,5 +250,13 @@ class MockProviderService : Service() {
         private const val CHANNEL_ID = "system_mock_location"
         private const val NOTIFICATION_ID = 2401
         private const val TICK_MILLIS = 1_000L
+
+        /**
+         * #173: bound for the in-bracket emission wait — covers one queued
+         * tick plus a full refresh (a handful of LM binder calls and a prefs
+         * read) with headroom, while keeping a stuck pipeline from holding the
+         * contract bracket open.
+         */
+        private const val EMISSION_DELIVERY_TIMEOUT_MS = 2_000L
     }
 }
