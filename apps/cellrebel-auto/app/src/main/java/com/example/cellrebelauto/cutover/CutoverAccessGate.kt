@@ -235,11 +235,13 @@ class CutoverAccessGate private constructor(
      * [retryMaxBackoffMs]). Direct, exception-aware callers (`withNormalAccessBlockingOrThrow`)
      * keep the #162 typed failure; only the executor wrapper retries.
      *
-     * Ordering: requeued commands wait in a per-gate FIFO and are re-admitted head-first by a
-     * single scheduler; a submission that arrives while the queue is non-empty joins the tail
-     * instead of overtaking — requeued commands run in submission order. (A submission with an
-     * empty queue still uses the inline fast path; an inherited owner always dispatches
-     * immediately — both pre-existing semantics.) Room does not require FIFO of a query executor
+     * Ordering (review #165 P2, documented as-built): REQUEUED commands run in submission
+     * order — they wait in a per-gate FIFO and are re-admitted head-first by a single
+     * scheduler. A submission that is admitted inline (gate open, or an inherited owner)
+     * dispatches immediately and MAY overtake the retry queue; there is no cross-check that
+     * diverts inline-admitted submissions behind queued ones. Room does not require FIFO of a
+     * query executor (see below), so this is a documentation-truth fix, not a behavior gap;
+     * a full no-overtake queue is a possible follow-up if a caller ever needs it. Room does not require FIFO of a query executor
      * (production wraps `Dispatchers.IO`, a pooling dispatcher), serializes transactions itself,
      * and its invalidation refresh loop is self-serializing, so the one observable cost — a fresh
      * command waiting behind the head's remaining backoff (≤ cap, typically one base step) — is
