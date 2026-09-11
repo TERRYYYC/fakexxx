@@ -59,6 +59,34 @@ interface QwyEnvironment {
      * publish path report the failure instead of faking success.
      */
     fun republishCurrentItem(): String? = null
+
+    /**
+     * #168: apply's legacy publish-chain linkage. The contract apply just moved
+     * the effective schedule item, but two legacy carriers do not follow the
+     * pointer by themselves: the anchored profile (publish_state's
+     * activeProfileId) and the spoof_config payload published from it — the
+     * payload the hook projects (CellRebel's view) AND the payload
+     * MockProviderMain's 1 Hz refresh re-delivers to the system mock provider.
+     * Left alone, both keep the PREVIOUS item's row while the contract chain
+     * (oracle/observation) already names the new one — the three-chain split of
+     * #168: every stale-coordinate re-delivery reads as a covered semantic
+     * change, the oracle cursor keeps advancing, and each attempt's PRE/POST
+     * window drifts fail-closed.
+     *
+     * Implementations re-anchor the chains to the CURRENT schedule item and
+     * republish it — but ONLY when the anchored item actually lags: a
+     * same-item apply replay must stay publish-silent (no redundant IO, no
+     * fresh cross-process payload write). The outcome is honest:
+     * [LegacyAnchorSync.Current] proves alignment, [LegacyAnchorSync.Republished]
+     * names the item the chains now carry, and [LegacyAnchorSync.PublishFailed]
+     * admits the chains still lag — the caller treats that as an honest partial
+     * (the contract apply stays authoritative) and warns.
+     *
+     * Default [LegacyAnchorSync.Current]: environments without a modeled legacy
+     * publish chain (inert harnesses) have nothing to move.
+     */
+    fun syncLegacyAnchorToCurrentItem(): LegacyAnchorSync = LegacyAnchorSync.Current
+
     fun applyEnvironment(intent: EnvironmentIntentV1): ApplyOutcome
     fun cleanup(leaseId: String): CleanupOutcome
     fun observeEffective(): EffectiveEnvironment
@@ -142,6 +170,29 @@ sealed class CleanupOutcome {
     data class Incomplete(val residualReasonWires: List<Int>) : CleanupOutcome()
 }
 
+/**
+ * #168: outcome of apply's legacy publish-chain linkage
+ * ([QwyEnvironment.syncLegacyAnchorToCurrentItem]). Honest by construction —
+ * "skipped" and "moved" and "failed" are three different answers, never folded
+ * into one.
+ */
+sealed interface LegacyAnchorSync {
+    /** The anchored item already names the applied item — chains aligned, publish-silent. */
+    data object Current : LegacyAnchorSync
+
+    /** The chains lagged and were re-anchored + republished to the applied item. */
+    data class Republished(val itemId: String) : LegacyAnchorSync
+
+    /**
+     * The republish did not happen (publish failed / current item not
+     * resolvable to a profile row) — the chains still lag the contract
+     * effective. Honest partial: the apply stays authoritative and the caller
+     * warns; the split keeps observations fail-closed until the chains
+     * realign, exactly as before the fix but now named where it is created.
+     */
+    data object PublishFailed : LegacyAnchorSync
+}
+
 data class EffectiveEnvironment(
     val latitude: Double?,
     val longitude: Double?,
@@ -212,11 +263,46 @@ class QwyEnvironmentController(
      * honest partial, never a guessed ref.
      */
     override fun republishCurrentItem(): String? {
-        if (!profileDatabaseAvailable) return null
-        val itemId = scheduleStore.getCurrentItemId() ?: return null
+        val itemId = currentItemItemId() ?: return null
         val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
         val published = ConfigPrefsSync.sync(appContext, profileId = dbId)
         return if (published) itemId else null
+    }
+
+    /**
+     * The current schedule item's id, resolvable only for profile-anchored rows
+     * over an available profile DB — the shared preconditions of both publish
+     * paths below ([republishCurrentItem], [syncLegacyAnchorToCurrentItem]).
+     */
+    private fun currentItemItemId(): String? {
+        if (!profileDatabaseAvailable) return null
+        val itemId = scheduleStore.getCurrentItemId() ?: return null
+        return itemId.takeIf { it.startsWith("profile-") }
+    }
+
+    /**
+     * #168: re-anchor the legacy publish chains at the CURRENT schedule item
+     * when they lag it. The anchor (publish_state's activeProfileId, persisted
+     * by every verified publish) is the durable record of which profile row the
+     * published payload reflects; comparing it against the applied item's dbId
+     * is the whole gate — equal means the chains already carry this item and
+     * the same-item apply replay stays publish-silent, lagging means the same
+     * [ConfigPrefsSync.sync] write [republishCurrentItem] performs, now
+     * carrying the applied row to BOTH legacy readers (the hook projection and
+     * MockProviderMain's 1 Hz refresh).
+     */
+    override fun syncLegacyAnchorToCurrentItem(): LegacyAnchorSync {
+        val itemId = currentItemItemId() ?: return LegacyAnchorSync.PublishFailed
+        val dbId = itemId.removePrefix("profile-").toLongOrNull()
+            ?: return LegacyAnchorSync.PublishFailed
+        if (ConfigPrefsSync.readActiveProfileId(appContext) == dbId) {
+            return LegacyAnchorSync.Current
+        }
+        return if (ConfigPrefsSync.sync(appContext, profileId = dbId)) {
+            LegacyAnchorSync.Republished(itemId)
+        } else {
+            LegacyAnchorSync.PublishFailed
+        }
     }
 
     /**
