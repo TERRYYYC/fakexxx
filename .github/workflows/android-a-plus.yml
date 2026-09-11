@@ -154,6 +154,27 @@ jobs:
         # present, the property it claimed was never actually carried.
         run: ./scripts/selftest-derived-counts.sh
 
+      - name: check-runbook-evidence-tiers
+        # §11-7 originally listed screenshots alongside judgment-bearing items
+        # under a blanket "缺项即不可判定" header.  C5 run#2 proved three failure
+        # modes (black screen, stale frame, transition half-frame) all pass naïve
+        # checks yet carry zero evidence value (F-19).  The runbook now tiers §11
+        # into Tier A (judgment-bearing) and Tier B (auxiliary).  This guard
+        # prevents regression to the flat-list false-green surface.
+        run: ./scripts/check-runbook-evidence-tiers.sh
+
+      - name: selftest-runbook-evidence-tiers
+        # Same mutation-kill argument as selftest-contract-v1: runs the production
+        # gate against mutated copies and asserts each mutation is caught.  19
+        # negative cases (M1–M18 + M4b) cover structural regressions (tier
+        # removal, item migration, disclaimer removal), fail-closed §7/§12
+        # screenshot guards, isolated guard kills for classification heading,
+        # label, report-file term, raw-evidence category ban, fail-closed §10.1
+        # authority pointer with 4 decoy types (fenced code, 4-space indent,
+        # HTML comment, nested blockquote — R7/R8), and definition-restatement
+        # lint (P4).
+        run: ./scripts/selftest-runbook-evidence-tiers.sh
+
   cellrebel-auto:
     # Green here covers apps/cellrebel-auto ONLY.
     name: cellrebel-auto (unit + lint + assemble)
