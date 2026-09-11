@@ -14,13 +14,11 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -91,23 +89,26 @@ class CutoverRoomAccessRaceTest {
     }
 
     @Test
-    fun ordinaryRoomWriterIsRejectedSynchronouslyAndCannotMutateDuringExclusive() = runBlocking {
+    fun ordinaryRoomWriterIsDeferredDuringExclusiveAndLandsAfterReopen() = runBlocking {
         // Force Room open while normal admission is available.
         assertNull(db.planDao().getLatestPlan())
         val lease = (gate.acquireExclusive(identity) as CutoverExclusiveAdmission.Granted).lease
 
-        val failure = withTimeout(2_000) {
-            runCatching {
-                withContext(Dispatchers.Default) {
-                    db.planDao().insertPlan(plan("forbidden.csv", importedAt = 3L))
-                }
-            }.exceptionOrNull()
+        // #164: the executor path requeues instead of throwing into framework internals. The
+        // suspend writer therefore parks on its Room continuation until the cutover reopens.
+        val writer = async(Dispatchers.Default) {
+            db.planDao().insertPlan(plan("deferred.csv", importedAt = 3L))
         }
-
-        assertNotNull(failure)
-        assertTrue(failure.hasCause<CutoverAccessUnavailableException>())
+        withTimeoutOrNull(500) { writer.join() }
+        assertTrue(
+            "the writer must not complete (and the insert must not land) while the gate is exclusive",
+            writer.isActive
+        )
         lease.withExclusiveAccess { assertNull(db.planDao().getLatestPlan()) }
+
         assertTrue(lease.release(CutoverExclusiveRelease.OPEN))
+        withTimeout(5_000) { writer.join() }
+        assertEquals("deferred.csv", db.planDao().getLatestPlan()?.sourceFileName)
     }
 
     @Test
@@ -146,13 +147,4 @@ class CutoverRoomAccessRaceTest {
         totalRows = 0,
         totalRequiredSuccesses = 0
     )
-
-    private inline fun <reified T : Throwable> Throwable?.hasCause(): Boolean {
-        var cursor = this
-        while (cursor != null) {
-            if (cursor is T) return true
-            cursor = cursor.cause
-        }
-        return false
-    }
 }

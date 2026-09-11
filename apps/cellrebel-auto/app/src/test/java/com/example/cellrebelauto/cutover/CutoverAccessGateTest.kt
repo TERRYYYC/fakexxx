@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.sync.Mutex
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -385,22 +386,24 @@ class CutoverAccessGateTest {
     // ---- #161: guardExecutor must never park the submitting thread on the gate mutex ----
 
     /**
-     * #161 RED: the ANR trace pinned `main` in `runBlocking { acquireNormalAccess() }` inside the
-     * guardExecutor lambda while the gate mutex was owned by a coroutine that itself needed the
-     * parked thread to make progress — a self-deadlock that also killed the attempt watchdog.
-     * A wedged mutex stands in for that holder: an ownerless submission must fail closed within
-     * the admission budget (Room callers already handle gate rejection) instead of parking forever.
+     * #161 (kept, retargeted by #164): the ANR trace pinned `main` in
+     * `runBlocking { acquireNormalAccess() }` inside the guardExecutor lambda while the gate mutex
+     * was owned by a coroutine that itself needed the parked thread to make progress. A wedged
+     * mutex stands in for that holder: the submitting thread must still return within the bounded
+     * admission budget — but since #164 the bounded lapse requeues the command instead of throwing
+     * into the framework submitter, and once the wedge clears the queued command must run.
      */
     @Test
-    fun ownerlessGuardExecutorSubmissionFailsClosedInsteadOfParkingBehindTheGateMutex() {
+    fun ownerlessGuardExecutorSubmissionRequeuesInsteadOfParkingBehindTheGateMutex() {
         val budgetMs = 250L
         val gate = CutoverAccessGate.open(admissionWaitBudgetMs = budgetMs)
         val mutex = mutexOf(gate)
         runBlocking { mutex.lock() } // pathological holder: the admission mutex never frees on its own
+        var executed = false
         val outcome = CompletableFuture<Throwable?>()
         val submitting = Thread {
             try {
-                gate.guardExecutor(Executor { }).execute { }
+                gate.guardExecutor(Executor { command -> command.run() }).execute { executed = true }
                 outcome.complete(null)
             } catch (failure: Throwable) {
                 outcome.complete(failure)
@@ -417,10 +420,152 @@ class CutoverAccessGateTest {
         } finally {
             mutex.unlock()
         }
-        assertTrue(
-            "expected fail-closed gate rejection at submission, got $result",
-            result is CutoverAccessUnavailableException
+        assertEquals(
+            "#164: the executor path must requeue instead of throwing into the framework submitter",
+            null,
+            result
         )
+        assertTrue("queued command must run once the wedge clears", awaitTrue { executed })
+        assertEquals(CutoverGateSnapshot.open(), runBlocking { gate.snapshot() })
+    }
+
+    // ---- #164: admission failure requeues the command with backoff instead of throwing ----
+
+    /**
+     * #164 RED: a gate transient (CUTOVER_IN_PROGRESS) hitting a framework-internal submission
+     * (Room InvalidationTracker.createFlow emits on main through the gated queryExecutor) used to
+     * fail closed with CutoverAccessUnavailableException — no framework path handles it, so the
+     * process crashed. Cutover is transient: the command must be requeued, retried with backoff
+     * (observable via counters, never thrown), and must run once the cutover reopens.
+     */
+    @Test
+    fun admissionFailureUnderPermanentExclusiveRequeuesAndRunsAfterCutoverReopens() {
+        val gate = CutoverAccessGate.open(
+            admissionWaitBudgetMs = 250L,
+            retryBudgetMs = 60_000L,
+            retryBaseBackoffMs = 50L,
+            retryMaxBackoffMs = 1_000L
+        )
+        val logs = CopyOnWriteArrayList<String>()
+        gate.retryLogSink = { logs += it }
+        val lease = exclusiveLease(gate)
+        var executed = false
+
+        gate.guardExecutor(Executor { command -> command.run() }).execute { executed = true }
+
+        assertFalse("command must not run while the gate is exclusive", executed)
+        assertTrue("the command must be requeued for retry", gate.gateRetryStats().enqueued >= 1)
+
+        Thread {
+            Thread.sleep(400) // hold exclusive across several backoff attempts
+            runBlocking { assertTrue(lease.release(CutoverExclusiveRelease.OPEN)) }
+        }.start()
+
+        assertTrue("command must run after cutover reopens", awaitTrue { executed })
+        assertTrue("the requeued command must actually have retried", gate.gateRetryStats().attempts >= 1)
+        assertEquals("a recovered command must never be dropped", 0L, gate.gateRetryStats().dropped)
+        assertTrue("retries must emit diagnostics", logs.isNotEmpty())
+    }
+
+    /** Transient exclusive: the command lands after roughly the transient duration plus a backoff. */
+    @Test
+    fun transientExclusiveDelaysTheCommandButNeverDropsOrThrows() {
+        val gate = CutoverAccessGate.open(
+            admissionWaitBudgetMs = 250L,
+            retryBudgetMs = 30_000L,
+            retryBaseBackoffMs = 50L,
+            retryMaxBackoffMs = 1_000L
+        )
+        val lease = exclusiveLease(gate)
+        var executed = false
+        val submittedAtMs = System.currentTimeMillis()
+
+        gate.guardExecutor(Executor { command -> command.run() }).execute { executed = true }
+
+        Thread {
+            Thread.sleep(300)
+            runBlocking { assertTrue(lease.release(CutoverExclusiveRelease.OPEN)) }
+        }.start()
+
+        assertTrue(awaitTrue { executed })
+        val elapsedMs = System.currentTimeMillis() - submittedAtMs
+        assertTrue(
+            "command ran ($elapsedMs ms) before the transient window ended — gate bypass",
+            elapsedMs >= 300
+        )
+        assertTrue("command took too long after the transient: $elapsedMs ms", elapsedMs < 5_000)
+        assertEquals(0L, gate.gateRetryStats().dropped)
+    }
+
+    /**
+     * The budget is the last resort (a dropped DAO command leaves its caller suspended): when it
+     * lapses the command is dropped WITHOUT throwing, with a WARN that names the loss and a
+     * counter — and the command stays dead even after the gate reopens.
+     */
+    @Test
+    fun retryBudgetExhaustionDropsTheCommandQuietlyInsteadOfThrowing() {
+        val gate = CutoverAccessGate.open(
+            admissionWaitBudgetMs = 250L,
+            retryBudgetMs = 300L,
+            retryBaseBackoffMs = 40L,
+            retryMaxBackoffMs = 200L
+        )
+        val logs = CopyOnWriteArrayList<String>()
+        gate.retryLogSink = { logs += it }
+        val lease = exclusiveLease(gate)
+        var executed = false
+
+        gate.guardExecutor(Executor { command -> command.run() }).execute { executed = true }
+
+        assertTrue(
+            "budget exhaustion must surface as a drop counter, not an exception",
+            awaitTrue(timeoutMs = 10_000) { gate.gateRetryStats().dropped == 1L }
+        )
+        assertFalse("a dropped command must never execute", executed)
+        assertTrue(
+            "the drop must WARN that the command was lost",
+            logs.any { it.contains("DROPPED", ignoreCase = true) }
+        )
+        runBlocking { assertTrue(lease.release(CutoverExclusiveRelease.OPEN)) }
+        Thread.sleep(300)
+        assertFalse("a dropped command stays dead after reopen", executed)
+    }
+
+    /** Ordering: queued retries run in submission order (FIFO queue + single scheduler). */
+    @Test
+    fun requeuedCommandsKeepSubmissionOrder() {
+        val gate = CutoverAccessGate.open(
+            admissionWaitBudgetMs = 250L,
+            retryBudgetMs = 60_000L,
+            retryBaseBackoffMs = 50L,
+            retryMaxBackoffMs = 1_000L
+        )
+        val lease = exclusiveLease(gate)
+        val order = CopyOnWriteArrayList<String>()
+        val guarded = gate.guardExecutor(Executor { command -> command.run() })
+
+        guarded.execute { order += "a" }
+        guarded.execute { order += "b" }
+        guarded.execute { order += "c" }
+        assertEquals(3L, gate.gateRetryStats().enqueued)
+
+        runBlocking { assertTrue(lease.release(CutoverExclusiveRelease.OPEN)) }
+        assertTrue(awaitTrue { order.size == 3 })
+        assertEquals(listOf("a", "b", "c"), order.toList())
+    }
+
+    /**
+     * #162 semantic preservation (#164 scope): only the executor wrapper requeues. Direct,
+     * exception-aware callers keep the typed failure.
+     */
+    @Test
+    fun directCallersStillReceiveTheTypedExceptionWhenTheGateIsClosed() {
+        val gate = CutoverAccessGate.recoveryRequired(identity)
+        val failure = runCatching { gate.withNormalAccessBlockingOrThrow { "x" } }.exceptionOrNull()
+        assertTrue("expected CutoverAccessUnavailableException, got $failure", failure is CutoverAccessUnavailableException)
+        val rejection = failure as CutoverAccessUnavailableException
+        assertEquals(CutoverUnavailableReason.RECOVERY_REQUIRED, rejection.reason)
+        assertEquals(identity, rejection.identity)
     }
 
     /**
@@ -452,22 +597,21 @@ class CutoverAccessGateTest {
         assertEquals(CutoverGateSnapshot.open(), runBlocking { gate.snapshot() })
     }
 
-    /** Semantic preservation: a closed gate rejects the DAO call at submission, never on a worker. */
+    /**
+     * #164: a closed gate must not throw at submission (that exception used to travel up Room's
+     * InvalidationTracker emit chain to main and kill the process). The command is requeued on an
+     * independent scheduler instead — and never reaches the worker while the gate is closed.
+     */
     @Test
-    fun closedGateRejectsOwnerlessSubmissionSynchronouslyWithoutReachingTheWorker() = runTest {
+    fun closedGateQueuesOwnerlessSubmissionWithoutThrowingOrReachingTheWorker() {
         val gate = CutoverAccessGate.recoveryRequired(identity)
         var workerSawCommand = false
-        val failure = runCatching {
-            gate.guardExecutor(Executor { command ->
-                workerSawCommand = true
-                command.run()
-            }).execute { workerSawCommand = true }
-        }.exceptionOrNull()
-        assertTrue("expected CutoverAccessUnavailableException, got $failure", failure is CutoverAccessUnavailableException)
-        val rejection = failure as CutoverAccessUnavailableException
-        assertEquals(CutoverUnavailableReason.RECOVERY_REQUIRED, rejection.reason)
-        assertEquals(identity, rejection.identity)
-        assertFalse("a rejected command must never reach the delegate executor", workerSawCommand)
+        gate.guardExecutor(Executor { command ->
+            workerSawCommand = true
+            command.run()
+        }).execute { workerSawCommand = true }
+        assertFalse("a queued command must never reach the delegate executor", workerSawCommand)
+        assertTrue("the command must be requeued for retry", gate.gateRetryStats().enqueued >= 1)
     }
 
     /** Semantic preservation: an open gate admits the submission and the slot returns after the run. */
@@ -484,6 +628,21 @@ class CutoverAccessGateTest {
         val field = CutoverAccessGate::class.java.getDeclaredField("mutex")
         field.isAccessible = true
         return field.get(gate) as Mutex
+    }
+
+    private fun exclusiveLease(gate: CutoverAccessGate): CutoverExclusiveLease =
+        requireType<CutoverExclusiveAdmission.Granted>(
+            runBlocking { gate.acquireExclusive(identity) }
+        ).lease
+
+    /** Wall-clock poll for wall-clock (real scheduler) assertions. */
+    private fun awaitTrue(timeoutMs: Long = 5_000, condition: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return true
+            Thread.sleep(20)
+        }
+        return condition()
     }
 
     private inline fun <reified T> requireType(value: Any?): T {
