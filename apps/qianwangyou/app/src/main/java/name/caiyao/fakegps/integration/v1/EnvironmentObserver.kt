@@ -146,9 +146,21 @@ class EnvironmentObserver(
             if (authoritativeWindowIsValid && snap.continuitySinceElapsedRealtimeMs == null) {
                 tracker.recordAuthoritativeObservationStart()
                 snap = tracker.snapshot()
-            } else if (!authoritativeWindowIsValid && authoritativeSource != null &&
-                !(oracleAbsentFallback && pre == null && post == null)
+            } else if (oracleAbsentFallback && authoritativeSource != null &&
+                pre == null && post == null
             ) {
+                // [#179 operator fallback] oracle ABSENT deployment: establish the window
+                // HERE (generation-local) instead of fail-closing — the apply path's
+                // byte-verified readback backs the environment; the FIRST observe of a
+                // generation establishes, later ones (same generation) inherit, so
+                // TrustPolicy's PRE/POST equality holds. A generation change between PRE
+                // and POST still fails closed (revision bump + cleared since) — the same
+                // continuity contract as the authoritative mode.
+                if (snap.continuitySinceElapsedRealtimeMs == null) {
+                    tracker.markContinuityEstablished()
+                    snap = tracker.snapshot()
+                }
+            } else if (!authoritativeWindowIsValid && authoritativeSource != null) {
                 tracker.reportObserverGap()
                 snap = tracker.snapshot()
             }
@@ -181,6 +193,15 @@ class EnvironmentObserver(
         // this process) → legacy coverage semantics: the tracker's coverage stands,
         // established by the apply path's byte-verified readback. Oracle present
         // but window invalid → NONE (fail-closed rigor kept where the oracle runs).
+        runCatching {
+            android.util.Log.w(
+                "EnvControl",
+                "observe coverage resolve: valid=" + authoritativeWindowIsValid +
+                    " fallback=" + oracleAbsentFallback +
+                    " pre=" + (pre != null) + " post=" + (post != null) +
+                    " snapCoverage=" + snap.coverageWire,
+            )
+        }
         val coverageWire = when {
             authoritativeWindowIsValid -> ContinuityCoverageV1.FULL.wire
             oracleAbsentFallback && pre == null && post == null -> snap.coverageWire
