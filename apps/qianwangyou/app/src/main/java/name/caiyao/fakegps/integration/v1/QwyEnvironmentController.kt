@@ -558,6 +558,7 @@ class QwyEnvironmentController(
         /** SharedPreferences 写出的传输文件中 `json` 键的取值（XML 实体转义形态）。 */
         private val JSON_VALUE_REGEX =
             Regex("""<string name="json">([^\x00]*?)</string>""")
+
     }
 
     private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? =
@@ -744,8 +745,26 @@ class QwyEnvironmentController(
     }
 }
 
+/**
+ * Deliberately a no-op for now — the contract lane ships without GMS FLP mocking.
+ *
+ * Wiring the real fused gateway (tried 2026-09-12, ZY22JHW9M4) DID deliver: the
+ * fused provider served the payload coordinates and consumer apps (Google Maps)
+ * showed the mock. It was reverted because ORACLE_WINDOW_INVALID failures were
+ * observed concurrently (GMS re-registers its location requests asynchronously
+ * when mock mode flips, and those foreign-uid mutations land inside the
+ * post-apply oracle window). CAVEAT: a concurrent UNTRUSTED regression
+ * independent of fused (#179 — a revision bump from the test host's own
+ * request registration) confounds that attribution; re-test the fused path
+ * after #179 is fixed before treating the incompatibility as final. The
+ * delivery-side wrapper that worked is preserved in PR #177's history
+ * (BestEffortFusedGateway: per-op try/log, 2s bound, constructor falls back
+ * to this no-op when GMS is absent).
+ */
 private object NoopFusedGateway : FusedMockProviderGateway {
     override fun enable() {}
     override fun publish(config: MockLocationConfig) {}
     override fun disable() {}
 }
+
+

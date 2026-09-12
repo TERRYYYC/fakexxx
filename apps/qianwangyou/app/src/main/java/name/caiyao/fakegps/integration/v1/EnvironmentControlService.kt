@@ -121,6 +121,12 @@ fun toTypedResult(block: () -> EnvironmentControlResultV1): EnvironmentControlRe
     try {
         block()
     } catch (e: ContractException) {
+        // #138 family: expected business failures were invisible on the wire-side log —
+        // field diagnosis had no way to tell NOT_PAIRED from CALLER_NOT_ALLOWED from a
+        // silent null on the consumer. Log the typed code + message before carrying it.
+        runCatching {
+            android.util.Log.w("EnvControl", "contract failure: code=${e.code.wire} (${e.code.name}) msg=${e.message}")
+        }
         EnvironmentControlResultV1.failure(
             errorCodeWire = e.code.wire,
             diagnosticMessage = e.message,

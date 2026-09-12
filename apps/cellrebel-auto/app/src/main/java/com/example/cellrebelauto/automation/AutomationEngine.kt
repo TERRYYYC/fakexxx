@@ -1218,7 +1218,9 @@ class AutomationEngine(
         val providerApplicationId = ProviderPrincipal.selected
         val trustAttempt =
             com.example.cellrebelauto.environment.ProviderTrustRejections.beginAttempt(providerApplicationId)
+        android.util.Log.w("AutoDiscover", "engine: calling executorBackend().discover()")
         val capabilities = coord.executorBackend().discover()
+        android.util.Log.w("AutoDiscover", "engine: discover returned capabilities=$capabilities")
         if (capabilities == null || capabilities.protocolVersion != ContractV1.PROTOCOL_VERSION) {
             val gateRejection = com.example.cellrebelauto.environment.ProviderTrustRejections.consume(
                 trustAttempt,

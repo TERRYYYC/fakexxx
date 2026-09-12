@@ -198,7 +198,9 @@ class EnvironmentControlHandler(
     }
 
     fun discover(callingUid: Int): CapabilitySnapshotV1 = withOwnerFence {
+        runCatching { android.util.Log.w("EnvControl", "discover entered: callingUid=$callingUid") }
         authorizer.authorize(callingUid)
+        runCatching { android.util.Log.w("EnvControl", "discover authorized ok") }
         val snap = tracker.snapshot()
         val schedule = environment.scheduleSnapshot()
         // v1.81 CI-attestation group: the effective item's cellular columns,
