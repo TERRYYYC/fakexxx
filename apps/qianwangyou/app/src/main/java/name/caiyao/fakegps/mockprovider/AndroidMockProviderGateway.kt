@@ -57,6 +57,13 @@ class AndroidMockProviderGateway(
         firstFailure?.let { throw it }
     }
 
+    /**
+     * ACCESS_FINE_LOCATION is declared and granted for this app; the lint
+     * MissingPermission flag is silenced because denial is handled right here —
+     * a revoked appop yields null and the #176 readback gate treats that as
+     * coords-unverifiable (logged downgrade), never as a crash or a fake success.
+     */
+    @SuppressLint("MissingPermission")
     override fun readbackLastLocation(): MockReadback? = try {
         // 读回事实而非自记录：getLastKnownLocation 命中 test provider 刚 set 的样本。
         // 注意：它受 FINE_LOCATION appops 管控，默认 foreground 模式会拒掉后台 provider 进程
