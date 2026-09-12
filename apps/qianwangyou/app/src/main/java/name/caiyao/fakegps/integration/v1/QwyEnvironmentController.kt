@@ -3,6 +3,7 @@ package name.caiyao.fakegps.integration.v1
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.location.LocationManager
+import io.github.terryyyc.fakexxx.contract.v1.ContractErrorCodeV1
 import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
 import io.github.terryyyc.fakexxx.contract.v1.ScheduleDecisionV1
 import io.github.terryyyc.fakexxx.contract.v1.VerificationLevelV1
@@ -20,6 +21,7 @@ import name.caiyao.fakegps.mockprovider.FusedMockProviderGateway
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderEmissionTrigger
 import name.caiyao.fakegps.mockprovider.MockProviderGateway
+import org.json.JSONObject
 
 /**
  * Seam between the v1 provider and qianwangyou's existing capabilities.
@@ -434,13 +436,14 @@ class QwyEnvironmentController(
 
         // KB-8 (v1.62): coordinates are QWY-OWNED. The intent no longer carries
         // them — resolve from the CURRENT SCHEDULE ITEM's profile row, the
-        // single coordinate owner. Auto supplies only the reference.
+        // single coordinate owner.
         val currentItem = scheduleStore.getCurrentItemId()
             ?: throw IllegalStateException("no current schedule item; environment cannot be applied without qwy-owned coordinates")
-        val coords = resolveItemCoordinates(currentItem)
+        val itemProfile = resolveItemProfile(currentItem)
             ?: throw IllegalStateException(
                 "schedule item $currentItem has no profile coordinates; the schedule owner must provide them"
             )
+        val coords = itemProfile.first to itemProfile.second
 
         val config = SpoofConfig(
             location = SpoofConfig.Location(
@@ -458,18 +461,81 @@ class QwyEnvironmentController(
             ),
         )
 
-        val published = ConfigPrefsSync.sync(appContext, profileId = null, clearIfMissing = false)
+        // KB-8 completeness: the HOOK payload must be the CURRENT SCHEDULE ITEM's own
+        // profile row, not the UI-anchored effective profile. profileId=null resolved to
+        // activeProfileId, which nothing advances with the schedule pointer — the hook then
+        // spoofed the anchored profile's location for EVERY attempt (device evidence
+        // 2026-09-09 ZY22JHW9M4: whole run stuck at loc-01 while the pointer advanced; the
+        // 2026-09-06 stress test had the same defect, masked by provider-side assertions).
+        // The item id IS a profile dbId (resolveItemCoordinates above already required it).
+        val itemProfileDbId = currentItem.removePrefix("profile-").toLongOrNull()
+        val published = ConfigPrefsSync.sync(
+            appContext,
+            profileId = itemProfileDbId,
+            clearIfMissing = false,
+        )
+
+        // #176 A+C: readback verification + follow. The delivery above is what we INTEND;
+        // the readback below is what the device ACTUALLY has (LocationManager fact + the
+        // payload file the hook consumes). Three device incidents (payload pinned #175,
+        // appops reset 2026-09-11, Vector half-injection 2026-09-06) all had correct-looking
+        // provider-side records while the fact was wrong — verify the fact, repair once,
+        // and refuse the receipt (typed, fail-closed) if the address still does not follow.
+        var publishOutcome = published
+        val readbackGate = DeliveryReadbackGate(
+            log = { android.util.Log.w("EnvControl", it) },
+        )
+        val readbackNow = {
+            val mock = mockGateway!!.readbackLastLocation()
+            val payload = readPublishedPayloadFields()
+            DeliveryReadbackGate.Readback(
+                mockLatitude = mock?.latitude,
+                mockLongitude = mock?.longitude,
+                payloadLatitude = payload?.first,
+                payloadLongitude = payload?.second,
+                payloadAddname = payload?.third,
+            )
+        }
+        val readbackOutcome = readbackGate.enforce(
+            expectedLatitude = coords.first,
+            expectedLongitude = coords.second,
+            expectedAddname = itemProfile.third,
+            initialReadback = readbackNow(),
+            repairAndReadback = {
+                // 修复阶梯第 1 级：完整重投递（重注册 → 重发布 mock → 重发布载荷）后读回。
+                mockGateway!!.replaceGpsProvider()
+                mockGateway!!.publish(
+                    MockLocationConfig(
+                        latitude = coords.first,
+                        longitude = coords.second,
+                    ),
+                )
+                publishOutcome = ConfigPrefsSync.sync(
+                    appContext,
+                    profileId = itemProfileDbId,
+                    clearIfMissing = false,
+                )
+                readbackNow()
+            },
+        )
+        if (readbackOutcome is DeliveryReadbackGate.Outcome.Mismatch) {
+            throw ContractException(
+                ContractErrorCodeV1.CAPABILITY_UNAVAILABLE,
+                "environment readback mismatch — delivery does not follow the schedule " +
+                    "item $currentItem: ${readbackOutcome.detail}",
+            )
+        }
 
         // P2 fix (dsf round-3/4): persist the applied coordinates + publish
         // outcome so observeEffective returns what the mock provider actually
         // has, with verification level matching the real sync result.
         scheduleStore.recordLastApplied(
             coords.first, coords.second, android.os.SystemClock.elapsedRealtime(),
-            verified = published,
+            verified = publishOutcome,
         )
 
         // P1-2 fix: verification level reflects actual publish outcome.
-        val verificationLevel = if (published)
+        val verificationLevel = if (publishOutcome)
             VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
         else
             VerificationLevelV1.NONE.wire
@@ -488,7 +554,26 @@ class QwyEnvironmentController(
      * is missing or its coordinates are null — the schedule owner's data is
      * the truth, and missing truth is reported, never guessed.
      */
-    private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? {
+    companion object {
+        /** SharedPreferences 写出的传输文件中 `json` 键的取值（XML 实体转义形态）。 */
+        private val JSON_VALUE_REGEX =
+            Regex("""<string name="json">([^\x00]*?)</string>""")
+
+    }
+
+    private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? =
+        resolveItemProfile(itemId)?.let { it.first to it.second }
+
+    /**
+     * One read-only open resolves the schedule item's whole delivery identity:
+     * latitude, longitude and addname. addname is the #176 readback's payload
+     * identity probe (#175 pinned the payload while the pointer moved — the
+     * coordinates alone matched, the name exposed the drift). Guarded by
+     * LegacyRecoveryDirectOpenGuardTest as one of the three allowed direct
+     * opens: READONLY, never runs recovery itself — owner-start recovery
+     * precedes controller construction.
+     */
+    private fun resolveItemProfile(itemId: String): Triple<Double, Double, String?>? {
         if (!itemId.startsWith("profile-")) return null
         if (!profileDatabaseAvailable) return null
         val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
@@ -497,14 +582,15 @@ class QwyEnvironmentController(
         return try {
             SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
                 db.rawQuery(
-                    "SELECT latitude, longitude FROM temp WHERE id = ?",
+                    "SELECT latitude, longitude, addname FROM temp WHERE id = ?",
                     arrayOf(dbId.toString()),
                 ).use { cursor ->
                     if (!cursor.moveToFirst()) return@use null
                     val lat = cursor.getDouble(0)
                     val lng = cursor.getDouble(1)
+                    val addname = if (cursor.isNull(2)) null else cursor.getString(2)
                     if (lat == 0.0 && lng == 0.0 && cursor.isNull(0) && cursor.isNull(1)) null
-                    else if (!cursor.isNull(0) && !cursor.isNull(1)) lat to lng
+                    else if (!cursor.isNull(0) && !cursor.isNull(1)) Triple(lat, lng, addname)
                     else null
                 }
             }
@@ -512,6 +598,36 @@ class QwyEnvironmentController(
             null
         }
     }
+
+    /**
+     * #176 读回：hook 消费的载荷**文件**实际内容（lat, lng, addname）。
+     *
+     * 故意不走 `readPublished`（SharedPreferences 进程内缓存——刚写完再读等于自己对自己，
+     * 抓不到"缓存有值但文件未落盘"的半套注入形态），而是读传输文件字节后解析。
+     * 读不到/解析失败 → null（门按不可信处理，fail-closed）。
+     */
+    private fun readPublishedPayloadFields(): Triple<Double, Double, String?>? = try {
+        val bytes = ConfigPrefsSync.readPublishedFileBytes(appContext) ?: return null
+        val xml = String(bytes, Charsets.UTF_8)
+        // 传输文件由本 app 的 SharedPreferences 写出，形状固定：<string name="json">{…}</string>
+        val jsonRaw = JSON_VALUE_REGEX.find(xml)?.groupValues?.get(1) ?: return null
+        val fields = JSONObject(unescapeXml(jsonRaw)).optJSONObject("fields") ?: return null
+        if (!fields.has("latitude") || !fields.has("longitude")) null
+        else Triple(
+            fields.getDouble("latitude"),
+            fields.getDouble("longitude"),
+            fields.optString("addname", null as String?),
+        )
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun unescapeXml(s: String): String = s
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 
     override fun achievableVerificationLevelWire(): Int {
         // F-17: mirror applyEnvironment()'s own preconditions exactly — every
@@ -629,8 +745,26 @@ class QwyEnvironmentController(
     }
 }
 
+/**
+ * Deliberately a no-op for now — the contract lane ships without GMS FLP mocking.
+ *
+ * Wiring the real fused gateway (tried 2026-09-12, ZY22JHW9M4) DID deliver: the
+ * fused provider served the payload coordinates and consumer apps (Google Maps)
+ * showed the mock. It was reverted because ORACLE_WINDOW_INVALID failures were
+ * observed concurrently (GMS re-registers its location requests asynchronously
+ * when mock mode flips, and those foreign-uid mutations land inside the
+ * post-apply oracle window). CAVEAT: a concurrent UNTRUSTED regression
+ * independent of fused (#179 — a revision bump from the test host's own
+ * request registration) confounds that attribution; re-test the fused path
+ * after #179 is fixed before treating the incompatibility as final. The
+ * delivery-side wrapper that worked is preserved in PR #177's history
+ * (BestEffortFusedGateway: per-op try/log, 2s bound, constructor falls back
+ * to this no-op when GMS is absent).
+ */
 private object NoopFusedGateway : FusedMockProviderGateway {
     override fun enable() {}
     override fun publish(config: MockLocationConfig) {}
     override fun disable() {}
 }
+
+

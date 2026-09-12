@@ -756,14 +756,26 @@ class EngineTrustedPathRedTest {
         assertTrue("unverified evidenceDigest is non-empty", unverified.evidenceDigest.isNotEmpty())
         assertEquals("never mint on fail", 0, db.trustedQuotaDao().countAll())
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
-        assertEquals("UNTRUSTED", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.failureReason)
+        // [operator requirement 2026-09-12] trust-FAIL now HOLDS the environment: the attempt
+        // stays non-terminal ('running', aplusState=UNVERIFIED_RECORDED, durable lease held) so
+        // the mock keeps serving the last applied position; the release converges on resume
+        // (recovery classifies UNVERIFIED_RECORDED as release-converged).
+        val heldAttempt = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }
         assertEquals(
-            "the trust-fail path must begin release from the reducer's actual unverified state",
-            "UNVERIFIED_RECORDED->RELEASE_PENDING",
-            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.BEGIN_RELEASE.name }.payloadDigest
+            "trust-FAIL holds the attempt non-terminal for the environment hold",
+            "running", heldAttempt.status,
         )
         assertEquals(
-            "the unverified release source must itself come from the trust reducer",
+            "held attempt persists the unverified phase",
+            "UNVERIFIED_RECORDED", heldAttempt.aplusState,
+        )
+        assertNotNull("the durable lease stays HELD across the pause", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.aplusLeaseId)
+        assertTrue(
+            "no release is dispatched while holding the environment",
+            auditDao.forAttempt(realAttemptId).none { it.eventType == AttemptEvent.BEGIN_RELEASE.name },
+        )
+        assertEquals(
+            "the trust reducer still records the fail transition",
             "DECIDING->UNVERIFIED_RECORDED",
             auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.TRUST_POLICY_FAIL.name }.payloadDigest
         )

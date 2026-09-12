@@ -517,15 +517,18 @@ class CutoverAccessGateTest {
 
         gate.guardExecutor(Executor { command -> command.run() }).execute { executed = true }
 
+        // The drop path increments the counter and THEN invokes the log sink — two statements
+        // with no lock between. Awaiting the counter alone samples the intermediate state on
+        // slow runners (#178: 3/4 CI runs failed the WARN assertion while the counter read 1).
+        // The log line is the drop path's LAST side effect, so await it instead.
         assertTrue(
             "budget exhaustion must surface as a drop counter, not an exception",
-            awaitTrue(timeoutMs = 10_000) { gate.gateRetryStats().dropped == 1L }
+            awaitTrue(timeoutMs = 10_000) {
+                logs.any { it.contains("DROPPED", ignoreCase = true) }
+            }
         )
+        assertEquals(1L, gate.gateRetryStats().dropped)
         assertFalse("a dropped command must never execute", executed)
-        assertTrue(
-            "the drop must WARN that the command was lost",
-            logs.any { it.contains("DROPPED", ignoreCase = true) }
-        )
         runBlocking { assertTrue(lease.release(CutoverExclusiveRelease.OPEN)) }
         Thread.sleep(300)
         assertFalse("a dropped command stays dead after reopen", executed)

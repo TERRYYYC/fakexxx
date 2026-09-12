@@ -720,7 +720,7 @@ class AutomationEngine(
                     )
                     val leaseId = applyOutcome.leaseId
                     if (leaseId == null) {
-                        aplusPause("apply did not acquire a lease for attempt $attemptId")
+                        aplusPause("apply did not acquire a lease for attempt $attemptId (outcome=${applyOutcome.outcome})")
                         return@coroutineScope
                     }
                     planRepository.markAplusLease(attemptId, leaseId)
@@ -1038,14 +1038,19 @@ class AutomationEngine(
                                 planRepository.markAplusState(attemptId, "UNVERIFIED_RECORDED")
                                 updateState(AutomationState.FAILED)
                                 _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
-                                // # P1-5：release BEFORE terminalize（lease-bound + durable，P1-4），然后终态化 attempt。
-                                if (!aplusReleaseAndFinalize(attemptId, task.id, aplusState, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = outcome.webScore, videoScore = outcome.videoScore)) {
-                                    return@coroutineScope
-                                }
-                                log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
-                                // # fail-closed（P1-3/P1-5）：trust-fail = 安全失败（§8.2 STOPPED），持久 PAUSED，
-                                // # 绝不静默重试、绝不动 legacy 计数；也终结骨架恒 FAIL 时的无限重试。
-                                aplusPause("trust decision FAIL for attempt $attemptId — UNVERIFIED_RECORDED, no quota, no legacy counter")
+                                // # [operator requirement 2026-09-12] 暂停保持环境：trust-FAIL 不再走
+                                // # aplusReleaseAndFinalize（其 release 会清理 test provider，Maps 等
+                                // # 消费方立刻回真实位置）。attempt 保持非终态（status=running、
+                                // # aplusState=UNVERIFIED_RECORDED、durable lease 持有）→ 系统 mock 保持
+                                // # 在最后投递的坐标上。Resume 时恢复路径原生收敛：UNVERIFIED_RECORDED
+                                // # 属 release-converged（BEGIN_RELEASE → durable release + cleanup），
+                                // # 然后下一个 attempt 全新 mint——无 stranded lease、无重复 apply。
+                                // # #179 未决期间每次 Resume 会再失败一次（每轮一次保持循环）——
+                                // # 保持本身即 operator 要求的行为。
+                                log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState) — environment HELD at last applied position")
+                                // # fail-closed（P1-3）：trust-fail = 安全失败（§8.2 STOPPED），持久 PAUSED，
+                                // # 绝不静默重试、绝不动 legacy 计数。
+                                aplusPause("trust decision FAIL for attempt $attemptId — UNVERIFIED_RECORDED; environment HELD at last position (resume to converge the lease)")
                                 return@coroutineScope
                             }
                             log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
@@ -1218,7 +1223,9 @@ class AutomationEngine(
         val providerApplicationId = ProviderPrincipal.selected
         val trustAttempt =
             com.example.cellrebelauto.environment.ProviderTrustRejections.beginAttempt(providerApplicationId)
+        android.util.Log.w("AutoDiscover", "engine: calling executorBackend().discover()")
         val capabilities = coord.executorBackend().discover()
+        android.util.Log.w("AutoDiscover", "engine: discover returned capabilities=$capabilities")
         if (capabilities == null || capabilities.protocolVersion != ContractV1.PROTOCOL_VERSION) {
             val gateRejection = com.example.cellrebelauto.environment.ProviderTrustRejections.consume(
                 trustAttempt,

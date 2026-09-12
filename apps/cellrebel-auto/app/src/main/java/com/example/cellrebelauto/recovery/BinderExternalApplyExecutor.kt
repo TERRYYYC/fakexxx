@@ -139,13 +139,20 @@ class BinderExternalApplyExecutor(
     // validator — every failure mode fail-closes to null. ----
 
     override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? {
-        val api = remote ?: return null
+        val api = remote ?: run {
+            android.util.Log.w("AutoDiscover", "discover: binder remote is NULL — connection not established")
+            return null
+        }
         return try {
             when (val v = ContractResponseValidator.validateDiscover(api.discover())) {
                 is ContractResponseValidator.ValidatedContractResponse.Success -> v.payload
-                is ContractResponseValidator.ValidatedContractResponse.Failure -> null
+                is ContractResponseValidator.ValidatedContractResponse.Failure -> {
+                    android.util.Log.w("AutoDiscover", "discover: response validation failed: ${v.typedOutcome}")
+                    null
+                }
             }
         } catch (e: Exception) {
+            android.util.Log.w("AutoDiscover", "discover: binder call threw", e)
             null
         }
     }
