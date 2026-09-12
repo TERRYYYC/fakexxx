@@ -34,4 +34,10 @@ class CoordinatedMockProviderGateway(
         }
         firstFailure?.let { throw it }
     }
+
+    /**
+     * 读回委托给 framework 层：FLP mock 模式没有同步读回 API，而 framework 层的
+     * LocationManager 事实源（gps/network test provider）是 CellRebel 实际消费的底层。
+     */
+    override fun readbackLastLocation(): MockReadback? = framework.readbackLastLocation()
 }

@@ -357,6 +357,23 @@ object ConfigPrefsSync {
         PayloadRead.ReadError("${t.javaClass.simpleName}: ${t.message}")
     }
 
+    /**
+     * #176 readback: the transport file's RAW BYTES — the same bytes the hook's
+     * XSharedPreferences reads. Unlike [readPublished], this bypasses the in-process
+     * SharedPreferences cache, so a payload that "committed" into the cache but never
+     * reached the file (Vector half-injection form) reads back as the stale fact it is.
+     * Null when the file cannot be resolved or read.
+     */
+    @JvmStatic
+    fun readPublishedFileBytes(context: Context): ByteArray? = try {
+        val transport = acquireTransport(context)
+        val file = sharedPrefsFileOrNull(transport.prefs)
+        if (file == null || !file.isFile) null else file.readBytes()
+    } catch (t: Throwable) {
+        Log.e(TAG, "payload file readback failed", t)
+        null
+    }
+
     /** Wall-clock time of the last VERIFIED publish, or null if never published / not recorded. */
     @JvmStatic
     fun readPublishedAt(context: Context): Long? = readPublishState(context).publishedAtMs

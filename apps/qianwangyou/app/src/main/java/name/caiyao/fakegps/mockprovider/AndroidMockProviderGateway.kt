@@ -57,6 +57,22 @@ class AndroidMockProviderGateway(
         firstFailure?.let { throw it }
     }
 
+    override fun readbackLastLocation(): MockReadback? = try {
+        // 读回事实而非自记录：getLastKnownLocation 命中 test provider 刚 set 的样本。
+        // 注意：它受 FINE_LOCATION appops 管控，默认 foreground 模式会拒掉后台 provider 进程
+        // （设备实证 2026-09-12：rejectTime 与读回时刻吻合）——车道配置必须
+        // `appops set <pkg> FINE_LOCATION allow`，缺失时本读回为 null、门按不可信 fail-closed。
+        // 任何一层断链（appops 拒、注册丢失、发布落空）都表现为 null/stale 坐标。
+        ACTIVE_PROVIDER_NAMES
+            .mapNotNull { provider ->
+                runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
+            }
+            .maxByOrNull { it.elapsedRealtimeNanos }
+            ?.let { observed -> MockReadback(observed.latitude, observed.longitude) }
+    } catch (_: Throwable) {
+        null
+    }
+
     @RequiresApi(Build.VERSION_CODES.S)
     private fun addModernProvider(provider: String) {
         val networkProvider = provider == LocationManager.NETWORK_PROVIDER
