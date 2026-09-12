@@ -436,13 +436,14 @@ class QwyEnvironmentController(
 
         // KB-8 (v1.62): coordinates are QWY-OWNED. The intent no longer carries
         // them — resolve from the CURRENT SCHEDULE ITEM's profile row, the
-        // single coordinate owner. Auto supplies only the reference.
+        // single coordinate owner.
         val currentItem = scheduleStore.getCurrentItemId()
             ?: throw IllegalStateException("no current schedule item; environment cannot be applied without qwy-owned coordinates")
-        val coords = resolveItemCoordinates(currentItem)
+        val itemProfile = resolveItemProfile(currentItem)
             ?: throw IllegalStateException(
                 "schedule item $currentItem has no profile coordinates; the schedule owner must provide them"
             )
+        val coords = itemProfile.first to itemProfile.second
 
         val config = SpoofConfig(
             location = SpoofConfig.Location(
@@ -498,7 +499,7 @@ class QwyEnvironmentController(
         val readbackOutcome = readbackGate.enforce(
             expectedLatitude = coords.first,
             expectedLongitude = coords.second,
-            expectedAddname = itemAddname(currentItem),
+            expectedAddname = itemProfile.third,
             initialReadback = readbackNow(),
             repairAndReadback = {
                 // 修复阶梯第 1 级：完整重投递（重注册 → 重发布 mock → 重发布载荷）后读回。
@@ -559,7 +560,19 @@ class QwyEnvironmentController(
             Regex("""<string name="json">([^\x00]*?)</string>""")
     }
 
-    private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? {
+    private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? =
+        resolveItemProfile(itemId)?.let { it.first to it.second }
+
+    /**
+     * One read-only open resolves the schedule item's whole delivery identity:
+     * latitude, longitude and addname. addname is the #176 readback's payload
+     * identity probe (#175 pinned the payload while the pointer moved — the
+     * coordinates alone matched, the name exposed the drift). Guarded by
+     * LegacyRecoveryDirectOpenGuardTest as one of the three allowed direct
+     * opens: READONLY, never runs recovery itself — owner-start recovery
+     * precedes controller construction.
+     */
+    private fun resolveItemProfile(itemId: String): Triple<Double, Double, String?>? {
         if (!itemId.startsWith("profile-")) return null
         if (!profileDatabaseAvailable) return null
         val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
@@ -568,14 +581,15 @@ class QwyEnvironmentController(
         return try {
             SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
                 db.rawQuery(
-                    "SELECT latitude, longitude FROM temp WHERE id = ?",
+                    "SELECT latitude, longitude, addname FROM temp WHERE id = ?",
                     arrayOf(dbId.toString()),
                 ).use { cursor ->
                     if (!cursor.moveToFirst()) return@use null
                     val lat = cursor.getDouble(0)
                     val lng = cursor.getDouble(1)
+                    val addname = if (cursor.isNull(2)) null else cursor.getString(2)
                     if (lat == 0.0 && lng == 0.0 && cursor.isNull(0) && cursor.isNull(1)) null
-                    else if (!cursor.isNull(0) && !cursor.isNull(1)) lat to lng
+                    else if (!cursor.isNull(0) && !cursor.isNull(1)) Triple(lat, lng, addname)
                     else null
                 }
             }
@@ -613,27 +627,6 @@ class QwyEnvironmentController(
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
-
-    /** #176 读回：当前日程项档案行的 addname（载荷唯一标识，#175 事故的暴露维度）。 */
-    private fun itemAddname(itemId: String): String? {
-        val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
-        val dbFile = appContext.getDatabasePath("fakegps.db")
-        if (!dbFile.exists()) return null
-        return try {
-            SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
-                db.rawQuery(
-                    "SELECT addname FROM temp WHERE id = ?",
-                    arrayOf(dbId.toString()),
-                ).use { cursor ->
-                    if (!cursor.moveToFirst()) null
-                    else if (cursor.isNull(0)) null
-                    else cursor.getString(0)
-                }
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
 
     override fun achievableVerificationLevelWire(): Int {
         // F-17: mirror applyEnvironment()'s own preconditions exactly — every
