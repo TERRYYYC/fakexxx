@@ -84,6 +84,11 @@ class EnvironmentControlHandler(
     // #173 face 3: bounded re-read policy for the owner cursor ack's after-read
     // while the oracle sequence is odd (a covered platform mutation in flight).
     private val ackCursorReRead: AckCursorReRead = AckCursorReRead(),
+    // [#179 operator fallback 2026-09-12] When TRUE, a verified apply establishes
+    // coverage FULL (legacy semantics) — the oracle-absent deployment fallback
+    // (see #179 / Vector#971: the system-server oracle producer is not shippable
+    // on every device yet).
+    private val oracleAbsentFallback: Boolean = false,
 ) {
     fun restartScheduleForOperator(): OperatorScheduleRestartResult = withOwnerFence {
         if (leaseStore.blockingLease() != null) {
@@ -430,6 +435,18 @@ class EnvironmentControlHandler(
                 outcome to tracker.snapshot().revision
             }
             val (applyOutcome, revisionAfter) = bracketed
+
+            // [operator fallback 2026-09-12, #179] with the system-server oracle
+            // ABSENT (not registrable on all devices — see #179 / Vector#971),
+            // coverage FULL is established from the apply path's own byte-verified
+            // readback instead of the authoritative window. The oracle-absence
+            // check is live (registry), so the moment the oracle ships/registers,
+            // this marker stops firing and the authoritative window governs.
+            if (oracleAbsentFallback &&
+                applyOutcome.verificationLevelWire == VerificationLevelV1.SYSTEM_MOCK_INDEPENDENTLY_VERIFIED.wire
+            ) {
+                tracker.markContinuityEstablished()
+            }
 
             val receipt = ApplyReceiptV1(
                 operationId = operationId,
