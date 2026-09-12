@@ -125,4 +125,8 @@ fun toTypedResult(block: () -> EnvironmentControlResultV1): EnvironmentControlRe
             errorCodeWire = e.code.wire,
             diagnosticMessage = e.message,
         )
+    } catch (e: Exception) {
+        // JVM lane: android.util.Log is not mocked (ConfigPrefsSync precedent) — guard.
+        runCatching { android.util.Log.w("EnvControl", "non-contract exception in contract call", e) }
+        throw e
     }

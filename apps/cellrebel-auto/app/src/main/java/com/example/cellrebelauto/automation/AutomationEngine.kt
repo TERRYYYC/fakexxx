@@ -720,7 +720,7 @@ class AutomationEngine(
                     )
                     val leaseId = applyOutcome.leaseId
                     if (leaseId == null) {
-                        aplusPause("apply did not acquire a lease for attempt $attemptId")
+                        aplusPause("apply did not acquire a lease for attempt $attemptId (outcome=${applyOutcome.outcome})")
                         return@coroutineScope
                     }
                     planRepository.markAplusLease(attemptId, leaseId)
