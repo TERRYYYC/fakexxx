@@ -8,6 +8,7 @@ import com.example.cellrebelauto.automation.aplus.AttemptEvent
 import com.example.cellrebelauto.automation.aplus.AttemptTransitions
 import com.example.cellrebelauto.automation.aplus.ReleaseReceiptRoute
 import com.example.cellrebelauto.automation.plan.PlanScheduler
+import com.example.cellrebelauto.automation.selfheal.ZombieAttemptPolicy
 import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.db.TaskAttemptCount
@@ -1743,6 +1744,51 @@ class PlanRepository(
     // # 停止/取消：仅在途尝试仍为非终态时标记 interrupted
     suspend fun markAttemptInterruptedIfNonTerminal(attemptId: Long, nowMs: Long) =
         db.testAttemptDao().markInterruptedIfNonTerminal(attemptId, nowMs)
+
+    // ---- #138 zombie attempt SAFE finalization ----
+
+    /**
+     * #138: engine-internalized field surgery for a provably-dead APPLY_PENDING zombie. EVERY
+     * eligibility guard (non-terminal, APPLY_PENDING, lease-free, execution-free, receipt-free,
+     * stale) is enforced atomically inside [TestAttemptDao.finalizeZombieAttemptIfEligible]; this
+     * wrapper adds the append-only audit row in the SAME transaction, so "row interrupted" and
+     * "engine fired" are one durable fact. Idempotent: a second call updates zero rows and writes
+     * no audit. Semantics (surgery-equivalent): `status='interrupted'` + `endedAt` + typed
+     * [ZombieAttemptPolicy.FAILURE_REASON]; `aplusState` preserved; NO receipt, NO trusted/unverified
+     * ledger write, NEVER completed.
+     *
+     * The CALLER owns the ordering safety: this must only be offered after the §8.1 reconcile has
+     * already failed with InsufficientEvidence (never preempt self-heal — a crash-window-(b) apply
+     * that landed on the provider is recovered by the same-key replay, and the receipt-free guard
+     * backstops that here at the storage layer).
+     *
+     * @return true iff THIS call performed the finalization (false = not eligible or already finalized).
+     * # 僵尸终结（手术等价）：守卫式原子 UPDATE + 同事务审计行；幂等；绝不推配额
+     */
+    suspend fun finalizeZombieAttempt(attemptId: Long, staleBeforeMs: Long, nowMs: Long): Boolean =
+        db.withTransaction {
+            val updated = db.testAttemptDao().finalizeZombieAttemptIfEligible(
+                attemptId = attemptId,
+                applyIdempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                staleBeforeMs = staleBeforeMs,
+                failureReason = ZombieAttemptPolicy.FAILURE_REASON,
+                endedAtMs = nowMs
+            )
+            if (updated == 1) {
+                db.auditEventDao().insert(
+                    AutoAuditEvent(
+                        seq = db.auditEventDao().count().toLong() + 1,
+                        attemptId = attemptId,
+                        correlationRef = null,
+                        eventType = ZombieAttemptPolicy.AUDIT_EVENT_TYPE,
+                        payloadDigest = "APPLY_PENDING zombie: receipt-free, lease-free, " +
+                            "execution-free, stale before $staleBeforeMs — finalized interrupted",
+                        recordedAt = nowMs
+                    )
+                )
+            }
+            updated == 1
+        }
 
     // ---- Trusted completion persistence (R4-F1, §11.2 / §11.4) ----
 

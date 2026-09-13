@@ -12,6 +12,7 @@ import com.example.cellrebelauto.automation.plan.BufferGate
 import com.example.cellrebelauto.automation.plan.PlanScheduler
 import com.example.cellrebelauto.automation.selfheal.AttemptWatchdogPolicy
 import com.example.cellrebelauto.automation.selfheal.CoordinateGuard
+import com.example.cellrebelauto.automation.selfheal.ZombieAttemptPolicy
 import com.example.cellrebelauto.environment.CompletionTrustContext
 import com.example.cellrebelauto.environment.TrustPolicy
 import com.example.cellrebelauto.environment.ObservationSnapshot
@@ -2082,6 +2083,30 @@ class AutomationEngine(
                 else -> null
             }
             if (leaseId == null) {
+                // ==================== #138: zombie attempt SAFE finalization branch ====================
+                // Reconcile failed with InsufficientEvidence = NO durable apply receipt AND no fresh
+                // apply authority (anchor drift / protocol skew / null capabilities — the #138 field
+                // shape) or a fail-closed executor. The §8.1 recovery has no re-dispatch/terminate
+                // path for such an owner, so every Resume re-pauses forever and only operator DB
+                // surgery escaped it. Finalize the surgery-equivalent way, but ONLY when the owner is
+                // provably dead: APPLY_PENDING + receipt-free + lease-free + execution-free + stale
+                // past its intent window (all guards enforced atomically inside the DAO write).
+                // ORDERING SAFETY: finalization comes strictly AFTER reconcile failed — a fresh owner
+                // still pauses (keeping crash-window-(b) same-key replay + later-Resume self-heal),
+                // a lease holder is rejected by the write guard (A-line iron rule), and IdempotencyConflict
+                // (a receipt EXISTS, integrity signal) never enters this branch. Re-running on an
+                // already-finalized zombie matches zero rows (idempotent).
+                if (result is ReconcileResult.InsufficientEvidence) {
+                    val staleBeforeMs = nowMs() - ZombieAttemptPolicy.stallThresholdMs(testTimeoutMs)
+                    if (planRepository.finalizeZombieAttempt(crashed.id, staleBeforeMs, nowMs())) {
+                        log(
+                            "Zombie finalization: attempt ${crashed.id} ($recoveryOwnerState, " +
+                                "receipt-free/lease-free, stale past threshold) → interrupted; " +
+                                "recovery continues without it (issue #138)"
+                        )
+                        return true
+                    }
+                }
                 aplusPause("reconcile of attempt ${crashed.id} = $result (§8.2: 证据不足走 PAUSED)")
                 return false
             }
