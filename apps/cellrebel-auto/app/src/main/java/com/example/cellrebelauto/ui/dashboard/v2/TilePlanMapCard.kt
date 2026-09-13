@@ -199,9 +199,13 @@ internal class FirstOutcomeGate(
 /**
  * The single tile-source construction point. Swapping to a self-hosted/
  * commercial raster = changing [OsmTileSource.TILE_SOURCE_URL] (+ UA) only.
+ * The first XYTileSource arg is part of osmdroid's disk-cache key — it comes
+ * from [OsmTileSource.TILE_SOURCE_CACHE_NAME], which MUST be bumped together
+ * with the URL (issue #182: #183 swapped .org→.de without a bump and upgraded
+ * devices kept hitting stale 403 placeholder tiles under the same key).
  */
 private fun buildTileSource() = XYTileSource(
-    "fakexxx-auto-osm",
+    OsmTileSource.TILE_SOURCE_CACHE_NAME,
     OsmTileSource.MIN_ZOOM,
     OsmTileSource.MAX_ZOOM,
     256,

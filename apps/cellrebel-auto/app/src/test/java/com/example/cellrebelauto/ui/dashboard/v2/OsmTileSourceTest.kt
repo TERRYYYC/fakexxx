@@ -19,7 +19,11 @@ import org.junit.Test
  *    the same ODbL data and is likewise allowed only for LOW-VOLUME internal
  *    testing (its usage policy restricts commercial/high-traffic use) —
  *    swapping to a self-hosted/commercial source must still touch this
- *    constant (and the user-agent) and nothing else.
+ *    constant (and the user-agent) and nothing else. Caveat: swapping the URL
+ *    also REQUIRES bumping [OsmTileSource.TILE_SOURCE_CACHE_NAME] — the
+ *    XYTileSource name is part of osmdroid's disk-cache key, and #183's
+ *    .org→.de swap without a bump left upgraded devices serving stale 403
+ *    placeholder tiles under the same key (issue #182).
  *  - The user-agent must carry the real application id: the tile servers
  *    (OSMF official and the FOSSGIS mirror alike) require a valid, identifying
  *    HTTP User-Agent (osmdroid's generic default is throttled/blocked for
@@ -43,6 +47,24 @@ class OsmTileSourceTest {
     @Test
     fun `tile source defaults to the OSM German mirror standard raster`() {
         assertEquals("https://tile.openstreetmap.de/", OsmTileSource.TILE_SOURCE_URL)
+    }
+
+    @Test
+    fun `cache name tld suffix tracks the tile source host - bump together on source swap`() {
+        // Coupling pin (issue #182): the XYTileSource name is part of osmdroid's
+        // disk-cache key, so it MUST change whenever TILE_SOURCE_URL changes —
+        // otherwise upgraded devices hit stale tiles under the same key. Simplest
+        // enforceable contract: the cache name ends with "-<host TLD>", so a
+        // source swap to a different domain TLD (org → de → ...) cannot compile
+        // green without the name following.
+        val host = java.net.URI(OsmTileSource.TILE_SOURCE_URL).host
+        val tld = host.substringAfterLast('.')
+        assertTrue(
+            "TILE_SOURCE_CACHE_NAME must end with \"-$tld\" to match TILE_SOURCE_URL host " +
+                "\"$host\"; bump TILE_SOURCE_CACHE_NAME whenever TILE_SOURCE_URL changes " +
+                "(issue #182: .org→.de swap without a bump served stale 403 placeholder tiles)",
+            OsmTileSource.TILE_SOURCE_CACHE_NAME.endsWith("-$tld"),
+        )
     }
 
     @Test
