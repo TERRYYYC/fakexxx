@@ -275,7 +275,7 @@ class PlanSupersedingImportTest {
         )
         repository.recordUnverifiedOutcome(attemptId, "UNTRUSTED", "negative-digest")
         repository.persistReleaseReceipt(
-            APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId, null),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId),
             "RELEASED",
@@ -306,7 +306,7 @@ class PlanSupersedingImportTest {
         repository.commitReleaseReceipt(
             attemptId,
             com.example.cellrebelauto.recovery.ProviderReleaseHandoff(
-                APlusOperationIdentity.releaseIdempotencyKey(attemptId), leaseId,
+                APlusOperationIdentity.releaseIdempotencyKey(attemptId, null), leaseId,
                 APlusOperationIdentity.releaseDigest(leaseId), "RELEASED", 240L,
                 alreadyDurable = false
             ),
@@ -316,7 +316,7 @@ class PlanSupersedingImportTest {
         )
         val unsigned = io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1(
             leaseId = leaseId,
-            idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+            idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
             requestDigest = "",
             expectedScheduleId = "schedule-x",
             expectedScheduleVersion = 3L,
@@ -403,7 +403,7 @@ class PlanSupersedingImportTest {
                 leaseId = "lease-trusted-crossing").copy(attemptOrdinal = 2)
         )
         repository.persistReleaseReceipt(
-            APlusOperationIdentity.releaseIdempotencyKey(crossingAttempt),
+            APlusOperationIdentity.releaseIdempotencyKey(crossingAttempt, null),
             "lease-trusted-crossing",
             APlusOperationIdentity.releaseDigest("lease-trusted-crossing"),
             "RELEASED",
@@ -444,7 +444,7 @@ class PlanSupersedingImportTest {
         repository.commitReleaseReceipt(
             attemptId,
             com.example.cellrebelauto.recovery.ProviderReleaseHandoff(
-                APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+                APlusOperationIdentity.releaseIdempotencyKey(attemptId, null),
                 leaseId,
                 APlusOperationIdentity.releaseDigest(leaseId),
                 "RELEASED",
@@ -492,7 +492,7 @@ class PlanSupersedingImportTest {
         val attemptId = db.testAttemptDao().insert(attempt(taskId, sessionId, state = "CREATED"))
         db.operationReceiptDao().insertIfAbsent(
             OperationReceiptRow(
-                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
                 requestDigest = "unknown-apply",
                 resultOutcome = "APPLIED",
                 createdAt = 210L,
@@ -584,7 +584,7 @@ class PlanSupersedingImportTest {
             attempt(taskId, sessionId, state = "CLOSED", status = "succeeded", endedAt = 250L, leaseId = leaseId)
         )
         repository.persistReleaseReceipt(
-            APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId, null),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId),
             "RELEASED",

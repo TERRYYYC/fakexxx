@@ -53,6 +53,9 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class EngineJourneyConsumerOracleTest {
 
+    /** #179: the seeded plans' importedAt — the epoch the engine stamps on admitted attempts. */
+    private companion object { const val PLAN_EPOCH = 1000L }
+
     private lateinit var db: AppDatabase
     private lateinit var repo: com.example.cellrebelauto.repository.PlanRepository
 
@@ -283,7 +286,7 @@ class EngineJourneyConsumerOracleTest {
 
     private suspend fun seedPlan(requiredSuccesses: Int = 1): Pair<Long, Long> {
         val planId = db.planDao().insertPlanWithTasks(
-            LocationPlan(sourceFileName = "j.csv", importedAt = 1000L, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = requiredSuccesses),
+            LocationPlan(sourceFileName = "j.csv", importedAt = PLAN_EPOCH, globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = requiredSuccesses),
             listOf(LocationTask(planId = 0, csvRow = 1, longitude = 116.4, latitude = 39.9, priority = 1, requiredSuccesses = requiredSuccesses))
         )
         val task = db.locationTaskDao().getTasksForPlan(planId).first()
@@ -294,7 +297,7 @@ class EngineJourneyConsumerOracleTest {
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(
                 sourceFileName = "two-items.csv",
-                importedAt = 1000L,
+                importedAt = PLAN_EPOCH,
                 globalBufferSeconds = 0,
                 totalRows = 2,
                 totalRequiredSuccesses = firstRequiredSuccesses + 1
@@ -326,7 +329,7 @@ class EngineJourneyConsumerOracleTest {
         val planId = db.planDao().insertPlanWithTasks(
             LocationPlan(
                 sourceFileName = "bound.csv",
-                importedAt = 1000L,
+                importedAt = PLAN_EPOCH,
                 globalBufferSeconds = 0,
                 totalRows = 2,
                 totalRequiredSuccesses = requiredSuccesses + 1,
@@ -471,7 +474,7 @@ class EngineJourneyConsumerOracleTest {
         assertEquals("stop-only never preflights a persisted APPLY_PENDING owner", 0, preflightCalls.size)
         assertEquals("stop-only never replays provider apply without its durable receipt",
             emptyList<String>(), events)
-        assertNull(db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attemptId)))
+        assertNull(db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attemptId, null)))
         assertEquals(AttemptState.APPLY_PENDING.name,
             db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
         assertEquals(listOf(attemptId), db.testAttemptDao().getAttemptsForTask(taskId).map { it.id })
@@ -662,7 +665,7 @@ class EngineJourneyConsumerOracleTest {
         val rejectedIntent = preflightCalls.single()
         val rejectedId = rejectedIntent.attemptId.toLong()
         assertEquals(
-            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(rejectedId),
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(rejectedId, PLAN_EPOCH),
             preflightKeys.single()
         )
         assertEquals(null, db.testAttemptDao().getAttemptById(rejectedId))
@@ -676,7 +679,7 @@ class EngineJourneyConsumerOracleTest {
         val admittedId = admittedIntent.attemptId.toLong()
         assertTrue("a rejected reservation is never reused", admittedId > rejectedId)
         assertEquals(
-            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(admittedId),
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(admittedId, PLAN_EPOCH),
             preflightKeys.last()
         )
         assertTrue("the provider-facing retry key is fresh", preflightKeys.first() != preflightKeys.last())
@@ -703,7 +706,7 @@ class EngineJourneyConsumerOracleTest {
 
         assertEquals("CREATED recovery rechecks the original attempt", attemptId.toString(), preflightCalls.single().attemptId)
         assertEquals(
-            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
             preflightKeys.single()
         )
         assertEquals("the original attempt alone is reconciled then released", listOf("apply", "release"), events)
@@ -1076,7 +1079,7 @@ class EngineJourneyConsumerOracleTest {
         db.operationReceiptDao().insertIfAbsent(
             com.example.cellrebelauto.recovery.OperationReceiptRow(
                 idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-                    .applyIdempotencyKey(attemptId),
+                    .applyIdempotencyKey(attemptId, null),
                 requestDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
                     .requestDigest(intent),
                 resultOutcome = "APPLIED",
@@ -1299,7 +1302,7 @@ class EngineJourneyConsumerOracleTest {
         )
         db.operationReceiptDao().insertIfAbsent(
             com.example.cellrebelauto.recovery.OperationReceiptRow(
-                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
                 requestDigest = "apply-digest-$attemptId",
                 resultOutcome = "APPLIED",
                 createdAt = 700L,
@@ -1325,7 +1328,7 @@ class EngineJourneyConsumerOracleTest {
             db.releaseReceiptDao().insertIfAbsent(
                 com.example.cellrebelauto.recovery.ReleaseReceiptRow(
                     idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-                        .releaseIdempotencyKey(attemptId),
+                        .releaseIdempotencyKey(attemptId, null),
                     leaseId = leaseId,
                     releaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
                         .releaseDigest(leaseId),
@@ -1385,7 +1388,7 @@ class EngineJourneyConsumerOracleTest {
         val base = CompleteAndAdvanceRequestV1(
             leaseId = "lease-$attemptId",
             idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-                .applyIdempotencyKey(attemptId),
+                .applyIdempotencyKey(attemptId, null),
             requestDigest = "",
             expectedScheduleId = anchorScheduleId,
             expectedScheduleVersion = anchorVersion,
@@ -1442,7 +1445,7 @@ class EngineJourneyConsumerOracleTest {
         assertEquals("one original terminal call plus one recovery replay", 2, advanceInvocationCount)
         assertEquals("same-key replay cannot apply a second provider effect", 1, advanceEffectCount)
         assertEquals(
-            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
             replay.idempotencyKey
         )
         assertEquals(CanonicalAdvanceDigestV1.compute(replay), replay.requestDigest)

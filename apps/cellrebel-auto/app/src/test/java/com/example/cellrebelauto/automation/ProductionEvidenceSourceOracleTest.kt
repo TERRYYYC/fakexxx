@@ -156,7 +156,7 @@ class ProductionEvidenceSourceOracleTest {
         // The apply receipt (with lease + operationId + intent hash) the evidence source consumes.
         db.operationReceiptDao().insertIfAbsent(
             com.example.cellrebelauto.recovery.OperationReceiptRow(
-                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L),
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L, null),
                 requestDigest = expectedHash(), resultOutcome = "APPLIED", createdAt = 1000L,
                 leaseId = "lease-77", operationId = "op-77", acceptedIntentHash = expectedHash(),
                 appliedAtEpochMs = 1000L, environmentRevision = 7L,

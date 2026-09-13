@@ -290,7 +290,7 @@ class EngineTrustedPathRedTest {
     private suspend fun seedPlan(taskId: Long, quota: Int): Long {
         val planId = db.planDao().insertPlan(
             LocationPlan(
-                sourceFileName = "r10.csv", importedAt = 1000L,
+                sourceFileName = "r10.csv", importedAt = PLAN_EPOCH,
                 globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = quota
             )
         )
@@ -405,6 +405,8 @@ class EngineTrustedPathRedTest {
     // ---- §6.4-positive constants ----
 
     companion object {
+        /** #179: the seeded plan's importedAt — the epoch the engine stamps on admitted attempts. */
+        private const val PLAN_EPOCH = 1000L
         private val WIRE_VERIFIED = CellRebelCompletionEvidenceV1.VERIFIED_NEW_COMPLETION.wire // 1
         private const val LEASE = "L1"
         private const val REVISION = 7L
@@ -447,8 +449,12 @@ class EngineTrustedPathRedTest {
         FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = true)
     )
 
-    private fun applyKey(attemptId: Long): String = APlusOperationIdentity.applyIdempotencyKey(attemptId)
-    private fun releaseKey(attemptId: Long): String = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+    // Legacy-literal keys: attempts seeded DIRECTLY (id 77 fixtures) carry aplusPlanEpoch = null.
+    private fun applyKey(attemptId: Long): String = APlusOperationIdentity.applyIdempotencyKey(attemptId, null)
+    private fun releaseKey(attemptId: Long): String = APlusOperationIdentity.releaseIdempotencyKey(attemptId, null)
+    // Engine-ADMITTED attempts carry the seeded plan epoch (#179).
+    private fun admittedApplyKey(attemptId: Long): String = APlusOperationIdentity.applyIdempotencyKey(attemptId, PLAN_EPOCH)
+    private fun admittedReleaseKey(attemptId: Long): String = APlusOperationIdentity.releaseIdempotencyKey(attemptId, PLAN_EPOCH)
     private fun releaseDigest(leaseId: String): String = APlusOperationIdentity.releaseDigest(leaseId)
 
     private suspend fun assertNormalAdvanceFailure(
@@ -564,13 +570,13 @@ class EngineTrustedPathRedTest {
 
         val realAttemptId = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id > 77L }.id
         // Provider effect + lease (P1-2): the normal chain drove the executor and persisted the lease.
-        assertEquals("the normal chain must drive the apply executor exactly once", 1, executor.invocationCount(applyKey(realAttemptId)))
+        assertEquals("the normal chain must drive the apply executor exactly once", 1, executor.invocationCount(admittedApplyKey(realAttemptId)))
         assertEquals("the provider apply effect must happen exactly once", 1, executor.effectCount(realAttemptId))
         assertEquals("the lease must be persisted from the apply (never invented)", "lease-$realAttemptId", db.testAttemptDao().getAplusLeaseId(realAttemptId))
         // Finding #6 (normal receipt durability): the apply receipt must be DURABLE — a drop-receipt bad
         // impl would leave it null.
-        assertNotNull("the normal apply must record a durable apply receipt", log.receiptFor(applyKey(realAttemptId)))
-        assertEquals("the normal chain must drive the release executor exactly once", 1, executor.releaseInvocationCount(releaseKey(realAttemptId)))
+        assertNotNull("the normal apply must record a durable apply receipt", log.receiptFor(admittedApplyKey(realAttemptId)))
+        assertEquals("the normal chain must drive the release executor exactly once", 1, executor.releaseInvocationCount(admittedReleaseKey(realAttemptId)))
         assertEquals(
             "the happy path must begin release from the reducer's actual committed state",
             "QUOTA_COMMITTED->RELEASE_PENDING",
@@ -912,7 +918,7 @@ class EngineTrustedPathRedTest {
         )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
-        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+        assertEquals(1, executor.releaseInvocationCount(admittedReleaseKey(attemptId)))
     }
 
     @Test
@@ -957,7 +963,7 @@ class EngineTrustedPathRedTest {
         )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
-        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+        assertEquals(1, executor.releaseInvocationCount(admittedReleaseKey(attemptId)))
     }
 
     @Test
@@ -1009,7 +1015,7 @@ class EngineTrustedPathRedTest {
         )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
-        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+        assertEquals(1, executor.releaseInvocationCount(admittedReleaseKey(attemptId)))
     }
 
     @Test
@@ -1064,7 +1070,7 @@ class EngineTrustedPathRedTest {
         )
         assertEquals(AttemptState.CLOSED.name, attempt.aplusState)
         assertEquals(1, trail.count { it.eventType == AttemptEvent.RELEASE_RECEIPT.name })
-        assertEquals(1, executor.releaseInvocationCount(releaseKey(attemptId)))
+        assertEquals(1, executor.releaseInvocationCount(admittedReleaseKey(attemptId)))
     }
 
     @Test
@@ -1090,7 +1096,7 @@ class EngineTrustedPathRedTest {
         ).run()
 
         val attemptId = db.testAttemptDao().getAttemptsForTask(taskId).single().id
-        assertEquals(0, executor.releaseInvocationCount(releaseKey(attemptId)))
+        assertEquals(0, executor.releaseInvocationCount(admittedReleaseKey(attemptId)))
         assertEquals("RECOVERY_REQUIRED", db.testAttemptDao().getAttemptById(attemptId)!!.aplusState)
     }
 

@@ -142,7 +142,7 @@ class EngineAdvanceRecoveryOracleTest {
     private fun expectedAdvanceRequest(): CompleteAndAdvanceRequestV1 {
         val base = CompleteAndAdvanceRequestV1(
             leaseId = "lease-31",
-            idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(31L),
+            idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(31L, null),
             requestDigest = "",
             expectedScheduleId = anchorScheduleId,
             expectedScheduleVersion = anchorVersion,
@@ -231,7 +231,7 @@ class EngineAdvanceRecoveryOracleTest {
         // The Room apply receipt carrying the verbatim operationId (the observe tuple's leg).
         db.operationReceiptDao().insertIfAbsent(
             com.example.cellrebelauto.recovery.OperationReceiptRow(
-                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
                 requestDigest = "h", resultOutcome = "APPLIED", createdAt = 1000L,
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
@@ -239,7 +239,7 @@ class EngineAdvanceRecoveryOracleTest {
         db.releaseReceiptDao().insertIfAbsent(
             com.example.cellrebelauto.recovery.ReleaseReceiptRow(
                 idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-                    .releaseIdempotencyKey(attemptId),
+                    .releaseIdempotencyKey(attemptId, null),
                 leaseId = "lease-$attemptId",
                 releaseDigest = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
                     .releaseDigest("lease-$attemptId"),
@@ -301,7 +301,7 @@ class EngineAdvanceRecoveryOracleTest {
 
         assertEquals("failed atomic commit must not expose an orphan release receipt", null,
             db.releaseReceiptDao().byKey(
-                com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey(31L)
+                com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.releaseIdempotencyKey(31L, null)
             ))
         assertEquals(null, repo.getAdvanceReplayRequest(31L))
         assertEquals("RELEASE_PENDING", repo.getAttempt(31L)!!.aplusState)

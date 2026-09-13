@@ -209,7 +209,7 @@ class AdvanceMatrixTest {
         )
         db.operationReceiptDao().insertIfAbsent(
             OperationReceiptRow(
-                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
                 requestDigest = "h", resultOutcome = "APPLIED", createdAt = 1000L,
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
@@ -218,7 +218,7 @@ class AdvanceMatrixTest {
             val leaseId = "lease-$attemptId"
             db.releaseReceiptDao().insertIfAbsent(
                 ReleaseReceiptRow(
-                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId, null),
                     leaseId = leaseId,
                     releaseDigest = APlusOperationIdentity.releaseDigest(leaseId),
                     resultOutcome = "RELEASED",
@@ -227,7 +227,7 @@ class AdvanceMatrixTest {
             )
             val base = CompleteAndAdvanceRequestV1(
                 leaseId = leaseId,
-                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
                 requestDigest = "",
                 expectedScheduleId = anchorScheduleId,
                 expectedScheduleVersion = anchorVersion,

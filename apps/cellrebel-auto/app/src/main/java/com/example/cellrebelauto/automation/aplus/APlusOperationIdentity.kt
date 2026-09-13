@@ -23,11 +23,35 @@ import io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1
  */
 object APlusOperationIdentity {
 
-    /** Idempotency key of the attempt's APPLY operation (deterministic in the attempt id). */
-    fun applyIdempotencyKey(attemptId: Long): String = "auto-aplus-apply-$attemptId"
+    /**
+     * Idempotency key of the attempt's APPLY operation (deterministic in the attempt id + the
+     * plan epoch). #179: `test_attempts.id` is AUTOINCREMENT-monotonic only WITHIN one DB
+     * lifetime — a DB reset (clear-data/reinstall/operator reset) rewinds the counter, and the
+     * provider's durable receipts survive it, so a bare attempt-id key could collide with a
+     * stale receipt (IDEMPOTENCY_CONFLICT, the g54 incident). The key therefore carries the
+     * PLAN EPOCH — the persisted `test_attempts.aplusPlanEpoch` (= `location_plans.importedAt`):
+     * every re-import yields a new epoch even across DB resets, and the epoch is stable for the
+     * plan's lifetime, so crash recovery recomputes the byte-identical key from durable state.
+     *
+     * NULL epoch = compatibility discriminator (the `aplusIntentProfileRef` precedent): attempts
+     * admitted before the epoch column existed replay the EXACT old literal — a mid-upgrade
+     * in-flight attempt still finds its pre-existing provider receipt instead of re-applying
+     * into an ACTIVE lease. Legacy receipts are never falsely rejected: an epoch key is
+     * structurally different from (and never equal to) any legacy key.
+     */
+    fun applyIdempotencyKey(attemptId: Long, planEpoch: Long?): String =
+        if (planEpoch == null) "auto-aplus-apply-$attemptId"
+        else "auto-aplus-apply-$planEpoch-$attemptId"
 
-    /** Idempotency key of the attempt's RELEASE operation (distinct domain from apply). */
-    fun releaseIdempotencyKey(attemptId: Long): String = "auto-aplus-release-$attemptId"
+    /**
+     * Idempotency key of the attempt's RELEASE operation (distinct domain from apply). Epoch
+     * rules mirror [applyIdempotencyKey] SYMMETRICALLY — otherwise an epoch-apply attempt's
+     * ADVANCE/release could reuse a legacy-shaped release key and hit a stale pre-reset
+     * release receipt under the old key. Null epoch = legacy literal replay (see above).
+     */
+    fun releaseIdempotencyKey(attemptId: Long, planEpoch: Long?): String =
+        if (planEpoch == null) "auto-aplus-release-$attemptId"
+        else "auto-aplus-release-$planEpoch-$attemptId"
 
     /**
      * The §6.3.1 intent preimage for an attempt, built from the DURABLE owner state. KB-8: NO

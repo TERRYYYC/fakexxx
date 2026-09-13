@@ -132,7 +132,12 @@ data class TestAttempt(
     val aplusAnchorItemId: String? = null,
     val aplusAnchorVersion: Long? = null,
     /** Exact profileRef sent on wire; null means historical `plan-$planId` recomputation. */
-    val aplusIntentProfileRef: String? = null
+    val aplusIntentProfileRef: String? = null,
+    // #179 幂等键计划纪元：admission 时落库的 location_plans.importedAt（墙钟毫秒）。A+ 幂等键由
+    // # (planEpoch, attemptId) 派生——每次导入必不同且跨 Auto DB 重置仍不同（attempt id AUTOINCREMENT
+    // # 会被清数据归零，provider 收据不死）。null = 升级前 admitted 的历史行：幂等键重算旧字面量
+    // # （aplusIntentProfileRef 同款判别器先例），升级中途在途 attempt 恢复重放不错配。
+    val aplusPlanEpoch: Long? = null
 )
 
 /**

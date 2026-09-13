@@ -260,13 +260,17 @@ object APlusComposition {
                     if (!trustGate.isCurrentSignerTrusted(providerApplicationId)) return null
                     // The observe tuple: lease (durable receipt first, attempt owner fallback),
                     // operationId (durable receipt), expected hash (owner recompute).
+                    // #179: the receipt is addressed by the epoch-bearing key recomputed from the
+                    // attempt's persisted plan epoch — the attempt row (fail-closed null) is read
+                    // FIRST so the key matches the one the apply was dispatched under.
+                    val attempt = db.testAttemptDao().getAttemptById(attemptId) ?: return null
                     val receipt = db.operationReceiptDao().byKey(
-                        com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId)
+                        com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                            .applyIdempotencyKey(attemptId, attempt.aplusPlanEpoch)
                     )
                     val leaseId = receipt?.leaseId ?: db.testAttemptDao().getAplusLeaseId(attemptId) ?: return null
                     val operationId = receipt?.operationId ?: return null
                     // The owner recompute needs the full durable identity: attempt → task → plan.
-                    val attempt = db.testAttemptDao().getAttemptById(attemptId) ?: return null
                     val task = db.locationTaskDao().getTaskById(attempt.taskId) ?: return null
                     val plan = db.planDao().getPlanById(task.planId) ?: return null
                     // R45 (Sol R45 P1-1): the intent window MUST be the SAME durable inputs the
@@ -345,8 +349,13 @@ object APlusComposition {
                         val ownerExecId = db.testAttemptDao().getCurrentExecutionId(attemptId) ?: return@runBlocking null
                         val exec = db.attemptExecutionDao().byExecutionId(ownerExecId) ?: return@runBlocking null
                         if (exec.attemptId != attemptId) return@runBlocking null
+                        // #179: the verbatim apply receipt is addressed by the attempt's persisted
+                        // plan-epoch key. A missing attempt row reads null epoch = legacy key,
+                        // fail-closing exactly as before at the receipt lookup below.
+                        val attemptEpoch = db.testAttemptDao().getAttemptById(attemptId)?.aplusPlanEpoch
                         val receipt = db.operationReceiptDao().byKey(
-                            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId)
+                            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
+                                .applyIdempotencyKey(attemptId, attemptEpoch)
                         ) ?: return@runBlocking null
                         APlusCompletionEvidence(
                             execution = exec,

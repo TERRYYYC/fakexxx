@@ -388,8 +388,8 @@ class PlanRepository(
     private suspend fun classifySupersessionStopAttempt(
         attempt: com.example.cellrebelauto.model.plan.TestAttempt
     ): StopAttemptEvidence {
-        val apply = db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attempt.id))
-        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
+        val apply = db.operationReceiptDao().byKey(APlusOperationIdentity.applyIdempotencyKey(attempt.id, attempt.aplusPlanEpoch))
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attempt.id, attempt.aplusPlanEpoch)
         val releaseByKey = db.releaseReceiptDao().byKey(releaseKey)
         val releaseByLease = attempt.aplusLeaseId?.let { db.releaseReceiptDao().byLease(it) }
         val carrier = db.advanceReplayCarrierDao().byAttempt(attempt.id)
@@ -507,7 +507,7 @@ class PlanRepository(
             if (CanonicalAdvanceDigestV1.compute(request) != request.requestDigest ||
                 carrier.releaseIdempotencyKey != releaseKey || carrier.releaseLeaseId != lease ||
                 carrier.releaseDigest != releaseByKey?.releaseDigest || request.leaseId != lease ||
-                request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id) ||
+                request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id, attempt.aplusPlanEpoch) ||
                 request.expectedScheduleId != attempt.aplusAnchorScheduleId ||
                 request.expectedCurrentItemId != attempt.aplusAnchorItemId ||
                 request.expectedScheduleVersion != attempt.aplusAnchorVersion ||
@@ -916,6 +916,15 @@ class PlanRepository(
     suspend fun getAttempt(attemptId: Long): TestAttempt? =
         db.testAttemptDao().getAttemptById(attemptId)
 
+    /**
+     * The persisted plan epoch (#179) for an attempt — the ONLY source its A+ idempotency keys
+     * may be recomputed from when the caller holds no attempt row. Null = pre-epoch legacy row
+     * (old key literal). A missing attempt row also reads null: every caller fail-closes on the
+     * missing lease/receipt immediately after, so the null-epoch read never dispatches a key.
+     */
+    suspend fun aplusPlanEpoch(attemptId: Long): Long? =
+        db.testAttemptDao().getAttemptById(attemptId)?.aplusPlanEpoch
+
     /** The active (running) session the recovery supersedes rather than duplicating (Sol round-8 P1-6). */
     suspend fun findActiveRunSession(planId: Long): RunSession? =
         db.runSessionDao().findActiveRunningSession(planId)
@@ -1068,7 +1077,10 @@ class PlanRepository(
     /** The apply-receipt operationId (ObserveRequest tuple leg; the post-advance observe is lease-bound). */
     suspend fun getApplyOperationId(attemptId: Long): String? =
         db.testAttemptDao().getOperationIdForIdempotencyKey(
-            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId)
+            com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(
+                attemptId,
+                db.testAttemptDao().getAttemptById(attemptId)?.aplusPlanEpoch
+            )
         )
 
     // # R37 (Sol R36 P1-2): current execution owner persist/read
@@ -1275,7 +1287,7 @@ class PlanRepository(
                 trustedCountForTask(attempt.taskId) < task.requiredSuccesses -> ReleaseReceiptRoute.COMMITTED_UNDER_QUOTA
                 else -> ReleaseReceiptRoute.COMMITTED_QUOTA_REACHED
             }
-            val release = requireNotNull(db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(attemptId)))
+            val release = requireNotNull(db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(attemptId, attempt.aplusPlanEpoch)))
             // RELEASED is outside the frozen reducer. Record an explicit owner recovery fact,
             // then consume its legal RECONCILE edge, all in this same owner transaction.
             markRecoveryRequired(attemptId, "LEGACY_RELEASED_RECONCILE", recordedAt)
@@ -1297,7 +1309,7 @@ class PlanRepository(
 
     private suspend fun legacyReleaseAuthorityFailure(attempt: TestAttempt, hadAdvancePhase: Boolean): String? {
         val lease = attempt.aplusLeaseId?.takeIf { it.isNotBlank() } ?: return "LEASE_MISSING"
-        val key = APlusOperationIdentity.releaseIdempotencyKey(attempt.id)
+        val key = APlusOperationIdentity.releaseIdempotencyKey(attempt.id, attempt.aplusPlanEpoch)
         val byKey = db.releaseReceiptDao().byKey(key)
         val byLease = db.releaseReceiptDao().byLease(lease)
         if (byKey == null && byLease == null) return "RELEASE_RECEIPT_MISSING"
@@ -1324,7 +1336,7 @@ class PlanRepository(
             readAdvanceReplayRequest(attempt.id)
         } catch (_: IllegalStateException) { return "ADVANCE_CARRIER_INVALID" }
         if (request == null || carrier.releaseIdempotencyKey != key || request.leaseId != lease ||
-            request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id) ||
+            request.idempotencyKey != APlusOperationIdentity.applyIdempotencyKey(attempt.id, attempt.aplusPlanEpoch) ||
             request.expectedScheduleId != attempt.aplusAnchorScheduleId ||
             request.expectedCurrentItemId != attempt.aplusAnchorItemId ||
             request.expectedScheduleVersion != attempt.aplusAnchorVersion ||
@@ -1354,7 +1366,7 @@ class PlanRepository(
     ): AttemptState = db.withTransaction {
         val attempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId))
         val current = AttemptState.valueOf(requireNotNull(attempt.aplusState))
-        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId, attempt.aplusPlanEpoch)
         check(handoff.idempotencyKey == releaseKey && handoff.leaseId == attempt.aplusLeaseId &&
             handoff.releaseDigest == APlusOperationIdentity.releaseDigest(handoff.leaseId) &&
             handoff.resultOutcome == "RELEASED") { "RELEASE_HANDOFF_OWNER_MISMATCH:$attemptId" }
@@ -1402,7 +1414,7 @@ class PlanRepository(
             val version = checkNotNull(attempt.aplusAnchorVersion) { "ADVANCE_ANCHOR_MISSING:$attemptId" }
             val base = CompleteAndAdvanceRequestV1(
                 leaseId = handoff.leaseId,
-                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId, attempt.aplusPlanEpoch),
                 requestDigest = "", expectedScheduleId = scheduleId,
                 expectedScheduleVersion = version, expectedCurrentItemId = itemId,
                 completionProof = CompletionProofV1(itemId, trustedCount, task.requiredSuccesses,
@@ -1462,14 +1474,14 @@ class PlanRepository(
         request: CompleteAndAdvanceRequestV1,
         createdAt: Long
     ) = db.withTransaction {
-        requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
+        val carrierAttempt = requireNotNull(db.testAttemptDao().getAttemptById(attemptId)) {
             "ADVANCE_CARRIER_ATTEMPT_MISSING:$attemptId"
         }
         check(CanonicalAdvanceDigestV1.compute(request) == request.requestDigest) {
             "ADVANCE_CARRIER_REQUEST_DIGEST_INVALID:$attemptId"
         }
         val releaseKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity
-            .releaseIdempotencyKey(attemptId)
+            .releaseIdempotencyKey(attemptId, carrierAttempt.aplusPlanEpoch)
         val release = requireNotNull(db.releaseReceiptDao().byKey(releaseKey)) {
             "ADVANCE_CARRIER_RELEASE_RECEIPT_MISSING:$attemptId"
         }
@@ -1650,7 +1662,8 @@ class PlanRepository(
             db.testAttemptDao().deletePristineIdReservation(
                 reservedId,
                 template.taskId,
-                template.runSessionId
+                template.runSessionId,
+                template.aplusPlanEpoch
             ) == 1
         ) { "attempt id reservation was not pristine" }
         reservedId

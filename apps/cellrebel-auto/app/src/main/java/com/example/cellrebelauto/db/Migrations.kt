@@ -412,3 +412,22 @@ val MIGRATION_9_10 = object : Migration(9, 10) {
         db.execSQL("ALTER TABLE durable_observation_records ADD COLUMN servingRsrpDbm INTEGER")
     }
 }
+
+/**
+ * v10 → v11 (#179 idempotency plan epoch): `test_attempts` gains the nullable
+ * `aplusPlanEpoch` column — the persisted `location_plans.importedAt` that A+
+ * idempotency keys are derived from. Additive only, INV-24-safe: every migrated
+ * row keeps NULL, which is exactly the legacy discriminator semantics — a
+ * pre-epoch attempt recomputes the EXACT old `auto-aplus-{apply,release}-{id}`
+ * key, so an attempt that was in flight across the upgrade still finds its
+ * provider receipt instead of re-applying into an ACTIVE lease. The column is
+ * written at A+ admission; it is never backfilled (backfilling would be a
+ * key rewrite under live receipts).
+ *
+ * # v10→v11 迁移：test_attempts 增 aplusPlanEpoch；旧行保持 null = 旧格式幂等键判别器
+ */
+val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusPlanEpoch INTEGER")
+    }
+}

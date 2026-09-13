@@ -587,21 +587,8 @@ class AutomationEngine(
 
                 val startedAt = nowMs()
                 val attemptOrdinal = planRepository.countAttemptsForTask(task.id) + 1
-                val attemptTemplate = TestAttempt(
-                    taskId = task.id,
-                    runSessionId = runSessionId,
-                    attemptOrdinal = attemptOrdinal,
-                    successOrdinal = null,
-                    startedAt = startedAt,
-                    runningObservedAt = null,
-                    endedAt = null,
-                    status = "starting",
-                    failureReason = null,
-                    webBrowsingScore = null,
-                    videoStreamingScore = null,
-                    latitude = task.latitude,
-                    longitude = task.longitude,
-                    stageNotes = stageNotes
+                val attemptTemplate = buildAttemptTemplate(
+                    plan, task, runSessionId, attemptOrdinal, startedAt, stageNotes
                 )
 
                 val aplusAdmission: APlusAttemptAdmission?
@@ -626,7 +613,7 @@ class AutomationEngine(
                     val digest = APlusOperationIdentity.requestDigest(intent)
                     val preflight = aplusCoord.executorBackend()?.preflight(
                         intent,
-                        APlusOperationIdentity.applyIdempotencyKey(reservedAttemptId),
+                        APlusOperationIdentity.applyIdempotencyKey(reservedAttemptId, plan.importedAt),
                         digest
                     )
                     if (preflight?.exhausted == true) {
@@ -728,7 +715,7 @@ class AutomationEngine(
                     // # P1-2（Sol round-9）：正路径 apply 是 provider 驱动——dispatchApply → ApplyOutcome.leaseId
                     // # 持久化 lease（绝不凭空发明）；fail-closed executor 无 lease → PAUSED。
                     val applyOutcome = aplusCoord.dispatchApply(
-                        attemptId, applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId), intentDigest, nowMs()
+                        attemptId, applyIntent, APlusOperationIdentity.applyIdempotencyKey(attemptId, plan.importedAt), intentDigest, nowMs()
                     )
                     val leaseId = applyOutcome.leaseId
                     if (leaseId == null) {
@@ -1293,6 +1280,40 @@ class AutomationEngine(
     }
 
     /**
+     * Assemble the durable attempt reservation template. Extracted verbatim from [run] (its
+     * coroutine already brushes the JVM 64KB method limit — keep [run] lean, not for style).
+     *
+     * #179 idempotency plan epoch: the key epoch is the plan's persisted importedAt, stamped on
+     * the attempt AT ADMISSION so crash recovery recomputes byte-identical keys from the attempt
+     * row alone. Re-importing the plan (new importedAt) or an Auto DB reset (recycled attempt
+     * ids) can never re-address a live provider receipt.
+     */
+    private fun buildAttemptTemplate(
+        plan: com.example.cellrebelauto.model.plan.LocationPlan,
+        task: com.example.cellrebelauto.model.plan.LocationTask,
+        runSessionId: Long,
+        attemptOrdinal: Int,
+        startedAt: Long,
+        stageNotes: String?
+    ): com.example.cellrebelauto.model.plan.TestAttempt = com.example.cellrebelauto.model.plan.TestAttempt(
+        taskId = task.id,
+        runSessionId = runSessionId,
+        attemptOrdinal = attemptOrdinal,
+        successOrdinal = null,
+        startedAt = startedAt,
+        runningObservedAt = null,
+        endedAt = null,
+        status = "starting",
+        failureReason = null,
+        webBrowsingScore = null,
+        videoStreamingScore = null,
+        latitude = task.latitude,
+        longitude = task.longitude,
+        stageNotes = stageNotes,
+        aplusPlanEpoch = plan.importedAt
+    )
+
+    /**
      * Fresh attempt anchor; a cooldown-time pointer change pauses instead of retargeting silently.
      * it adds the bound-schedule pinning checks on top of the same protocol/exhausted/
      * completeness fail-closes, and the watchdog race reuses its result.
@@ -1715,7 +1736,7 @@ class AutomationEngine(
         val requestDigest = APlusOperationIdentity.requestDigest(intent)
         val preflight = coordinator.executorBackend().preflight(
             intent,
-            APlusOperationIdentity.applyIdempotencyKey(crashed.id),
+            APlusOperationIdentity.applyIdempotencyKey(crashed.id, crashed.aplusPlanEpoch),
             requestDigest
         )
         if (preflight == null ||
@@ -2041,7 +2062,7 @@ class AutomationEngine(
         // APPLY_PENDING = apply dispatched, receipt/lease not yet durable → reconcile the apply (idempotent
         // replay) to obtain the lease, which comes BACK from the apply — never pre-seeded (Sol round-9 P1-3).
         if (recoveryOwnerState == "APPLY_PENDING") {
-            val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id)
+            val applyKey = APlusOperationIdentity.applyIdempotencyKey(crashed.id, crashed.aplusPlanEpoch)
             // R44 (Sol GREEN-review-3 F2): the SAME intent object feeds the digest and the wire
             // request — all inputs from the durable owner state (attempt row + plan config).
             // F12: scheduleRef comes from the persisted anchor, not taskId.
@@ -2138,7 +2159,7 @@ class AutomationEngine(
         val releaseRoute = resolveReleaseReceiptRoute(crashed) ?: return false
         val receipt = coordinator.prepareReleaseLease(
             crashed.id,
-            APlusOperationIdentity.releaseIdempotencyKey(crashed.id),
+            APlusOperationIdentity.releaseIdempotencyKey(crashed.id, crashed.aplusPlanEpoch),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId),
             nowMs()
@@ -2716,7 +2737,7 @@ class AutomationEngine(
         }
         val receipt = recoveryCoordinator?.prepareReleaseLease(
             attemptId,
-            APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId, planRepository.aplusPlanEpoch(attemptId)),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId),
             nowMs()
@@ -3069,7 +3090,7 @@ class AutomationEngine(
                 "durable lease is missing"
             )
         }
-        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+        val releaseKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId, planRepository.aplusPlanEpoch(attemptId))
         val releaseDigest = APlusOperationIdentity.releaseDigest(advanceLease)
         if (!planRepository.hasMatchingReleaseReceipt(releaseKey, advanceLease, releaseDigest)) {
             return rejectAdvanceReplayAuthority(
@@ -3354,7 +3375,7 @@ class AutomationEngine(
         }
         val receipt = recoveryCoordinator?.prepareReleaseLease(
             attemptId,
-            APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+            APlusOperationIdentity.releaseIdempotencyKey(attemptId, planRepository.aplusPlanEpoch(attemptId)),
             leaseId,
             APlusOperationIdentity.releaseDigest(leaseId),
             nowMs()

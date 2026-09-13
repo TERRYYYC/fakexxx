@@ -185,7 +185,7 @@ class EngineQuotaRecoveryRedTest {
         // The Room apply receipt carrying the verbatim operationId (the observe tuple's leg)
         db.operationReceiptDao().insertIfAbsent(
             com.example.cellrebelauto.recovery.OperationReceiptRow(
-                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(attemptId, null),
                 requestDigest = "h", resultOutcome = "APPLIED", createdAt = 1000L,
                 leaseId = "lease-$attemptId", operationId = "op-$attemptId"
             )
@@ -196,7 +196,7 @@ class EngineQuotaRecoveryRedTest {
             // replay from Room instead of silently issuing a fresh provider release.
             db.releaseReceiptDao().insertIfAbsent(
                 ReleaseReceiptRow(
-                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId),
+                    idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId, null),
                     leaseId = "lease-$attemptId",
                     releaseDigest = APlusOperationIdentity.releaseDigest("lease-$attemptId"),
                     resultOutcome = "RELEASED",
@@ -280,7 +280,7 @@ class EngineQuotaRecoveryRedTest {
         assertEquals("unknown released history must not cause a fresh provider release", 0, releaseAttempts.size)
         assertEquals(0, advanceReplays.size)
         assertEquals(null, repo.getAdvanceReplayRequest(31L))
-        assertEquals(null, db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31L)))
+        assertEquals(null, db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31L, null)))
         val attempt = repo.getAttempt(31L)!!
         assertEquals("RECOVERY_REQUIRED", attempt.aplusState)
         assertEquals("LEGACY_RELEASED_AUTHORITY:RELEASE_RECEIPT_MISSING", attempt.failureReason)
@@ -303,7 +303,7 @@ class EngineQuotaRecoveryRedTest {
     }
 
     private fun legacyRequest(): CompleteAndAdvanceRequestV1 = CompleteAndAdvanceRequestV1(
-        leaseId = "lease-31", idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(31), requestDigest = "",
+        leaseId = "lease-31", idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(31, null), requestDigest = "",
         expectedScheduleId = anchorScheduleId, expectedScheduleVersion = anchorVersion,
         expectedCurrentItemId = anchorItemId,
         completionProof = CompletionProofV1(anchorItemId, 1, 1, "ledger-31", 123_456_789L),
@@ -318,7 +318,7 @@ class EngineQuotaRecoveryRedTest {
 
     private suspend fun assertLegacyRejected(planId: Long, failure: String) {
         val beforeCarrier = db.advanceReplayCarrierDao().byAttempt(31)
-        val beforeRelease = db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31))
+        val beforeRelease = db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31, null))
         val beforeByLease = db.releaseReceiptDao().byLease("lease-31")
         val beforeAdvanceReceipt = db.advanceReceiptDao().byAttempt(31)
         repeat(2) {
@@ -326,7 +326,7 @@ class EngineQuotaRecoveryRedTest {
             assertEquals("a rejected legacy owner cannot call provider release", 0, releaseAttempts.size)
             assertEquals("a rejected legacy owner cannot call provider advance", 0, advanceReplays.size)
             assertEquals(beforeCarrier, db.advanceReplayCarrierDao().byAttempt(31))
-            assertEquals(beforeRelease, db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31)))
+            assertEquals(beforeRelease, db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(31, null)))
             assertEquals(beforeByLease, db.releaseReceiptDao().byLease("lease-31"))
             assertEquals(beforeAdvanceReceipt, db.advanceReceiptDao().byAttempt(31))
             assertEquals("RECOVERY_REQUIRED", repo.getAttempt(31)!!.aplusState)
