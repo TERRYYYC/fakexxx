@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.drawable.Drawable
 import android.net.ConnectivityManager
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -43,7 +44,9 @@ import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.MapTileProviderBase
 import org.osmdroid.tileprovider.MapTileProviderBasic
 import org.osmdroid.tileprovider.MapTileRequestState
+import org.osmdroid.tileprovider.modules.INetworkAvailablityCheck
 import org.osmdroid.tileprovider.tilesource.XYTileSource
+import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.Projection
@@ -78,6 +81,22 @@ import java.io.File
  * onRelease（见 [buildTileMapView]），否则任何中途窗口 detach 都会以
  * "mWriter being null (map shutdown?)" 的形式把首启变成永远不出图的寂静卡
  * （2026-09-09 真机 mi14 首启修复）。
+ *
+ * ## 判网根因（真机 moto g54 冷启动首瓦片 67ms 即刻失败，2026-09-13；
+ * osmdroid 6.1.20 字节码核实）
+ * `MapTileDownloader.TileLoader.loadTile` 第一步就问
+ * `INetworkAvailabliltyCheck.getNetworkAvailable()`，为 false 时**静默返回
+ * null**（不发起任何 HTTP）。osmdroid 默认实现 `NetworkAvailabliltyCheck`
+ * 用 legacy `ConnectivityManager.getActiveNetworkInfo().isConnected()`——
+ * g54 冷启动首秒（网络仍在 VALIDATING/连接栈未就绪）该值恒 false，于是
+ * 全模块链在 ~67ms 内同步穷尽 → 首瓦片失败 → sticky 降级 CANVAS 永久不出图。
+ * 失败位之所以永不自清：选卡用的 [TileNetworkGate]（`activeNetwork != null`）
+ * 全程为 true，永远等不到"离线→在线"的清除跳变。日志侧的两条假象：
+ * "Tile cache increased" 是内存缓存扩容（与下载无关）；"mWriter being null"
+ * 洪水是降级释放 MapView（onDetach→provider detach）时在飞任务排水的下游
+ * 噪音，不是病根。修复 = 注入与选卡同信号的 [GateNetworkAvailablityCheck]
+ * （判网分歧消除后 downloader 真正尝试 HTTP）+ [FirstOutcomeGate] 启动宽限
+ * 窗（宽限窗内的瞬时失败不粘死卡片，配套重绘重试泵自愈）。
  *
  * # 瓦片地图卡：osmdroid 原生手势 + 三色标记 + 虚线顺序连线 + 比例尺 + ODbL 归属
  */
@@ -116,6 +135,66 @@ object TileNetworkGate {
 }
 
 /**
+ * The osmdroid-facing view of [TileNetworkGate] — the ONE network signal, shared
+ * by the card policy and the tile pipeline.
+ *
+ * osmdroid 6.1.20's stock [org.osmdroid.tileprovider.modules.NetworkAvailabliltyCheck]
+ * answers via the legacy `getActiveNetworkInfo().isConnected()`, which reads
+ * FALSE during the first seconds of a cold start (network still VALIDATING) —
+ * the downloader then silently refuses every tile (no HTTP at all) and the
+ * first-tile failure flips the card to canvas forever (moto g54, 2026-09-13).
+ * Injecting this check into the provider removes the divergence: while the
+ * app's policy says "online", the downloader actually ATTEMPTS the download;
+ * when truly offline (`activeNetwork == null`) the refusal stays instant and
+ * clean — and the policy shows the offline canvas anyway.
+ */
+internal class GateNetworkAvailablityCheck(context: Context) : INetworkAvailablityCheck {
+    private val appContext = context.applicationContext
+
+    override fun getNetworkAvailable(): Boolean = TileNetworkGate.isOnline(appContext)
+
+    override fun getWiFiNetworkAvailable(): Boolean = getNetworkAvailable()
+
+    override fun getCellularDataNetworkAvailable(): Boolean = getNetworkAvailable()
+
+    override fun getRouteToPathExists(hostAddress: Int): Boolean = getNetworkAvailable()
+}
+
+/**
+ * First-outcome dedup + startup grace, factored out of [ReportingTileProvider]
+ * so the semantics stay plain-JVM testable.
+ *
+ * The FIRST outcome wins — except a FAILURE that lands inside the startup grace
+ * window ([graceMs] since construction): at that point no HTTP could have
+ * completed yet, so the failure is definitionally transient (network stack still
+ * waking up — moto g54 first-tile failure at t≈67ms). Swallowing it keeps the
+ * card alive; the draw-driven retry pump re-issues the tile and a healthy
+ * network reports success moments later. After the grace window a failure is
+ * real evidence (bad UA, banned source, captive portal) and reports sticky as
+ * before. Success always reports immediately.
+ */
+internal class FirstOutcomeGate(
+    private val graceMs: Long,
+    private val nowMs: () -> Long = { SystemClock.uptimeMillis() },
+) {
+    private val createdAtMs = nowMs()
+
+    @Volatile private var reported = false
+
+    /** true = surface this outcome to the caller; false = swallow it. */
+    fun shouldReport(success: Boolean): Boolean {
+        if (reported) return false
+        if (success) {
+            reported = true
+            return true
+        }
+        if (nowMs() - createdAtMs < graceMs) return false
+        reported = true
+        return true
+    }
+}
+
+/**
  * The single tile-source construction point. Swapping to a self-hosted/
  * commercial raster = changing [OsmTileSource.TILE_SOURCE_URL] (+ UA) only.
  */
@@ -130,41 +209,62 @@ private fun buildTileSource() = XYTileSource(
 )
 
 /**
+ * Startup grace for the first tile outcome (moto g54 cold-start fix). On a
+ * healthy network the first tile lands in ~1-2s; a failure arriving inside
+ * this window cannot be a real source problem (no HTTP had time to finish),
+ * so it is swallowed and retried via the draw pump instead of sticking the
+ * card to the canvas fallback forever.
+ */
+private const val FIRST_TILE_GRACE_MS = 10_000L
+
+/**
  * First-tile-callback health: reports the FIRST provider outcome (success or
- * failure) exactly once. Fires on osmdroid worker threads — both sinks are
- * thread-safe (a Compose snapshot write / a StateFlow write).
+ * failure) exactly once — through [FirstOutcomeGate], which absorbs transient
+ * failures inside the startup grace window (moto g54 cold-start fix,
+ * 2026-09-13). Fires on osmdroid worker threads — both sinks are thread-safe
+ * (a Compose snapshot write / a StateFlow write).
  *
  * Note: osmdroid's offline downgraded mode can also serve approximated tiles
  * through the completed callback; airplane mode is independently gated by
  * [TileNetworkGate], so this stays a conservative "first evidence" signal.
+ *
+ * Constructed through the 5-arg MapTileProviderBasic constructor so the
+ * [GateNetworkAvailablityCheck] replaces osmdroid's legacy
+ * `getActiveNetworkInfo().isConnected()` check (the g54 root cause). The cache
+ * argument stays null on purpose: per-provider SqlTileWriter is osmdroid's
+ * own default wiring — 6.1.20's MapTileSqlCacheProvider ignores the injected
+ * cache anyway (it always news its own reader writer), so a shared writer
+ * would change nothing in the failure chain.
  */
 private class ReportingTileProvider(
     context: Context,
     private val onFirstSuccess: () -> Unit,
     private val onFirstFailure: () -> Unit,
-) : MapTileProviderBasic(context, buildTileSource()) {
+    graceMs: Long = FIRST_TILE_GRACE_MS,
+    nowMs: () -> Long = { SystemClock.uptimeMillis() },
+) : MapTileProviderBasic(
+    SimpleRegisterReceiver(context),
+    GateNetworkAvailablityCheck(context),
+    buildTileSource(),
+    context,
+    null,
+) {
 
-    @Volatile private var reported = false
-
-    private fun report(success: Boolean) {
-        if (reported) return
-        reported = true
-        if (success) onFirstSuccess() else onFirstFailure()
-    }
+    private val gate = FirstOutcomeGate(graceMs, nowMs)
 
     override fun mapTileRequestCompleted(state: MapTileRequestState?, result: Drawable?) {
         super.mapTileRequestCompleted(state, result)
-        report(success = true)
+        if (gate.shouldReport(success = true)) onFirstSuccess()
     }
 
     override fun mapTileRequestFailed(state: MapTileRequestState?) {
         super.mapTileRequestFailed(state)
-        report(success = false)
+        if (gate.shouldReport(success = false)) onFirstFailure()
     }
 
     override fun mapTileRequestFailedExceedsMaxQueueSize(state: MapTileRequestState?) {
         super.mapTileRequestFailedExceedsMaxQueueSize(state)
-        report(success = false)
+        if (gate.shouldReport(success = false)) onFirstFailure()
     }
 }
 
@@ -395,6 +495,17 @@ fun TilePlanMapCard(
             overlay.pulsePhase = (overlay.pulsePhase + 0.05f) % 1f
             mapViewRef.value?.postInvalidate()
             delay(33)
+        }
+    }
+
+    // 瓦片重试泵（moto g54 冷启动自愈，2026-09-13）：osmdroid 的失败瓦片没有
+    // 自带重试——请求由绘制帧的 cache-miss 路径补发（MapTileProviderArray
+    // .getMapTile）。首图就绪前以 2Hz 强制重绘，保证宽限窗内被吞掉的瞬时失败
+    // 会被真实重发，网络就绪后第一张成功瓦片即上报并停泵。
+    LaunchedEffect(tilesReady) {
+        while (!tilesReady) {
+            mapViewRef.value?.postInvalidate()
+            delay(500)
         }
     }
 
