@@ -2097,8 +2097,16 @@ class AutomationEngine(
                 // (a receipt EXISTS, integrity signal) never enters this branch. Re-running on an
                 // already-finalized zombie matches zero rows (idempotent).
                 if (result is ReconcileResult.InsufficientEvidence) {
-                    val staleBeforeMs = nowMs() - ZombieAttemptPolicy.stallThresholdMs(testTimeoutMs)
-                    if (planRepository.finalizeZombieAttempt(crashed.id, staleBeforeMs, nowMs())) {
+                    // Single clock read: the staleness bound and the terminal endedAt must derive
+                    // from the SAME instant (one `now` ⇒ both the guard and the persisted timestamp).
+                    val finalizedAtMs = nowMs()
+                    // `staleBeforeMs` is the SQL twin of ZombieAttemptPolicy.isStale:
+                    // startedAt <= now - stallThresholdMs ⟺ startedAt + stallThresholdMs <= now.
+                    // The engine cannot pre-check isStale (startedAt lives only in the row the DAO
+                    // UPDATE guards atomically), so these two formulations are the ONE semantic —
+                    // they MUST be changed together.
+                    val staleBeforeMs = finalizedAtMs - ZombieAttemptPolicy.stallThresholdMs(testTimeoutMs)
+                    if (planRepository.finalizeZombieAttempt(crashed.id, staleBeforeMs, finalizedAtMs)) {
                         log(
                             "Zombie finalization: attempt ${crashed.id} ($recoveryOwnerState, " +
                                 "receipt-free/lease-free, stale past threshold) → interrupted; " +

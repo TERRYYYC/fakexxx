@@ -170,6 +170,11 @@ interface TestAttemptDao {
      *    a durable receipt makes reconcile replay locally, so such an owner is recoverable, never
      *    a zombie;
      *  - stale (`startedAt <= :staleBeforeMs`) — the intent window is irrevocably expired.
+     *    SEMANTIC BINDING (single source of truth): this condition is the SQL twin of
+     *    [com.example.cellrebelauto.automation.selfheal.ZombieAttemptPolicy.isStale] —
+     *    `startedAt <= staleBeforeMs` ⟺ `startedAt + max(2× testTimeoutMs, MIN_STALL_MS) <= nowMs`.
+     *    The SQL copy exists only because `startedAt` lives in the row this UPDATE guards
+     *    atomically; the two formulations are ONE semantics and MUST be changed together.
      *
      * `aplusState` is deliberately LEFT as APPLY_PENDING (byte-equivalent to the field surgery,
      * which unblocked recovery because [findAPlusRecoverableAttempts] selects on non-terminal
