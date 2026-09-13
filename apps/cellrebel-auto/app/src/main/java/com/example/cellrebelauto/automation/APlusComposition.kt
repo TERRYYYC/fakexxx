@@ -159,8 +159,11 @@ object APlusComposition {
             override fun release(attemptId: Long, idempotencyKey: String, leaseId: String, releaseDigest: String, now: Long): com.example.cellrebelauto.recovery.ApplyOutcome =
                 rawExecutor.release(attemptId, idempotencyKey, leaseId, releaseDigest, now)
 
-            override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? =
-                if (trusted()) rawExecutor.discover() else null
+            override fun discover(): io.github.terryyyc.fakexxx.contract.v1.CapabilitySnapshotV1? {
+                val t = trusted()
+                android.util.Log.w("AutoDiscover", "decorator: trusted()=$t")
+                return if (t) rawExecutor.discover() else null
+            }
 
             override fun preflight(intent: io.github.terryyyc.fakexxx.contract.v1.EnvironmentIntentV1, idempotencyKey: String, requestDigest: String): io.github.terryyyc.fakexxx.contract.v1.PreflightReportV1? =
                 if (trusted()) rawExecutor.preflight(intent, idempotencyKey, requestDigest) else null

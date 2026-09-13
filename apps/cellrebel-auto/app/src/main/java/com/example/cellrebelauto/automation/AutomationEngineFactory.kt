@@ -65,7 +65,10 @@ object AutomationEngineFactory {
         initialRunSessionId: Long? = null,
         // # P1.3 自愈开关（看门狗/坐标校验）——与 stageToggles 同样的运行时快照 seam
         selfHealConfig: suspend () -> com.example.cellrebelauto.data.SelfHealConfig =
-            { com.example.cellrebelauto.data.SelfHealConfig() }
+            { com.example.cellrebelauto.data.SelfHealConfig() },
+        // [task-boundary monitor 2026-09-13] per-completed-task foreground hook; the
+        // Service wires it behind TaskBoundarySettings.returnToMonitor.
+        taskBoundaryAction: (suspend () -> Unit)? = null
     ): AutomationEngine = AutomationEngine(
         planId = planId,
         planRepository = planRepository,
@@ -84,6 +87,7 @@ object AutomationEngineFactory {
         commitClockMs = commitClockMs,
         elapsedClockMs = elapsedClockMs,
         initialRunSessionId = initialRunSessionId,
-        selfHealConfig = selfHealConfig
+        selfHealConfig = selfHealConfig,
+        taskBoundaryAction = taskBoundaryAction
     )
 }

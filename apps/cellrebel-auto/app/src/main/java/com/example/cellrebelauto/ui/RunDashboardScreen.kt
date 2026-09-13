@@ -129,6 +129,9 @@ fun RunDashboardScreen(
     mapTilesEnabled: Boolean,
     mapTileFailure: Boolean,
     onSetMapTilesEnabled: (Boolean) -> Unit,
+    // [task-boundary monitor 2026-09-13]
+    returnToMonitor: Boolean,
+    onSetReturnToMonitor: (Boolean) -> Unit,
     onReportTileFailure: () -> Unit,
     onClearTileFailure: () -> Unit,
     resumeOutcome: MainViewModel.ResumeOutcome?,
@@ -223,6 +226,8 @@ fun RunDashboardScreen(
                 selfHealConfig = selfHealConfig,
                 mapTilesEnabled = mapTilesEnabled,
                 onSetMapTilesEnabled = onSetMapTilesEnabled,
+                returnToMonitor = returnToMonitor,
+                onSetReturnToMonitor = onSetReturnToMonitor,
                 onOpenPlan = onOpenPlan,
                 onOpenProviders = onOpenProviders,
                 onResetPlan = onResetPlan,
@@ -470,6 +475,26 @@ private fun MapCardSection(
     val mapModifier = if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth()
 
     Box(modifier = if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(220.dp)) {
+        // [map diagnostics 2026-09-13] WHY the abstract canvas is showing — the silent
+        // fallback read as "the map is broken" on device; name the reason instead.
+        if (points.isNotEmpty() && card == TileMapCardPolicy.PlanMapCard.CANVAS) {
+            val reason = when {
+                mapTileFailure -> "OSM 瓦片加载失败 · 示意图"
+                !networkOnline -> "离线 · 示意图"
+                else -> "示意图模式（开关关）"
+            }
+            Text(
+                reason,
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
         if (points.isEmpty()) {
             Text(
                 "导入计划后显示点位",
@@ -820,6 +845,8 @@ private fun LogDrawer(
     selfHealConfig: SelfHealConfig,
     mapTilesEnabled: Boolean,
     onSetMapTilesEnabled: (Boolean) -> Unit,
+    returnToMonitor: Boolean,
+    onSetReturnToMonitor: (Boolean) -> Unit,
     onOpenPlan: () -> Unit,
     onOpenProviders: () -> Unit,
     onResetPlan: () -> Unit,
@@ -961,6 +988,7 @@ private fun LogDrawer(
                             SwitchRow("坐标校验（配额入账前核对档案/计划）", selfHealConfig.coordinateGuardEnabled, onSetCoordinateGuard)
                             SwitchRow("服务重连自动恢复（服务被回收后自动 Resume）", selfHealConfig.serviceReconnectAutoResumeEnabled, onSetServiceAutoResume)
                             SwitchRow("瓦片真实底图（关闭回退抽象地图）", mapTilesEnabled, onSetMapTilesEnabled)
+                            SwitchRow("任务边界回监控页（每组任务完成后切回本页）", returnToMonitor, onSetReturnToMonitor)
                         }
                     }
                 }

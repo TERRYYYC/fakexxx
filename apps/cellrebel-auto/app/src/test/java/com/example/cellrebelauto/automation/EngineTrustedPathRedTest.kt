@@ -259,7 +259,8 @@ class EngineTrustedPathRedTest {
         driver: APlusAttemptDriver? = null,
         backend: APlusBackend? = null,
         elapsedClockMs: (() -> Long)? = null,
-        toggles: StageToggles = StageToggles()
+        toggles: StageToggles = StageToggles(),
+        taskBoundaryAction: (suspend () -> Unit)? = null
     ): AutomationEngine {
         // Service-used composition oracle (Sol round-11 P1-1): the SAME engineAplusParams the Service
         // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
@@ -279,7 +280,8 @@ class EngineTrustedPathRedTest {
             stageToggles = { toggles },
             attemptDriver = driver,
             recoveryCoordinator = params?.first,
-            completionEvidenceSource = params?.second
+            completionEvidenceSource = params?.second,
+            taskBoundaryAction = taskBoundaryAction
         )
     }
 
@@ -303,7 +305,59 @@ class EngineTrustedPathRedTest {
         return planId
     }
 
-    private suspend fun seedTerminalDummyAttempt(taskId: Long, attemptId: Long) {
+    // ---- [task-boundary monitor 2026-09-13] boundary hook fires per completed task ----
+
+    @Test
+    fun `task boundary hook fires exactly once when a task quota is reached`() = runTest {
+        val taskId = 51L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        var boundaries = 0
+        val backend = passingBackend()
+        buildEngine(
+            planId,
+            runningSuccessRunner(VirtualClock()),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            VirtualClock(),
+            driver = APlusAttemptDriver(auditDao),
+            backend = backend,
+            taskBoundaryAction = { boundaries++ },
+        ).run()
+
+        assertEquals(
+            "quota=1 task completed in one PASS — exactly ONE boundary callback",
+            1, boundaries,
+        )
+        assertEquals("the boundary means the task actually completed", "completed",
+            db.locationTaskDao().getTaskById(taskId)!!.status)
+    }
+
+    @Test
+    fun `task boundary hook does NOT fire on a trust-failing attempt`() = runTest {
+        val taskId = 52L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        var boundaries = 0
+        // UNVERIFIED evidence ⇒ trust FAIL ⇒ [hold semantics] no quota, no boundary
+        val backend = FakeBackend(
+            RecordingExternalApplyExecutor(), FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false)
+        )
+        buildEngine(
+            planId,
+            runningSuccessRunner(VirtualClock()),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            VirtualClock(),
+            driver = APlusAttemptDriver(auditDao),
+            backend = backend,
+            taskBoundaryAction = { boundaries++ },
+        ).run()
+
+        assertEquals("a trust-failing attempt never surfaces a boundary", 0, boundaries)
+    }
+
+        private suspend fun seedTerminalDummyAttempt(taskId: Long, attemptId: Long) {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 400L))
         db.testAttemptDao().insert(
             TestAttempt(
@@ -756,14 +810,26 @@ class EngineTrustedPathRedTest {
         assertTrue("unverified evidenceDigest is non-empty", unverified.evidenceDigest.isNotEmpty())
         assertEquals("never mint on fail", 0, db.trustedQuotaDao().countAll())
         assertEquals("legacy-zero", 0, db.locationTaskDao().getTaskById(taskId)!!.completedSuccesses)
-        assertEquals("UNTRUSTED", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.failureReason)
+        // [operator requirement 2026-09-12] trust-FAIL now HOLDS the environment: the attempt
+        // stays non-terminal ('running', aplusState=UNVERIFIED_RECORDED, durable lease held) so
+        // the mock keeps serving the last applied position; the release converges on resume
+        // (recovery classifies UNVERIFIED_RECORDED as release-converged).
+        val heldAttempt = db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }
         assertEquals(
-            "the trust-fail path must begin release from the reducer's actual unverified state",
-            "UNVERIFIED_RECORDED->RELEASE_PENDING",
-            auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.BEGIN_RELEASE.name }.payloadDigest
+            "trust-FAIL holds the attempt non-terminal for the environment hold",
+            "running", heldAttempt.status,
         )
         assertEquals(
-            "the unverified release source must itself come from the trust reducer",
+            "held attempt persists the unverified phase",
+            "UNVERIFIED_RECORDED", heldAttempt.aplusState,
+        )
+        assertNotNull("the durable lease stays HELD across the pause", db.testAttemptDao().getAttemptsForTask(taskId).first { it.id == realAttemptId }.aplusLeaseId)
+        assertTrue(
+            "no release is dispatched while holding the environment",
+            auditDao.forAttempt(realAttemptId).none { it.eventType == AttemptEvent.BEGIN_RELEASE.name },
+        )
+        assertEquals(
+            "the trust reducer still records the fail transition",
             "DECIDING->UNVERIFIED_RECORDED",
             auditDao.forAttempt(realAttemptId).single { it.eventType == AttemptEvent.TRUST_POLICY_FAIL.name }.payloadDigest
         )

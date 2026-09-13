@@ -89,7 +89,10 @@ class AccessibilityBridgeGestureTimeoutTest {
 
         val outcome = withTimeoutOrNull(60_000) {
             val deferred = async(start = CoroutineStart.UNDISPATCHED) {
-                bridge.dispatchGestureCore(8_000) { callback -> captured = callback; true }
+                // [#143 family] 8s gesture window under a loaded parallel suite can expire
+                // before the real test thread lands the callback — this test's SUBJECT is
+                // the thread identity, not the timing; widen the window.
+                bridge.dispatchGestureCore(30_000) { callback -> captured = callback; true }
             }
             // UNDISPATCHED ran the bridge up to its suspension; the fake registered the callback.
             captured!!.onCompleted(null)
@@ -140,7 +143,10 @@ class AccessibilityBridgeGestureTimeoutTest {
 
         val outcome = withTimeoutOrNull(60_000) {
             val deferred = async(start = CoroutineStart.UNDISPATCHED) {
-                bridge.dispatchGestureCore(8_000) { callback ->
+                // [#143 family] 8s gesture window under a loaded parallel suite can expire
+                // before the real test thread lands the callback — this test's SUBJECT is
+                // the thread identity, not the timing; widen the window.
+                bridge.dispatchGestureCore(30_000) { callback ->
                     callback.onCompleted(null)
                     true
                 }

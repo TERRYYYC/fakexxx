@@ -232,6 +232,12 @@ object ProviderRuntime {
             // arrival and brackets every semantic write (bit 6) — the producer
             // side the observer's FULL path has been missing.
             oracleRegistry = OracleClientRegistry.process,
+            // [#179 operator fallback 2026-09-12, operator decision] TRUE: while
+            // the system-server oracle producer is unshippable (Vector#971), a
+            // byte-verified apply establishes coverage (legacy semantics) so the
+            // automated lane stays usable. When Vector#971 lands and the oracle
+            // registers, flip this to FALSE to restore the authoritative window.
+            oracleAbsentFallback = true,
         )
     }
 
@@ -267,6 +273,10 @@ object ProviderRuntime {
         // #173 face 3: bounded re-read policy for the owner cursor ack's
         // after-read; defaulted here so the production wiring stays implicit.
         ackCursorReRead: AckCursorReRead = AckCursorReRead(),
+        // [#179 operator fallback 2026-09-12] When TRUE, a verified apply
+        // establishes coverage FULL (legacy semantics) — the oracle-absent
+        // deployment fallback. Default FALSE = the strict shipped behavior.
+        oracleAbsentFallback: Boolean = false,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -284,6 +294,7 @@ object ProviderRuntime {
             expectedOracleOwnerPackage,
             expectedOracleOwnerUid,
             authoritativeCommitStore,
+            oracleAbsentFallback = oracleAbsentFallback,
         )
 
         // The driver's digest source is bound to the SAME tracker/environment

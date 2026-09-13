@@ -35,6 +35,7 @@ import com.example.cellrebelauto.util.DiagnosticFiles
 import com.example.cellrebelauto.util.RollingLogFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -1659,6 +1660,11 @@ class MainViewModel @JvmOverloads constructor(
     private val mapTilesSettings = injectedMapTilesSettings
         ?: com.example.cellrebelauto.data.MapTilesSettings(application)
 
+    // [task-boundary monitor 2026-09-13] boundary-foreground switch (DataStore).
+    private val taskBoundarySettings by lazy {
+        com.example.cellrebelauto.data.TaskBoundarySettings(application)
+    }
+
     private val _mapTileFailure = MutableStateFlow(false)
 
     /**
@@ -1681,6 +1687,19 @@ class MainViewModel @JvmOverloads constructor(
 
     fun reportTileLoadFailure() {
         _mapTileFailure.value = true
+        // [map diagnostics 2026-09-13] silent canvas fallback was invisible on device
+        // ("no real map" with no reason anywhere) — make the flip loud in logcat.
+        android.util.Log.w("MapTiles", "first OSM tile load FAILED — canvas fallback engaged (check network/UA/tile source)")
+    }
+
+    // [task-boundary monitor 2026-09-13] exposed as the raw DataStore flow — NO
+    // init collector: a persistent collect in init re-triggered the tree-level
+    // TestMainDispatcher races documented on the VM test files (file-backed
+    // DataStore reads outliving tearDown). UI collects with initial = true.
+    val returnToMonitor: Flow<Boolean> = taskBoundarySettings.returnToMonitor
+
+    fun setReturnToMonitor(enabled: Boolean) {
+        viewModelScope.launch { taskBoundarySettings.setReturnToMonitor(enabled) }
     }
 
     fun clearTileLoadFailure() {

@@ -27,6 +27,12 @@ class EnvironmentObserver(
     private val expectedOracleOwnerPackage: String? = null,
     private val expectedOracleOwnerUid: Int? = null,
     private val authoritativeCommitStore: AuthoritativeObservationCommitStore? = null,
+    // [#179 operator fallback 2026-09-12] When TRUE and the authoritative oracle
+    // snapshot is ABSENT (unregistered producer — see #179 / Vector#971),
+    // observations fall back to the tracker's coverage (legacy semantics)
+    // instead of fail-closing to NONE. Default FALSE = the strict shipped
+    // behavior; production wires TRUE (operator decision).
+    val oracleAbsentFallback: Boolean = false,
 ) {
     /**
      * @throws ContractException ENVIRONMENT_DRIFT when expectedIntentHash does
@@ -44,6 +50,17 @@ class EnvironmentObserver(
         // The only production FULL path reads an external source immediately
         // before and after the complete local projection. A source is optional
         // only for legacy JVM harnesses; ProviderRuntime always supplies it.
+        // [operator fallback 2026-09-12, #179] When the authoritative oracle is
+        // NOT REGISTERED (snapshot() == null — absence, honestly distinguishable
+        // from an oracle present-and-invalid), the observation degrades to the
+        // legacy coverage semantics: the tracker's coverage stands, established
+        // by the apply path's byte-verified readback. An oracle that IS present
+        // but fails its window still fail-closes to NONE — rigor is kept
+        // wherever the oracle actually runs (see #179: the system-server
+        // producer is blocked upstream, Vector#971).
+        // [#179 operator fallback] with oracleAbsentFallback and an ABSENT
+        // snapshot (unregistered producer), coverage falls back to the tracker's
+        // value below — see the coverage `when`.
         val pre = authoritativeSource?.let { source -> runCatching(source::snapshot).getOrNull() }
         val windowStartElapsedRealtimeMs = clock.elapsedRealtimeMs()
         var snap = tracker.snapshot()
@@ -60,7 +77,6 @@ class EnvironmentObserver(
             schedule = schedule,
         )
         var authoritativeWindowIsValid = when {
-            authoritativeSource == null -> false
             expectedOracleOwnerPackage == null || expectedOracleOwnerUid == null -> false
             classifyAuthoritativeWindow(
                 pre = pre,
@@ -130,6 +146,20 @@ class EnvironmentObserver(
             if (authoritativeWindowIsValid && snap.continuitySinceElapsedRealtimeMs == null) {
                 tracker.recordAuthoritativeObservationStart()
                 snap = tracker.snapshot()
+            } else if (oracleAbsentFallback && authoritativeSource != null &&
+                pre == null && post == null
+            ) {
+                // [#179 operator fallback] oracle ABSENT deployment: establish the window
+                // HERE (generation-local) instead of fail-closing — the apply path's
+                // byte-verified readback backs the environment; the FIRST observe of a
+                // generation establishes, later ones (same generation) inherit, so
+                // TrustPolicy's PRE/POST equality holds. A generation change between PRE
+                // and POST still fails closed (revision bump + cleared since) — the same
+                // continuity contract as the authoritative mode.
+                if (snap.continuitySinceElapsedRealtimeMs == null) {
+                    tracker.markContinuityEstablished()
+                    snap = tracker.snapshot()
+                }
             } else if (!authoritativeWindowIsValid && authoritativeSource != null) {
                 tracker.reportObserverGap()
                 snap = tracker.snapshot()
@@ -159,14 +189,27 @@ class EnvironmentObserver(
                 payloadDigest = trace.invalidReason(),
             )
         }
+        // [operator fallback 2026-09-12, #179] oracle ABSENT (not registered in
+        // this process) → legacy coverage semantics: the tracker's coverage stands,
+        // established by the apply path's byte-verified readback. Oracle present
+        // but window invalid → NONE (fail-closed rigor kept where the oracle runs).
+        runCatching {
+            android.util.Log.w(
+                "EnvControl",
+                "observe coverage resolve: valid=" + authoritativeWindowIsValid +
+                    " fallback=" + oracleAbsentFallback +
+                    " pre=" + (pre != null) + " post=" + (post != null) +
+                    " snapCoverage=" + snap.coverageWire,
+            )
+        }
         val coverageWire = when {
-            authoritativeSource == null -> snap.coverageWire
             authoritativeWindowIsValid -> ContinuityCoverageV1.FULL.wire
+            oracleAbsentFallback && pre == null && post == null -> snap.coverageWire
             else -> ContinuityCoverageV1.NONE.wire
         }
         val continuitySince = when {
-            authoritativeSource == null -> snap.continuitySinceElapsedRealtimeMs
             authoritativeWindowIsValid -> snap.continuitySinceElapsedRealtimeMs ?: windowStartElapsedRealtimeMs
+            oracleAbsentFallback && pre == null && post == null -> snap.continuitySinceElapsedRealtimeMs
             else -> null
         }
 

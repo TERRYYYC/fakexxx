@@ -70,6 +70,11 @@ class AutomationService : AccessibilityService() {
     private var activePlanId: Long? = null
 
     private val selfHealSettings by lazy { SelfHealSettings(applicationContext) }
+
+    // [task-boundary monitor 2026-09-13] boundary-foreground switch (DataStore).
+    private val taskBoundarySettings by lazy {
+        com.example.cellrebelauto.data.TaskBoundarySettings(applicationContext)
+    }
     private val recycleMarkerStore by lazy { ServiceRecycleMarkerStore(applicationContext) }
     private val reconnectPolicy by lazy { ServiceReconnectAutoResumePolicy() }
 
@@ -593,7 +598,15 @@ class AutomationService : AccessibilityService() {
             bridge = bridge,
             initialRunSessionId = sessionId,
             // # P1.3：自愈开关（看门狗/坐标校验）与阶段开关同一条 DataStore 快照 seam
-            selfHealConfig = { selfHealSettings.config.first() }
+            selfHealConfig = { selfHealSettings.config.first() },
+            // [task-boundary monitor 2026-09-13] 每个「任务配额达成」边界把运行台带到前台，
+            // 展示上一轮的可信位置（dashboard 数据 = plan tasks + trusted counts 的持久投影）。
+            // 开关默认开（TaskBoundarySettings.returnToMonitor）；关=不切前台。
+            taskBoundaryAction = {
+                if (taskBoundarySettings.returnToMonitor.first()) {
+                    bringMonitorToFront()
+                }
+            }
         )
     }
 
@@ -681,6 +694,24 @@ class AutomationService : AccessibilityService() {
      * Cancels the automation coroutine.
      * # 取消自动化协程
      */
+    /**
+     * [task-boundary monitor] Bring the run dashboard to the foreground. From this
+     * bound accessibility service the background-activity-start is permitted (same
+     * privilege the CellRebel launches already rely on). SINGLE_TOP keeps the
+     * existing instance; runCatching = a vendor-specific start refusal must never
+     * fail the engine coroutine that reached a task boundary.
+     */
+    private fun bringMonitorToFront() {
+        val intent = android.content.Intent(this, com.example.cellrebelauto.ui.MainActivity::class.java)
+            .addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+        runCatching { startActivity(intent) }
+            .onSuccess { addLog("Task boundary — monitor surfaced") }
+            .onFailure { addLog("Task boundary — could not surface monitor: ${it.message}") }
+    }
+
     private fun stopRunning() {
         if (automationJob?.isActive == true) {
             addLog("Stopping automation...")

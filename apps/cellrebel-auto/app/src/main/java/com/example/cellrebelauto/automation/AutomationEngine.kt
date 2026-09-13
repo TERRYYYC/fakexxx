@@ -141,6 +141,14 @@ class AutomationEngine(
     /** #80: service admission owns this durable session before the engine begins work. */
     private val initialRunSessionId: Long? = null,
     // # P1.3 自愈开关（看门狗/坐标校验）快照提供者，默认全默认值（看门狗 on / 坐标校验 on）
+    // [task-boundary monitor 2026-09-13] Invoked once per COMPLETED TASK boundary
+    // (quota reached + finalized + advanced), before the engine moves to the next
+    // task. Production wires it to "bring the run dashboard to the foreground"
+    // behind the TaskBoundarySettings.returnToMonitorOnTaskBoundary switch, so the
+    // operator sees the last round's verified position without unlocking/switching.
+    // The last boundary of a plan (final task completed) also fires here — plan
+    // completion is the boundary of the final task. Default null = no-op.
+    private val taskBoundaryAction: (suspend () -> Unit)? = null,
     private val selfHealConfig: suspend () -> com.example.cellrebelauto.data.SelfHealConfig =
         { com.example.cellrebelauto.data.SelfHealConfig() }
 ) {
@@ -671,6 +679,9 @@ class AutomationEngine(
                     // # 留下 running 僵尸 attempt。每个 attempt 记录一行明确原因（跳过必留痕，INV-F3-1 语义）。
                     log("A+ contract lane — legacy Fake GPS stage skipped (provider owns location)")
                     var aplusState = AttemptState.CREATED
+                    // [task-boundary monitor] per-attempt scratch: set at the quota-commit
+                    // point, consumed by the iteration bookkeeping below.
+                    var taskBoundaryJustReached = false
                     val anchorProjection = checkNotNull(aplusAnchorProjection)
                     val admitted = checkNotNull(aplusAdmission)
                     val applyIntent = admitted.applyIntent
@@ -720,7 +731,7 @@ class AutomationEngine(
                     )
                     val leaseId = applyOutcome.leaseId
                     if (leaseId == null) {
-                        aplusPause("apply did not acquire a lease for attempt $attemptId")
+                        aplusPause("apply did not acquire a lease for attempt $attemptId (outcome=${applyOutcome.outcome})")
                         return@coroutineScope
                     }
                     planRepository.markAplusLease(attemptId, leaseId)
@@ -981,6 +992,7 @@ class AutomationEngine(
                                 // # (after the ledger commit) must recover as QUOTA_COMMITTED, not DECIDING.
                                 planRepository.markAplusState(attemptId, "QUOTA_COMMITTED")
                                 val quotaReached = planRepository.trustedCountForTaskPublic(task.id) >= task.requiredSuccesses
+                                if (quotaReached) taskBoundaryJustReached = true
                                 // R45 (Sol R45 P1-4 / §6.7.4a frozen order): RELEASE FIRST. The apply
                                 // lease binds the CURRENT item's environment; advancing while holding
                                 // it swaps the environment under an ACTIVE lease — the exact shape
@@ -1038,18 +1050,30 @@ class AutomationEngine(
                                 planRepository.markAplusState(attemptId, "UNVERIFIED_RECORDED")
                                 updateState(AutomationState.FAILED)
                                 _lastFailure.value = LastFailureInfo(attemptOrdinal, FailureReason.UNTRUSTED.name)
-                                // # P1-5：release BEFORE terminalize（lease-bound + durable，P1-4），然后终态化 attempt。
-                                if (!aplusReleaseAndFinalize(attemptId, task.id, aplusState, success = false, reason = FailureReason.UNTRUSTED.name, endedAt = outcome.endedAt, webScore = outcome.webScore, videoScore = outcome.videoScore)) {
-                                    return@coroutineScope
-                                }
-                                log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
-                                // # fail-closed（P1-3/P1-5）：trust-fail = 安全失败（§8.2 STOPPED），持久 PAUSED，
-                                // # 绝不静默重试、绝不动 legacy 计数；也终结骨架恒 FAIL 时的无限重试。
-                                aplusPause("trust decision FAIL for attempt $attemptId — UNVERIFIED_RECORDED, no quota, no legacy counter")
+                                // # [operator requirement 2026-09-12] 暂停保持环境：trust-FAIL 不再走
+                                // # aplusReleaseAndFinalize（其 release 会清理 test provider，Maps 等
+                                // # 消费方立刻回真实位置）。attempt 保持非终态（status=running、
+                                // # aplusState=UNVERIFIED_RECORDED、durable lease 持有）→ 系统 mock 保持
+                                // # 在最后投递的坐标上。Resume 时恢复路径原生收敛：UNVERIFIED_RECORDED
+                                // # 属 release-converged（BEGIN_RELEASE → durable release + cleanup），
+                                // # 然后下一个 attempt 全新 mint——无 stranded lease、无重复 apply。
+                                // # #179 未决期间每次 Resume 会再失败一次（每轮一次保持循环）——
+                                // # 保持本身即 operator 要求的行为。
+                                log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState) — environment HELD at last applied position")
+                                // # fail-closed（P1-3）：trust-fail = 安全失败（§8.2 STOPPED），持久 PAUSED，
+                                // # 绝不静默重试、绝不动 legacy 计数。
+                                aplusPause("trust decision FAIL for attempt $attemptId — UNVERIFIED_RECORDED; environment HELD at last position (resume to converge the lease)")
                                 return@coroutineScope
                             }
                             log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
                         }
+                    }
+                    // [task-boundary monitor 2026-09-13] after the task bookkeeping refresh,
+                    // surface the boundary (dashboard shows last round's verified position
+                    // from the durable projection — see MainViewModel's mapPoints source).
+                    if (taskBoundaryJustReached) {
+                        taskBoundaryJustReached = false
+                        taskBoundaryAction?.invoke()
                     }
                     currentAttemptId = null
                     tasks = planRepository.getTasks(planId)
@@ -1218,7 +1242,9 @@ class AutomationEngine(
         val providerApplicationId = ProviderPrincipal.selected
         val trustAttempt =
             com.example.cellrebelauto.environment.ProviderTrustRejections.beginAttempt(providerApplicationId)
+        android.util.Log.w("AutoDiscover", "engine: calling executorBackend().discover()")
         val capabilities = coord.executorBackend().discover()
+        android.util.Log.w("AutoDiscover", "engine: discover returned capabilities=$capabilities")
         if (capabilities == null || capabilities.protocolVersion != ContractV1.PROTOCOL_VERSION) {
             val gateRejection = com.example.cellrebelauto.environment.ProviderTrustRejections.consume(
                 trustAttempt,
