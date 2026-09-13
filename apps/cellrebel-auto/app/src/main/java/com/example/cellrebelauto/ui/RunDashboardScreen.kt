@@ -53,8 +53,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -83,6 +86,7 @@ import com.example.cellrebelauto.ui.dashboard.v2.MetricKey
 import com.example.cellrebelauto.ui.dashboard.v2.MetricPillFormatter
 import com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints
 import com.example.cellrebelauto.ui.dashboard.v2.PlanMapProjector
+import com.example.cellrebelauto.ui.dashboard.v2.PlanMapWorld
 import com.example.cellrebelauto.ui.dashboard.v2.RunStatusBarProjection
 import com.example.cellrebelauto.ui.dashboard.v2.TileMapCardPolicy
 import com.example.cellrebelauto.ui.dashboard.v2.TileNetworkGate
@@ -565,22 +569,27 @@ private fun PlanMapCard(
         }
     }
     // 世界坐标 = 内容包围盒左上角为原点的像素坐标；内容尺寸用于平移钳制。
-    val projected = remember(points, geo, fit) {
-        if (geo == null || fit == null || points.isEmpty()) {
+    // 计划层与实测层共用同一纯函数（PlanMapWorld.project）：同一投影、同一内容
+    // 原点（minX,minY）——零偏差实测点的世界坐标==计划点世界坐标（PlanMapGeometry
+    // Test 钉死；#185 F1 的整体错位正是实测层曾直接用含 fit.tx/ty 的视口坐标）。
+    val worldPoints = remember(points, geo, fit) {
+        if (geo == null || fit == null) {
             emptyList()
         } else {
-            points.map {
-                val p = PlanMapProjector.project(it.latitude, it.longitude, geo, fit)
-                p.first.toFloat() to p.second.toFloat()
-            }
+            PlanMapWorld.project(points, geo, fit)
         }
     }
-    val minX = projected.minOfOrNull { it.first } ?: 0f
-    val minY = projected.minOfOrNull { it.second } ?: 0f
-    val contentW = ((projected.maxOfOrNull { it.first } ?: 0f) - minX).coerceAtLeast(1f)
-    val contentH = ((projected.maxOfOrNull { it.second } ?: 0f) - minY).coerceAtLeast(1f)
-    val world = remember(projected, minX, minY) {
-        projected.map { (it.first - minX) to (it.second - minY) }
+    val world = remember(worldPoints) { worldPoints.map { it.planX to it.planY } }
+    val contentW = ((worldPoints.maxOfOrNull { it.planX }) ?: 0f).coerceAtLeast(1f)
+    val contentH = ((worldPoints.maxOfOrNull { it.planY }) ?: 0f).coerceAtLeast(1f)
+    // 实测层：探针观察投影（同 task 配对，与计划层同坐标系）；实测可能晚于点位
+    // 到达（DB 异步流），无实测数据的点不出现在此列表（只画计划位）。
+    val measuredWorld = remember(worldPoints) {
+        worldPoints.mapIndexedNotNull { index, w ->
+            val mx = w.measuredX ?: return@mapIndexedNotNull null
+            val my = w.measuredY ?: return@mapIndexedNotNull null
+            Triple(index, mx, my)
+        }
     }
 
     fun initial(): MapTransform.Transform =
@@ -679,6 +688,27 @@ private fun PlanMapCard(
                             )
                     }
                 }
+                // 实测层：计划点→实测点偏差连线 + 菱形实测标记（与瓦片卡同风格）。
+                // amber 小菱形=匹配；红大菱形+描边=不匹配（醒目）。偏差≈0 时连线长度
+                // 为零、菱形缩在计划点下——自然退化为"只见计划位"。
+                measuredWorld.forEach { (index, wx, wy) ->
+                    val plan = world.getOrNull(index) ?: return@forEach
+                    val (px, py) = MapTransform.toScreen(t, plan.first, plan.second)
+                    val (mx, my) = MapTransform.toScreen(t, wx, wy)
+                    if (mx < -40f || my < -40f || mx > vw + 40f || my > vh + 40f) return@forEach
+                    val matched = points[index].measuredMatched
+                    drawLine(
+                        semantic.amber,
+                        Offset(px, py), Offset(mx, my),
+                        strokeWidth = 1.5.dp.toPx(), cap = StrokeCap.Round,
+                    )
+                    drawDiamond(
+                        center = Offset(mx, my),
+                        radius = (if (matched) 4.dp else 5.5.dp).toPx(),
+                        fillColor = if (matched) semantic.amber else semantic.red,
+                        strokeColor = if (matched) null else outlineColor,
+                    )
+                }
             }
         }
         // 右下角微型图例
@@ -695,6 +725,32 @@ private fun PlanMapCard(
             LegendDot(semantic.green, filled = true); Text("完成", fontSize = 10.sp)
             LegendDot(semantic.blue, filled = true); Text("进行中", fontSize = 10.sp)
             LegendDot(semantic.grayDot, filled = false); Text("待完成", fontSize = 10.sp)
+            // ---- 实测层图例 + 匹配统计（与瓦片卡同语义；无实测数据时整段不出现） ----
+            val measuredCount = points.count { it.measuredLat != null && it.measuredLng != null }
+            if (measuredCount > 0) {
+                val mismatchCount = points.count { it.measuredLat != null && !it.measuredMatched }
+                LegendDiamond(semantic.amber)
+                Text("实测 $measuredCount", fontSize = 10.sp)
+                if (mismatchCount > 0) {
+                    LegendDiamond(semantic.red)
+                    Text("偏差 $mismatchCount", fontSize = 10.sp, color = semantic.red)
+                }
+                Text(
+                    "匹配 ${measuredCount - mismatchCount}/$measuredCount",
+                    fontSize = 10.sp,
+                    color = if (mismatchCount > 0) semantic.red else Color.Unspecified,
+                    fontWeight = if (mismatchCount > 0) FontWeight.SemiBold else FontWeight.Normal,
+                )
+                // 最大偏差角标（haversineMeters 的展示消费点，纯函数 PlanMapPoints
+                // .maxDeviationMeters 与瓦片卡同源）
+                PlanMapPoints.maxDeviationMeters(points)?.let { dev ->
+                    Text(
+                        if (dev >= 1000.0) String.format(java.util.Locale.US, "最大偏差 %.2f km", dev / 1000.0)
+                        else String.format(java.util.Locale.US, "最大偏差 %.0f m", dev),
+                        fontSize = 10.sp,
+                    )
+                }
+            }
         }
         // 当前点坐标小字（左下）
         currentPoint?.let {
@@ -735,6 +791,38 @@ private fun LegendDot(color: Color, filled: Boolean) {
                     .background(color)
             )
         }
+    }
+}
+
+/** 实测标记的菱形图例（45° 旋转小方块，与两卡地图上的橙/红菱形同构）。 */
+@Composable
+private fun LegendDiamond(color: Color) {
+    Box(
+        modifier = Modifier
+            .size(7.dp)
+            .graphicsLayer(rotationZ = 45f)
+            .clip(RoundedCornerShape(1.dp))
+            .background(color)
+    )
+}
+
+/** 菱形实测标记（CANVAS 卡 DrawScope 版；osmdroid 卡在 TilePlanMapCard 内自绘）。 */
+private fun DrawScope.drawDiamond(
+    center: Offset,
+    radius: Float,
+    fillColor: Color,
+    strokeColor: Color?,
+) {
+    val path = Path().apply {
+        moveTo(center.x, center.y - radius)
+        lineTo(center.x + radius, center.y)
+        lineTo(center.x, center.y + radius)
+        lineTo(center.x - radius, center.y)
+        close()
+    }
+    drawPath(path, fillColor)
+    if (strokeColor != null) {
+        drawPath(path, strokeColor, style = Stroke(width = 1.5.dp.toPx()))
     }
 }
 

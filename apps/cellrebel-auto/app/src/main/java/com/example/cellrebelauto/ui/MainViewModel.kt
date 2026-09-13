@@ -62,8 +62,12 @@ data class PlanUiState(
     val attemptCounts: Map<Long, Int> = emptyMap(),
     // # taskId -> 可信成功数（§7.3 进度唯一投影；legacy completedSuccesses 列在可信路径下冻结不写）
     val trustedCounts: Map<Long, Int> = emptyMap(),
-    // # #12：本计划是否存在终态卡死的 RECOVERY_REQUIRED 尝试（死车道标志）
-    val hasRecoveryRequired: Boolean = false
+    // #12：本计划是否存在终态卡死的 RECOVERY_REQUIRED 尝试（死车道标志）
+    val hasRecoveryRequired: Boolean = false,
+    // # taskId -> 探针实测位置（地图卡实测层；只读观察投影，展示专用，与信任/入账无关。
+    // # 观察可能晚于点位到达——空 map = 尚无实测数据，各点只画计划位）
+    val measuredFixes: Map<Long, com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.MeasuredFix> =
+        emptyMap()
 ) {
     // # 已验证成功总数（计划级进度）——可信计数求和，不读 legacy 列
     val completedSuccesses: Int get() = trustedCounts.values.sum()
@@ -551,14 +555,23 @@ class MainViewModel @JvmOverloads constructor(
                     planRepository.observeTasksWithTrustedCounts(plan.id),
                     planRepository.observeAttemptCounts(plan.id),
                     // #12：RECOVERY_REQUIRED 死尝试投影（重置入口可见性的第二支）
-                    planRepository.observeRecoveryRequiredCount(plan.id)
-                ) { tasksWithTrusted, counts, recoveryRequired ->
+                    planRepository.observeRecoveryRequiredCount(plan.id),
+                    // # 实测层：每 task 最近一次 succeeded attempt 的探针观察（只读展示流，
+                    // # Room 失效驱动——新观察落库自动重发，晚于点位到达也无序安全）
+                    planRepository.observeMeasuredObservations(plan.id)
+                ) { tasksWithTrusted, counts, recoveryRequired, measured ->
                     PlanUiState(
                         plan = plan,
                         tasks = PlanScheduler.executionOrder(tasksWithTrusted.map { it.task }),
                         attemptCounts = counts.associate { it.taskId to it.count },
                         trustedCounts = tasksWithTrusted.associate { it.task.id to it.trustedSuccesses },
-                        hasRecoveryRequired = recoveryRequired > 0
+                        hasRecoveryRequired = recoveryRequired > 0,
+                        measuredFixes = measured.mapValues {
+                            com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.MeasuredFix(
+                                latitude = it.value.measuredLat,
+                                longitude = it.value.measuredLng,
+                            )
+                        }
                     )
                 }
             }
@@ -1923,6 +1936,8 @@ class MainViewModel @JvmOverloads constructor(
                 )
                 // T7v2 §A1-v2 #3: map points are a pure projection over plan
                 // rows + trusted counts (never legacy, never attempt rows).
+                // 实测层叠加：measuredFixes（探针观察投影）按 taskId 配到点上；
+                // 无观察的点保持纯计划位（measured 为 null → 地图不画实测层）。
                 val mapPoints = com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.project(
                     tasks = view.planState.tasks.map {
                         com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.Row(
@@ -1936,6 +1951,7 @@ class MainViewModel @JvmOverloads constructor(
                     },
                     trustedCounts = view.planState.trustedCounts,
                     currentCsvRow = view.currentCsvRow,
+                    measured = view.planState.measuredFixes,
                 )
                 val currentRow = view.planState.tasks.firstOrNull {
                     it.csvRow == view.currentCsvRow

@@ -214,4 +214,79 @@ class PlanMapGeometryTest {
         assertEquals(1L, points[1].taskId)
         assertEquals(MapPointState.ACTIVE, points[1].state)
     }
+
+    // ---- 实测层世界坐标（#185 F1 回归钉：实测与计划共用同一内容原点） -------------
+
+    private fun twoPointPlan() = listOf(
+        PlanMapPoints.Row(id = 1, csvRow = 1, latitude = 50.0, longitude = 30.0, status = "active", requiredSuccesses = 1),
+        PlanMapPoints.Row(id = 2, csvRow = 2, latitude = 50.002, longitude = 30.004, status = "pending", requiredSuccesses = 1),
+    )
+
+    private fun worldFor(points: List<PlanMapPoints.MapPoint>): List<PlanMeasuredWorld> {
+        val geo = PlanMapProjector.boundsOf(
+            points.map { PlanMapProjector.GeoPoint(it.latitude, it.longitude) }
+        )!!
+        val fit = PlanMapProjector.fit(geo, viewW = 600.0, viewH = 400.0, paddingPx = 24.0)!!
+        return PlanMapWorld.project(points, geo, fit)
+    }
+
+    @Test
+    fun measuredWorld_zeroDeviation_landsExactlyOnPlanWorldPosition() {
+        // F1 曾是：实测层直接用含 fit.tx/ty 的视口像素坐标（未减内容原点），零偏差
+        // 也画出一根原点长的偏差线 + 游离菱形。钉死：零偏差实测的世界坐标必须与
+        // 计划点完全重合（该数学现在内聚在纯函数里，绘制层无法再各算各的）。
+        val points = PlanMapPoints.project(
+            twoPointPlan(), emptyMap(), null,
+            measured = mapOf(1L to PlanMapPoints.MeasuredFix(50.0, 30.0)), // 零偏差
+        )
+        // 前置：视口投影确实含非零原点（padding/居中），否则本测试恒真、钉不住。
+        val raw = PlanMapProjector.project(
+            50.0, 30.0,
+            PlanMapProjector.boundsOf(points.map { PlanMapProjector.GeoPoint(it.latitude, it.longitude) })!!,
+            PlanMapProjector.fit(
+                PlanMapProjector.boundsOf(points.map { PlanMapProjector.GeoPoint(it.latitude, it.longitude) })!!,
+                600.0, 400.0, 24.0,
+            )!!,
+        )
+        assertTrue("precondition: viewport coords carry a nonzero origin", raw.first > 0.0 && raw.second > 0.0)
+
+        val world = worldFor(points)
+        val zeroDev = world[0]
+        assertEquals(zeroDev.planX.toDouble(), zeroDev.measuredX!!.toDouble(), 0.0)
+        assertEquals(zeroDev.planY.toDouble(), zeroDev.measuredY!!.toDouble(), 0.0)
+        // 整层被 re-based 到内容原点：最小计划世界坐标即 (0,0)。
+        assertEquals(0.0, world.minOf { it.planX }.toDouble(), 1e-4)
+        assertEquals(0.0, world.minOf { it.planY }.toDouble(), 1e-4)
+    }
+
+    @Test
+    fun measuredWorld_deviatedFix_keepsTheRawViewportDelta() {
+        // 有偏差时：同原点平移不改变相对几何——实测-计划的世界差 == 视口投影差。
+        val fixLat = 50.0 + 0.001
+        val fixLng = 30.0 + 0.002
+        val points = PlanMapPoints.project(
+            twoPointPlan(), emptyMap(), null,
+            measured = mapOf(1L to PlanMapPoints.MeasuredFix(fixLat, fixLng)),
+        )
+        val geo = PlanMapProjector.boundsOf(
+            points.map { PlanMapProjector.GeoPoint(it.latitude, it.longitude) }
+        )!!
+        val fit = PlanMapProjector.fit(geo, viewW = 600.0, viewH = 400.0, paddingPx = 24.0)!!
+
+        val w = PlanMapWorld.project(points, geo, fit)[0]
+        val (rawPlanX, rawPlanY) = PlanMapProjector.project(50.0, 30.0, geo, fit)
+        val (rawMeasX, rawMeasY) = PlanMapProjector.project(fixLat, fixLng, geo, fit)
+        assertEquals(rawMeasX - rawPlanX, (w.measuredX!! - w.planX).toDouble(), 1e-3)
+        assertEquals(rawMeasY - rawPlanY, (w.measuredY!! - w.planY).toDouble(), 1e-3)
+    }
+
+    @Test
+    fun measuredWorld_pointWithoutFix_hasNoMeasuredWorld() {
+        val points = PlanMapPoints.project(twoPointPlan(), emptyMap(), null)
+        val world = worldFor(points)
+        assertNull(world[0].measuredX)
+        assertNull(world[0].measuredY)
+        assertNull(world[1].measuredX)
+        assertNull(world[1].measuredY)
+    }
 }
