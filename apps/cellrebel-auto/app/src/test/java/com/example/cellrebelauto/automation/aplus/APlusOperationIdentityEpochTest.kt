@@ -73,10 +73,11 @@ class APlusOperationIdentityEpochTest {
         // epoch-stamped attempt's ADVANCE reuses its (epoch) apply key — which can never equal
         // the pre-reset legacy receipt key, closing the g54-style wrap-around conflict.
         val epoch = 1726200000000L
-        assertEquals(
-            APlusOperationIdentity.applyIdempotencyKey(5L, epoch),
-            APlusOperationIdentity.applyIdempotencyKey(5L, epoch) // ADVANCE reuses THIS key
-        )
+        // ADVANCE reuses the (epoch, attemptId) apply key — the same key the original APPLY
+        // minted. That reuse's determinism (re-derivation always yields the identical key) is
+        // already pinned by `same epoch and attempt always derive the same key` above, so the
+        // load-bearing assertions here are only the negatives: the reused key can never collide
+        // with either pre-reset legacy receipt key.
         assertNotEquals(
             "auto-aplus-apply-5",
             APlusOperationIdentity.applyIdempotencyKey(5L, epoch)
