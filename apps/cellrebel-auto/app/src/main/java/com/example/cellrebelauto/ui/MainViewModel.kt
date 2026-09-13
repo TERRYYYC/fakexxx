@@ -1659,6 +1659,11 @@ class MainViewModel @JvmOverloads constructor(
     private val mapTilesSettings = injectedMapTilesSettings
         ?: com.example.cellrebelauto.data.MapTilesSettings(application)
 
+    // [task-boundary monitor 2026-09-13] boundary-foreground switch (DataStore).
+    private val taskBoundarySettings by lazy {
+        com.example.cellrebelauto.data.TaskBoundarySettings(application)
+    }
+
     private val _mapTileFailure = MutableStateFlow(false)
 
     /**
@@ -1681,6 +1686,21 @@ class MainViewModel @JvmOverloads constructor(
 
     fun reportTileLoadFailure() {
         _mapTileFailure.value = true
+        // [map diagnostics 2026-09-13] silent canvas fallback was invisible on device
+        // ("no real map" with no reason anywhere) — make the flip loud in logcat.
+        android.util.Log.w("MapTiles", "first OSM tile load FAILED — canvas fallback engaged (check network/UA/tile source)")
+    }
+
+    // [task-boundary monitor 2026-09-13]
+    private val _returnToMonitor = MutableStateFlow(true)
+    val returnToMonitor: StateFlow<Boolean> = _returnToMonitor
+
+    init {
+        viewModelScope.launch { taskBoundarySettings.returnToMonitor.collect { _returnToMonitor.value = it } }
+    }
+
+    fun setReturnToMonitor(enabled: Boolean) {
+        viewModelScope.launch { taskBoundarySettings.setReturnToMonitor(enabled) }
     }
 
     fun clearTileLoadFailure() {

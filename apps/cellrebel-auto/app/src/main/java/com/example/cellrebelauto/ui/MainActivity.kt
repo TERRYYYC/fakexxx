@@ -171,6 +171,9 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                     mapTilesEnabled = vm.mapTilesEnabled.collectAsState().value,
                     mapTileFailure = vm.mapTileFailure.collectAsState().value,
                     onSetMapTilesEnabled = { vm.setMapTilesEnabled(it) },
+                    // [task-boundary monitor 2026-09-13]
+                    returnToMonitor = vm.returnToMonitor.collectAsState().value,
+                    onSetReturnToMonitor = { vm.setReturnToMonitor(it) },
                     onReportTileFailure = { vm.reportTileLoadFailure() },
                     onClearTileFailure = { vm.clearTileLoadFailure() },
                     // T7v2: 重启恢复/启动 = 同一 startOrResumePlan 入口；停止/导出/导航同 v1

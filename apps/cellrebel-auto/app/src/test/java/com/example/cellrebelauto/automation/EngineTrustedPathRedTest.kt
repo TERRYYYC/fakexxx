@@ -259,7 +259,8 @@ class EngineTrustedPathRedTest {
         driver: APlusAttemptDriver? = null,
         backend: APlusBackend? = null,
         elapsedClockMs: (() -> Long)? = null,
-        toggles: StageToggles = StageToggles()
+        toggles: StageToggles = StageToggles(),
+        taskBoundaryAction: (suspend () -> Unit)? = null
     ): AutomationEngine {
         // Service-used composition oracle (Sol round-11 P1-1): the SAME engineAplusParams the Service
         // uses, so a Service-disconnect bad impl cannot diverge from what the tests exercise.
@@ -279,7 +280,8 @@ class EngineTrustedPathRedTest {
             stageToggles = { toggles },
             attemptDriver = driver,
             recoveryCoordinator = params?.first,
-            completionEvidenceSource = params?.second
+            completionEvidenceSource = params?.second,
+            taskBoundaryAction = taskBoundaryAction
         )
     }
 
@@ -303,7 +305,59 @@ class EngineTrustedPathRedTest {
         return planId
     }
 
-    private suspend fun seedTerminalDummyAttempt(taskId: Long, attemptId: Long) {
+    // ---- [task-boundary monitor 2026-09-13] boundary hook fires per completed task ----
+
+    @Test
+    fun `task boundary hook fires exactly once when a task quota is reached`() = runTest {
+        val taskId = 51L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        var boundaries = 0
+        val backend = passingBackend()
+        buildEngine(
+            planId,
+            runningSuccessRunner(VirtualClock()),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            VirtualClock(),
+            driver = APlusAttemptDriver(auditDao),
+            backend = backend,
+            taskBoundaryAction = { boundaries++ },
+        ).run()
+
+        assertEquals(
+            "quota=1 task completed in one PASS — exactly ONE boundary callback",
+            1, boundaries,
+        )
+        assertEquals("the boundary means the task actually completed", "completed",
+            db.locationTaskDao().getTaskById(taskId)!!.status)
+    }
+
+    @Test
+    fun `task boundary hook does NOT fire on a trust-failing attempt`() = runTest {
+        val taskId = 52L
+        val planId = seedPlan(taskId = taskId, quota = 1)
+        val auditDao = db.auditEventDao()
+        var boundaries = 0
+        // UNVERIFIED evidence ⇒ trust FAIL ⇒ [hold semantics] no quota, no boundary
+        val backend = FakeBackend(
+            RecordingExternalApplyExecutor(), FakeDurableRecoveryLog(),
+            SeededObserve(emptyMap()), SeededRevision(emptyMap()), SeededQuota(emptyMap()),
+            FakeEvidenceSource(TARGET_LAT, TARGET_LNG, WIRE_VERIFIED, "SYSTEM_MOCK", present = false)
+        )
+        buildEngine(
+            planId,
+            runningSuccessRunner(VirtualClock()),
+            FakeGpsSetter(listOf(GpsOutcome.Active)),
+            VirtualClock(),
+            driver = APlusAttemptDriver(auditDao),
+            backend = backend,
+            taskBoundaryAction = { boundaries++ },
+        ).run()
+
+        assertEquals("a trust-failing attempt never surfaces a boundary", 0, boundaries)
+    }
+
+        private suspend fun seedTerminalDummyAttempt(taskId: Long, attemptId: Long) {
         val sessionId = db.runSessionDao().insert(RunSession(startedAt = 400L))
         db.testAttemptDao().insert(
             TestAttempt(

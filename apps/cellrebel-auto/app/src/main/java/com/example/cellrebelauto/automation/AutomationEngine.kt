@@ -141,6 +141,14 @@ class AutomationEngine(
     /** #80: service admission owns this durable session before the engine begins work. */
     private val initialRunSessionId: Long? = null,
     // # P1.3 自愈开关（看门狗/坐标校验）快照提供者，默认全默认值（看门狗 on / 坐标校验 on）
+    // [task-boundary monitor 2026-09-13] Invoked once per COMPLETED TASK boundary
+    // (quota reached + finalized + advanced), before the engine moves to the next
+    // task. Production wires it to "bring the run dashboard to the foreground"
+    // behind the TaskBoundarySettings.returnToMonitorOnTaskBoundary switch, so the
+    // operator sees the last round's verified position without unlocking/switching.
+    // The last boundary of a plan (final task completed) also fires here — plan
+    // completion is the boundary of the final task. Default null = no-op.
+    private val taskBoundaryAction: (suspend () -> Unit)? = null,
     private val selfHealConfig: suspend () -> com.example.cellrebelauto.data.SelfHealConfig =
         { com.example.cellrebelauto.data.SelfHealConfig() }
 ) {
@@ -671,6 +679,9 @@ class AutomationEngine(
                     // # 留下 running 僵尸 attempt。每个 attempt 记录一行明确原因（跳过必留痕，INV-F3-1 语义）。
                     log("A+ contract lane — legacy Fake GPS stage skipped (provider owns location)")
                     var aplusState = AttemptState.CREATED
+                    // [task-boundary monitor] per-attempt scratch: set at the quota-commit
+                    // point, consumed by the iteration bookkeeping below.
+                    var taskBoundaryJustReached = false
                     val anchorProjection = checkNotNull(aplusAnchorProjection)
                     val admitted = checkNotNull(aplusAdmission)
                     val applyIntent = admitted.applyIntent
@@ -981,6 +992,7 @@ class AutomationEngine(
                                 // # (after the ledger commit) must recover as QUOTA_COMMITTED, not DECIDING.
                                 planRepository.markAplusState(attemptId, "QUOTA_COMMITTED")
                                 val quotaReached = planRepository.trustedCountForTaskPublic(task.id) >= task.requiredSuccesses
+                                if (quotaReached) taskBoundaryJustReached = true
                                 // R45 (Sol R45 P1-4 / §6.7.4a frozen order): RELEASE FIRST. The apply
                                 // lease binds the CURRENT item's environment; advancing while holding
                                 // it swaps the environment under an ACTIVE lease — the exact shape
@@ -1055,6 +1067,13 @@ class AutomationEngine(
                             }
                             log("A+ attempt $attemptOrdinal decided=$decision (state $aplusState)")
                         }
+                    }
+                    // [task-boundary monitor 2026-09-13] after the task bookkeeping refresh,
+                    // surface the boundary (dashboard shows last round's verified position
+                    // from the durable projection — see MainViewModel's mapPoints source).
+                    if (taskBoundaryJustReached) {
+                        taskBoundaryJustReached = false
+                        taskBoundaryAction?.invoke()
                     }
                     currentAttemptId = null
                     tasks = planRepository.getTasks(planId)
