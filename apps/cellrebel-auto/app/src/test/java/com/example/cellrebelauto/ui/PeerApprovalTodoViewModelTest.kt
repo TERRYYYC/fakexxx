@@ -57,6 +57,10 @@ class PeerApprovalTodoViewModelTest {
     fun tearDown() {
         createdVms.forEach { it.viewModelScope.cancel() }
         createdVms.clear()
+        // [#143 family] viewModelScope.cancel() is asynchronous — in-flight Room/DataStore
+        // continuations still dispatch through the process-global TestMainDispatcher whose
+        // RW lock the NEXT class's setMain takes (same drain as SelfHealDashboardViewModelTest).
+        Thread.sleep(250)
         db.close()
         Dispatchers.resetMain()
     }
