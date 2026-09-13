@@ -22,13 +22,16 @@ import org.robolectric.RobolectricTestRunner
 /**
  * 运行台地图卡实测层（evidence-only display）的查询语义 oracle：
  * 每 task 取**最近一次 succeeded attempt**（succeeded | ok_gps_only，与
- * RunProgressProjection 的成功语义一致）的**最新一条带坐标观察**（同 attempt 内
- * 后写入者胜 = POST 优先于 PRE；坐标 NULL 的"未捕获"行绝不参与）。
+ * RunProgressProjection 的成功语义一致）内 **id 最大且坐标非空**的那条观察
+ * （同 attempt 内后写入的行 id 更大，正常流即 POST；坐标 NULL 的"未捕获"行绝不参与）。
  *
  * 严格性边界：最近一次 succeeded attempt 若没有任何带坐标观察，该 task 不出结果
  * ——绝不回退到更早的 attempt（宁可无标记，不画旧证据）。
  *
- * # 实测层查询 oracle：最近 succeeded attempt / 最新带坐标观察 / 严格不回退
+ * 跨 run 新鲜度（#185 F4）：只认该 plan 最近一次 run session 启动之后的观察——
+ * 重复运行时上一 run 的旧证据不立即上屏；无 plan 关联的旧会话不设门槛。
+ *
+ * # 实测层查询 oracle：最近 succeeded attempt / 最新带坐标观察 / 严格不回退 / 跨 run 新鲜度
  */
 @RunWith(RobolectricTestRunner::class)
 class PlanRepositoryMeasuredObservationTest {
@@ -67,10 +70,15 @@ class PlanRepositoryMeasuredObservationTest {
         return planId
     }
 
-    private suspend fun insertAttempt(taskId: Long, status: String, ordinal: Int = 1): Long =
+    private suspend fun insertAttempt(
+        taskId: Long,
+        status: String,
+        ordinal: Int = 1,
+        session: Long = sessionId,
+    ): Long =
         db.testAttemptDao().insert(
             TestAttempt(
-                taskId = taskId, runSessionId = sessionId,
+                taskId = taskId, runSessionId = session,
                 attemptOrdinal = ordinal, successOrdinal = if (status == "succeeded" || status == "ok_gps_only") ordinal else null,
                 startedAt = ordinal * 10L, runningObservedAt = null, endedAt = ordinal * 100L,
                 status = status, failureReason = null,
@@ -79,7 +87,13 @@ class PlanRepositoryMeasuredObservationTest {
             )
         )
 
-    private suspend fun insertObservation(attemptId: Long, phase: String, lat: Double?, lng: Double?): Long =
+    private suspend fun insertObservation(
+        attemptId: Long,
+        phase: String,
+        lat: Double?,
+        lng: Double?,
+        observedAt: Long = 1L,
+    ): Long =
         db.durableObservationDao().insert(
             DurableObservationRecord(
                 attemptId = attemptId, phase = phase,
@@ -88,7 +102,7 @@ class PlanRepositoryMeasuredObservationTest {
                 isMock = true, scheduleDecision = "ALLOWED_NOW",
                 effectiveLat = lat, effectiveLng = lng,
                 environmentRevision = 1L, environmentFingerprint = "fp",
-                observedAtElapsedRealtimeMs = 1L, observedAtEpochMs = 1L,
+                observedAtElapsedRealtimeMs = 1L, observedAtEpochMs = observedAt,
                 continuitySinceElapsedRealtimeMs = null, continuitySinceEpochMs = null,
                 evidenceRefsJson = "[]", evidenceRefs = "",
             )
@@ -171,6 +185,50 @@ class PlanRepositoryMeasuredObservationTest {
 
         val row = measured(planId).getValue(1L)
         assertEquals(50.5, row.measuredLat, 1e-12)
+    }
+
+    // ---- 跨 run 新鲜度（#185 F4）：只认该 plan 最近一次 session 之后的观察 -------
+
+    @Test
+    fun observation_withinLatestSession_isShown() = runTest {
+        val planId = insertPlanWithTasks(1L)
+        // 旧 run 的观察先落库（session 起始 1000，观察 1500——当时新鲜）。
+        val s1 = db.runSessionDao().insert(RunSession(startedAt = 1_000L, planId = planId))
+        val a1 = insertAttempt(1L, "succeeded", session = s1)
+        insertObservation(a1, "POST", 50.0, 30.0, observedAt = 1_500L)
+        assertEquals(50.0, measured(planId).getValue(1L).measuredLat, 1e-12)
+
+        // 重跑同一 plan：新 session（起始 2000）内的新鲜观察胜出上屏。
+        val s2 = db.runSessionDao().insert(RunSession(startedAt = 2_000L, planId = planId))
+        val a2 = insertAttempt(1L, "succeeded", ordinal = 2, session = s2)
+        insertObservation(a2, "POST", 50.0001, 30.0001, observedAt = 2_500L)
+
+        val row = measured(planId).getValue(1L)
+        assertEquals(50.0001, row.measuredLat, 1e-12)
+    }
+
+    @Test
+    fun observation_beforeLatestSessionStart_isStaleAndHidden() = runTest {
+        val planId = insertPlanWithTasks(1L)
+        val s1 = db.runSessionDao().insert(RunSession(startedAt = 1_000L, planId = planId))
+        val a1 = insertAttempt(1L, "succeeded", session = s1)
+        insertObservation(a1, "POST", 50.0, 30.0, observedAt = 1_500L)
+        assertEquals(50.0, measured(planId).getValue(1L).measuredLat, 1e-12)
+
+        // 新 session 启动后（如重复运行同计划），上一 run 的观察立即变陈旧——
+        // 不再上屏（宁可无标记，不画旧证据，语义 = "最近一次 run 的实测"）。
+        db.runSessionDao().insert(RunSession(startedAt = 2_000L, planId = planId))
+        assertTrue(measured(planId).isEmpty())
+    }
+
+    @Test
+    fun legacySessionWithoutPlanLink_doesNotGate() = runTest {
+        // setUp 的 session 无 planId（v3 之前旧数据）：不设新鲜度门槛，历史观察仍上屏。
+        val planId = insertPlanWithTasks(1L)
+        val a = insertAttempt(1L, "succeeded") // runSessionId = setUp 的无关联 session
+        insertObservation(a, "POST", 50.0, 30.0, observedAt = 1L)
+
+        assertEquals(50.0, measured(planId).getValue(1L).measuredLat, 1e-12)
     }
 
     // ---- 计划隔离与多任务 --------------------------------------------------------

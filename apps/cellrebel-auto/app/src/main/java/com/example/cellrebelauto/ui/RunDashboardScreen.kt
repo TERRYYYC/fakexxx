@@ -86,6 +86,7 @@ import com.example.cellrebelauto.ui.dashboard.v2.MetricKey
 import com.example.cellrebelauto.ui.dashboard.v2.MetricPillFormatter
 import com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints
 import com.example.cellrebelauto.ui.dashboard.v2.PlanMapProjector
+import com.example.cellrebelauto.ui.dashboard.v2.PlanMapWorld
 import com.example.cellrebelauto.ui.dashboard.v2.RunStatusBarProjection
 import com.example.cellrebelauto.ui.dashboard.v2.TileMapCardPolicy
 import com.example.cellrebelauto.ui.dashboard.v2.TileNetworkGate
@@ -568,35 +569,26 @@ private fun PlanMapCard(
         }
     }
     // 世界坐标 = 内容包围盒左上角为原点的像素坐标；内容尺寸用于平移钳制。
-    val projected = remember(points, geo, fit) {
-        if (geo == null || fit == null || points.isEmpty()) {
-            emptyList()
-        } else {
-            points.map {
-                val p = PlanMapProjector.project(it.latitude, it.longitude, geo, fit)
-                p.first.toFloat() to p.second.toFloat()
-            }
-        }
-    }
-    val minX = projected.minOfOrNull { it.first } ?: 0f
-    val minY = projected.minOfOrNull { it.second } ?: 0f
-    val contentW = ((projected.maxOfOrNull { it.first } ?: 0f) - minX).coerceAtLeast(1f)
-    val contentH = ((projected.maxOfOrNull { it.second } ?: 0f) - minY).coerceAtLeast(1f)
-    val world = remember(projected, minX, minY) {
-        projected.map { (it.first - minX) to (it.second - minY) }
-    }
-    // 实测层：探针观察投影（taskId 配对），投影到同一世界坐标；实测可能晚于点位
-    // 到达（DB 异步流），无实测数据的点不出现在此列表（只画计划位）。
-    val measuredWorld = remember(points, geo, fit) {
+    // 计划层与实测层共用同一纯函数（PlanMapWorld.project）：同一投影、同一内容
+    // 原点（minX,minY）——零偏差实测点的世界坐标==计划点世界坐标（PlanMapGeometry
+    // Test 钉死；#185 F1 的整体错位正是实测层曾直接用含 fit.tx/ty 的视口坐标）。
+    val worldPoints = remember(points, geo, fit) {
         if (geo == null || fit == null) {
             emptyList()
         } else {
-            points.mapIndexedNotNull { index, p ->
-                val mLat = p.measuredLat ?: return@mapIndexedNotNull null
-                val mLng = p.measuredLng ?: return@mapIndexedNotNull null
-                val (wx, wy) = PlanMapProjector.project(mLat, mLng, geo, fit)
-                Triple(index, wx.toFloat(), wy.toFloat())
-            }
+            PlanMapWorld.project(points, geo, fit)
+        }
+    }
+    val world = remember(worldPoints) { worldPoints.map { it.planX to it.planY } }
+    val contentW = ((worldPoints.maxOfOrNull { it.planX }) ?: 0f).coerceAtLeast(1f)
+    val contentH = ((worldPoints.maxOfOrNull { it.planY }) ?: 0f).coerceAtLeast(1f)
+    // 实测层：探针观察投影（同 task 配对，与计划层同坐标系）；实测可能晚于点位
+    // 到达（DB 异步流），无实测数据的点不出现在此列表（只画计划位）。
+    val measuredWorld = remember(worldPoints) {
+        worldPoints.mapIndexedNotNull { index, w ->
+            val mx = w.measuredX ?: return@mapIndexedNotNull null
+            val my = w.measuredY ?: return@mapIndexedNotNull null
+            Triple(index, mx, my)
         }
     }
 
@@ -749,6 +741,15 @@ private fun PlanMapCard(
                     color = if (mismatchCount > 0) semantic.red else Color.Unspecified,
                     fontWeight = if (mismatchCount > 0) FontWeight.SemiBold else FontWeight.Normal,
                 )
+                // 最大偏差角标（haversineMeters 的展示消费点，纯函数 PlanMapPoints
+                // .maxDeviationMeters 与瓦片卡同源）
+                PlanMapPoints.maxDeviationMeters(points)?.let { dev ->
+                    Text(
+                        if (dev >= 1000.0) String.format(java.util.Locale.US, "最大偏差 %.2f km", dev / 1000.0)
+                        else String.format(java.util.Locale.US, "最大偏差 %.0f m", dev),
+                        fontSize = 10.sp,
+                    )
+                }
             }
         }
         // 当前点坐标小字（左下）

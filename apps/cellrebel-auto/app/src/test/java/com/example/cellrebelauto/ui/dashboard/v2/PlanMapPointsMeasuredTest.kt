@@ -167,4 +167,34 @@ class PlanMapPointsMeasuredTest {
         val meters = PlanMapPoints.haversineMeters(50.4501, 30.5234, 49.8397, 24.0297)
         assertTrue("got $meters", abs(meters - 470_000.0) < 470_000.0 * 0.02)
     }
+
+    // ---- 最大偏差角标（haversineMeters 的图例消费点，#185 F3） --------------------
+
+    @Test
+    fun maxDeviationMeters_noMeasuredFix_isNull() {
+        val points = PlanMapPoints.project(
+            tasks = listOf(row(id = 1)),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+        )
+        assertNull(PlanMapPoints.maxDeviationMeters(points))
+    }
+
+    @Test
+    fun maxDeviationMeters_takesMaxAcrossMeasuredPoints() {
+        val points = PlanMapPoints.project(
+            tasks = listOf(row(id = 1), row(id = 2, lat = 51.0, lng = 31.0)),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+            measured = mapOf(
+                // 点 1：容差内小偏差；点 2：~111m 级大偏差——角标必须取后者。
+                1L to PlanMapPoints.MeasuredFix(50.0 + CoordinateGuard.TOLERANCE_DEG / 2, 30.0),
+                2L to PlanMapPoints.MeasuredFix(51.0 + 0.001, 31.0),
+            ),
+        )
+        val max = PlanMapPoints.maxDeviationMeters(points)!!
+        val big = PlanMapPoints.haversineMeters(51.0, 31.0, 51.0 + 0.001, 31.0)
+        assertEquals(big, max, 1e-9)
+        assertTrue("got $max", max > 100.0)
+    }
 }

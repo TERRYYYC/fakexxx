@@ -189,10 +189,11 @@ object PlanMapPoints {
 
     /**
      * DISPLAY-ONLY great-circle distance in meters (haversine, mean Earth
-     * radius) — feeds the 偏差 visualization/legend. KB-8 stays intact: Auto
-     * still runs NO haversine in the trust path (distance-to-intent remains
-     * provider-exclusive); this projection is never a trust input.
-     * # 偏差距离（米，haversine）：仅展示层；KB-8 信任路径仍然零本地测距
+     * radius) — consumed by [maxDeviationMeters] for the legend's
+     * "最大偏差" badge. KB-8 stays intact: Auto still runs NO haversine in
+     * the trust path (distance-to-intent remains provider-exclusive); this
+     * projection is never a trust input.
+     * # 偏差距离（米，haversine）：仅展示层图例；KB-8 信任路径仍然零本地测距
      */
     fun haversineMeters(
         lat1: Double, lng1: Double,
@@ -206,6 +207,17 @@ object PlanMapPoints {
             Math.sin(dLng / 2) * Math.sin(dLng / 2)
         return 2 * r * Math.asin(Math.sqrt(h.coerceIn(0.0, 1.0)))
     }
+
+    /**
+     * 最大偏差（米）：所有带实测数据的点的"实测-计划" haversine 距离取最大；
+     * 无任何实测数据时 null。图例/角标"最大偏差 X m"的唯一数据源
+     * （[haversineMeters] 的消费点）。# 展示层最大偏差统计：仅图例，不入信任路径
+     */
+    fun maxDeviationMeters(points: List<MapPoint>): Double? = points.mapNotNull { p ->
+        val mLat = p.measuredLat ?: return@mapNotNull null
+        val mLng = p.measuredLng ?: return@mapNotNull null
+        haversineMeters(p.latitude, p.longitude, mLat, mLng)
+    }.maxOrNull()
 
     fun resolvePointState(status: String, trusted: Int, required: Int, isCurrent: Boolean): MapPointState =
         when {
@@ -253,4 +265,63 @@ object PlanMapPoints {
                 measuredMatched = fix != null && measuredMatched(row.latitude, row.longitude, fix),
             )
         }
+}
+
+/**
+ * One row of the CANVAS card's world-coordinate layer: the plan point's world
+ * position plus (when a measured fix exists) its measured fix's world position
+ * — both re-based onto the SAME content origin.
+ * # 一行 = 计划世界坐标 +（可选）实测世界坐标，同原点
+ */
+data class PlanMeasuredWorld(
+    val planX: Float,
+    val planY: Float,
+    val measuredX: Float? = null,
+    val measuredY: Float? = null,
+)
+
+/**
+ * The CANVAS card's shared projection step ([RunDashboardScreen] PlanMapCard).
+ * Plan points AND their measured fixes go through the same
+ * [PlanMapProjector.fit] and are re-based onto the SAME content origin — the
+ * top-left of the projected PLAN bounding box (min plan pixel), exactly the
+ * translation the plan layer has always applied. Raw [PlanMapProjector.project]
+ * output is a viewport pixel coordinate (includes fit.tx/ty padding +
+ * centering); feeding one layer raw viewport pixels while the other subtracts
+ * the origin shifts the overlay by exactly that origin — the #185 F1 bug this
+ * pure function pins shut: a zero-deviation fix MUST land exactly on its plan
+ * point's world coordinates (pinned by PlanMapGeometryTest).
+ * # 实测层与计划层同一投影、同一内容原点：零偏差实测==计划世界坐标（F1 回归钉）
+ */
+object PlanMapWorld {
+
+    fun project(
+        points: List<PlanMapPoints.MapPoint>,
+        bounds: PlanMapProjector.GeoBounds,
+        fit: PlanMapProjector.Fit,
+    ): List<PlanMeasuredWorld> {
+        if (points.isEmpty()) return emptyList()
+        val planPixels = points.map {
+            val (x, y) = PlanMapProjector.project(it.latitude, it.longitude, bounds, fit)
+            x.toFloat() to y.toFloat()
+        }
+        // 内容原点 = 计划像素包围盒左上角——两个图层共用；实测层缺这次平移即整体错位。
+        val originX = planPixels.minOf { it.first }
+        val originY = planPixels.minOf { it.second }
+        return planPixels.mapIndexed { index, (px, py) ->
+            val mLat = points[index].measuredLat
+            val mLng = points[index].measuredLng
+            if (mLat == null || mLng == null) {
+                PlanMeasuredWorld(planX = px - originX, planY = py - originY)
+            } else {
+                val (mx, my) = PlanMapProjector.project(mLat, mLng, bounds, fit)
+                PlanMeasuredWorld(
+                    planX = px - originX,
+                    planY = py - originY,
+                    measuredX = mx.toFloat() - originX,
+                    measuredY = my.toFloat() - originY,
+                )
+            }
+        }
+    }
 }

@@ -619,6 +619,10 @@ fun TilePlanMapCard(
             update = { mv ->
                 overlay.entries = currentEntries(points)
                 overlay.style = style
+                // #185 F2：entries 换新后必须显式请求重绘——osmdroid 只在手势/瓦片
+                // 加载/脉冲循环时自绘；暂停/空闲态晚到的实测数据若不 postInvalidate
+                // 就一直不上屏（幂等、廉价）。
+                mv.postInvalidate()
                 // 计划内容（中心）变化才重新 fit；否则手势视口说了算
                 if (boundsKey != mv.tag) {
                     mv.tag = boundsKey
@@ -687,6 +691,15 @@ fun TilePlanMapCard(
                     color = if (mismatchCount > 0) semantic.red else onSurfaceColor,
                     fontWeight = if (mismatchCount > 0) FontWeight.SemiBold else FontWeight.Normal,
                 )
+                // 最大偏差角标（haversineMeters 的展示消费点，与 CANVAS 卡同源）
+                PlanMapPoints.maxDeviationMeters(points)?.let { dev ->
+                    Text(
+                        if (dev >= 1000.0) String.format(java.util.Locale.US, "最大偏差 %.2f km", dev / 1000.0)
+                        else String.format(java.util.Locale.US, "最大偏差 %.0f m", dev),
+                        fontSize = 9.sp,
+                        color = onSurfaceColor,
+                    )
+                }
             }
         }
         // 全屏态 ＋/－/⌂（按钮而非手势；⌂ = fit 还原，v3 的 zc 列）
