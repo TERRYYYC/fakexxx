@@ -61,8 +61,10 @@ import java.io.File
  * 瓦片引擎 = osmdroid（栅格、原生双指/平移手势、瓦片源可换）。选它而不选
  * MapLibre：本卡只需要栅格底图 + 覆盖物，体积/复杂度小一个量级；未来若要
  * 矢量/离线包，迁移路径 = 替换本文件的 AndroidView 实现，选卡决策
- * （[TileMapCardPolicy]）与降级策略原样复用。默认瓦片源 = OSM 官方标准栅格，
- * **仅低量/内部测试合规**（OSMF 使用政策）；量产换源只动 [OsmTileSource]。
+ * （[TileMapCardPolicy]）与降级策略原样复用。默认瓦片源 = OSM 德国镜像标准
+ * 栅格（tile.openstreetmap.de；2026-09-13 换源：官方源对蜂窝 CGNAT + 非浏览器
+ * UA 整页 403，决策记录见 #182），**仅低量/内部测试合规**（镜像使用政策同样
+ * 限制商业/高流量用途）；量产换源只动 [OsmTileSource]。
  *
  * ## 权限（按需最小化）
  * osmdroid 6.1.20 的 AAR manifest 不声明任何权限，权限全部由宿主 app 负责。
@@ -107,7 +109,7 @@ object OsmdroidBootstrap {
     /**
      * Process-wide osmdroid Configuration. MUST run before any MapView. Cache
      * lives in cacheDir (internal storage — no storage permission, system-
-     * clearable); the UA carries the real application id (OSMF policy).
+     * clearable); the UA carries the real application id (tile-server policy).
      */
     fun ensure(context: Context) {
         if (configured) return

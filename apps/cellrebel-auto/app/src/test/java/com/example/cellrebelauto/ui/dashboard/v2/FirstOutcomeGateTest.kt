@@ -69,6 +69,23 @@ class FirstOutcomeGateTest {
     }
 
     @Test
+    fun `failure at exactly graceMs is already past the window and reports sticky - half-open grace interval`() {
+        val clock = FakeClock().apply { now = 0L }
+        val gate = gateWith(clock)
+
+        // 边界钉死（PR #183 评审 nit）：宽限窗是半开区间 [0, graceMs)——判定为
+        // `<`，恰好 == 10_000ms 已属窗外真证据，照旧上报粘住。评审 nit 写的
+        // "恰好 graceMs 语义为吞" 是对 `<` 的误读，此处按代码实况钉住并纠正
+        // 记录（2026-09-13 owner 确认钉现状，不改生产语义）。
+        clock.now = 10_000L // == 10s 宽限窗（不小于 → 已出窗）
+        assertTrue(
+            "at exactly graceMs the failure is no longer transient evidence and must stick",
+            gate.shouldReport(success = false),
+        )
+        assertFalse("first outcome already reported", gate.shouldReport(success = true))
+    }
+
+    @Test
     fun `zero grace restores the old first-failure-sticks semantics`() {
         val clock = FakeClock().apply { now = 0L }
         val gate = gateWith(clock, graceMs = 0L)
