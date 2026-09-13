@@ -1780,9 +1780,19 @@ class PlanRepository(
      */
     suspend fun finalizeZombieAttempt(attemptId: Long, staleBeforeMs: Long, nowMs: Long): Boolean =
         db.withTransaction {
+            // #179 rebased onto #180: the receipt-free guard below matches on the attempt's APPLY
+            // key, which since #179 is epoch-qualified. Recompute it from the attempt's PERSISTED
+            // `aplusPlanEpoch` inside THIS transaction — the same durable owner state the original
+            // apply derived its key from — so a receipt landed under the epoch key still blocks
+            // finalization (crash-window-(b) stays closed) and a NULL-epoch legacy attempt still
+            // checks the exact legacy literal. A missing row finalizes nothing (the guarded UPDATE
+            // would match zero rows anyway).
+            val attempt = db.testAttemptDao().getAttemptById(attemptId)
+                ?: return@withTransaction false
             val updated = db.testAttemptDao().finalizeZombieAttemptIfEligible(
                 attemptId = attemptId,
-                applyIdempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId),
+                applyIdempotencyKey =
+                    APlusOperationIdentity.applyIdempotencyKey(attemptId, attempt.aplusPlanEpoch),
                 staleBeforeMs = staleBeforeMs,
                 failureReason = ZombieAttemptPolicy.FAILURE_REASON,
                 endedAtMs = nowMs
