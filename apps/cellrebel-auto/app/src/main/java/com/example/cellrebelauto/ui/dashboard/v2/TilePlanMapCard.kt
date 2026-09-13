@@ -32,8 +32,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -280,6 +282,10 @@ private data class PlanOverlayStyle(
     val lineHalo: Int,
     val lineDash: Int,
     val density: Float,
+    // ---- 实测层（探针观察投影）：amber 菱形=实测，红=偏差不匹配，amber 细线=偏差连线 ----
+    val measuredFill: Int = 0,
+    val measuredMismatch: Int = 0,
+    val deviationLine: Int = 0,
 )
 
 /**
@@ -291,7 +297,15 @@ private data class PlanOverlayStyle(
  */
 private class PlanPointsOverlay : Overlay() {
 
-    data class Entry(val latitude: Double, val longitude: Double, val state: MapPointState)
+    data class Entry(
+        val latitude: Double,
+        val longitude: Double,
+        val state: MapPointState,
+        // ---- 实测层（探针观察投影；null = 无观察数据，只画计划位） ----
+        val measuredLat: Double? = null,
+        val measuredLng: Double? = null,
+        val measuredMatched: Boolean = false,
+    )
 
     var entries: List<Entry> = emptyList()
     var style: PlanOverlayStyle = PlanOverlayStyle(0, 0, 0, 0, 0, 0, 0, 1f)
@@ -308,6 +322,41 @@ private class PlanPointsOverlay : Overlay() {
         val pts = entries.map {
             projection.toPixels(GeoPoint(it.latitude, it.longitude), point)
             Pair(point.x.toFloat(), point.y.toFloat())
+        }
+        // ---- 实测层（先画，垫在计划标记下）：偏差连线 + 菱形实测标记 ----
+        // 计划点与实测点重合（偏差≈0）时连线长度为零、菱形被计划圆点盖住——
+        // 自然退化为"只见计划位"；有偏差时橙菱形+细线立现，不匹配画大红菱形。
+        entries.forEachIndexed { i, e ->
+            val mLat = e.measuredLat ?: return@forEachIndexed
+            val mLng = e.measuredLng ?: return@forEachIndexed
+            projection.toPixels(GeoPoint(mLat, mLng), point)
+            val mx = point.x.toFloat()
+            val my = point.y.toFloat()
+            val (px, py) = pts[i]
+            paint.style = Paint.Style.STROKE
+            paint.pathEffect = null
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.color = style.deviationLine
+            paint.strokeWidth = 1.5f * d
+            canvas.drawLine(px, py, mx, my, paint)
+            val r = (if (e.measuredMatched) 4f else 5.5f) * d
+            val diamond = Path().apply {
+                moveTo(mx, my - r)
+                lineTo(mx + r, my)
+                lineTo(mx, my + r)
+                lineTo(mx - r, my)
+                close()
+            }
+            paint.style = Paint.Style.FILL
+            paint.color = if (e.measuredMatched) style.measuredFill else style.measuredMismatch
+            canvas.drawPath(diamond, paint)
+            if (!e.measuredMatched) {
+                // 不匹配醒目：surface 描边勾出大菱形轮廓（与计划点描边同构）
+                paint.style = Paint.Style.STROKE
+                paint.color = style.pendingFill
+                paint.strokeWidth = 1.5f * d
+                canvas.drawPath(diamond, paint)
+            }
         }
         // ---- 顺序连线：表面色晕 + 主题色虚线（v3 双 pass） ----
         if (pts.size >= 2) {
@@ -378,7 +427,16 @@ private class PlanPointsOverlay : Overlay() {
 }
 
 private fun currentEntries(points: List<PlanMapPoints.MapPoint>): List<PlanPointsOverlay.Entry> =
-    points.map { PlanPointsOverlay.Entry(it.latitude, it.longitude, it.state) }
+    points.map {
+        PlanPointsOverlay.Entry(
+            latitude = it.latitude,
+            longitude = it.longitude,
+            state = it.state,
+            measuredLat = it.measuredLat,
+            measuredLng = it.measuredLng,
+            measuredMatched = it.measuredMatched,
+        )
+    }
 
 /**
  * Single construction point of the card's MapView + its tile provider wiring.
@@ -475,6 +533,9 @@ fun TilePlanMapCard(
             lineHalo = surfaceColor.toArgb(),
             lineDash = semantic.blue.toArgb(),
             density = context.resources.displayMetrics.density,
+            measuredFill = semantic.amber.toArgb(),
+            measuredMismatch = semantic.red.toArgb(),
+            deviationLine = semantic.amber.copy(alpha = 0.9f).toArgb(),
         )
     }
 
@@ -610,6 +671,23 @@ fun TilePlanMapCard(
             Text("进行中 ${points.count { it.state == MapPointState.ACTIVE }}", fontSize = 9.sp, color = onSurfaceColor)
             LegendDotSmall(semantic.grayDot, filled = false)
             Text("待完成 ${points.count { it.state == MapPointState.PENDING }}", fontSize = 9.sp, color = onSurfaceColor)
+            // ---- 实测层图例 + 匹配统计（探针观察投影；无实测数据时整段不出现） ----
+            val measuredCount = points.count { it.measuredLat != null && it.measuredLng != null }
+            if (measuredCount > 0) {
+                val mismatchCount = points.count { it.measuredLat != null && !it.measuredMatched }
+                LegendDiamondSmall(semantic.amber)
+                Text("实测 $measuredCount", fontSize = 9.sp, color = onSurfaceColor)
+                if (mismatchCount > 0) {
+                    LegendDiamondSmall(semantic.red)
+                    Text("偏差 $mismatchCount", fontSize = 9.sp, color = semantic.red)
+                }
+                Text(
+                    "匹配 ${measuredCount - mismatchCount}/$measuredCount",
+                    fontSize = 9.sp,
+                    color = if (mismatchCount > 0) semantic.red else onSurfaceColor,
+                    fontWeight = if (mismatchCount > 0) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
         }
         // 全屏态 ＋/－/⌂（按钮而非手势；⌂ = fit 还原，v3 的 zc 列）
         if (fullscreen) {
@@ -650,6 +728,18 @@ private fun LegendDotSmall(color: androidx.compose.ui.graphics.Color, filled: Bo
             modifier = Modifier.size(7.dp).clip(CircleShape).background(color.copy(alpha = 0.25f))
         )
     }
+}
+
+/** 实测标记的菱形图例（45° 旋转小方块，与地图上的橙/红菱形同构）。 */
+@Composable
+private fun LegendDiamondSmall(color: androidx.compose.ui.graphics.Color) {
+    Box(
+        modifier = Modifier
+            .size(7.dp)
+            .graphicsLayer(rotationZ = 45f)
+            .clip(RoundedCornerShape(1.dp))
+            .background(color)
+    )
 }
 
 @Composable

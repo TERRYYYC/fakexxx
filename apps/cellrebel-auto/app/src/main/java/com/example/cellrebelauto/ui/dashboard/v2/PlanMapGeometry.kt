@@ -151,13 +151,61 @@ object PlanMapPoints {
         val requiredSuccesses: Int,
     )
 
+    /**
+     * One probe-measured fix (探针实测位置) for a plan row, straight from the
+     * durable observation records (evidence-only display projection).
+     * # 实测修复：只读观察投影，绝不入信任/入账路径
+     */
+    data class MeasuredFix(val latitude: Double, val longitude: Double)
+
     data class MapPoint(
         val taskId: Long,
         val csvRow: Int,
         val latitude: Double,
         val longitude: Double,
         val state: MapPointState,
+        // ---- 实测层（探针观察投影；null = 无观察数据，只画计划位） ----
+        val measuredLat: Double? = null,
+        val measuredLng: Double? = null,
+        /** 实测 vs 计划是否在 CoordinateGuard 容差内；仅实测坐标非空时有意义。 */
+        val measuredMatched: Boolean = false,
     )
+
+    /**
+     * The measured-vs-plan match verdict — the EXACT CoordinateGuard assertion
+     * (per-axis |Δ| ≤ TOLERANCE_DEG) reused verbatim so the map's 匹配/不匹配
+     * means precisely what the quota-mint guard enforces. No second threshold.
+     * # 匹配判定 = 逐字复用 CoordinateGuard.violation，零新阈值
+     */
+    fun measuredMatched(
+        expectedLat: Double,
+        expectedLng: Double,
+        fix: MeasuredFix,
+    ): Boolean = com.example.cellrebelauto.automation.selfheal.CoordinateGuard.violation(
+        expectedLat = expectedLat,
+        expectedLng = expectedLng,
+        observed = listOf(Triple("MEASURED", fix.latitude, fix.longitude)),
+    ) == null
+
+    /**
+     * DISPLAY-ONLY great-circle distance in meters (haversine, mean Earth
+     * radius) — feeds the 偏差 visualization/legend. KB-8 stays intact: Auto
+     * still runs NO haversine in the trust path (distance-to-intent remains
+     * provider-exclusive); this projection is never a trust input.
+     * # 偏差距离（米，haversine）：仅展示层；KB-8 信任路径仍然零本地测距
+     */
+    fun haversineMeters(
+        lat1: Double, lng1: Double,
+        lat2: Double, lng2: Double,
+    ): Double {
+        val r = 6_371_000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLng = Math.toRadians(lng2 - lng1)
+        val h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2)
+        return 2 * r * Math.asin(Math.sqrt(h.coerceIn(0.0, 1.0)))
+    }
 
     fun resolvePointState(status: String, trusted: Int, required: Int, isCurrent: Boolean): MapPointState =
         when {
@@ -173,15 +221,22 @@ object PlanMapPoints {
      * Projects plan rows to map points in execution order (csvRow ASC).
      * (0,0) rows are parse artifacts and are skipped so they cannot drag the
      * bounds to the Gulf of Guinea.
+     *
+     * [measured] (optional, default empty) overlays the probe-measured fixes
+     * keyed by taskId; a fix arrives later than the plan rows without any
+     * ordering guarantee (DB async flow), so a missing entry simply leaves the
+     * point plan-only. # 实测数据异步晚到：缺条目 = 只画计划位
      */
     fun project(
         tasks: List<Row>,
         trustedCounts: Map<Long, Int>,
         currentCsvRow: Int?,
+        measured: Map<Long, MeasuredFix> = emptyMap(),
     ): List<MapPoint> = tasks
         .sortedBy { it.csvRow }
         .filterNot { it.latitude == 0.0 && it.longitude == 0.0 }
         .map { row ->
+            val fix = measured[row.id]
             MapPoint(
                 taskId = row.id,
                 csvRow = row.csvRow,
@@ -193,6 +248,9 @@ object PlanMapPoints {
                     required = row.requiredSuccesses,
                     isCurrent = currentCsvRow != null && row.csvRow == currentCsvRow,
                 ),
+                measuredLat = fix?.latitude,
+                measuredLng = fix?.longitude,
+                measuredMatched = fix != null && measuredMatched(row.latitude, row.longitude, fix),
             )
         }
 }

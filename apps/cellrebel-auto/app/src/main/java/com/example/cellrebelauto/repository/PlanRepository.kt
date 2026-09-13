@@ -35,6 +35,7 @@ import io.github.terryyyc.fakexxx.contract.v1.CompleteAndAdvanceRequestV1
 import io.github.terryyyc.fakexxx.contract.v1.CompletionProofV1
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 
 sealed interface LegacyReleaseRecovery {
     data object NotLegacy : LegacyReleaseRecovery
@@ -181,6 +182,19 @@ class PlanRepository(
     // #12：观察某计划 RECOVERY_REQUIRED 死尝试数（Plan 页重置入口可见性投影）
     fun observeRecoveryRequiredCount(planId: Long): Flow<Int> =
         db.testAttemptDao().observeRecoveryRequiredForPlan(planId)
+
+    /**
+     * Plan-map 实测层（运行台地图卡的"实测位置"标记）只读查询流：taskId → 该 task
+     * 最近一次 succeeded attempt 的最新带坐标观察（选择语义见 DAO 注释）。
+     * EVIDENCE-ONLY DISPLAY：结果只进 UI 投影（实测标记/偏差连线/匹配统计），绝不
+     * 参与 TrustPolicy、配额入账或任务选择——信任语义的唯一输入仍是 §6.4 观察证据
+     * 链本体。# 实测层只读流：展示用；绝不入信任/入账路径
+     */
+    fun observeMeasuredObservations(
+        planId: Long
+    ): Flow<Map<Long, com.example.cellrebelauto.db.TaskMeasuredObservation>> =
+        accessGate.gateFlow(db.durableObservationDao().observeLatestSucceededObservationsForPlan(planId))
+            .map { rows -> rows.associateBy { it.taskId } }
 
     // ---- History / export (AC-C3, INV-8) ----
 

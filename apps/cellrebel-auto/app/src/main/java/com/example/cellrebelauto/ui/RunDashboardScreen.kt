@@ -53,8 +53,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -582,6 +585,20 @@ private fun PlanMapCard(
     val world = remember(projected, minX, minY) {
         projected.map { (it.first - minX) to (it.second - minY) }
     }
+    // 实测层：探针观察投影（taskId 配对），投影到同一世界坐标；实测可能晚于点位
+    // 到达（DB 异步流），无实测数据的点不出现在此列表（只画计划位）。
+    val measuredWorld = remember(points, geo, fit) {
+        if (geo == null || fit == null) {
+            emptyList()
+        } else {
+            points.mapIndexedNotNull { index, p ->
+                val mLat = p.measuredLat ?: return@mapIndexedNotNull null
+                val mLng = p.measuredLng ?: return@mapIndexedNotNull null
+                val (wx, wy) = PlanMapProjector.project(mLat, mLng, geo, fit)
+                Triple(index, wx.toFloat(), wy.toFloat())
+            }
+        }
+    }
 
     fun initial(): MapTransform.Transform =
         MapTransform.pan(
@@ -679,6 +696,27 @@ private fun PlanMapCard(
                             )
                     }
                 }
+                // 实测层：计划点→实测点偏差连线 + 菱形实测标记（与瓦片卡同风格）。
+                // amber 小菱形=匹配；红大菱形+描边=不匹配（醒目）。偏差≈0 时连线长度
+                // 为零、菱形缩在计划点下——自然退化为"只见计划位"。
+                measuredWorld.forEach { (index, wx, wy) ->
+                    val plan = world.getOrNull(index) ?: return@forEach
+                    val (px, py) = MapTransform.toScreen(t, plan.first, plan.second)
+                    val (mx, my) = MapTransform.toScreen(t, wx, wy)
+                    if (mx < -40f || my < -40f || mx > vw + 40f || my > vh + 40f) return@forEach
+                    val matched = points[index].measuredMatched
+                    drawLine(
+                        semantic.amber,
+                        Offset(px, py), Offset(mx, my),
+                        strokeWidth = 1.5.dp.toPx(), cap = StrokeCap.Round,
+                    )
+                    drawDiamond(
+                        center = Offset(mx, my),
+                        radius = (if (matched) 4.dp else 5.5.dp).toPx(),
+                        fillColor = if (matched) semantic.amber else semantic.red,
+                        strokeColor = if (matched) null else outlineColor,
+                    )
+                }
             }
         }
         // 右下角微型图例
@@ -695,6 +733,23 @@ private fun PlanMapCard(
             LegendDot(semantic.green, filled = true); Text("完成", fontSize = 10.sp)
             LegendDot(semantic.blue, filled = true); Text("进行中", fontSize = 10.sp)
             LegendDot(semantic.grayDot, filled = false); Text("待完成", fontSize = 10.sp)
+            // ---- 实测层图例 + 匹配统计（与瓦片卡同语义；无实测数据时整段不出现） ----
+            val measuredCount = points.count { it.measuredLat != null && it.measuredLng != null }
+            if (measuredCount > 0) {
+                val mismatchCount = points.count { it.measuredLat != null && !it.measuredMatched }
+                LegendDiamond(semantic.amber)
+                Text("实测 $measuredCount", fontSize = 10.sp)
+                if (mismatchCount > 0) {
+                    LegendDiamond(semantic.red)
+                    Text("偏差 $mismatchCount", fontSize = 10.sp, color = semantic.red)
+                }
+                Text(
+                    "匹配 ${measuredCount - mismatchCount}/$measuredCount",
+                    fontSize = 10.sp,
+                    color = if (mismatchCount > 0) semantic.red else Color.Unspecified,
+                    fontWeight = if (mismatchCount > 0) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
         }
         // 当前点坐标小字（左下）
         currentPoint?.let {
@@ -735,6 +790,38 @@ private fun LegendDot(color: Color, filled: Boolean) {
                     .background(color)
             )
         }
+    }
+}
+
+/** 实测标记的菱形图例（45° 旋转小方块，与两卡地图上的橙/红菱形同构）。 */
+@Composable
+private fun LegendDiamond(color: Color) {
+    Box(
+        modifier = Modifier
+            .size(7.dp)
+            .graphicsLayer(rotationZ = 45f)
+            .clip(RoundedCornerShape(1.dp))
+            .background(color)
+    )
+}
+
+/** 菱形实测标记（CANVAS 卡 DrawScope 版；osmdroid 卡在 TilePlanMapCard 内自绘）。 */
+private fun DrawScope.drawDiamond(
+    center: Offset,
+    radius: Float,
+    fillColor: Color,
+    strokeColor: Color?,
+) {
+    val path = Path().apply {
+        moveTo(center.x, center.y - radius)
+        lineTo(center.x + radius, center.y)
+        lineTo(center.x, center.y + radius)
+        lineTo(center.x - radius, center.y)
+        close()
+    }
+    drawPath(path, fillColor)
+    if (strokeColor != null) {
+        drawPath(path, strokeColor, style = Stroke(width = 1.5.dp.toPx()))
     }
 }
 
