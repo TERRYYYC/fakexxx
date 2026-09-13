@@ -31,8 +31,13 @@ import java.util.UUID
 /**
  * Bounded spin: the DataStore write runs on its own IO executor outside
  * runTest's scheduler, so assertions poll instead of assuming completion.
+ * [#143 family] 5s was too tight on loaded CI runners (the watchdog toggle
+ * test flaked there while passing locally 100%): the whole suite's parallel
+ * IO work can starve DataStore's single-thread executor for many seconds.
+ * 30s keeps the bound meaningful (still fails on a real hang) while riding
+ * out runner contention.
  */
-private fun awaitUntil(deadlineMs: Long = 5_000, condition: suspend () -> Boolean) {
+private fun awaitUntil(deadlineMs: Long = 30_000, condition: suspend () -> Boolean) {
     val deadline = System.currentTimeMillis() + deadlineMs
     while (!kotlinx.coroutines.runBlocking { condition() } && System.currentTimeMillis() < deadline) {
         Thread.sleep(20)
