@@ -154,6 +154,51 @@ interface TestAttemptDao {
     )
     suspend fun markInterruptedIfNonTerminal(attemptId: Long, nowMs: Long)
 
+    // ---- #138 zombie attempt SAFE finalization (surgery-equivalent, engine-internalized) ----
+
+    /**
+     * #138: finalize ONE provably-dead zombie with the field surgery's exact semantics
+     * (status='interrupted' + endedAt + typed reason; NO receipt, NO trusted-quota push, never
+     * completed). EVERY eligibility fact is enforced inside this single guarded UPDATE, so the
+     * check-and-write is atomic (no TOCTOU) and idempotent (a second call matches zero rows):
+     *
+     *  - non-terminal only (`status IN ('starting','running') AND endedAt IS NULL`);
+     *  - APPLY_PENDING only — the one §8.1 phase that may hold NO external effect (a lease-holding
+     *    RUNNING attempt stays running for engine self-heal — A-line iron rule);
+     *  - lease-free (`aplusLeaseId IS NULL`) and execution-free (`currentExecutionId IS NULL`);
+     *  - receipt-free (`NOT EXISTS operation_receipts` for the attempt's deterministic apply key) —
+     *    a durable receipt makes reconcile replay locally, so such an owner is recoverable, never
+     *    a zombie;
+     *  - stale (`startedAt <= :staleBeforeMs`) — the intent window is irrevocably expired.
+     *    SEMANTIC BINDING (single source of truth): this condition is the SQL twin of
+     *    [com.example.cellrebelauto.automation.selfheal.ZombieAttemptPolicy.isStale] —
+     *    `startedAt <= staleBeforeMs` ⟺ `startedAt + max(2× testTimeoutMs, MIN_STALL_MS) <= nowMs`.
+     *    The SQL copy exists only because `startedAt` lives in the row this UPDATE guards
+     *    atomically; the two formulations are ONE semantics and MUST be changed together.
+     *
+     * `aplusState` is deliberately LEFT as APPLY_PENDING (byte-equivalent to the field surgery,
+     * which unblocked recovery because [findAPlusRecoverableAttempts] selects on non-terminal
+     * status): the owner phase remains honest evidence of where the attempt died.
+     *
+     * # 僵尸终结写（手术等价）：全部守卫在单条原子 UPDATE 内；幂等；不触碰终态/持 lease 行
+     */
+    @Query(
+        "UPDATE test_attempts SET status = 'interrupted', failureReason = :failureReason, endedAt = :endedAtMs " +
+            "WHERE id = :attemptId AND status IN ('starting', 'running') AND endedAt IS NULL " +
+            "AND aplusState = 'APPLY_PENDING' AND aplusLeaseId IS NULL AND currentExecutionId IS NULL " +
+            "AND startedAt <= :staleBeforeMs " +
+            "AND NOT EXISTS (" +
+                "SELECT 1 FROM operation_receipts r " +
+                "WHERE r.idempotencyKey = :applyIdempotencyKey)"
+    )
+    suspend fun finalizeZombieAttemptIfEligible(
+        attemptId: Long,
+        applyIdempotencyKey: String,
+        staleBeforeMs: Long,
+        failureReason: String,
+        endedAtMs: Long
+    ): Int
+
     // ---- A+ current-operation owner state (R9, Sol round-8 P1-3/P1-4) ----
 
     /** Persist the current §8.1 phase on the attempt (§7.1: the Attempt owns its 当前 operation). */
