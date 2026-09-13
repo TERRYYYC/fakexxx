@@ -35,6 +35,7 @@ import com.example.cellrebelauto.util.DiagnosticFiles
 import com.example.cellrebelauto.util.RollingLogFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -1691,13 +1692,11 @@ class MainViewModel @JvmOverloads constructor(
         android.util.Log.w("MapTiles", "first OSM tile load FAILED — canvas fallback engaged (check network/UA/tile source)")
     }
 
-    // [task-boundary monitor 2026-09-13]
-    private val _returnToMonitor = MutableStateFlow(true)
-    val returnToMonitor: StateFlow<Boolean> = _returnToMonitor
-
-    init {
-        viewModelScope.launch { taskBoundarySettings.returnToMonitor.collect { _returnToMonitor.value = it } }
-    }
+    // [task-boundary monitor 2026-09-13] exposed as the raw DataStore flow — NO
+    // init collector: a persistent collect in init re-triggered the tree-level
+    // TestMainDispatcher races documented on the VM test files (file-backed
+    // DataStore reads outliving tearDown). UI collects with initial = true.
+    val returnToMonitor: Flow<Boolean> = taskBoundarySettings.returnToMonitor
 
     fun setReturnToMonitor(enabled: Boolean) {
         viewModelScope.launch { taskBoundarySettings.setReturnToMonitor(enabled) }

@@ -172,7 +172,7 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                     mapTileFailure = vm.mapTileFailure.collectAsState().value,
                     onSetMapTilesEnabled = { vm.setMapTilesEnabled(it) },
                     // [task-boundary monitor 2026-09-13]
-                    returnToMonitor = vm.returnToMonitor.collectAsState().value,
+                    returnToMonitor = vm.returnToMonitor.collectAsState(initial = true).value,
                     onSetReturnToMonitor = { vm.setReturnToMonitor(it) },
                     onReportTileFailure = { vm.reportTileLoadFailure() },
                     onClearTileFailure = { vm.clearTileLoadFailure() },
