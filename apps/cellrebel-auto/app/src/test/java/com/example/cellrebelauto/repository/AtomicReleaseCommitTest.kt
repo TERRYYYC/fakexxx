@@ -35,7 +35,7 @@ class AtomicReleaseCommitTest {
     private lateinit var coordinator: RecoveryCoordinator
     private var attemptId = 0L
     private val lease = "lease-atomic"
-    private val key get() = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+    private val key get() = APlusOperationIdentity.releaseIdempotencyKey(attemptId, null)
     private val digest get() = APlusOperationIdentity.releaseDigest(lease)
 
     @Before fun setUp() {

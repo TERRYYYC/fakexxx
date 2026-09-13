@@ -120,7 +120,7 @@ class EngineLegacyAdmissionMatrixTest {
         }
 
         fun request(id: Long): CompleteAndAdvanceRequestV1 {
-            val base = CompleteAndAdvanceRequestV1("lease-$id", APlusOperationIdentity.applyIdempotencyKey(id), "",
+            val base = CompleteAndAdvanceRequestV1("lease-$id", APlusOperationIdentity.applyIdempotencyKey(id, null), "",
                 "schedule", 12, "item", CompletionProofV1("item", 1, 1, "ledger-$id", 123_456_789),
                 ContractV1.PROTOCOL_VERSION)
             return base.copy(requestDigest = CanonicalAdvanceDigestV1.compute(base))
@@ -174,9 +174,9 @@ class EngineLegacyAdmissionMatrixTest {
             if (shape == Shape.NEGATIVE) repo.recordUnverifiedOutcome(id, "UNTRUSTED", "negative")
             else db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = id, taskId = taskId,
                 evidenceDigest = "trusted-$id", committedAt = 1))
-            db.operationReceiptDao().insertIfAbsent(OperationReceiptRow(APlusOperationIdentity.applyIdempotencyKey(id),
+            db.operationReceiptDao().insertIfAbsent(OperationReceiptRow(APlusOperationIdentity.applyIdempotencyKey(id, null),
                 "apply-digest", "APPLIED", 1, "lease-$id", "op-$id"))
-            val key = APlusOperationIdentity.releaseIdempotencyKey(id)
+            val key = APlusOperationIdentity.releaseIdempotencyKey(id, null)
             val release = ReleaseReceiptRow(key, "lease-$id", APlusOperationIdentity.releaseDigest("lease-$id"), "RELEASED", 1)
             db.releaseReceiptDao().insertIfAbsent(release)
             var req = request(id)
@@ -231,7 +231,7 @@ class EngineLegacyAdmissionMatrixTest {
         )
 
         suspend fun immutableRows(id: Long): List<Any?> = listOf(
-            db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(id)),
+            db.releaseReceiptDao().byKey(APlusOperationIdentity.releaseIdempotencyKey(id, null)),
             db.releaseReceiptDao().byLease("lease-$id"), db.advanceReplayCarrierDao().byAttempt(id),
             db.advanceReceiptDao().byAttempt(id))
 

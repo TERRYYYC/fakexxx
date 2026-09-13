@@ -52,7 +52,7 @@ class AdvanceReplayCarrierTest {
         db.trustedQuotaDao().insert(TrustedQuotaEntry(attemptId = attemptId, taskId = task.id, evidenceDigest = "ev", committedAt = 2))
         db.releaseReceiptDao().insertIfAbsent(
             ReleaseReceiptRow(
-                idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId), leaseId = "lease-1",
+                idempotencyKey = APlusOperationIdentity.releaseIdempotencyKey(attemptId, null), leaseId = "lease-1",
                 releaseDigest = APlusOperationIdentity.releaseDigest("lease-1"), resultOutcome = "RELEASED", createdAt = 3
             )
         )
@@ -61,7 +61,7 @@ class AdvanceReplayCarrierTest {
 
     private fun request(verifiedAt: Long): CompleteAndAdvanceRequestV1 {
         val base = CompleteAndAdvanceRequestV1(
-            leaseId = "lease-1", idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId), requestDigest = "",
+            leaseId = "lease-1", idempotencyKey = APlusOperationIdentity.applyIdempotencyKey(attemptId, null), requestDigest = "",
             expectedScheduleId = "schedule-1", expectedScheduleVersion = 7, expectedCurrentItemId = "item-1",
             completionProof = CompletionProofV1("item-1", 1, 1, "ledger-$attemptId", verifiedAt),
             callerProtocolVersion = ContractV1.PROTOCOL_VERSION

@@ -259,8 +259,8 @@ class CrashMatrixTest {
         return sessionId
     }
 
-    private fun applyKey(attemptId: Long) = APlusOperationIdentity.applyIdempotencyKey(attemptId)
-    private fun releaseKey(attemptId: Long) = APlusOperationIdentity.releaseIdempotencyKey(attemptId)
+    private fun applyKey(attemptId: Long) = APlusOperationIdentity.applyIdempotencyKey(attemptId, null)
+    private fun releaseKey(attemptId: Long) = APlusOperationIdentity.releaseIdempotencyKey(attemptId, null)
     // The owner-state intent digest the recovery recomputes from the durable attempt identity.
     // R44 (Sol GREEN-review-3 F2): identical inputs to the engine's recompute — plan/task refs +
     // the seeded attempt's own validity window (startedAt=600 from seedAttempt, timeout=90s from buildEngine).

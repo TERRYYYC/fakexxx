@@ -112,8 +112,8 @@ class ProductionCommitClockFactoryTest {
         repo.persistCompletionReceipt(77L, 1, intentDigest, "lease-77")
         val executor = RecordingExternalApplyExecutor()
         val log = FakeDurableRecoveryLog()
-        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), requestDigest = intentDigest, now = 1000L)
-        log.seedReceipt(com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L), intentDigest, "RELEASED", 1000L)
+        executor.apply(attemptId = 77L, intent = testApplyIntent(), idempotencyKey = com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L, null), requestDigest = intentDigest, now = 1000L)
+        log.seedReceipt(com.example.cellrebelauto.automation.aplus.APlusOperationIdentity.applyIdempotencyKey(77L, null), intentDigest, "RELEASED", 1000L)
 
         val backend = com.example.cellrebelauto.automation.APlusComposition.run {
             object : com.example.cellrebelauto.automation.aplus.APlusBackend {

@@ -117,16 +117,16 @@ class Migration5to6Test {
                     generateSequence { if (c.moveToNext()) c.getString(0) else null }.toList()
                 }
             assertEquals(listOf("healthy-v5-marker"), sessions)
-            assertEquals(10, db.openHelper.readableDatabase.version)
+            assertEquals(11, db.openHelper.readableDatabase.version)
 
-            // The identity hash after the full production ladder is the committed v10 hash
-            // (v1.81: the ladder now ends at MIGRATION_9_10); v5→v6 itself remains
+            // The identity hash after the full production ladder is the committed v11 hash
+            // (#179: the ladder now ends at MIGRATION_10_11); v5→v6 itself remains
             // table-for-table unchanged (asserted below).
             val hash = db.openHelper.readableDatabase
                 .query("SELECT identity_hash FROM room_master_table LIMIT 1")
                 .use { c -> if (c.moveToFirst()) c.getString(0) else null }
             assertEquals(
-                JSONObject(committedSchemaJson(10).readText()).getJSONObject("database").getString("identityHash"),
+                JSONObject(committedSchemaJson(11).readText()).getJSONObject("database").getString("identityHash"),
                 hash
             )
         } finally {

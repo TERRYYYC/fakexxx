@@ -36,7 +36,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 
 /**
- * Room database singleton, version 9.
+ * Room database singleton, version 11.
+ *
+ * v11 (#179, 2026-09-13): `test_attempts.aplusPlanEpoch` — the persisted plan epoch
+ * (`location_plans.importedAt`) that A+ idempotency keys derive from, so a provider receipt can
+ * never be re-addressed by a post-DB-reset attempt that recycles the same AUTOINCREMENT id.
+ * NULL = pre-epoch row recomputing the legacy key literal (MIGRATION_10_11 is additive-only).
  *
  * v5 introduced the trusted-ledger / execution / audit / legacy-snapshot / provider-pairing tables
  * (MIGRATION_4_5). `cellrebel_executions` is born in v5 carrying its FULL §7.1 / §8.6 completion-
@@ -87,7 +92,7 @@ import kotlinx.coroutines.asExecutor
         AdvanceReplayCarrierRow::class,
         AdvanceReceiptRow::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -274,7 +279,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_6_7,
                     MIGRATION_7_8,
                     MIGRATION_8_9,
-                    MIGRATION_9_10
+                    MIGRATION_9_10,
+                    MIGRATION_10_11
                 )
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()

@@ -159,8 +159,11 @@ class ZombieFinalizationGuardTest {
         )
         // Crash window (c): the apply DID land and the receipt IS durable — same-key replay
         // recovers the lease locally, so this owner is recoverable, never a zombie.
+        // #179 rebase: the seeded attempt carries the default NULL epoch, so the receipt is
+        // recorded under the exact legacy literal — the same key finalizeZombieAttempt now
+        // recomputes for a NULL-epoch attempt.
         log.recordReceipt(
-            APlusOperationIdentity.applyIdempotencyKey(recoverableId),
+            APlusOperationIdentity.applyIdempotencyKey(recoverableId, null),
             requestDigest = "digest-x", outcome = "APPLIED", now = staleStartedAt, leaseId = "lease-r"
         )
 

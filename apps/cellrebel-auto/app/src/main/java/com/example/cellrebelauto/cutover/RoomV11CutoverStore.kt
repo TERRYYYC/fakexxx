@@ -15,16 +15,15 @@ import java.security.MessageDigest
 import java.util.Base64
 
 /**
- * Schema-10-only Room adapter for the application-id cutover archive.
+ * Schema-11-only Room adapter for the application-id cutover archive.
  *
- * v1.81 rebase note: v10 adds the durable_observation_records serving-cell
- * columns (CI-attestation evidence). The census digest below is the REAL v10
- * schema, and the archive `schemaVersion` moves with it — a v9 archive
- * (captured by a pre-v1.81 build) is refused fail-closed by the version and
- * digest checks, exactly the design intent: a partial-schema restore can
- * never pass.
+ * #179 rebase note: v11 adds `test_attempts.aplusPlanEpoch` (the idempotency
+ * plan epoch). The census digest below is the REAL v11 schema, and the archive
+ * `schemaVersion` moves with it — a v10 archive (captured by a pre-epoch
+ * build) is refused fail-closed by the version and digest checks, exactly the
+ * v1.81 design intent: a partial-schema restore can never pass.
  */
-class RoomV10CutoverStore(
+class RoomV11CutoverStore(
     private val database: AppDatabase
 ) : CutoverRoomGenerationPort, CutoverRoomSnapshotPort {
     override suspend fun schemaPolicy(): CutoverArchivePolicy {
@@ -97,7 +96,7 @@ class RoomV10CutoverStore(
             while (cursor.moveToNext()) tableNames += cursor.getString(0)
         }
         check(tableNames == EXPECTED_TABLES) {
-            "Room v10 schema mismatch: expected tables=$EXPECTED_TABLES actual=$tableNames"
+            "Room v11 schema mismatch: expected tables=$EXPECTED_TABLES actual=$tableNames"
         }
 
         val tables = tableNames.associateWith { inspectTable(sql, it) }
@@ -107,7 +106,7 @@ class RoomV10CutoverStore(
             tableDigests.forEach { (name, digest) -> append(name).append('=').append(digest).append('\n') }
         }.toByteArray(Charsets.UTF_8).let(::sha256)
         check(overall == EXPECTED_SCHEMA_DIGEST) {
-            "Room v10 schema mismatch: expected=$EXPECTED_SCHEMA_DIGEST actual=$overall"
+            "Room v11 schema mismatch: expected=$EXPECTED_SCHEMA_DIGEST actual=$overall"
         }
         return RoomSchema(tables, tableDigests)
     }
@@ -133,9 +132,9 @@ class RoomV10CutoverStore(
                     .append(column.primaryKeyPosition).append('\n')
             }
         }
-        check(columns.isNotEmpty()) { "Room v10 schema mismatch: $tableName has no columns" }
+        check(columns.isNotEmpty()) { "Room v11 schema mismatch: $tableName has no columns" }
         check(columns.any { it.primaryKeyPosition > 0 }) {
-            "Room v10 schema mismatch: $tableName has no primary key"
+            "Room v11 schema mismatch: $tableName has no primary key"
         }
 
         val foreignKeys = mutableListOf<String>()
@@ -288,7 +287,7 @@ class RoomV10CutoverStore(
         require(row.orderKeyBase64Url == expectedOrderKey) { "row order key mismatch for ${meta.name}" }
         if (meta.name == PAIRING_TABLE) {
             val revokedAtIndex = meta.columns.indexOfFirst { it.name == "revokedAt" }
-            check(revokedAtIndex >= 0) { "Room v10 schema mismatch: pairing revocation column missing" }
+            check(revokedAtIndex >= 0) { "Room v11 schema mismatch: pairing revocation column missing" }
             require(values[revokedAtIndex] != SqlCell.Null) { "historical pairing must be revoked" }
         }
         return values
@@ -479,10 +478,10 @@ class RoomV10CutoverStore(
     }
 
     private companion object {
-        const val SCHEMA_VERSION = 10
+        const val SCHEMA_VERSION = 11
         const val PAIRING_TABLE = "provider_pairing_records"
         const val EXPECTED_SCHEMA_DIGEST =
-            "sha256:cb27b42719e25bce0ab1f0ab122d89b28134fc3e38ed72d8131bf0bada85d9f0"
+            "sha256:1d386810c9ca6a4cd2b093b8bcc4b13259901da3ff7ff0324a32ea303a9a6188"
         const val TAG_NULL = 0
         const val TAG_INTEGER = 1
         const val TAG_REAL = 2

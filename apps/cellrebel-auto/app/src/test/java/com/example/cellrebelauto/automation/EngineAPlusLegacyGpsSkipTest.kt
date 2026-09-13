@@ -58,6 +58,9 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class EngineAPlusLegacyGpsSkipTest {
 
+    /** #179: the seeded plan's importedAt — the epoch the engine stamps on admitted attempts. */
+    private companion object { const val PLAN_EPOCH = 1000L }
+
     private lateinit var db: AppDatabase
     private lateinit var repo: PlanRepository
 
@@ -95,7 +98,7 @@ class EngineAPlusLegacyGpsSkipTest {
     private suspend fun seedPlan(taskId: Long, quota: Int): Long {
         val planId = db.planDao().insertPlan(
             LocationPlan(
-                sourceFileName = "issue17.csv", importedAt = 1000L,
+                sourceFileName = "issue17.csv", importedAt = PLAN_EPOCH,
                 globalBufferSeconds = 0, totalRows = 1, totalRequiredSuccesses = quota
             )
         )
@@ -230,7 +233,9 @@ class EngineAPlusLegacyGpsSkipTest {
         val attempt = db.testAttemptDao().getAttemptsForTask(taskId).single()
         assertEquals(
             "the A+ flow ran (apply dispatched exactly once)",
-            1, executor.invocationCount(APlusOperationIdentity.applyIdempotencyKey(attempt.id))
+            1, executor.invocationCount(
+                APlusOperationIdentity.applyIdempotencyKey(attempt.id, PLAN_EPOCH)
+            )
         )
         assertEquals(
             "the provider lease was persisted for the attempt",

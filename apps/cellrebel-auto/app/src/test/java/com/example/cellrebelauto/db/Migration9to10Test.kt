@@ -76,7 +76,7 @@ class Migration9to10Test {
     @Test fun `v9 observations keep uncaptured serving cells and v10 captures device readings`() = runTest {
         createCommittedV9()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_9_10).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_9_10, MIGRATION_10_11).allowMainThreadQueries().build()
         try {
             // (a) The migrated v9 row survives with honest "未捕获" columns.
             val migrated = db.durableObservationDao().forAttemptPhase(30L, "PRE")!!
@@ -86,7 +86,7 @@ class Migration9to10Test {
             assertNull(migrated.servingMcc)
             assertNull(migrated.servingMnc)
             assertNull(migrated.servingRsrpDbm)
-            assertEquals(10, db.openHelper.readableDatabase.version)
+            assertEquals(11, db.openHelper.readableDatabase.version)
 
             // (b) A v10 record carries the device-side reading; the attestation
             // query surfaces it for the plan, and skips the uncaptured row.
@@ -126,7 +126,7 @@ class Migration9to10Test {
         // schema after migrating) — a fresh v10 open round-trips without error.
         createCommittedV9()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_9_10).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_9_10, MIGRATION_10_11).allowMainThreadQueries().build()
         try {
             db.durableObservationDao().countForAttempt(30L)
             db.planDao().insertTasks(
