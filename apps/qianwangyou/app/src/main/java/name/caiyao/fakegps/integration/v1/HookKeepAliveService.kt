@@ -29,13 +29,22 @@ import name.caiyao.fakegps.ui.ComposeActivity
  * 语义 —— 启动失败被 [HookKeepAlive] 吞掉（降级为无保活），服务被系统杀死后
  * 下一次 lease 信号自愈重拉；release 的正确性从不依赖本服务存活。
  *
- * 语义（由 [HookKeepAlive] 驱动，服务自身无状态机）：
+ * 语义（由 [LingeringKeepAlive] → [HookKeepAlive] 驱动，服务自身无状态机）：
  *  - ACTION_ENGAGE（或首次创建）：立即 startForeground（onCreate 里做，掐灭
  *    startForegroundService 的 fg-required 竞态）+ 极轻心跳（仅打日志，不持
  *    wakelock —— FGS 前台态本身即 PowerKeeper 豁免）。
- *  - release：lease 全部收敛（无阻塞 lease）时控制器 stopService（→ onDestroy），
- *    不常驻耗电。停止是 stopService 的职责，服务没有"命令型停止"分支。
+ *  - release：lease 全部收敛（无阻塞 lease）时不再立即 stopService —— 迭代一
+ *    的立即停止被 mi14 实测证伪（3.0–3.8s 后即被冻结，引擎间隙 ≥9s 整个落在
+ *    冻结窗内）。迭代二起控制器（[LingeringKeepAlive]）在收敛后保持本服务
+ *    有界 linger（默认 30s），期间新 lease 到达即继续，定时器到点才
+ *    stopService（→ onDestroy）。plan 真结束时保活仍在 linger 上限内退出，
+ *    不常驻。停止是 stopService 的职责，服务没有"命令型停止"分支。
  *  - START_NOT_STICKY：死即止，重启由下一个合同信号负责。
+ *
+ * 通知文案（迭代二决策）：单一份文案覆盖 lease 活跃与 linger 两相 —— 服务
+ * 保持无状态机，不为文案切换引入第二条命令通道；IMPORTANCE_LOW 静默折叠，
+ * linger 至多 30s 后随 stopService 自动消失。文案必须两相皆真（不谎报"合同
+ * 生效中"），这是操作员可见性的底线。
  *
  * FGS 类型（targetSdk 35 / API 34+ 强制声明）：specialUse —— 本服务不投递
  * 位置（hook 模式由引擎 apply 发布载荷），借用 location 类型是谎报；specialUse
@@ -103,7 +112,7 @@ class HookKeepAliveService : Service() {
     private fun notification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_lan)
         .setContentTitle("千网游 · 环境合同保活")
-        .setContentText("Hook 投递合同生效期间保持前台，防止系统冻结")
+        .setContentText("合同执行与 attempt 间隙期间保持前台，防止系统冻结中断")
         .setOngoing(true)
         .setContentIntent(
             PendingIntent.getActivity(

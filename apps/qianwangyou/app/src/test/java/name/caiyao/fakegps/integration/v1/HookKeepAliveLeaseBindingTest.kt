@@ -1,7 +1,9 @@
 package name.caiyao.fakegps.integration.v1
 
 import io.github.terryyyc.fakexxx.contract.v1.ObserveRequestV1
+import name.caiyao.fakegps.integration.v1.support.FakeMonotonicClock
 import name.caiyao.fakegps.integration.v1.support.ProviderHarness
+import name.caiyao.fakegps.integration.v1.support.RecordingDiagnosticLog
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -195,5 +197,52 @@ class HookKeepAliveLeaseBindingTest {
         val release = h.release(receipt.leaseId)
 
         assertTrue(release.releaseComplete)
+    }
+
+    // ---- #198 迭代二：linger 跨 attempt 间隙（合同侧 binding） ----
+
+    @Test
+    fun `linger bridges the attempt gap - no disengage between a converged release and the next apply`() {
+        val recorder = RecordingKeepAlive()
+        val clock = FakeMonotonicClock()
+        val timer = HookKeepAliveLingerTest.FakeLingerTimer()
+        val h = ProviderHarness.create(
+            keepAlive = LingeringKeepAlive(
+                downstream = recorder,
+                clock = clock,
+                lingerTimer = timer,
+                diagnostics = RecordingDiagnosticLog(),
+            ),
+        )
+        h.pair()
+
+        // attempt 1：apply → release（收敛，进入 linger）
+        val first = h.apply()
+        h.release(first.leaseId)
+
+        // attempt 间隙：BufferGate 默认 10s（< linger 30s）。真实设备上这正是
+        // 迭代一被 PowerKeeper 冻结（3.0–3.8s）并黑洞掉下一次 discover 的窗口。
+        clock.advance(10_000L)
+        val second = h.apply(
+            key = "apply-k2",
+            intent = h.intent(runId = "run-1", attemptId = "att-2"),
+        )
+
+        assertEquals(
+            "间隙内下一次 apply 期间不得出现 disengage —— 保活必须跨 attempt 间隙",
+            listOf(true, true),
+            recorder.events,
+        )
+
+        // plan 真结束：收敛 + linger 到期 → 保活仍会在上限内退出（不常驻）
+        h.release(second.leaseId, key = "release-k2", operationId = "op-rel-2")
+        clock.advance(LingeringKeepAlive.DEFAULT_LINGER_MILLIS)
+        timer.fire()
+
+        assertEquals(
+            "linger 到期才真正 disengage",
+            listOf(true, true, false),
+            recorder.events,
+        )
     }
 }
