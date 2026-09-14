@@ -47,7 +47,7 @@ E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入�
 
 | 文件 | 列 | 去向 |
 | --- | --- | --- |
-| `plan.csv` | `longitude,latitude,priority,required_successes`（**lng 在前**） | CellRebel Auto 计划导入 |
+| `plan.csv` | `longitude,latitude,priority,required_successes,ci`（**lng 在前**；ci=该点继承的源行 ECGI，Auto 旧版不识别时删该列即回 4 列） | CellRebel Auto 计划导入（ci 列供 #190 验证层对照） |
 | `profiles.csv` | `addname,latitude,longitude,ci`（ci=该点继承的源行 ECGI） | QWY 收藏档案导入；#193 读回门按 ci 做字节级比对 |
 | `ecgi_map.csv` | `addname,ecgi,custom_admin_3,source_row` | #189 CI hook / #190 验证层（保留作期望真相源与审计） |
 | `manifest.json` | 参数快照 + 输入 sha256 + 行数统计 + 每站摘要（路径长度/包围盒） | 审计复现 |
@@ -86,7 +86,9 @@ QWY hook 载荷里的 addname），`ecgi/custom_admin_3/source_row` 继承原始
 - **#189（CI 按位置 hook）**：mock 切到某日程项位置时，按 addname 查
   `ecgi_map.csv` 得到该轨迹点应有的 ECGI，注入 telephony 读数。
 - **#190（CI 验证层）**：探针实测 serving cell 与该位置期望 ECGI 对照
-  （复用 #185 模式）；`source_row` 可回溯原始站点行供 UI 展示区县。
+  （复用 #185 模式）；期望 ci 已随 `plan.csv` 第 5 列直接进 Auto 的
+  `location_tasks.expectedCi`，Auto 运行台小区卡/地图角标就地对照，
+  `ecgi_map.csv` 保留作期望真相源与事后审计。
 
 ## 测试
 
@@ -96,6 +98,6 @@ python3 -m unittest discover -s scripts/trajectory
 ```
 
 覆盖：步进数学（50m@lat49.87 → Δlat≈0.000449、Δlng≈0.00069 量级）、原点为首点、
-box50 闭合、ECGI 继承、profiles.csv 列数/列名/ci 继承（4 列对齐 #193）、三件套行数
-一致、plan 列序 lng 在前、addname 唯一、`--points` clamp、`--stations` 子集选择与
-越界拒绝、manifest 摘要。
+box50 闭合、ECGI 继承、profiles.csv 列数/列名/ci 继承（4 列对齐 #193）、plan.csv
+5 列 ci 继承（对齐 #190）、三件套行数一致、plan 列序 lng 在前、addname 唯一、
+`--points` clamp、`--stations` 子集选择与越界拒绝、manifest 摘要。
