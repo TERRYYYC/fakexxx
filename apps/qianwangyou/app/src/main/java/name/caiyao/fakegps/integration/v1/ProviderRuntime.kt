@@ -3,6 +3,8 @@ package name.caiyao.fakegps.integration.v1
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import java.io.File
 import java.security.MessageDigest
@@ -238,10 +240,18 @@ object ProviderRuntime {
             // automated lane stays usable. When Vector#971 lands and the oracle
             // registers, flip this to FALSE to restore the authoritative window.
             oracleAbsentFallback = true,
-            // #198: hook 模式（引擎 apply 驱动）运行期间 QWY 无前台服务 →
-            // PowerKeeper 冻结进程 → lease release 事务黑洞。把阻塞 lease 的
-            // 存在交给轻量 FGS（HookKeepAliveService）抗冻。
-            keepAlive = HookKeepAlive(appContext),
+            // #198 迭代二：保活跨 attempt 间隙。迭代一在 lease 收敛瞬间
+            // stopService，而 mi14 实测 FGS 移除后 3.0–3.8s PowerKeeper 即冻结
+            // QWY，引擎间隙（BufferGate 默认 10s）整个落在冻结窗内 → 下一次
+            // attempt 的 discover 黑洞 → typed PAUSED。LingeringKeepAlive 让
+            // 收敛后保活有界 linger（默认 30s），间隙内下一次 apply 到达即取消
+            // 退出；plan 真结束时仍在 linger 上限内退出（不常驻）。延迟路径的
+            // 失败由策略器就地降级，红线不变：保活死亡不得影响合同语义。
+            keepAlive = LingeringKeepAlive(
+                downstream = HookKeepAlive(appContext),
+                clock = AndroidMonotonicClock(),
+                lingerTimer = HandlerLingerTimer(Handler(Looper.getMainLooper())),
+            ),
         )
     }
 

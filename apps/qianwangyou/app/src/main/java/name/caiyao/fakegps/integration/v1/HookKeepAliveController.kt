@@ -23,13 +23,18 @@ fun interface LeaseKeepAliveSignal {
  * #198 production impl: turn lease pressure into [HookKeepAliveService] FGS
  * lifecycle.
  *
- * 启停语义：
+ * 启停语义（迭代二起生产 wiring 由 [LingeringKeepAlive] 驱动 —— 收敛不再立即
+ * 停，先过有界 linger；本类仍是唯一的 Android 执行器，语义不变）：
  *  - engage（存在阻塞 lease）：System Mock 前台已在跑时【不重复拉起】
  *    （MockProviderService 的 FGS 已提供同样的 PowerKeeper 豁免）；否则
  *    startForegroundService(ACTION_ENGAGE)。
- *  - disengage（无阻塞 lease）：stopService。服务不在即无操作。
+ *  - disengage（无阻塞 lease）：stopService。服务不在即无操作。迭代一在这里
+ *    立即停，实测 FGS 移除后 3.0–3.8s 即被 PowerKeeper 冻结、引擎间隙内下一
+ *    次 attempt 黑洞 —— 迭代二起该调用只发生在 linger 到期后（见
+ *    [LingeringKeepAlive]）。
  *  - 全部 Android 失败路径 runCatching + WARN：保活只是抗冻手段，服务死亡
- *    不得影响合同语义（红线）。
+ *    不得影响合同语义（红线）。linger 延迟路径经策略器调用时同样被
+ *    [LingeringKeepAlive.deliver] 兜底降级。
  */
 class HookKeepAlive(private val context: Context) : LeaseKeepAliveSignal {
 
