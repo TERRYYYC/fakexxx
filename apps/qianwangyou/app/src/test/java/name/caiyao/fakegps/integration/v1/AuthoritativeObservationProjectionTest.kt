@@ -285,7 +285,14 @@ class AuthoritativeObservationProjectionTest {
 
         assertEquals(ContinuityCoverageV1.FULL.wire, first.continuityCoverageWire)
         assertEquals(ContinuityCoverageV1.FULL.wire, second.continuityCoverageWire)
-        assertNotEquals(first.environmentRevision, second.environmentRevision)
+        // #199 form 2: the digest-stable cursor motion (8 → 10) is producer
+        // bookkeeping, not a QWY semantic change — it contributes NOTHING to
+        // the revision (attempt 399: PRE 627 / POST 628 burned an attempt as
+        // UNVERIFIED). The +2 delta below comes ENTIRELY from the mock-owner
+        // hijack's own local relevant-change callbacks (hijackAndRestoreMockOwner
+        // bumps twice), a legitimate §6.4 revision source that fails the attempt
+        // honestly through TrustPolicy's own PRE/POST comparison.
+        assertEquals(first.environmentRevision + 2L, second.environmentRevision)
         assertEquals(firstCursor, store.acknowledgement(firstCursor)?.cursor)
         assertEquals(secondCursor, store.acknowledgement(secondCursor)?.cursor)
         val firstSeq = first.evidenceRefs.single().removePrefix("qwy:audit:").toLong()
@@ -295,7 +302,7 @@ class AuthoritativeObservationProjectionTest {
     }
 
     @Test
-    fun `a new valid source cursor conservatively advances local revision inside its observation commit`() {
+    fun `a new valid source cursor with an unchanged semantic digest is acknowledged without a revision bump (#199)`() {
         val h = ProviderHarness.create()
         h.pair()
         val receipt = h.apply(key = "authoritative-source-cursor-bump")
@@ -326,11 +333,88 @@ class AuthoritativeObservationProjectionTest {
         val second = h.kv.transaction { observer.observe(lease, request) }
 
         assertEquals(ContinuityCoverageV1.FULL.wire, second.continuityCoverageWire)
+        // #199 form 2: digest-stable cursor motion (8 → 10, same qwySemanticDigest)
+        // is producer bookkeeping, not a semantic change — the local revision must
+        // NOT advance, or Auto's frozen PRE==POST equality burns the attempt.
         assertEquals(
-            "a new trusted cursor must not reuse the earlier local revision",
+            "a digest-stable cursor must not reuse a bumped revision",
+            first.environmentRevision,
+            second.environmentRevision,
+        )
+    }
+
+    @Test
+    fun `an unexplained digest transition in a valid window keeps the conservative revision bump (#199 fail-closed)`() {
+        // 🔴 #199 review-mandated observation-level pin for the attribution
+        // when's ELSE branch (EnvironmentObserver: valid window + known epoch +
+        // digest transition NO owner interval explains). The #199 fix flipped
+        // every other observation-level bump pin to "no longer bumps"; this is
+        // the fail-closed residue — the ONLY defense if a future digest
+        // publisher appears outside owner brackets. Deleting or inverting the
+        // else branch must turn this test red (the bump is asserted EXACT +1).
+        val h = ProviderHarness.create()
+        h.pair()
+        val receipt = h.apply(key = "authoritative-unexplained-transition")
+        val lease = checkNotNull(h.leases.get(receipt.leaseId))
+        fun localDigest() = QwyObservedSemanticDigest.compute(
+            ownerGeneration = h.tracker.generation,
+            effective = h.env.observeEffective(),
+            schedule = h.env.scheduleSnapshot(),
+        )
+        val firstCursor = AuthoritativeObservationCursor(
+            "123e4567-e89b-12d3-a456-426614174000", "oracle-a", 8L, localDigest(),
+        )
+        val reads = ArrayDeque<AuthoritativeContinuitySnapshot?>().apply {
+            add(snapshot(firstCursor.qwySemanticDigest, firstCursor.sequence))
+            add(snapshot(firstCursor.qwySemanticDigest, firstCursor.sequence))
+        }
+        val store = AuthoritativeObservationCommitStore(h.kv)
+        val observer = EnvironmentObserver(
+            tracker = h.tracker,
+            environment = h.env,
+            clock = h.clock,
+            audit = h.audit,
+            authoritativeSource = AuthoritativeContinuitySource { reads.removeFirst() },
+            expectedOracleOwnerPackage = "name.caiyao.fakegps",
+            expectedOracleOwnerUid = 10_321,
+            authoritativeCommitStore = store,
+        )
+        val request = ObserveRequestV1(receipt.leaseId, receipt.operationId, receipt.acceptedIntentHash)
+
+        // PRE observe: first cursor of the epoch — acknowledged, no bump.
+        val first = h.kv.transaction { observer.observe(lease, request) }
+        assertEquals(ContinuityCoverageV1.FULL.wire, first.continuityCoverageWire)
+        assertEquals(firstCursor, store.acknowledgement(firstCursor)?.cursor)
+
+        // A semantic environment change OUTSIDE any owner bracket (the UI /
+        // legacy-chain path): the local projection moves, so the next window is
+        // still valid — but NO owner digest interval explains the transition,
+        // and no local callback bumped the revision for it.
+        h.env.effectiveLatitude = (h.env.effectiveLatitude ?: 50.0) + 0.001
+        val secondCursor = firstCursor.copy(sequence = 10L, qwySemanticDigest = localDigest())
+        assertEquals(true, store.ownerMutationIntervals().isEmpty())
+        reads.add(snapshot(secondCursor.qwySemanticDigest, secondCursor.sequence))
+        reads.add(snapshot(secondCursor.qwySemanticDigest, secondCursor.sequence))
+
+        val second = h.kv.transaction { observer.observe(lease, request) }
+
+        assertEquals(ContinuityCoverageV1.FULL.wire, second.continuityCoverageWire)
+        assertEquals(
+            "#199: the unexplained digest transition must catch up the revision by " +
+                "EXACTLY one bump — the else branch is the fail-closed residue for " +
+                "any future non-owner digest publisher",
             first.environmentRevision + 1L,
             second.environmentRevision,
         )
+        assertEquals(
+            "the conservative bump must also record the new cursor's acknowledgement",
+            secondCursor,
+            store.acknowledgement(secondCursor)?.cursor,
+        )
+        val firstSeq = first.evidenceRefs.single().removePrefix("qwy:audit:").toLong()
+        val secondSeq = second.evidenceRefs.single().removePrefix("qwy:audit:").toLong()
+        assertEquals(first.environmentRevision, store.recordForEvidence(firstSeq)?.localRevision)
+        assertEquals(second.environmentRevision, store.recordForEvidence(secondSeq)?.localRevision)
     }
 
     @Test

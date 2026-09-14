@@ -8,6 +8,22 @@ data class AuthoritativeObservationCursor(
     val qwySemanticDigest: String,
 )
 
+/**
+ * #199: the durable digest interval one cleanly finished owner bracket drove
+ * (beforeDigest → afterDigest). Recorded by the handler right after the bracket
+ * publishes its after-digest, BEFORE the bracket-time cursor ack is attempted —
+ * so when that ack is later skipped (odd sequence in flight, foreign mutation
+ * sharing the window, unreadable after-read), the NEXT observe can still
+ * attribute the cursor motion to the owner's own, already revision-counted
+ * mutation instead of double-counting it as an external change.
+ */
+data class OwnerMutationInterval(
+    val mutationId: String,
+    val beforeDigest: String,
+    val afterDigest: String,
+    val localGeneration: Long,
+)
+
 /** First local acknowledgement of one source cursor. It is diagnostic, never a source of FULL. */
 data class AuthoritativeObservationAcknowledgement(
     val cursor: AuthoritativeObservationCursor,
@@ -38,6 +54,20 @@ class AuthoritativeObservationCommitStore(
         private const val NAMESPACE = "integration.v1.authoritative_observation"
         private const val ACK_PREFIX = "ack:"
         private const val RECORD_PREFIX = "record:"
+        private const val INTERVAL_PREFIX = "interval:"
+
+        /**
+         * #199: bounded DFS for owner digest-interval chains. Real chains are
+         * one or two brackets long (apply → pre-observe, release → advance →
+         * post-observe). The depth cap terminates pathological cycles where
+         * repeated re-publishes return the environment to a prior digest; the
+         * NODE budget bounds TOTAL work so a pathological interval family
+         * (many intervals sharing one beforeDigest) cannot turn the observe
+         * path exponential — overshooting the budget classifies the transition
+         * as unexplained, which is the conservative bump direction.
+         */
+        private const val INTERVAL_WALK_LIMIT = 16
+        private const val INTERVAL_WALK_NODE_BUDGET = 256
     }
 
     /**
@@ -142,6 +172,97 @@ class AuthoritativeObservationCommitStore(
     internal fun acknowledgement(cursor: AuthoritativeObservationCursor): AuthoritativeObservationAcknowledgement? =
         storage.read(NAMESPACE, ACK_PREFIX + encodeCursor(cursor))?.let(::decodeAcknowledgement)
 
+    /**
+     * #199: the FULL highest-acknowledged cursor of the cursor's source epoch —
+     * its [AuthoritativeObservationCursor.qwySemanticDigest] is the semantic
+     * baseline the observer attributes unacknowledged cursor motion against.
+     */
+    internal fun highestAcknowledgedCursorForSourceEpoch(
+        cursor: AuthoritativeObservationCursor,
+    ): AuthoritativeObservationCursor? = storage.keys(NAMESPACE)
+        .asSequence()
+        .filter { it.startsWith(ACK_PREFIX) }
+        .map { decodeAcknowledgement(checkNotNull(storage.read(NAMESPACE, it))).cursor }
+        .filter { acknowledged ->
+            acknowledged.bootId == cursor.bootId && acknowledged.oracleInstanceId == cursor.oracleInstanceId
+        }
+        .maxByOrNull { it.sequence }
+
+    /**
+     * #199: durable attribution evidence for the observer's revision catch-up.
+     * A digest transition [fromDigest] → [toDigest] is OWNER-ACCOUNTED when a
+     * chain of recorded owner-mutation intervals explains it — the owner's own
+     * operation already bumped the tracker, so the observer must acknowledge
+     * the cursor instead of double-counting it.
+     *
+     * Soundness rests on two producer invariants (SystemServerOracleState):
+     * the oracle digest only changes when an owner bracket publishes an
+     * afterDigest (covered platform mutations pass null), and every handler
+     * operation bumps the tracker BEFORE its bracket publishes. An interval
+     * row can therefore only ever explain a transition the tracker counted.
+     */
+    internal fun explainsDigestTransition(fromDigest: String, toDigest: String): Boolean {
+        if (fromDigest == toDigest) return true
+        val budget = intArrayOf(INTERVAL_WALK_NODE_BUDGET)
+        return walkIntervals(ownerMutationIntervals(), fromDigest, toDigest, mutableSetOf(), 0, budget)
+    }
+
+    private fun walkIntervals(
+        intervals: List<OwnerMutationInterval>,
+        current: String,
+        target: String,
+        used: MutableSet<String>,
+        depth: Int,
+        budget: IntArray,
+    ): Boolean {
+        if (current == target) return true
+        if (depth >= INTERVAL_WALK_LIMIT) return false
+        for (interval in intervals) {
+            if (interval.beforeDigest != current || interval.mutationId in used) continue
+            if (budget[0] <= 0) return false
+            budget[0] -= 1
+            used += interval.mutationId
+            if (walkIntervals(intervals, interval.afterDigest, target, used, depth + 1, budget)) return true
+            used -= interval.mutationId
+        }
+        return false
+    }
+
+    /** Every durable owner-mutation interval row (bounded per owner epoch). */
+    internal fun ownerMutationIntervals(): List<OwnerMutationInterval> =
+        storage.keys(NAMESPACE)
+            .asSequence()
+            .filter { it.startsWith(INTERVAL_PREFIX) }
+            .map { decodeInterval(checkNotNull(storage.read(NAMESPACE, it))) }
+            .toList()
+
+    /**
+     * #199: record the digest interval of one cleanly finished owner bracket.
+     * First-write-wins per (generation, mutationId) — a settled replay of the
+     * same operation drives the same transition. Callers join an outer
+     * DurableKv transaction; failures degrade at the call site to the
+     * conservative pre-#199 bump behavior.
+     */
+    fun recordOwnerMutationInterval(
+        mutationId: String,
+        beforeDigest: String,
+        afterDigest: String,
+        localGeneration: Long,
+    ) = storage.transaction {
+        require(mutationId.isNotBlank()) { "owner mutation interval requires a mutation id" }
+        require(beforeDigest.isNotBlank() && afterDigest.isNotBlank()) {
+            "owner mutation interval requires both digest endpoints"
+        }
+        val key = INTERVAL_PREFIX + "$localGeneration:$mutationId"
+        if (storage.read(NAMESPACE, key) == null) {
+            storage.write(
+                NAMESPACE,
+                key,
+                encodeInterval(OwnerMutationInterval(mutationId, beforeDigest, afterDigest, localGeneration)),
+            )
+        }
+    }
+
     /** True only when this oracle boot/instance has an earlier trusted cursor. */
     internal fun hasAcknowledgementForSourceEpoch(cursor: AuthoritativeObservationCursor): Boolean =
         storage.keys(NAMESPACE)
@@ -214,6 +335,26 @@ class AuthoritativeObservationCommitStore(
             cursor = decodeCursor(fields[0]),
             localGeneration = fields[1].toLong(),
             localRevision = fields[2].toLong(),
+        )
+    }
+
+    private fun encodeInterval(value: OwnerMutationInterval): String = DurableFieldCodec.encode(
+        listOf(
+            value.mutationId,
+            value.beforeDigest,
+            value.afterDigest,
+            value.localGeneration.toString(),
+        ),
+    )
+
+    private fun decodeInterval(encoded: String): OwnerMutationInterval {
+        val fields = DurableFieldCodec.decodeNonNull(encoded)
+        check(fields.size == 4) { "invalid owner mutation interval" }
+        return OwnerMutationInterval(
+            mutationId = fields[0],
+            beforeDigest = fields[1],
+            afterDigest = fields[2],
+            localGeneration = fields[3].toLong(),
         )
     }
 

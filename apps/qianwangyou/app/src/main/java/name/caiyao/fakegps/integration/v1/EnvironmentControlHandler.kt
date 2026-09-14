@@ -1235,6 +1235,30 @@ class EnvironmentControlHandler(
             val after = observedSemanticDigestNow(tracker, environment)
             val changed = after != mutation.beforeDigest
             mutation.finish(changed = changed, uncertain = false, afterDigest = after)
+            // #199: durably record the digest interval this bracket drove BEFORE
+            // the bracket-time cursor ack is attempted. If that ack is later
+            // skipped (odd sequence in flight, foreign mutation in the window,
+            // unreadable after-read), the next observe attributes the cursor
+            // motion to this record instead of double-counting it as an
+            // external semantic change — the mi14 attempts 398/403 shape.
+            // Best-effort: a failed record degrades to the conservative
+            // pre-#199 bump, never fails the operation that already committed.
+            if (changed && authoritativeCommitStore != null) {
+                try {
+                    authoritativeCommitStore.recordOwnerMutationInterval(
+                        mutationId = mutationId,
+                        beforeDigest = mutation.beforeDigest,
+                        afterDigest = after,
+                        localGeneration = tracker.generation,
+                    )
+                } catch (recordFailure: RuntimeException) {
+                    diagnostics.warn(
+                        DIAG_TAG,
+                        "#199 $mutationId: owner interval record failed — " +
+                            "${recordFailure.javaClass.simpleName}: ${recordFailure.message}",
+                    )
+                }
+            }
             acknowledgeOwnCursorAdvance(mutationId, changed, beforeAckSnapshot)
             result
         } catch (failure: Throwable) {

@@ -67,7 +67,7 @@ import org.robolectric.RobolectricTestRunner
  * | M_AD_15 | DECIDING crash window re-mint: corrupt row → fail-closed | mismatched evidenceDigest ⇒ TRUSTED_LEDGER_CORRUPTION |
  * | M_AD_16 | Exhausted receipt forged digest → RECOVERY_REQUIRED | forged digest ⇒ fail-closed |
  * | M_AD_17 | Observe intentHash mismatch → durable typed reason | failureReason contains "acceptedIntentHash" |
- * | M_AD_18 | Observe environmentRevision mismatch → durable typed reason | failureReason contains "environmentRevision" |
+ * | M_AD_18 | Observe environmentRevision regression → durable typed reason (#199: leg is monotonic) | failureReason contains "environmentRevision" |
  * | M_AD_19 | Cross-fork same-key replay → idempotent (under-target + target-met) | both branches ⇒ 0 replays on second run |
  */
 @RunWith(RobolectricTestRunner::class)
@@ -469,7 +469,9 @@ class AdvanceMatrixTest {
         )
     }
 
-    // ===== M_AD_18: Observe environmentRevision mismatch → durable typed reason =====
+    // ===== M_AD_18: Observe environmentRevision regression → durable typed reason =====
+    // (#199: the leg is monotonic-forward — a REGRESSED revision stays a mismatch;
+    // a forward revision over matching semantic identity is benign bookkeeping.)
 
     @Test
     fun M_AD_18() = runTest {
@@ -483,7 +485,9 @@ class AdvanceMatrixTest {
                 )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = journeyExecutor.observe(leaseId, operationId, expectedIntentHash)
-                return honest?.copy(environmentRevision = 999L)
+                return honest?.copy(
+                    environmentRevision = advanceAnswer!!.effectiveEnvironmentRevision - 1L,
+                )
             }
         }
         val (planId, _) = seedAdvanceCrash("ADVANCE_PENDING")

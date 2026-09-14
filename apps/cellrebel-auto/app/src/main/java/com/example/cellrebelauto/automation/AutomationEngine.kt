@@ -3229,12 +3229,26 @@ class AutomationEngine(
             // P1-3 (Sol Issue #19/#20 R2): typed reason identifies WHICH leg failed independently.
             // Each leg is verified separately so the failure reason names the exact mismatch —
             // a generic "four-leg" message hides which verification surface is broken.
+            //
+            // #199: the environmentRevision leg is MONOTONIC-FORWARD, not exact
+            // equality. environmentRevision is §6.6's monotonic CHANGE COUNTER —
+            // the three legs above are the environment IDENTITY (item, version,
+            // intent hash). A REGRESSED revision means the receipt does not
+            // describe this environment (fail-closed). A FORWARD revision with
+            // matching identity is benign bookkeeping (the provider counted a
+            // foreign platform motion, or a QWY process restart generation
+            // bump — mi14 hook-mode differential: +5-level cross-restart jumps —
+            // landed between the receipt freeze and this observe) and must NOT
+            // roll the task cursor back: the provider pointer is durable-forward
+            // here, so a rollback misaligns every later boundary by +1 — the
+            // mi14 attempts 398/403 quota burn loop (386: POST missing, same
+            // freeze family; issue正文所引 391 已被手术删除，DB 无行).
             val mismatchLeg: String? = when {
                 observed == null -> "OBSERVE_NULL"
                 observed.scheduleItemId != durableAdvanceReceipt.advancedToItemId -> "scheduleItemId"
                 observed.scheduleVersion != durableAdvanceReceipt.scheduleVersionAfter -> "scheduleVersion"
                 observed.acceptedIntentHash != durableAdvanceReceipt.effectiveIntentHash -> "acceptedIntentHash"
-                observed.environmentRevision != durableAdvanceReceipt.effectiveEnvironmentRevision -> "environmentRevision"
+                observed.environmentRevision < durableAdvanceReceipt.effectiveEnvironmentRevision -> "environmentRevision"
                 else -> null
             }
             if (mismatchLeg != null) {

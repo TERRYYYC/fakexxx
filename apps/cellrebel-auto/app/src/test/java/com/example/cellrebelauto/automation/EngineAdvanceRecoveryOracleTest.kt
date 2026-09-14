@@ -772,13 +772,52 @@ class EngineAdvanceRecoveryOracleTest {
         )
     }
 
-    // ---- M-AD-18: Non-terminal observe environmentRevision mismatch → RECOVERY_REQUIRED ----
+    // ---- #199 form 1 (engine side): a FORWARD revision drift on the post-advance
+    // observe with all three semantic legs matching is benign bookkeeping — the
+    // environmentRevision is §6.6's monotonic change counter, not identity. The
+    // provider pointer is durable-forward at this point, so failing the attempt
+    // here rolls the task cursor back and misaligns every later boundary by +1
+    // (mi14 attempts 386/391). The leg keeps failing REGRESSED revisions. ----
 
     @Test
-    fun `M-AD-18 a non-terminal observe with environmentRevision mismatch fail-closes independently`() = runTest {
-        // observe().environmentRevision ≠ receipt.effectiveEnvironmentRevision (item, version,
+    fun `post-advance observe with forward revision drift and matching identity closes trusted`() = runTest {
+        val realExecutor = journeyExecutor
+        val driftedExecutor = object : ExternalApplyExecutor by realExecutor {
+            override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
+                realExecutor.completeAndAdvance(request, expectedIntentHash)
+            override fun completeAndAdvanceOutcome(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String) =
+                com.example.cellrebelauto.recovery.CompleteAndAdvanceOutcome.fromReceipt(
+                    completeAndAdvance(request, expectedIntentHash)
+                )
+            override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
+                val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
+                // The #199 shape: the provider counted a benign revision bump
+                // (foreign platform motion / observer catch-up) after the receipt
+                // froze its revision — forward only, identity untouched.
+                return honest?.copy(environmentRevision = advanceAnswer!!.effectiveEnvironmentRevision + 1L)
+            }
+        }
+        val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
+        buildEngineWith(planId, VClock(), driftedExecutor).run()
+
+        val attempt = db.testAttemptDao().getAttemptById(31L)!!
+        assertEquals(
+            "#199: forward revision drift over matching semantic identity must NOT " +
+                "roll the cursor back (provider pointer is durable-forward)",
+            "CLOSED", attempt.aplusState
+        )
+        assertEquals("succeeded", attempt.status)
+    }
+
+    // ---- M-AD-18: Non-terminal observe environmentRevision REGRESSION → RECOVERY_REQUIRED ----
+
+    @Test
+    fun `M-AD-18 a non-terminal observe with environmentRevision regression fail-closes independently`() = runTest {
+        // observe().environmentRevision < receipt.effectiveEnvironmentRevision (item, version,
         // and intentHash all match). Distinct from M-AD-17: single-leg readers miss each
         // other's failure mode. Only the full four-leg conjunction catches both.
+        // #199 re-scoped the leg from exact equality to monotonic-forward: a receipt
+        // revision the environment does NOT yet reflect is still a hard mismatch.
         val realExecutor = journeyExecutor
         val tamperedExecutor = object : ExternalApplyExecutor by realExecutor {
             override fun completeAndAdvance(request: CompleteAndAdvanceRequestV1, expectedIntentHash: String): AdvanceReceiptV1? =
@@ -789,8 +828,8 @@ class EngineAdvanceRecoveryOracleTest {
                 )
             override fun observe(leaseId: String, operationId: String, expectedIntentHash: String): EnvironmentObservationV1? {
                 val honest = realExecutor.observe(leaseId, operationId, expectedIntentHash)
-                // Tamper ONLY the environmentRevision leg
-                return honest?.copy(environmentRevision = 999L)
+                // Tamper ONLY the environmentRevision leg, downwards (regressed)
+                return honest?.copy(environmentRevision = advanceAnswer!!.effectiveEnvironmentRevision - 1L)
             }
         }
         val (planId, _) = seedCrashedAt("ADVANCE_PENDING")
@@ -798,7 +837,7 @@ class EngineAdvanceRecoveryOracleTest {
 
         val attempt = db.testAttemptDao().getAttemptById(31L)!!
         assertEquals(
-            "M-AD-18: revision mismatch must fail-closed (killing mutation: removed " +
+            "M-AD-18: revision regression must fail-closed (killing mutation: removed " +
                 "revision leg from the conjunction ⇒ the other 3 legs pass ⇒ succeeded)",
             "RECOVERY_REQUIRED", attempt.aplusState
         )

@@ -126,20 +126,54 @@ class EnvironmentObserver(
                 epochStable = false
             }
         }
-        // A new stable cursor in the same authoritative epoch reports a
-        // producer-observed semantic change which local callbacks may not have
-        // delivered. The revision owner, not the replay store, conservatively
-        // advances the local revision once before the observation is bound.
-        // The first cursor of an epoch is only acknowledged; repeating it never
-        // bumps revision. All calls are enclosed by the handler's outer
-        // DurableKv transaction in production.
+        // A new stable cursor in the same authoritative epoch must be ATTRIBUTED
+        // before it can move the local revision (#199). The oracle state machine
+        // guarantees two things (SystemServerOracleState.finishMutationLocked):
+        // covered platform mutations (MockProviderService 1 Hz refresh, LM calls)
+        // advance the sequence WITHOUT touching qwySemanticDigest, and the digest
+        // only changes when an OWNER bracket publishes an afterDigest — after the
+        // owner's operation already bumped the tracker. An unacknowledged cursor
+        // is therefore either digest-neutral bookkeeping or owner-accounted
+        // change; the old unconditional bump double-counted both:
+        //  - form 1 (mi14 attempts 386/391): the advance's own cursor whose
+        //    bracket-time ack was skipped → receipt revision + 1 → the engine's
+        //    four-leg equality failed on the revision leg → OBSERVED_TUPLE_MISMATCH
+        //    → task cursor rollback against a durable-forward provider (the quota
+        //    burn loop). The skipped ack is retried HERE via the durably recorded
+        //    owner digest intervals ("nothing ever retried it").
+        //  - form 2 (attempt 399): foreign platform motion between the PRE and
+        //    POST observe → POST bumped → TrustPolicy PRE≠POST → UNVERIFIED.
+        // Only a digest transition NO recorded owner interval explains keeps the
+        // conservative catch-up bump (fail-closed for the unbracketed residue).
+        // All calls are enclosed by the handler's outer DurableKv transaction in
+        // production.
         authoritativeCursor?.let { cursor ->
             if (authoritativeCommitStore != null &&
                 authoritativeCommitStore.acknowledgement(cursor) == null &&
                 authoritativeCommitStore.hasAcknowledgementForSourceEpoch(cursor)
             ) {
-                tracker.bump(RevisionBumpReason.AUTHORITATIVE_CURSOR_CHANGED)
-                snap = tracker.snapshot()
+                val highestAcked = authoritativeCommitStore.highestAcknowledgedCursorForSourceEpoch(cursor)
+                val digestUnchanged =
+                    highestAcked != null && highestAcked.qwySemanticDigest == cursor.qwySemanticDigest
+                val ownerExplained = highestAcked != null && !digestUnchanged &&
+                    authoritativeCommitStore.explainsDigestTransition(
+                        highestAcked.qwySemanticDigest,
+                        cursor.qwySemanticDigest,
+                    )
+                when {
+                    digestUnchanged || ownerExplained ->
+                        // Bookkeeping or the owner's own counted mutation: advance
+                        // the replay watermark WITHOUT a revision bump.
+                        authoritativeCommitStore.acknowledgeOwnerMutation(
+                            cursor = cursor,
+                            localGeneration = snap.generation,
+                            localRevision = snap.revision,
+                        )
+                    else -> {
+                        tracker.bump(RevisionBumpReason.AUTHORITATIVE_CURSOR_CHANGED)
+                        snap = tracker.snapshot()
+                    }
+                }
             }
         }
         if (authoritativeCommitStore != null) {

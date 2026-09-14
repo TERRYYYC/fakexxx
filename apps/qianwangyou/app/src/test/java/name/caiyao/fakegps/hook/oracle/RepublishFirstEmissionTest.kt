@@ -408,14 +408,25 @@ class RepublishFirstEmissionTest {
             g.commitStore.acknowledgement(checkNotNull(g.stableCursor())),
         )
 
-        // The next observe reports the unacked change, fail-closed: +1 revision.
+        // The next observe (post-#173=#199 semantics): the backlog cursor is
+        // DIGEST-STABLE (the covered tick never publishes an afterDigest — the
+        // apply bracket already published and revision-counted the new
+        // effective), so the observe ATTRIBUTES it as bookkeeping: it
+        // acknowledges the watermark without a revision bump. The attempt does
+        // NOT die on a backlog bump anymore — the pre-#199 poison is
+        // self-healing at the observation boundary.
         val observed = g.observeActive(second, "obs-173-poison")
         assertEquals(
-            "the row-boundary attempt dies on the backlog bump",
-            second.environmentRevision + 1L,
+            "#199: a digest-neutral backlog cursor must not surface as a revision " +
+                "bump on the row-boundary verify",
+            second.environmentRevision,
             observed.environmentRevision,
         )
         assertEquals(ContinuityCoverageV1.FULL.wire, observed.continuityCoverageWire)
+        assertNotNull(
+            "the attributing observe must also clear the backlog watermark",
+            g.commitStore.acknowledgement(checkNotNull(g.stableCursor())),
+        )
     }
 
     /**
@@ -461,9 +472,18 @@ class RepublishFirstEmissionTest {
         assertNull("the corrected bracket's cursor is still not acked over the backlog",
             g.commitStore.acknowledgement(cursorAfterSecond))
 
-        // ONE observe digests: bump once, acknowledge the cursor it saw.
+        // ONE observe digests the backlog (#199 semantics: the backlog cursor
+        // is digest-neutral — the covered tick never publishes an afterDigest —
+        // so the observe acknowledges the watermark WITHOUT a revision bump;
+        // the corrected brackets' own revision bumps already counted the real
+        // semantic state).
         val observed = g.observeActive(second, "obs-173-t2")
-        assertEquals(second.environmentRevision + 1L, observed.environmentRevision)
+        assertEquals(
+            "#199: the digesting observe must not double-count the digest-neutral " +
+                "backlog as a semantic change",
+            second.environmentRevision,
+            observed.environmentRevision,
+        )
         assertNotNull(
             "the digesting observe must acknowledge the backlog cursor",
             g.commitStore.acknowledgement(cursorAfterSecond),
