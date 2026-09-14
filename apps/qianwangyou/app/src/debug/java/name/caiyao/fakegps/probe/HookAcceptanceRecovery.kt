@@ -1,6 +1,7 @@
 package name.caiyao.fakegps.probe
 
 import android.content.Context
+import android.os.UserManager
 import android.util.Log
 import name.caiyao.fakegps.config.ConfigPrefsSync
 import name.caiyao.fakegps.config.PublishedConfig
@@ -11,12 +12,42 @@ internal object HookAcceptanceRecovery {
     const val KEY_PENDING = "pending"
     private const val KEY_PREVIOUS_JSON = "previous_json"
 
-    fun hasPending(context: Context): Boolean =
-        recordPrefs(context).getBoolean(KEY_PENDING, false)
+    /**
+     * Direct-boot safety (#194). The acceptance record lives in credential-encrypted storage,
+     * yet this process can start inside the direct-boot window: system_server's boot phase-600
+     * bind pulls up the directBootAware OracleBridgeService (and with it this Application)
+     * before the user has unlocked the device. Reading CE prefs before unlock throws, and an
+     * unprotected throw here killed the whole process at startup — which also took down the
+     * system_server oracle bridge registration.
+     *
+     * A locked device (or any CE read failure) is therefore reported as "no pending work".
+     * Callers defer to the next process start after unlock: the durable record is still on
+     * disk and recovery runs as usual then. The acceptance harness itself only ever runs
+     * unlocked, so deferral can never lose a recoverable transaction.
+     */
+    fun hasPending(context: Context): Boolean = runCatching {
+        isDeviceUnlocked(context) && recordPrefs(context).getBoolean(KEY_PENDING, false)
+    }.onFailure {
+        Log.w(TAG, "pending_check_deferred", it)
+    }.getOrDefault(false)
 
-    /** Fingerprint of the durable payload itself, before any normal Activity publish can mask it. */
-    fun pendingFingerprint(context: Context): String? =
-        pendingPayload(context)?.let(PublishedConfig::fingerprint)
+    /**
+     * Fingerprint of the durable payload itself, before any normal Activity publish can mask it.
+     * Shares [hasPending]'s direct-boot semantics: a locked CE store yields null instead of
+     * throwing.
+     */
+    fun pendingFingerprint(context: Context): String? = runCatching {
+        if (isDeviceUnlocked(context)) pendingPayload(context)?.let(PublishedConfig::fingerprint) else null
+    }.onFailure {
+        Log.w(TAG, "pending_fingerprint_deferred", it)
+    }.getOrNull()
+
+    /**
+     * True only while credential-encrypted storage is readable. A missing UserManager (host
+     * JVM / early shadows) counts as unlocked so the gate never blocks a real recovery.
+     */
+    private fun isDeviceUnlocked(context: Context): Boolean =
+        context.getSystemService(UserManager::class.java)?.isUserUnlocked ?: true
 
     fun prepare(context: Context): Boolean = runCatching {
         coordinator(context).prepare()

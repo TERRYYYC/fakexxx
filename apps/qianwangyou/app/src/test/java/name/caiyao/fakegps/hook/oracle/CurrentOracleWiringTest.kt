@@ -1,5 +1,6 @@
 package name.caiyao.fakegps.hook.oracle
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -67,5 +68,43 @@ class CurrentOracleWiringTest {
         val installer = File(root, "src/main/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleInstaller.java").readText()
         assertTrue(installer.contains("oracleBinder.finishCoveredMutation(token, uncertain)"))
         assertTrue(installer.contains("oracleBinder.onBridgeConnected(context, connectionGeneration)"))
+    }
+
+    /**
+     * #194 source boundary: every phase-600 bridge registration failure path (bind rejected,
+     * bindService threw, null binding, registerOracle failure, bound-but-never-connected
+     * watchdog) must feed the backoff retry budget instead of ending in a silent poison.
+     */
+    @Test
+    fun `every bridge registration failure path feeds the backoff retry budget`() {
+        val installer = File(root, "src/main/java/name/caiyao/fakegps/hook/oracle/SystemServerOracleInstaller.java").readText()
+        val policy = File(root, "src/main/java/name/caiyao/fakegps/hook/oracle/BridgeBindRetry.java").readText()
+
+        // Five feeders: bindService threw + bind rejected + null binding + registerOracle
+        // failure + never-connected watchdog. BridgeBindRetry itself owns the sixth (definition).
+        assertEquals(5, installer.split("onRegistrationFailed(").size - 1)
+        assertTrue(
+            "registration success must reset the retry budget",
+            installer.contains("bridgeRetry(context).onRegistrationSucceeded()"),
+        )
+
+        val bind = installer.substringAfter("private static void bindBridge")
+        val boundCheckAt = bind.indexOf("if (!bound)")
+        val watchdogPostAt = bind.indexOf("MAIN_HANDLER.postDelayed(connectWatchdog")
+        assertTrue(
+            "watchdog may only be armed after bindService actually accepted the bind",
+            boundCheckAt in 0 until watchdogPostAt,
+        )
+        val connected = bind.substringAfter("onServiceConnected")
+        val registeredAt = connected.indexOf("REGISTERED_GENERATION.set(connectionGeneration)")
+        val stateUpdatedAt = connected.indexOf("oracleBinder.onBridgeConnected(context, connectionGeneration)")
+        assertTrue(
+            "watchdog retirement must be ordered before the state transition it protects",
+            registeredAt in 0 until stateUpdatedAt,
+        )
+        assertTrue(
+            "retry budget must keep the 1s/5s/30s escalation",
+            policy.contains("{1_000L, 5_000L, 30_000L, 30_000L}"),
+        )
     }
 }
