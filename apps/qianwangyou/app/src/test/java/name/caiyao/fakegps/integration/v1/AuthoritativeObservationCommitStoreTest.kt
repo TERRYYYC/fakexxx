@@ -70,6 +70,76 @@ class AuthoritativeObservationCommitStoreTest {
         assertEquals(committed, audit.resolve(committed.seq))
     }
 
+    // ---- #199: owner digest-interval attribution ----
+
+    private fun intervalStore(): AuthoritativeObservationCommitStore =
+        AuthoritativeObservationCommitStore(InMemoryDurableKv())
+
+    @Test
+    fun `explains an owner interval chain across consecutively skipped acks`() {
+        val store = intervalStore()
+        store.recordOwnerMutationInterval("apply-l1", "D0", "D1", 3L)
+        store.recordOwnerMutationInterval("release-l1", "D1", "D2", 3L)
+        store.recordOwnerMutationInterval("advance-k1", "D2", "D3", 3L)
+        assertEquals(true, store.explainsDigestTransition("D1", "D3"))
+        assertEquals(true, store.explainsDigestTransition("D0", "D3"))
+        assertEquals(
+            "digest-stable motion is bookkeeping by definition",
+            true,
+            store.explainsDigestTransition("D2", "D2"),
+        )
+        assertEquals(false, store.explainsDigestTransition("D3", "D0"))
+    }
+
+    @Test
+    fun `an unexplained ghost digest transition is not attributed`() {
+        val store = intervalStore()
+        store.recordOwnerMutationInterval("advance-k1", "D0", "D1", 3L)
+        // A digest transition no owner bracket recorded (e.g. a foreign digest
+        // publisher or a forged chain endpoint) keeps the conservative bump.
+        assertEquals(false, store.explainsDigestTransition("D1", "ghost"))
+        assertEquals(false, store.explainsDigestTransition("ghost", "D1"))
+    }
+
+    @Test
+    fun `a pathological interval family stays budget-bounded and conservatively unexplained`() {
+        val store = intervalStore()
+        // A branching interval tree (4 branches × 8 levels = 4^8 DFS paths if
+        // unbounded), none reaching the target: the depth cap alone would allow
+        // exponential work on the observe path — the node budget must bound the
+        // total work and answer false.
+        var levelDigests = listOf("D0")
+        var id = 0
+        repeat(8) {
+            val next = mutableListOf<String>()
+            for (from in levelDigests) {
+                repeat(4) {
+                    val to = "L$it-x${id++}"
+                    store.recordOwnerMutationInterval("apply-$id", from, to, 3L)
+                    next += to
+                }
+            }
+            levelDigests = next
+        }
+        val started = System.nanoTime()
+        assertEquals(false, store.explainsDigestTransition("D0", "never-reached"))
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        check(elapsedMs < 2_000) { "interval walk must be budget-bounded, took ${elapsedMs}ms" }
+    }
+
+    @Test
+    fun `interval records are first-write-wins per generation and mutation id`() {
+        val store = intervalStore()
+        store.recordOwnerMutationInterval("advance-k1", "D0", "D1", 3L)
+        store.recordOwnerMutationInterval("advance-k1", "D0", "OTHER", 3L)
+        store.recordOwnerMutationInterval("advance-k1", "D0", "D1-gen4", 4L)
+        val intervals = store.ownerMutationIntervals()
+        assertEquals(2, intervals.size)
+        assertEquals(true, store.explainsDigestTransition("D0", "D1"))
+        assertEquals(false, store.explainsDigestTransition("D0", "OTHER"))
+        assertEquals(true, store.explainsDigestTransition("D0", "D1-gen4"))
+    }
+
     @Test
     fun `same valid cursor records every fresh observation without changing its acknowledgement`() {
         val kv = InMemoryDurableKv()

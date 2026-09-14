@@ -57,12 +57,17 @@ class AuthoritativeObservationCommitStore(
         private const val INTERVAL_PREFIX = "interval:"
 
         /**
-         * #199: bounded DFS depth for owner digest-interval chains. Real chains
-         * are one or two brackets long (apply → pre-observe, release → advance
-         * → post-observe); the cap only terminates pathological cycles where
-         * repeated re-publishes return the environment to a prior digest.
+         * #199: bounded DFS for owner digest-interval chains. Real chains are
+         * one or two brackets long (apply → pre-observe, release → advance →
+         * post-observe). The depth cap terminates pathological cycles where
+         * repeated re-publishes return the environment to a prior digest; the
+         * NODE budget bounds TOTAL work so a pathological interval family
+         * (many intervals sharing one beforeDigest) cannot turn the observe
+         * path exponential — overshooting the budget classifies the transition
+         * as unexplained, which is the conservative bump direction.
          */
         private const val INTERVAL_WALK_LIMIT = 16
+        private const val INTERVAL_WALK_NODE_BUDGET = 256
     }
 
     /**
@@ -198,8 +203,8 @@ class AuthoritativeObservationCommitStore(
      */
     internal fun explainsDigestTransition(fromDigest: String, toDigest: String): Boolean {
         if (fromDigest == toDigest) return true
-        val intervals = ownerMutationIntervals()
-        return walkIntervals(intervals, fromDigest, toDigest, mutableSetOf(), 0)
+        val budget = intArrayOf(INTERVAL_WALK_NODE_BUDGET)
+        return walkIntervals(ownerMutationIntervals(), fromDigest, toDigest, mutableSetOf(), 0, budget)
     }
 
     private fun walkIntervals(
@@ -208,13 +213,16 @@ class AuthoritativeObservationCommitStore(
         target: String,
         used: MutableSet<String>,
         depth: Int,
+        budget: IntArray,
     ): Boolean {
         if (current == target) return true
         if (depth >= INTERVAL_WALK_LIMIT) return false
         for (interval in intervals) {
             if (interval.beforeDigest != current || interval.mutationId in used) continue
+            if (budget[0] <= 0) return false
+            budget[0] -= 1
             used += interval.mutationId
-            if (walkIntervals(intervals, interval.afterDigest, target, used, depth + 1)) return true
+            if (walkIntervals(intervals, interval.afterDigest, target, used, depth + 1, budget)) return true
             used -= interval.mutationId
         }
         return false
