@@ -1,6 +1,7 @@
 package com.example.cellrebelauto.model.plan
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -173,5 +174,124 @@ class WorklistParserTest {
         assertEquals(2, errors.size)
         assertEquals(2, errors[0].csvRow)
         assertEquals(4, errors[1].csvRow)
+    }
+
+    // ---- #190：5 列 CI 契约（轨迹工具 plan.csv；期望 ECGI 直接入计划行） ----------
+
+    private val ciHeader = WorklistParser.CI_HEADER
+
+    @Test
+    fun `ci contract file parses 5th column as expected ci`() {
+        val csv = """
+            $ciHeader
+            29.9243986,49.8714584,3,3,28918569
+            29.94462,49.8240183,3,3,29592117
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Success)
+        val rows = (result as ParseResult.Success).rows
+        assertEquals(2, rows.size)
+        assertEquals(28918569L, rows[0].ci)
+        assertEquals(29592117L, rows[1].ci)
+        // CI 契约不带绑定列，向后兼容字段保持 null。
+        assertTrue(rows.all { it.scheduleId == null && it.scheduleItemId == null })
+    }
+
+    @Test
+    fun `legacy 4-column file keeps ci null`() {
+        // 向后兼容：旧 4 列清单解析不变，ci = null（诚实缺席，绝不编造期望）。
+        val csv = """
+            $header
+            116.397,39.908,1,3
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Success)
+        assertNull((result as ParseResult.Success).rows.single().ci)
+    }
+
+    @Test
+    fun `bound v2 file keeps ci null`() {
+        // 绑定契约第 5/6 列是 schedule 语义，与 CI 契约互斥；ci 恒为 null。
+        val csv = """
+            $boundHeader
+            116.397,39.908,9,2,schedule-generation-a,item-1
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Success)
+        assertNull((result as ParseResult.Success).rows.single().ci)
+    }
+
+    @Test
+    fun `ci at range boundaries is accepted`() {
+        val csv = """
+            $ciHeader
+            29.9,49.8,3,3,0
+            29.9,49.8,3,3,268435455
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Success)
+        val rows = (result as ParseResult.Success).rows
+        assertEquals(0L, rows[0].ci)
+        assertEquals(268435455L, rows[1].ci)
+    }
+
+    @Test
+    fun `ci above 28-bit range is rejected`() {
+        // 268435456 = 2^28：越出 #193 同款值域即拒（fail-closed，绝不 clamp）。
+        val csv = "$ciHeader\n29.9,49.8,3,3,268435456"
+        val result = WorklistParser.parse(csv)
+        assertTrue(result is ParseResult.Failure)
+        val error = (result as ParseResult.Failure).errors.single()
+        assertEquals(1, error.csvRow)
+        assertTrue(error.message.contains("28-bit ECI"))
+    }
+
+    @Test
+    fun `negative ci is rejected`() {
+        val csv = "$ciHeader\n29.9,49.8,3,3,-1"
+        val result = WorklistParser.parse(csv)
+        assertTrue(result is ParseResult.Failure)
+        assertTrue((result as ParseResult.Failure).errors.single().message.contains("28-bit ECI"))
+    }
+
+    @Test
+    fun `non-numeric ci is rejected`() {
+        val csv = "$ciHeader\n29.9,49.8,3,3,28a18569"
+        val result = WorklistParser.parse(csv)
+        assertTrue(result is ParseResult.Failure)
+        assertTrue((result as ParseResult.Failure).errors.single().message.contains("28-bit ECI"))
+    }
+
+    @Test
+    fun `blank ci is rejected`() {
+        // 空 ci ≠ 无期望：CI 契约下行必须带值；要"无期望"请用 4 列契约。
+        val csv = "$ciHeader\n29.9,49.8,3,3,"
+        val result = WorklistParser.parse(csv)
+        assertTrue(result is ParseResult.Failure)
+        assertTrue((result as ParseResult.Failure).errors.single().message.contains("28-bit ECI"))
+    }
+
+    @Test
+    fun `ci contract rejects 4-column rows atomically`() {
+        val csv = """
+            $ciHeader
+            29.9,49.8,3,3,28918569
+            29.9,49.8,3,3
+        """.trimIndent()
+
+        val result = WorklistParser.parse(csv)
+
+        assertTrue(result is ParseResult.Failure)
+        val error = (result as ParseResult.Failure).errors.single()
+        assertEquals(2, error.csvRow)
+        assertTrue(error.message.contains("5 columns"))
     }
 }

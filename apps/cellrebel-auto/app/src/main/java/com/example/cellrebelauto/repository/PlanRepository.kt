@@ -306,7 +306,8 @@ class PlanRepository(
                     latitude = it.latitude,
                     priority = it.priority,
                     requiredSuccesses = it.requiredSuccesses,
-                    scheduleItemId = it.scheduleItemId
+                    scheduleItemId = it.scheduleItemId,
+                    expectedCi = it.ci // #190：期望 ci 透传入库（展示层验证对照）
                 )
             }
         )
@@ -645,7 +646,8 @@ class PlanRepository(
                     latitude = it.latitude,
                     priority = it.priority,
                     requiredSuccesses = it.requiredSuccesses,
-                    scheduleItemId = it.scheduleItemId
+                    scheduleItemId = it.scheduleItemId,
+                    expectedCi = it.ci // #190：期望 ci 透传入库（展示层验证对照）
                 )
             }
         )
@@ -799,7 +801,8 @@ class PlanRepository(
                     latitude = it.latitude,
                     priority = it.priority,
                     requiredSuccesses = it.requiredSuccesses,
-                    scheduleItemId = it.scheduleItemId
+                    scheduleItemId = it.scheduleItemId,
+                    expectedCi = it.ci // #190：期望 ci 透传入库（展示层验证对照）
                 )
             }
         )
@@ -826,8 +829,8 @@ class PlanRepository(
     /**
      * #12: re-activate the latest plan as a FRESH GENERATION — insert a new
      * plan row and copy its task rows verbatim (csvRow/coordinates/priority/
-     * quota), all pending, in ONE transaction, then append a typed PLAN_RESET
-     * audit row binding old→new plan ids.
+     * quota/expectedCi), all pending, in ONE transaction, then append a typed
+     * PLAN_RESET audit row binding old→new plan ids.
      *
      * WHY COPY-ROWS instead of re-running the CSV import pipeline: the SAF Uri
      * grant from the original import is long gone and the app does not retain
@@ -880,7 +883,8 @@ class PlanRepository(
                         longitude = it.longitude,
                         latitude = it.latitude,
                         priority = it.priority,
-                        requiredSuccesses = it.requiredSuccesses
+                        requiredSuccesses = it.requiredSuccesses,
+                        expectedCi = it.expectedCi // #190：重置逐行复制 worklist 定义（含期望 ci）
                         // # completedSuccesses/status 故意不复制：新代际从零开始
                     )
                 }

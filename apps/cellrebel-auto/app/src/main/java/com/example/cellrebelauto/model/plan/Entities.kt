@@ -68,7 +68,14 @@ data class LocationTask(
     val completedSuccesses: Int = 0,
     val status: String = "pending",
     /** #79: immutable QWY item identity from CSV v2; null retains legacy ordering semantics. */
-    val scheduleItemId: String? = null
+    val scheduleItemId: String? = null,
+    /**
+     * #190 期望 serving cell CI（28-bit ECI，十进制，CSV 第 5 列）——展示层
+     * 验证对照的唯一期望来源。NULL = 行未带 ci（4/6 列旧格式或历史行），诚实
+     * 缺席：UI 只显示实测、不打匹配结论。SCOPE RED LINE（同 #185）：绝不进
+     * TrustPolicy / 配额入账 / 任务选择——只进运行台小区卡与地图角标投影。
+     */
+    val expectedCi: Long? = null
 )
 
 /**

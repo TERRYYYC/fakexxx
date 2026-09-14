@@ -36,7 +36,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asExecutor
 
 /**
- * Room database singleton, version 11.
+ * Room database singleton, version 12.
+ *
+ * v12 (#190, 2026-09-13): `location_tasks.expectedCi` — the plan row's expected
+ * serving-cell CI (28-bit ECI from the CSV 5th column). NULL = the row predates
+ * the column / a ci-less CSV; the UI then shows the measured cell with NO match
+ * verdict (MIGRATION_11_12 is additive-only). Display-only: never read by
+ * TrustPolicy or the quota path (#185 red line).
  *
  * v11 (#179, 2026-09-13): `test_attempts.aplusPlanEpoch` — the persisted plan epoch
  * (`location_plans.importedAt`) that A+ idempotency keys derive from, so a provider receipt can
@@ -92,7 +98,7 @@ import kotlinx.coroutines.asExecutor
         AdvanceReplayCarrierRow::class,
         AdvanceReceiptRow::class
     ],
-    version = 11,
+    version = 12,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -280,7 +286,8 @@ abstract class AppDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
-                    MIGRATION_10_11
+                    MIGRATION_10_11,
+                    MIGRATION_11_12
                 )
                 .fallbackToDestructiveMigration(dropAllTables = true)
                 .build()

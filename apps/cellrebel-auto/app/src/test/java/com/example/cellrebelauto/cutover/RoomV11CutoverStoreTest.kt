@@ -33,7 +33,7 @@ class RoomV11CutoverStoreTest {
 
         val policy = store.schemaPolicy()
 
-        assertEquals(11, policy.schemaVersion)
+        assertEquals(12, policy.schemaVersion)
         assertEquals(EXPECTED_TABLES, policy.requiredTableSchemaDigests.keys)
         assertTrue(policy.requiredTableSchemaDigests.values.all { it.matches(Regex("sha256:[0-9a-f]{64}")) })
         assertEquals(setOf("provider_pairing_records"), policy.historicalOnlyTables)
@@ -100,7 +100,7 @@ class RoomV11CutoverStoreTest {
         val clearFailure = runCatching { store.clear() }.exceptionOrNull()
 
         assertTrue(captureFailure is IllegalStateException)
-        assertTrue(captureFailure?.message.orEmpty().contains("Room v11 schema mismatch"))
+        assertTrue(captureFailure?.message.orEmpty().contains("Room v12 schema mismatch"))
         assertTrue(clearFailure is IllegalStateException)
         assertFalse(clearFailure?.message.orEmpty().contains("no such table"))
     }
@@ -262,7 +262,7 @@ class RoomV11CutoverStoreTest {
     private fun archive(tables: List<CutoverTableSection>) = CutoverArchiveV2(
         sourcePackage = "com.example.cellrebelauto",
         captureId = "capture-room",
-        schemaVersion = 11,
+        schemaVersion = 12,
         tables = tables,
         preferences = emptyList()
     )

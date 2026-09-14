@@ -13,6 +13,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -93,6 +94,7 @@ class PlanRepositoryMeasuredObservationTest {
         lat: Double?,
         lng: Double?,
         observedAt: Long = 1L,
+        servingCi: Long? = null,
     ): Long =
         db.durableObservationDao().insert(
             DurableObservationRecord(
@@ -105,6 +107,7 @@ class PlanRepositoryMeasuredObservationTest {
                 observedAtElapsedRealtimeMs = 1L, observedAtEpochMs = observedAt,
                 continuitySinceElapsedRealtimeMs = null, continuitySinceEpochMs = null,
                 evidenceRefsJson = "[]", evidenceRefs = "",
+                servingCi = servingCi,
             )
         )
 
@@ -258,5 +261,42 @@ class PlanRepositoryMeasuredObservationTest {
         assertEquals(1L, row.observedAtEpochMs)
         assertEquals(50.0, row.measuredLat, 1e-12)
         assertEquals(30.0, row.measuredLng, 1e-12)
+    }
+
+    // ---- #190：投影带出同一条观察采样的 servingCi（CI 验证层实测腿） -------------
+
+    @Test
+    fun projection_carriesServingCi_fromSameObservation() = runTest {
+        val planId = insertPlanWithTasks(1L)
+        val a = insertAttempt(1L, "succeeded")
+        // POST 带坐标+小区：正常 hook 路径（observeLive 同时刻采样坐标与 serving cell）。
+        insertObservation(a, "POST", lat = 50.0, lng = 30.0, servingCi = 28918569L)
+
+        val row = measured(planId).getValue(1L)
+        assertEquals(28918569L, row.servingCi)
+    }
+
+    @Test
+    fun projection_nullServingCi_isHonestAbsence_notZero() = runTest {
+        val planId = insertPlanWithTasks(1L)
+        val a = insertAttempt(1L, "succeeded")
+        // 带坐标但未捕获小区（v10 前历史行/读数失败）：null 原样透传，绝不编 0。
+        insertObservation(a, "POST", lat = 50.0, lng = 30.0, servingCi = null)
+
+        assertNull(measured(planId).getValue(1L).servingCi)
+    }
+
+    @Test
+    fun projection_servingCi_followsLatestCoordinateObservation() = runTest {
+        val planId = insertPlanWithTasks(1L)
+        val a1 = insertAttempt(1L, "succeeded", ordinal = 1)
+        insertObservation(a1, "POST", lat = 50.0, lng = 30.0, servingCi = 111L)
+        // 更晚的成功 attempt：新观察携带新 ci —— 同一条证据行，位置与小区同源。
+        val a2 = insertAttempt(1L, "succeeded", ordinal = 2)
+        insertObservation(a2, "POST", lat = 50.0001, lng = 30.0001, servingCi = 222L)
+
+        val row = measured(planId).getValue(1L)
+        assertEquals(50.0001, row.measuredLat, 1e-12)
+        assertEquals(222L, row.servingCi)
     }
 }

@@ -52,13 +52,20 @@ interface DurableObservationDao {
      * 无 plan 关联的旧会话不设门槛（COALESCE 0，历史数据行为不变）；run_sessions 进
      * 查询后 Room 失效跟踪会在新 session 开始时自动重发本流。
      *
+     * #190：投影同时带出同一条观察采样到的 `servingCi`（observeLive 在坐标同一
+     * 时刻读的 TelephonyManager 值——hook 下即注入值，正是要与 expectedCi 对照的
+     * 实测）。NULL = 该观察未捕获小区（v10 前历史行/读数失败）：UI 如实显示
+     * "未捕获"，绝不编造。仍只选带坐标的行——位置与小区取同一条证据，两层
+     * 对照永远同源同时刻。
+     *
      * SCOPE RED LINE: 展示层只读投影——与 TrustPolicy / 配额入账判定完全无关，
      * 匹配判定仅复用 [com.example.cellrebelauto.automation.selfheal.CoordinateGuard]
      * 的容差语义做可视化。
      */
     @Query(
         "SELECT t.id AS taskId, o.effectiveLat AS measuredLat, o.effectiveLng AS measuredLng, " +
-            "o.observedAtEpochMs AS observedAtEpochMs, o.verificationLevel AS verificationLevel " +
+            "o.observedAtEpochMs AS observedAtEpochMs, o.verificationLevel AS verificationLevel, " +
+            "o.servingCi AS servingCi " +
             "FROM location_tasks t " +
             "INNER JOIN test_attempts latest ON latest.id = (" +
             "  SELECT MAX(a.id) FROM test_attempts a WHERE a.taskId = t.id " +
@@ -80,6 +87,7 @@ interface DurableObservationDao {
  * One row of the plan-map measured overlay projection (see
  * [DurableObservationDao.observeLatestSucceededObservationsForPlan]).
  * # 实测层投影行：taskId → 最近一次 succeeded attempt 的最新带坐标观察
+ * # （#190：servingCi = 同一条观察采样的实测小区；null = 未捕获）
  */
 data class TaskMeasuredObservation(
     val taskId: Long,
@@ -87,4 +95,5 @@ data class TaskMeasuredObservation(
     val measuredLng: Double,
     val observedAtEpochMs: Long,
     val verificationLevel: String,
+    val servingCi: Long? = null,
 )

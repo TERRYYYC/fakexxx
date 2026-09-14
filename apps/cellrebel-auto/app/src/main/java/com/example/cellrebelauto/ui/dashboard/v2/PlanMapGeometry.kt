@@ -141,7 +141,12 @@ enum class MapPointState { DONE, ACTIVE, PENDING }
 
 object PlanMapPoints {
 
-    /** Execution-order row input; the ViewModel maps LocationTask onto this. */
+    /**
+     * Execution-order row input; the ViewModel maps LocationTask onto this.
+     * #190: [expectedCi] is the task's expected serving-cell CI (28-bit ECI);
+     * null = the plan row carries no ci (4/6-column CSV) — the UI then renders
+     * the measured cell WITHOUT a match verdict.
+     */
     data class Row(
         val id: Long,
         val csvRow: Int,
@@ -149,14 +154,18 @@ object PlanMapPoints {
         val longitude: Double,
         val status: String,
         val requiredSuccesses: Int,
+        val expectedCi: Long? = null,
     )
 
     /**
      * One probe-measured fix (探针实测位置) for a plan row, straight from the
      * durable observation records (evidence-only display projection).
+     * #190: [servingCi] is the cell the device reported at the SAME instant as
+     * the fix (one observation row carries both); null = 未捕获 (v10-历史行 or
+     * the radio withheld it).
      * # 实测修复：只读观察投影，绝不入信任/入账路径
      */
-    data class MeasuredFix(val latitude: Double, val longitude: Double)
+    data class MeasuredFix(val latitude: Double, val longitude: Double, val servingCi: Long? = null)
 
     data class MapPoint(
         val taskId: Long,
@@ -169,7 +178,38 @@ object PlanMapPoints {
         val measuredLng: Double? = null,
         /** 实测 vs 计划是否在 CoordinateGuard 容差内；仅实测坐标非空时有意义。 */
         val measuredMatched: Boolean = false,
+        // ---- #190 CI 验证层（期望 vs 实测 serving cell；展示层，不入信任路径） ----
+        val expectedCi: Long? = null,
+        /** 同一条观察采样的实测小区 CI；null = 未捕获。 */
+        val measuredCi: Long? = null,
+        /**
+         * 期望 vs 实测 CI 匹配判定（严格相等）。三态：true=匹配 / false=不匹配 /
+         * null=不可判定（期望或实测缺失——诚实缺席，绝不猜测）。
+         */
+        val ciMatched: Boolean? = null,
     )
+
+    /**
+     * #190 CI 匹配判定：严格相等，零阈值、零换算（期望与实测同为 28-bit ECI
+     * 十进制——与 #193 读回门的 ci 腿同域）。期望缺失（计划行未带 ci）或实测
+     * 缺失（观察未捕获小区）→ null：不可判定是诚实缺席，绝不渲染成匹配。
+     * # 展示层专用判定；绝不入 TrustPolicy / 配额路径（#185 同款红线）
+     */
+    fun ciMatched(expectedCi: Long?, measuredCi: Long?): Boolean? = when {
+        expectedCi == null || measuredCi == null -> null
+        else -> expectedCi == measuredCi
+    }
+
+    /**
+     * #190 图例统计 "CI 匹配 n/m"：m = 可判定对数（期望与实测都存在的点），
+     * n = 其中严格相等者。无可判定对（null）→ 图例整段隐藏。
+     */
+    fun ciMatchStats(points: List<MapPoint>): Pair<Int, Int>? {
+        val comparable = points.filter { it.expectedCi != null && it.measuredCi != null }
+        if (comparable.isEmpty()) return null
+        val matched = comparable.count { it.ciMatched == true }
+        return matched to comparable.size
+    }
 
     /**
      * The measured-vs-plan match verdict — the EXACT CoordinateGuard assertion
@@ -263,6 +303,10 @@ object PlanMapPoints {
                 measuredLat = fix?.latitude,
                 measuredLng = fix?.longitude,
                 measuredMatched = fix != null && measuredMatched(row.latitude, row.longitude, fix),
+                expectedCi = row.expectedCi,
+                measuredCi = fix?.servingCi,
+                // fix 为 null 时 expected/measured 不可判定 → ciMatched 保持 null（同 fix!=null 守卫语义）
+                ciMatched = fix?.let { ciMatched(row.expectedCi, it.servingCi) },
             )
         }
 }

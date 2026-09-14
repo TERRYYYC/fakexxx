@@ -47,9 +47,60 @@ data class ServingCellReading(
 data class CiHeroView(
     val reading: ServingCellReading?,
     val badge: CiBadge?,
+    /**
+     * #190：当前计划行的期望 serving cell CI（location_tasks.expectedCi）；
+     * null = 计划行未带 ci —— 小区卡不渲染对照行（只显示实测大数字）。
+     */
+    val expectedCi: Long? = null,
 ) {
     /** Display form of the big number; "--" when the framework withheld the CI. */
     val ciText: String get() = reading?.ci?.toString() ?: "--"
+
+    /**
+     * #190 期望 vs 实测对照（展示层）：期望缺失 → null（无对照行，实测已是大
+     * 数字）；否则按 [CiVerification.of] 判定。绝入不了信任路径（#185 红线）。
+     */
+    val verification: CiVerification?
+        get() = CiVerification.of(expectedCi, reading?.ci)
+}
+
+/**
+ * #190 CI 验证层的展示词汇：期望（计划行 expectedCi）vs 实测（观察链采样 /
+ * 小区卡实时读数）serving cell CI 的对照结论。判定 = 严格相等，零阈值零换算
+ * （两侧同为 28-bit ECI 十进制，与 #193 读回门 ci 腿同域）。
+ *
+ * 三态穷尽（expectedCi == null 已在 [of] 收窄为 null，不进本枚举）：
+ *   MATCHED    期望=实测（hook 生效的最直接展示证据）
+ *   MISMATCHED 期望≠实测（hook 前/失效时的常态——正是本层要暴露的事实）
+ *   UNMEASURED 实测未捕获（观察/读数缺小区字段）——显示"未捕获"，绝不猜测
+ *
+ * SCOPE RED LINE（同 #185）：纯展示投影，绝不入 TrustPolicy / 配额入账 /
+ * 任务选择——信任语义的唯一输入仍是 §6.4 观察证据链本体。
+ */
+data class CiVerification(
+    val state: State,
+    val expectedCi: Long,
+    val measuredCi: Long?,
+) {
+    enum class State { MATCHED, MISMATCHED, UNMEASURED }
+
+    /** 展示文本：匹配 / 不匹配 / 实测未捕获。 */
+    val verdictText: String
+        get() = when (state) {
+            State.MATCHED -> "匹配"
+            State.MISMATCHED -> "不匹配"
+            State.UNMEASURED -> "实测未捕获"
+        }
+
+    companion object {
+        /** 期望缺失 → null（无对照行）；否则三态判定。 */
+        fun of(expectedCi: Long?, measuredCi: Long?): CiVerification? = when {
+            expectedCi == null -> null
+            measuredCi == null -> CiVerification(State.UNMEASURED, expectedCi, null)
+            expectedCi == measuredCi -> CiVerification(State.MATCHED, expectedCi, measuredCi)
+            else -> CiVerification(State.MISMATCHED, expectedCi, measuredCi)
+        }
+    }
 }
 
 /** The current plan point for the coordinate pill / map caption (plan truth, not GPS). */
