@@ -60,8 +60,11 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class RunV2DashboardViewModelTest {
 
-    // Rule order matters: MainDispatcherRule is outermost (setMain before everything;
-    // drain + retry-guarded resetMain after everything). DataStoreTestRule runs inside it.
+    // Rule order (empirical): JUnit4 wraps later-declared @Rule fields OUTSIDE earlier
+    // ones, so MainDispatcherRule runs INSIDE DataStoreTestRule — setMain → test → drain
+    // + retry-guarded resetMain → dataStore.finished (scope cancel + temp-dir delete
+    // after resetMain; safe — the DataStore scope is real IO and never dispatches on
+    // Main, see DataStoreTestRule's KDoc).
     // #143 governance replaces the hand-rolled setMain/createdViewModels/Thread.sleep(250)
     // teardown, whose fixed settle window still raced trailing Main dispatches on slow CI.
     @get:Rule

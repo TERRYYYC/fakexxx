@@ -25,8 +25,17 @@ import java.util.UUID
  *  - every file is deleted in [finished] — the hand-rolled teardowns leaked some files
  *    (SelfHeal's metrics file, RunV2's self-heal file).
  *
- * Declare AFTER [MainDispatcherRule] so scope cancel + file delete happen while Main is
- * still installed, before its resetMain.
+ * Ordering (empirically verified): declared after [MainDispatcherRule], this rule wraps
+ * OUTSIDE it (JUnit4 applies later `@Rule` fields on the outside), so [finished] runs
+ * AFTER the Main rule's drain + resetMain — scope cancel + temp-dir delete happen with
+ * Main already reset. That is safe: this scope is a real-IO scope (SupervisorJob +
+ * Dispatchers.IO) and DataStore's actor/writer never dispatch on Main, so nothing here
+ * can hit the Main-swap concurrency guard; conversely, the Main-traffic sources are
+ * still drained inside MainDispatcherRule.finished BEFORE its resetMain. No write
+ * continuation survives into the next test (scope.cancel runs in this same per-test
+ * teardown); the delete can only race a writer that has not yet observed cancellation —
+ * i.e. an abandoned file in this test's own temp dir, never cross-test state, since
+ * every test gets a fresh directory.
  */
 class DataStoreTestRule : TestWatcher() {
 

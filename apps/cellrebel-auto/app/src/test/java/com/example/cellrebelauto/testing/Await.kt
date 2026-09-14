@@ -12,6 +12,9 @@ package com.example.cellrebelauto.testing
  * real hang) while riding out runner contention.
  *
  * Centralized so the deadline can never silently regress to a per-class constant again.
+ *
+ * Mirror file of apps/qianwangyou/app/src/test/java/name/caiyao/fakegps/testing/Await.kt —
+ * any change here must be double-written to the mirror.
  */
 fun awaitUntil(deadlineMs: Long = 30_000, condition: suspend () -> Boolean): Boolean {
     val deadline = System.currentTimeMillis() + deadlineMs

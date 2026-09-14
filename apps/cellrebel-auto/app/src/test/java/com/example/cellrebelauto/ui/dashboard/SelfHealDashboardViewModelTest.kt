@@ -47,9 +47,11 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class SelfHealDashboardViewModelTest {
 
-    // Rule order matters: MainDispatcherRule is outermost (setMain before everything;
-    // drain + retry-guarded resetMain after everything). DataStoreTestRule runs inside it
-    // (per-test temp dir + real-IO scope, cancelled + deleted before the resetMain).
+    // Rule order (empirical): JUnit4 wraps later-declared @Rule fields OUTSIDE earlier
+    // ones, so MainDispatcherRule runs INSIDE DataStoreTestRule — dataStore.starting →
+    // setMain → test → drain + retry-guarded resetMain → dataStore.finished (scope cancel
+    // + temp-dir delete after resetMain; safe — the DataStore scope is real IO and never
+    // dispatches on Main, see DataStoreTestRule's KDoc).
     // #143 governance replaces the hand-rolled setMain/createdViewModels/Thread.sleep(250)
     // teardown, whose fixed settle window still raced trailing Main dispatches on slow CI
     // runners (watchdog toggle flakes, #185/#196).

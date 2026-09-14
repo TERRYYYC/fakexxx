@@ -37,8 +37,17 @@ import org.junit.runner.Description
  *     `Thread.sleep(250)` settle window. Note the library's write may take effect BEFORE
  *     its post-write check throws, so retrying set/reset is idempotent-safe.
  *
- * Declare this rule FIRST so it is the outermost rule: setMain runs before everything,
- * resetMain (with drain + retry) after everything.
+ * Ordering (empirically verified): JUnit4 applies later-declared `@Rule` fields on the
+ * OUTSIDE, so declaring this rule FIRST makes it the INNERMOST rule. Observed order with
+ * declaration [this first, DataStoreTestRule second]:
+ *   dataStore.starting → main.starting (setMain) → test →
+ *   main.finished (cancelTracked + retry-guarded resetMain) → dataStore.finished.
+ * The invariant that matters lives inside [finished]: every tracked Main-traffic source
+ * is drained BEFORE resetMain — that property, not outermost nesting, is what the swap
+ * retry relies on. setMain running after dataStore.starting is harmless (that only
+ * creates a temp dir + real-IO scope, no Main traffic), and sibling-rule cleanup running
+ * after resetMain is safe (real-IO scope, never dispatches on Main — see
+ * DataStoreTestRule's KDoc).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRule(
