@@ -7,12 +7,15 @@ import android.content.ServiceConnection;
 import android.location.Location;
 import android.os.Binder;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -32,6 +35,14 @@ public final class SystemServerOracleInstaller {
     private static final AtomicBoolean INSTALL_STARTED = new AtomicBoolean();
     private static final AtomicBoolean BRIDGE_BIND_STARTED = new AtomicBoolean();
     private static final AtomicLong BRIDGE_CONNECTION_GENERATION = new AtomicLong();
+    // #194 registration-retry state. Every bridge callback (boot phase, ServiceConnection,
+    // Handler runnables) runs on system_server's main thread, so atomics only carry visibility,
+    // not mutual exclusion. REGISTERED_GENERATION records the generation whose registerOracle
+    // call completed; a generation higher than that has not registered yet.
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    private static final AtomicReference<ServiceConnection> ACTIVE_CONNECTION = new AtomicReference<>();
+    private static final AtomicLong REGISTERED_GENERATION = new AtomicLong(Long.MIN_VALUE);
+    private static final AtomicReference<BridgeBindRetry> BRIDGE_RETRY = new AtomicReference<>();
     private static final ThreadLocal<CoveredCallerProvenance> COVERED_CALLER_PROVENANCE =
             new ThreadLocal<>();
     private static final OrderedCoveredMutationFinisher COVERED_MUTATION_FINISHER =
@@ -459,11 +470,32 @@ public final class SystemServerOracleInstaller {
         bindBridge(context);
     }
 
+    /**
+     * #194: every failure path of the phase-600 bridge registration (rejected bindService,
+     * null binding, registerOracle failure, or a bound generation whose QWY process died
+     * before the service ever connected) previously ended in poisonCallback with no retry, so
+     * a single reboot-time hiccup left the oracle unregistered until a manual reinstall. Each
+     * path now feeds [BridgeBindRetry], which schedules bounded backoff rebinds (1s/5s/30s/30s)
+     * and logs a final give-up line; a completed registration resets that budget, and so does
+     * every framework-driven onBindingDied rebind (#195 review: fresh generation → fresh
+     * budget, so its own failures stay retried and logged).
+     */
     private static void bindBridge(Context context) {
         if (!BRIDGE_BIND_STARTED.compareAndSet(false, true)) return;
         final long connectionGeneration = BRIDGE_CONNECTION_GENERATION.incrementAndGet();
         Intent intent = new Intent();
         intent.setComponent(new ComponentName(BuildConfig.APPLICATION_ID, BRIDGE_SERVICE_CLASS));
+        // #194 watchdog: catches the exact mi14 failure mode — the bind was accepted but the
+        // QWY process died during startup (direct-boot CE crash), so the service never
+        // connected and no ServiceConnection callback ever fired. Generation checks make this
+        // runnable inert once any newer bind or a late successful registration supersedes it.
+        final Runnable connectWatchdog = () -> {
+            if (BRIDGE_CONNECTION_GENERATION.get() != connectionGeneration) return;
+            if (REGISTERED_GENERATION.get() >= connectionGeneration) return;
+            bridgeRetry(context).onRegistrationFailed(
+                    "bound for " + (BridgeBindRetry.CONNECT_WATCHDOG_MS / 1000)
+                            + "s but QWY bridge never connected");
+        };
         ServiceConnection connection = new ServiceConnection() {
             @Override
             public void onServiceConnected(ComponentName name, IBinder service) {
@@ -474,9 +506,18 @@ public final class SystemServerOracleInstaller {
                         throw new IllegalStateException("QWY registrar binder unavailable");
                     }
                     registrar.registerOracle(oracleBinder);
+                    // #194: registration completed — retire the watchdog and reset the retry
+                    // budget so any later bridge generation starts with a fresh one.
+                    REGISTERED_GENERATION.set(connectionGeneration);
+                    bridgeRetry(context).onRegistrationSucceeded();
+                    MAIN_HANDLER.removeCallbacks(connectWatchdog);
                     oracleBinder.onBridgeConnected(context, connectionGeneration);
                 } catch (Throwable callbackFailure) {
                     oracleBinder.poisonCallback(callbackFailure);
+                    if (REGISTERED_GENERATION.get() < connectionGeneration) {
+                        bridgeRetry(context).onRegistrationFailed(
+                                "registerOracle failed: " + callbackFailure);
+                    }
                 }
             }
 
@@ -493,6 +534,13 @@ public final class SystemServerOracleInstaller {
                 } catch (RuntimeException callbackFailure) {
                     oracleBinder.poisonCallback(callbackFailure);
                 }
+                // #195 review (Medium): the framework hands this rebind a brand-new generation,
+                // so it also gets a fresh retry budget — after a give-up, a binding-death rebind
+                // whose registration failed again would otherwise be budgetless AND silent
+                // (gaveUpLogged suppressed the log). Only the budget resets; the generation
+                // guards in the retry runnable above stay intact, so a stale scheduled rebind
+                // still cannot tear down the healthy binding this path creates.
+                bridgeRetry(context).resetBudget();
                 BRIDGE_BIND_STARTED.set(false);
                 bindBridge(context);
             }
@@ -501,8 +549,10 @@ public final class SystemServerOracleInstaller {
             public void onNullBinding(ComponentName name) {
                 oracleBinder.poisonCallback(
                         new IllegalStateException("QWY registrar returned a null binding"));
+                bridgeRetry(context).onRegistrationFailed("registrar returned a null binding");
             }
         };
+        ACTIVE_CONNECTION.set(connection);
         final boolean bound;
         try {
             bound = context.bindService(
@@ -512,11 +562,50 @@ public final class SystemServerOracleInstaller {
         } catch (RuntimeException failure) {
             BRIDGE_BIND_STARTED.set(false);
             oracleBinder.poisonCallback(failure);
+            bridgeRetry(context).onRegistrationFailed("bindService threw: " + failure);
             return;
         }
         if (!bound) {
             BRIDGE_BIND_STARTED.set(false);
             oracleBinder.poisonCallback(new IllegalStateException("phase-600 bridge bind rejected"));
+            bridgeRetry(context).onRegistrationFailed("phase-600 bridge bind rejected");
+            return;
         }
+        MAIN_HANDLER.postDelayed(connectWatchdog, BridgeBindRetry.CONNECT_WATCHDOG_MS);
+    }
+
+    /** Lazily builds the retry budget wired to a main-thread rebind of the active generation. */
+    private static BridgeBindRetry bridgeRetry(Context context) {
+        BridgeBindRetry existing = BRIDGE_RETRY.get();
+        if (existing != null) return existing;
+        BridgeBindRetry created = new BridgeBindRetry(new BridgeBindRetry.Environment() {
+            @Override
+            public void scheduleRebind(long delayMs) {
+                final long scheduledGeneration = BRIDGE_CONNECTION_GENERATION.get();
+                MAIN_HANDLER.postDelayed(() -> {
+                    // A newer bind (onBindingDied path) or a late successful registration
+                    // supersedes this scheduled retry; tearing down the healthy binding again
+                    // would be a regression, not a recovery.
+                    if (BRIDGE_CONNECTION_GENERATION.get() != scheduledGeneration) return;
+                    if (REGISTERED_GENERATION.get() >= scheduledGeneration) return;
+                    ServiceConnection stale = ACTIVE_CONNECTION.get();
+                    if (stale != null) {
+                        try {
+                            context.unbindService(stale);
+                        } catch (RuntimeException ignored) {
+                            // The binding was already torn down; the unbind is best-effort.
+                        }
+                    }
+                    BRIDGE_BIND_STARTED.set(false);
+                    bindBridge(context);
+                }, delayMs);
+            }
+
+            @Override
+            public void log(String message) {
+                XposedBridge.log(TAG + ": " + message);
+            }
+        });
+        return BRIDGE_RETRY.compareAndSet(null, created) ? created : BRIDGE_RETRY.get();
     }
 }
