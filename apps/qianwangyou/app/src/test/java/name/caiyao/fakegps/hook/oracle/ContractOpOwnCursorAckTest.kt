@@ -414,14 +414,19 @@ class ContractOpOwnCursorAckTest {
     }
 
     @Test
-    fun `unreadable oracle at bracket completion stays fail-closed - observe still bumps`() {
+    fun `unreadable oracle at bracket completion - observe attributes the owner digest interval (#199)`() {
         val g = Graph()
         val applyReceipt = g.apply("apply-166-blind")
         g.observeActive(applyReceipt, "obs-166-blind-1")
 
         // Transient binder failure exactly while the handler tries to read the
-        // cursor for its ack: the ack must be skipped (never faked), and the
-        // next observe keeps today's conservative external-change behavior.
+        // cursor for its ack: the ack itself must be skipped (never faked).
+        // #199 form 1 (mi14 attempts 386/391): the owner's bracket cleanly
+        // published its after-digest — the next observe ATTRIBUTES the cursor
+        // motion to that durably recorded digest interval instead of
+        // double-counting it as an external change (the old +1 bump here is
+        // exactly what failed the engine's four-leg equality and rolled the
+        // task cursor back on a durable-forward provider).
         g.release(applyReceipt, "release-166-blind")
         g.gate.mode = SourceMode.BLIND
         val advanceReceipt = g.advance(applyReceipt, "advance-166-blind")
@@ -429,28 +434,31 @@ class ContractOpOwnCursorAckTest {
 
         val cursorAfter = checkNotNull(g.stableCursor())
         assertNull(
-            "a skipped ack must not be pretended into the store",
+            "the ack itself stays skipped at bracket time (no faked watermark)",
             g.commitStore.acknowledgement(cursorAfter),
         )
         val verify = g.observePostAdvance(applyReceipt, "advance-166-blind")
         assertEquals(
-            "fail-closed = current behavior: the unacked cursor still bumps",
-            advanceReceipt.effectiveEnvironmentRevision + 1L,
+            "#199: the observe attributes the owner's own digest transition — " +
+                "the verify observe reads the receipt revision",
+            advanceReceipt.effectiveEnvironmentRevision,
             verify.environmentRevision,
         )
         assertEquals(ContinuityCoverageV1.FULL.wire, verify.continuityCoverageWire)
     }
 
     @Test
-    fun `foreign cursor advance inside the bracket window is not acknowledged`() {
+    fun `foreign cursor advance inside the bracket window is digest-attributed at observe (#199)`() {
         val g = Graph()
         val applyReceipt = g.apply("apply-166-foreign")
         g.observeActive(applyReceipt, "obs-166-foreign-1")
 
         // A foreign covered platform mutation lands between the handler's
         // pre-bracket read and its own bracket: the sequence delta is no longer
-        // the owner's own +2, so the ack must be withheld and the observe must
-        // keep reporting the external change.
+        // the owner's own +2, so the BRACKET-TIME ack is withheld. #199 form 1:
+        // the foreign motion is digest-neutral (platform calls never publish an
+        // after-digest) and the owner's own digest change is already
+        // revision-counted — the observe attributes both instead of bumping.
         g.release(applyReceipt, "release-166-foreign")
         g.gate.mode = SourceMode.FOREIGN_INSIDE_OWNER_WINDOW
         val advanceReceipt = g.advance(applyReceipt, "advance-166-foreign")
@@ -459,13 +467,14 @@ class ContractOpOwnCursorAckTest {
 
         val cursorAfter = checkNotNull(g.stableCursor())
         assertNull(
-            "a cursor carrying a foreign advance must not be owner-acknowledged",
+            "the bracket-time ack stays withheld (no faked watermark)",
             g.commitStore.acknowledgement(cursorAfter),
         )
         val verify = g.observePostAdvance(applyReceipt, "advance-166-foreign")
         assertEquals(
-            "the foreign semantic change is still reported as a revision bump",
-            advanceReceipt.effectiveEnvironmentRevision + 1L,
+            "#199: the observe attributes the skipped-ack cursor — the verify " +
+                "observe reads the receipt revision",
+            advanceReceipt.effectiveEnvironmentRevision,
             verify.environmentRevision,
         )
         assertEquals(ContinuityCoverageV1.FULL.wire, verify.continuityCoverageWire)
