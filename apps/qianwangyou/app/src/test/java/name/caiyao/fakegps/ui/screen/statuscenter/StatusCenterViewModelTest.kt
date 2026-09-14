@@ -3,11 +3,6 @@ package name.caiyao.fakegps.ui.screen.statuscenter
 import android.app.Application
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
 import name.caiyao.fakegps.config.SpoofModules
 import name.caiyao.fakegps.data.SpoofSettings
 import name.caiyao.fakegps.data.db.AppDatabase
@@ -17,10 +12,13 @@ import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
 import name.caiyao.fakegps.mockprovider.MockLocationConfig
 import name.caiyao.fakegps.mockprovider.MockProviderState
 import name.caiyao.fakegps.mockprovider.MockProviderStatusStore
+import name.caiyao.fakegps.testing.MainDispatcherRule
+import name.caiyao.fakegps.testing.awaitUntil
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -36,8 +34,12 @@ import org.robolectric.RobolectricTestRunner
  *
  * 模块开关复用 T5 的 [name.caiyao.fakegps.ui.screen.settings.ModuleToggleUpdate] 持久化→发布
  * 序列，这里钉「状态中心的开关行也走同一条发布链」。
+ *
+ * #143 治理：setMain/drain/resetMain 与 VM 泄漏治理收敛到 [MainDispatcherRule]——
+ * 此前 tearDown 直接 resetMain 且从不 cancel VM，init 收集器（repo.observeEntities 等）
+ * 在真实 IO 线程上的在途 dispatch 会撞上下一个测试类的 setMain，即
+ * "Dispatchers.Main is used concurrently with setting it"（CI 慢 runner 专属 flake）。
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class StatusCenterViewModelTest {
 
@@ -49,6 +51,11 @@ class StatusCenterViewModelTest {
             return nextResult
         }
     }
+
+    // 最外层规则：starting 里 setMain，finished 里 drain 全部被追踪的 VM scope 后
+    // 重试收口 resetMain。#143 治理。
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var db: AppDatabase
     private val publisher = RecordingPublisher()
@@ -62,7 +69,6 @@ class StatusCenterViewModelTest {
 
     @Before
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
         val app = ApplicationProvider.getApplicationContext<Application>()
         db = Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java)
             .allowMainThreadQueries()
@@ -77,8 +83,10 @@ class StatusCenterViewModelTest {
 
     @After
     fun tearDown() {
+        // 先 drain 全部 VM 的 Main-dispatching scope，再关库；resetMain 由
+        // MainDispatcherRule.finished 统一执行（带竞态重试收口）。
+        mainDispatcherRule.cancelTracked()
         db.close()
-        Dispatchers.resetMain()
     }
 
     private fun newViewModel(
@@ -98,7 +106,7 @@ class StatusCenterViewModelTest {
             pendingCallersLoader = { _ -> pending },
             selfHooked = selfHooked,
             clock = { fixedNowMs },
-        )
+        ).also { mainDispatcherRule.trackViewModel(it) }
     }
 
     private fun candidate(pkg: String = "com.example.auto") = PendingPairingCandidate(
@@ -107,13 +115,6 @@ class StatusCenterViewModelTest {
         observedVersionCode = 1L,
         firstSeenAtElapsedRealtimeMs = 0L,
     )
-
-    /** Room 流 / IO 协程的异步到达窗口：与 CollectionViewModelAnchorTest 同一轮询纪律。 */
-    private fun await(message: String, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + 10_000L
-        while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(20L)
-        assertTrue(message, condition())
-    }
 
     // ---- 三灯三态 ------------------------------------------------------------------
 
@@ -133,7 +134,7 @@ class StatusCenterViewModelTest {
             pending = emptyList(),
         )
 
-        await("anchored profile row reaches the projection") {
+        awaitUntil("anchored profile row reaches the projection") {
             vm.ui.value.profile.state == ProfileCardState.ANCHORED
         }
         val ui = vm.ui.value
@@ -163,7 +164,7 @@ class StatusCenterViewModelTest {
         val vm = newViewModel(
             snapshot = fixedSnapshot.copy(activeProfileId = 1L, publishFailed = true),
         )
-        await("pointer row reaches the projection") {
+        awaitUntil("pointer row reaches the projection") {
             vm.ui.value.profile.state == ProfileCardState.PUBLISH_FAILED
         }
         // 档案名照常显示，但徽标必须说「发布失败」，不许假装已锚定。
@@ -217,14 +218,14 @@ class StatusCenterViewModelTest {
             snapshotReader = { _ -> fixedSnapshot },
             pendingCallersLoader = { _ -> pending },
             selfHooked = true,
-        )
+        ).also { mainDispatcherRule.trackViewModel(it) }
 
         assertTrue(vm.ui.value.todos.any { it.title == "等待批准 Auto" })
 
         // 批准发生在别处（Auto 侧/设置页）；状态中心回读为空 → 待办条消失。
         pending = emptyList()
         vm.refresh()
-        await("todo bar disappears once the readback is empty") {
+        awaitUntil("todo bar disappears once the readback is empty") {
             vm.ui.value.todos.none { it.title == "等待批准 Auto" }
         }
     }
@@ -249,7 +250,7 @@ class StatusCenterViewModelTest {
 
         vm.anchorActiveProfile(inserted)
 
-        await("anchor reaches the publish chain with the explicit profile id") {
+        awaitUntil("anchor reaches the publish chain with the explicit profile id") {
             publisher.requests.any { it.profileId == inserted }
         }
     }
@@ -266,7 +267,7 @@ class StatusCenterViewModelTest {
 
         vm.anchorActiveProfile(inserted)
 
-        await("failure notice is surfaced") { vm.anchorNotice.value != null }
+        awaitUntil("failure notice is surfaced") { vm.anchorNotice.value != null }
         assertTrue(vm.anchorNotice.value!!.contains("失败"))
     }
 

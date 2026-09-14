@@ -1,12 +1,14 @@
 package com.example.cellrebelauto.ui.dashboard
 
 import android.app.Application
-import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.cellrebelauto.data.SelfHealSettings
 import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
+import com.example.cellrebelauto.testing.DataStoreTestRule
+import com.example.cellrebelauto.testing.MainDispatcherRule
+import com.example.cellrebelauto.testing.awaitUntil
 import com.example.cellrebelauto.ui.MainViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineScope
@@ -16,33 +18,13 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import java.io.File
-import java.util.UUID
-
-/**
- * Bounded spin: the DataStore write runs on its own IO executor outside
- * runTest's scheduler, so assertions poll instead of assuming completion.
- * [#143 family] 5s was too tight on loaded CI runners (the watchdog toggle
- * test flaked there while passing locally 100%): the whole suite's parallel
- * IO work can starve DataStore's single-thread executor for many seconds.
- * 30s keeps the bound meaningful (still fails on a real hang) while riding
- * out runner contention.
- */
-private fun awaitUntil(deadlineMs: Long = 30_000, condition: suspend () -> Boolean) {
-    val deadline = System.currentTimeMillis() + deadlineMs
-    while (!kotlinx.coroutines.runBlocking { condition() } && System.currentTimeMillis() < deadline) {
-        Thread.sleep(20)
-    }
-}
 
 /**
  * T7 — the run dashboard's self-heal switch section, pinned at the ViewModel
@@ -55,68 +37,57 @@ private fun awaitUntil(deadlineMs: Long = 30_000, condition: suspend () -> Boole
  *    direct settings readback assertions;
  *  - a swapped wiring (watchdog toggle writes the guard key) fails per-key.
  *
+ * #143 governance: Main lifecycle (setMain / drain / resetMain) and the DataStore
+ * lifecycle (per-test temp files, real-IO scope) live in the shared rules; write
+ * assertions poll via the shared [awaitUntil] whose deadline is CI-safe.
+ *
  * # 自愈三开关 ViewModel oracle：读写均落在 T4 的 SelfHealSettings，逐键断言
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class SelfHealDashboardViewModelTest {
 
+    // Rule order matters: MainDispatcherRule is outermost (setMain before everything;
+    // drain + retry-guarded resetMain after everything). DataStoreTestRule runs inside it
+    // (per-test temp dir + real-IO scope, cancelled + deleted before the resetMain).
+    // #143 governance replaces the hand-rolled setMain/createdViewModels/Thread.sleep(250)
+    // teardown, whose fixed settle window still raced trailing Main dispatches on slow CI
+    // runners (watchdog toggle flakes, #185/#196).
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule()
+
+    @get:Rule
+    val dataStoreRule = DataStoreTestRule()
+
     private lateinit var db: AppDatabase
-    private lateinit var dataStoreFile: File
-    private lateinit var metricsStoreFile: File
-    private lateinit var dataStoreScope: CoroutineScope
 
     @Before
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
         db = Room.inMemoryDatabaseBuilder(
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java
         ).build()
-        dataStoreFile = File(
-            System.getProperty("java.io.tmpdir"),
-            "self-heal-dash-test-${UUID.randomUUID()}.preferences_pb"
-        )
-        metricsStoreFile = File(
-            System.getProperty("java.io.tmpdir"),
-            "dash-metrics-test-${UUID.randomUUID()}.preferences_pb"
-        )
-        // A REAL scope, not runTest's backgroundScope: DataStore IO dispatched to the
-        // test scheduler would deadlock under the oracle's runBlocking polling.
-        dataStoreScope = CoroutineScope(Dispatchers.IO + kotlinx.coroutines.Job())
     }
 
     @After
     fun tearDown() {
-        dataStoreScope.cancel()
-        // Test hygiene (Wave-1 #111 lesson): cancel every constructed MainViewModel's
-        // scope BEFORE resetMain — leaked Main-dispatcher coroutines race the next
-        // test class's setMain (the PlanProfileConsistencyViewModelTest flake).
-        createdViewModels.forEach { it.viewModelScope.cancel() }
-        createdViewModels.clear()
-        // Full drain (review §②): viewModelScope.cancel() is asynchronous — in-flight
-        // DataStore/Room continuations still dispatch through the process-global
-        // TestMainDispatcher, whose RW lock the NEXT setMain/resetMain takes. Give
-        // them a bounded settle window so the lock is free when the next class
-        // swaps the delegate.
-        Thread.sleep(250)
+        // Drain every VM's Main-dispatching scope BEFORE db.close/resetMain (the #111
+        // lesson); MainDispatcherRule.finished re-runs this (idempotent) and resets Main
+        // with retry-on-conflict — deterministic convergence instead of sleep(250).
+        mainDispatcherRule.cancelTracked()
         db.close()
-        Dispatchers.resetMain()
-        dataStoreFile.delete()
     }
 
-    // Every MainViewModel this class constructs, so tearDown can drain them all.
-    private val createdViewModels = mutableListOf<MainViewModel>()
-
     private fun settings() = SelfHealSettings(
-        PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { dataStoreFile })
+        // rule.store resolves ONE stable file per DataStore (produceFile must be idempotent).
+        dataStoreRule.store("self-heal-dash-test")
     )
 
     // Rebase note (T7 isolation): inject the metrics store too — the VM's default
     // DashboardMetricsSettings(application) falls back to a PROCESS-PERSISTENT
     // preferencesDataStore delegate shared across Robolectric class boundaries.
     private fun metricsSettings() = com.example.cellrebelauto.data.DashboardMetricsSettings(
-        PreferenceDataStoreFactory.create(scope = dataStoreScope, produceFile = { metricsStoreFile })
+        dataStoreRule.store("dash-metrics-test")
     )
 
     private fun vm(selfHeal: SelfHealSettings): MainViewModel =
@@ -128,7 +99,7 @@ class SelfHealDashboardViewModelTest {
             injectedAccessGate = CutoverAccessGate.open(),
             injectedSelfHealSettings = selfHeal,
             injectedMetricsSettings = metricsSettings()
-        ).also { createdViewModels += it }
+        ).also { mainDispatcherRule.trackViewModel(it) }
 
     @Test
     fun `config flow surfaces the persisted defaults`() = runTest {
