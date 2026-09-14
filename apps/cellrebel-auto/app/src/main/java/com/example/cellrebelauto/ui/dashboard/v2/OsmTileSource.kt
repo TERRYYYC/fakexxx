@@ -17,9 +17,11 @@ package com.example.cellrebelauto.ui.dashboard.v2
  *
  * [TILE_SOURCE_URL] 是唯一的瓦片源配置点（TILE_SOURCE 配置点）：换源只改这里
  * 与 [userAgent]，选卡/降级/归属逻辑不动。注意换源后归属字符串须同步替换为
- * 数据源要求的信用文本（ODbL © OpenStreetMap contributors 仅对 OSM 数据）。
+ * 数据源要求的信用文本（ODbL © OpenStreetMap contributors 仅对 OSM 数据），
+ * 且**必须同步 bump [TILE_SOURCE_CACHE_NAME]**（osmdroid 磁盘缓存 key 的组成
+ * 部分，否则升级设备的旧缓存按同 key 命中挡住新源——#183 踩坑，见该常量 KDoc）。
  *
- * # 瓦片契约：归属常量（ODbL 强制）、TILE_SOURCE 单点、UA 带 app id
+ * # 瓦片契约：归属常量（ODbL 强制）、TILE_SOURCE 单点（换源须同 bump 缓存名）、UA 带 app id
  */
 object OsmTileSource {
 
@@ -35,6 +37,17 @@ object OsmTileSource {
      * 见类注释与 issue #182）。镜像与官方源同样仅低量/内部测试合规。
      */
     const val TILE_SOURCE_URL = "https://tile.openstreetmap.de/"
+
+    /**
+     * osmdroid `XYTileSource` 的第一个参数（name）——**磁盘缓存 key 的组成部分**。
+     * 换 [TILE_SOURCE_URL] 时必须同步 bump 此名：#183 把源从 tile.openstreetmap.org
+     * 换到 .de 镜像时没 bump（仍叫 "fakexxx-auto-osm"），升级设备上 .org 时代的
+     * 403 占位 PNG 按同一 key 命中，新镜像瓦片永远不出网，g54 真机 259/275 张
+     * 全是旧占位块、手动清缓存才恢复（证据：issue #182 评论，2026-09-13 真机
+     * 验证段）。命名约定 = 原名 + 源域名 TLD 后缀（"-de" ↔ tile.openstreetmap.**de**），
+     * [OsmTileSourceTest] 钉死两者一致性，防将来换源忘 bump。
+     */
+    const val TILE_SOURCE_CACHE_NAME = "fakexxx-auto-osm-de"
 
     /** v3 MAPZ.min — 原型全屏地图的最小整数层级。 */
     const val MIN_ZOOM = 3
