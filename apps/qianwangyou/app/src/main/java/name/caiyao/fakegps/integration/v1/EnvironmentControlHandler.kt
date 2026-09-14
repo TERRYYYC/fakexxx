@@ -1106,12 +1106,16 @@ class EnvironmentControlHandler(
      *
      * Fire-and-forget by red line: a throwing seam impl is degraded to a
      * diagnostics line — the contract result that triggered the signal must
-     * never fail because the anti-freeze means misbehaved.
+     * never fail because the anti-freeze means misbehaved. The blockingLease()
+     * recompute sits inside the try for the same reason: it decodes the stored
+     * row via DurableFieldCodec (whose corrupt-framing check throws), and that
+     * failure must degrade too, not escape after the contract mutation
+     * already committed.
      */
     private fun signalLeasePressure() {
         if (keepAlive == null) return
-        val hasBlocking = leaseStore.blockingLease() != null
         try {
+            val hasBlocking = leaseStore.blockingLease() != null
             keepAlive.onLeasePressure(hasBlocking)
         } catch (failure: RuntimeException) {
             diagnostics.warn(

@@ -33,8 +33,8 @@ import name.caiyao.fakegps.ui.ComposeActivity
  *  - ACTION_ENGAGE（或首次创建）：立即 startForeground（onCreate 里做，掐灭
  *    startForegroundService 的 fg-required 竞态）+ 极轻心跳（仅打日志，不持
  *    wakelock —— FGS 前台态本身即 PowerKeeper 豁免）。
- *  - ACTION_RELEASE：stopForeground + stopSelf。lease 全部收敛（无阻塞 lease）
- *    时由控制器调用，不常驻耗电。
+ *  - release：lease 全部收敛（无阻塞 lease）时控制器 stopService（→ onDestroy），
+ *    不常驻耗电。停止是 stopService 的职责，服务没有"命令型停止"分支。
  *  - START_NOT_STICKY：死即止，重启由下一个合同信号负责。
  *
  * FGS 类型（targetSdk 35 / API 34+ 强制声明）：specialUse —— 本服务不投递
@@ -55,25 +55,18 @@ class HookKeepAliveService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // onCreate 内 startForeground：即使 ACTION_RELEASE 紧随 startForegroundService
-        // 到达，fg-required 也已满足，不会触发"did not then call startForeground"崩溃。
+        // onCreate 内 startForeground：不依赖 intent 内容——只要经
+        // startForegroundService 拉起，fg-required 即已满足，不会触发
+        // "did not then call startForeground"崩溃。
         beginForeground()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_RELEASE -> {
-                handler.removeCallbacks(tick)
-                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                stopSelf()
-                return START_NOT_STICKY
-            }
-            // ACTION_ENGAGE 与重复 start（幂等）：重置心跳即可
-            else -> {
-                handler.removeCallbacks(tick)
-                handler.postDelayed(tick, TICK_MILLIS)
-            }
-        }
+        // ENGAGE、重复 start、无 action start 一律幂等：重置心跳即可。
+        // release 走控制器的 stopService（→ onDestroy），无命令 intent；
+        // stopService 对未运行的服务是无害 no-op，也不受后台 start 限制。
+        handler.removeCallbacks(tick)
+        handler.postDelayed(tick, TICK_MILLIS)
         return START_NOT_STICKY
     }
 
@@ -125,7 +118,6 @@ class HookKeepAliveService : Service() {
     companion object {
         private const val TAG = "HookKeepAlive"
         const val ACTION_ENGAGE = "name.caiyao.fakegps.action.HOOK_KEEP_ALIVE_ENGAGE"
-        const val ACTION_RELEASE = "name.caiyao.fakegps.action.HOOK_KEEP_ALIVE_RELEASE"
         const val CHANNEL_ID = "hook_keepalive"
         const val NOTIFICATION_ID = 2402
 

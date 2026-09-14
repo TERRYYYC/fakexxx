@@ -11,7 +11,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -24,9 +23,9 @@ import org.robolectric.Shadows.shadowOf
  *
  *  - [HookKeepAlive] engage → startForegroundService(HookKeepAliveService, ENGAGE)
  *  - System Mock 前台运行中（MockProviderService 已有 FGS）→ 不重复拉起
- *  - [HookKeepAlive] disengage → stopService
+ *  - [HookKeepAlive] disengage → stopService（生产 release 路径，服务侧无命令 intent）
  *  - 服务本体：创建即前台（onCreate startForeground，掐灭 fg-required 竞态），
- *    ENGAGE 幂等重置心跳，RELEASE → stopForeground + stopSelf
+ *    ENGAGE 幂等重置心跳，任何命令都不停服务（停止归 stopService/onDestroy）
  */
 @RunWith(RobolectricTestRunner::class)
 class HookKeepAliveServiceTest {
@@ -122,16 +121,21 @@ class HookKeepAliveServiceTest {
     }
 
     @Test
-    fun `release action stops foreground and self`() {
+    fun `release has no command intent - production disengage is stopService`() {
+        // 生产 disengage = controller.stopService（已由 `disengage signal stops the
+        // service` 钉住）→ 系统直接走 onDestroy：没有任何"命令型停止"分支。到达
+        // 服务的每个命令（含无 action）都只是 engage/重置心跳。
         val controller = Robolectric.buildService(
             HookKeepAliveService::class.java,
-            Intent(context, HookKeepAliveService::class.java)
-                .setAction(HookKeepAliveService.ACTION_RELEASE),
+            Intent(context, HookKeepAliveService::class.java), // no action at all
         ).create().startCommand(0, 1)
 
         val shadow = shadowOf(controller.get())
-        assertTrue("release must drop the foreground state", shadow.isForegroundStopped)
-        assertTrue("release must stop the service (不常驻耗电)", shadow.isStoppedBySelf)
+        assertFalse("no command intent may stop the service — stopping is stopService's job", shadow.isStoppedBySelf)
+        assertFalse("no command intent may drop the foreground state", shadow.isForegroundStopped)
+
+        // stopService 的落地形状：onDestroy 清理心跳，teardown 无需命令 intent。
+        controller.destroy()
     }
 
     @Test
