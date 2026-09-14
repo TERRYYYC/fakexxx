@@ -15,9 +15,10 @@
 #   2.  compatibility.yaml and the Kotlin sources agree on every wire code, so the
 #       machine-readable handshake surface cannot drift from the implementation.
 #   3.  Every DTO named in §6.3/§6.3.2 has both a .kt and a .aidl declaration.
-#   4.  The contract module compiles and its tests pass from BOTH app Gradle
-#       roots, which is what makes the shared library claim real rather than
-#       "it worked in Auto's build".
+#   4.  BOTH contract modules (environment-control-v1 AND
+#       environment-maintenance-v1) compile and their tests pass from BOTH app
+#       Gradle roots, which is what makes the shared library claim real rather
+#       than "it worked in Auto's build".
 #   5.  The canonical spec, Kotlin and compatibility.yaml agree on the error-code
 #       table. Sections 1-3 are internal-consistency only: they cannot notice that
 #       the document being frozen has been superseded.
@@ -242,30 +243,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-section "4. contract module builds and tests green from BOTH app roots"
+section "4. both contract modules build and test green from BOTH app roots"
 
 if [ "$SKIP_GRADLE" -eq 1 ]; then
   printf '  SKIP  --static-only requested (Gradle checks not run)\n'
   printf '  NOTE  --static-only is NOT a pass of this gate.\n'
 else
+  # BOTH contract modules, from BOTH roots — not just the control module. The
+  # Auto app lane runs unit tests via flavor-qualified task names
+  # (testLegacyIdDebugUnitTest / testProductIdDebugUnitTest); the maintenance
+  # library declares no product flavors, so Gradle's per-project unqualified
+  # name resolution finds no such task inside it and that lane silently covers
+  # nothing there. The fully-qualified target below is therefore the ONLY lane
+  # that runs the maintenance golden wire bytes under the Auto root — without
+  # it, the #186 pin for the maintenance surface had CI coverage under ONE
+  # root, which is exactly the single-build blind spot the pin exists to close.
   for app in cellrebel-auto qianwangyou; do
-    # Capture instead of discarding. The old form sent stdout+stderr to
-    # /dev/null, so the single most useful fact — WHY Gradle exited non-zero —
-    # was destroyed at the exact moment it was produced.
-    log="$(mktemp)"
-    if ( cd "apps/$app" && ./gradlew --no-daemon :environment-control-v1:testDebugUnitTest ) >"$log" 2>&1; then
-      pass "apps/$app :environment-control-v1:testDebugUnitTest"
-    elif grep -qE 'Unable to locate a Java Runtime|JAVA_HOME is not set|no Java (runtime|installation)' "$log"; then
-      # No JDK on this machine: Gradle never started, so the contract was never
-      # exercised. Reporting FAIL here would be a false red, and — worse — it
-      # would look exactly like a genuine contract regression.
-      inconc "apps/$app :environment-control-v1:testDebugUnitTest — NO JDK; Gradle never started, contract not exercised"
-    else
-      fail "apps/$app :environment-control-v1:testDebugUnitTest"
-      printf '        ---- last 15 lines ----\n'
-      tail -15 "$log" | sed 's/^/        /'
-    fi
-    rm -f "$log"
+    for module in environment-control-v1 environment-maintenance-v1; do
+      target=":$module:testDebugUnitTest"
+      # Capture instead of discarding. The old form sent stdout+stderr to
+      # /dev/null, so the single most useful fact — WHY Gradle exited non-zero —
+      # was destroyed at the exact moment it was produced.
+      log="$(mktemp)"
+      if ( cd "apps/$app" && ./gradlew --no-daemon "$target" ) >"$log" 2>&1; then
+        pass "apps/$app $target"
+      elif grep -qE 'Unable to locate a Java Runtime|JAVA_HOME is not set|no Java (runtime|installation)' "$log"; then
+        # No JDK on this machine: Gradle never started, so the contract was never
+        # exercised. Reporting FAIL here would be a false red, and — worse — it
+        # would look exactly like a genuine contract regression.
+        inconc "apps/$app $target — NO JDK; Gradle never started, contract not exercised"
+      else
+        fail "apps/$app $target"
+        printf '        ---- last 15 lines ----\n'
+        tail -15 "$log" | sed 's/^/        /'
+      fi
+      rm -f "$log"
+    done
   done
 fi
 
