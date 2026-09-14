@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.cellrebelauto.model.AutomationState
 import com.example.cellrebelauto.model.plan.LocationTask
 import com.example.cellrebelauto.model.plan.PlanConfig
 import com.example.cellrebelauto.model.plan.PlanProfileMismatch
@@ -58,10 +59,14 @@ import com.example.cellrebelauto.model.plan.RowError
  * timing, execution-order task cards, and state-driven Start/Resume/Stop.
  * #12 adds the plan-reset entry (visible only once the plan is complete or an
  * attempt is stuck RECOVERY_REQUIRED) with a confirm dialog that spells out
- * the provider-side half of the sequence.
+ * the provider-side half of the sequence. #187 adds the in-process Resume
+ * parity entry: while the engine reports running but is parked in a held
+ * terminal (durable paused session), the same Resume entry the post-restart
+ * surface shows stays reachable here.
  * # 计划页（F001 首页）：导入卡片 + 原子错误面板、首次必填的全局缓冲、
  * # 折叠的高级参数、执行顺序任务卡片、按状态切换的 Start/Resume/Stop；
- * # #12 增加计划重置入口（仅计划完成或存在 RECOVERY_REQUIRED 死尝试时可见）
+ * # #12 增加计划重置入口（仅计划完成或存在 RECOVERY_REQUIRED 死尝试时可见）；
+ * # #187 增加 paused 会话的进程内 Resume 入口（与重启后行为一致、同一路径）
  */
 @Composable
 fun PlanScreen(
@@ -69,6 +74,9 @@ fun PlanScreen(
     planConfig: PlanConfig,
     isRunning: Boolean,
     isServiceConnected: Boolean,
+    // #187(a): the engine's terminal state — gates the in-process Resume parity
+    // entry while a paused session's job is still winding down / parked.
+    engineState: AutomationState = AutomationState.IDLE,
     // Issue #9: readable WHY for a grey Start — null when the device is ready (no line shown).
     serviceStatusLine: String? = null,
     importErrors: List<RowError>,
@@ -453,24 +461,40 @@ fun PlanScreen(
             when {
                 // # 仅存在 active session 时显示 Stop + Run 入口
                 isRunning -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Button(
-                            onClick = onStop,
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            )
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("■ Stop", modifier = Modifier.padding(vertical = 8.dp))
+                            Button(
+                                onClick = onStop,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Text("■ Stop", modifier = Modifier.padding(vertical = 8.dp))
+                            }
+                            OutlinedButton(
+                                onClick = onOpenRun,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Run ▸", modifier = Modifier.padding(vertical = 8.dp))
+                            }
                         }
-                        OutlinedButton(
-                            onClick = onOpenRun,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Run ▸", modifier = Modifier.padding(vertical = 8.dp))
+                        // #187(a)：paused 会话的进程内 Resume 入口——引擎仍报 running
+                        // 但已挂起在 held 终态时（暂停收尾/挂起窗口），同一条
+                        // startOrResumePlan 路径在本页保持可达，与重启后出现的行为一致。
+                        // 引擎的 already-running 守卫让并发按下成为安全 no-op（INV-9）。
+                        if (PlanSurfaceActions.offerResumeWhileRunning(isRunning, engineState)) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = onStartOrResume,
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = isServiceConnected
+                            ) {
+                                Text("⏸ Resume Plan", modifier = Modifier.padding(vertical = 8.dp))
+                            }
                         }
                     }
                 }

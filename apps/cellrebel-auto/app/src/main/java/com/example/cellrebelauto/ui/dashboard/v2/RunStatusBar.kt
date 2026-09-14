@@ -12,7 +12,16 @@ import com.example.cellrebelauto.model.AutomationState
  * broadcast RESUME), STOP = stopAutomation, EXPORT = the v1 diagnostic bundle,
  * OPEN_LOG = the log drawer.
  *
- * # 极简状态条投影：一行状态词 + 单主按钮（暂停态同构；恢复失败转「查看日志」）
+ * #187: the DONE state additionally carries ONE secondary action, RERUN — the
+ * explicit rerun entry the operator surface lacked (the explainer card used to
+ * redirect to the Plan page's reset entry, and a headless rerun required the
+ * root RESET_PLAN broadcast). RERUN routes to the SAME #12
+ * resetPlanAsFreshGeneration entry (MainViewModel.resetPlan) the Plan page
+ * button and the broadcast use — no second domain path. The primary stays
+ * EXPORT (one-primary minimalism; a finished run's first move is exporting).
+ *
+ * # 极简状态条投影：一行状态词 + 单主按钮（暂停态同构；恢复失败转「查看日志」）；
+ * # #187：已完成态追加唯一次按钮「重跑」——复用 #12 重置入口，不造第二条领域路径
  */
 object RunStatusBarProjection {
 
@@ -20,12 +29,17 @@ object RunStatusBarProjection {
 
     enum class Primary { RESUME, STOP, EXPORT, OPEN_LOG, NONE }
 
+    /** #187: the at-most-one secondary action; RERUN = the #12 reset entry. */
+    enum class Secondary { NONE, RERUN }
+
     data class Model(
         val tone: Tone,
         val statusWord: String,
         val subLine: String?,
         val primary: Primary,
         val primaryLabel: String,
+        val secondary: Secondary = Secondary.NONE,
+        val secondaryLabel: String = "",
     )
 
     fun project(
@@ -41,15 +55,21 @@ object RunStatusBarProjection {
         if (isRunning) {
             return Model(Tone.RUNNING, "运行中", null, Primary.STOP, "停止")
         }
-        // 2) A held engine over a COMPLETE plan: exporting is the operator's
-        //    next move; Resume would be safe but pointless.
+        // 2) A held engine over a COMPLETE plan: exporting stays the primary
+        //    move (resume would be safe but pointless); #187 adds the rerun
+        //    secondary so this surface is no longer a dead end for the
+        //    parked-complete field shape (#180: paused session + completed
+        //    plan → previously NO action but the root broadcast).
         val planComplete = trustedTotal > 0 && trustedDone >= trustedTotal
         // 3) Held states are ISOMORPHIC (极简铁律): same word, same button, no
         //    per-reason main surface. A failed one-tap resume flips the primary
         //    to 查看日志 and names the typed rejection in the small line.
         val held = engineState in HELD_STATES
         return when {
-            planComplete -> Model(Tone.DONE, "已完成", null, Primary.EXPORT, "导出结果")
+            planComplete -> Model(
+                Tone.DONE, "已完成", null, Primary.EXPORT, "导出结果",
+                secondary = Secondary.RERUN, secondaryLabel = "重跑",
+            )
             resumeFailure != null && held -> Model(
                 tone = Tone.HELD,
                 statusWord = "已暂停",

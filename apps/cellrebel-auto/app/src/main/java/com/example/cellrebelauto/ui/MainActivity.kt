@@ -111,6 +111,9 @@ fun MainApp(vm: MainViewModel = viewModel(), initialScreen: Screen? = null) {
                                     planConfig = readyPlanConfig,
                                     isRunning = isRunning,
                                     isServiceConnected = isServiceConnected,
+                                    // #187(a)：in-process Resume parity — 引擎终态进
+                                    // 计划页，判别 paused 挂起窗口的 Resume 可见性
+                                    engineState = currentState,
                                     serviceStatusLine = serviceStatusLine,
                                     importErrors = importErrors,
                                     importNotice = importNotice,

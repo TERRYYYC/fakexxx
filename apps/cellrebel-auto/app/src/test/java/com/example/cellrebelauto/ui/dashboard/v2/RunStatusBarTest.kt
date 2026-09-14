@@ -117,4 +117,59 @@ class RunStatusBarTest {
         )
         assertEquals(RunStatusBarProjection.Primary.NONE, bar.primary)
     }
+
+    // ---- #187: the DONE surface must carry an explicit rerun entry ----------
+
+    @Test
+    fun completedPlan_keepsExportPrimary_andOffersExplicitRerunSecondary() {
+        // #187: "运行台显示已完成但无任何 Resume/重跑按钮" — the DONE surface used
+        // to offer ONLY export (the explainer card redirected to the Plan page),
+        // so a rerun required the root RESET_PLAN broadcast. Minimalism keeps ONE
+        // primary (export); the rerun joins as the single secondary, routed to
+        // the SAME #12 resetPlanAsFreshGeneration entry the Plan page uses.
+        val bar = RunStatusBarProjection.project(
+            engineState = AutomationState.DONE, isRunning = false,
+            trustedDone = 10, trustedTotal = 10, resumeFailure = null,
+        )
+        assertEquals("导出结果 stays primary", RunStatusBarProjection.Primary.EXPORT, bar.primary)
+        assertEquals(RunStatusBarProjection.Secondary.RERUN, bar.secondary)
+        assertEquals("重跑", bar.secondaryLabel)
+    }
+
+    @Test
+    fun doneOverHeldEngine_stillCarriesTheRerunSecondary() {
+        // #180 field shape: the quota reached total while the engine parked
+        // HELD (paused session + status=completed). The reviewed DONE-over-held
+        // primary stays (resume is safe but pointless on a complete plan), and
+        // the rerun entry must SURVIVE — that parked-complete state is exactly
+        // where the operator previously had no action but the root broadcast.
+        val bar = RunStatusBarProjection.project(
+            engineState = AutomationState.PAUSED, isRunning = false,
+            trustedDone = 10, trustedTotal = 10, resumeFailure = null,
+        )
+        assertEquals(RunStatusBarProjection.Primary.EXPORT, bar.primary)
+        assertEquals(RunStatusBarProjection.Secondary.RERUN, bar.secondary)
+    }
+
+    @Test
+    fun nonDoneSurfaces_offerNoRerunSecondary() {
+        // Minimalism: the secondary belongs to the DONE state only. Held states
+        // keep Resume as primary (the explainer card routes reset where it
+        // applies); running keeps Stop; idle keeps the single start entry.
+        val cases = listOf(
+            AutomationState.PAUSED to false,
+            AutomationState.SERVICE_RECYCLED to false,
+            AutomationState.WAITING_FOR_RESULT to true,
+            AutomationState.IDLE to false,
+        )
+        for ((state, running) in cases) {
+            val bar = RunStatusBarProjection.project(
+                engineState = state, isRunning = running,
+                trustedDone = 3, trustedTotal = 10, resumeFailure = null,
+            )
+            assertEquals(
+                "state=$state", RunStatusBarProjection.Secondary.NONE, bar.secondary
+            )
+        }
+    }
 }

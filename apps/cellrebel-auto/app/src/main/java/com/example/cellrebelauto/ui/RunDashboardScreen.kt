@@ -177,6 +177,9 @@ fun RunDashboardScreen(
                 bar = bar,
                 onResume = onResume,
                 onStop = onStop,
+                // #187：已完成态的「重跑」次按钮——复用既有 #12 reset 入口
+                // （与 Plan 页按钮 / RESET_PLAN 广播同一条 resetPlanAsFreshGeneration 路径）
+                onRerun = onResetPlan,
                 onExport = onExportDiagnostics,
                 onOpenLog = { drawerExpanded = true },
             )
@@ -319,6 +322,7 @@ private fun StatusBarRow(
     bar: RunStatusBarProjection.Model,
     onResume: () -> Unit,
     onStop: () -> Unit,
+    onRerun: () -> Unit,
     onExport: () -> Unit,
     onOpenLog: () -> Unit,
 ) {
@@ -345,6 +349,12 @@ private fun StatusBarRow(
             bar.subLine?.let {
                 Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
             }
+        }
+        // #187：唯一次按钮（当前仅 DONE 态的「重跑」）——主按钮极简纪律不变，
+        // onRerun 复用既有 onResetPlan 入口（#12 resetPlanAsFreshGeneration）
+        if (bar.secondary == RunStatusBarProjection.Secondary.RERUN) {
+            OutlinedButton(onClick = onRerun) { Text(bar.secondaryLabel) }
+            Spacer(modifier = Modifier.width(8.dp))
         }
         when (bar.primary) {
             RunStatusBarProjection.Primary.RESUME ->
