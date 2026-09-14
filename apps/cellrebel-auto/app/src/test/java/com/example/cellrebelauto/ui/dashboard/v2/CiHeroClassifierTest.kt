@@ -181,4 +181,54 @@ class CiHeroClassifierTest {
         assertEquals("透传·真实", CiBadge.PASSTHROUGH_REAL.label)
         assertEquals("设备读数", CiBadge.DEVICE_READING.label)
     }
+
+    // ---- #190 CI 验证层：期望(计划行) vs 实测 的对照判定 -------------------------
+    // 与徽标判定（configuredCell 投影）正交：验证层的期望腿是 location_tasks.expectedCi，
+    // 判定 = 严格相等；期望缺失 → 无对照行（null），绝不渲染成结论。
+
+    @Test
+    fun verification_strictEqualityVerdicts() {
+        val matched = CiVerification.of(expectedCi = 28918569L, measuredCi = 28918569L)!!
+        assertEquals(CiVerification.State.MATCHED, matched.state)
+        assertEquals("匹配", matched.verdictText)
+
+        val mismatched = CiVerification.of(expectedCi = 28918569L, measuredCi = 29592117L)!!
+        assertEquals(CiVerification.State.MISMATCHED, mismatched.state)
+        assertEquals("不匹配", mismatched.verdictText)
+    }
+
+    @Test
+    fun verification_missingExpected_noComparisonRow() {
+        // 计划行未带 ci（4/6 列 CSV）：null = 不渲染对照行——实测大数字已单独展示，
+        // 这里绝不打"匹配/不匹配"的臆断结论。
+        assertNull(CiVerification.of(expectedCi = null, measuredCi = 28918569L))
+        assertNull(CiVerification.of(expectedCi = null, measuredCi = null))
+    }
+
+    @Test
+    fun verification_missingMeasured_isHonestAbsence_notVerdict() {
+        val v = CiVerification.of(expectedCi = 28918569L, measuredCi = null)!!
+        assertEquals(CiVerification.State.UNMEASURED, v.state)
+        assertEquals("实测未捕获", v.verdictText)
+        assertNull(v.measuredCi)
+    }
+
+    @Test
+    fun ciHeroView_verificationProjectsFromReadingAndExpected() {
+        val withExpectation = CiHeroView(
+            reading = ServingCellReading(
+                rat = "LTE", ci = 28918569L, tac = null, pci = null,
+                mcc = null, mnc = null, rsrpDbm = null, registered = true, readAtMs = 0L,
+            ),
+            badge = null,
+            expectedCi = 28918569L,
+        )
+        assertEquals(CiVerification.State.MATCHED, withExpectation.verification?.state)
+
+        val noExpectation = withExpectation.copy(expectedCi = null)
+        assertNull(noExpectation.verification)
+
+        val unread = withExpectation.copy(reading = null)
+        assertEquals(CiVerification.State.UNMEASURED, unread.verification?.state)
+    }
 }

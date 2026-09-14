@@ -67,7 +67,7 @@ class Migration6to7Test {
     fun `v6 plan is retained and starts active after v7 archive-link migration`() = runTest {
         createCommittedV6()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
+            .addMigrations(MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
             .allowMainThreadQueries()
             .build()
         try {
@@ -75,7 +75,7 @@ class Migration6to7Test {
             assertEquals("old.csv", plan.sourceFileName)
             assertNull(plan.supersededAt)
             assertNull(plan.supersededByPlanId)
-            assertEquals(11, db.openHelper.readableDatabase.version)
+            assertEquals(12, db.openHelper.readableDatabase.version)
         } finally {
             db.close()
         }

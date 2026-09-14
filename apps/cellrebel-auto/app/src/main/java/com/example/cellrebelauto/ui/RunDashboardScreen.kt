@@ -416,6 +416,30 @@ private fun CiHeroContent(ciHero: com.example.cellrebelauto.ui.dashboard.v2.CiHe
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
         )
+        // ---- #190 CI 验证层对照行（展示层）：期望(计划行) vs 实测(设备读数)。 ----
+        // 期望缺失（计划未带 ci）→ 整行不出现，只显示上面的实测大数字。
+        // 判定=严格相等；"实测未捕获"是诚实缺席，绝不渲染成匹配/不匹配。
+        // SCOPE RED LINE（同 #185）：只做展示，绝不入信任/入账路径。
+        ciHero.verification?.let { v ->
+            Spacer(modifier = Modifier.height(4.dp))
+            val verdictColor = when (v.state) {
+                com.example.cellrebelauto.ui.dashboard.v2.CiVerification.State.MATCHED -> semantic.green
+                com.example.cellrebelauto.ui.dashboard.v2.CiVerification.State.MISMATCHED -> semantic.red
+                com.example.cellrebelauto.ui.dashboard.v2.CiVerification.State.UNMEASURED -> semantic.amber
+            }
+            Text(
+                "期望 ci ${v.expectedCi} · 实测 ${v.measuredCi ?: "--"} · ${v.verdictText}",
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                color = verdictColor,
+                fontWeight = if (v.state == com.example.cellrebelauto.ui.dashboard.v2.CiVerification.State.MISMATCHED) {
+                    FontWeight.SemiBold
+                } else {
+                    FontWeight.Normal
+                },
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -750,6 +774,16 @@ private fun PlanMapCard(
                         fontSize = 10.sp,
                     )
                 }
+            }
+            // ---- #190 CI 验证层角标（期望 vs 实测小区；无一对可判定时隐藏） ----
+            PlanMapPoints.ciMatchStats(points)?.let { (matched, total) ->
+                val anyCiMismatch = matched < total
+                Text(
+                    "CI 匹配 $matched/$total",
+                    fontSize = 10.sp,
+                    color = if (anyCiMismatch) semantic.red else Color.Unspecified,
+                    fontWeight = if (anyCiMismatch) FontWeight.SemiBold else FontWeight.Normal,
+                )
             }
         }
         // 当前点坐标小字（左下）

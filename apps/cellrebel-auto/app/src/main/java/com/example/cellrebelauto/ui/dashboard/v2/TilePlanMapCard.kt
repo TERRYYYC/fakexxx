@@ -705,6 +705,16 @@ fun TilePlanMapCard(
                     )
                 }
             }
+            // ---- #190 CI 验证层角标（期望 vs 实测小区；无一对可判定时隐藏） ----
+            PlanMapPoints.ciMatchStats(points)?.let { (matched, total) ->
+                val anyCiMismatch = matched < total
+                Text(
+                    "CI 匹配 $matched/$total",
+                    fontSize = 9.sp,
+                    color = if (anyCiMismatch) semantic.red else onSurfaceColor,
+                    fontWeight = if (anyCiMismatch) FontWeight.SemiBold else FontWeight.Normal,
+                )
+            }
         }
         // 全屏态 ＋/－/⌂（按钮而非手势；⌂ = fit 还原，v3 的 zc 列）
         if (fullscreen) {

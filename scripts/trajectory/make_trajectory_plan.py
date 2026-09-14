@@ -5,8 +5,10 @@
 如 Excel 导出的「表格 1」）。注意输入列序是 latitude1 在前、longitude1 在后。
 
 输出（写入 --out-dir）：
-  plan.csv      longitude,latitude,priority,required_successes（列序 lng 在前，
-                对齐 WorklistParser canonical contract，直接进 Download 作计划）
+  plan.csv      longitude,latitude,priority,required_successes,ci（列序 lng 在前，
+                对齐 Auto WorklistParser 契约；第 5 列 ci=该点继承的源行 ECGI，
+                供 #190 验证层"期望 ci vs 实测 serving cell"对照；旧版 Auto 只认
+                4 列时可删掉该列，其余不变）
   profiles.csv  addname,latitude,longitude,ci（QWY 收藏档案导入格式；ci=该点继承
                 的源行 ECGI，#193 导入器 header 按名绑定、读回门做 ci 字节级比对）
   ecgi_map.csv  addname,ecgi,custom_admin_3,source_row（轨迹点继承原始行信息，
@@ -238,7 +240,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "  walk100  持续向东 100m 直线步行\n"
             "\n"
             "配合导入（详见同目录 README.md）:\n"
-            "  plan.csv → CellRebel Auto 计划导入（Download）；\n"
+            "  plan.csv（5 列含 ci）→ CellRebel Auto 计划导入（Download），ci 列供 #190 验证层对照；\n"
             "  profiles.csv（含 ci 第 4 列）→ QWY 收藏档案导入，#193 读回门按 ci 字节级比对；\n"
             "  ecgi_map.csv → #189 CI hook / #190 验证层的位置→ECGI 期望（审计用）。\n"
             "  导入 QWY 档案后记得编辑保存任一档案完成锚定（SKILL §2.6）。\n"
@@ -315,7 +317,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             for step_idx, (lat, lng) in enumerate(coords):
                 addname = ADDNAME_FMT.format(station=station["row"], step=step_idx)
-                plan_rows.append([fmt7(lng), fmt7(lat), str(args.priority), str(args.required_successes)])
+                # plan.csv 第 5 列 ci（#190 验证层的期望 ECGI）：与 profiles 同源继承，
+                # 同域同值零换算——Auto 导入器按 #193 的 ci 值域（28-bit ECI）校验。
+                plan_rows.append(
+                    [fmt7(lng), fmt7(lat), str(args.priority), str(args.required_successes), station["ecgi"]]
+                )
                 profile_rows.append([addname, fmt7(lat), fmt7(lng), station["ecgi"]])
                 ecgi_rows.append(
                     [addname, station["ecgi"], station["custom_admin_3"], str(station["row"])]
@@ -340,7 +346,11 @@ def main(argv: list[str] | None = None) -> int:
                 writer.writerow(header)
                 writer.writerows(rows)
 
-        write_csv("plan.csv", ("longitude", "latitude", "priority", "required_successes"), plan_rows)
+        write_csv(
+            "plan.csv",
+            ("longitude", "latitude", "priority", "required_successes", "ci"),
+            plan_rows,
+        )
         write_csv("profiles.csv", ("addname", "latitude", "longitude", "ci"), profile_rows)
         write_csv("ecgi_map.csv", ("addname", "ecgi", "custom_admin_3", "source_row"), ecgi_rows)
 

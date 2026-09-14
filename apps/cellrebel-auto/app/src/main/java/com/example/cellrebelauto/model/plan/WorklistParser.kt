@@ -11,7 +11,9 @@ data class WorklistRow(
     val requiredSuccesses: Int,
     val csvRow: Int,
     val scheduleId: String? = null,
-    val scheduleItemId: String? = null
+    val scheduleItemId: String? = null,
+    /** #190：期望 serving cell CI（28-bit ECI，十进制）；null = 行未带 ci（4/6 列旧格式）。 */
+    val ci: Long? = null
 )
 
 /**
@@ -35,21 +37,35 @@ sealed interface ParseResult {
  *
  * Canonical legacy contract (design gate, no third-party dependency):
  *   longitude,latitude,priority,required_successes
+ * CI verification contract (#190, trajectory tool plan.csv):
+ *   longitude,latitude,priority,required_successes,ci
  * Bound v2 contract:
  *   longitude,latitude,priority,required_successes,schedule_id,schedule_item_id
  *
  * Rules:
- * - First non-blank line must be the exact header.
+ * - First non-blank line must be the exact header (one of the three shapes).
  * - Blank lines are skipped; csvRow numbers data rows only, 1-based.
  * - longitude ∈ [-180, 180], latitude ∈ [-90, 90],
  *   priority ≥ 0 integer, required_successes ≥ 1 integer.
- * - Any invalid row rejects the whole file; every row error is reported.
+ * - ci (#190): optional 5th column, integer in [0, 268435455] (28-bit ECI —
+ *   the SAME value domain #193's QWY profile importer enforces, zero
+ *   conversion). Any invalid row rejects the whole file; every row error is
+ *   reported.
  */
 object WorklistParser {
 
     const val HEADER = "longitude,latitude,priority,required_successes"
+    const val CI_HEADER = "longitude,latitude,priority,required_successes,ci"
     const val BOUND_HEADER =
         "longitude,latitude,priority,required_successes,schedule_id,schedule_item_id"
+
+    /**
+     * 28-bit ECI value domain — byte-for-byte the same range as the QWY
+     * profile importer's `ci` spec (ProfileFieldValueValidator), so a plan row
+     * and its matching QWY profile can never disagree about validity.
+     * # ci 值域 = #193 的 28-bit ECI：计划行与 QWY 档案对同一值域判 valid
+     */
+    val CI_RANGE = 0L..268_435_455L
 
     fun parse(text: String): ParseResult {
         val lines = text.lines()
@@ -60,12 +76,13 @@ object WorklistParser {
             return ParseResult.Failure(listOf(RowError(0, "empty file: expected header '$HEADER'")))
         }
         val bound = lines.first() == BOUND_HEADER
-        if (lines.first() != HEADER && !bound) {
+        val withCi = lines.first() == CI_HEADER
+        if (!bound && !withCi && lines.first() != HEADER) {
             return ParseResult.Failure(
                 listOf(
                     RowError(
                         0,
-                        "invalid header: expected '$HEADER' or '$BOUND_HEADER', got '${lines.first()}'"
+                        "invalid header: expected '$HEADER' or '$CI_HEADER' or '$BOUND_HEADER', got '${lines.first()}'"
                     )
                 )
             )
@@ -73,7 +90,11 @@ object WorklistParser {
 
         val rows = mutableListOf<WorklistRow>()
         val errors = mutableListOf<RowError>()
-        val expectedColumns = if (bound) 6 else 4
+        val expectedColumns = when {
+            bound -> 6
+            withCi -> 5
+            else -> 4
+        }
         var boundScheduleId: String? = null
         val seenItemIds = mutableSetOf<String>()
 
@@ -84,7 +105,7 @@ object WorklistParser {
                 errors.add(
                     RowError(
                         csvRow,
-                        "expected $expectedColumns columns (${if (bound) BOUND_HEADER else HEADER}), got ${fields.size}"
+                        "expected $expectedColumns columns (${if (bound) BOUND_HEADER else if (withCi) CI_HEADER else HEADER}), got ${fields.size}"
                     )
                 )
                 return@forEachIndexed
@@ -105,8 +126,11 @@ object WorklistParser {
                 requiredSuccesses == null || requiredSuccesses < 1 ->
                     errors.add(RowError(csvRow, "required_successes '${fields[3]}' must be an integer ≥ 1"))
                 else -> {
-                    val scheduleId = fields.getOrNull(4)
-                    val scheduleItemId = fields.getOrNull(5)
+                    // Columns 5/6 carry schedule semantics on the BOUND contract ONLY.
+                    // On the CI contract the 5th column is `ci` and must never leak
+                    // into scheduleId (that would trip the binding validator).
+                    val scheduleId = if (bound) fields.getOrNull(4) else null
+                    val scheduleItemId = if (bound) fields.getOrNull(5) else null
                     var bindingValid = true
                     if (bound) {
                         if (scheduleId.isNullOrBlank()) {
@@ -131,6 +155,23 @@ object WorklistParser {
                             bindingValid = false
                         }
                     }
+                    // #190 fail-closed ci validation: the 5th column on the CI
+                    // contract must be a 28-bit ECI integer — the SAME domain
+                    // #193 validates on the QWY side. Reject (never clamp/round)
+                    // so an off-domain value can't silently become the期望.
+                    val ci = when {
+                        !withCi -> null
+                        else -> fields[4].toLongOrNull()?.takeIf { it in CI_RANGE }
+                    }
+                    if (withCi && ci == null) {
+                        errors.add(
+                            RowError(
+                                csvRow,
+                                "ci '${fields[4]}' must be an integer in [0, 268435455] (28-bit ECI)"
+                            )
+                        )
+                        bindingValid = false
+                    }
                     if (bindingValid) {
                         rows.add(
                             WorklistRow(
@@ -140,7 +181,8 @@ object WorklistParser {
                                 requiredSuccesses,
                                 csvRow,
                                 scheduleId,
-                                scheduleItemId
+                                scheduleItemId,
+                                ci
                             )
                         )
                     }

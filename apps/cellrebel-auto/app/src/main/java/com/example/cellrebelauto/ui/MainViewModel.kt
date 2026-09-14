@@ -570,6 +570,7 @@ class MainViewModel @JvmOverloads constructor(
                             com.example.cellrebelauto.ui.dashboard.v2.PlanMapPoints.MeasuredFix(
                                 latitude = it.value.measuredLat,
                                 longitude = it.value.measuredLng,
+                                servingCi = it.value.servingCi, // #190：同一条观察采样的实测小区
                             )
                         }
                     )
@@ -1866,6 +1867,8 @@ class MainViewModel @JvmOverloads constructor(
             emptyList(),
         /** The currently executing plan row (coordinate pill / map caption). */
         val currentPoint: com.example.cellrebelauto.ui.dashboard.v2.CurrentPointView? = null,
+        /** #190：当前任务行的期望 serving cell CI；null = 计划行未带 ci（无对照行）。 */
+        val currentExpectedCi: Long? = null,
         /** CI hero: raw device reading + its honest badge. */
         val ciHero: com.example.cellrebelauto.ui.dashboard.v2.CiHeroView =
             com.example.cellrebelauto.ui.dashboard.v2.CiHeroView(null, null),
@@ -1947,6 +1950,7 @@ class MainViewModel @JvmOverloads constructor(
                             longitude = it.longitude,
                             status = it.status,
                             requiredSuccesses = it.requiredSuccesses,
+                            expectedCi = it.expectedCi, // #190：期望 ci 进地图对照层
                         )
                     },
                     trustedCounts = view.planState.trustedCounts,
@@ -1967,6 +1971,8 @@ class MainViewModel @JvmOverloads constructor(
                             csvRow = it.csvRow, latitude = it.latitude, longitude = it.longitude,
                         )
                     },
+                    // #190：当前任务行的期望 ci（小区卡对照行的期望腿来源）
+                    currentExpectedCi = currentRow?.expectedCi,
                     hasPlan = plan != null,
                 )
             }
@@ -1989,6 +1995,8 @@ class MainViewModel @JvmOverloads constructor(
                                     _configuredCell.value?.cellularHookConfigured == true,
                                 observedRat = reading?.rat,
                             ),
+                        // #190：对照行期望腿 = 当前计划行的 expectedCi（null = 无对照行）
+                        expectedCi = partial.currentExpectedCi,
                     ),
                 )
             }

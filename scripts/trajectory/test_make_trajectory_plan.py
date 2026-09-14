@@ -129,7 +129,10 @@ class EndToEndTest(Base):
         expected_rows = 3 * 13
         for name, table in (("plan.csv", plan), ("profiles.csv", profiles), ("ecgi_map.csv", ecgi)):
             self.assertEqual(len(table) - 1, expected_rows, name)
-        self.assertEqual(plan[0], ["longitude", "latitude", "priority", "required_successes"])
+        # 第 5 列 ci（#190 验证层的期望 ECGI）。
+        self.assertEqual(
+            plan[0], ["longitude", "latitude", "priority", "required_successes", "ci"]
+        )
         self.assertEqual(profiles[0], ["addname", "latitude", "longitude", "ci"])
         self.assertEqual(ecgi[0], ["addname", "ecgi", "custom_admin_3", "source_row"])
 
@@ -137,13 +140,14 @@ class EndToEndTest(Base):
         self.run_default()
         plan = self.read_csv("plan.csv")
         first_data = plan[1]
-        self.assertEqual(len(first_data), 4)
+        self.assertEqual(len(first_data), 5)
         lng, lat = float(first_data[0]), float(first_data[1])
         # 乌克兰站点：经度 ~29 > 纬度 ~49 是 lng 在前的反证不够硬，直接对照源行。
         self.assertAlmostEqual(lng, 29.9243986, places=7)
         self.assertAlmostEqual(lat, 49.8714584, places=7)
         self.assertEqual(first_data[2], "3")
         self.assertEqual(first_data[3], "3")
+        self.assertEqual(first_data[4], "28918569")
 
     def test_origin_included_as_first_point(self) -> None:
         self.run_default()
@@ -171,6 +175,20 @@ class EndToEndTest(Base):
         # 原点行抽查。
         self.assertEqual(profiles[1][0], "traj-001-00")
         self.assertEqual(profiles[1][3], "28918569")
+
+    def test_plan_ci_column_inheritance(self) -> None:
+        """plan.csv 第 5 列 ci（#190 验证层期望 ECGI）：与 profiles.csv 第 4 列
+        同源同值零换算，整站继承源行 ECGI。"""
+        self.run_default()
+        plan = self.read_csv("plan.csv")
+        profiles = self.read_csv("profiles.csv")
+        # 两份输出的 ci 逐行同源：plan 第 5 列 == profiles 第 4 列。
+        self.assertEqual(
+            [row[4] for row in plan[1:]], [row[3] for row in profiles[1:]]
+        )
+        # 站 1 → 28918569、站 2 → 29592117、站 3 → 29073696。
+        expected_ci = ["28918569"] * 13 + ["29592117"] * 13 + ["29073696"] * 13
+        self.assertEqual([row[4] for row in plan[1:]], expected_ci)
 
     def test_ecgi_inheritance(self) -> None:
         self.run_default()

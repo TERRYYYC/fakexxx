@@ -72,7 +72,7 @@ class Migration8to9Test {
     @Test fun `v8 rows retain legacy null bindings and v9 enforces per-plan item uniqueness`() = runTest {
         createCommittedV8()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12).allowMainThreadQueries().build()
         try {
             assertNull(db.planDao().getPlanById(1L)!!.boundScheduleId)
             assertNull(db.locationTaskDao().getTaskById(10L)!!.scheduleItemId)
@@ -99,7 +99,7 @@ class Migration8to9Test {
                 rejected = true
             }
             assertTrue("duplicate bound item in one plan must be rejected", rejected)
-            assertEquals(11, db.openHelper.readableDatabase.version)
+            assertEquals(12, db.openHelper.readableDatabase.version)
         } finally {
             db.close()
         }

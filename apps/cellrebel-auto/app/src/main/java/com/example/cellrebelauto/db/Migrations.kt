@@ -431,3 +431,23 @@ val MIGRATION_10_11 = object : Migration(10, 11) {
         db.execSQL("ALTER TABLE test_attempts ADD COLUMN aplusPlanEpoch INTEGER")
     }
 }
+
+/**
+ * v11 → v12 (#190 CI 验证层): `location_tasks` gains the nullable `expectedCi`
+ * column — the plan row's expected serving-cell CI (28-bit ECI, decimal, CSV
+ * 5th column produced by the trajectory tool). Additive only, INV-24-safe:
+ * every migrated row keeps NULL, which is exactly the honest-absence semantics
+ * (the row was imported before the ci column existed / a 4- or 6-column CSV) —
+ * the UI shows the measured cell WITHOUT a match verdict, never a guessed one.
+ * The column is DISPLAY-ONLY: it feeds the run-console cell card / map badge
+ * comparison against the observed `durable_observation_records.servingCi`
+ * (v10) and NEVER enters TrustPolicy, quota minting or task selection (the
+ * same evidence-only red line as #185's measured overlay).
+ *
+ * # v11→v12 迁移：location_tasks 增 expectedCi；旧行保持 null = 无期望，UI 不打匹配结论
+ */
+val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE location_tasks ADD COLUMN expectedCi INTEGER")
+    }
+}

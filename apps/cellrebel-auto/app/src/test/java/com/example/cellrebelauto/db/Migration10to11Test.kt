@@ -81,9 +81,9 @@ class Migration10to11Test {
     @Test fun `v10 rows survive with null epoch and legacy receipts stay addressable`() = runTest {
         createCommittedV10()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_10_11).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_10_11, MIGRATION_11_12).allowMainThreadQueries().build()
         try {
-            assertEquals(11, db.openHelper.readableDatabase.version)
+            assertEquals(12, db.openHelper.readableDatabase.version)
 
             // (a) The migrated attempt is byte-preserved except for the new NULL column.
             val attempt = db.testAttemptDao().getAttemptById(30L)!!
@@ -109,7 +109,7 @@ class Migration10to11Test {
         // migrating) — a fresh v11 open round-trips without error.
         createCommittedV10()
         val db = Room.databaseBuilder(context, AppDatabase::class.java, dbName)
-            .addMigrations(MIGRATION_10_11).allowMainThreadQueries().build()
+            .addMigrations(MIGRATION_10_11, MIGRATION_11_12).allowMainThreadQueries().build()
         try {
             db.testAttemptDao().countAttemptsForTask(10L)
         } finally {

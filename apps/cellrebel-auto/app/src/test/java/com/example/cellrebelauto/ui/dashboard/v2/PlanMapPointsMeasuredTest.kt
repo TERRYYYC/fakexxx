@@ -197,4 +197,115 @@ class PlanMapPointsMeasuredTest {
         assertEquals(big, max, 1e-9)
         assertTrue("got $max", max > 100.0)
     }
+
+    // ---- #190 CI 验证层：期望 vs 实测小区（展示层纯投影） ------------------------
+
+    @Test
+    fun ciMatched_strictEquality_only() {
+        assertEquals(true, PlanMapPoints.ciMatched(28918569L, 28918569L))
+        assertEquals(false, PlanMapPoints.ciMatched(28918569L, 29592117L))
+    }
+
+    @Test
+    fun ciMatched_missingSide_isUndecidable_notFalse() {
+        // 期望缺失（计划行未带 ci）或实测缺失（观察未捕获小区）→ null：
+        // "不可判定"是诚实缺席，绝不与"不匹配"混淆。
+        assertNull(PlanMapPoints.ciMatched(null, 28918569L))
+        assertNull(PlanMapPoints.ciMatched(28918569L, null))
+        assertNull(PlanMapPoints.ciMatched(null, null))
+    }
+
+    @Test
+    fun project_carriesExpectedAndMeasuredCi() {
+        val points = PlanMapPoints.project(
+            tasks = listOf(
+                row(id = 1).copy(expectedCi = 28918569L),
+                row(id = 2).copy(expectedCi = null),
+            ),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+            measured = mapOf(
+                1L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 29592117L),
+                2L to PlanMapPoints.MeasuredFix(51.0, 31.0, servingCi = 42L),
+            ),
+        )
+        val p1 = points.first { it.taskId == 1L }
+        assertEquals(28918569L, p1.expectedCi)
+        assertEquals(29592117L, p1.measuredCi)
+        assertEquals(false, p1.ciMatched) // 两侧都在但不等 → 不匹配
+        val p2 = points.first { it.taskId == 2L }
+        assertNull(p2.expectedCi)
+        assertEquals(42L, p2.measuredCi)
+        assertNull(p2.ciMatched) // 期望缺失 → 只显示实测，不打结论
+    }
+
+    @Test
+    fun project_noFix_ciFieldsStayEmpty() {
+        val points = PlanMapPoints.project(
+            tasks = listOf(row(id = 1).copy(expectedCi = 28918569L)),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+        )
+        val p = points.single()
+        assertEquals(28918569L, p.expectedCi)
+        assertNull(p.measuredCi)
+        assertNull(p.ciMatched)
+    }
+
+    @Test
+    fun ciMatchStats_countsComparablePairsOnly() {
+        val points = PlanMapPoints.project(
+            tasks = listOf(
+                row(id = 1).copy(expectedCi = 28918569L), // 匹配
+                row(id = 2).copy(expectedCi = 29592117L), // 不匹配
+                row(id = 3).copy(expectedCi = 42L),       // 不匹配（两侧都在但不等）
+                row(id = 4),                              // 无期望 → 不入统计
+            ),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+            measured = mapOf(
+                1L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 28918569L),
+                2L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 111L),
+                3L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 222L),
+                4L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 333L),
+            ),
+        )
+        assertEquals(1 to 3, PlanMapPoints.ciMatchStats(points))
+    }
+
+    @Test
+    fun ciMatchStats_noComparablePair_isNull() {
+        // 图例整段隐藏语义：没有任何一对可判定 → null。
+        val withFixOnly = PlanMapPoints.project(
+            tasks = listOf(row(id = 1)),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+            measured = mapOf(1L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 28918569L)),
+        )
+        assertNull(PlanMapPoints.ciMatchStats(withFixOnly))
+
+        val withExpectedOnly = PlanMapPoints.project(
+            tasks = listOf(row(id = 1).copy(expectedCi = 28918569L)),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+        )
+        assertNull(PlanMapPoints.ciMatchStats(withExpectedOnly))
+    }
+
+    @Test
+    fun ciMatchStats_allMatched_whenEveryComparablePairEquals() {
+        val points = PlanMapPoints.project(
+            tasks = listOf(
+                row(id = 1).copy(expectedCi = 28918569L),
+                row(id = 2).copy(expectedCi = 29592117L),
+            ),
+            trustedCounts = emptyMap(),
+            currentCsvRow = null,
+            measured = mapOf(
+                1L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 28918569L),
+                2L to PlanMapPoints.MeasuredFix(50.0, 30.0, servingCi = 29592117L),
+            ),
+        )
+        assertEquals(2 to 2, PlanMapPoints.ciMatchStats(points))
+    }
 }
