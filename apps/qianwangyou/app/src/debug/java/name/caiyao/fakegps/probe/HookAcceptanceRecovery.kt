@@ -13,34 +13,74 @@ internal object HookAcceptanceRecovery {
     private const val KEY_PREVIOUS_JSON = "previous_json"
 
     /**
-     * Direct-boot safety (#194). The acceptance record lives in credential-encrypted storage,
-     * yet this process can start inside the direct-boot window: system_server's boot phase-600
-     * bind pulls up the directBootAware OracleBridgeService (and with it this Application)
-     * before the user has unlocked the device. Reading CE prefs before unlock throws, and an
-     * unprotected throw here killed the whole process at startup — which also took down the
-     * system_server oracle bridge registration.
+     * Direct-boot safety (#194), with the locked/unlocked log distinction from the #195 review.
+     * The acceptance record lives in credential-encrypted storage, yet this process can start
+     * inside the direct-boot window: system_server's boot phase-600 bind pulls up the
+     * directBootAware OracleBridgeService (and with it this Application) before the user has
+     * unlocked the device. Reading CE prefs before unlock throws, and an unprotected throw here
+     * killed the whole process at startup — which also took down the system_server oracle
+     * bridge registration.
      *
-     * A locked device (or any CE read failure) is therefore reported as "no pending work".
-     * Callers defer to the next process start after unlock: the durable record is still on
-     * disk and recovery runs as usual then. The acceptance harness itself only ever runs
-     * unlocked, so deferral can never lose a recoverable transaction.
+     * The probes deliberately attempt the CE read BEFORE the unlock gate so that a locked-state
+     * read failure stays observable as the expected WARN `*_deferred` (the log the #194 device
+     * validation greps for) instead of vanishing behind a short-circuit; the gate then ANDs the
+     * read result with the unlock state, so a locked-but-readable store still reports "no
+     * pending work" and the durable record is left untouched for the next start after unlock.
+     * The acceptance harness itself only ever runs unlocked, so deferral can never lose a
+     * recoverable transaction. A CE read failure while the device is ALREADY unlocked is a
+     * different beast — nothing will ever re-trigger recovery for this start, so "deferred"
+     * would mislead; it is logged at ERROR (`*_unlocked_read_failure`).
      */
-    fun hasPending(context: Context): Boolean = runCatching {
-        isDeviceUnlocked(context) && recordPrefs(context).getBoolean(KEY_PENDING, false)
-    }.onFailure {
-        Log.w(TAG, "pending_check_deferred", it)
-    }.getOrDefault(false)
+    fun hasPending(context: Context): Boolean =
+        directBootGuarded(
+            context,
+            default = false,
+            lockedLog = "pending_check_deferred",
+            unlockedFailureLog = "pending_check_unlocked_read_failure",
+        ) { unlocked ->
+            recordPrefs(context).getBoolean(KEY_PENDING, false) && unlocked
+        }
 
     /**
      * Fingerprint of the durable payload itself, before any normal Activity publish can mask it.
      * Shares [hasPending]'s direct-boot semantics: a locked CE store yields null instead of
-     * throwing.
+     * throwing, and an unlocked-state read failure escalates to ERROR instead of "deferred".
      */
-    fun pendingFingerprint(context: Context): String? = runCatching {
-        if (isDeviceUnlocked(context)) pendingPayload(context)?.let(PublishedConfig::fingerprint) else null
-    }.onFailure {
-        Log.w(TAG, "pending_fingerprint_deferred", it)
-    }.getOrNull()
+    fun pendingFingerprint(context: Context): String? =
+        directBootGuarded(
+            context,
+            default = null,
+            lockedLog = "pending_fingerprint_deferred",
+            unlockedFailureLog = "pending_fingerprint_unlocked_read_failure",
+        ) { unlocked ->
+            val payload = pendingPayload(context)
+            if (unlocked) payload?.let(PublishedConfig::fingerprint) else null
+        }
+
+    /**
+     * Runs a CE probe under the direct-boot contract: failures never propagate. The unlock
+     * probe itself runs inside the catch scope — if even that fails, the failure is reported
+     * on the unlocked (real-anomaly) branch, consistent with [isDeviceUnlocked] treating an
+     * unprobeable device as unlocked.
+     */
+    private inline fun <T> directBootGuarded(
+        context: Context,
+        default: T,
+        lockedLog: String,
+        unlockedFailureLog: String,
+        op: (deviceUnlocked: Boolean) -> T,
+    ): T {
+        var deviceUnlocked = true
+        return runCatching { op(isDeviceUnlocked(context).also { deviceUnlocked = it }) }
+            .onFailure { failure ->
+                if (deviceUnlocked) {
+                    Log.e(TAG, unlockedFailureLog, failure)
+                } else {
+                    Log.w(TAG, lockedLog, failure)
+                }
+            }
+            .getOrDefault(default)
+    }
 
     /**
      * True only while credential-encrypted storage is readable. A missing UserManager (host

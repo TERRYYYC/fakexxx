@@ -476,8 +476,9 @@ public final class SystemServerOracleInstaller {
      * before the service ever connected) previously ended in poisonCallback with no retry, so
      * a single reboot-time hiccup left the oracle unregistered until a manual reinstall. Each
      * path now feeds [BridgeBindRetry], which schedules bounded backoff rebinds (1s/5s/30s/30s)
-     * and logs a final give-up line; a completed registration resets that budget. The existing
-     * framework-driven onBindingDied immediate rebind is kept unchanged.
+     * and logs a final give-up line; a completed registration resets that budget, and so does
+     * every framework-driven onBindingDied rebind (#195 review: fresh generation → fresh
+     * budget, so its own failures stay retried and logged).
      */
     private static void bindBridge(Context context) {
         if (!BRIDGE_BIND_STARTED.compareAndSet(false, true)) return;
@@ -533,6 +534,13 @@ public final class SystemServerOracleInstaller {
                 } catch (RuntimeException callbackFailure) {
                     oracleBinder.poisonCallback(callbackFailure);
                 }
+                // #195 review (Medium): the framework hands this rebind a brand-new generation,
+                // so it also gets a fresh retry budget — after a give-up, a binding-death rebind
+                // whose registration failed again would otherwise be budgetless AND silent
+                // (gaveUpLogged suppressed the log). Only the budget resets; the generation
+                // guards in the retry runnable above stay intact, so a stale scheduled rebind
+                // still cannot tear down the healthy binding this path creates.
+                bridgeRetry(context).resetBudget();
                 BRIDGE_BIND_STARTED.set(false);
                 bindBridge(context);
             }

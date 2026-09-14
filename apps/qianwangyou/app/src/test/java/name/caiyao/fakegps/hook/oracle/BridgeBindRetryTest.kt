@@ -68,6 +68,35 @@ class BridgeBindRetryTest {
         assertEquals(2, env.logs.count { it.contains("gave up") })
     }
 
+    /**
+     * #195 review (Medium)：预算耗尽后 onBindingDied 触发的 rebind 曾无预算且失败静默。框架
+     * binding death 交给安装器的是全新一代，rebind 前 resetBudget()——只重置预算，不动代际
+     * 守卫（代际归安装器管），rebind 的失败重新可调度、可日志，二次死路能再打一条放弃日志。
+     */
+    @Test
+    fun `binding death after give-up hands the rebind a fresh budget that retries and logs again`() {
+        val env = FakeEnvironment()
+        val retry = BridgeBindRetry(env)
+
+        repeat(BridgeBindRetry.RETRY_DELAYS_MS.size + 1) { retry.onRegistrationFailed("first generation") }
+        assertEquals(1, env.logs.count { it.contains("gave up") })
+
+        // onBindingDied → installer resetBudget() → rebind。
+        retry.resetBudget()
+        assertEquals(0, retry.retriesUsed())
+
+        retry.onRegistrationFailed("rebind rejected")
+        assertEquals("the rebind's first failure schedules a backoff from 1s again",
+            listOf(1_000L), env.scheduledDelaysMs.takeLast(1))
+        assertEquals("no premature second give-up line while the fresh budget lasts",
+            1, env.logs.count { it.contains("gave up") })
+
+        repeat(BridgeBindRetry.RETRY_DELAYS_MS.size) { retry.onRegistrationFailed("rebind session") }
+        assertEquals("a second dead end logs its own give-up line", 2, env.logs.count { it.contains("gave up") })
+        assertTrue("second give-up names the rebind session as the last failure",
+            env.logs.last { it.contains("gave up") }.contains("rebind session"))
+    }
+
     @Test
     fun `failure reason and attempt progress are preserved in the log line`() {
         val env = FakeEnvironment()

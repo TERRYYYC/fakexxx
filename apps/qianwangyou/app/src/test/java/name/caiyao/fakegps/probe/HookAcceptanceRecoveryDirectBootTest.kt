@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.os.UserManager
+import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,7 +23,8 @@ import org.robolectric.shadows.ShadowLog
  * （directBootAware 的 OracleBridgeService 随进程启动 HookAcceptanceApplication），此时
  * credential-encrypted 存储不可读。这里在 JVM 上模拟两种 CE 不可用形态：
  * 1. CE prefs 读取直接抛（真机 direct-boot 的实际症状）——hasPending/pendingFingerprint 必须
- *    返回默认值而不是把进程打死；
+ *    返回默认值而不是把进程打死；解锁态下该异常按 #195 评审升 ERROR（unlocked_read_failure，
+ *    无人会再触发恢复），锁定态保持 WARN deferred（预期延后）；
  * 2. UserManager.isUserUnlocked=false（CE 明确未解锁）——显式走延后路径：durable record 原样
  *    保留，等下一次解锁后的进程启动再恢复（验收 harness 本身只在解锁态运行，延后不丢事务）。
  */
@@ -62,15 +64,45 @@ class HookAcceptanceRecoveryDirectBootTest {
             .setUserUnlocked(unlocked)
     }
 
+    /**
+     * #195 review (Low)：解锁态下 CE 读失败是真异常——解锁后没有任何东西会再触发恢复，
+     * "deferred" 措辞会误导，必须升 ERROR 且改用 unlocked_read_failure 措辞。
+     */
     @Test
-    fun `locked CE storage reports no pending instead of crashing the process start`() {
+    fun `unlocked CE read failure escalates to ERROR instead of the misleading deferred WARN`() {
+        val throwingStorage = lockedStorageContext()
+
+        assertFalse(HookAcceptanceRecovery.hasPending(throwingStorage))
+        assertNull(HookAcceptanceRecovery.pendingFingerprint(throwingStorage))
+        val logs = ShadowLog.getLogsForTag(HookAcceptanceRecovery.TAG)
+        assertTrue(
+            "unlocked read failure must be loud: nothing re-triggers recovery after this start",
+            logs.any {
+                it.msg == "pending_check_unlocked_read_failure" && it.type == Log.ERROR
+            },
+        )
+        assertFalse(
+            "'deferred' would promise a replay that never comes in the unlocked state",
+            logs.any { it.msg.contains("deferred") },
+        )
+    }
+
+    /** 锁定态读失败保持预期路径：WARN deferred（下一次解锁后的进程启动自然重放）。 */
+    @Test
+    fun `locked CE read failure keeps the expected deferred WARN`() {
+        setUserUnlocked(false)
         val locked = lockedStorageContext()
 
         assertFalse(HookAcceptanceRecovery.hasPending(locked))
         assertNull(HookAcceptanceRecovery.pendingFingerprint(locked))
+        val logs = ShadowLog.getLogsForTag(HookAcceptanceRecovery.TAG)
         assertTrue(
-            "deferral must be observable in the log",
-            ShadowLog.getLogsForTag(HookAcceptanceRecovery.TAG).any { it.msg == "pending_check_deferred" },
+            "locked deferral stays the expected WARN path",
+            logs.any { it.msg == "pending_check_deferred" && it.type == Log.WARN },
+        )
+        assertFalse(
+            "locked deferral must not be escalated to the unlocked failure branch",
+            logs.any { it.msg.contains("unlocked_read_failure") },
         )
     }
 

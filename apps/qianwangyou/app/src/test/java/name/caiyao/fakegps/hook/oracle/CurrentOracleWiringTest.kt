@@ -102,6 +102,21 @@ class CurrentOracleWiringTest {
             "watchdog retirement must be ordered before the state transition it protects",
             registeredAt in 0 until stateUpdatedAt,
         )
+        // #195 review (Medium): the framework's onBindingDied rebind must reset the retry
+        // budget before rebinding — a post-give-up rebind used to fail with zero logs and
+        // zero retries. The reset must sit inside the onBindingDied branch, ahead of the
+        // rebind call, and must not touch the generation guards.
+        val died = bind.substringAfter("public void onBindingDied(ComponentName name)")
+        val resetAt = died.indexOf("bridgeRetry(context).resetBudget()")
+        val rebindAt = died.indexOf("bindBridge(context)")
+        assertTrue(
+            "framework binding-death rebind must start from a fresh budget",
+            resetAt in 0 until rebindAt,
+        )
+        assertTrue(
+            "budget reset must not bump generation guards (stale-retry protection stays)",
+            !died.substringBefore("bindBridge(context)").contains("GENERATION.set"),
+        )
         assertTrue(
             "retry budget must keep the 1s/5s/30s escalation",
             policy.contains("{1_000L, 5_000L, 30_000L, 30_000L}"),
