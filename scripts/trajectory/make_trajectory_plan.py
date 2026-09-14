@@ -7,9 +7,10 @@
 输出（写入 --out-dir）：
   plan.csv      longitude,latitude,priority,required_successes（列序 lng 在前，
                 对齐 WorklistParser canonical contract，直接进 Download 作计划）
-  profiles.csv  addname,latitude,longitude（QWY 收藏档案导入格式）
+  profiles.csv  addname,latitude,longitude,ci（QWY 收藏档案导入格式；ci=该点继承
+                的源行 ECGI，#193 导入器 header 按名绑定、读回门做 ci 字节级比对）
   ecgi_map.csv  addname,ecgi,custom_admin_3,source_row（轨迹点继承原始行信息，
-                供 #189 CI hook 与 #190 验证层使用）
+                供 #189 CI hook 与 #190 验证层使用；审计用，与 profiles.csv 并存）
   manifest.json 参数快照 + 行数统计 + 每站轨迹摘要（审计复现用）
 
 仅用 Python 3 标准库。
@@ -237,8 +238,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "  walk100  持续向东 100m 直线步行\n"
             "\n"
             "配合导入（详见同目录 README.md）:\n"
-            "  plan.csv → CellRebel Auto 计划导入（Download）；profiles.csv → QWY 收藏档案导入；\n"
-            "  ecgi_map.csv → #189 CI hook / #190 验证层的位置→ECGI 期望。\n"
+            "  plan.csv → CellRebel Auto 计划导入（Download）；\n"
+            "  profiles.csv（含 ci 第 4 列）→ QWY 收藏档案导入，#193 读回门按 ci 字节级比对；\n"
+            "  ecgi_map.csv → #189 CI hook / #190 验证层的位置→ECGI 期望（审计用）。\n"
             "  导入 QWY 档案后记得编辑保存任一档案完成锚定（SKILL §2.6）。\n"
         ),
     )
@@ -314,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             for step_idx, (lat, lng) in enumerate(coords):
                 addname = ADDNAME_FMT.format(station=station["row"], step=step_idx)
                 plan_rows.append([fmt7(lng), fmt7(lat), str(args.priority), str(args.required_successes)])
-                profile_rows.append([addname, fmt7(lat), fmt7(lng)])
+                profile_rows.append([addname, fmt7(lat), fmt7(lng), station["ecgi"]])
                 ecgi_rows.append(
                     [addname, station["ecgi"], station["custom_admin_3"], str(station["row"])]
                 )
@@ -339,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                 writer.writerows(rows)
 
         write_csv("plan.csv", ("longitude", "latitude", "priority", "required_successes"), plan_rows)
-        write_csv("profiles.csv", ("addname", "latitude", "longitude"), profile_rows)
+        write_csv("profiles.csv", ("addname", "latitude", "longitude", "ci"), profile_rows)
         write_csv("ecgi_map.csv", ("addname", "ecgi", "custom_admin_3", "source_row"), ecgi_rows)
 
         try:

@@ -130,7 +130,7 @@ class EndToEndTest(Base):
         for name, table in (("plan.csv", plan), ("profiles.csv", profiles), ("ecgi_map.csv", ecgi)):
             self.assertEqual(len(table) - 1, expected_rows, name)
         self.assertEqual(plan[0], ["longitude", "latitude", "priority", "required_successes"])
-        self.assertEqual(profiles[0], ["addname", "latitude", "longitude"])
+        self.assertEqual(profiles[0], ["addname", "latitude", "longitude", "ci"])
         self.assertEqual(ecgi[0], ["addname", "ecgi", "custom_admin_3", "source_row"])
 
     def test_plan_column_order_lng_first(self) -> None:
@@ -156,6 +156,21 @@ class EndToEndTest(Base):
         # plan.csv 第一行也必须是原点（lng 在前）。
         self.assertAlmostEqual(float(plan[1][0]), 29.9243986, places=7)
         self.assertAlmostEqual(float(plan[1][1]), 49.8714584, places=7)
+
+    def test_profiles_ci_column_and_inheritance(self) -> None:
+        """profiles.csv 第 4 列 ci：列数/列名对齐 #193 QWY 导入器 header 契约，
+        值继承源行 ECGI（读回门按此做字节级比对）。"""
+        self.run_default()
+        profiles = self.read_csv("profiles.csv")
+        self.assertEqual(profiles[0], ["addname", "latitude", "longitude", "ci"])
+        for row in profiles[1:]:
+            self.assertEqual(len(row), 4, row)
+        # 每站 13 点整段继承源行 ECGI：站 1 → 28918569、站 2 → 29592117、站 3 → 29073696。
+        expected_ci = ["28918569"] * 13 + ["29592117"] * 13 + ["29073696"] * 13
+        self.assertEqual([row[3] for row in profiles[1:]], expected_ci)
+        # 原点行抽查。
+        self.assertEqual(profiles[1][0], "traj-001-00")
+        self.assertEqual(profiles[1][3], "28918569")
 
     def test_ecgi_inheritance(self) -> None:
         self.run_default()

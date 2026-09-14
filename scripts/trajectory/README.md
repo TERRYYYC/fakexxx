@@ -48,13 +48,25 @@ E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入�
 | 文件 | 列 | 去向 |
 | --- | --- | --- |
 | `plan.csv` | `longitude,latitude,priority,required_successes`（**lng 在前**） | CellRebel Auto 计划导入 |
-| `profiles.csv` | `addname,latitude,longitude` | QWY 收藏档案导入 |
-| `ecgi_map.csv` | `addname,ecgi,custom_admin_3,source_row` | #189 CI hook / #190 验证层 |
+| `profiles.csv` | `addname,latitude,longitude,ci`（ci=该点继承的源行 ECGI） | QWY 收藏档案导入；#193 读回门按 ci 做字节级比对 |
+| `ecgi_map.csv` | `addname,ecgi,custom_admin_3,source_row` | #189 CI hook / #190 验证层（保留作期望真相源与审计） |
 | `manifest.json` | 参数快照 + 输入 sha256 + 行数统计 + 每站摘要（路径长度/包围盒） | 审计复现 |
 
 行序 = 站点序 × 轨迹序（step 0 = 原点）。addname 命名 `traj-{station:03d}-{step:02d}`
 （如 `traj-001-00`），其中 station = 原始 CSV 数据行号；全小写字母数字连字符，
 QWY 档案名保守兼容。轨迹点继承原始行的 ECGI/区县/行号。
+
+## 与 #193 的衔接（读回门闭环）
+
+`profiles.csv` 自带第 4 列 `ci`（= 该点继承的源行 ECGI），与 #193 QWY 档案导入器
+的 header 按名绑定契约（`addname,latitude,longitude,ci`，4 列）直接对齐——**单文件
+导入即闭环，无需再把 `ecgi_map.csv` 手工并进档案**。导入后：
+
+- QWY 读回门（DeliveryReadbackGate）会把档案已发布的 ci 与 hook 载荷 ci 做
+  **字节级比对**，不一致即进修复阶梯；ci 缺失/null 时该腿静默跳过（旧行为不变）。
+- 因此轨迹工作流下每行档案都带正确 ci：一期「ci 跟随伪造」目标在该链路真实生效，
+  不会出现「导入后 ci 全 null → 读回门静默跳过」的缺口（#193 评审 F1 已修复）。
+- `ecgi_map.csv` 保留原样，供 #189 CI hook / #190 验证层消费与事后审计。
 
 ## 与装机流程配合（SKILL §2.5/§2.6）
 
@@ -84,5 +96,6 @@ python3 -m unittest discover -s scripts/trajectory
 ```
 
 覆盖：步进数学（50m@lat49.87 → Δlat≈0.000449、Δlng≈0.00069 量级）、原点为首点、
-box50 闭合、ECGI 继承、三件套行数一致、plan 列序 lng 在前、addname 唯一、
-`--points` clamp、`--stations` 子集选择与越界拒绝、manifest 摘要。
+box50 闭合、ECGI 继承、profiles.csv 列数/列名/ci 继承（4 列对齐 #193）、三件套行数
+一致、plan 列序 lng 在前、addname 唯一、`--points` clamp、`--stations` 子集选择与
+越界拒绝、manifest 摘要。
