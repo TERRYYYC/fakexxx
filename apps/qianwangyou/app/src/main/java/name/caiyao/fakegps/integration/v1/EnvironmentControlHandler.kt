@@ -1240,7 +1240,7 @@ class EnvironmentControlHandler(
             // skipped (odd sequence in flight, foreign mutation in the window,
             // unreadable after-read), the next observe attributes the cursor
             // motion to this record instead of double-counting it as an
-            // external semantic change — the mi14 attempts 386/391 shape.
+            // external semantic change — the mi14 attempts 398/403 shape.
             // Best-effort: a failed record degrades to the conservative
             // pre-#199 bump, never fails the operation that already committed.
             if (changed && authoritativeCommitStore != null) {

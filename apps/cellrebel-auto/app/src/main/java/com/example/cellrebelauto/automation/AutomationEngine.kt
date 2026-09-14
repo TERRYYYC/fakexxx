@@ -3236,11 +3236,13 @@ class AutomationEngine(
             // intent hash). A REGRESSED revision means the receipt does not
             // describe this environment (fail-closed). A FORWARD revision with
             // matching identity is benign bookkeeping (the provider counted a
-            // foreign platform motion or a restart generation bump between the
-            // receipt freeze and this observe) and must NOT roll the task cursor
-            // back: the provider pointer is durable-forward here, so a rollback
-            // misaligns every later boundary by +1 — the mi14 attempts 386/391
-            // quota burn loop.
+            // foreign platform motion, or a QWY process restart generation
+            // bump — mi14 hook-mode differential: +5-level cross-restart jumps —
+            // landed between the receipt freeze and this observe) and must NOT
+            // roll the task cursor back: the provider pointer is durable-forward
+            // here, so a rollback misaligns every later boundary by +1 — the
+            // mi14 attempts 398/403 quota burn loop (386: POST missing, same
+            // freeze family; issue正文所引 391 已被手术删除，DB 无行).
             val mismatchLeg: String? = when {
                 observed == null -> "OBSERVE_NULL"
                 observed.scheduleItemId != durableAdvanceReceipt.advancedToItemId -> "scheduleItemId"

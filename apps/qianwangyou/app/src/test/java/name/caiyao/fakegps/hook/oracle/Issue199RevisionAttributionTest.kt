@@ -55,7 +55,11 @@ import org.junit.Test
  * owner-accounted (the tracker already counted it) — the catch-up bump is a
  * DOUBLE COUNT in both cases, and Auto's frozen equality predicates convert it:
  *
- * Form 1 (mi14 attempts 386/391, devices.md e53cfd3d 2026-09-14 坑⑥): the
+ * Form 1 (mi14 attempt 398: OBSERVED_TUPLE_MISMATCH:environmentRevision at
+ * PRE==POST=622; attempt 403 reproduced the same boundary shape in hook mode —
+ * injection-independent; 386 = POST missing in the freeze family; the issue
+ * body's "386/391" predates the DB audit — 391 was deleted by the plan2
+ * surgery and has no row. devices.md e53cfd3d 2026-09-14 坑⑥): the
  * advance's own cursor ack is SKIPPED (odd sequence in flight / foreign
  * mutation in the window / unreadable after-read) — nothing ever retries it.
  * The post-advance observe then bumps → revision = receipt + 1 →
@@ -63,7 +67,8 @@ import org.junit.Test
  * task cursor rolls back while the provider pointer is durable-forward → every
  * boundary misaligned by +1 (quota burn loop, attempt surgery).
  *
- * Form 2 (attempt 399, 2026-09-14 #190 visual acceptance): digest-neutral
+ * Form 2 (attempt 399; same-shape rows 387/392 in the 17:49 DB audit;
+ * 2026-09-14 #190 visual acceptance): digest-neutral
  * platform motion between the PRE and POST observe → POST bumps →
  * PRE 627 ≠ POST 628 → TrustPolicy FAIL → UNVERIFIED — quota burned although
  * coordinates, coverage, verification and intent hash were all verified.
@@ -316,7 +321,7 @@ class Issue199RevisionAttributionTest {
 
     // ---- Form 1: post-advance observe must read the receipt revision even when
     // the advance's own cursor ack was skipped. Every skip shape below is one of
-    // the mi14 attempt-386/391 precursors ("nothing ever retried it"). ----
+    // the mi14 attempt-398/403 precursors ("nothing ever retried it"). ----
 
     @Test
     fun `form1 foreign platform mutation in the advance window - observe reads the receipt revision`() {
