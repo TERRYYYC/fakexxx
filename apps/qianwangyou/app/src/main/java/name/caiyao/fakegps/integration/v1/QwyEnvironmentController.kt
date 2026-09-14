@@ -443,7 +443,7 @@ class QwyEnvironmentController(
             ?: throw IllegalStateException(
                 "schedule item $currentItem has no profile coordinates; the schedule owner must provide them"
             )
-        val coords = itemProfile.first to itemProfile.second
+        val coords = itemProfile.latitude to itemProfile.longitude
 
         val config = SpoofConfig(
             location = SpoofConfig.Location(
@@ -481,6 +481,10 @@ class QwyEnvironmentController(
         // appops reset 2026-09-11, Vector half-injection 2026-09-06) all had correct-looking
         // provider-side records while the fact was wrong — verify the fact, repair once,
         // and refuse the receipt (typed, fail-closed) if the address still does not follow.
+        //
+        // #189 一期边界：读回门只加 ci 腿（28-bit ECI）。载荷里的 mcc/mnc/tac/pci 保持
+        // passthrough 真实值——站点表无这些列，一期接受"新 ECI + 旧 TAC/PCI 同框"的呈现
+        // （验收口径 = ECGI 对照）；设备驻留 NR 时 CellRebel 走 getNci()，该路径一期不生效。
         var publishOutcome = published
         val readbackGate = DeliveryReadbackGate(
             log = { android.util.Log.w("EnvControl", it) },
@@ -491,15 +495,17 @@ class QwyEnvironmentController(
             DeliveryReadbackGate.Readback(
                 mockLatitude = mock?.latitude,
                 mockLongitude = mock?.longitude,
-                payloadLatitude = payload?.first,
-                payloadLongitude = payload?.second,
-                payloadAddname = payload?.third,
+                payloadLatitude = payload?.latitude,
+                payloadLongitude = payload?.longitude,
+                payloadAddname = payload?.addname,
+                // #189: 载荷 fields.ci 读回（缺列 = null，与 3 列旧档案发布形态兼容）。
+                payloadCi = payload?.ci,
             )
         }
         val readbackOutcome = readbackGate.enforce(
             expectedLatitude = coords.first,
             expectedLongitude = coords.second,
-            expectedAddname = itemProfile.third,
+            expectedAddname = itemProfile.addname,
             initialReadback = readbackNow(),
             repairAndReadback = {
                 // 修复阶梯第 1 级：完整重投递（重注册 → 重发布 mock → 重发布载荷）后读回。
@@ -517,6 +523,9 @@ class QwyEnvironmentController(
                 )
                 readbackNow()
             },
+            // #189: item 的 ci 为 null（旧档案/未带 ECGI 计划行）→ 门内跳过 ci 腿；
+            // 非 null 且与载荷 fields.ci 不符 → MISMATCH fail-closed（同坐标腿语义）。
+            expectedCi = itemProfile.ci,
         )
         if (readbackOutcome is DeliveryReadbackGate.Outcome.Mismatch) {
             throw ContractException(
@@ -562,18 +571,22 @@ class QwyEnvironmentController(
     }
 
     private fun resolveItemCoordinates(itemId: String): Pair<Double, Double>? =
-        resolveItemProfile(itemId)?.let { it.first to it.second }
+        resolveItemProfile(itemId)?.let { it.latitude to it.longitude }
 
     /**
      * One read-only open resolves the schedule item's whole delivery identity:
-     * latitude, longitude and addname. addname is the #176 readback's payload
-     * identity probe (#175 pinned the payload while the pointer moved — the
-     * coordinates alone matched, the name exposed the drift). Guarded by
+     * latitude, longitude, addname and — since #189 — the LTE CI (28-bit ECI,
+     * 十进制，与站点表/轨迹工具 ecgi_map.csv 同域，零换算). addname is the #176
+     * readback's payload identity probe (#175 pinned the payload while the
+     * pointer moved — the coordinates alone matched, the name exposed the
+     * drift); ci is the #189 readback's serving-cell identity probe (same
+     * pinned-payload family: coordinates following while ci stays on the
+     * previous item reads as a real mismatch). Guarded by
      * LegacyRecoveryDirectOpenGuardTest as one of the three allowed direct
      * opens: READONLY, never runs recovery itself — owner-start recovery
      * precedes controller construction.
      */
-    private fun resolveItemProfile(itemId: String): Triple<Double, Double, String?>? {
+    private fun resolveItemProfile(itemId: String): ItemDeliveryIdentity? {
         if (!itemId.startsWith("profile-")) return null
         if (!profileDatabaseAvailable) return null
         val dbId = itemId.removePrefix("profile-").toLongOrNull() ?: return null
@@ -582,16 +595,19 @@ class QwyEnvironmentController(
         return try {
             SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
                 db.rawQuery(
-                    "SELECT latitude, longitude, addname FROM temp WHERE id = ?",
+                    "SELECT latitude, longitude, addname, ci FROM temp WHERE id = ?",
                     arrayOf(dbId.toString()),
                 ).use { cursor ->
                     if (!cursor.moveToFirst()) return@use null
                     val lat = cursor.getDouble(0)
                     val lng = cursor.getDouble(1)
                     val addname = if (cursor.isNull(2)) null else cursor.getString(2)
+                    // #189: NULL ci = 旧档案/未带 ECGI 的计划行 = 读回门跳过 ci 比对。
+                    val ci = if (cursor.isNull(3)) null else cursor.getLong(3)
                     if (lat == 0.0 && lng == 0.0 && cursor.isNull(0) && cursor.isNull(1)) null
-                    else if (!cursor.isNull(0) && !cursor.isNull(1)) Triple(lat, lng, addname)
-                    else null
+                    else if (!cursor.isNull(0) && !cursor.isNull(1)) {
+                        ItemDeliveryIdentity(lat, lng, addname, ci)
+                    } else null
                 }
             }
         } catch (e: Exception) {
@@ -600,34 +616,39 @@ class QwyEnvironmentController(
     }
 
     /**
-     * #176 读回：hook 消费的载荷**文件**实际内容（lat, lng, addname）。
+     * #176 读回：hook 消费的载荷**文件**实际内容（lat, lng, addname；#189 起
+     * 另读 fields.ci）。
      *
      * 故意不走 `readPublished`（SharedPreferences 进程内缓存——刚写完再读等于自己对自己，
      * 抓不到"缓存有值但文件未落盘"的半套注入形态），而是读传输文件字节后解析。
-     * 读不到/解析失败 → null（门按不可信处理，fail-closed）。
+     * 读不到/解析失败 → null（门按不可信处理，fail-closed）。载荷无 ci 列
+     * （3 列旧档案的合法发布形态）→ ci=null，由门按 expectedCi 决定是否比对。
      */
-    private fun readPublishedPayloadFields(): Triple<Double, Double, String?>? = try {
+    private fun readPublishedPayloadFields(): ItemDeliveryIdentity? = try {
         val bytes = ConfigPrefsSync.readPublishedFileBytes(appContext) ?: return null
         val xml = String(bytes, Charsets.UTF_8)
         // 传输文件由本 app 的 SharedPreferences 写出，形状固定：<string name="json">{…}</string>
         val jsonRaw = JSON_VALUE_REGEX.find(xml)?.groupValues?.get(1) ?: return null
         val fields = JSONObject(unescapeXml(jsonRaw)).optJSONObject("fields") ?: return null
         if (!fields.has("latitude") || !fields.has("longitude")) null
-        else Triple(
-            fields.getDouble("latitude"),
-            fields.getDouble("longitude"),
-            fields.optString("addname", null as String?),
+        else ItemDeliveryIdentity(
+            latitude = fields.getDouble("latitude"),
+            longitude = fields.getDouble("longitude"),
+            addname = fields.optString("addname", null as String?),
+            // #189: INTEGER 列透传进 fields；缺列/NULL = null（= 旧载荷形态）。
+            ci = if (fields.has("ci") && !fields.isNull("ci")) fields.getLong("ci") else null,
         )
     } catch (e: Exception) {
         null
     }
 
-    private fun unescapeXml(s: String): String = s
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
+    private fun unescapeXml(s: String): String =
+        s
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
 
     override fun achievableVerificationLevelWire(): Int {
         // F-17: mirror applyEnvironment()'s own preconditions exactly — every
@@ -744,6 +765,19 @@ class QwyEnvironmentController(
         changeListener = listener
     }
 }
+
+/**
+ * #189: one delivery identity shared by both sides of the readback comparison —
+ * the schedule item's profile row (resolveItemProfile, the EXPECTED values) and
+ * the hook payload file's fields (readPublishedPayloadFields, the ACTUAL values).
+ * ci is the十进制 28-bit ECI; null = 未配置 = 读回门跳过 ci 腿（向后兼容 3 列旧档案）。
+ */
+private data class ItemDeliveryIdentity(
+    val latitude: Double,
+    val longitude: Double,
+    val addname: String?,
+    val ci: Long?,
+)
 
 /**
  * Deliberately a no-op for now — the contract lane ships without GMS FLP mocking.

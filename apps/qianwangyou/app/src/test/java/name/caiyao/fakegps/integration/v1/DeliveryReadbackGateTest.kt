@@ -34,6 +34,18 @@ class DeliveryReadbackGateTest {
             payloadAddname = addname,
         )
 
+    /** #189: 坐标/addname 之外再带载荷 fields.ci 的读回。 */
+    private fun atWithCi(
+        coords: Pair<Double, Double>,
+        addname: String?,
+        payloadCi: Long?,
+    ): DeliveryReadbackGate.Readback =
+        at(coords, addname).copy(payloadCi = payloadCi)
+
+    /** #189 调研报告：运行台实测读数同域的真实 ECI 样本（Lvivska 段）。 */
+    private val eciA = 37_054_241L
+    private val eciB = 36_055_594L
+
     private fun unreadableMock(coords: Pair<Double, Double>, addname: String?) =
         at(coords, addname).copy(mockLatitude = null, mockLongitude = null)
 
@@ -158,5 +170,122 @@ class DeliveryReadbackGateTest {
         )
         assertTrue(logs.any { it.contains("loc-01") })
         assertTrue(logs.any { it.contains("repair", ignoreCase = true) })
+    }
+
+    // ------------------------------------------------------------------
+    // #189 CI 腿三态：null 跳过 / 一致过 / 不一致拒（detail 标明 ci 腿）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `ci - expected null skips the ci leg entirely`() {
+        // 3 列旧档案 / 未带 ECGI 的计划行：期望 ci=null 且载荷也无 ci 列 → 行为与 #176 相同
+        var repairs = 0
+        val outcome = gate.enforce(
+            expectedLatitude = loc01.first,
+            expectedLongitude = loc01.second,
+            expectedAddname = "loc-01",
+            initialReadback = at(loc01, "loc-01"), // payloadCi 默认 null
+            repairAndReadback = { repairs++; at(loc01, "loc-01") },
+            expectedCi = null,
+        )
+        assertEquals(DeliveryReadbackGate.Outcome.Verified, outcome)
+        assertEquals(0, repairs)
+    }
+
+    @Test
+    fun `ci - expected null also tolerates a payload that carries a ci`() {
+        // 期望侧无 ci 时，载荷多出 ci 列也不构成 mismatch（比对完全跳过，不是"值相等才过"）
+        val outcome = gate.enforce(
+            expectedLatitude = loc01.first,
+            expectedLongitude = loc01.second,
+            expectedAddname = "loc-01",
+            initialReadback = atWithCi(loc01, "loc-01", eciA),
+            repairAndReadback = { atWithCi(loc01, "loc-01", eciA) },
+            expectedCi = null,
+        )
+        assertEquals(DeliveryReadbackGate.Outcome.Verified, outcome)
+    }
+
+    @Test
+    fun `ci - matching payload ci verifies without repair`() {
+        var repairs = 0
+        val outcome = gate.enforce(
+            expectedLatitude = loc01.first,
+            expectedLongitude = loc01.second,
+            expectedAddname = "loc-01",
+            initialReadback = atWithCi(loc01, "loc-01", eciA),
+            repairAndReadback = { repairs++; atWithCi(loc01, "loc-01", eciA) },
+            expectedCi = eciA,
+        )
+        assertEquals(DeliveryReadbackGate.Outcome.Verified, outcome)
+        assertEquals(0, repairs)
+    }
+
+    @Test
+    fun `ci - stale payload ci mismatches fail-closed with the ci leg named in detail`() {
+        // 日程项切到 B 位置而载荷 ci 还钉在 A 的 ECI（与 #175 同构的钉死形态，ci 版）
+        val outcome = gate.enforce(
+            expectedLatitude = loc02.first,
+            expectedLongitude = loc02.second,
+            expectedAddname = "loc-02",
+            initialReadback = atWithCi(loc02, "loc-02", eciA),
+            repairAndReadback = { atWithCi(loc02, "loc-02", eciA) },
+            expectedCi = eciB,
+        )
+        assertTrue(outcome is DeliveryReadbackGate.Outcome.Mismatch)
+        val detail = (outcome as DeliveryReadbackGate.Outcome.Mismatch).detail
+        assertTrue("detail should name the ci leg with the wrong value: $detail", "payloadCi=$eciA" in detail)
+        assertTrue("detail should carry the expected ci: $detail", "ci=$eciB" in detail)
+    }
+
+    @Test
+    fun `ci - payload missing the ci column mismatches when expected ci is set`() {
+        // item 带 ECGI 而载荷没有 ci 列（钉死在一份 3 列旧档案上）→ 也是 ci 腿错
+        val outcome = gate.enforce(
+            expectedLatitude = loc02.first,
+            expectedLongitude = loc02.second,
+            expectedAddname = "loc-02",
+            initialReadback = atWithCi(loc02, "loc-02", null),
+            repairAndReadback = { atWithCi(loc02, "loc-02", null) },
+            expectedCi = eciB,
+        )
+        assertTrue(outcome is DeliveryReadbackGate.Outcome.Mismatch)
+        val detail = (outcome as DeliveryReadbackGate.Outcome.Mismatch).detail
+        assertTrue("detail should name the absent payload ci: $detail", "payloadCi=null" in detail)
+    }
+
+    @Test
+    fun `ci - repair makes the payload ci follow - verified after one repair`() {
+        var repairs = 0
+        val outcome = gate.enforce(
+            expectedLatitude = loc02.first,
+            expectedLongitude = loc02.second,
+            expectedAddname = "loc-02",
+            initialReadback = atWithCi(loc01, "loc-01", eciA),
+            repairAndReadback = {
+                repairs++
+                atWithCi(loc02, "loc-02", eciB)
+            },
+            expectedCi = eciB,
+        )
+        assertEquals(DeliveryReadbackGate.Outcome.Verified, outcome)
+        assertEquals(1, repairs)
+    }
+
+    @Test
+    fun `ci - unreadable payload stays unreadable regardless of expected ci`() {
+        // 载荷整体读不回（Vector 半套注入）→ payload=unreadable 腿覆盖，ci 腿不重复报
+        val outcome = gate.enforce(
+            expectedLatitude = loc02.first,
+            expectedLongitude = loc02.second,
+            expectedAddname = "loc-02",
+            initialReadback = unreadablePayload(loc02, "loc-02"),
+            repairAndReadback = { unreadablePayload(loc02, "loc-02") },
+            expectedCi = eciB,
+        )
+        assertTrue(outcome is DeliveryReadbackGate.Outcome.Mismatch)
+        val detail = (outcome as DeliveryReadbackGate.Outcome.Mismatch).detail
+        assertTrue("payload=unreadable" in detail)
+        assertTrue("ci leg must not double-report: $detail", "payloadCi=" !in detail)
     }
 }

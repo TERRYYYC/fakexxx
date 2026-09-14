@@ -29,12 +29,26 @@ package name.caiyao.fakegps.integration.v1
  *
  * 坐标容差 [COORDINATE_TOLERANCE] 吸收档案 DB REAL → JSON 载荷 → 读回的浮点往返
  * （设备实测 49.732763 vs 49.73276311），与计划导入的逐位比对口径一致。
+ *
+ * #189 CI 腿：expectedCi 非空时比对载荷 fields.ci（十进制 28-bit ECI，与
+ * CellRebel 的 getCi() 同域，零换算）。语义与坐标腿同 fail-closed：item 的
+ * ci 为 null（3 列旧档案 / 未带 ECGI 的计划行）→ **跳过** ci 比对，行为与
+ * #176 完全一致（向后兼容）；非空且与载荷不符（含载荷缺 ci 列）→ MISMATCH
+ * 拒绝，detail 以 `payloadCi=` 标明是 ci 腿。修复阶梯（重投递→重读回）不动。
+ *
+ * #189 一期边界（明确不做，保持透传真实值）：
+ *  - mcc/mnc/tac/pci 不比对：档案/站点表无这些列，一期接受"新 ECI + 旧
+ *    TAC/PCI 同框"的呈现（验收口径 = ECGI 对照，见 issue #189 调研报告 §6）；
+ *  - 设备驻留 NR 时 CellRebel 走 CellIdentityNr.getNci()，本门只护 LTE ci 腿，
+ *    nci 路径一期不生效。
  */
 class DeliveryReadbackGate(private val log: (String) -> Unit = {}) {
 
     /**
      * 三层读回快照。mock 坐标 null = 该进程读不到坐标（后台 provider 进程常态），
      * 此时 mock 层按"投递即证明"接受；载荷坐标 null = hook 载荷读不回来，fail-closed。
+     * payloadCi null = 载荷 fields 无 ci 列（3 列旧档案的合法形态，是否构成
+     * mismatch 由 expectedCi 决定）。
      */
     data class Readback(
         val mockLatitude: Double?,
@@ -42,6 +56,7 @@ class DeliveryReadbackGate(private val log: (String) -> Unit = {}) {
         val payloadLatitude: Double?,
         val payloadLongitude: Double?,
         val payloadAddname: String?,
+        val payloadCi: Long? = null,
     )
 
     sealed interface Outcome {
@@ -55,23 +70,30 @@ class DeliveryReadbackGate(private val log: (String) -> Unit = {}) {
         expectedAddname: String?,
         initialReadback: Readback,
         repairAndReadback: () -> Readback,
+        expectedCi: Long? = null,
     ): Outcome {
-        initialReadback.diagnose(expectedLatitude, expectedLongitude, expectedAddname)?.let { detail ->
+        initialReadback.diagnose(expectedLatitude, expectedLongitude, expectedAddname, expectedCi)
+            ?.let { detail ->
             log("readback MISMATCH before repair: $detail")
             val afterRepair = repairAndReadback()
-            afterRepair.diagnose(expectedLatitude, expectedLongitude, expectedAddname)?.let { repairedDetail ->
+            afterRepair.diagnose(expectedLatitude, expectedLongitude, expectedAddname, expectedCi)
+                ?.let { repairedDetail ->
                 log("readback MISMATCH after 1 repair (delivery did not follow the schedule item): $repairedDetail")
                 return Outcome.Mismatch(
-                    "expected=($expectedLatitude,$expectedLongitude)${addnameSuffix(expectedAddname)} " +
+                    "expected=($expectedLatitude,$expectedLongitude)${addnameSuffix(expectedAddname)}" +
+                        "${ciSuffix(expectedCi)} " +
                         "initial=[$detail] afterRepair=[$repairedDetail]",
                 )
             }
-            log("readback repaired: delivery now follows expected=($expectedLatitude,$expectedLongitude)${addnameSuffix(expectedAddname)}")
+            log(
+                "readback repaired: delivery now follows expected=($expectedLatitude,$expectedLongitude)" +
+                    addnameSuffix(expectedAddname) + ciSuffix(expectedCi),
+            )
             return Outcome.Verified
         }
         log(
             "readback OK: mock+payload follow expected=($expectedLatitude,$expectedLongitude)" +
-                addnameSuffix(expectedAddname) + initialReadback.mockNote(),
+                addnameSuffix(expectedAddname) + ciSuffix(expectedCi) + initialReadback.mockNote(),
         )
         return Outcome.Verified
     }
@@ -81,6 +103,7 @@ class DeliveryReadbackGate(private val log: (String) -> Unit = {}) {
         expectedLatitude: Double,
         expectedLongitude: Double,
         expectedAddname: String?,
+        expectedCi: Long?,
     ): String? {
         val problems = mutableListOf<String>()
         // mock 坐标可读才比对（后台读不到≠错，见类注释）；可读但陈旧 = 真实漂移。
@@ -98,6 +121,14 @@ class DeliveryReadbackGate(private val log: (String) -> Unit = {}) {
             if (payloadAddname != expectedAddname) {
                 problems += "payloadAddname=$payloadAddname"
             }
+            // #189 CI 腿：item 期望 ci 非空才比对（null = 旧档案/未带 ECGI 的计划行，
+            // 完全向后兼容——跳过）。载荷缺 ci 列（payloadCi=null）或值不符都算腿错，
+            // 与坐标腿同 fail-closed；载荷整体不可读已由 payload=unreadable 覆盖，不重复报。
+            if (expectedCi != null && payloadLatitude != null && payloadLongitude != null) {
+                if (payloadCi != expectedCi) {
+                    problems += "payloadCi=$payloadCi"
+                }
+            }
         }
         return if (problems.isEmpty()) null else problems.joinToString(" ")
     }
@@ -112,6 +143,10 @@ class DeliveryReadbackGate(private val log: (String) -> Unit = {}) {
 
     private fun addnameSuffix(expectedAddname: String?): String =
         expectedAddname?.let { " addname=$it" } ?: " addname=null"
+
+    /** 期望 ci 只进日志/detail 的期望侧；载荷侧的实际值由 payloadCi 腿名点出。 */
+    private fun ciSuffix(expectedCi: Long?): String =
+        expectedCi?.let { " ci=$it" } ?: ""
 
     companion object {
         /** 档案→载荷→读回的浮点往返容差（设备实测口径，见类注释）。 */
