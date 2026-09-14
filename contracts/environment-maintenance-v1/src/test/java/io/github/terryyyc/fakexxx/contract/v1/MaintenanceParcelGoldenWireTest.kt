@@ -23,6 +23,13 @@ import org.robolectric.RobolectricTestRunner
  * result kind (bit order b0=errorCodeWire, b1=diagnosticMessage,
  * b2=scheduleVersionAfter, b3=republishedProfileRef), plus the OK result kind.
  *
+ * **What the pin does NOT bind — field content.** 该黄金向量钉的是 codegen
+ * 调用序列漂移，对字段内容不敏感：空串、unicode（增补平面码点）、空集合等
+ * 内容边界不在向量内。它们由 2^n 组合的字段等值断言兜底 — here the 2^4 masks
+ * ARE the vector set and every vector asserts field equality on decode of BOTH
+ * the golden bytes and this root's freshly written bytes, so a content-only
+ * change is invisible by design while a call-sequence change is a golden diff.
+ *
  * Regeneration (deliberate, reviewed act — §6.1 freezes the layout):
  *
  * 1. `cd apps/cellrebel-auto && DUMP_PARCEL_GOLDENS=/tmp/golden-maintenance.txt \

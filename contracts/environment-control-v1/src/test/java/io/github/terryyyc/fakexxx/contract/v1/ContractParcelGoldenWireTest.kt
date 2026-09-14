@@ -56,6 +56,13 @@ import org.robolectric.RobolectricTestRunner
  * test round-trips EVERY 2^n combination (legal or not) so a field-equality
  * regression cannot hide in states the golden table does not enumerate.
  *
+ * **What the pin does NOT bind — field content.** 这些黄金向量钉的是 codegen
+ * 调用序列漂移，对字段内容不敏感：空串、unicode（增补平面码点）、空集合等
+ * 内容边界不在向量内。它们由 2^n 组合的字段等值断言兜底 — a change confined
+ * to representative VALUES is invisible here by design, and a change to HOW
+ * fields are written (ordering, encoding, null-flag discipline) is exactly what
+ * a golden diff exposes.
+ *
  * **Provenance & caveat.** Goldens were generated under Robolectric's JVM
  * Parcel simulation (Robolectric 4.14.1), which reproduces android.os.Parcel
  * encoding. The invariant this enforces is "both roots byte-identical" — if
