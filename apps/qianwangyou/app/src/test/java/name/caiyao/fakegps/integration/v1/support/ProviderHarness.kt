@@ -16,6 +16,7 @@ import name.caiyao.fakegps.integration.v1.DurablePairingStore
 import name.caiyao.fakegps.integration.v1.EnvironmentControlHandler
 import name.caiyao.fakegps.integration.v1.EnvironmentLeaseStore
 import name.caiyao.fakegps.integration.v1.EnvironmentObserver
+import name.caiyao.fakegps.integration.v1.LeaseKeepAliveSignal
 import name.caiyao.fakegps.integration.v1.PendingPairingCandidate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
@@ -27,7 +28,12 @@ import org.junit.Assert.fail
  * process restart of §8.4/§6.6; reboot=true additionally resets the monotonic
  * clock epoch like a device boot (M-LS-13).
  */
-class ProviderHarness private constructor(externalEnvStore: Boolean) {
+class ProviderHarness private constructor(
+    externalEnvStore: Boolean,
+    // #198: lease keep-alive seam under test. Null default keeps every legacy
+    // scenario on the pre-#198 wiring (no signal at all).
+    private val keepAliveSignal: LeaseKeepAliveSignal? = null,
+) {
 
     val kv = InMemoryDurableKv()
     val clock = FakeMonotonicClock()
@@ -87,7 +93,8 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
         const val OTHER_SIGNER = "signer-other-1"
         const val OTHER_UID = 10202
 
-        fun create(): ProviderHarness = build(externalEnvStore = false)
+        fun create(keepAlive: LeaseKeepAliveSignal? = null): ProviderHarness =
+            build(externalEnvStore = false, keepAlive = keepAlive)
 
         /**
          * Env persists in its OWN store (the production topology): provider
@@ -97,8 +104,8 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
          */
         fun createWithExternalEnvStore(): ProviderHarness = build(externalEnvStore = true)
 
-        private fun build(externalEnvStore: Boolean): ProviderHarness {
-            val h = ProviderHarness(externalEnvStore)
+        private fun build(externalEnvStore: Boolean, keepAlive: LeaseKeepAliveSignal? = null): ProviderHarness {
+            val h = ProviderHarness(externalEnvStore, keepAlive)
             h.resolver.register(AUTO_UID, AUTO_PKG, AUTO_SIGNER)
             h.resolver.register(OTHER_UID, OTHER_PKG, OTHER_SIGNER)
             h.boot(cleanlinessProvable = true, firstBoot = true)
@@ -126,6 +133,7 @@ class ProviderHarness private constructor(externalEnvStore: Boolean) {
             clock = clock,
             storage = kv,
             diagnostics = diagnostics,
+            keepAlive = keepAliveSignal,
         )
         if (!firstBoot) {
             handler.onOwnerProcessStart(cleanlinessProvable)

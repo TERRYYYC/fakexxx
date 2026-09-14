@@ -89,6 +89,15 @@ class EnvironmentControlHandler(
     // (see #179 / Vector#971: the system-server oracle producer is not shippable
     // on every device yet).
     private val oracleAbsentFallback: Boolean = false,
+    // #198: lease-pressure signal — the production wiring turns "a blocking
+    // lease exists" into a lightweight foreground service ([HookKeepAliveService])
+    // so Xiaomi PowerKeeper cannot freeze the provider process mid-lease (the
+    // frozen process is what turned lease release into a binder black hole on
+    // mi14). Null (legacy harnesses) = no keep-alive, the pre-#198 behavior.
+    // RED LINE: the signal fires AFTER the durable mutation settled and the
+    // production impl swallows its own failures — a dead keep-alive must never
+    // influence contract semantics; it is only an anti-freeze means.
+    private val keepAlive: LeaseKeepAliveSignal? = null,
 ) {
     fun restartScheduleForOperator(): OperatorScheduleRestartResult = withOwnerFence {
         if (leaseStore.blockingLease() != null) {
@@ -322,7 +331,7 @@ class EnvironmentControlHandler(
         // The owner fence additionally serializes this against the advance
         // commit→external-apply window, so a lease can never be granted while a
         // committed advance still has an unapplied pointer change (Terra round-3).
-        storage.transaction {
+        val appliedReceipt = storage.transaction {
             // §6.3.4: idempotency check
             val existing = idempotencyReceiptForCaller(
                 caller = caller,
@@ -483,6 +492,10 @@ class EnvironmentControlHandler(
 
             receipt
         }
+        // #198: a lease now blocks the device — engage the anti-freeze FGS
+        // (after the durable mutation settled; failures never propagate).
+        signalLeasePressure()
+        appliedReceipt
     }
 
     fun observe(callingUid: Int, request: ObserveRequestV1): EnvironmentObservationV1 = withOwnerFence {
@@ -531,7 +544,12 @@ class EnvironmentControlHandler(
         // The source cursor acknowledgement and the returned audit reference
         // have one crash boundary. Nested store transactions join this owner
         // transaction on every DurableKv implementation.
-        storage.transaction { observer.observe(lease, request) }
+        val observation = storage.transaction { observer.observe(lease, request) }
+        // #198: read-side self-heal — an FGS that died mid-lease is re-engaged
+        // on the next verification poll, so the release that follows is not the
+        // first (and frozen) touch. Idempotent; failures never propagate.
+        signalLeasePressure()
+        observation
     }
 
     fun release(callingUid: Int, request: ReleaseRequestV1): ReleaseReceiptV1 = withOwnerFence {
@@ -573,7 +591,7 @@ class EnvironmentControlHandler(
 
         // Entire mutation (state transition + cleanup + receipt) in ONE transaction
         // so a crash between writes rolls back cleanly (release_crashBetweenWrites).
-        storage.transaction {
+        val releaseReceipt = storage.transaction {
             // Transition to RELEASING
             leaseStore.put(lease.copy(state = LeaseState.RELEASING, releaseIdempotencyKey = request.idempotencyKey))
 
@@ -634,6 +652,11 @@ class EnvironmentControlHandler(
 
             receipt
         }
+        // #198: the last blocking lease may have converged — recompute and let
+        // the keep-alive disengage (RELEASE_INCOMPLETE stays blocking, so the
+        // signal honestly re-engages there).
+        signalLeasePressure()
+        releaseReceipt
     }
 
     fun completeAndAdvance(callingUid: Int, request: CompleteAndAdvanceRequestV1): AdvanceReceiptV1 = withOwnerFence {
@@ -1041,6 +1064,11 @@ class EnvironmentControlHandler(
         environment.setRelevantChangeListener { reason ->
             tracker.bump(reason)
         }
+
+        // #198: owner start with a surviving blocking lease (unclean →
+        // RELEASE_INCOMPLETE, RELEASING replay, etc.) re-engages the anti-freeze
+        // FGS so the converged release can actually land.
+        signalLeasePressure()
     }
 
     /**
@@ -1050,11 +1078,13 @@ class EnvironmentControlHandler(
      */
     fun onCallerRevoked(applicationId: String, signerDigest: String): Unit = withOwnerFence {
         // §6.5: revoke the pairing so authorize() rejects with CALLER_NOT_ALLOWED
-        // on any subsequent call from this identity (M-LS-04/09).
+        // on any subsequent call from that identity (M-LS-04/09).
         pairingStore.revoke(applicationId, signerDigest, clock.elapsedRealtimeMs())
         // Mark the lease REVOKED (M-PA-09/M-LS-04)
         leaseStore.markRevoked(applicationId, RevokeSource.QWY_REVOKED_CALLER)
         audit.append("caller_revoked", callerApplicationId = applicationId)
+        // #198: REVOKED keeps blocking until provider cleanup converges it.
+        signalLeasePressure()
     }
 
     /**
@@ -1064,6 +1094,32 @@ class EnvironmentControlHandler(
      */
     fun runRevokedLeaseCleanup(): Unit = withOwnerFence {
         leaseStore.runProviderCleanupForRevoked(environment)
+        // #198: cleanup convergence may release the last blocking lease.
+        signalLeasePressure()
+    }
+
+    /**
+     * #198: recompute "does a blocking lease exist" and hand the single bit to
+     * the keep-alive seam. INV-28 makes blocking a STORED-state predicate (ANY
+     * non-RELEASED state blocks, EXPIRED/REVOKED/RELEASE_INCOMPLETE included),
+     * so [EnvironmentLeaseStore.blockingLease] is the exact truth to signal.
+     *
+     * Fire-and-forget by red line: a throwing seam impl is degraded to a
+     * diagnostics line — the contract result that triggered the signal must
+     * never fail because the anti-freeze means misbehaved.
+     */
+    private fun signalLeasePressure() {
+        if (keepAlive == null) return
+        val hasBlocking = leaseStore.blockingLease() != null
+        try {
+            keepAlive.onLeasePressure(hasBlocking)
+        } catch (failure: RuntimeException) {
+            diagnostics.warn(
+                DIAG_TAG,
+                "#198 lease keep-alive signal failed (contract semantics unaffected) — " +
+                    "${failure.javaClass.simpleName}: ${failure.message}",
+            )
+        }
     }
 
     // --- Receipt serialization via the shared total codec (DurableFieldCodec) ---
