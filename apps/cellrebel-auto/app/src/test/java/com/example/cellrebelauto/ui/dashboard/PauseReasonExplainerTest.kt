@@ -228,4 +228,24 @@ class PauseReasonExplainerTest {
             e.headline.contains("缓冲") || e.headline.contains("等待")
         )
     }
+
+    // ---- #187: the DONE copy must point at the ON-SURFACE rerun entry ---------
+
+    @Test
+    fun `done explanation names the on-surface rerun entry instead of redirecting`() {
+        // #187: the DONE card used to say "重跑请用 Plan 页的重置入口" — a redirect
+        // to another surface, which is exactly the gap (the operator's landing
+        // page carried no rerun at all). The rerun button now lives on THIS
+        // surface; the copy must say so and must not redirect.
+        val e = PauseReasonExplainer.explain(AutomationState.DONE)
+        assertEquals(DashboardAction.NONE, e.action)
+        assertTrue(
+            "detail=${e.detail}",
+            e.detail.contains("重跑")
+        )
+        assertTrue(
+            "the copy must not redirect to another surface any more: ${e.detail}",
+            !e.detail.contains("Plan 页")
+        )
+    }
 }

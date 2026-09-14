@@ -93,7 +93,10 @@ object PauseReasonExplainer {
         if (state == AutomationState.DONE) {
             return PauseExplanation.idle(
                 headline = "计划已完成",
-                detail = "所有位置的配额都已可信达成。重跑请用 Plan 页的重置入口。"
+                // #187：重跑入口已在本页状态条上（「重跑」次按钮，走既有 #12 重置路径）——
+                // 不再让操作员跳去 Plan 页找入口，更不再只能发 root 广播。
+                detail = "所有位置的配额都已可信达成。点状态条「重跑」以同一清单开启新代际" +
+                    "（进度归零、已入账配额保留）；重跑前需按提示在千网游侧重开日程。"
             )
         }
         if (state == AutomationState.FAILED || state == AutomationState.SUCCEEDED) {
