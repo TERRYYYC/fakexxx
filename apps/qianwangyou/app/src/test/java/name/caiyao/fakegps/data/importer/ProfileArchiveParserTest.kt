@@ -11,6 +11,7 @@ import name.caiyao.fakegps.config.UnavailableFieldSet
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -188,6 +189,70 @@ class ProfileArchiveParserTest {
     fun `missing display name uses content signature while legacy XLS stays unsupported`() {
         assertEquals(2, ready(null, fixture("valid-unicode.xlsx")).records.size)
         assertIssue(null, byteArrayOf(0xD0.toByte(), 0xCF.toByte(), 0x11, 0xE0.toByte()), ImportIssueCode.UNSUPPORTED_FILE)
+    }
+
+    // ------------------------------------------------------------------
+    // #189：站点表第 4 列 ci（28-bit ECI，十进制）——日程项位置切换时 serving
+    // cell 的 ci 跟随伪造的数据入口。列可空：3 列旧档案 ci=null = 读回门跳过。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `four column site table with ci parses the decimal 28-bit ECI verbatim`() {
+        // 真实值域样本（#189 调研报告 §2：28,292,129–100,839,199，零换算直填）
+        val csv = """
+            addname,latitude,longitude,ci
+            Lvivska-37054241,49.8397,24.0297,37054241
+            Kyivska-28292129,50.4501,30.5234,28292129
+            Frankivska-100839199,48.9226,24.7111,100839199
+        """.trimIndent().toByteArray()
+
+        val records = ready("site-table.csv", csv).records
+        assertEquals(3, records.size)
+        assertEquals(37_054_241L, records[0].ci!!.toLong())
+        assertEquals(28_292_129L, records[1].ci!!.toLong())
+        assertEquals(100_839_199L, records[2].ci!!.toLong())
+    }
+
+    @Test
+    fun `three column legacy archive keeps ci null so the readback gate skips the leg`() {
+        val csv = """
+            addname,latitude,longitude
+            legacy-1,50.0,30.0
+            legacy-2,49.0,29.0
+        """.trimIndent().toByteArray()
+
+        val records = ready("legacy.csv", csv).records
+        assertEquals(2, records.size)
+        assertNull(records[0].ci)
+        assertNull(records[1].ci)
+    }
+
+    @Test
+    fun `ci beyond the 28-bit domain is rejected`() {
+        val csv = """
+            addname,latitude,longitude,ci
+            overflow,50.0,30.0,268435456
+        """.trimIndent().toByteArray()
+
+        assertTrue(
+            invalid("site-table.csv", csv).issues.any {
+                it.code == ImportIssueCode.INVALID_VALUE && it.column == "ci"
+            },
+        )
+    }
+
+    @Test
+    fun `ci column position is free because headers bind by name`() {
+        // 站点表 owner 原始列序是 custom_admin_3,latitude1,longitude1,ECGI——
+        // 导入前由轨迹工具改名/换序，但解析器本身按 header 名绑定，不依赖列序。
+        val csv = """
+            ci,addname,latitude,longitude
+            37054241,reordered,49.8397,24.0297
+        """.trimIndent().toByteArray()
+
+        val records = ready("site-table.csv", csv).records
+        assertEquals("reordered", records.single().addname)
+        assertEquals(37_054_241L, records.single().ci!!.toLong())
     }
 
     private fun ready(name: String?, bytes: ByteArray): ProfileImportAnalysis.Ready {
