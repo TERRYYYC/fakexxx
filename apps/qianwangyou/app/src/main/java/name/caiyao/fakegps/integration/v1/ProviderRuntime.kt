@@ -238,6 +238,10 @@ object ProviderRuntime {
             // automated lane stays usable. When Vector#971 lands and the oracle
             // registers, flip this to FALSE to restore the authoritative window.
             oracleAbsentFallback = true,
+            // #198: hook 模式（引擎 apply 驱动）运行期间 QWY 无前台服务 →
+            // PowerKeeper 冻结进程 → lease release 事务黑洞。把阻塞 lease 的
+            // 存在交给轻量 FGS（HookKeepAliveService）抗冻。
+            keepAlive = HookKeepAlive(appContext),
         )
     }
 
@@ -277,6 +281,9 @@ object ProviderRuntime {
         // establishes coverage FULL (legacy semantics) — the oracle-absent
         // deployment fallback. Default FALSE = the strict shipped behavior.
         oracleAbsentFallback: Boolean = false,
+        // #198: anti-freeze keep-alive seam. Null (default, legacy harness
+        // wiring) = the handler never signals; production passes [HookKeepAlive].
+        keepAlive: LeaseKeepAliveSignal? = null,
     ): EnvironmentControlHandler {
         val pairing = DurablePairingStore(kv)
         val authorizer = CallerAuthorizer(resolver, pairing, clock)
@@ -329,6 +336,7 @@ object ProviderRuntime {
             authoritativeCommitStore = authoritativeCommitStore,
             diagnostics = diagnostics,
             ackCursorReRead = ackCursorReRead,
+            keepAlive = keepAlive,
         )
 
         // A provider process that starts without proof of a clean shutdown must

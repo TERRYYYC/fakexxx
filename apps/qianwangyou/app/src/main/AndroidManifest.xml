@@ -21,6 +21,8 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- #198: hook 模式抗冻保活 FGS 用 specialUse 类型（不投递位置，不谎报 location）。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -119,6 +121,22 @@
             android:name=".mockprovider.MockProviderService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <!--
+            #198 hook 模式抗冻保活（lease 生命周期驱动，见 HookKeepAlive）：
+            引擎 apply 授予阻塞 lease 期间拉起，全部 lease 收敛后停止，不常驻。
+            只是抗冻手段 —— 服务死亡不影响合同语义。targetSdk 35 要求显式 FGS
+            类型：不投递位置，借 location 是谎报，用 specialUse + subtype 说明。
+            exported=false：只有本 app 的合同通道（同进程）会拉起它。
+        -->
+        <service
+            android:name=".integration.v1.HookKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Environment-control contract keep-alive: keeps the provider process un-frozen (MIUI PowerKeeper) while a blocking environment lease is active, so lease release cannot fall into a binder black hole." />
+        </service>
 
         <!--
             Environment Control contract v1 (§6.1). This is the ONLY service here
