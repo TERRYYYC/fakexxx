@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -249,6 +251,127 @@ class EndToEndTest(Base):
         self.assertEqual(first["station"], 1)
         self.assertAlmostEqual(first["path_m"], 12 * 50.0)
         self.assertIn("bbox", first)
+
+
+class RandomCountsTest(Base):
+    """--required-range 随机执行次数（For #191 随机化）：区间/互斥/复现/审计。"""
+
+    RANGE_ARGS = ("--stations", "1-3", "--preset", "box50", "--points", "13")
+
+    def read_bytes(self, name: str) -> bytes:
+        with open(os.path.join(self.out_dir, name), "rb") as handle:
+            return handle.read()
+
+    def load_manifest(self) -> dict:
+        with open(os.path.join(self.out_dir, "manifest.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_range_mode_within_bounds_and_varies(self) -> None:
+        self.assertEqual(
+            self.run_tool(*self.RANGE_ARGS, "--required-range", "1-5", "--seed", "7"), 0
+        )
+        plan = self.read_csv("plan.csv")[1:]
+        self.assertEqual(len(plan), 39)
+        values = [int(row[3]) for row in plan]
+        for value in values:
+            self.assertGreaterEqual(value, 1)
+            self.assertLessEqual(value, 5)
+        # 区间内确实有变化（39 行全同的概率 ≈ 5^-38，不可能撞上）。
+        self.assertGreater(len(set(values)), 1)
+
+        manifest = self.load_manifest()
+        self.assertEqual(manifest["params"]["seed"], 7)
+        self.assertEqual(manifest["params"]["required_successes_mode"], "random_range")
+        self.assertIsNone(manifest["params"]["required_successes"])
+        self.assertEqual(manifest["params"]["required_successes_range"], {"min": 1, "max": 5})
+        self.assertIn("random.Random(seed).randint(1,5)", manifest["params"]["rng"])
+        # 总和 + 分布摘要（审计口径：sum=总执行次数，distribution=值→行数）。
+        summary = manifest["required_successes_summary"]
+        self.assertEqual(summary["sum"], sum(values))
+        self.assertEqual(summary["min"], min(values))
+        self.assertEqual(summary["max"], max(values))
+        expected_dist: dict[str, int] = {}
+        for value in values:
+            expected_dist[str(value)] = expected_dist.get(str(value), 0) + 1
+        self.assertEqual(
+            summary["distribution"],
+            {key: expected_dist[key] for key in sorted(expected_dist, key=int)},
+        )
+        self.assertEqual(sum(summary["distribution"].values()), 39)
+        # 每站摘要：min/max/sum 与 plan.csv 对应片段一致。
+        for idx, station in enumerate(manifest["stations"]):
+            chunk = values[idx * 13 : (idx + 1) * 13]
+            self.assertEqual(
+                station["required_successes"],
+                {"min": min(chunk), "max": max(chunk), "sum": sum(chunk)},
+            )
+
+    def test_unspecified_seed_is_recorded(self) -> None:
+        self.assertEqual(self.run_tool(*self.RANGE_ARGS, "--required-range", "1-5"), 0)
+        manifest = self.load_manifest()
+        self.assertIsInstance(manifest["params"]["seed"], int)  # 事后可复现该次产出
+
+    def test_same_seed_reproduces_byte_identical_outputs(self) -> None:
+        self.assertEqual(
+            self.run_tool(*self.RANGE_ARGS, "--required-range", "1-5", "--seed", "42"), 0
+        )
+        first = {name: self.read_bytes(name) for name in ("plan.csv", "profiles.csv", "ecgi_map.csv")}
+        manifest_first = self.load_manifest()
+        shutil.rmtree(self.out_dir)
+        self.assertEqual(
+            self.run_tool(*self.RANGE_ARGS, "--required-range", "1-5", "--seed", "42"), 0
+        )
+        for name, payload in first.items():
+            self.assertEqual(self.read_bytes(name), payload, name)  # 逐字节相同
+        manifest_second = self.load_manifest()
+        manifest_first.pop("generated_at")  # 时间戳是唯一允许差异（事件时刻，非产物）
+        manifest_second.pop("generated_at")
+        self.assertEqual(manifest_first, manifest_second)
+
+    def test_different_seeds_give_different_outputs(self) -> None:
+        self.assertEqual(
+            self.run_tool(*self.RANGE_ARGS, "--required-range", "1-5", "--seed", "7"), 0
+        )
+        plan_seed7 = self.read_bytes("plan.csv")
+        shutil.rmtree(self.out_dir)
+        self.assertEqual(
+            self.run_tool(*self.RANGE_ARGS, "--required-range", "1-5", "--seed", "8"), 0
+        )
+        self.assertNotEqual(self.read_bytes("plan.csv"), plan_seed7)
+
+    def test_default_behavior_matches_legacy_constant(self) -> None:
+        """不给新参数：全行 required_successes=3（与旧版逐字节一致的行为）。"""
+        self.assertEqual(self.run_tool(*self.RANGE_ARGS), 0)
+        plan = self.read_csv("plan.csv")[1:]
+        self.assertEqual(len(plan), 39)
+        self.assertEqual({row[3] for row in plan}, {"3"})
+        manifest = self.load_manifest()
+        self.assertEqual(manifest["params"]["required_successes"], 3)
+        self.assertEqual(manifest["params"]["required_successes_mode"], "constant")
+        self.assertNotIn("seed", manifest["params"])  # 无随机性，无 seed
+        self.assertNotIn("rng", manifest["params"])
+        self.assertNotIn("required_successes_summary", manifest)
+        for station in manifest["stations"]:
+            self.assertEqual(station["required_successes"], {"min": 3, "max": 3, "sum": 39})
+
+    def test_invalid_range_and_conflicts_rejected(self) -> None:
+        # min ≥ 1。
+        self.assertEqual(self.run_tool("--stations", "1", "--required-range", "0-5"), 2)
+        # max ≥ min。
+        self.assertEqual(self.run_tool("--stations", "1", "--required-range", "5-1"), 2)
+        # 格式 fail-closed。
+        for bad in ("abc", "1", "1-5-9", ""):
+            self.assertEqual(self.run_tool("--stations", "1", "--required-range", bad), 2, bad)
+        # 以 "-" 开头的值 argparse 在参数层直接拒收（同样 fail-closed）。
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_tool("--stations", "1", "--required-range", "-1-5")
+        self.assertEqual(ctx.exception.code, 2)
+        # 与 --required-successes 互斥。
+        self.assertEqual(
+            self.run_tool("--stations", "1", "--required-successes", "3", "--required-range", "1-5"), 2
+        )
+        # 失败路径不产生半成品输出。
+        self.assertFalse(os.path.exists(self.out_dir))
 
 
 if __name__ == "__main__":

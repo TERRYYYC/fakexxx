@@ -13,7 +13,9 @@
                 的源行 ECGI，#193 导入器 header 按名绑定、读回门做 ci 字节级比对）
   ecgi_map.csv  addname,ecgi,custom_admin_3,source_row（轨迹点继承原始行信息，
                 供 #189 CI hook 与 #190 验证层使用；审计用，与 profiles.csv 并存）
-  manifest.json 参数快照 + 行数统计 + 每站轨迹摘要（审计复现用）
+  manifest.json 参数快照 + 行数统计 + 每站轨迹摘要（审计复现用）；required_successes
+                走随机区间（--required-range）时还记录 seed/RNG 方式/分布摘要，
+                同 seed 同输入可复现出逐字节相同的三件套
 
 仅用 Python 3 标准库。
 
@@ -22,6 +24,8 @@
       --stations "1-3" --preset box50 --points 13
   python3 make_trajectory_plan.py --input sites.csv --out-dir /tmp/traj \\
       --steps "E50,N50,E50,S50" --points 12
+  python3 make_trajectory_plan.py --input "0914 test 2.csv" --out-dir /tmp/traj \\
+      --stations "1-10" --preset box50 --points 13 --required-range "1-5" --seed 7
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -130,6 +135,19 @@ def parse_stations(spec: str, total: int) -> list[int]:
     if not selected:
         raise ToolError("--stations 未解析出任何站点")
     return sorted(selected)
+
+
+def parse_required_range(spec: str) -> tuple[int, int]:
+    """解析 "min-max" 为闭区间 (min, max)。min ≥ 1、max ≥ min，fail-closed。"""
+    match = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", spec)
+    if not match:
+        raise ToolError(f'非法 --required-range {spec!r}（格式应为 "min-max"，如 "1-5"）')
+    lo, hi = int(match.group(1)), int(match.group(2))
+    if lo < 1:
+        raise ToolError(f"--required-range 最小值必须 ≥ 1，得到 min={lo}")
+    if lo > hi:
+        raise ToolError(f"--required-range 区间上下界颠倒：min {lo} > max {hi}")
+    return lo, hi
 
 
 def delta_for_step(direction: str, meters: float, lat: float) -> tuple[float, float]:
@@ -269,7 +287,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--priority", type=int, default=3, help="plan.csv 的 priority 常量（默认 3）")
     parser.add_argument(
-        "--required-successes", type=int, default=3, help="plan.csv 的 required_successes 常量（默认 3）"
+        "--required-successes",
+        type=int,
+        default=None,
+        help="plan.csv 的 required_successes 常量（默认 3；与 --required-range 互斥）",
+    )
+    parser.add_argument(
+        "--required-range",
+        help=(
+            '每行 required_successes 在 [min,max] 闭区间均匀随机（每行独立），'
+            '如 "1-5"；与 --required-successes 互斥，配合 --seed 可复现'
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="随机种子（--required-range 时生效；缺省自动取随机 seed 并写入 manifest）",
     )
     return parser
 
@@ -289,8 +323,26 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.priority < 0:
             raise ToolError(f"--priority 必须 ≥ 0，得到 {args.priority}")
-        if args.required_successes < 1:
-            raise ToolError(f"--required-successes 必须 ≥ 1，得到 {args.required_successes}")
+
+        # required_successes 二选一：--required-successes（常量，缺省 3）或
+        # --required-range（每行独立均匀随机）。都给/都缺按 fail-closed 处理。
+        range_given = args.required_range is not None
+        successes_given = args.required_successes is not None
+        if range_given and successes_given:
+            raise ToolError(
+                "--required-successes 与 --required-range 互斥：请二选一"
+                "（常量用前者；每行随机用后者）"
+            )
+        if range_given:
+            req_min, req_max = parse_required_range(args.required_range)
+            # seed 落盘到 manifest：不指定时取 OS 随机 seed，事后仍可复现该次产出。
+            seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**63)
+            rng = random.Random(seed)
+            rng_desc = f"random.Random(seed).randint({req_min},{req_max}) [MT19937]"
+        else:
+            required_successes = args.required_successes if successes_given else 3
+            if required_successes < 1:
+                raise ToolError(f"--required-successes 必须 ≥ 1，得到 {required_successes}")
 
         stations = load_stations(args.input)
 
@@ -310,17 +362,25 @@ def main(argv: list[str] | None = None) -> int:
         profile_rows: list[list[str]] = []
         ecgi_rows: list[list[str]] = []
         station_summaries: list[dict] = []
+        req_values: list[int] = []  # plan.csv 行序的 required_successes（审计摘要用）
 
         for station in chosen:
             coords, path_m, bbox = build_trajectory(
                 station["lat"], station["lng"], template, points
             )
+            station_reqs: list[int] = []
             for step_idx, (lat, lng) in enumerate(coords):
                 addname = ADDNAME_FMT.format(station=station["row"], step=step_idx)
+                if range_given:
+                    req = rng.randint(req_min, req_max)
+                else:
+                    req = required_successes
+                req_values.append(req)
+                station_reqs.append(req)
                 # plan.csv 第 5 列 ci（#190 验证层的期望 ECGI）：与 profiles 同源继承，
                 # 同域同值零换算——Auto 导入器按 #193 的 ci 值域（28-bit ECI）校验。
                 plan_rows.append(
-                    [fmt7(lng), fmt7(lat), str(args.priority), str(args.required_successes), station["ecgi"]]
+                    [fmt7(lng), fmt7(lat), str(args.priority), str(req), station["ecgi"]]
                 )
                 profile_rows.append([addname, fmt7(lat), fmt7(lng), station["ecgi"]])
                 ecgi_rows.append(
@@ -335,6 +395,11 @@ def main(argv: list[str] | None = None) -> int:
                     "points": points,
                     "path_m": round(path_m, 3),
                     "bbox": {key: round(value, 7) for key, value in bbox.items()},
+                    "required_successes": {
+                        "min": min(station_reqs),
+                        "max": max(station_reqs),
+                        "sum": sum(station_reqs),
+                    },
                 }
             )
 
@@ -377,7 +442,9 @@ def main(argv: list[str] | None = None) -> int:
                 "stations_arg": args.stations,
                 "selected_stations": len(chosen),
                 "priority": args.priority,
-                "required_successes": args.required_successes,
+                # 常量模式记常量值；随机模式置 null，值分布见 required_successes_summary。
+                "required_successes": None if range_given else required_successes,
+                "required_successes_mode": "random_range" if range_given else "constant",
             },
             "outputs": {
                 "plan.csv": len(plan_rows),
@@ -386,15 +453,37 @@ def main(argv: list[str] | None = None) -> int:
             },
             "stations": station_summaries,
         }
+        if range_given:
+            distribution: dict[str, int] = {}
+            for value in req_values:
+                distribution[str(value)] = distribution.get(str(value), 0) + 1
+            manifest["params"]["required_successes_range"] = {"min": req_min, "max": req_max}
+            manifest["params"]["seed"] = seed
+            manifest["params"]["rng"] = rng_desc
+            manifest["required_successes_summary"] = {
+                "min": min(req_values),
+                "max": max(req_values),
+                "sum": sum(req_values),
+                # 值 → 出现行数（按值升序）；总量审计看 sum，拟真度审计看分布。
+                "distribution": {
+                    key: distribution[key] for key in sorted(distribution, key=int)
+                },
+            }
         with open(os.path.join(args.out_dir, "manifest.json"), "w", encoding="utf-8") as handle:
             json.dump(manifest, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
 
-        print(
+        ok_line = (
             f"[ok] {len(chosen)} 站 × {points} 点（模板 {template_desc}，含原点）→ {args.out_dir}\n"
             f"     plan.csv {len(plan_rows)} 行 | profiles.csv {len(profile_rows)} 行 | "
             f"ecgi_map.csv {len(ecgi_rows)} 行 | manifest.json"
         )
+        if range_given:
+            ok_line += (
+                f"\n     required_successes 随机 [{req_min}-{req_max}] "
+                f"seed={seed} | 总执行 {sum(req_values)} 次（分布见 manifest）"
+            )
+        print(ok_line)
         return 0
     except ToolError as exc:
         print(f"[error] {exc}", file=sys.stderr)

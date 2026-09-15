@@ -18,6 +18,13 @@ python3 scripts/trajectory/make_trajectory_plan.py \
 # 参数化步进序列（E/W/N/S + 米，任意长度，超出按序列循环）
 python3 scripts/trajectory/make_trajectory_plan.py \
     --input sites.csv --out-dir /tmp/traj --steps "E50,N50,E50,S50"
+
+# 执行次数随机化：每行 required_successes 在 1-5 均匀随机（每行独立），
+# 指定 --seed 可复现（同 seed 同输入 → 三件套逐字节相同）
+python3 scripts/trajectory/make_trajectory_plan.py \
+    --input "~/Desktop/信息/0914 test 2.csv" \
+    --out-dir /tmp/traj --stations "1-10" --preset box50 --points 13 \
+    --required-range "1-5" --seed 7
 ```
 
 | 参数 | 说明 |
@@ -29,6 +36,8 @@ python3 scripts/trajectory/make_trajectory_plan.py \
 | `--points` | 每站展开点数（**含原点**），clamp 到 10-20；默认 12 |
 | `--stations` | 站点选择，1-based **原始 CSV 数据行号**，如 `"1-10,33,100"`；缺省=全部 510 站（打印规模警告） |
 | `--priority` / `--required-successes` | plan.csv 两列常量，默认 3/3（对齐现有 285 计划风格） |
+| `--required-range` | 每行 `required_successes` 在 `[min,max]` 闭区间均匀随机（每行独立），如 `"1-5"`；min≥1、max≥min，与 `--required-successes` 互斥 |
+| `--seed` | 随机种子（`--required-range` 时生效）；缺省自动取 OS 随机 seed 并写入 manifest，事后仍可复现 |
 
 坐标数学：纬度 1°≈111320m，经度 1°≈111320·cos(lat)m（用当前点纬度修正）；
 E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入精度）。
@@ -50,11 +59,25 @@ E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入�
 | `plan.csv` | `longitude,latitude,priority,required_successes,ci`（**lng 在前**；ci=该点继承的源行 ECGI，Auto 旧版不识别时删该列即回 4 列） | CellRebel Auto 计划导入（ci 列供 #190 验证层对照） |
 | `profiles.csv` | `addname,latitude,longitude,ci`（ci=该点继承的源行 ECGI） | QWY 收藏档案导入；#193 读回门按 ci 做字节级比对 |
 | `ecgi_map.csv` | `addname,ecgi,custom_admin_3,source_row` | #189 CI hook / #190 验证层（保留作期望真相源与审计） |
-| `manifest.json` | 参数快照 + 输入 sha256 + 行数统计 + 每站摘要（路径长度/包围盒） | 审计复现 |
+| `manifest.json` | 参数快照 + 输入 sha256 + 行数统计 + 每站摘要（路径长度/包围盒/该站 required_successes 的 min/max/sum） | 审计复现 |
 
 行序 = 站点序 × 轨迹序（step 0 = 原点）。addname 命名 `traj-{station:03d}-{step:02d}`
 （如 `traj-001-00`），其中 station = 原始 CSV 数据行号；全小写字母数字连字符，
 QWY 档案名保守兼容。轨迹点继承原始行的 ECGI/区县/行号。
+
+## required_successes 随机化（审计与复现）
+
+`--required-range "1-5"` 时每行 `required_successes` 在 `[1,5]` 闭区间独立均匀随机
+（RNG：`random.Random(seed).randint` / MT19937，逐行按计划行序抽取）：
+
+- **可复现**：同 seed + 同输入 → 三件套逐字节相同（manifest 里 `generated_at`
+  是唯一随运行变化的字段——它记录的是生成时刻，不属于产物）。
+- **审计**：manifest 记录 `params.seed` / `params.rng` / `params.required_successes_range`
+  及顶层 `required_successes_summary`（`min`/`max`/`sum`/`distribution`——sum 即总执行
+  次数，distribution 是值→行数分布）；每站摘要含该站 `required_successes` 的
+  min/max/sum。逐行明细在 plan.csv 第 4 列。
+- **缺省行为不变**：不给 `--required-range` 时全行仍为常量 3（`--required-successes`
+  可改），manifest 模式记 `constant`，无 seed 字段。
 
 ## 与 #193 的衔接（读回门闭环）
 
@@ -100,4 +123,6 @@ python3 -m unittest discover -s scripts/trajectory
 覆盖：步进数学（50m@lat49.87 → Δlat≈0.000449、Δlng≈0.00069 量级）、原点为首点、
 box50 闭合、ECGI 继承、profiles.csv 列数/列名/ci 继承（4 列对齐 #193）、plan.csv
 5 列 ci 继承（对齐 #190）、三件套行数一致、plan 列序 lng 在前、addname 唯一、
-`--points` clamp、`--stations` 子集选择与越界拒绝、manifest 摘要。
+`--points` clamp、`--stations` 子集选择与越界拒绝、manifest 摘要、`--required-range`
+随机区间（值域/有变化/同 seed 逐字节复现/异 seed 不同/缺省常量 3 逐字节兼容旧版/
+非法区间与互斥拒绝/seed 落盘）。
