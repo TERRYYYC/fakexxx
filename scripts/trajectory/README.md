@@ -25,6 +25,16 @@ python3 scripts/trajectory/make_trajectory_plan.py \
     --input "~/Desktop/信息/0914 test 2.csv" \
     --out-dir /tmp/traj --stations "1-10" --preset box50 --points 13 \
     --required-range "1-5" --seed 7
+
+# 多场景组合：显式场景序列（全站统一），如 owner 原话「蛇形+方块+蛇形+1 字形」
+python3 scripts/trajectory/make_trajectory_plan.py \
+    --input sites.csv --out-dir /tmp/traj --stations "1-10" \
+    --combo "snake+box+snake+line" --points 13
+
+# 多场景组合：每站独立随机抽 2-5 个场景组成序列，--seed 可复现（缺省自动生成并落 manifest）
+python3 scripts/trajectory/make_trajectory_plan.py \
+    --input sites.csv --out-dir /tmp/traj --stations "1-10" \
+    --combo-random "2-5" --seed 7 --points 13
 ```
 
 | 参数 | 说明 |
@@ -33,11 +43,18 @@ python3 scripts/trajectory/make_trajectory_plan.py \
 | `--out-dir` | 输出目录（不存在则创建；重复运行直接覆盖） |
 | `--steps` | 步进序列，如 `"E50,N50,E50,S50"`；与 `--preset` 互斥 |
 | `--preset` | `box50`（默认）/ `cross75` / `walk100`，`--steps` 缺省时生效 |
-| `--points` | 每站展开点数（**含原点**），clamp 到 10-20；默认 12 |
+| `--combo` | 显式场景序列（全站统一），如 `"seven+box+snake"`；场景名可带步长后缀（`seven50`/`snake75`，缺省 50m） |
+| `--combo-random` | 每站独立从场景库随机抽 `"min-max"` 个场景组成序列（可重复抽，如 snake+box+snake），如 `"2-5"`；配合 `--seed` 可复现 |
+| `--scene-points` | 可选，覆盖各场景默认点数，如 `"line=4,seven=5,snake=6,box=5"`（仅 combo 模式生效） |
+| `--seed` | 随机种子（仅 `--combo-random` 时生效；缺省自动生成并写入 manifest） |
+| `--points` | 每站展开总点数（**含原点**），clamp 到 10-20；默认 12；combo 下=组合展开后截断/循环补足到该数 |
 | `--stations` | 站点选择，1-based **原始 CSV 数据行号**，如 `"1-10,33,100"`；缺省=全部 510 站（打印规模警告） |
 | `--priority` / `--required-successes` | plan.csv 两列常量，默认 3/3（对齐现有 285 计划风格） |
 | `--required-range` | 每行 `required_successes` 在 `[min,max]` 闭区间均匀随机（每行独立），如 `"1-5"`；min≥1、max≥min，与 `--required-successes` 互斥 |
 | `--seed` | 随机种子（`--required-range` 时生效）；缺省自动取 OS 随机 seed 并写入 manifest，事后仍可复现 |
+
+轨迹模板**三选一**：`--steps` / `--preset` / `--combo` 或 `--combo-random`（后两者互斥）；
+同时给多个直接报错。
 
 坐标数学：纬度 1°≈111320m，经度 1°≈111320·cos(lat)m（用当前点纬度修正）；
 E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入精度）。
@@ -51,6 +68,38 @@ E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入�
 | `walk100` | E100 | 持续向东 100m 直线步行 |
 
 例：box50 + `--points 13` → 12 步 = 方框循环 3 圈，点 0/4/8/12 回到原点。
+
+## 场景库（多场景组合，编号 1-4）
+
+每形状默认步长 50m（场景名可带步长后缀覆盖，如 `seven50`/`snake75`）；
+`--combo` 显式给序列（全站统一），`--combo-random` 每站独立随机抽（可重复抽）。
+
+| 编号 | 场景 | 形状 | 移动段（默认步长 50m） | 默认点数 |
+| --- | --- | --- | --- | --- |
+| 1 | `line` | 1 字形 | 单方向直线走 3 步（E,E,E） | 4 |
+| 2 | `seven` | 7 字形 | 先东 2 步再北 2 步（E,E,N,N） | 5 |
+| 3 | `snake` | 蛇字形 | 东 1→北 1→西 2→北 1→东 1（西 2 步为一段 100m，终点在起点正北方） | 6 |
+| 4 | `box` | 方块 | 东-北-西-南 回到进入点（E,N,W,S） | 5 |
+
+例：`--combo "snake+box+snake+line"`（owner 原话「蛇形+方块+蛇形+1 字形」）
+自然展开 1+5+4+5+3 = 18 点。
+
+**衔接规则**：开放形状（line/seven/snake）从当前笔位置继续——上一场景终点=
+下一场景起点，场景边界坐标无缝衔接无跳变；box 闭合回路（终点=进入点）。
+轨迹点坐标全精度累加、7 位小数输出。
+
+**总点数**：各场景按默认点数（或 `--scene-points` 覆盖值，场景步进序列循环/
+截断到目标点数）展开，组合序列再按 `--points` 收口——超 N 截断、不足循环
+整个 combo 补足（与单模板的 `--points` 语义一致，同受 10-20 clamp）。
+
+**manifest 审计**：combo 模式下 params 记录 `trajectory_mode` / `scene_points` /
+`combo`（显式 spec 或随机 count_range+seed+rng），每站记录其场景序列
+（编号/名称/点数/步长，如 traj-001: `["snake","box","line"]`），事后可复现可追溯。
+
+**`--combo-random` 审计注记**：同 seed 下某站的场景序列取决于 `--stations` 选择集——
+场景流是一条共享 RNG 流按站序消费，站序在流中的位置随选择集变化（增删站点会改变
+其后各站的抽取结果）。审计口径以 manifest 逐站 scenes 记录为准；重放时使用相同的
+`--stations` 集合即可逐字节复现。
 
 ## 输出三件套（out-dir 下）
 
@@ -76,6 +125,9 @@ QWY 档案名保守兼容。轨迹点继承原始行的 ECGI/区县/行号。
   及顶层 `required_successes_summary`（`min`/`max`/`sum`/`distribution`——sum 即总执行
   次数，distribution 是值→行数分布）；每站摘要含该站 `required_successes` 的
   min/max/sum。逐行明细在 plan.csv 第 4 列。
+- **键位说明**：随机模式启用时 `params.seed`（`--required-range` 次数流）与
+  `params.combo.seed`（`--combo-random` 场景流）并行记录，两流独立派生
+  （各自独立 RNG 实例顺序消费，互不挤占游标）。
 - **缺省行为不变**：不给 `--required-range` 时全行仍为常量 3（`--required-successes`
   可改），manifest 模式记 `constant`，无 seed 字段。
 
@@ -126,3 +178,10 @@ box50 闭合、ECGI 继承、profiles.csv 列数/列名/ci 继承（4 列对齐 
 `--points` clamp、`--stations` 子集选择与越界拒绝、manifest 摘要、`--required-range`
 随机区间（值域/有变化/同 seed 逐字节复现/异 seed 不同/缺省常量 3 逐字节兼容旧版/
 非法区间与互斥拒绝/seed 落盘）。
+
+多场景组合：四形状各自然点几何（line 直线单调 / seven 两段 / snake 蛇形往返 /
+box 闭合回进入点）、场景 token 与序列解析（步长后缀）、场景点数循环/截断展开、
+combo 显式序列拼接连续性（边界无跳变、box 中段闭合）、combo-random 同 seed
+逐字节复现/异 seed 不同/每站独立、`--scene-points` 覆盖联动、`--points` 截断/
+循环补足、三选一互斥校验、旧用法（`--preset`/`--steps`）输出与旧版逐字节相同
+（测试内独立 oracle 重算整文件字节比对）。
