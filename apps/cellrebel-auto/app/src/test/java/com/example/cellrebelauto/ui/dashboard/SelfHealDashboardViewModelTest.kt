@@ -8,6 +8,7 @@ import com.example.cellrebelauto.cutover.CutoverAccessGate
 import com.example.cellrebelauto.db.AppDatabase
 import com.example.cellrebelauto.testing.DataStoreTestRule
 import com.example.cellrebelauto.testing.MainDispatcherRule
+import com.example.cellrebelauto.testing.RetryRule
 import com.example.cellrebelauto.testing.awaitUntil
 import com.example.cellrebelauto.ui.MainViewModel
 import androidx.lifecycle.viewModelScope
@@ -68,6 +69,24 @@ class SelfHealDashboardViewModelTest {
     // #143 governance replaces the hand-rolled setMain/createdViewModels/Thread.sleep(250)
     // teardown, whose fixed settle window still raced trailing Main dispatches on slow CI
     // runners (watchdog toggle flakes, #185/#196).
+    // `retry` is declared FIRST = INNERMOST: a retry round re-runs only the fixtures
+    // (@Before/@After rebuild the db/store fresh) plus the test body, while the
+    // Main/DataStore lifecycle rules stay OUTSIDE the retry loop, running once per
+    // test method (a per-round setMain/store would widen the very race being ridden out).
+
+    // CI 慢 runner 时序敏感 flaky（#143 归档）：`watchdog toggle writes the persisted
+    // watchdog key` 的第二层时序——#197 治理后仍复发（2026-09-15 PR #210，productId，
+    // AssertionError@L131；治理前同用例 30.038s@L132 亦三度命中）——形态=断言失败、rerun
+    // 即绿、本地恒绿（含评审员 fresh 全量绿），实证为 runner IO 时序而非产品缺陷。
+    // maxAttempts=3 的显式重试是过渡手段：终结"每个 PR 都被咬、rerun 赌运气"的三连
+    // rerun 成本；根治走 #143。
+    @get:Rule
+    val retry = RetryRule(
+        maxAttempts = 3,
+        // 红线：白名单仅此一个已归档用例；同类其余用例不包装，新 flaky 必须首轮裸奔暴露。
+        onlyMethods = setOf("watchdog toggle writes the persisted watchdog key"),
+    )
+
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
