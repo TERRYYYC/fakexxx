@@ -2,6 +2,7 @@ package com.example.cellrebelauto.automation
 
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
+import com.example.cellrebelauto.testing.RetryRule
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
@@ -15,6 +16,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
@@ -57,6 +59,18 @@ class AccessibilityBridgeGestureTimeoutTest {
 
     /** Runs the dispatch lambda inline on the caller thread (test determinism; off-main is covered separately). */
     private val directExecutor = Executor { it.run() }
+
+    // CI 慢 runner 时序敏感 flaky（#143 归档）：binderDispatchRunsOffTheCallerThread 的
+    // AssertionError（PR #148 / 7dc8dad 引入，#197、#201 评审期各实证一次）——形态=全量并发
+    // suite 下断言偶发失败、隔离+rerun 即绿、本地恒绿（含压力循环），实证为 runner 负载时序
+    // 而非产品缺陷。maxAttempts=3 的显式重试是过渡手段：终结"每个 PR 都被咬、rerun 赌运气"
+    // 的三连 rerun 成本；根治走 #143。
+    @get:Rule
+    val retry = RetryRule(
+        maxAttempts = 3,
+        // 红线：白名单仅此一个已归档用例；同类其余用例不包装，新 flaky 必须首轮裸奔暴露。
+        onlyMethods = setOf("binderDispatchRunsOffTheCallerThread"),
+    )
 
     @Before
     fun setUp() {
