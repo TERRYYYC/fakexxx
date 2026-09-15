@@ -38,12 +38,17 @@ import java.util.UUID
  * i.e. an abandoned file in this test's own temp dir, never cross-test state, since
  * every test gets a fresh directory.
  *
- * #143 form-B (CI run 34871213797): the "delete can only race a writer" framing missed
- * that cancel() is cooperative — the EAGERLY-shared `store.data` first read can still be
- * mid-syscall when [finished] runs, and the delete landing inside its exists→open window
- * surfaces as a transient FileNotFoundException on a test that then passes. [finished]
- * therefore JOINS the scope to quiescence (bounded by [scopeQuiesceTimeoutMs]) before
- * deleting; pinned by DataStoreTestRuleTest.
+ * #143 form-B (CI run 34871213797) — two INDEPENDENT remedies, the first fixing the
+ * actual failure:
+ *  - the FNF fix is [store] pre-creating the store file (empty): the reviewed mechanism
+ *    (bytecode-verified against datastore 1.1.1) is the in-test first read racing the
+ *    first write's atomicMove commit through readData's catch-handler exists-check —
+ *    see the store() KDoc for the full chain;
+ *  - teardown hygiene (kept): [finished] joins the scope to quiescence (bounded)
+ *    before deleteRecursively — the delete racing an in-flight read cannot throw (the
+ *    catch handler swallows post-delete ENOENT into the default) but would silently
+ *    serve that read a stale default; joining pins the ordering. Both pinned by
+ *    DataStoreTestRuleTest.
  */
 open class DataStoreTestRule(
     /** Bounded wait in [finished] for the store scope to quiesce before the temp-dir delete. */
@@ -57,6 +62,10 @@ open class DataStoreTestRule(
 
     /** Test visibility: whether this test's temp dir is still on disk (lifecycle pins). */
     fun tempDirExists(): Boolean = this::dir.isInitialized && dir.exists()
+
+    /** Test visibility: the temp dir's current entries (lifecycle pins). */
+    fun tempDirEntries(): List<File> =
+        if (this::dir.isInitialized) dir.listFiles()?.toList() ?: emptyList() else emptyList()
 
     open override fun starting(description: Description) {
         dir = Files.createTempDirectory("datastore-test").toFile()
@@ -73,9 +82,26 @@ open class DataStoreTestRule(
      * idempotent (it may be invoked per read/write connection; a fresh path per
      * invocation sends reads and writes to different files, i.e. an intermittent
      * FileNotFoundException / stale-defaults flake).
+     *
+     * The file is PRE-CREATED empty (reviewed #143 form-B fix, CI run 34871213797).
+     * Bytecode-verified mechanism (datastore 1.1.1): OkioReadScope.readData's exists()
+     * check lives in its FileNotFoundException CATCH handler (handler@364:
+     * `exists ? rethrow : getDefaultValue`), so an open-time ENOENT only escapes when
+     * the file exists AGAIN by catch time — the creator being the first write's
+     * atomicMove(scratch→path) commit (OkioStorageConnection write path). Reads and
+     * writes are not excluded in-process (SingleProcessCoordinator.tryLock is a
+     * non-blocking Mutex.tryLock), and the in-test first read starts when the VM's
+     * stateIn subscription arrives (DataStoreImpl's only shareIn is the
+     * WhileSubscribed update NOTIFICATION flow) — so read-before-commit, then
+     * commit-before-catch is exactly the escaping FNF. Pre-creating the file means
+     * open can never ENOENT (nothing deletes until teardown), killing that whole
+     * race class; an empty file reads back as default/empty prefs (protobuf
+     * parseFrom of empty input = default instance) — behavior-equivalent to the
+     * missing-file default path.
      */
     open fun store(baseName: String): androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
         val file = newFile(baseName)
+        file.createNewFile()
         return PreferenceDataStoreFactory.create(
             scope = scope,
             produceFile = { file },
@@ -84,17 +110,14 @@ open class DataStoreTestRule(
 
     open override fun finished(description: Description) {
         scope.cancel()
-        // #143 form-B remedy: cancel() is COOPERATIVE — a store-scope coroutine that a
-        // starved runner left mid-syscall (DataStore shares `store.data` EAGERLY in this
-        // scope, so the first read starts at store creation, subscriber or not) keeps
-        // running through cancel(). DataStore 1.1.1's read path checks exists() then
-        // opens the file (non-atomic, no suspension between), and this method's
-        // deleteRecursively() is the only deleter in the codebase — when the delete lands
-        // inside that exists→open window, a transient FileNotFoundException escapes the
-        // SupervisorJob scope (no CoroutineExceptionHandler) and is attributed to
-        // whatever test is running: CI run 34871213797, `auto-resume toggle…`, 0.031s.
-        // Joining the scope to quiescence (bounded) serializes every in-flight
-        // read/write tail BEFORE the delete, closing the window deterministically.
+        // Teardown hygiene (kept after #143 review): cancel() is COOPERATIVE — a
+        // store-scope coroutine left mid-flight keeps running through cancel(). The
+        // temp-dir delete racing such a read does NOT throw (readData's FNF catch
+        // handler swallows post-delete ENOENT into the default) — it would silently
+        // feed the read a stale default value after the test's assertions are done.
+        // Joining the scope to quiescence (bounded) stops in-flight work from
+        // outliving the test. The CI FNF itself is fixed at the SOURCE by store()
+        // pre-creating the file (see the store() KDoc for the reviewed mechanism).
         awaitScopeQuiescence()
         dir.deleteRecursively()
     }

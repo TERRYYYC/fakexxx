@@ -9,24 +9,30 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * #143 form-B regression pin — the DataStoreTestRule lifecycle ordering.
+ * #143 form-B regression pins — the DataStoreTestRule lifecycle (reviewed mechanism).
  *
  * CI evidence (run 34871213797): a transient FileNotFoundException on the store's FIRST
  * state load (`DataStoreImpl.readDataOrHandleCorruption` → `OkioReadScope.readData`) in
- * the `auto-resume toggle` case, 0.031s in. DataStore 1.1.1 checks `exists()` before
- * opening (decompiled OkioStorage), so the FNF is a genuine TOCTOU: the only deleter in
- * the codebase is this rule's `dir.deleteRecursively()` in [finished], and `scope.cancel()`
- * is cooperative — it cannot stop a first-read coroutine that a starved runner has left
- * mid-flight (DataStore shares `store.data` EAGERLY in the rule scope, so the read starts
- * at store creation, no subscriber needed). When the delete lands inside the read's
- * exists→open window, the FNF escapes the SupervisorJob scope (no handler) and is
- * attributed to whatever test is running.
+ * the `auto-resume toggle` case, 0.031s in — an IN-TEST failure, not teardown.
+ * Bytecode-verified mechanism (datastore 1.1.1): readData's exists() check lives in its
+ * FileNotFoundException catch handler (`exists ? rethrow : default`), so an ENOENT on
+ * open escapes ONLY if the file exists again by catch time — the creator being the
+ * first write's `atomicMove(scratch→path)` commit. Reads and writes are not excluded
+ * in-process (`SingleProcessCoordinator.tryLock` is a non-blocking Mutex.tryLock) and
+ * the first read starts at the VM's stateIn subscription (DataStoreImpl's only shareIn
+ * is the WhileSubscribed update-notification flow), so read→(commit)→catch is the
+ * escaping FNF.
  *
- * The pin: `finished` must NOT return — i.e. must not have deleted the temp dir — while
- * store-scope work is still in flight. The deterministic stand-in for the in-flight read
- * is a rule-scope child queued behind a thread-holding blocker on a single-thread
- * executor: it cannot observe `scope.cancel()` until released, exactly like a read stuck
- * mid-syscall on a starved runner thread.
+ * Two pins:
+ *  1. "store pre-creates its file so the first read can never ENOENT" — the FNF fix:
+ *     with the file created at store() time, open can never ENOENT (nothing deletes
+ *     until teardown).
+ *  2. the ordering pin below — teardown hygiene: `finished` must join the scope to
+ *     quiescence BEFORE deleting the temp dir. The delete racing an in-flight read
+ *     cannot throw (post-delete ENOENT is swallowed into the default) but would
+ *     silently serve that read a stale default value; the deterministic stand-in for
+ *     the in-flight read is a scope child already running and stuck below a
+ *     cancellation checkpoint on a single-thread executor.
  */
 class DataStoreTestRuleTest {
 
@@ -34,6 +40,31 @@ class DataStoreTestRuleTest {
     private class LifecycleExposedRule : DataStoreTestRule() {
         public override fun starting(description: Description) = super.starting(description)
         public override fun finished(description: Description) = super.finished(description)
+    }
+
+    @Test
+    fun `store pre-creates its file so the first read can never ENOENT`() {
+        val rule = LifecycleExposedRule()
+        val description = Description.createSuiteDescription(javaClass)
+        rule.starting(description)
+        try {
+            rule.store("probe")
+            val entries = rule.tempDirEntries()
+            org.junit.Assert.assertEquals(
+                "store() must create the DataStore file EAGERLY (empty) — the reviewed " +
+                    "#143 form-B fix: the in-test first read (VM stateIn subscription) must " +
+                    "never open-then-ENOENT before the first write's atomicMove commit",
+                1,
+                entries.size
+            )
+            org.junit.Assert.assertTrue(
+                "the pre-created file must be the store's own .preferences_pb",
+                entries.single().isFile && entries.single().name.startsWith("probe-") &&
+                    entries.single().name.endsWith(".preferences_pb")
+            )
+        } finally {
+            rule.finished(description)
+        }
     }
 
     @Test
@@ -68,8 +99,10 @@ class DataStoreTestRuleTest {
             try {
                 org.junit.Assert.assertFalse(
                     "DataStoreTestRule.finished returned while store-scope work was still " +
-                        "in flight — cancel() is cooperative, finished must join the scope " +
-                        "to quiescence BEFORE deleteRecursively (form-B FNF mechanism)",
+                        "in flight — cancel() is cooperative; finished must join the scope " +
+                        "to quiescence BEFORE deleteRecursively, else the delete silently " +
+                        "feeds an in-flight read a stale default (post-delete ENOENT is " +
+                        "swallowed by readData's catch handler)",
                     finishedReturned.await(500, TimeUnit.MILLISECONDS)
                 )
             } finally {
