@@ -3,6 +3,7 @@ package com.example.cellrebelauto.testing
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.rules.TestWatcher
@@ -36,15 +37,37 @@ import java.util.UUID
  * teardown); the delete can only race a writer that has not yet observed cancellation —
  * i.e. an abandoned file in this test's own temp dir, never cross-test state, since
  * every test gets a fresh directory.
+ *
+ * #143 form-B (CI run 34871213797) — two INDEPENDENT remedies, the first fixing the
+ * actual failure:
+ *  - the FNF fix is [store] pre-creating the store file (empty): the reviewed mechanism
+ *    (bytecode-verified against datastore 1.1.1) is the in-test first read racing the
+ *    first write's atomicMove commit through readData's catch-handler exists-check —
+ *    see the store() KDoc for the full chain;
+ *  - teardown hygiene (kept): [finished] joins the scope to quiescence (bounded)
+ *    before deleteRecursively — the delete racing an in-flight read cannot throw (the
+ *    catch handler swallows post-delete ENOENT into the default) but would silently
+ *    serve that read a stale default; joining pins the ordering. Both pinned by
+ *    DataStoreTestRuleTest.
  */
-class DataStoreTestRule : TestWatcher() {
+open class DataStoreTestRule(
+    /** Bounded wait in [finished] for the store scope to quiesce before the temp-dir delete. */
+    protected val scopeQuiesceTimeoutMs: Long = 30_000,
+) : TestWatcher() {
 
     lateinit var scope: CoroutineScope
         private set
 
     private lateinit var dir: File
 
-    override fun starting(description: Description) {
+    /** Test visibility: whether this test's temp dir is still on disk (lifecycle pins). */
+    fun tempDirExists(): Boolean = this::dir.isInitialized && dir.exists()
+
+    /** Test visibility: the temp dir's current entries (lifecycle pins). */
+    fun tempDirEntries(): List<File> =
+        if (this::dir.isInitialized) dir.listFiles()?.toList() ?: emptyList() else emptyList()
+
+    open override fun starting(description: Description) {
         dir = Files.createTempDirectory("datastore-test").toFile()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
@@ -59,17 +82,57 @@ class DataStoreTestRule : TestWatcher() {
      * idempotent (it may be invoked per read/write connection; a fresh path per
      * invocation sends reads and writes to different files, i.e. an intermittent
      * FileNotFoundException / stale-defaults flake).
+     *
+     * The file is PRE-CREATED empty (reviewed #143 form-B fix, CI run 34871213797).
+     * Bytecode-verified mechanism (datastore 1.1.1): OkioReadScope.readData's exists()
+     * check lives in its FileNotFoundException CATCH handler (handler@364:
+     * `exists ? rethrow : getDefaultValue`), so an open-time ENOENT only escapes when
+     * the file exists AGAIN by catch time — the creator being the first write's
+     * atomicMove(scratch→path) commit (OkioStorageConnection write path). Reads and
+     * writes are not excluded in-process (SingleProcessCoordinator.tryLock is a
+     * non-blocking Mutex.tryLock), and the in-test first read starts when the VM's
+     * stateIn subscription arrives (DataStoreImpl's only shareIn is the
+     * WhileSubscribed update NOTIFICATION flow) — so read-before-commit, then
+     * commit-before-catch is exactly the escaping FNF. Pre-creating the file means
+     * open can never ENOENT (nothing deletes until teardown), killing that whole
+     * race class; an empty file reads back as default/empty prefs (protobuf
+     * parseFrom of empty input = default instance) — behavior-equivalent to the
+     * missing-file default path.
      */
-    fun store(baseName: String): androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+    open fun store(baseName: String): androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
         val file = newFile(baseName)
+        file.createNewFile()
         return PreferenceDataStoreFactory.create(
             scope = scope,
             produceFile = { file },
         )
     }
 
-    override fun finished(description: Description) {
+    open override fun finished(description: Description) {
         scope.cancel()
+        // Teardown hygiene (kept after #143 review): cancel() is COOPERATIVE — a
+        // store-scope coroutine left mid-flight keeps running through cancel(). The
+        // temp-dir delete racing such a read does NOT throw (readData's FNF catch
+        // handler swallows post-delete ENOENT into the default) — it would silently
+        // feed the read a stale default value after the test's assertions are done.
+        // Joining the scope to quiescence (bounded) stops in-flight work from
+        // outliving the test. The CI FNF itself is fixed at the SOURCE by store()
+        // pre-creating the file (see the store() KDoc for the reviewed mechanism).
+        awaitScopeQuiescence()
         dir.deleteRecursively()
+    }
+
+    private fun awaitScopeQuiescence() {
+        val job = scope.coroutineContext[Job] ?: return
+        try {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(scopeQuiesceTimeoutMs) { job.join() }
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            // Bounded: a child wedged past this deadline must not hang the suite's
+            // teardown — fall back to the previous delete-anyway behavior. The deadline
+            // is generous (CI starvation evidence is >30s for POLLING loops, but join
+            // only waits out the current syscall + next cancellation checkpoint).
+        }
     }
 }
