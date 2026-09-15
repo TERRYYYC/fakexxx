@@ -37,6 +37,18 @@ import android.os.Handler
  *
  * 时钟：仅用 [MonotonicClock.elapsedRealtimeMs]（单调，§6.4.2）做 linger 窗口
  * 核算 —— 定时器提前/重复触发按剩余时间重挂，不精确定时器最终也会触发退出。
+ *
+ * 保活覆盖语义（#204 补充，纯文档）：本策略器的覆盖 = 「存在任何非 RELEASED
+ * 阻塞 lease 的整个期间」+「lease 全收敛后的 linger 窗口」两段。
+ * [onLeasePressure][LeaseKeepAliveSignal.onLeasePressure] 的
+ * hasBlockingLease 真值来自 [EnvironmentLeaseStore.blockingLease]（§8.4
+ * INV-28）：RELEASE_INCOMPLETE / EXPIRED / REVOKED 等未收敛状态都算阻塞 →
+ * FGS 故意【诚实】保持，直到真正收敛（provider 自清理 / 过期裁决 / revoke
+ * 清理）或走 linger 退出 —— 与 #200 的 RELEASE_INCOMPLETE/REVOKED 诚实保持
+ * 语义一致（保活是抗冻姿态，不是"合同生效中"的宣称，服务通知文案对两相皆
+ * 真）。特别地，停机/Stop 时若仍有未收敛 lease（在飞 attempt 被打断），
+ * handler 不发收敛信号、FGS 按设计保持 —— 正是下次 Resume 恢复所需的状态；
+ * 该行为已由 c3441ee 真机验证留档（issues/198#issuecomment-5668680218）。
  */
 class LingeringKeepAlive(
     private val downstream: LeaseKeepAliveSignal,

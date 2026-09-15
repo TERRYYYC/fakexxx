@@ -57,6 +57,13 @@ class AuthoritativeObservationCommitStore(
         private const val INTERVAL_PREFIX = "interval:"
 
         /**
+         * #205: durable generation high-water for the interval retention
+         * window. Deliberately NOT under [INTERVAL_PREFIX] so the interval
+         * key-scan can never mistake it for an interval row.
+         */
+        private const val INTERVAL_GENERATION_HIGH_WATER_KEY = "intervalGenerationHighWater"
+
+        /**
          * #199: bounded DFS for owner digest-interval chains. Real chains are
          * one or two brackets long (apply → pre-observe, release → advance →
          * post-observe). The depth cap terminates pathological cycles where
@@ -68,6 +75,24 @@ class AuthoritativeObservationCommitStore(
          */
         private const val INTERVAL_WALK_LIMIT = 16
         private const val INTERVAL_WALK_NODE_BUDGET = 256
+
+        /**
+         * #205: interval-row retention window, in owner generations. Only rows
+         * of the newest [INTERVAL_RETAINED_GENERATIONS] generations (the
+         * current owner epoch plus its immediate predecessors) materialize
+         * onto the walk; rows of older generations are dropped from every read
+         * path. Three is the smallest window that still attributes the #199
+         * form-1 crash-restart backlog: the durable watermark can sit one
+         * generation behind the current one, and the explaining chain then
+         * spans exactly two generations; the third is slack for one restart
+         * with no observe in between.
+         *
+         * Dropping rows is structurally fail-closed: explanations are only
+         * ever REMOVED, never created, so eviction can only demote an
+         * explainable transition to the conservative bump — it can never
+         * fabricate an acknowledgement (no false-positive ack).
+         */
+        private const val INTERVAL_RETAINED_GENERATIONS = 3L
     }
 
     /**
@@ -218,23 +243,62 @@ class AuthoritativeObservationCommitStore(
         if (current == target) return true
         if (depth >= INTERVAL_WALK_LIMIT) return false
         for (interval in intervals) {
-            if (interval.beforeDigest != current || interval.mutationId in used) continue
+            // #206: the used key is the row's FULL durable identity
+            // (generation, mutationId) — the same identity the storage key
+            // uses — never the mutationId alone. Production mutation ids
+            // recur verbatim across owner generations ("settle-restart-v$X",
+            // "settle-advance-$item" are schedule-derived, not epoch-derived);
+            // keying by id alone aliased the two rows, pruning the second
+            // while the first was on the path, and misjudged a cross-generation
+            // owner chain as unexplainable (spurious conservative bump, #199
+            // precision lost exactly at the crash-restart shape). One ROW is
+            // still used at most once per path, so cycle protection and the
+            // depth/node caps are unchanged.
+            val usedKey = "${interval.localGeneration}:${interval.mutationId}"
+            if (interval.beforeDigest != current || usedKey in used) continue
             if (budget[0] <= 0) return false
             budget[0] -= 1
-            used += interval.mutationId
+            used += usedKey
             if (walkIntervals(intervals, interval.afterDigest, target, used, depth + 1, budget)) return true
-            used -= interval.mutationId
+            used -= usedKey
         }
         return false
     }
 
-    /** Every durable owner-mutation interval row (bounded per owner epoch). */
-    internal fun ownerMutationIntervals(): List<OwnerMutationInterval> =
-        storage.keys(NAMESPACE)
+    /**
+     * Owner-mutation interval rows inside the #205 bounded retention window
+     * (see [INTERVAL_RETAINED_GENERATIONS]). This is THE materialization point
+     * feeding the digest-transition walk — rows of generations older than the
+     * window are dropped here, so the per-observe materialization stays
+     * bounded instead of growing with the process lifetime.
+     *
+     * Eviction safety (the #199 structural guarantee, restated): a dropped row
+     * can only DEMOTE an explainable digest transition to "unexplained" — the
+     * observer then keeps the conservative bump (fail-closed). Eviction never
+     * creates an explanation, so a false-positive acknowledgement remains
+     * structurally impossible.
+     */
+    internal fun ownerMutationIntervals(): List<OwnerMutationInterval> {
+        val retentionFloor = intervalRetentionFloor()
+        return storage.keys(NAMESPACE)
             .asSequence()
             .filter { it.startsWith(INTERVAL_PREFIX) }
             .map { decodeInterval(checkNotNull(storage.read(NAMESPACE, it))) }
+            .filter { it.localGeneration >= retentionFloor }
             .toList()
+    }
+
+    /**
+     * #205: lowest generation still inside the retention window, derived from
+     * the durable generation high-water. Absent bookkeeping (no interval ever
+     * recorded) keeps everything — there is nothing to drop anyway.
+     */
+    private fun intervalRetentionFloor(): Long {
+        val highWater =
+            storage.read(NAMESPACE, INTERVAL_GENERATION_HIGH_WATER_KEY)?.toLongOrNull()
+                ?: return Long.MIN_VALUE
+        return highWater - (INTERVAL_RETAINED_GENERATIONS - 1)
+    }
 
     /**
      * #199: record the digest interval of one cleanly finished owner bracket.
@@ -242,6 +306,14 @@ class AuthoritativeObservationCommitStore(
      * same operation drives the same transition. Callers join an outer
      * DurableKv transaction; failures degrade at the call site to the
      * conservative pre-#199 bump behavior.
+     *
+     * #205: the write also advances the durable generation high-water, which
+     * defines the bounded retention window for [ownerMutationIntervals] —
+     * rows of generations older than the window stop materializing (fail-closed:
+     * eviction only removes explanations, it cannot fabricate an ack). The
+     * DurableKv seam has no delete, so reclamation of the physical keys is a
+     * durable-layer concern; this store's contract-bounded surface is the
+     * materialized row set every read path sees.
      */
     fun recordOwnerMutationInterval(
         mutationId: String,
@@ -253,6 +325,7 @@ class AuthoritativeObservationCommitStore(
         require(beforeDigest.isNotBlank() && afterDigest.isNotBlank()) {
             "owner mutation interval requires both digest endpoints"
         }
+        require(localGeneration >= 0L) { "owner mutation interval requires a non-negative generation" }
         val key = INTERVAL_PREFIX + "$localGeneration:$mutationId"
         if (storage.read(NAMESPACE, key) == null) {
             storage.write(
@@ -260,6 +333,13 @@ class AuthoritativeObservationCommitStore(
                 key,
                 encodeInterval(OwnerMutationInterval(mutationId, beforeDigest, afterDigest, localGeneration)),
             )
+        }
+        val highWater =
+            storage.read(NAMESPACE, INTERVAL_GENERATION_HIGH_WATER_KEY)?.toLongOrNull() ?: Long.MIN_VALUE
+        if (localGeneration > highWater) {
+            // Monotonic: a settled replay of an older generation must never
+            // pull the window back over rows it already dropped.
+            storage.write(NAMESPACE, INTERVAL_GENERATION_HIGH_WATER_KEY, localGeneration.toString())
         }
     }
 
