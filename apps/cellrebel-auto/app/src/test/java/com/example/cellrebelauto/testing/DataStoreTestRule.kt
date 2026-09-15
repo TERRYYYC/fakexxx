@@ -3,6 +3,7 @@ package com.example.cellrebelauto.testing
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.rules.TestWatcher
@@ -36,15 +37,28 @@ import java.util.UUID
  * teardown); the delete can only race a writer that has not yet observed cancellation —
  * i.e. an abandoned file in this test's own temp dir, never cross-test state, since
  * every test gets a fresh directory.
+ *
+ * #143 form-B (CI run 34871213797): the "delete can only race a writer" framing missed
+ * that cancel() is cooperative — the EAGERLY-shared `store.data` first read can still be
+ * mid-syscall when [finished] runs, and the delete landing inside its exists→open window
+ * surfaces as a transient FileNotFoundException on a test that then passes. [finished]
+ * therefore JOINS the scope to quiescence (bounded by [scopeQuiesceTimeoutMs]) before
+ * deleting; pinned by DataStoreTestRuleTest.
  */
-class DataStoreTestRule : TestWatcher() {
+open class DataStoreTestRule(
+    /** Bounded wait in [finished] for the store scope to quiesce before the temp-dir delete. */
+    protected val scopeQuiesceTimeoutMs: Long = 30_000,
+) : TestWatcher() {
 
     lateinit var scope: CoroutineScope
         private set
 
     private lateinit var dir: File
 
-    override fun starting(description: Description) {
+    /** Test visibility: whether this test's temp dir is still on disk (lifecycle pins). */
+    fun tempDirExists(): Boolean = this::dir.isInitialized && dir.exists()
+
+    open override fun starting(description: Description) {
         dir = Files.createTempDirectory("datastore-test").toFile()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
@@ -60,7 +74,7 @@ class DataStoreTestRule : TestWatcher() {
      * invocation sends reads and writes to different files, i.e. an intermittent
      * FileNotFoundException / stale-defaults flake).
      */
-    fun store(baseName: String): androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
+    open fun store(baseName: String): androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> {
         val file = newFile(baseName)
         return PreferenceDataStoreFactory.create(
             scope = scope,
@@ -68,8 +82,34 @@ class DataStoreTestRule : TestWatcher() {
         )
     }
 
-    override fun finished(description: Description) {
+    open override fun finished(description: Description) {
         scope.cancel()
+        // #143 form-B remedy: cancel() is COOPERATIVE — a store-scope coroutine that a
+        // starved runner left mid-syscall (DataStore shares `store.data` EAGERLY in this
+        // scope, so the first read starts at store creation, subscriber or not) keeps
+        // running through cancel(). DataStore 1.1.1's read path checks exists() then
+        // opens the file (non-atomic, no suspension between), and this method's
+        // deleteRecursively() is the only deleter in the codebase — when the delete lands
+        // inside that exists→open window, a transient FileNotFoundException escapes the
+        // SupervisorJob scope (no CoroutineExceptionHandler) and is attributed to
+        // whatever test is running: CI run 34871213797, `auto-resume toggle…`, 0.031s.
+        // Joining the scope to quiescence (bounded) serializes every in-flight
+        // read/write tail BEFORE the delete, closing the window deterministically.
+        awaitScopeQuiescence()
         dir.deleteRecursively()
+    }
+
+    private fun awaitScopeQuiescence() {
+        val job = scope.coroutineContext[Job] ?: return
+        try {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(scopeQuiesceTimeoutMs) { job.join() }
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            // Bounded: a child wedged past this deadline must not hang the suite's
+            // teardown — fall back to the previous delete-anyway behavior. The deadline
+            // is generous (CI starvation evidence is >30s for POLLING loops, but join
+            // only waits out the current syscall + next cancellation checkpoint).
+        }
     }
 }

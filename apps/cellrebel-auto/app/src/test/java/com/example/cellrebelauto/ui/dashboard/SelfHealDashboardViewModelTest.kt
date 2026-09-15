@@ -47,6 +47,19 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class SelfHealDashboardViewModelTest {
 
+    private companion object {
+        /**
+         * #143 form-A remedy: this class's polls use the ASSERTING awaitUntil variant
+         * (a timed-out poll must fail loudly with context, never silently hand control
+         * to a follow-up assert on the default value), and this family gets its own
+         * relaxed deadline: CI run 34874550513 died at 30.038s — exactly the shared 30s
+         * bound — with the toggle write still not propagated (runner IO starvation past
+         * 30s on a 6m20s build machine). 60s is 2x the observed starvation, still
+         * bounded so a real hang fails inside the minute instead of hanging the lane.
+         */
+        const val TOGGLE_PERSIST_DEADLINE_MS = 60_000L
+    }
+
     // Rule order (empirical): JUnit4 wraps later-declared @Rule fields OUTSIDE earlier
     // ones, so MainDispatcherRule runs INSIDE DataStoreTestRule — dataStore.starting →
     // setMain → test → drain + retry-guarded resetMain → dataStore.finished (scope cancel
@@ -127,7 +140,15 @@ class SelfHealDashboardViewModelTest {
         val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.Job())
         val collector = collectScope.launch { viewModel.selfHealConfig.toList(readings) }
         viewModel.setAttemptWatchdogEnabled(false)
-        awaitUntil { readings.lastOrNull()?.attemptWatchdogEnabled == false }
+        // ASSERTING variant (#143 form A): the boolean variant returned false silently on
+        // timeout, so the failure surfaced later as a bare AssertionError at the follow-up
+        // assertFalse ON THE DEFAULT VALUE (CI run 34874550513, :132, 30.038s) with zero
+        // poll context. A timed-out poll must name itself.
+        awaitUntil(
+            "watchdog toggle write did not propagate attemptWatchdogEnabled=false to " +
+                "selfHealConfig within ${TOGGLE_PERSIST_DEADLINE_MS}ms",
+            TOGGLE_PERSIST_DEADLINE_MS,
+        ) { readings.lastOrNull()?.attemptWatchdogEnabled == false }
         collector.cancel(); collectScope.cancel()
         org.junit.Assert.assertFalse(readings.last().attemptWatchdogEnabled)
         org.junit.Assert.assertFalse(store.config.first().attemptWatchdogEnabled)
@@ -143,7 +164,12 @@ class SelfHealDashboardViewModelTest {
         val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default + kotlinx.coroutines.Job())
         val collector = collectScope.launch { viewModel.selfHealConfig.toList(readings) }
         viewModel.setCoordinateGuardEnabled(false)
-        awaitUntil { readings.lastOrNull()?.coordinateGuardEnabled == false }
+        // ASSERTING variant — same form-A remedy as the watchdog toggle above.
+        awaitUntil(
+            "coordinate guard toggle write did not propagate coordinateGuardEnabled=false " +
+                "to selfHealConfig within ${TOGGLE_PERSIST_DEADLINE_MS}ms",
+            TOGGLE_PERSIST_DEADLINE_MS,
+        ) { readings.lastOrNull()?.coordinateGuardEnabled == false }
         collector.cancel(); collectScope.cancel()
         org.junit.Assert.assertFalse(readings.last().coordinateGuardEnabled)
         org.junit.Assert.assertFalse(store.config.first().coordinateGuardEnabled)
@@ -154,8 +180,18 @@ class SelfHealDashboardViewModelTest {
         val store = settings()
         val viewModel = vm(store)
         viewModel.setServiceReconnectAutoResumeEnabled(true)
-        awaitUntil { viewModel.selfHealConfig.first().serviceReconnectAutoResumeEnabled }
-        awaitUntil { store.config.first().serviceReconnectAutoResumeEnabled }
+        // ASSERTING variants (#143 form A) — the polling chain stays, but a timeout now
+        // fails HERE with the key name, not downstream on a default-valued assertTrue.
+        awaitUntil(
+            "auto-resume toggle write did not surface in selfHealConfig within " +
+                "${TOGGLE_PERSIST_DEADLINE_MS}ms",
+            TOGGLE_PERSIST_DEADLINE_MS,
+        ) { viewModel.selfHealConfig.first().serviceReconnectAutoResumeEnabled }
+        awaitUntil(
+            "auto-resume toggle write did not reach the persisted store config within " +
+                "${TOGGLE_PERSIST_DEADLINE_MS}ms",
+            TOGGLE_PERSIST_DEADLINE_MS,
+        ) { store.config.first().serviceReconnectAutoResumeEnabled }
         org.junit.Assert.assertTrue(viewModel.selfHealConfig.first().serviceReconnectAutoResumeEnabled)
         org.junit.Assert.assertTrue(store.config.first().serviceReconnectAutoResumeEnabled)
     }
@@ -166,7 +202,12 @@ class SelfHealDashboardViewModelTest {
         val viewModel = vm(store)
         viewModel.setServiceReconnectAutoResumeEnabled(true)
         viewModel.setAttemptWatchdogEnabled(false)
-        awaitUntil {
+        // ASSERTING variant (#143 form A) — last boolean awaitUntil in this class.
+        awaitUntil(
+            "toggles (watchdog=off, auto-resume=on) did not both reach the persisted store " +
+                "config within ${TOGGLE_PERSIST_DEADLINE_MS}ms",
+            TOGGLE_PERSIST_DEADLINE_MS,
+        ) {
             val c = store.config.first()
             !c.attemptWatchdogEnabled && c.serviceReconnectAutoResumeEnabled
         }
