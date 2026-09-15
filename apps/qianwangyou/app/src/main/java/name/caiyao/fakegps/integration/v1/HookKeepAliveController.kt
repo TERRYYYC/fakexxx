@@ -15,7 +15,20 @@ import name.caiyao.fakegps.mockprovider.MockProviderStatusStore
  * posture, never a contract outcome.
  */
 fun interface LeaseKeepAliveSignal {
-    /** [hasBlockingLease] = 设备上存在任何非 RELEASED 的阻塞 lease。 */
+    /**
+     * [hasBlockingLease] = 设备上存在任何非 RELEASED 的阻塞 lease。
+     *
+     * #204 语义留档（纯文档，零行为改动）：真值即
+     * [EnvironmentLeaseStore.blockingLease]（§8.4 INV-28）——任何非 RELEASED
+     * 状态都算阻塞，RELEASE_INCOMPLETE / EXPIRED / REVOKED 因此【诚实地】保持
+     * true，直到 lease 真正收敛（provider 自清理 / 过期裁决 / revoke 清理）。
+     * 这与 #200 的 RELEASE_INCOMPLETE/REVOKED 诚实保持语义一致：保活覆盖 =
+     * 「任何非 RELEASED lease 的整个期间」+「收敛后的 linger 窗口」，它是抗冻
+     * 姿态而非合同有效性的宣称。停机（Stop/owner 退出）时若仍有未收敛 lease
+     * （如在飞 attempt 被打断），handler 不会发出收敛信号 → FGS 按设计保持，
+     * 这正是下次恢复所需的状态（c3441ee 真机验证留档：
+     * issues/198#issuecomment-5668680218）。
+     */
     fun onLeasePressure(hasBlockingLease: Boolean)
 }
 
