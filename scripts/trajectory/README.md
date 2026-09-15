@@ -96,6 +96,11 @@ E=+lng、W=−lng、N=+lat、S=−lat；输出统一 7 位小数（对齐输入�
 `combo`（显式 spec 或随机 count_range+seed+rng），每站记录其场景序列
 （编号/名称/点数/步长，如 traj-001: `["snake","box","line"]`），事后可复现可追溯。
 
+**`--combo-random` 审计注记**：同 seed 下某站的场景序列取决于 `--stations` 选择集——
+场景流是一条共享 RNG 流按站序消费，站序在流中的位置随选择集变化（增删站点会改变
+其后各站的抽取结果）。审计口径以 manifest 逐站 scenes 记录为准；重放时使用相同的
+`--stations` 集合即可逐字节复现。
+
 ## 输出三件套（out-dir 下）
 
 | 文件 | 列 | 去向 |
@@ -120,6 +125,9 @@ QWY 档案名保守兼容。轨迹点继承原始行的 ECGI/区县/行号。
   及顶层 `required_successes_summary`（`min`/`max`/`sum`/`distribution`——sum 即总执行
   次数，distribution 是值→行数分布）；每站摘要含该站 `required_successes` 的
   min/max/sum。逐行明细在 plan.csv 第 4 列。
+- **键位说明**：随机模式启用时 `params.seed`（`--required-range` 次数流）与
+  `params.combo.seed`（`--combo-random` 场景流）并行记录，两流独立派生
+  （各自独立 RNG 实例顺序消费，互不挤占游标）。
 - **缺省行为不变**：不给 `--required-range` 时全行仍为常量 3（`--required-successes`
   可改），manifest 模式记 `constant`，无 seed 字段。
 
